@@ -97,14 +97,17 @@ from vllm.models.muse_spark.amd.specialized_decode.wide.stages.tiled import (
     token_tiles,
 )
 
-CAP = 32  # routes of a block at most
-UP_PIECES = INTER // PIECE  # 128
-DOWN_OWNERS = POOLED // OWNER  # 64
+CAP = 16  # routes of a block at most
+UP_PIECES = INTER // PIECE  # 64
+DOWN_OWNERS = POOLED // OWNER  # 32
+MT = PIECE // 32  # weight tiles a wave a unit (two waves a half of a piece)
+assert OWNER == 64 * MT
+LINE_GROUPS = POOLED // 64  # the expert sum's 64-column exchange groups
 EXPERT_CM = 0  # plain loads: nt streams the experts ~25% slower on MI300
 EXPERT_CHUNK = 128  # K bytes a step
 UP_CHUNKS = POOLED // EXPERT_CHUNK  # FP8 K
 DOWN_CHUNKS = INTER // EXPERT_CHUNK
-TILE_STRIDE = 36  # words a token row of the up epilogue's u tile
+TILE_STRIDE = PIECE + 4  # words a token row of the up epilogue's u tile
 
 
 def i32(v) -> fx.Int32:
@@ -139,7 +142,7 @@ class MoEShape:
         self.blocks = take(self.max_blocks)
         self.share = take(WAVES * 64)
         self.utile = take(self.tiles * TILE * TILE_STRIDE)
-        self.stage = take(stage_words(self.cap, EXPERT_CHUNK))
+        self.stage = take(stage_words(self.cap, EXPERT_CHUNK * EXPERT_DEPTH))
         self.words = at
 
 
@@ -427,10 +430,11 @@ def nblocks(sh, lp):
 # --------------------------------------------------------------------------
 
 
-@traced
-def up_unit(g, sh, lp, b, gemm, blk, p):
-    lane, wave = g.lane, g.wave
-    src = Source(b.hq, POOLED, 0, rows=lambda i: blk.assignment(i) // TOPK)
+def up_weights(g, sh, lp, b, u):
+    """Unit ``u``'s block, w13 and the wave's first row of each weight tile:
+    waves 0-1 the piece's gate rows, 2-3 its up rows, 16-row tiles ``wave % 2
+    + 2 mt``."""
+    blk = Block(sh, lp, u // UP_PIECES)
     w = fp8_weights(
         b.w13 + fx.Int64(blk.expert) * fx.Int64(2 * INTER * b.w13_ld),
         2 * INTER,
@@ -438,49 +442,106 @@ def up_unit(g, sh, lp, b, gemm, blk, p):
         cm=EXPERT_CM,
         row_bytes=b.w13_ld,
     )
-    half = wave // 2  # 0: gate, 1: up
-    first = half * i32(INTER) + p * i32(PIECE) + wave % 2 * i32(TILE)
-    acc = gemm.run(src, w, [first + lane % TILE], i32(0), UP_CHUNKS, rot=g.bid)[0]
+    base = g.wave // 2 * i32(INTER) + u % i32(UP_PIECES) * i32(PIECE)
+    firsts = [base + (g.wave % 2 + i32(2 * mt)) * i32(TILE) for mt in range(MT)]
+    return blk, w, firsts
 
-    col = wave % 2 * TILE + lane // TILE * 4  # within the piece
-    ws = ld(b.w13s, blk.expert * (2 * INTER) + first + lane // TILE * 4, fx.Float32, 4)
-    vals, routes = [], []
+
+def lane_rows(g, firsts):
+    return [f + g.lane % TILE for f in firsts]
+
+
+def ahead(g, units, u, weights):
+    """``Gemm.run``'s ``ahead`` for the CTA's unit after ``u``."""
+    nu = u + i32(BLOCKS)
+    _, w, firsts = weights(fx.min(nu, units - 1))
+    return w, lane_rows(g, firsts), nu < units
+
+
+def first_weights(g, gemm, units, weights, count):
+    """The first group's weight loads of the CTA's first unit (masked)."""
+    _, w, firsts = weights(fx.min(g.bid, units - 1))
+    return gemm.first_group(w, lane_rows(g, firsts), count, g.bid, g.bid < units)
+
+
+@traced
+def up_unit(g, sh, lp, b, gemm, unit, units, pending):
+    lane, wave = g.lane, g.wave
+    blk, w, firsts = up_weights(g, sh, lp, b, unit)
+    p = unit % i32(UP_PIECES)
+    src = Source(b.hq, POOLED, 0, rows=lambda i: blk.assignment(i) // TOPK)
+    half = wave // 2  # 0: gate, 1: up
+    # the epilogue's loads before the K loop: waiting for them after it would
+    # also wait for the next unit's weights (vmcnt is in order)
+    cols = [
+        (wave % 2 + i32(2 * mt)) * i32(TILE) + lane // TILE * 4 for mt in range(MT)
+    ]  # within the piece
+    ws = [
+        ld(b.w13s, blk.expert * (2 * INTER) + f + lane // TILE * 4, fx.Float32, 4)
+        for f in firsts
+    ]
+    routes, hss = [], []
     for t in range_constexpr(sh.tiles):
         i = i32(t * TILE) + lane % TILE
         a = blk.assignment(i)
-        hs = ld(b.hs, a // TOPK, fx.Float32, cm=CM_DEV)
-        vals.append([bf16_round(acc[t][e] * hs * ws[e]) for e in range(4)])
+        hss.append(ld(b.hs, a // TOPK, fx.Float32, cm=CM_DEV))
         routes.append((i, a))
+    acc, pending = gemm.run(
+        src,
+        w,
+        lane_rows(g, firsts),
+        i32(0),
+        UP_CHUNKS,
+        pending=pending,
+        rot=g.bid,
+        ahead=ahead(g, units, unit, lambda v: up_weights(g, sh, lp, b, v)),
+    )
+
+    vals = [
+        [
+            [bf16_round(acc[mt][t][e] * hss[t] * ws[mt][e]) for e in range(4)]
+            for t in range(sh.tiles)
+        ]
+        for mt in range(MT)
+    ]
     ut = lp + sh.utile
     if half == 1:
-        for t in range_constexpr(sh.tiles):
-            i, _ = routes[t]
-            lds_st(
-                ut + i * TILE_STRIDE + col,
-                fx.Vector.from_elements(vals[t], fx.Float32).bitcast(fx.Int32),
-            )
+        for mt in range_constexpr(MT):
+            for t in range_constexpr(sh.tiles):
+                i, _ = routes[t]
+                lds_st(
+                    ut + i * TILE_STRIDE + cols[mt],
+                    fx.Vector.from_elements(vals[mt][t], fx.Float32).bitcast(fx.Int32),
+                )
     fx.barrier()
     if half == 0:
         for t in range_constexpr(sh.tiles):
             i, a = routes[t]
-            u = lds_ld(ut + i * TILE_STRIDE + col, 4).bitcast(fx.Float32)
-            act = [bf16_round(bf16_round(silu(vals[t][e])) * u[e]) for e in range(4)]
-            m = fx.max(
-                fx.max(fabs(act[0]), fabs(act[1])), fx.max(fabs(act[2]), fabs(act[3]))
-            )
+            acts, m = [], fx.Float32(0.0)
+            for mt in range_constexpr(MT):
+                u = lds_ld(ut + i * TILE_STRIDE + cols[mt], 4).bitcast(fx.Float32)
+                act = [
+                    bf16_round(bf16_round(silu(vals[mt][t][e])) * u[e])
+                    for e in range(4)
+                ]
+                for e in range_constexpr(4):
+                    m = fx.max(m, fabs(act[e]))
+                acts.append(act)
             m = butterfly(m, (16, 32), fx.max)
             if i < blk.n:
-                st(
-                    b.act,
-                    (a * INTER + p * PIECE + col) // 2,
-                    fx.Vector.from_elements(act, fx.Float32)
-                    .to(fx.BFloat16)
-                    .bitcast(fx.Int32),
-                    cm=CM_DEV,
-                )
+                for mt in range_constexpr(MT):
+                    st(
+                        b.act,
+                        (a * INTER + p * PIECE + cols[mt]) // 2,
+                        fx.Vector.from_elements(acts[mt], fx.Float32)
+                        .to(fx.BFloat16)
+                        .bitcast(fx.Int32),
+                        cm=CM_DEV,
+                    )
                 if lane < TILE:
                     atomic_max_pos(b.amax + fx.Int64(a) * fx.Int64(4), m)
     fx.barrier()
+    return pending
 
 
 @traced
@@ -489,9 +550,11 @@ def up_units(g, sh, lp, b, gemm):
     + BLOCKS, ..``."""
     acquire_device()  # hq: cached loads, shared in the XCD's L2
     units = nblocks(sh, lp) * i32(UP_PIECES)
+    pending = first_weights(
+        g, gemm, units, lambda v: up_weights(g, sh, lp, b, v), UP_CHUNKS
+    )
     for u in range(g.bid, units, i32(BLOCKS)):
-        blk = Block(sh, lp, u // UP_PIECES)
-        up_unit(g, sh, lp, b, gemm, blk, u % UP_PIECES)
+        pending = up_unit(g, sh, lp, b, gemm, u, units, pending)
 
 
 # --------------------------------------------------------------------------
@@ -527,9 +590,10 @@ class QuantSource(TraceInvariant):
         return fx.Vector.from_elements(codes, fx.Int32)
 
 
-@traced
-def down_unit(g, sh, lp, b, gemm, blk, o):
-    lane, wave = g.lane, g.wave
+def down_weights(g, sh, lp, b, u):
+    """Unit ``u``'s block, w2 and the wave's first row of each weight tile of
+    the owner's ``OWNER`` rows."""
+    blk = Block(sh, lp, u // DOWN_OWNERS)
     w = fp8_weights(
         b.w2 + fx.Int64(blk.expert) * fx.Int64(POOLED * b.w2_ld),
         POOLED,
@@ -537,33 +601,55 @@ def down_unit(g, sh, lp, b, gemm, blk, o):
         cm=EXPERT_CM,
         row_bytes=b.w2_ld,
     )
-    first = o * i32(OWNER) + wave * i32(TILE)
-    acc = gemm.run(
-        QuantSource(b, blk), w, [first + lane % TILE], i32(0), DOWN_CHUNKS, rot=g.bid
-    )[0]
+    base = u % i32(DOWN_OWNERS) * i32(OWNER) + g.wave * i32(TILE)
+    return blk, w, [base + i32(64 * mt) for mt in range(MT)]
 
-    row = first + lane // TILE * 4
-    ws = ld(b.w2s, blk.expert * POOLED + row, fx.Float32, 4)
-    gain = ld(b.post_w1, row, fx.Float32, 4)
-    share = lp + sh.share
+
+@traced
+def down_unit(g, sh, lp, b, gemm, unit, units, pending):
+    lane, wave = g.lane, g.wave
+    blk, w, firsts = down_weights(g, sh, lp, b, unit)
+    o = unit % i32(DOWN_OWNERS)
+    # the epilogue's loads before the K loop (see up_unit)
+    rows = [f + lane // TILE * 4 for f in firsts]
+    ws = [ld(b.w2s, blk.expert * POOLED + r, fx.Float32, 4) for r in rows]
+    gain = [ld(b.post_w1, r, fx.Float32, 4) for r in rows]
+    routes, amaxes = [], []
     for t in range_constexpr(sh.tiles):
         i = i32(t * TILE) + lane % TILE
         a = blk.assignment(i)
-        s2 = quant_scale(ld(b.amax, a, fx.Float32, cm=CM_DEV), MOE_MID_QUANT)
-        y = [bf16_round(acc[t][e] * s2 * ws[e]) for e in range(4)]
-        if i < blk.n:
-            st(
-                b.y,
-                (a * POOLED + row) // 2,
-                fx.Vector.from_elements(y, fx.Float32)
-                .to(fx.BFloat16)
-                .bitcast(fx.Int32),
-                cm=CM_DEV,
-            )
+        amaxes.append(ld(b.amax, a, fx.Float32, cm=CM_DEV))
+        routes.append((i, a))
+    acc, pending = gemm.run(
+        QuantSource(b, blk),
+        w,
+        lane_rows(g, firsts),
+        i32(0),
+        DOWN_CHUNKS,
+        pending=pending,
+        rot=g.bid,
+        ahead=ahead(g, units, unit, lambda v: down_weights(g, sh, lp, b, v)),
+    )
+
+    share = lp + sh.share
+    for t in range_constexpr(sh.tiles):
+        i, a = routes[t]
+        s2 = quant_scale(amaxes[t], MOE_MID_QUANT)
         q = fx.Float32(0.0)
-        for e in range_constexpr(4):
-            x = y[e] * gain[e]
-            q = q + x * x
+        for mt in range_constexpr(MT):
+            y = [bf16_round(acc[mt][t][e] * s2 * ws[mt][e]) for e in range(4)]
+            if i < blk.n:
+                st(
+                    b.y,
+                    (a * POOLED + rows[mt]) // 2,
+                    fx.Vector.from_elements(y, fx.Float32)
+                    .to(fx.BFloat16)
+                    .bitcast(fx.Int32),
+                    cm=CM_DEV,
+                )
+            for e in range_constexpr(4):
+                x = y[e] * gain[mt][e]
+                q = q + x * x
         q = butterfly(q, (16, 32))
         if lane < TILE:
             lds_st(share + wave * (sh.tiles * TILE) + i, q.bitcast(fx.Int32))
@@ -578,22 +664,27 @@ def down_unit(g, sh, lp, b, gemm, blk, o):
         if i < blk.n:
             st(b.sq, blk.assignment(i) * DOWN_OWNERS + o, total, cm=CM_DEV)
     fx.barrier()
+    return pending
 
 
 @traced
 def down_units(g, sh, lp, b, gemm):
     acquire_device()  # act: cached loads, shared in the XCD's L2
     units = nblocks(sh, lp) * i32(DOWN_OWNERS)
+    pending = first_weights(
+        g, gemm, units, lambda v: down_weights(g, sh, lp, b, v), DOWN_CHUNKS
+    )
     for u in range(g.bid, units, i32(BLOCKS)):
-        blk = Block(sh, lp, u // DOWN_OWNERS)
-        down_unit(g, sh, lp, b, gemm, blk, u % DOWN_OWNERS)
+        pending = down_unit(g, sh, lp, b, gemm, u, units, pending)
 
 
 EXPERT_DEPTH = 4  # chunks in flight: the expert stream's latency
 
 
 def expert_gemm(sh, lp, tid):
-    return Gemm(lp + sh.stage, sh.cap, tid, 1, depth=EXPERT_DEPTH, chunk=EXPERT_CHUNK)
+    return Gemm(
+        lp + sh.stage, sh.cap, tid, 1, MT, EXPERT_DEPTH, EXPERT_CHUNK, grouped=True
+    )
 
 
 # --------------------------------------------------------------------------
@@ -665,8 +756,8 @@ def finalize_line(g, sh, lp, b, sc, rank, group, line):
 
 @traced
 def finalize_lines(g, sh, lp, b, sc, rank):
-    """Every line of the 64 column groups, a wave each over the grid."""
+    """Every line of the ``LINE_GROUPS`` column groups, a wave each over the grid."""
     lpg = sc.lpg
     waves = i32(BLOCKS * WAVES)
-    for i in range(g.spread, i32(DOWN_OWNERS * lpg), waves):
+    for i in range(g.spread, i32(LINE_GROUPS * lpg), waves):
         finalize_line(g, sh, lp, b, sc, rank, i // lpg, i % lpg)

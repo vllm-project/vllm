@@ -41,8 +41,8 @@ from .wide.layout import (
 logger = init_logger(__name__)
 
 HEALTH_POLL_INTERVAL = 64
-# widest step the kernels take: from 32 rows on, stock decodes faster on MI325X
-MAX_ROWS = 16
+# widest step the kernels take (the CUDA graph sizes up to it)
+MAX_ROWS = 128
 
 
 # --------------------------------------------------------------------------

@@ -49,6 +49,7 @@ from vllm.models.muse_spark.amd.specialized_decode.wide.common.ops import (
     lds_st,
     mfma_bf16,
     mfma_fp8,
+    sched_barrier,
     st,
     traced,
     zeros,
@@ -203,7 +204,9 @@ class Source(TraceInvariant):
 class Gemm(TraceInvariant):
     """The staged-activation K loop for one step of ``rows`` tokens and ``elem``
     -byte elements, ``chunk`` bytes of K a step. ``page``: the LDS stage
-    (``stage_words(rows, chunk)`` i32 words)."""
+    (``stage_words(rows, chunk)`` i32 words). ``grouped`` (a long K): the
+    stage holds ``depth`` chunks, one group, staged once a group with one
+    barrier (``stage_words(rows, depth * chunk)``), not once a chunk."""
 
     def __init__(
         self,
@@ -214,7 +217,9 @@ class Gemm(TraceInvariant):
         mtiles: int = 1,
         depth: int = DEPTH,
         chunk: int = CHUNK_BYTES,
+        grouped: bool = False,
     ):
+        self.grouped = grouped
         self.page = page
         self.batch = rows
         self.tiles = token_tiles(rows)
@@ -226,8 +231,10 @@ class Gemm(TraceInvariant):
         self.depth = depth
         self.chunk = chunk
         self.slices = chunk // 32
-        self.items = chunk // ITEM_BYTES
-        self.xstride = chunk // 4 + 4
+        # the stage's K bytes: a chunk, or a group of ``depth`` chunks
+        self.xchunk = chunk * depth if grouped else chunk
+        self.items = self.xchunk // ITEM_BYTES
+        self.xstride = self.xchunk // 4 + 4
 
     # staging: thread v of a token tile round holds token v // items, bytes
     # 16 (v % items) .. + 15 of the chunk
@@ -250,7 +257,7 @@ class Gemm(TraceInvariant):
         out = []
         for t in range(self._rounds()):
             v, _ = self._item(t)
-            byte = chunk * i32(self.chunk) + (v % i32(self.items)) * i32(ITEM_BYTES)
+            byte = chunk * i32(self.xchunk) + (v % i32(self.items)) * i32(ITEM_BYTES)
             out.append(source.issue(prep[t], byte))
         return out
 
@@ -270,11 +277,12 @@ class Gemm(TraceInvariant):
             else:
                 lds_st(self.page + at, value)
 
-    def operands(self, buf, t):
-        """Token tile ``t``'s four slice operands of LDS buffer ``buf``."""
+    def operands(self, buf, t, sub: int = 0):
+        """Token tile ``t``'s slice operands of LDS buffer ``buf`` (chunk ``sub``
+        of a group)."""
         base = (
             (buf * i32(self.tiles) + i32(t)) * i32(TILE) + self.lane % i32(TILE)
-        ) * i32(self.xstride)
+        ) * i32(self.xstride) + i32(sub * self.chunk // 4)
         out = []
         for m in range(self.slices):
             w = lds_ld(self.page + base + koff(m, self.group) // i32(4), 2)
@@ -310,9 +318,11 @@ class Gemm(TraceInvariant):
         if rot is not None:
             k = (k + rot) % i32(count)
         chunk = first + k
+        # the fill first: its LDS store waits for it, and vmcnt is in order
+        xs = self.fill(source, chunk, prep)
         if pre is None:
             pre = [weights.issue(r, chunk, self.group, None, self.chunk) for r in rows]
-        return self.fill(source, chunk, prep), pre
+        return xs, pre
 
     def preload(self, weights, rows, first, count: int, mask=None):
         """The weight loads ``run`` stages outside its loop (every chunk when
@@ -327,15 +337,47 @@ class Gemm(TraceInvariant):
             for i in range(n)
         ]
 
-    def run(self, source, weights, rows, first, count: int, pending=None, rot=None):
+    def first_group(self, weights, rows, count: int, rot, mask):
+        """A grouped ``run``'s first group's weight loads (``rot`` as ``run``'s),
+        to pass as its ``pending``."""
+        g0 = rot % i32(count // self.depth)
+        return [
+            [
+                weights.issue(
+                    r, g0 * i32(self.depth) + i32(j), self.group, mask, self.chunk
+                )
+                for r in rows
+            ]
+            for j in range(self.depth)
+        ]
+
+    def run(
+        self,
+        source,
+        weights,
+        rows,
+        first,
+        count: int,
+        pending=None,
+        rot=None,
+        ahead=None,
+    ):
         """Accumulate chunks ``first .. first + count`` (a trace-time count) into
         one accumulator per (weight tile, token tile); ``rows``: the lane's
         weight row of each weight tile. ``pending``: ``preload``'s loads.
         ``rot`` (a long K only): start at chunk ``rot`` and wrap, so that CTAs
         streaming many rows in step do not all read the same column bytes of
-        their rows at once."""
+        their rows at once. Grouped only: ``ahead = (weights, rows, live)`` of the
+        CTA's next unit, whose first group's weights the last group issues
+        (masked by ``live``); returns ``(acc, those loads)``, the next ``run``'s
+        ``pending``."""
         pre = list(pending or ())
         pre += [None] * (count - len(pre))
+        if const_expr(self.grouped):
+            assert count % self.depth == 0, "grouped: whole groups"
+            return _grouped_loop(
+                self, source, weights, rows, first, count, rot, pending, ahead
+            )
         prep = self.prepare(source)
         if count <= UNROLL:
             return self._unrolled(source, weights, rows, first, count, pre, prep)
@@ -411,6 +453,74 @@ def _gemm_loop(gemm, source, weights, rows, first, count, pre, prep, rot=None):
             gemm.put(i32(1 - j % 2), slots[j + 1][0], source, prep)
         fx.barrier()
     return acc
+
+
+@traced
+def _grouped_loop(
+    gemm, source, weights, rows, first, count, rot=None, pending=None, ahead=None
+):
+    """``Gemm.run(grouped)``: an iteration multiplies one group of ``depth``
+    chunks from one LDS buffer while it issues the next group's activations
+    (first: the barrier's wait for them is then not behind its weights) and
+    weights, each chunk's into its ring slot; then one store and one barrier.
+    ``rot`` rotates whole groups; the last group issues ``ahead``'s first."""
+    depth = gemm.depth
+    groups = count // depth
+    prep = gemm.prepare(source)
+
+    def group_at(gi):
+        gi = (gi < i32(groups)).select(gi, i32(groups - 1))
+        if rot is not None:
+            gi = (gi + rot) % i32(groups)
+        return gi
+
+    def wload(w, rs, gi, j, mask=None):
+        chunk = first + gi * i32(depth) + i32(j)
+        return [w.issue(r, chunk, gemm.group, mask, gemm.chunk) for r in rs]
+
+    def multiply(acc, slots, buf):
+        for j in range_constexpr(depth):
+            acc = gemm.mma_tiles(
+                acc, slots[j], lambda t, j=j, buf=buf: gemm.operands(buf, t, j)
+            )
+        return acc
+
+    g0 = group_at(i32(0))
+    xs = gemm.fill(source, first // i32(depth) + g0, prep)
+    slots = (
+        list(pending)
+        if pending
+        else [wload(weights, rows, g0, j) for j in range(depth)]
+    )
+    gemm.put(i32(0), xs, source, prep)
+    fx.barrier()
+    acc = [[zeros(4) for _ in range(gemm.tiles)] for _ in range(gemm.mtiles)]
+    for gi in range(i32(0), i32(groups - 1), i32(1)):
+        buf = gi % i32(2)
+        gn = group_at(gi + i32(1))
+        xs = gemm.fill(source, first // i32(depth) + gn, prep)
+        nxt = []
+        for j in range_constexpr(depth):
+            acc = gemm.mma_tiles(
+                acc, slots[j], lambda t, j=j, buf=buf: gemm.operands(buf, t, j)
+            )
+            nxt.append(wload(weights, rows, gn, j))
+            sched_barrier()
+        gemm.put(i32(1) - buf, xs, source, prep)
+        fx.barrier()
+        slots = nxt
+    buf = i32((groups - 1) % 2)
+    if const_expr(ahead is None):
+        return multiply(acc, slots, buf)
+    w2, rows2, live = ahead
+    nxt = []
+    for j in range_constexpr(depth):
+        acc = gemm.mma_tiles(
+            acc, slots[j], lambda t, j=j, buf=buf: gemm.operands(buf, t, j)
+        )
+        nxt.append(wload(w2, rows2, g0, j, live))
+        sched_barrier()
+    return acc, nxt
 
 
 # --------------------------------------------------------------------------
@@ -534,6 +644,9 @@ def partial_epilogue(gemm, plan, part):
 
 
 SUM_BATCH = 8  # splits' loads in flight while summing partials
+# 16-byte partial loads a fold keeps in flight: several token tiles of a
+# shallow split, ``SUM_BATCH`` splits of one tile of a deep one
+FOLD_LOADS = 16
 
 
 def sum_partials4(part, plan, tokens: int, token, row):
@@ -569,22 +682,50 @@ def fold(g, gemm, plan, part, counter0, finish, done=None):
     fold counters."""
     epilogue = partial_epilogue(gemm, plan, part)
 
+    span = max(1, FOLD_LOADS // plan.splits)
+
     @traced
     def last(group):
         wave, lane = gemm.tid // i32(LANES), gemm.tid % i32(LANES)
         for mt in range_constexpr(plan.mtiles):
             first = group * i32(plan.unit_rows) + (i32(mt * WAVES) + wave) * i32(TILE)
             row = first + lane // i32(TILE) * i32(4)
+            tokens = [i32(t * TILE) + lane % i32(TILE) for t in range(gemm.tiles)]
+            tokens = [
+                (token < i32(gemm.batch)).select(token, i32(gemm.batch - 1))
+                for token in tokens
+            ]
             acc = []
-            for t in range_constexpr(gemm.tiles):
-                token = i32(t * TILE) + lane % i32(TILE)
-                token = (token < i32(gemm.batch)).select(token, i32(gemm.batch - 1))
-                acc.append(
-                    fx.Vector.from_elements(
-                        sum_partials4(part, plan, gemm.batch, token, row),
-                        fx.Float32,
+            if const_expr(plan.splits > FOLD_LOADS):
+                for t in range_constexpr(gemm.tiles):
+                    acc.append(
+                        fx.Vector.from_elements(
+                            sum_partials4(part, plan, gemm.batch, tokens[t], row),
+                            fx.Float32,
+                        )
                     )
-                )
+            else:
+                for t0 in range_constexpr(0, gemm.tiles, span):
+                    tiles = range(t0, min(t0 + span, gemm.tiles))
+                    loads = [
+                        [
+                            ld(
+                                part,
+                                (i32(s * gemm.batch) + tokens[t]) * i32(plan.padded)
+                                + row,
+                                fx.Float32,
+                                4,
+                                cm=CM_DEV,
+                            )
+                            for t in tiles
+                        ]
+                        for s in range(plan.splits)
+                    ]
+                    for i in range_constexpr(len(tiles)):
+                        total = [loads[0][i][e] for e in range(4)]
+                        for s in range_constexpr(1, plan.splits):
+                            total = [total[e] + loads[s][i][e] for e in range(4)]
+                        acc.append(fx.Vector.from_elements(total, fx.Float32))
             finish(group, first, lane, acc)
         if const_expr(done is not None):
             done(group)

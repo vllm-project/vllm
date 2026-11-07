@@ -412,7 +412,7 @@ def run_layer(widths, seed: int = 0, iters: int = 20, port: int = 29517):
 
 
 @pytest.mark.skipif(not _gpus_ok(), reason="needs 8 gfx942 GPUs and FlyDSL")
-@pytest.mark.parametrize("rows", [1, 8, 16, 128])
+@pytest.mark.parametrize("rows", [1, 8, 16, 24, 64, 128])
 def test_layer_tp8(rows):
     run_layer([rows], seed=rows)
 

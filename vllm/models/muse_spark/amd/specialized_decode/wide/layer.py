@@ -149,17 +149,35 @@ SCRATCH = (
     "part_qkvg",
 )
 
-# split-K plans
-O_PLAN = SplitK(HIDDEN, Q_ROWS, 1, splits=2)  # 128 groups x 2
-ROUTER_PLAN = SplitK(dense.ROUTER_ROWS, HIDDEN, 2, splits=16)  # 2 x 16
-POOL_PLAN = SplitK(POOL_ROWS, HIDDEN, 2, splits=32)  # 8 x 32
-UNPOOL_PLAN = SplitK(UNPOOL_ROWS, POOLED, 2, splits=16)  # 16 x 16
-QKVG_PLAN = SplitK(QKVG, HIDDEN, 1, splits=8)  # 36 x 8
-PLANS = (O_PLAN, ROUTER_PLAN, POOL_PLAN, UNPOOL_PLAN, QKVG_PLAN)
-FOLD_O, FOLD_ROUTER, FOLD_POOL, FOLD_UNPOOL, FOLD_QKVG = (
-    sum(p.groups for p in PLANS[:i]) for i in range(len(PLANS))
-)
-assert ROUTER_PLAN.units + POOL_PLAN.units <= BLOCKS
+# split-K splits a width: (o, router, pool, unpool, qkvg)
+NARROW_SPLITS = (2, 16, 32, 16, 8)  # 128 x 2, 2 x 16, 8 x 32, 16 x 16, 36 x 8 units
+WIDE_SPLITS = (2, 16, 16, 8, 8)  # the pooler fold of 32 splits: ~50 us at 128 rows
+
+
+class Plans:
+    """The split-K plans of width ``rows``: a last arriver sums ``splits *
+    rows`` partials a row, so wide steps cut K fewer ways."""
+
+    def __init__(self, rows: int):
+        o, router, pool, unpool, qkvg = NARROW_SPLITS if rows <= 16 else WIDE_SPLITS
+        self.splits = (o, router, pool, unpool, qkvg)
+        self.o = SplitK(HIDDEN, Q_ROWS, 1, splits=o)
+        self.router = SplitK(dense.ROUTER_ROWS, HIDDEN, 2, splits=router)
+        self.pool = SplitK(POOL_ROWS, HIDDEN, 2, splits=pool)
+        self.unpool = SplitK(UNPOOL_ROWS, POOLED, 2, splits=unpool)
+        self.qkvg = SplitK(QKVG, HIDDEN, 1, splits=qkvg)
+        plans = (self.o, self.router, self.pool, self.unpool, self.qkvg)
+        # the fold counters: each plan's row groups, in order
+        firsts = [sum(p.groups for p in plans[:i]) for i in range(len(plans))]
+        (
+            self.fold_o,
+            self.fold_router,
+            self.fold_pool,
+            self.fold_unpool,
+            self.fold_qkvg,
+        ) = firsts
+        assert self.router.units + self.pool.units <= BLOCKS
+
 
 # the layer's exchanges: groups of 64 bf16 columns (the logits: 32 f32)
 O_SC, O_GA = Kind("o_sc", HIDDEN // COLS), Kind("o_ga", HIDDEN // COLS)
@@ -177,6 +195,7 @@ POOL_OWNED = POOLED // COLS // TP  # 8
 def scratch_bytes(rows: int) -> dict[str, int]:
     """Each ``SCRATCH`` buffer's bytes at width ``rows``."""
     a = rows * TOPK
+    p = Plans(rows)
     return {
         "stream": rows * HIDDEN * 4,
         "xo": rows * Q_ROWS,
@@ -192,11 +211,11 @@ def scratch_bytes(rows: int) -> dict[str, int]:
         "amax": a * 4,
         "y": a * POOLED * 2,
         "sq": a * moe.DOWN_OWNERS * 4,
-        "part_o": O_PLAN.partial_words(rows) * 4,
-        "part_router": ROUTER_PLAN.partial_words(rows) * 4,
-        "part_pool": POOL_PLAN.partial_words(rows) * 4,
-        "part_unpool": UNPOOL_PLAN.partial_words(rows) * 4,
-        "part_qkvg": QKVG_PLAN.partial_words(rows) * 4,
+        "part_o": p.o.partial_words(rows) * 4,
+        "part_router": p.router.partial_words(rows) * 4,
+        "part_pool": p.pool.partial_words(rows) * 4,
+        "part_unpool": p.unpool.partial_words(rows) * 4,
+        "part_qkvg": p.qkvg.partial_words(rows) * 4,
     }
 
 
@@ -239,14 +258,30 @@ def build(
     are compiled in."""
     lds = LdsPlan(rows)
     sh = lds.moe
+    plans = Plans(rows)
+    O_PLAN, ROUTER_PLAN, POOL_PLAN, UNPOOL_PLAN, QKVG_PLAN = (
+        plans.o,
+        plans.router,
+        plans.pool,
+        plans.unpool,
+        plans.qkvg,
+    )
+    FOLD_O, FOLD_ROUTER, FOLD_POOL, FOLD_UNPOOL, FOLD_QKVG = (
+        plans.fold_o,
+        plans.fold_router,
+        plans.fold_pool,
+        plans.fold_unpool,
+        plans.fold_qkvg,
+    )
     key = (_SOURCE_KEY, *sorted(phases))
+    split_key = plans.splits
 
     @fx.struct
     class Smem:
         word: fx.Array[fx.Int32, 4, 16]
         page: fx.Array[fx.Int32, lds.words, 16]
 
-    name = f"muse942_layer_s{rows}"
+    name = f"muse942_layer_s{rows}_k" + "_".join(str(s) for s in plans.splits)
     if phases != ALL_PHASES:
         name += "_p" + "_".join(str(p) for p in sorted(phases))
 
@@ -266,6 +301,7 @@ def build(
         folds: Int64,
         health: Int64,
     ):
+        assert const_expr(len(split_key) == 5)  # keys the compile cache
         tid = fx.thread_idx.x
         bid = fx.block_idx.x
         alloc = fx.SharedAllocator()
