@@ -145,6 +145,7 @@ def _compute_global_logprobs_and_logsumexp(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_vocab_size,
     draft_logits_row_mapping_ptr,
     # [num_logits, num_blocks]
     draft_local_max_ptr,
@@ -181,7 +182,7 @@ def _compute_global_logprobs_and_logsumexp(
                 * draft_logits_stride_0
                 + draft_step * draft_logits_stride_1
                 + token,
-                mask=mask,
+                mask=mask & (token < draft_vocab_size),
                 other=float("-inf"),
             ).to(tl.float32)
             / temp
@@ -238,6 +239,7 @@ def _compute_local_logits_stats_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_vocab_size,
     draft_logits_row_mapping_ptr,
     # [num_logits]
     expanded_idx_mapping_ptr,
@@ -313,7 +315,7 @@ def _compute_local_logits_stats_kernel(
                     * draft_logits_stride_0
                     + draft_step_idx * draft_logits_stride_1
                     + block_offsets,
-                    mask=mask,
+                    mask=mask & (block_offsets < draft_vocab_size),
                     other=float("-inf"),
                 ).to(tl.float32)
                 / temp
@@ -350,6 +352,7 @@ def _compute_cumulative_log_p_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_vocab_size,
     draft_logits_row_mapping_ptr,
     # [num_logits, num_blocks]
     draft_local_max_ptr,
@@ -400,6 +403,7 @@ def _compute_cumulative_log_p_kernel(
                     draft_logits_ptr,
                     draft_logits_stride_0,
                     draft_logits_stride_1,
+                    draft_vocab_size,
                     draft_logits_row_mapping_ptr,
                     draft_local_max_ptr,
                     draft_local_max_stride,
@@ -434,6 +438,7 @@ def _compute_local_residual_mass_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_vocab_size,
     draft_logits_row_mapping_ptr,
     # [num_logits, num_blocks]
     draft_local_max_ptr,
@@ -495,6 +500,7 @@ def _compute_local_residual_mass_kernel(
         draft_logits_ptr,
         draft_logits_stride_0,
         draft_logits_stride_1,
+        draft_vocab_size,
         draft_logits_row_mapping_ptr,
         draft_local_max_ptr,
         draft_local_max_stride,
@@ -545,6 +551,7 @@ def _rejection_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_vocab_size,
     draft_logits_row_mapping_ptr,
     # [num_logits, num_blocks]
     draft_local_max_ptr,
@@ -694,6 +701,7 @@ def _rejection_kernel(
                         draft_logits_ptr,
                         draft_logits_stride_0,
                         draft_logits_stride_1,
+                        draft_vocab_size,
                         draft_logits_row_mapping_ptr,
                         draft_local_max_ptr,
                         draft_local_max_stride,
@@ -837,6 +845,7 @@ def _resample_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_vocab_size,
     draft_logits_row_mapping_ptr,
     # [num_reqs]
     draft_rejected_logsumexp_ptr,
@@ -954,7 +963,7 @@ def _resample_kernel(
                 * draft_logits_stride_0
                 + resample_idx * draft_logits_stride_1
                 + block,
-                mask=mask,
+                mask=mask & (block < draft_vocab_size),
                 other=float("-inf"),
             ).to(tl.float32)
             / temp
@@ -1203,12 +1212,12 @@ def rejection_sample(
         watermark_key_1 = watermark_key >> 32
     draft_logits_stride_0 = 0
     draft_logits_stride_1 = 0
+    draft_vocab_size = vocab_size
     if has_draft_logits := draft_logits is not None:
+        draft_vocab_size = draft_logits.size(-1)
+        assert draft_vocab_size <= vocab_size
         draft_logits_stride_0 = draft_logits.stride(0)
         draft_logits_stride_1 = draft_logits.stride(1)
-        # In some cases (e.g. MiMo v2.5 Pro + DFlash) the target model's
-        # vocab size is larger than the draft's due to padding.
-        vocab_size = min(vocab_size, draft_logits.size(-1))
 
     fly_entropy = None
     if fly_window_size > 0:
@@ -1254,6 +1263,7 @@ def rejection_sample(
         draft_logits,
         draft_logits_stride_0,
         draft_logits_stride_1,
+        draft_vocab_size,
         draft_logits_row_mapping,
         expanded_idx_mapping,
         expanded_local_pos,
@@ -1287,6 +1297,7 @@ def rejection_sample(
             draft_logits,
             draft_logits_stride_0,
             draft_logits_stride_1,
+            draft_vocab_size,
             draft_logits_row_mapping,
             draft_local_max,
             draft_local_max.stride(0),
@@ -1322,6 +1333,7 @@ def rejection_sample(
                 draft_logits,
                 draft_logits_stride_0,
                 draft_logits_stride_1,
+                draft_vocab_size,
                 draft_logits_row_mapping,
                 draft_local_max,
                 draft_local_max.stride(0),
@@ -1369,6 +1381,7 @@ def rejection_sample(
         draft_logits,
         draft_logits_stride_0,
         draft_logits_stride_1,
+        draft_vocab_size,
         draft_logits_row_mapping,
         draft_local_max,
         draft_local_max.stride(0),
@@ -1417,6 +1430,7 @@ def rejection_sample(
         draft_logits,
         draft_logits_stride_0,
         draft_logits_stride_1,
+        draft_vocab_size,
         draft_logits_row_mapping,
         draft_rejected_logsumexp,
         num_sampled,

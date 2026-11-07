@@ -5,12 +5,22 @@
 import os
 
 import pytest
+import torch
 
 from tests.models.utils import check_logprobs_close
 from tests.v1.e2e.spec_decode.utils import compute_acceptance_len
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+from vllm.triton_utils.dispatcher import KernelOverride
+from vllm.utils.cpu_triton_utils import (
+    _rejection_random_sample_kernel_impl,
+    _sample_recovered_tokens_kernel_impl,
+)
+from vllm.v1.sample.rejection_sampler import (
+    rejection_random_sample_kernel,
+    sample_recovered_tokens_kernel,
+)
 
 pytestmark = pytest.mark.cpu_model
 
@@ -66,6 +76,65 @@ def _spec_metric(llm: LLM, name: str) -> float:
         if metric.name == name:
             return float(getattr(metric, "value", 0.0))
     return 0.0
+
+
+def test_cpu_rejection_sampler_supports_narrow_draft_probs():
+    current_platform.import_kernels()
+    batch_size = 32
+    draft_probs = torch.tensor([[1.0, 0.0]]).repeat(batch_size, 1)
+    target_probs = torch.tensor([[0.0, 0.0, 1.0]]).repeat(batch_size, 1)
+    draft_token_ids = torch.zeros(batch_size, dtype=torch.int32)
+    cu_num_draft_tokens = torch.arange(1, batch_size + 1, dtype=torch.int32)
+    recovered_token_ids = torch.empty(batch_size, dtype=torch.int32)
+
+    recovered_kernel = KernelOverride(
+        sample_recovered_tokens_kernel,
+        _sample_recovered_tokens_kernel_impl,
+    )
+    recovered_kernel[(batch_size, 1)](
+        output_token_ids_ptr=recovered_token_ids,
+        cu_num_draft_tokens_ptr=cu_num_draft_tokens,
+        draft_token_ids_ptr=draft_token_ids,
+        draft_probs_ptr=draft_probs,
+        draft_probs_stride=draft_probs.stride(0),
+        target_probs_ptr=target_probs,
+        inv_q_ptr=torch.ones((batch_size, 3)),
+        vocab_size=3,
+        draft_vocab_size=2,
+        BLOCK_SIZE=8192,
+        NO_DRAFT_PROBS=False,
+        USE_FP64_GUMBEL=False,
+    )
+
+    expected_target_only = torch.full((batch_size,), 2, dtype=torch.int32)
+    assert torch.equal(recovered_token_ids, expected_target_only)
+
+    output_token_ids = torch.full((batch_size, 2), -1, dtype=torch.int32)
+    random_kernel = KernelOverride(
+        rejection_random_sample_kernel,
+        _rejection_random_sample_kernel_impl,
+    )
+    random_kernel[(batch_size,)](
+        output_token_ids_ptr=output_token_ids,
+        cu_num_draft_tokens_ptr=cu_num_draft_tokens,
+        draft_token_ids_ptr=torch.full((batch_size,), 2, dtype=torch.int32),
+        draft_probs_ptr=draft_probs,
+        draft_probs_stride=draft_probs.stride(0),
+        target_probs_ptr=target_probs,
+        bonus_token_ids_ptr=torch.zeros((batch_size, 1), dtype=torch.int32),
+        recovered_token_ids_ptr=torch.ones(batch_size, dtype=torch.int32),
+        uniform_probs_ptr=torch.full((batch_size,), 0.5, dtype=torch.float64),
+        is_greedy_ptr=torch.zeros(batch_size, dtype=torch.bool),
+        max_spec_len=1,
+        vocab_size=3,
+        draft_vocab_size=2,
+        synthetic_conditional_rates_ptr=None,
+        NO_DRAFT_PROBS=False,
+        SYNTHETIC_MODE=False,
+    )
+
+    expected_recovered = torch.ones(batch_size, dtype=torch.int32)
+    assert torch.equal(output_token_ids[:, 0], expected_recovered)
 
 
 def test_ngram_spec_decode_matches_baseline(baseline_refs):

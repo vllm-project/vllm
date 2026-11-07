@@ -343,7 +343,8 @@ void rejection_random_sample_kernel_impl(
     const torch::Tensor& recovered_token_ids,
     const torch::Tensor& uniform_probs,
     const std::optional<torch::Tensor>& is_greedy, const int64_t max_spec_len,
-    const int64_t vocab_size, const bool no_draft_probs) {
+    const int64_t vocab_size, const int64_t draft_probs_stride,
+    const int64_t draft_vocab_size, const bool no_draft_probs) {
   const int64_t batch_size = cu_num_draft_tokens.size(0);
 
   int64_t* out_ptr = output_token_ids.data_ptr<int64_t>();
@@ -361,9 +362,6 @@ void rejection_random_sample_kernel_impl(
   const int64_t out_stride = output_token_ids.stride(0);
   const int64_t bonus_stride = bonus_token_ids.stride(0);
   const int64_t target_stride = target_probs.stride(0);
-  const int64_t draft_probs_stride =
-      no_draft_probs ? 0 : draft_probs.value().stride(0);
-
 #pragma omp parallel for
   for (int64_t req_idx = 0; req_idx < batch_size; ++req_idx) {
     if (greedy_ptr && greedy_ptr[req_idx]) continue;
@@ -378,10 +376,12 @@ void rejection_random_sample_kernel_impl(
       int64_t draft_id = draft_ids_ptr[token_idx];
 
       float p = target_probs_ptr[token_idx * target_stride + draft_id];
-      float q =
-          no_draft_probs
-              ? 1.0f
-              : draft_probs_ptr[token_idx * draft_probs_stride + draft_id];
+      float q = 1.0f;
+      if (!no_draft_probs) {
+        q = draft_id < draft_vocab_size
+                ? draft_probs_ptr[token_idx * draft_probs_stride + draft_id]
+                : 0.0f;
+      }
       float uniform_p = uniform_probs_ptr[token_idx];
 
       float ratio = (q > 0.0f) ? (p / q) : 0.0f;
@@ -432,7 +432,8 @@ void sample_recovered_tokens_kernel_impl(
     const torch::Tensor& draft_token_ids,
     const std::optional<torch::Tensor>& draft_probs,
     const torch::Tensor& target_probs, const torch::Tensor& inv_q,
-    const int64_t vocab_size, const bool no_draft_probs) {
+    const int64_t vocab_size, const int64_t draft_probs_stride,
+    const int64_t draft_vocab_size, const bool no_draft_probs) {
   const int64_t batch_size = cu_num_draft_tokens.size(0);
 
   int64_t* out_ptr = output_token_ids.data_ptr<int64_t>();
@@ -444,8 +445,6 @@ void sample_recovered_tokens_kernel_impl(
   const float* inv_q_ptr = inv_q.data_ptr<float>();
 
   const int64_t target_stride = target_probs.stride(0);
-  const int64_t draft_probs_stride =
-      no_draft_probs ? 0 : draft_probs.value().stride(0);
   const int64_t inv_q_stride = inv_q.stride(0);
 
 #pragma omp parallel for
@@ -474,7 +473,8 @@ void sample_recovered_tokens_kernel_impl(
         if (no_draft_probs) {
           if (v == draft_id) prob = 0.0f;
         } else {
-          float diff = prob - token_draft_probs[v];
+          float draft_prob = v < draft_vocab_size ? token_draft_probs[v] : 0.0f;
+          float diff = prob - draft_prob;
           prob = diff > 0.0f ? diff : 0.0f;
         }
 

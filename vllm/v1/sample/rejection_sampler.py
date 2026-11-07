@@ -464,6 +464,7 @@ def rejection_sample(
     assert draft_probs is None or draft_probs.is_contiguous()
     assert bonus_token_ids.is_contiguous()
     assert target_logits.shape == (num_tokens, vocab_size)
+    assert draft_probs is None or draft_probs.shape[-1] <= vocab_size
     fly_enabled = fly_window_size is not None
     if fly_enabled:
         assert fly_entropy_threshold is not None
@@ -897,7 +898,8 @@ def rejection_random_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
     cu_num_draft_tokens_ptr,  # [batch_size]
     draft_token_ids_ptr,  # [num_tokens]
-    draft_probs_ptr,  # [num_tokens, vocab_size] or None
+    draft_probs_ptr,  # [num_tokens, draft_vocab_size] or None
+    draft_probs_stride,
     target_probs_ptr,  # [num_tokens, vocab_size]
     bonus_token_ids_ptr,  # [batch_size]
     recovered_token_ids_ptr,  # [num_tokens]
@@ -905,6 +907,7 @@ def rejection_random_sample_kernel(
     is_greedy_ptr,  # [batch_size]
     max_spec_len,
     vocab_size,
+    draft_vocab_size,
     synthetic_conditional_rates_ptr,  # [num_speculative_tokens] or None
     NO_DRAFT_PROBS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
@@ -940,8 +943,10 @@ def rejection_random_sample_kernel(
                 else:
                     draft_prob = tl.load(
                         draft_probs_ptr
-                        + (start_idx + pos) * vocab_size
-                        + draft_token_id
+                        + (start_idx + pos) * draft_probs_stride
+                        + draft_token_id,
+                        mask=draft_token_id < draft_vocab_size,
+                        other=0.0,
                     )
                 target_prob = tl.load(
                     target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id
@@ -1013,6 +1018,10 @@ def _rejection_random_sample(
 ) -> DispatchSpec:
     return (output_token_ids.shape[0],), dict(
         vocab_size=target_probs.shape[1],
+        draft_probs_stride=draft_probs.stride(0) if draft_probs is not None else 0,
+        draft_vocab_size=(
+            draft_probs.shape[1] if draft_probs is not None else target_probs.shape[1]
+        ),
         NO_DRAFT_PROBS=draft_probs is None,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
     )
@@ -1072,10 +1081,12 @@ def sample_recovered_tokens_kernel(
     output_token_ids_ptr,  # [num_tokens]
     cu_num_draft_tokens_ptr,  # [batch_size]
     draft_token_ids_ptr,  # [num_tokens]
-    draft_probs_ptr,  # [num_tokens, vocab_size] or None
+    draft_probs_ptr,  # [num_tokens, draft_vocab_size] or None
+    draft_probs_stride,
     target_probs_ptr,  # [num_tokens, vocab_size]
     inv_q_ptr,  # [batch_size, vocab_size]
     vocab_size,
+    draft_vocab_size,
     BLOCK_SIZE: tl.constexpr,
     NO_DRAFT_PROBS: tl.constexpr,
     USE_FP64_GUMBEL: tl.constexpr,
@@ -1116,8 +1127,8 @@ def sample_recovered_tokens_kernel(
             )
         else:
             draft_prob = tl.load(
-                draft_probs_ptr + token_idx * vocab_size + vocab_offset,
-                mask=vocab_mask,
+                draft_probs_ptr + token_idx * draft_probs_stride + vocab_offset,
+                mask=(vocab_mask & (vocab_offset < draft_vocab_size)),
                 other=0.0,
             )
             target_prob = tl.load(
@@ -1191,6 +1202,10 @@ def _sample_recovered_tokens(
 ) -> DispatchSpec:
     return (cu_num_draft_tokens.shape[0], max_spec_len), dict(
         vocab_size=target_probs.shape[1],
+        draft_probs_stride=draft_probs.stride(0) if draft_probs is not None else 0,
+        draft_vocab_size=(
+            draft_probs.shape[1] if draft_probs is not None else target_probs.shape[1]
+        ),
         BLOCK_SIZE=8192,
         NO_DRAFT_PROBS=draft_probs is None,
         USE_FP64_GUMBEL=inv_q.dtype == torch.float64,
