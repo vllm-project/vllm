@@ -330,6 +330,10 @@ class Qwen3XPressForCausalLM(DFlashQwen3ForCausalLM):
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def context_kv_modules(self) -> list[nn.Module]:
+        """See `SupportsContextKVOnly`."""
+        return self.model.context_kv_modules()
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
         includes_embed_tokens = False

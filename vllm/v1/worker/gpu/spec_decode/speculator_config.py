@@ -60,6 +60,8 @@ class SpeculatorConfig:
     supports_watermarking: ClassVar[bool] = False
     # Prefill context parallelism.
     supports_pcp: ClassVar[bool] = False
+    # See `SpeculativeConfig.prefill_context_kv_only`.
+    supports_prefill_context_kv_only: ClassVar[bool] = False
 
     # --- SpeculativeConfig setup ---
 
@@ -103,6 +105,17 @@ class SpeculatorConfig:
     @final
     def num_speculative_tokens(self) -> int:
         return self.spec_config.num_speculative_tokens
+
+    @property
+    @final
+    def num_draft_tokens_per_step(self) -> int:
+        """Draft tokens to schedule per step (dynamic speculative decoding may
+        schedule fewer). 0 with `prefill_context_kv_only`, which keeps
+        `num_speculative_tokens`: it also sizes state that the decode instance
+        loads (e.g. the Mamba state)."""
+        if self.spec_config.prefill_context_kv_only:
+            return 0
+        return self.num_speculative_tokens
 
     @property
     def uses_aux_hidden_states(self) -> bool:

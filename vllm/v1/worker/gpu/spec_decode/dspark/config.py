@@ -123,7 +123,7 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             # Anchor-sampling DSpark drafts a block of num_speculative_tokens
             # query tokens in which the anchor itself is the first prediction
             # position (no separate bonus query).
-            return self.num_speculative_tokens
+            return self.num_draft_tokens_per_step
         return super().num_lookahead_tokens
 
     def hash_factors(self) -> list[Any]:
