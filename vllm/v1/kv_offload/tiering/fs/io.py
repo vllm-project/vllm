@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import errno
 import logging
 import mmap
 import os
@@ -87,6 +88,29 @@ def _validate_offsets(view: memoryview, offsets: list[int], block_size: int) -> 
             )
 
 
+def _write_fully(fd: int, data: memoryview, use_o_direct: bool) -> None:
+    """Write all of ``data``, retrying short writes so a full disk raises
+    ``ENOSPC`` (or ``EDQUOT``/``EFBIG``). Mirrors ``write_fully`` in fs_io.cpp."""
+    total = 0
+    size = len(data)
+    while total < size:
+        try:
+            n = os.write(fd, data[total:])
+        except OSError as exc:
+            # An unaligned O_DIRECT remainder fails with EINVAL; report as before.
+            if exc.errno == errno.EINVAL and use_o_direct and total > 0:
+                raise OSError(
+                    errno.EIO,
+                    f"Short write: expected {size} bytes, wrote {total}",
+                ) from exc
+            raise
+        if n == 0:
+            raise OSError(
+                errno.EIO, f"Short write: expected {size} bytes, wrote {total}"
+            )
+        total += n
+
+
 def _store_block(
     dest_path: str,
     buffer: memoryview,
@@ -114,11 +138,7 @@ def _store_block(
             0o644,
         )
         try:
-            written = os.write(fd, view_slice)
-            if written < len(view_slice):
-                raise OSError(
-                    f"Short write: expected {len(view_slice)} bytes, wrote {written}"
-                )
+            _write_fully(fd, view_slice, use_o_direct)
         finally:
             os.close(fd)
         try:

@@ -33,6 +33,33 @@ inline int ensure_parent_dirs(const std::string& path) {
   return ec ? ec.value() : 0;
 }
 
+// Returns 0, or the errno of the failing write(2). A short write is retried so
+// the next write reports the cause (ENOSPC, EDQUOT, EFBIG) instead of EIO.
+inline int write_fully(int fd, const char* src, size_t size,
+                       bool use_o_direct) {
+  size_t total = 0;
+  while (total < size) {
+    const ssize_t n = write(fd, src + total, size - total);
+    if (n > 0) {
+      total += static_cast<size_t>(n);
+      continue;
+    }
+    if (n < 0 && errno == EINTR) {
+      continue;
+    }
+    if (n == 0) {
+      return EIO;
+    }
+    const int err = errno;
+    // An unaligned O_DIRECT remainder fails with EINVAL; report it as before.
+    if (err == EINVAL && use_o_direct && total > 0) {
+      return EIO;
+    }
+    return err;
+  }
+  return 0;
+}
+
 // Core single-block store: src/size are raw pointer + byte count. Returns 0
 // on success, or the errno of the failing step on failure -- captured
 // before any subsequent cleanup call can overwrite it. On failure, the temp
@@ -54,9 +81,7 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
     return errno;
   }
 
-  const ssize_t written = write(fd, src, size);
-  if (written < 0 || static_cast<size_t>(written) != size) {
-    const int err = written < 0 ? errno : EIO;
+  if (const int err = write_fully(fd, src, size, use_o_direct); err != 0) {
     close(fd);  // Best-effort cleanup; the real error is already captured.
     unlink(tmp_path);
     return err;
