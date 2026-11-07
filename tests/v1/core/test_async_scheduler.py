@@ -8,7 +8,7 @@ import pytest
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
 from vllm.v1.utils import ConstantList
@@ -811,3 +811,72 @@ def test_resumable_request_handoff():
 
     engine._process_oldest_step()
     assert len(request.output_token_ids) == 1
+
+
+def test_sync_kv_load_failure_recovery_inflight_stale():
+    """Regression test for #65131: synchronous KV load failure recovery under
+    AsyncScheduler must drain in-flight stale output, drop invalid tokens, and
+    reset num_output_placeholders so that prefill recomputation and subsequent
+    decoding do not underflow num_output_placeholders.
+    """
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_v2_model_runner=True,
+        block_size=16,
+    )
+    scheduler.recompute_kv_load_failures = True
+    engine = PipelinedEngine(scheduler, queue_size=3)
+
+    prompt_len = 16
+    request_id = "recompute-load-failure"
+    request = create_requests(
+        1, num_tokens=prompt_len, max_tokens=6, req_ids=[request_id]
+    )[0]
+    scheduler.add_request(request)
+
+    # Schedule prefill and advance into decode.
+    assert engine._schedule()
+    engine._process_oldest_step()
+    assert not request.is_prefill_chunk
+    assert len(request.output_token_ids) == 1
+
+    # Queue up pipelined decode steps while request is running.
+    assert engine._schedule()
+    assert engine._schedule()
+    assert request.num_output_placeholders > 0
+
+    # Get block IDs of the request to simulate load failure on one of them.
+    (req_block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    invalid_block_id = req_block_ids[0]
+
+    # Process the oldest step with KV load failure reported.
+    scheduler_output, new_reqs = engine.queue.pop()
+    req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+    stale_token = 8888
+    model_runner_output = ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        sampled_token_ids=[[stale_token]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        kv_connector_output=KVConnectorOutput(invalid_block_ids={invalid_block_id}),
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # Recomputation rolls back num_computed_tokens.
+    assert request.num_computed_tokens == 0
+    # In-flight state must be marked stale and placeholders reset.
+    assert request.drop_stale_output is True
+    assert request.num_output_placeholders == 0
+
+    # Process remaining in-flight step; its output executed over invalid KV
+    # and must be dropped.
+    while engine.queue:
+        engine._process_oldest_step()
+    assert stale_token not in request.output_token_ids
+
+    # Run engine to completion: recomputed prefill and decodes must finish
+    # without underflowing num_output_placeholders.
+    engine.run()
+    assert request.is_finished()

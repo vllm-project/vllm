@@ -3968,5 +3968,19 @@ class Scheduler(SchedulerInterface):
 
         # Mark async requests with KV load failures for retry once loading completes
         self.failed_recving_kv_req_ids |= async_failed_req_ids
+
+        # Async scheduling: mark all in-flight output for rescheduled sync
+        # requests as stale so batches computed over invalid KV memory are
+        # dropped upon return. Reset output placeholders so prefill
+        # recomputation starts with clean accounting.
+        for req_id in sync_failed_req_ids:
+            request = self.requests.get(req_id)
+            if request is not None:
+                request.drop_stale_output = True
+                request.num_stale_output_tokens = request.num_in_flight_tokens
+                request.num_output_placeholders = 0
+                if request.spec_token_ids:
+                    request.spec_token_ids = []
+
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids
