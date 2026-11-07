@@ -210,7 +210,9 @@ def _make_mega_moe_experts(
     )
 
 
-def _load_mega_moe_checkpoint_shuffled(experts, num_logical_experts, seed):
+def _mega_moe_checkpoint(experts, num_logical_experts, seed):
+    """A random checkpoint, stacked by logical expert, and its shards:
+    ``(param name, tensor, shard id, expert id)`` as model loaders pass them."""
     hidden, inter = experts.hidden_size, experts.intermediate_size
     routed = experts.weight_format.routed
     group = routed.scale_group_k
@@ -231,6 +233,8 @@ def _load_mega_moe_checkpoint_shuffled(experts, num_logical_experts, seed):
     shards = []
     for expert_id in range(num_logical_experts):
         for name, tensor in ckpt.items():
+            if name.endswith("weight_scale"):
+                tensor = tensor.view(routed.scale_dtype)
             if name.startswith("w2_"):
                 shards.append((name, tensor[expert_id], "w2", expert_id))
             elif tensor.dim() == 1:
@@ -240,18 +244,27 @@ def _load_mega_moe_checkpoint_shuffled(experts, num_logical_experts, seed):
             else:
                 shards.append((name, tensor[expert_id, :inter], "w1", expert_id))
                 shards.append((name, tensor[expert_id, inter:], "w3", expert_id))
+    return ckpt, shards
+
+
+def _load_mega_moe_checkpoint_shuffled(experts, num_logical_experts, seed):
+    """Load a random checkpoint, one shard per ``weight_loader`` call in a
+    shuffled order, then run post-load processing."""
+    ckpt, shards = _mega_moe_checkpoint(experts, num_logical_experts, seed)
+    generator = torch.Generator().manual_seed(seed)
     for i in torch.randperm(len(shards), generator=generator).tolist():
         name, loaded_weight, shard_id, expert_id = shards[i]
-        if name.endswith("weight_scale"):
-            loaded_weight = loaded_weight.view(routed.scale_dtype)
-        assert experts.weight_loader(
-            getattr(experts, name),
+        # Through the parameter, as model loaders do (reload wraps it).
+        param = getattr(experts, name)
+        assert param.weight_loader(
+            param,
             loaded_weight,
             f"experts.{name}",
             shard_id=shard_id,
             expert_id=expert_id,
             return_success=True,
         )
+    experts.process_weights_after_loading()
     return ckpt
 
 
@@ -309,20 +322,149 @@ def test_deep_gemm_mega_moe_loads_shards_into_kernel_layout(weight_format):
     assert experts.w2_weight_scale.stride() == (256 * 384 // group_k, 1, 256)
     if weight_format.routed.has_global_scale:
         physical = torch.arange(4) % 3
-        for name in ("w13_weight_scale_2", "w2_weight_scale_2", "w2_input_scale"):
-            assert torch.equal(getattr(experts, name), ckpt[name][physical])
+        l1_scale = ckpt["w13_weight_scale_2"][physical]
+        assert torch.equal(experts.w13_weight_scale_2, l1_scale.expand(2, 4))
+        assert torch.equal(
+            experts.w2_weight_scale_2, ckpt["w2_weight_scale_2"][physical]
+        )
+        assert torch.equal(experts.w2_input_scale, ckpt["w2_input_scale"])
         assert experts.l2_activation_scale == ckpt["w2_input_scale"].max().item()
 
 
 @pytest.mark.parametrize("weight_format", [MEGA_MOE_MXFP4, MEGA_MOE_NVFP4])
 def test_deep_gemm_mega_moe_reload_overwrites_kernel_layout_in_place(weight_format):
-    """A second load must update the live kernel tensors without reallocating."""
+    """A second load and post-load processing must update the live kernel
+    tensors without reallocating."""
     experts = _make_mega_moe_experts(2, 2, weight_format)
     _load_mega_moe_checkpoint_shuffled(experts, 2, seed=0)
-    data_ptrs = [param.data_ptr() for param in experts.parameters()]
+    data_ptrs = [t.data_ptr() for t in (*experts.parameters(), *experts.buffers())]
     ckpt = _load_mega_moe_checkpoint_shuffled(experts, 2, seed=1)
-    assert [param.data_ptr() for param in experts.parameters()] == data_ptrs
+    assert [
+        t.data_ptr() for t in (*experts.parameters(), *experts.buffers())
+    ] == data_ptrs
     _assert_mega_moe_layout(experts, _expected_mega_moe_layout(ckpt, 2, 2))
+
+
+class _MegaMoEModel(torch.nn.Module):
+    """One MegaMoE layer with per-expert checkpoint names,
+    ``experts.{expert}.{shard}.{param}``, as model loaders map them."""
+
+    def __init__(self, weight_format):
+        super().__init__()
+        self.experts = _make_mega_moe_experts(4, 3, weight_format)
+
+    def load_weights(self, weights):
+        for name, loaded_weight in weights:
+            _, expert_id, shard_id, param_name = name.split(".")
+            param = getattr(self.experts, param_name)
+            param.weight_loader(
+                param,
+                loaded_weight,
+                f"experts.{param_name}",
+                shard_id=shard_id,
+                expert_id=int(expert_id),
+            )
+
+
+@pytest.mark.parametrize("weight_format", [MEGA_MOE_MXFP4, MEGA_MOE_NVFP4])
+def test_deep_gemm_mega_moe_load_plan_is_direct_and_matches_cold_start(
+    monkeypatch, weight_format
+):
+    """Every routed-expert name is direct in a load plan, and updates through
+    the plan or through ``load_weights`` in another order end where a cold
+    start on the new checkpoint does, at the same addresses."""
+    from vllm.distributed.weight_transfer.base import ParamMeta
+    from vllm.model_executor.model_loader.reload import (
+        finish_reload,
+        load_planned,
+        plan_loads,
+        start_reload,
+    )
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    model_config = SimpleNamespace(
+        word_embeddings_untied_by_checkpoint=False, quantization=None
+    )
+    device = torch.device("cpu")
+
+    def checkpoint(model, seed):
+        _, shards = _mega_moe_checkpoint(model.experts, 3, seed)
+        return {f"experts.{e}.{s}.{name}": t for name, t, s, e in shards}
+
+    def cold_start(seed):
+        model = _MegaMoEModel(weight_format)
+        model.load_weights(checkpoint(model, seed).items())
+        process_weights_after_loading(model, model_config, device)
+        return model
+
+    def tensors(model):
+        return dict((*model.named_parameters(), *model.named_buffers()))
+
+    def assert_matches_cold_start(model, seed):
+        fresh = cold_start(seed)
+        actual, expected = tensors(model), tensors(fresh)
+        assert actual.keys() == expected.keys()
+        for name, tensor in actual.items():
+            assert torch.equal(tensor, expected[name]), name
+            assert tensor.data_ptr() == ptrs[name], f"{name} moved"
+        assert model.experts.l2_activation_scale == fresh.experts.l2_activation_scale
+
+    model = cold_start(seed=0)
+    ptrs = {name: t.data_ptr() for name, t in tensors(model).items()}
+    weights = checkpoint(model, seed=1)
+    start_reload(model)
+    plan = plan_loads(
+        model, [ParamMeta(n, t.dtype, tuple(t.shape)) for n, t in weights.items()]
+    )
+    assert {n: e.reason for n, e in plan.entries.items() if e.writes is None} == {}
+    load_planned(model, plan, weights.items())
+    finish_reload(model, model_config, device)
+    assert_matches_cold_start(model, seed=1)
+
+    weights = list(checkpoint(model, seed=2).items())
+    start_reload(model)
+    order = torch.randperm(len(weights), generator=torch.Generator().manual_seed(2))
+    model.load_weights(weights[i] for i in order.tolist())
+    finish_reload(model, model_config, device)
+    assert_matches_cold_start(model, seed=2)
+
+
+@pytest.mark.parametrize("weight_format", [MEGA_MOE_MXFP4, MEGA_MOE_NVFP4])
+def test_deep_gemm_mega_moe_layerwise_reload_processes_after_the_last_tensor(
+    weight_format,
+):
+    """Layerwise reload processes the layer when its last checkpoint tensor
+    arrives: not earlier (an over-count, which drops the later loads) and not
+    only at finalize (a derived tensor such as ``_l2_alpha`` counted as
+    loadable)."""
+    from vllm.model_executor.model_loader.reload import layerwise
+
+    model = torch.nn.Module()
+    model.experts = _make_mega_moe_experts(4, 3, weight_format)
+    _load_mega_moe_checkpoint_shuffled(model.experts, 3, seed=0)
+    layerwise.record_metadata_for_reloading(model)
+    layerwise.initialize_layerwise_reload(model)
+    # Processing resets the layer's info, after which it cannot load.
+    info = layerwise.get_layerwise_info(model.experts)
+    ckpt, shards = _mega_moe_checkpoint(model.experts, 3, seed=1)
+    # Block scales last: an over-count of them would process the layer early.
+    shards.sort(key=lambda shard: shard[0].endswith("weight_scale"))
+    for name, loaded_weight, shard_id, expert_id in shards:
+        assert info.can_load(), "processed before its last tensor"
+        param = getattr(model.experts, name)
+        param.weight_loader(
+            param,
+            loaded_weight,
+            f"experts.{name}",
+            shard_id=shard_id,
+            expert_id=expert_id,
+        )
+    assert not info.can_load(), "not processed at its last tensor"
+    layerwise.finalize_layerwise_reload(model, SimpleNamespace(quantization=None))
+    _assert_mega_moe_layout(model.experts, _expected_mega_moe_layout(ckpt, 4, 3))
+    if weight_format.routed.has_global_scale:
+        assert model.experts.l2_activation_scale == ckpt["w2_input_scale"].max().item()
 
 
 def test_deep_gemm_mega_moe_nvfp4_l2_scale_covers_every_expert():
@@ -339,7 +481,7 @@ def test_deep_gemm_mega_moe_nvfp4_l2_scale_covers_every_expert():
     )
     assert experts.l2_activation_scale == 1.0
     for expert_id, scale in enumerate((0.5, 4.0, 1.0, 2.0)):
-        loaded = experts.weight_loader(
+        assert experts.weight_loader(
             experts.w2_input_scale,
             torch.tensor(scale),
             "experts.w2_input_scale",
@@ -347,9 +489,9 @@ def test_deep_gemm_mega_moe_nvfp4_l2_scale_covers_every_expert():
             expert_id=expert_id,
             return_success=True,
         )
-        assert loaded == (expert_id >= 2)
+    experts.process_weights_after_loading()
     assert experts.l2_activation_scale == 4.0
-    assert experts.w2_input_scale.tolist() == [1.0, 2.0]
+    assert experts.w2_input_scale.tolist() == [0.5, 4.0, 1.0, 2.0]
     # A reload replaces the expert's scale rather than keeping the old max.
     experts.weight_loader(
         experts.w2_input_scale,
@@ -358,9 +500,30 @@ def test_deep_gemm_mega_moe_nvfp4_l2_scale_covers_every_expert():
         shard_id="w2",
         expert_id=1,
     )
+    experts.process_weights_after_loading()
     assert experts.l2_activation_scale == 2.0
-    # Global scales are expert weights that EPLB moves.
+    # w2_input_scale is not moved; both w13_weight_scale_2 rows are.
     assert len(experts.get_expert_weights()) == 7
+
+
+def test_deep_gemm_mega_moe_nvfp4_eplb_views_move_whole_experts():
+    """Swapping two local experts through the EPLB views swaps every expert
+    tensor the kernel reads, including both w13_weight_scale_2 rows."""
+    experts = _make_mega_moe_experts(2, 2, MEGA_MOE_NVFP4)
+    _load_mega_moe_checkpoint_shuffled(experts, 2, seed=0)
+    for row, scale in enumerate(experts.w13_weight_scale_2):
+        scale.copy_(torch.tensor([1.0, 2.0]) + 10 * row)
+    before = {n: p.clone() for n, p in experts.named_parameters()}
+    for view in experts.get_expert_weights():
+        assert view.shape[0] == 2
+        view.copy_(view.flip(0))
+    for name, param in experts.named_parameters():
+        if name == "w2_input_scale":  # per logical expert, not moved
+            assert torch.equal(param, before[name])
+        elif name == "w13_weight_scale_2":
+            assert torch.equal(param, before[name].flip(1))
+        else:
+            assert torch.equal(param, before[name].flip(0)), name
 
 
 def test_deep_gemm_mega_moe_nvfp4_rejects_mismatched_l1_scales():
@@ -378,30 +541,23 @@ def test_deep_gemm_mega_moe_nvfp4_rejects_mismatched_l1_scales():
 
     load("w1", 0.5)
     load("w3", 0.5)
-    # A reload may change the scale while the old pair is still live.
+    experts.process_weights_after_loading()
+    # Checked once all tensors are loaded, so the order does not matter.
     load("w3", 2.0)
     load("w1", 2.0)
+    experts.process_weights_after_loading()
     load("w1", 1.0)
-    with pytest.raises(ValueError, match="one L1 scale per expert"):
-        load("w3", 4.0)
+    load("w3", 4.0)
+    # Each lands in its own row; row 0 (w1) is the kernel's L1 alpha.
+    assert experts.w13_weight_scale_2[:, 0].tolist() == [1.0, 4.0]
+    with pytest.raises(ValueError, match=r"w1 weight_scale_2 1\.0 != w3 .* 4\.0"):
+        experts.process_weights_after_loading()
 
 
-def test_deep_gemm_mega_moe_nvfp4_meta_load_skips_host_scales():
-    """Reload dry runs load meta stand-ins, which must not reach host state."""
-    experts = _make_mega_moe_experts(1, 1, MEGA_MOE_NVFP4)
-    for name, shard_id in (
-        ("w2_input_scale", "w2"),
-        ("w13_weight_scale_2", "w1"),
-        ("w13_weight_scale_2", "w3"),
-    ):
-        assert experts.weight_loader(
-            getattr(experts, name).to("meta"),
-            torch.empty((), device="meta"),
-            f"experts.{name}",
-            shard_id=shard_id,
-            expert_id=0,
-            return_success=True,
-        )
+def test_deep_gemm_mega_moe_nvfp4_skips_post_load_processing_on_meta():
+    """A layer still on meta (weight cache) skips post-load processing."""
+    experts = _make_mega_moe_experts(1, 1, MEGA_MOE_NVFP4).to("meta")
+    experts.process_weights_after_loading()
     assert experts.l2_activation_scale == 1.0
 
 
@@ -1362,6 +1518,7 @@ def test_deep_gemm_mega_moe_matches_reference(dist_init, fmt_name, shared, act_n
                     expert_id=e,
                     return_success=True,
                 )
+    experts.process_weights_after_loading()
 
     shared_w13 = torch.cat([shared_ckpt[0][3], shared_ckpt[1][3]])
     reference_shared = _ReferenceSharedExpert(
