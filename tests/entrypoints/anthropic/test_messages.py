@@ -252,6 +252,35 @@ async def test_anthropic_streaming_cache_usage(client: anthropic.AsyncAnthropic)
 
 
 @pytest.mark.asyncio
+async def test_consecutive_assistant_messages_count_as_one_turn(
+    client: anthropic.AsyncAnthropic,
+):
+    blocks = [
+        {"type": "text", "text": "Let me read the reflog."},
+        {"type": "tool_use", "id": "toolu_1", "name": "bash", "input": {}},
+    ]
+    result = {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+    }
+
+    async def count(assistant_turns: list[dict]) -> int:
+        resp = await client.messages.count_tokens(
+            model="claude-3-7-sonnet-latest",
+            messages=[
+                {"role": "user", "content": "Find the lost commit."},
+                *assistant_turns,
+                result,
+            ],
+        )
+        return resp.input_tokens
+
+    split = await count([{"role": "assistant", "content": [b]} for b in blocks])
+    merged = await count([{"role": "assistant", "content": blocks}])
+    assert split == merged
+
+
+@pytest.mark.asyncio
 async def test_anthropic_server_tool_is_rejected(client: anthropic.AsyncAnthropic):
     with pytest.raises(anthropic.BadRequestError) as exc_info:
         await client.messages.create(
