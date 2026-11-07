@@ -44,6 +44,9 @@ from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import set_default_quant_scales
+from vllm.model_executor.layers.attention.kv_transfer_utils import (
+    maybe_transfer_kv_layer,
+)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     allreduce_gemma_rms_norm_mxfp8,
@@ -1225,7 +1228,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 qkv, positions, fwd_slot_mapping
             )
             output = torch.empty_like(q)
-            gfx942_attn = self._run_attention(q, index_q, output)
+            gfx942_attn = self._run_attention(self.layer_name, q, index_q, output)
             output, _ = self.o_proj(gfx942_attn)
             return output
 
@@ -1248,14 +1251,19 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                     dtype=MXFP8_SCALE_DTYPE,
                 )
                 self._run_attention(
-                    q, index_arg, None, out_q=out_q, out_scale=out_scale
+                    self.layer_name,
+                    q,
+                    index_arg,
+                    None,
+                    out_q=out_q,
+                    out_scale=out_scale,
                 )
                 attn_output = QuantizedActivation(
                     out_q, out_scale, q.dtype, out_q.shape, kMxfp8Dynamic
                 )
             else:
                 output = torch.empty_like(q)
-                attn_output = self._run_attention(q, index_arg, output)
+                attn_output = self._run_attention(self.layer_name, q, index_arg, output)
             output, _ = self.o_proj(attn_output)
             return output
         q = qkv.new_empty((num_tokens, self.q_size))
@@ -1454,7 +1462,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 )
 
         output = torch.empty_like(q)
-        attn_output = self._run_attention(q, index_q, output)
+        attn_output = self._run_attention(self.layer_name, q, index_q, output)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -1481,8 +1489,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         )
 
     @eager_break_during_capture
+    @maybe_transfer_kv_layer
     def _run_attention(
         self,
+        layer_name: str,
         query: torch.Tensor,
         index_query: torch.Tensor | None,
         output: torch.Tensor | None,
