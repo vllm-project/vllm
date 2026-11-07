@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -123,6 +123,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         copy_stream: torch.cuda.Stream,
         check_ep_fault: bool,
         pending_aux_output: "PendingAuxOutput | None",
+        word_align_fn: Callable[[list[str], list[list[int]]], Any] | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -131,6 +132,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
         self.pending_aux_output = pending_aux_output
+        self.word_align_fn = word_align_fn
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
@@ -215,6 +217,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 f"Mask: {mask.cpu().tolist()}"
             )
 
+        if self.word_align_fn is not None:
+            self.model_runner_output.word_align = self.word_align_fn(
+                self.model_runner_output.req_ids, sampled_token_ids
+            )
         return self.model_runner_output
 
     def get_kv_connector_output(self) -> KVConnectorOutput | None:
