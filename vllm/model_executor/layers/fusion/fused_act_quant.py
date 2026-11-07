@@ -17,7 +17,11 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.model_executor.layers.activation import ReLUSquaredActivation, SiluAndMul
+from vllm.model_executor.layers.activation import (
+    GeluAndMul,
+    ReLUSquaredActivation,
+    SiluAndMul,
+)
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
@@ -50,6 +54,24 @@ def _silu_and_mul_fp8_static(
     # into the kernel-specific input_scale attribute.
     scale = linear.input_scale
     torch.ops._C.silu_and_mul_quant(result, x, scale)
+    return QuantizedActivation(
+        data=result,
+        scale=scale,
+        orig_dtype=x.dtype,
+        orig_shape=out_shape,
+        quant_key=kFp8StaticTensorSym,
+    )
+
+
+def _gelu_tanh_and_mul_fp8_static(
+    x: torch.Tensor, linear: LinearBase
+) -> QuantizedActivation:
+    """GeluAndMul (tanh approximation) + FP8 static per-tensor quantization."""
+    d = x.shape[-1] // 2
+    out_shape = x.shape[:-1] + (d,)
+    result = torch.empty(out_shape, dtype=FP8_DTYPE, device=x.device)
+    scale = linear.input_scale
+    torch.ops._C.gelu_tanh_and_mul_quant(result, x, scale)
     return QuantizedActivation(
         data=result,
         scale=scale,
@@ -191,6 +213,23 @@ if current_platform.is_cuda_alike():
 # Add NVFP4 if supported (requires SM100+)
 if current_platform.is_cuda() and hasattr(torch.ops._C, "silu_and_mul_nvfp4_quant"):
     _FUSED_ACT_QUANT[(SiluAndMul, kNvfp4Dynamic)] = _silu_and_mul_nvfp4_dynamic
+
+# GELU variant. The fused kernel implements the tanh approximation, so
+# GeluAndMul(approximate="none") must fall back to the unfused path.
+if current_platform.is_cuda() and hasattr(torch.ops._C, "gelu_tanh_and_mul_quant"):
+
+    def _gelu_tanh_and_mul_fp8_static_supported(
+        act_fn: torch.nn.Module,
+        x: torch.Tensor,
+        linear: LinearBase,
+    ) -> bool:
+        return getattr(act_fn, "approximate", None) == "tanh"
+
+    _GELU_TANH_STATIC_FP8_KEY = (GeluAndMul, kFp8StaticTensorSym)
+    _FUSED_ACT_QUANT[_GELU_TANH_STATIC_FP8_KEY] = _gelu_tanh_and_mul_fp8_static
+    _FUSED_ACT_QUANT_SUPPORT[_GELU_TANH_STATIC_FP8_KEY] = (
+        _gelu_tanh_and_mul_fp8_static_supported
+    )
 
 
 def maybe_fused_act_quant(
