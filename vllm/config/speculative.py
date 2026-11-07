@@ -98,6 +98,48 @@ SpeculativeMethod = Literal[
 ]
 RejectionSampleMethod = Literal["standard", "synthetic", "block", "fly"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
+RemoteDraftTransport = Literal["auto", "inline"]
+RemoteDraftFailurePolicy = Literal["error", "target_only"]
+
+
+@config
+class RemoteDraftConfig:
+    """Placement configuration for running a target-conditioned speculator
+    in a standalone process on a dedicated same-host GPU.
+
+    This is orthogonal to the speculative method: `method` selects the
+    algorithm and `remote_draft` selects where it runs. Exactly one endpoint
+    is supported; routing across multiple draft servers is out of scope.
+    """
+
+    endpoint: str = ""
+    """Control-plane endpoint of the standalone speculator server:
+    "unix:///path" or "tcp://host:port". The server is unauthenticated, so
+    prefer a UNIX socket or a loopback address."""
+    transport: RemoteDraftTransport = "auto"
+    """Data-plane transport for target features and draft results. The initial
+    runtime supports the copy-based "inline" transport; "auto" currently
+    selects it. Zero-copy transports will be exposed when implemented."""
+    failure_policy: RemoteDraftFailurePolicy = "target_only"
+    """What to do when the remote speculator fails or times out.
+    "target_only" (production default) keeps decoding without speculation
+    for the affected requests; "error" surfaces the failure as an engine
+    error (development / CI)."""
+    request_timeout_ms: int = Field(default=100, gt=0)
+    """Deadline for collecting a proposal before the affected rows fall
+    back to target-only decoding with valid_length=0."""
+    startup_timeout_ms: int = Field(default=30_000, gt=0)
+    """Deadline for the initial connection and HELLO handshake."""
+
+    @model_validator(mode="after")
+    def _validate_endpoint(self) -> Self:
+        from vllm.v1.spec_decode.remote.transport import parse_endpoint
+
+        if not self.endpoint.strip():
+            raise ValueError("remote_draft.endpoint must not be empty")
+        parse_endpoint(self.endpoint)
+        return self
+
 
 _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
     {
@@ -572,6 +614,14 @@ class SpeculativeConfig:
     Deprecated: V1 model runner only (the V2 model runner falls back to V1 for
     it), and will be removed with it. V2 speculators that draft in parallel,
     such as DFlash and DSpark, do so without this option."""
+
+    # Placement
+    remote_draft: RemoteDraftConfig | None = None
+    """Run the speculator in a standalone process on a dedicated same-host
+    GPU instead of co-located with the target model. Only supported for
+    target-conditioned speculators that keep their own draft KV cache
+    (EAGLE/EAGLE3/P-EAGLE and standard native MTP). `None` keeps the
+    existing co-located behavior."""
 
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
@@ -1414,6 +1464,8 @@ class SpeculativeConfig:
             self.num_speculative_tokens is not None or self.use_dspark()
         ):
             self.model = config_cls.default_model(self)
+        if self.remote_draft is not None and self.draft_tensor_parallel_size is None:
+            self.draft_tensor_parallel_size = 1
         config_cls.configure(self)
         # The draft checkpoint may have determined the speculator.
         config_cls = get_speculator_config_class(self)
@@ -1440,7 +1492,33 @@ class SpeculativeConfig:
                 "materializes. Disable one of them."
             )
 
+        if self.remote_draft is not None:
+            self._validate_remote_draft()
+
         return self
+
+    def _validate_remote_draft(self) -> None:
+        from vllm.v1.spec_decode.remote.capabilities import (
+            remote_draft_config_incompatibilities,
+        )
+
+        if self.method == "mtp" and self.draft_model_config is None:
+            # The MTP variant (and thus KV sharing) cannot be determined
+            # without the draft model config; fail closed.
+            uses_target_kv = None
+        else:
+            uses_target_kv = self.use_gemma4_mtp()
+        reasons = remote_draft_config_incompatibilities(
+            method=self.method,
+            draft_tensor_parallel_size=self.draft_tensor_parallel_size,
+            draft_sample_method=self.draft_sample_method,
+            uses_target_kv=uses_target_kv,
+        )
+        if reasons:
+            raise ValueError(
+                "speculative_config.remote_draft is not supported with this "
+                "configuration: " + "; ".join(reasons)
+            )
 
     @property
     def speculator_config(self) -> SpeculatorConfig:
@@ -1823,6 +1901,9 @@ class SpeculativeConfig:
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
+
+    def use_remote_draft(self) -> bool:
+        return self.remote_draft is not None
 
     def use_dspark(self) -> bool:
         return self.method == "dspark"
