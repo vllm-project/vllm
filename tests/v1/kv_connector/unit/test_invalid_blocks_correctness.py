@@ -3,11 +3,13 @@
 
 """Tests for correctness in invalid block handling.
 
-These tests verify correct behavior in three scenarios:
+These tests verify correct behavior in four scenarios:
 1. Sync recompute case: Blocks should not be freed for running requests
    that need to recompute invalid blocks
 2. Sync fail case: Invalid blocks must be evicted from cache when request fails
 3. Async recompute case: Invalid blocks should not be cached after transfer
+4. Aborted sync load case: A request aborted in the step its load fails must
+   still have the invalid block and every block after it evicted
 """
 
 from collections.abc import Callable
@@ -18,6 +20,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import FinishReason, Request, RequestStatus
 
 from .utils import (
+    assert_scheduler_empty,
     create_mock_connector,
     create_model_runner_output,
     create_request,
@@ -55,6 +58,657 @@ def recompute_scheduler():
     assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_load_failure_policy = "recompute"
     return create_scheduler(vllm_config)
+
+
+@pytest.fixture
+def pipeline_size():
+    return 2
+
+
+@pytest.fixture(params=["fail", "recompute"])
+def sync_load_scheduler(request, pipeline_size):
+    vllm_config = create_vllm_config(kv_load_failure_policy=request.param)
+    vllm_config.scheduler_config.async_scheduling = False
+    vllm_config.parallel_config.pipeline_parallel_size = pipeline_size
+    scheduler = create_scheduler(vllm_config)
+    scheduler.connector = create_mock_connector()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = lambda req, _: (
+        max(0, req.num_prompt_tokens - scheduler.block_size),
+        False,
+    )
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+    return scheduler
+
+
+@pytest.mark.parametrize("delay_free", [False, True])
+@pytest.mark.parametrize("pipeline_size", [1, 2])
+def test_aborted_sync_load_invalid_suffix_evicted(
+    sync_load_scheduler, delay_free, pipeline_size
+):
+    """An abort must not hide a failed load or its dependent cached suffix."""
+    scheduler = sync_load_scheduler
+    block_size = scheduler.block_size
+    request = create_request(
+        num_tokens=8 * block_size, common_prefix_len=8 * block_size
+    )
+    scheduler.add_request(request)
+    scheduled = scheduler.schedule()
+    (block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    scheduler.connector.request_finished.return_value = (delay_free, None)
+
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert (request.request_id in scheduler.requests) == delay_free
+    assert scheduler.kv_cache_manager.get_block_ids(request.request_id) == (
+        list(block_ids) if delay_free else [],
+    )
+    pool = scheduler.kv_cache_manager.block_pool
+    expected_ref_count = int(delay_free or pipeline_size > 1)
+    assert all(pool.blocks[bid].ref_cnt == expected_ref_count for bid in block_ids)
+
+    scheduler.update_from_output(
+        scheduled,
+        create_model_runner_output([request], invalid_block_ids={block_ids[3]}),
+    )
+    assert all(pool.blocks[bid].block_hash is not None for bid in block_ids[:3])
+    assert all(pool.blocks[bid].block_hash is None for bid in block_ids[3:])
+
+    if delay_free:
+        scheduler.update_from_output(
+            scheduler.schedule(),
+            create_model_runner_output([], finished_sending={request.request_id}),
+        )
+    scheduler.connector.get_num_new_matched_tokens.return_value = (0, False)
+    scheduler.connector.get_num_new_matched_tokens.side_effect = None
+    next_request = create_request(
+        num_tokens=8 * block_size, common_prefix_len=8 * block_size
+    )
+    scheduler.add_request(next_request)
+    next_scheduled = scheduler.schedule()
+    cache_hit_tokens = (
+        next_request.num_computed_tokens
+        - next_scheduled.num_scheduled_tokens[next_request.request_id]
+    )
+    assert cache_hit_tokens == 3 * block_size
+    assert not scheduler._finished_inflight_kv
+
+
+def test_aborted_successful_sync_load_preserves_cache(sync_load_scheduler):
+    scheduler = sync_load_scheduler
+    request = create_request(num_tokens=8 * scheduler.block_size)
+    scheduler.add_request(request)
+    scheduled = scheduler.schedule()
+    (block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+
+    scheduler.update_from_output(
+        scheduled,
+        create_model_runner_output([request]),
+    )
+
+    assert all(
+        scheduler.kv_cache_manager.block_pool.blocks[bid].block_hash is not None
+        for bid in block_ids
+    )
+    assert not scheduler._finished_inflight_kv
+
+
+@pytest.fixture(params=["fail", "recompute"])
+def preempt_load_scheduler(request):
+    config = create_vllm_config(
+        kv_load_failure_policy=request.param, max_num_batched_tokens=256
+    )
+    config.scheduler_config.async_scheduling = True
+    scheduler = create_scheduler(config)
+    scheduler.connector = create_mock_connector()
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+    scheduler.connector.has_pending_block_frees.return_value = False
+    scheduler.connector.has_pending_push_work.return_value = False
+    return scheduler
+
+
+def _start_sync_load(scheduler):
+    block_size = scheduler.block_size
+    request = create_request(
+        num_tokens=8 * block_size, common_prefix_len=8 * block_size
+    )
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens({request.request_id: 7 * block_size}, False)
+    )
+    scheduler.add_request(request)
+    scheduled = scheduler.schedule()
+    (block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    assert len(block_ids) == 8
+    assert scheduled.num_scheduled_tokens[request.request_id] == block_size
+    assert scheduler.defer_block_free
+    scheduler.connector.get_num_new_matched_tokens.side_effect = None
+    scheduler.connector.get_num_new_matched_tokens.return_value = (0, False)
+    return request, scheduled, list(block_ids)
+
+
+def _preempt_sync_load(scheduler, request, drop_stale_output=False):
+    # Isolate preemption from the memory-pressure fence, which may disallow it.
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0, drop_stale_output=drop_stale_output)
+    assert request.status == RequestStatus.PREEMPTED
+
+
+def _finish_preempt_load_test(scheduler):
+    scheduler.finish_requests(list(scheduler.requests), RequestStatus.FINISHED_ABORTED)
+    scheduler.update_from_output(scheduler.schedule(), create_model_runner_output([]))
+    assert_scheduler_empty(scheduler)
+
+
+@pytest.mark.parametrize("failed", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_preempted_sync_load_policy_and_output(
+    preempt_load_scheduler, failed, async_scheduling
+):
+    """Rejected samples must not escape; success retains lossless preemption."""
+    config = preempt_load_scheduler.vllm_config
+    config.scheduler_config.async_scheduling = async_scheduling
+    config.parallel_config.pipeline_parallel_size = 1 if async_scheduling else 2
+    scheduler = create_scheduler(config)
+    scheduler.connector = preempt_load_scheduler.connector
+    request, scheduled, block_ids = _start_sync_load(scheduler)
+    _preempt_sync_load(scheduler, request)
+    result = scheduler.update_from_output(
+        scheduled,
+        create_model_runner_output(
+            [request],
+            invalid_block_ids={block_ids[3]} if failed else None,
+            token_id=999,
+        ),
+    )
+    outputs = [out for group in result.values() for out in group.outputs]
+    assert list(request.output_token_ids) == ([] if failed else [999])
+    assert [token for out in outputs for token in out.new_token_ids] == (
+        [] if failed else [999]
+    )
+    pool = scheduler.kv_cache_manager.block_pool
+    assert [pool.blocks[bid].block_hash is not None for bid in block_ids] == (
+        [True] * 3 + [False] * 5 if failed else [True] * 8
+    )
+    assert not scheduler._finished_inflight_kv
+    if failed and not scheduler.recompute_kv_load_failures:
+        assert request.status == RequestStatus.FINISHED_ERROR
+        assert [out.finish_reason for out in outputs] == [FinishReason.ERROR]
+        assert request.request_id not in scheduler.schedule().num_scheduled_tokens
+    else:
+        resumed = scheduler.schedule()
+        reused = (
+            request.num_computed_tokens
+            - resumed.num_scheduled_tokens[request.request_id]
+        )
+        assert reused == (
+            3 * scheduler.block_size if failed else request.num_prompt_tokens
+        )
+        scheduler.update_from_output(
+            resumed, create_model_runner_output([request], token_id=321)
+        )
+        assert list(request.output_token_ids) == ([321] if failed else [999, 321])
+    _finish_preempt_load_test(scheduler)
+
+
+@pytest.mark.parametrize("drop_stale_output", [False, True])
+@pytest.mark.parametrize("repeat_failure", [False, True])
+def test_preempted_sync_load_drains_before_readmission(
+    preempt_load_scheduler, drop_stale_output, repeat_failure
+):
+    """No new block generation may hide a pending load; other work can proceed."""
+    scheduler = preempt_load_scheduler
+    request, first, block_ids = _start_sync_load(scheduler)
+    second = scheduler.schedule()
+    assert second.num_scheduled_tokens[request.request_id] == 1
+    _preempt_sync_load(scheduler, request, drop_stale_output)
+    assert not scheduler.schedule().num_scheduled_tokens
+    result = scheduler.update_from_output(
+        first,
+        create_model_runner_output(
+            [request], invalid_block_ids={block_ids[3]}, token_id=999
+        ),
+    )
+    assert [
+        out.finish_reason for group in result.values() for out in group.outputs
+    ] == ([] if scheduler.recompute_kv_load_failures else [FinishReason.ERROR])
+    assert request.request_id in scheduler._finished_inflight_kv
+    other = create_request(num_tokens=16)
+    scheduler.add_request(other)
+    third = scheduler.schedule()
+    assert request.request_id not in third.num_scheduled_tokens
+    assert other.request_id in third.num_scheduled_tokens
+    result = scheduler.update_from_output(
+        second,
+        create_model_runner_output(
+            [request],
+            invalid_block_ids={block_ids[3]} if repeat_failure else None,
+            token_id=998,
+        ),
+    )
+    assert list(request.output_token_ids) == []
+    assert not any(group.outputs for group in result.values())
+    assert not scheduler._finished_inflight_kv
+    scheduler.update_from_output(
+        third, create_model_runner_output([other], use_eos=True)
+    )
+    resumed = scheduler.schedule()
+    if scheduler.recompute_kv_load_failures:
+        assert (
+            request.num_computed_tokens
+            - resumed.num_scheduled_tokens[request.request_id]
+            == 3 * scheduler.block_size
+        )
+        scheduler.update_from_output(
+            resumed, create_model_runner_output([request], use_eos=True)
+        )
+    else:
+        assert request.status == RequestStatus.FINISHED_ERROR
+        assert request.request_id not in resumed.num_scheduled_tokens
+    _finish_preempt_load_test(scheduler)
+
+
+def test_reset_error_preserves_sync_load_failure(preempt_load_scheduler):
+    """A failed public reset leaves preempted requests needing failure handling."""
+    scheduler = preempt_load_scheduler
+    request, scheduled, block_ids = _start_sync_load(scheduler)
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="Failed to reset KV cache"):
+            scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert request.status == RequestStatus.PREEMPTED
+    assert request.request_id not in scheduler.schedule().num_scheduled_tokens
+    result = scheduler.update_from_output(
+        scheduled,
+        create_model_runner_output(
+            [request], invalid_block_ids={block_ids[3]}, token_id=999
+        ),
+    )
+    assert not request.output_token_ids
+    assert not scheduler._finished_inflight_kv
+    if scheduler.recompute_kv_load_failures:
+        resumed = scheduler.schedule()
+        assert (
+            request.num_computed_tokens
+            - resumed.num_scheduled_tokens[request.request_id]
+            == 3 * scheduler.block_size
+        )
+        scheduler.update_from_output(
+            resumed, create_model_runner_output([request], use_eos=True)
+        )
+    else:
+        assert request.status == RequestStatus.FINISHED_ERROR
+        assert [
+            out.finish_reason for group in result.values() for out in group.outputs
+        ] == [FinishReason.ERROR]
+    _finish_preempt_load_test(scheduler)
+
+
+def test_abort_after_preempt_preserves_sync_load_record(preempt_load_scheduler):
+    """An abort with no attached blocks must not erase the preemption's record."""
+    scheduler = create_scheduler(preempt_load_scheduler.vllm_config, num_blocks=9)
+    scheduler.connector = preempt_load_scheduler.connector
+    request, scheduled, block_ids = _start_sync_load(scheduler)
+    _preempt_sync_load(scheduler, request)
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert scheduler.kv_cache_manager.get_block_ids(request.request_id) == ([],)
+    result = scheduler.update_from_output(
+        scheduled,
+        create_model_runner_output(
+            [request], invalid_block_ids={block_ids[3]}, token_id=999
+        ),
+    )
+    assert not any(group.outputs for group in result.values())
+    assert not scheduler._finished_inflight_kv
+    pool = scheduler.kv_cache_manager.block_pool
+    assert [pool.blocks[bid].block_hash is not None for bid in block_ids] == [
+        True
+    ] * 3 + [False] * 5
+    assert all(pool.blocks[bid].ref_cnt == 0 for bid in block_ids)
+    _finish_preempt_load_test(scheduler)
+
+    # With only eight usable blocks, a different prompt must reuse every ID.
+    other = create_request(num_tokens=8 * scheduler.block_size)
+    scheduler.add_request(other)
+    next_step = scheduler.schedule()
+    (reused_ids,) = scheduler.kv_cache_manager.get_block_ids(other.request_id)
+    assert set(reused_ids) == set(block_ids)
+    scheduler.update_from_output(
+        next_step, create_model_runner_output([other], token_id=321)
+    )
+    assert list(other.output_token_ids) == [321]
+    assert all(pool.blocks[bid].block_hash is not None for bid in reused_ids)
+    _finish_preempt_load_test(scheduler)
+
+
+@pytest.mark.parametrize("failed_step", [0, 1])
+def test_aborted_load_survives_other_queued_step(sync_load_scheduler, failed_step):
+    """Neither a later schedule nor an earlier output may lose the failure owner."""
+    scheduler = sync_load_scheduler
+    requests = [create_request(num_tokens=8 * scheduler.block_size) for _ in range(2)]
+    scheduled = []
+    for request in requests:
+        scheduler.add_request(request)
+        scheduled.append(scheduler.schedule())
+        assert set(scheduled[-1].num_scheduled_tokens) == {request.request_id}
+    failed_request = requests[failed_step]
+    (block_ids,) = scheduler.kv_cache_manager.get_block_ids(failed_request.request_id)
+    pool = scheduler.kv_cache_manager.block_pool
+    scheduler.finish_requests(failed_request.request_id, RequestStatus.FINISHED_ABORTED)
+
+    for index, (request, output) in enumerate(zip(requests, scheduled)):
+        scheduler.update_from_output(
+            output,
+            create_model_runner_output(
+                [request],
+                invalid_block_ids={block_ids[3]} if index == failed_step else None,
+            ),
+        )
+        if index < failed_step:
+            assert all(pool.blocks[bid].block_hash is not None for bid in block_ids)
+
+    assert all(pool.blocks[bid].block_hash is not None for bid in block_ids[:3])
+    assert all(pool.blocks[bid].block_hash is None for bid in block_ids[3:])
+    assert not scheduler._finished_inflight_kv
+
+
+@pytest.mark.parametrize("abort", [False, True])
+def test_released_sharer_suffix_evicted_by_earlier_batch_failure(
+    sync_load_scheduler, abort
+):
+    """A failed shared prefix invalidates a later released request's own suffix."""
+    scheduler = sync_load_scheduler
+    block_size = scheduler.block_size
+    owner, sharer = [
+        create_request(num_tokens=8 * block_size, common_prefix_len=4 * block_size)
+        for _ in range(2)
+    ]
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens({owner.request_id: 7 * block_size}, False)
+    )
+    scheduler.add_request(owner)
+    first = scheduler.schedule()
+    scheduler.add_request(sharer)
+    second = scheduler.schedule()
+    assert sharer.request_id not in first.num_scheduled_tokens
+    assert sharer.request_id in second.num_scheduled_tokens
+    (owner_block_ids,) = scheduler.kv_cache_manager.get_block_ids(owner.request_id)
+    (sharer_block_ids,) = scheduler.kv_cache_manager.get_block_ids(sharer.request_id)
+    assert sharer_block_ids[:4] == owner_block_ids[:4]
+    assert set(sharer_block_ids[4:]).isdisjoint(owner_block_ids[4:])
+
+    if abort:
+        scheduler.finish_requests(sharer.request_id, RequestStatus.FINISHED_ABORTED)
+    else:
+        _preempt_sync_load(scheduler, sharer)
+    scheduler.update_from_output(
+        first,
+        create_model_runner_output([owner], invalid_block_ids={owner_block_ids[3]}),
+    )
+
+    pool = scheduler.kv_cache_manager.block_pool
+    assert all(pool.blocks[bid].block_hash is not None for bid in sharer_block_ids[:3])
+    assert all(pool.blocks[bid].block_hash is None for bid in sharer_block_ids[3:])
+    assert sharer.request_id in scheduler._finished_inflight_kv
+    scheduler.update_from_output(second, create_model_runner_output([sharer]))
+    assert not sharer.output_token_ids
+    if not abort and not scheduler.recompute_kv_load_failures:
+        assert sharer.status == RequestStatus.FINISHED_ERROR
+    assert not scheduler._finished_inflight_kv
+
+
+def test_aborted_load_survives_empty_schedule(sync_load_scheduler):
+    scheduler = sync_load_scheduler
+    request = create_request(num_tokens=8 * scheduler.block_size)
+    scheduler.add_request(request)
+    scheduled = scheduler.schedule()
+    assert not scheduler.schedule().num_scheduled_tokens
+    (block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+
+    scheduler.update_from_output(
+        scheduled,
+        create_model_runner_output([request], invalid_block_ids={block_ids[3]}),
+    )
+
+    assert all(
+        scheduler.kv_cache_manager.block_pool.blocks[bid].block_hash is None
+        for bid in block_ids[3:]
+    )
+    assert not scheduler._finished_inflight_kv
+
+
+@pytest.mark.parametrize("abort", [False, True])
+def test_finished_request_retained_until_all_outputs_processed(
+    sync_load_scheduler, abort
+):
+    """Normal completion must retain only work following the completing output."""
+    vllm_config = sync_load_scheduler.vllm_config
+    vllm_config.scheduler_config.async_scheduling = True
+    vllm_config.parallel_config.pipeline_parallel_size = 1
+    async_load_scheduler = create_scheduler(vllm_config)
+    async_load_scheduler.connector = sync_load_scheduler.connector
+    request = create_request(num_tokens=8 * async_load_scheduler.block_size)
+    async_load_scheduler.add_request(request)
+    first = async_load_scheduler.schedule()
+    second = async_load_scheduler.schedule()
+    assert request.request_id in second.num_scheduled_tokens
+
+    if abort:
+        async_load_scheduler.finish_requests(
+            request.request_id, RequestStatus.FINISHED_ABORTED
+        )
+    async_load_scheduler.update_from_output(
+        first, create_model_runner_output([request], use_eos=not abort)
+    )
+
+    state = async_load_scheduler._finished_inflight_kv[request.request_id]
+    assert state.num_in_flight_tokens == second.num_scheduled_tokens[request.request_id]
+    async_load_scheduler.update_from_output(
+        second, create_model_runner_output([request])
+    )
+    assert not async_load_scheduler._finished_inflight_kv
+
+
+def _ordered_load_scheduler(policy, role, num_blocks=10000):
+    config = create_vllm_config(
+        kv_load_failure_policy=policy, kv_role=role, max_num_batched_tokens=256
+    )
+    config.scheduler_config.async_scheduling = True
+    scheduler = create_scheduler(config, num_blocks=num_blocks)
+    connector = create_mock_connector()
+    connector.get_loaded_kv_cache_group_ids.side_effect = (
+        scheduler.connector.get_loaded_kv_cache_group_ids
+    )
+    connector.request_finished.return_value = (False, None)
+    connector.register_finished_partial_tail.return_value = False
+    connector.take_events.return_value = ()
+    connector.has_pending_block_frees.return_value = False
+    connector.has_pending_push_work.return_value = False
+    connector.reset_cache.return_value = None
+    offers: dict[str, int] = {}
+    connector.get_num_new_matched_tokens.side_effect = lambda req, _: (
+        offers.pop(req.request_id, 0),
+        False,
+    )
+    scheduler.connector = connector
+    return scheduler, offers
+
+
+@pytest.mark.parametrize("policy", ["fail", "recompute"])
+@pytest.mark.parametrize("failed", [False, True])
+@pytest.mark.parametrize("requires_kv_delivery", [False, True])
+def test_pressure_preempts_sync_load_before_failure_report(
+    policy, failed, requires_kv_delivery
+):
+    scheduler, offers = _ordered_load_scheduler(policy, "kv_producer", num_blocks=11)
+    scheduler.requires_kv_delivery = requires_kv_delivery
+    bs = scheduler.block_size
+    peers = [
+        create_request(num_tokens=bs, max_tokens=2),
+        create_request(num_tokens=bs, max_tokens=1),
+    ]
+    owner = create_request(num_tokens=8 * bs, common_prefix_len=8 * bs)
+    requests = {req.request_id: req for req in [*peers, owner]}
+    offers[owner.request_id] = 7 * bs
+    for request in requests.values():
+        scheduler.add_request(request)
+    first = scheduler.schedule()
+    (blocks,) = scheduler.kv_cache_manager.get_block_ids(owner.request_id)
+    assert len(blocks) == 8
+    assert not scheduler.defer_block_free
+    second = scheduler.schedule()
+    assert owner.request_id in second.preempted_req_ids
+    assert owner.status == RequestStatus.PREEMPTED
+    assert owner.request_id not in second.num_scheduled_tokens
+
+    result = scheduler.update_from_output(
+        first,
+        create_model_runner_output(
+            [requests[rid] for rid in first.num_scheduled_tokens],
+            invalid_block_ids={blocks[3]} if failed else None,
+            token_id=999,
+        ),
+    )
+    owner_outputs = [
+        out
+        for group in result.values()
+        for out in group.outputs
+        if out.request_id == owner.request_id
+    ]
+    expected = [] if failed or requires_kv_delivery else [999]
+    assert list(owner.output_token_ids) == expected
+    assert [t for out in owner_outputs for t in out.new_token_ids] == expected
+    scheduler.update_from_output(
+        second,
+        create_model_runner_output(
+            [requests[rid] for rid in second.num_scheduled_tokens], use_eos=True
+        ),
+    )
+    resumed = scheduler.schedule()
+    if failed and policy == "fail":
+        assert owner.status == RequestStatus.FINISHED_ERROR
+        assert [out.finish_reason for out in owner_outputs] == [FinishReason.ERROR]
+        assert owner.request_id not in resumed.num_scheduled_tokens
+    else:
+        start = (
+            owner.num_computed_tokens - resumed.num_scheduled_tokens[owner.request_id]
+        )
+        # Pressure reuses the last block even when the load succeeds.
+        assert start == (3 * bs if failed else 7 * bs)
+        scheduler.update_from_output(
+            resumed, create_model_runner_output([owner], token_id=321)
+        )
+        assert list(owner.output_token_ids) == [*expected, 321]
+    _finish_preempt_load_test(scheduler)
+
+
+@pytest.mark.parametrize("policy", ["fail", "recompute"])
+@pytest.mark.parametrize("failed", [False, True])
+def test_reset_then_schedule_discards_rejected_next_frame(policy, failed, caplog_vllm):
+    scheduler, offers = _ordered_load_scheduler(policy, "kv_consumer")
+    bs = scheduler.block_size
+    owner = create_request(num_tokens=8 * bs, common_prefix_len=8 * bs)
+    offers[owner.request_id] = 7 * bs
+    scheduler.add_request(owner)
+    first = scheduler.schedule()
+    (blocks,) = scheduler.kv_cache_manager.get_block_ids(owner.request_id)
+    with pytest.raises(RuntimeError, match="Failed to reset KV cache"):
+        scheduler.reset_prefix_cache(reset_running_requests=True)
+    second = scheduler.schedule()
+    assert owner.request_id not in second.num_scheduled_tokens
+    scheduler.update_from_output(
+        first,
+        create_model_runner_output(
+            [owner], invalid_block_ids={blocks[3]} if failed else None, token_id=999
+        ),
+    )
+    result = scheduler.update_from_output(
+        second,
+        create_model_runner_output(
+            [owner] if owner.request_id in second.num_scheduled_tokens else [],
+            token_id=998,
+        ),
+    )
+    delivered = [
+        t
+        for group in result.values()
+        for out in group.outputs
+        for t in out.new_token_ids
+    ]
+    assert 999 not in owner.output_token_ids
+    if failed:
+        assert "0 tokens affected, excluding preempted requests" in caplog_vllm.text
+        assert 998 not in delivered
+        assert 998 not in owner.output_token_ids
+        if policy == "fail":
+            assert owner.status == RequestStatus.FINISHED_ERROR
+    else:
+        assert delivered == (
+            [998] if owner.request_id in second.num_scheduled_tokens else []
+        )
+    _finish_preempt_load_test(scheduler)
+
+
+@pytest.mark.parametrize("policy", ["fail", "recompute"])
+@pytest.mark.parametrize("failed", [False, True])
+def test_longer_prefix_does_not_reuse_failed_load_tail(policy, failed):
+    scheduler, offers = _ordered_load_scheduler(policy, "kv_consumer")
+    bs = scheduler.block_size
+    owner = create_request(num_tokens=8 * bs, common_prefix_len=8 * bs, max_tokens=2)
+    offers[owner.request_id] = 7 * bs
+    scheduler.add_request(owner)
+    first = scheduler.schedule()
+    (blocks,) = scheduler.kv_cache_manager.get_block_ids(owner.request_id)
+    poisoned_tail = blocks[-1]
+    with pytest.raises(RuntimeError, match="Failed to reset KV cache"):
+        scheduler.reset_prefix_cache(reset_running_requests=True)
+    second = scheduler.schedule()
+    scheduler.update_from_output(
+        first,
+        create_model_runner_output(
+            [owner], invalid_block_ids={blocks[3]} if failed else None, token_id=999
+        ),
+    )
+    scheduler.update_from_output(
+        second,
+        create_model_runner_output(
+            [owner] if owner.request_id in second.num_scheduled_tokens else [],
+            token_id=998,
+        ),
+    )
+    repair = create_request(num_tokens=8 * bs, common_prefix_len=8 * bs, max_tokens=1)
+    for request in [owner, repair]:
+        if request is repair:
+            scheduler.add_request(repair)
+        for _ in range(8):
+            if request.is_finished():
+                break
+            step = scheduler.schedule()
+            scheduler.update_from_output(
+                step,
+                create_model_runner_output(
+                    [request]
+                    if request.request_id in step.num_scheduled_tokens
+                    else [],
+                    token_id=321,
+                ),
+            )
+        assert request.is_finished()
+
+    longer = create_request(num_tokens=9 * bs, common_prefix_len=9 * bs, max_tokens=1)
+    scheduler.add_request(longer)
+    step = scheduler.schedule()
+    reused_tokens = (
+        longer.num_computed_tokens - step.num_scheduled_tokens[longer.request_id]
+    )
+    (reused_blocks,) = scheduler.kv_cache_manager.get_block_ids(longer.request_id)
+    # The large pool leaves the original tail unallocated unless its hash is hit.
+    assert reused_tokens == 8 * bs
+    assert (poisoned_tail in reused_blocks[: reused_tokens // bs]) == (not failed)
+    scheduler.update_from_output(
+        step, create_model_runner_output([longer], use_eos=True)
+    )
+    _finish_preempt_load_test(scheduler)
 
 
 def test_sync_recompute_blocks_not_freed_for_running_requests(
