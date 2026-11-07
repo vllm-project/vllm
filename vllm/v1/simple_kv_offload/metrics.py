@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
+from vllm.v1.metrics.prometheus import set_gauge_initial_value
 
 
 class MetricName:
@@ -248,6 +249,11 @@ class SimpleCPUOffloadPromMetrics(KVConnectorPromMetrics):
             MetricName.PENDING_STORE_BLOCKS: 0,
             MetricName.INFO: len(INFO_LABELS),
         }
+        for engine_idx, labelvalues in per_engine_labelvalues.items():
+            for name in (MetricName.USED_BLOCKS, MetricName.PENDING_STORE_BLOCKS):
+                child = self._defs[name].labels(*labelvalues)
+                set_gauge_initial_value(child, 0)
+                self._metrics[(engine_idx, name, ())] = child
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         """Observe transfer statistics."""

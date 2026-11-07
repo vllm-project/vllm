@@ -57,10 +57,6 @@ def attach_router(app: FastAPI):
     """Mount prometheus metrics to a FastAPI app."""
     registry = get_prometheus_registry()
 
-    # `response_class=PrometheusResponse` is needed to return an HTTP response
-    # with header "Content-Type: text/plain; version=0.0.4; charset=utf-8"
-    # instead of the default "application/json" which is incorrect.
-    # See https://github.com/trallnag/prometheus-fastapi-instrumentator/issues/163#issue-1296092364
     Instrumentator(
         excluded_handlers=[
             "/metrics",
@@ -71,10 +67,18 @@ def attach_router(app: FastAPI):
             "/server_info",
         ],
         registry=registry,
-    ).add().instrument(app).expose(app, response_class=PrometheusResponse)
+    ).add().instrument(app)
+
+    # A separate scrape registry avoids duplicate multiprocess HTTP samples.
+    scrape_registry = get_prometheus_registry()
+
+    # Keep Prometheus's content type in the OpenAPI response schema.
+    @app.get("/metrics", response_class=PrometheusResponse)
+    def metrics() -> PrometheusResponse:
+        return PrometheusResponse(prometheus_client.generate_latest(scrape_registry))
 
     # Add prometheus asgi middleware to route /metrics requests
-    metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
+    metrics_route = Mount("/metrics", make_asgi_app(registry=scrape_registry))
 
     # Workaround for 307 Redirect for /metrics
     metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")

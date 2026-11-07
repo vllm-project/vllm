@@ -72,7 +72,7 @@ def test_sleep_route_rejects_invalid_query_before_dispatch(
     assert response.json()["error"]["param"] == expected_param
     app.state.engine_client.sleep.assert_not_awaited()
     assert list(metrics.duration.collect()[0].samples) == []
-    assert list(metrics.in_flight.collect()[0].samples) == []
+    assert all(sample.value == 0 for sample in metrics.in_flight.collect()[0].samples)
 
 
 @pytest.mark.cpu_test
@@ -171,6 +171,13 @@ def test_sleep_routes_visible_on_production_metrics_endpoint(
     attach_metrics_router(app)
 
     with TestClient(app, raise_server_exceptions=False) as client:
+        startup = text_string_to_metric_families(client.get("/metrics").text)
+        assert {
+            sample.labels["operation"]: sample.value
+            for family in startup
+            for sample in family.samples
+            if sample.name == "vllm:sleep_mode_operations_in_flight"
+        } == {"sleep": 0, "release_kv_cache_memory": 0, "wake": 0}
         assert client.request(method, path).status_code == status
         response = client.get("/metrics")
 

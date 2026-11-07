@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import os
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,66 @@ MODELS = {
     "multimodal": "HuggingFaceTB/SmolVLM-256M-Instruct",
 }
 PREV_MINOR_VERSION = version._prev_minor_version()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("multiprocess", [False, True])
+def test_metrics_endpoint_preserves_startup_defaults(tmp_path, multiprocess):
+    """Both metrics paths export defaults without duplicating real samples."""
+    script = """
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from prometheus_client import Gauge
+from prometheus_client.parser import text_string_to_metric_families
+from vllm.entrypoints.serve.instrumentator.metrics import attach_router
+from vllm.v1.metrics.prometheus import set_gauge_initial_value
+
+app = FastAPI()
+
+@app.get("/probe")
+def probe():
+    return {"ok": True}
+
+attach_router(app)
+name = "vllm:test_startup_gauge"
+gauge = Gauge(name, "Startup gauge", ["engine"], multiprocess_mode="mostrecent")
+child = gauge.labels("0")
+set_gauge_initial_value(child, 0)
+
+with TestClient(app) as client:
+    assert client.get("/probe").status_code == 200
+    for value in (0, 7, 0):
+        if value == 7:
+            child.set(value)
+        for path in ("/metrics", "/metrics/"):
+            response = client.get(path, follow_redirects=False)
+            assert response.status_code == 200, response.text
+            samples = [sample for family in
+                       text_string_to_metric_families(response.text)
+                       for sample in family.samples]
+            usage = [(sample.labels, sample.value) for sample in samples
+                     if sample.name == name]
+            assert usage == [({"engine": "0"}, value)], (path, usage)
+            requests = [sample.value for sample in samples
+                        if sample.name == "http_requests_total"
+                        and sample.labels.get("handler") == "/probe"]
+            assert requests == [1], (path, requests)
+        child.set(0)
+"""
+    env = os.environ.copy()
+    env.pop("PROMETHEUS_MULTIPROC_DIR", None)
+    env.pop("prometheus_multiproc_dir", None)
+    if multiprocess:
+        env["PROMETHEUS_MULTIPROC_DIR"] = str(tmp_path)
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.fixture(scope="module", params=list(MODELS.keys()))
