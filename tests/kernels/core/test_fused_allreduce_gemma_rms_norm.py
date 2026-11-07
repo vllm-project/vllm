@@ -3,9 +3,9 @@
 """Tests for the manual AllReduce + GemmaRMSNorm fusion used by MiniMax M3.
 
 ``fused_allreduce_gemma_rms_norm`` must match the unfused model path, i.e.
-``GemmaRMSNorm(all_reduce(partial), residual)``, both on the flashinfer fast
-path (TP>1 with flashinfer + NVSwitch) and on the eager fallback (TP==1, or when
-flashinfer is unavailable / the GPU has no NVSwitch).
+``GemmaRMSNorm(all_reduce(partial), residual)``, both on the fused fast paths
+(TP>1 with flashinfer + NVSwitch, or AITER's one-stage fused all-reduce on ROCm)
+and on the eager fallback (TP==1, or when no fused path applies).
 """
 
 import pytest
@@ -16,6 +16,7 @@ from tests.utils import ensure_current_vllm_config, init_test_distributed_enviro
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
+    _can_use_aiter_fused_ar_rms,
     fused_allreduce_gemma_rms_norm,
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
@@ -55,6 +56,9 @@ def _worker_fused_ar_norm(
     torch.manual_seed(seed + 1000 + local_rank)
     partial = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
 
+    if current_platform.is_rocm() and world_size > 1:
+        assert _can_use_aiter_fused_ar_rms(partial) == (num_tokens <= 80)
+
     # Reference: the unfused model path.
     reduced = tensor_model_parallel_all_reduce(partial.clone())
     ref_out, ref_res = norm(reduced, residual.clone())
@@ -74,7 +78,7 @@ def _worker_fused_ar_norm(
     reason="CUDA or ROCm required",
 )
 # world_size=1 exercises the TP==1 identity branch on a single GPU; >1 exercises
-# the all_reduce + GemmaRMSNorm equivalence (flashinfer kernel or fallback).
+# the all_reduce + GemmaRMSNorm equivalence (flashinfer/AITER kernel or fallback).
 @pytest.mark.parametrize("world_size", [1, 2, 4])
 @pytest.mark.parametrize("num_tokens", [1, 128, 333])
 @pytest.mark.parametrize("hidden_size", [2048, 4096])
@@ -82,6 +86,7 @@ def _worker_fused_ar_norm(
 @pytest.mark.parametrize("eps", [1e-6])
 @pytest.mark.parametrize("seed", [42])
 def test_fused_allreduce_gemma_rms_norm(
+    monkeypatch,
     world_size,
     num_tokens,
     hidden_size,
@@ -92,6 +97,7 @@ def test_fused_allreduce_gemma_rms_norm(
     num_gpus = current_platform.device_count()
     if num_gpus < world_size:
         pytest.skip(f"Need >= {world_size} GPUs, have {num_gpus}")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     port = str(get_open_port())
     spawn(
         _worker_fused_ar_norm,

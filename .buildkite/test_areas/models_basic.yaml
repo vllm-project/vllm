@@ -478,6 +478,30 @@ steps:
   - tests/models/qwen3_5/
   commands:
   - pytest -v -s models/qwen3_5/
+  mirror:
+    amd:
+      automatic_shard: true
+      label: ":amd: (MI355) Qwen3.5"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 30
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/layers/fused_allreduce_gemma_rms_norm.py
+      - vllm/model_executor/layers/fused_qk_norm_rope.py
+      - vllm/model_executor/layers/mamba/gdn
+      - vllm/models/minimax_m3/amd/ops/gemma_rmsnorm.py
+      - vllm/models/qwen3_5/
+      - vllm/model_executor/models/qwen3_next.py
+      - vllm/config/vllm.py
+      - vllm/_aiter_ops.py
+      - vllm/distributed/device_communicators/aiter_custom_all_reduce.py
+      - vllm/platforms/rocm.py
+      - tests/models/qwen3_5/
+      - tests/kernels/mamba/test_gdn_output_projection.py
+      commands:
+      - pytest -v -s models/qwen3_5/ kernels/mamba/test_gdn_output_projection.py
 
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu

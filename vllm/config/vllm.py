@@ -152,10 +152,14 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
         # recipe can start.
         # HYV4 also runs without torch.compile, preserving runtime-shape
         # kernel selection during graph capture.
-        return frozenset({"DeepseekV41ForCausalLM", "HYV4ForCausalLM", "HYV4MTPModel"})
+        archs = frozenset({"DeepseekV41ForCausalLM", "HYV4ForCausalLM", "HYV4MTPModel"})
+        # On gfx950 Qwen3.5 runs the eager vllm/models/qwen3_5/amd model.
+        if current_platform.is_device_capability(95):
+            return archs | _QWEN3_5_ARCHITECTURES
+        return archs
     if current_platform.is_cuda():
-        # Qwen3.5 migrates to breakable CUDA graphs on NVIDIA only; other
-        # platforms keep the torch.compile path.
+        # Qwen3.5 migrates to breakable CUDA graphs on NVIDIA and ROCm gfx950;
+        # other platforms keep the torch.compile path.
         return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES | _QWEN3_5_ARCHITECTURES
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
