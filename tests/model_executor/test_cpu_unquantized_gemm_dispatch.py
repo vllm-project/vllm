@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for CPU unquantized GEMM dispatch behavior."""
 
+import types
+
 import pytest
 import torch
 
@@ -24,7 +26,9 @@ def test_dispatch_prepacks_arm_bf16_causal_conv(monkeypatch):
         pack_inputs.append(weight.clone())
         return packed
 
-    monkeypatch.setattr(utils.ops, "causal_conv1d_weight_pack", pack)
+    monkeypatch.setattr(torch.ops._C, "causal_conv1d_weight_pack", pack, raising=False)
+    for name in ("causal_conv1d_fwd_cpu", "causal_conv1d_update_cpu"):
+        monkeypatch.setattr(torch.ops._C, name, lambda *args: None, raising=False)
     original = torch.randn(32, 1, 4, dtype=torch.bfloat16)
     layer = torch.nn.Module()
     layer.weight = torch.nn.Parameter(original.clone(), requires_grad=False)
@@ -38,6 +42,25 @@ def test_dispatch_prepacks_arm_bf16_causal_conv(monkeypatch):
     torch.testing.assert_close(layer._cpu_unpacked_conv_weight, original.view(32, 4))
     # Check we have correctly stored the packed weights
     assert layer.weight.data_ptr() == packed.data_ptr()
+
+
+def test_dispatch_skips_arm_bf16_causal_conv_pack_without_kernel(monkeypatch):
+    # macOS builds leave out the C++ causal_conv1d kernels.
+    monkeypatch.setattr(
+        current_platform, "get_cpu_architecture", lambda: CpuArchEnum.ARM
+    )
+    monkeypatch.setattr(torch.cpu, "get_capabilities", lambda: {"bf16": True})
+    monkeypatch.setattr(torch.cpu, "_is_avx512_bf16_supported", lambda: False)
+    monkeypatch.setattr(torch.ops, "_C", types.SimpleNamespace())
+
+    original = torch.randn(32, 1, 4, dtype=torch.bfloat16)
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(original.clone(), requires_grad=False)
+
+    utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
+
+    assert not hasattr(layer, "_cpu_unpacked_conv_weight")
+    torch.testing.assert_close(layer.weight, original)
 
 
 def test_dispatch_does_not_pack_3d_expert_weight(monkeypatch):
