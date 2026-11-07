@@ -67,10 +67,6 @@ class TestGranite20bFcToolParser(ToolParserTests):
             parallel_tool_calls_count=2,
             parallel_tool_calls_names=["get_weather", "get_time"],
             # xfail markers
-            xfail_streaming={
-                "test_surrounding_text": (
-                    "Granite 20B FC streaming requires <function_call> at start"
-                ),
-            },
+            xfail_streaming={},
             xfail_nonstreaming={},
         )
