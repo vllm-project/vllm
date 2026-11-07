@@ -64,12 +64,14 @@ if TYPE_CHECKING:
     from vllm.tasks import ScoreType
     from vllm.tokenizers import TokenizerLike
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
         EncoderCudaGraphReplayBuffers,
         EncoderItemSpec,
     )
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 
 logger = init_logger(__name__)
 
@@ -139,6 +141,13 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
 _language_model_by_module: "weakref.WeakKeyDictionary[nn.Module, VllmModel]" = (
     weakref.WeakKeyDictionary()
 )
+
+
+def _is_language_model(model: object) -> TypeIs[VllmModel]:
+    # Text towers can use config/position_ids signatures and omit loader hooks.
+    return callable(getattr(model, "embed_input_ids", None)) and callable(
+        getattr(model, "forward", None)
+    )
 
 
 @runtime_checkable
@@ -284,14 +293,14 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
                     mod = getattr(mod, attr)
 
             candidate: object = mod
-            if candidate is not self_module and isinstance(candidate, VllmModel):
+            if candidate is not self_module and _is_language_model(candidate):
                 _language_model_by_module[self_module] = candidate
                 return candidate
 
         # Fallback
         for mod in self_module.children():
             candidate = mod
-            if isinstance(candidate, VllmModel):
+            if _is_language_model(candidate):
                 _language_model_by_module[self_module] = candidate
                 return candidate
 
@@ -347,7 +356,8 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         as a tower model component.
 
         Tower model components are automatically skipped when `--limit-mm-per-prompt`
-        is set to zero for all of their modalities.
+        is set to zero for all of their modalities, and on pipeline stages after the
+        first under Model Runner V2, which runs encoders on the first stage only.
 
         If `targets` is set, instead include descendants that are an instance
         of `targets`, even if they aren't direct children.
@@ -356,6 +366,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         it supports tower offloading), since `make_layers` only ever sees the
         decoder layer stack.
         """
+        from vllm.distributed import get_pp_group
         from vllm.model_executor.offloader import get_offloader
 
         from .utils import StageMissingLayer, collect_children, no_init_weights
@@ -378,6 +389,9 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
                     targets=targets,
                 )
                 if all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
+                or (
+                    vllm_config.use_v2_model_runner and not get_pp_group().is_first_rank
+                )
                 else nullcontext()
             ):
                 yield
@@ -663,6 +677,47 @@ def supports_score_template(
 
 
 @runtime_checkable
+class SupportsKVCacheGrouping(Protocol):
+    """The interface required for models that own their KV cache grouping.
+
+    .. note::
+        Experimental. The classmethod contract may change as model-owned
+        grouping stabilizes.
+
+    Implementing it lets a model replace the default KV cache grouping (which
+    layers share a block table) while Core keeps owning placement, byte
+    accounting, and admission.
+    """
+
+    @classmethod
+    def get_kv_cache_groups(
+        cls,
+        vllm_config: "VllmConfig",
+        kv_cache_spec: dict[str, "KVCacheSpec"],
+    ) -> list["KVCacheGroupSpec"]:
+        """Split the model's layers into logical KV cache groups."""
+        ...
+
+
+@overload
+def supports_kv_cache_grouping(
+    model: type[object],
+) -> TypeIs[type[SupportsKVCacheGrouping]]: ...
+
+
+@overload
+def supports_kv_cache_grouping(
+    model: object,
+) -> TypeIs[SupportsKVCacheGrouping]: ...
+
+
+def supports_kv_cache_grouping(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsKVCacheGrouping]] | TypeIs[SupportsKVCacheGrouping]:
+    return isinstance(model, SupportsKVCacheGrouping)
+
+
+@runtime_checkable
 class SupportsLoRA(Protocol):
     """The interface required for all models that support LoRA."""
 
@@ -682,7 +737,7 @@ class SupportsLoRA(Protocol):
     packed_modules_mapping: dict[str, list[str]] = {}
     # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
     lora_skip_prefixes: ClassVar[list[str]] = []
-    lora_manager: "LoRAModelManager | None"
+    lora_manager: "LoRAModelManager | None" = None
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
@@ -1060,8 +1115,14 @@ class MixtureOfExperts(Protocol):
         """
         self.expert_weights = []
         for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(list(layer.get_expert_weights()))
+            # Register the expert weights. EPLB only moves bytes, so 1-byte
+            # dtypes NCCL lacks (e.g. E8M0, FP4x2) go as uint8 views.
+            self.expert_weights.append(
+                [
+                    w.view(torch.uint8) if w.element_size() == 1 else w
+                    for w in layer.get_expert_weights()
+                ]
+            )
             layer.set_eplb_state(
                 moe_layer_idx=layer_idx,
                 expert_load_view=expert_load_view,
@@ -1134,12 +1195,9 @@ def has_noops(
 
 @runtime_checkable
 class SupportsMambaPrefixCaching(Protocol):
-    """The interface for models whose mamba layers support prefix caching.
-
-    This is currently experimental.
+    """The interface for attention-free Mamba models that support prefix
+    caching. Hybrid models get the same methods from `IsHybrid`.
     """
-
-    supports_mamba_prefix_caching: ClassVar[Literal[True]] = True
 
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple["MambaStateCopyFunc", ...]:
@@ -1154,24 +1212,6 @@ class SupportsMambaPrefixCaching(Protocol):
         """Map legacy copy functions to each requested Mamba backend."""
         copy_funcs = cls.get_mamba_state_copy_func()
         return {mamba_type: copy_funcs for mamba_type in mamba_types}
-
-
-@overload
-def supports_mamba_prefix_caching(
-    model: type[object],
-) -> TypeIs[type[SupportsMambaPrefixCaching]]: ...
-
-
-@overload
-def supports_mamba_prefix_caching(
-    model: object,
-) -> TypeIs[SupportsMambaPrefixCaching]: ...
-
-
-def supports_mamba_prefix_caching(
-    model: type[object] | object,
-) -> TypeIs[type[SupportsMambaPrefixCaching]] | TypeIs[SupportsMambaPrefixCaching]:
-    return getattr(model, "supports_mamba_prefix_caching", False)
 
 
 @runtime_checkable
@@ -1496,6 +1536,20 @@ def supports_transcription(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsTranscription]] | TypeIs[SupportsTranscription]:
     return getattr(model, "supports_transcription", False)
+
+
+@runtime_checkable
+class SpeculativeDraftModel(Protocol):
+    """The interface of a speculative decoding draft model which declares the
+    speculator it's for. This is read through the model registry, so that it's
+    available without importing the model.
+    """
+
+    speculator_config_class: ClassVar[type["SpeculatorConfig"]]
+    """The config class of the speculator that this is a draft model of.
+    Unless a speculative method is configured that the checkpoint can't
+    override, a draft checkpoint with this model's architecture uses this
+    speculator."""
 
 
 @runtime_checkable

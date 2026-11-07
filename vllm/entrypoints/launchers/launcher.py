@@ -14,14 +14,16 @@ from fastapi import FastAPI
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.launchers.utils.ssl import SSLCertRefresher
-from vllm.entrypoints.serve.utils.api_utils import (
+from vllm.entrypoints.common.cli_args import (
+    init_parser_plugin,
+    validate_api_server_args,
+)
+from vllm.entrypoints.common.startup import (
     log_non_default_args,
     log_version_and_model,
 )
+from vllm.entrypoints.launchers.utils.ssl import SSLCertRefresher
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParserManager
-from vllm.tool_parsers import ToolParserManager
 from vllm.tracing import instrument
 from vllm.utils.network_utils import find_process_using_port, is_valid_ipv6_address
 from vllm.utils.system_utils import set_ulimit
@@ -257,9 +259,6 @@ async def serve_http(
     async def dummy_shutdown() -> None:
         pass
 
-    loop.add_signal_handler(signal.SIGINT, signal_handler)
-    loop.add_signal_handler(signal.SIGTERM, signal_handler)
-
     async def handle_shutdown() -> None:
         await shutdown_event.wait()
 
@@ -283,12 +282,13 @@ async def serve_http(
         server_task.cancel()
         if watchdog_task is not None:
             watchdog_task.cancel()
-        if ssl_cert_refresher:
-            ssl_cert_refresher.stop()
 
-    shutdown_task = loop.create_task(handle_shutdown())
-
+    shutdown_task = None
     try:
+        loop.add_signal_handler(signal.SIGINT, signal_handler)
+        loop.add_signal_handler(signal.SIGTERM, signal_handler)
+        shutdown_task = loop.create_task(handle_shutdown())
+
         await server_task
         return dummy_shutdown()
     except asyncio.CancelledError:
@@ -304,9 +304,12 @@ async def serve_http(
         logger.info_once("[shutdown] API server: shutting down FastAPI HTTP server")
         return server.shutdown()
     finally:
-        shutdown_task.cancel()
+        if shutdown_task is not None:
+            shutdown_task.cancel()
         if watchdog_task is not None:
             watchdog_task.cancel()
+        if ssl_cert_refresher:
+            ssl_cert_refresher.stop()
 
 
 async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
@@ -328,7 +331,10 @@ def terminate_if_errored(server: uvicorn.Server, engine: EngineClient):
     for this request.
     """
     engine_errored = engine.errored and not engine.is_running
-    if not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH and engine_errored:
+    keep_alive = (
+        envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH or engine.should_keep_api_server_alive
+    )
+    if not keep_alive and engine_errored:
         server.should_exit = True
 
 
@@ -356,36 +362,12 @@ def create_server_unix_socket(path: str) -> socket.socket:
     return sock
 
 
-def validate_api_server_args(args):
-    valid_tool_parses = ToolParserManager.list_registered()
-    if args.enable_auto_tool_choice and args.tool_call_parser not in valid_tool_parses:
-        raise KeyError(
-            f"invalid tool call parser: {args.tool_call_parser} "
-            f"(chose from {{ {','.join(valid_tool_parses)} }})"
-        )
-
-    valid_reasoning_parsers = ReasoningParserManager.list_registered()
-    if (
-        reasoning_parser := args.structured_outputs_config.reasoning_parser
-    ) and reasoning_parser not in valid_reasoning_parsers:
-        raise KeyError(
-            f"invalid reasoning parser: {reasoning_parser} "
-            f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
-        )
-
-
 @instrument(span_name="API server setup")
 def setup_server(args, *, reuse_port: bool):
     """Validate API server args and create the server socket."""
     log_version_and_model(logger, VLLM_VERSION, args.model)
     log_non_default_args(args)
-
-    if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
-        ToolParserManager.import_tool_parser(args.tool_parser_plugin)
-
-    if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
-        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
-
+    init_parser_plugin(args)
     validate_api_server_args(args)
 
     # workaround to make sure that we bind the port before the engine is set up.

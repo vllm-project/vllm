@@ -46,10 +46,11 @@ def _triton_kernel_moe_supports_current_device() -> bool:
     p = current_platform
     if p.is_cuda():
         cap = p.get_device_capability()
-        # Hopper SM90, datacenter Blackwell SM100/103 and consumer Blackwell
-        # SM120/121. SM12x needs the opt-flag constraints applied by
-        # `_swizzle_mxfp4` and `_constrain_sm12x_block_m` to fit its 99KB of
-        # shared memory; it is still ordered after MARLIN by the selector.
+        # Hopper SM90, datacenter Blackwell SM100/103, Jetson Thor SM110 and
+        # consumer Blackwell SM120/121. SM110 and SM12x need the opt-flag
+        # constraints applied by `_swizzle_mxfp4` (SM12x also
+        # `_constrain_sm12x_block_m` to fit its 99KB of shared memory); both
+        # are still ordered after MARLIN by the selector.
         return cap is not None and (9, 0) <= (cap.major, cap.minor) < (13, 0)
     if p.is_rocm():
         from vllm.platforms.rocm import on_gfx1x, on_gfx9
@@ -847,6 +848,20 @@ def triton_kernel_fused_experts(
     return output_tensor
 
 
+def _tk38_routing_data(
+    col_sum: torch.Tensor,
+    order: torch.Tensor,
+    flat_w: torch.Tensor,
+    topk: int,
+) -> tuple["RoutingData", torch.Tensor, torch.Tensor]:
+    """Build 3.8 routing from per-expert counts and the stable expert order."""
+    nrows = order.shape[0]
+    ragged = make_ragged_tensor_metadata(col_sum, nrows)
+    gather_tok = (order // topk).to(torch.int32)
+    routing = RoutingData(ragged, flat_w[order], gather_tok, topk, nrows)
+    return routing, gather_tok, gather_tok
+
+
 def make_routing_data(
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -854,21 +869,18 @@ def make_routing_data(
 ) -> tuple["RoutingData", torch.Tensor, torch.Tensor]:
     if triton_kernels_version == "3.8":
         _, topk = topk_ids.shape
-        flat_e = topk_ids.reshape(-1)
-        valid = flat_e >= 0
-        flat_e = flat_e.to(torch.int64).clamp(min=0)
-        flat_w = topk_weights.reshape(-1).to(torch.float32) * valid.to(torch.float32)
-        nrows = flat_e.shape[0]
-        order = torch.argsort(flat_e, stable=True)
-        col_sum = torch.zeros(
-            num_local_experts, dtype=torch.int32, device=flat_e.device
+        flat_ids = topk_ids.reshape(-1)
+        # -1 (non-local) slots go to expert 0 with zero weight.
+        keys = flat_ids.clamp(min=0)
+        sorted_keys, order = torch.sort(keys, stable=True)
+        experts = torch.arange(
+            num_local_experts + 1, dtype=keys.dtype, device=keys.device
         )
-        col_sum.scatter_add_(0, flat_e, torch.ones_like(flat_e, dtype=torch.int32))
-        ragged = make_ragged_tensor_metadata(col_sum, nrows)
-        gather_tok = (order // topk).to(torch.int32)
-        gammas = flat_w[order]
-        routing = RoutingData(ragged, gammas, gather_tok, topk, nrows)
-        return routing, gather_tok, gather_tok
+        edges = torch.searchsorted(sorted_keys, experts, out_int32=True)
+        col_sum = edges[1:] - edges[:-1]
+        valid = (flat_ids >= 0).to(torch.float32)
+        flat_w = topk_weights.reshape(-1).to(torch.float32) * valid
+        return _tk38_routing_data(col_sum, order, flat_w, topk)
 
     topk_ids = topk_ids.to(torch.int16)
     topk_weights = topk_weights.to(torch.bfloat16)
@@ -936,8 +948,14 @@ def routing_data_from_sparse_topk(
     remapping) that work is redundant.
     """
     if triton_kernels_version == "3.8":
-        # 3.8 routing is rebuilt from raw ids; no SparseMatrix reuse.
-        return make_routing_data(sparse_topk.indx, sparse_topk.vals, n_expts)
+        # topk ids have no -1 slots, so the topk metadata matches make_routing_data.
+        mask_metadata = sparse_topk.mask_metadata
+        return _tk38_routing_data(
+            mask_metadata.col_sum,
+            mask_metadata.col_sorted_indx,
+            sparse_topk.vals.reshape(-1).to(torch.float32),
+            sparse_topk.indx.shape[1],
+        )
 
     dispatch_indx = sparse_topk.mask_metadata.row_sorted_indx
     combine_indx = sparse_topk.mask_metadata.col_sorted_indx

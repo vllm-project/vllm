@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import tempfile
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from itertools import chain, count
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import Mock
 
+import numpy as np
 import torch
 
 from vllm import SamplingParams
@@ -49,6 +50,11 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        _RegionPairs,
+    )
+
 EOS_TOKEN_ID = 50256
 
 
@@ -70,13 +76,16 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.requests) == 0
     assert len(scheduler.waiting) == 0
     assert len(scheduler.kv_holding_waiting) == 0
+    assert len(scheduler.async_kv_waiting) == 0
     assert not scheduler.deferred_waiting
     assert len(scheduler.running) == 0
     assert len(scheduler.finished_req_ids) == 0
     assert len(scheduler.finished_recving_kv_req_ids) == 0
     assert len(scheduler._inflight_prefills) == 0
+    assert not scheduler._parked_reservations
     assert not scheduler._kv_fetch_stages
     assert not any(scheduler._kv_fetch_counts.values())
+    assert not scheduler._aborted_kv_loads
 
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0
@@ -176,6 +185,26 @@ def create_vllm_config(
         attention_config=attention_config,
         speculative_config=speculative_config,
     )
+
+
+def set_mtp_config(
+    config: VllmConfig,
+    num_lookahead: int = 1,
+    *,
+    disable_lookahead_block_hashes: bool = False,
+) -> None:
+    """Configure test MTP without loading a separate draft model."""
+    assert config.model_config is not None
+    config.model_config.hf_config.n_predict = num_lookahead
+    spec = SpeculativeConfig(
+        model="ngram",
+        num_speculative_tokens=num_lookahead,
+        disable_lookahead_block_hashes=disable_lookahead_block_hashes,
+    )
+    spec.method = "mtp"
+    spec.draft_model_config = config.model_config
+    config.speculative_config = spec
+    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
 
 
 def create_scheduler(
@@ -288,6 +317,7 @@ def create_model_runner_output(
     use_eos: bool = False,
     token_id: int = 0,
     kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None,
+    failed_recving: set[str] | None = None,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
     # Make request data.
@@ -305,12 +335,14 @@ def create_model_runner_output(
             and finished_recving is None
             and invalid_block_ids is None
             and kv_connector_worker_meta is None
+            and failed_recving is None
         )
         else KVConnectorOutput(
             finished_sending=finished_sending,
             finished_recving=finished_recving,
             invalid_block_ids=invalid_block_ids or set(),
             kv_connector_worker_meta=kv_connector_worker_meta,
+            failed_recving=failed_recving or set(),
         )
     )
 
@@ -327,6 +359,8 @@ def create_model_runner_output(
 
 
 class TestExampleConnector(ExampleConnector):
+    __test__ = False
+
     def __init__(
         self,
         config: VllmConfig,
@@ -562,7 +596,14 @@ def make_nixl_scheduler(
         block_size=16,
         mamba_enabled=has_mamba,
     )
-    sched.vllm_config = SimpleNamespace(num_prefill_lookahead_tokens=0)
+    sched.kv_cache_config.hash_block_size = 16
+    sched.vllm_config = SimpleNamespace(
+        num_prefill_lookahead_tokens=0,
+        num_hash_lookahead_tokens=0,
+        cache_config=CacheConfig(block_size=16),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        kv_transfer_config=None,
+    )
 
     if heartbeat:
         sched._heartbeat_by_engine = {}
@@ -629,12 +670,16 @@ def make_nixl_push_scheduler(
         block_size=16,
         mamba_enabled=has_mamba,
     )
+    sched.kv_cache_config.hash_block_size = 16
 
     # vllm_config is consulted for parallel_config.tensor_parallel_size, and by
     # `_prefill_backoff` on both the P and D prefill paths.
     vllm_config = MagicMock()
     vllm_config.parallel_config.tensor_parallel_size = 1
+    vllm_config.parallel_config.decode_context_parallel_size = 1
+    vllm_config.cache_config = CacheConfig(block_size=16)
     vllm_config.num_prefill_lookahead_tokens = 0
+    vllm_config.num_hash_lookahead_tokens = 0
     sched.vllm_config = vllm_config
 
     # Push-specific state.
@@ -682,3 +727,39 @@ def make_moriio_writer(fake_worker: Any) -> Any:
     writer._defer_timeout = 60.0
     writer.ensure_worker_started = lambda: None
     return writer
+
+
+def expand_strided_descs(strided_descs: np.ndarray) -> np.ndarray:
+    """Expand Nx5 (addr, len, dev, stride, count) rows to one row per block.
+
+    Mirrors how NIXL indexes a strided descriptor list, so desc ids computed
+    by the connector can be resolved to (addr, len, dev) byte ranges.
+    """
+    strided_descs = np.asarray(strided_descs, dtype=np.uint64).reshape(-1, 5)
+    counts = strided_descs[:, 4].astype(np.intp)
+    starts = np.cumsum(strided_descs[:, 4]) - strided_descs[:, 4]
+    out = np.repeat(strided_descs[:, :3], counts, axis=0)
+    offsets = np.arange(len(out), dtype=np.uint64) - np.repeat(starts, counts)
+    out[:, 0] += offsets * np.repeat(strided_descs[:, 3], counts)
+    return out
+
+
+def region_pairs_by_index(
+    num_regions: int,
+    groups: Sequence[int] | None = None,
+    groups_match: bool = True,
+) -> "_RegionPairs":
+    """NIXL region pairs where peer region ``i`` pairs with local region ``i``."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        _RegionPairs,
+    )
+
+    regions = list(range(num_regions))
+    return _RegionPairs(
+        remote=regions,
+        local=regions,
+        group=list(groups) if groups is not None else [0] * num_regions,
+        remote_regions=regions,
+        partner=regions,
+        groups_match=groups_match,
+    )

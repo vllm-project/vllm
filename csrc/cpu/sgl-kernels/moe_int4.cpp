@@ -52,7 +52,8 @@ void fused_experts_int4_w4a8_kernel_impl(
     int64_t K,
     int64_t E,
     int64_t topk,
-    int64_t num_tokens_post_pad) {
+    int64_t num_tokens_post_pad,
+    CPUActMethod act_func) {
   constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n();
   int num_threads = at::get_num_threads();
@@ -188,12 +189,20 @@ void fused_experts_int4_w4a8_kernel_impl(
     }
   });
 
-  // stage 1.5: intermediate_cache1 = silu(intermediate_cache0)
-  at::parallel_for(0, M * topk, 0, [&](int64_t begin, int64_t end) {
-    for (int64_t m = begin; m < end; ++m) {
-      silu_and_mul_stub(ic1 + m * N, ic0 + m * 2 * N, ic0 + m * 2 * N + N, N);
-    }
-  });
+  // stage 1.5: intermediate_cache1 = activation(intermediate_cache0)
+  if (act_func == CPUActMethod::gelu_tanh_and_mul) {
+    at::parallel_for(0, M * topk, 0, [&](int64_t begin, int64_t end) {
+      for (int64_t m = begin; m < end; ++m) {
+        gelu_tanh_and_mul_stub(ic1 + m * N, ic0 + m * 2 * N, ic0 + m * 2 * N + N, N);
+      }
+    });
+  } else {
+    at::parallel_for(0, M * topk, 0, [&](int64_t begin, int64_t end) {
+      for (int64_t m = begin; m < end; ++m) {
+        silu_and_mul_stub(ic1 + m * N, ic0 + m * 2 * N, ic0 + m * 2 * N + N, N);
+      }
+    });
+  }
 
   // stage 1.5: quantize ic1 to uint8, [M * topk, N]
   at::parallel_for(0, M * topk, 0, [&](int64_t begin, int64_t end) {
@@ -317,7 +326,8 @@ void fused_experts_int4_w4a8_kernel_impl(
       int64_t K,                                           \
       int64_t E,                                           \
       int64_t topk,                                        \
-      int64_t num_tokens_post_pad)
+      int64_t num_tokens_post_pad,                          \
+      CPUActMethod act_func)
 
 INSTANTIATE_MOE_INT4_W4A8_TEMPLATE(at::BFloat16);
 INSTANTIATE_MOE_INT4_W4A8_TEMPLATE(at::Half);

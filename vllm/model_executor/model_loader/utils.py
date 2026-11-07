@@ -20,7 +20,6 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -33,6 +32,7 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
     is_draft_model_cacheable,
 )
 from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
+from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.tracing import instrument
@@ -83,6 +83,12 @@ def initialize_model(
         model_config = vllm_config.model_config
     if model_class is None:
         model_class, _ = get_model_architecture(model_config)
+
+    from vllm.model_executor.models.expert_substitution import (
+        as_expert_substitution_model,
+    )
+
+    model_class = as_expert_substitution_model(model_class, model_config)
 
     if vllm_config.quant_config is not None:
         configure_quant_config(vllm_config.quant_config, model_class)
@@ -145,8 +151,15 @@ def process_weights_after_loading(
     from vllm.model_executor.layers.quantization.online.moe_base import (
         OnlineMoEMethodBase,
     )
+    from vllm.model_executor.model_loader.reload.direct import (
+        direct_reload_enabled,
+        record_checkpoint_layout,
+    )
 
     maybe_retie_word_embeddings(model, model_config)
+
+    if direct_reload_enabled():
+        record_checkpoint_layout(model)  # cold start only; reloads reuse it
 
     for name, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)
@@ -177,6 +190,12 @@ def process_weights_after_loading(
                 else nullcontext()
             )
             with loading_context, timing_context:
+                # Quantize the staged fused shared experts into their slots.
+                shared_expert_loader = getattr(
+                    module, "shared_expert_online_loader", None
+                )
+                if shared_expert_loader is not None:
+                    shared_expert_loader.finalize(module)
                 quant_method.process_weights_after_loading(module)
             # process_weights_after_loading may swap in freshly-created
             # Parameters (e.g. FP8 requantization), which are stamped with the
@@ -189,19 +208,7 @@ def process_weights_after_loading(
             # the caching allocator, which starves the OS on UMA devices.
             release_device_memory_under_pressure(target_device)
 
-    # Initialize post-load attention weights for any attention layer and MM
-    # encoder. NOTE: Happens after other modules so we can easily decompress
-    # weights.
-    for _, module in model.named_modules():
-        if is_deferred_attention_layer(module):
-            # TODO(lucas): see if there is a way to unify the signatures
-            # of process_weights_after_loading
-            with device_loading_context(module, target_device):
-                module.process_weights_after_loading(model_config.dtype)
-
-    # Model-level post-load hook, after the per-layer quant finalize.
-    if hasattr(model, "process_weights_after_loading"):
-        model.process_weights_after_loading()
+    finalize_model_weights(model, target_device)
 
     # Needed for torchao model reloading via model.reload_weights
     # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`
@@ -210,8 +217,8 @@ def process_weights_after_loading(
 
 
 @contextmanager
-def device_loading_context(module: torch.nn.Module, target_device: torch.device):
-    if target_device.type == "cpu":
+def device_loading_context(module: torch.nn.Module, target_device: torch.device | None):
+    if target_device is None or target_device.type == "cpu":
         # If target is CPU, no need to move anything
         yield module
         return
