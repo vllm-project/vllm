@@ -35,6 +35,7 @@ from vllm.config import (
 )
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
+from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
 
 def _safe_profile_name(value: str) -> str:
@@ -1098,6 +1099,11 @@ def _run_mla_benchmark_batched(
 
     # Extract kv_cache_dtype from the first config
     kv_cache_dtype = getattr(first_config, "kv_cache_dtype", "auto")
+    # _run_single_benchmark only builds bf16/fp8 caches; reject per-token-head.
+    if get_kv_quant_mode(kv_cache_dtype).is_per_token_head:
+        raise ValueError(
+            f"{backend} does not support --kv-cache-dtype {kv_cache_dtype}"
+        )
 
     # FlashMLA sparse only supports "fp8_ds_mla" internally (not generic "fp8").
     # Remap here so the user can pass --kv-cache-dtype fp8 regardless of backend.
