@@ -1225,9 +1225,6 @@ def map_draft_quant_config(
     # names. Preserve their settings and only add the existing layer aliases.
     if start_layer_id == 0:
         return
-    exclusions = getattr(quant_config, "exclude_modules", None)
-    if not isinstance(exclusions, list):
-        return
 
     def offset_local_layer(match: re.Match[str]) -> str:
         layer_idx = int(match.group(1))
@@ -1235,14 +1232,31 @@ def map_draft_quant_config(
             return match.group(0)
         return f"layers.{layer_idx + start_layer_id}"
 
-    for exclusion in tuple(exclusions):
-        # Accept layers.N or *layers.N, excluding nested names such as
-        # lilicorr.layers.N, which are not decoder-layer indices.
-        global_exclusion = re.sub(
-            r"(?<![A-Za-z0-9_.])layers\.(\d+)", offset_local_layer, exclusion
-        )
-        if global_exclusion != exclusion and global_exclusion not in exclusions:
-            exclusions.append(global_exclusion)
+    root = f"{prefix}." if prefix else ""
+    # Each quant family keeps its own exclusion list (fp8 reads skips into
+    # ignored_layers, others into exclude_modules). Alias all of them so
+    # checkpoint-local names match both the global draft layer indices and the
+    # draft module root. Already-global entries are left untouched.
+    for attr in ("exclude_modules", "ignored_layers"):
+        exclusions = getattr(quant_config, attr, None)
+        if not isinstance(exclusions, list):
+            continue
+        for exclusion in tuple(exclusions):
+            # Accept layers.N or *layers.N, excluding nested names such as
+            # lilicorr.layers.N, which are not decoder-layer indices.
+            global_exclusion = re.sub(
+                r"(?<![A-Za-z0-9_.])layers\.(\d+)", offset_local_layer, exclusion
+            )
+            if global_exclusion == exclusion:
+                continue
+            if global_exclusion not in exclusions:
+                exclusions.append(global_exclusion)
+            # fp8 matches exactly, so the draft module tree must also be rooted
+            # at prefix to match the runtime module names.
+            if root and "*" not in exclusion:
+                rooted_exclusion = f"{root}{global_exclusion}"
+                if rooted_exclusion not in exclusions:
+                    exclusions.append(rooted_exclusion)
 
 
 def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:
