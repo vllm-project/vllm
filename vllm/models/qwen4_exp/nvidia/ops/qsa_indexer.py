@@ -515,6 +515,7 @@ def qsa_select_paged_decode(
     compress_ratio: int,
     decode_query_len: int,
     block_indices: torch.Tensor,
+    max_decode_rows: int | None = None,
 ) -> None:
     """Score and select compressed blocks for a request-major decode batch.
 
@@ -529,6 +530,11 @@ def qsa_select_paged_decode(
         compress_ratio: Number of logical tokens represented by a cache row.
         decode_query_len: Number of query tokens per request.
         block_indices: Compressed-index output buffer.
+        max_decode_rows: Upper bound on ``q.shape[0]`` across steps. The logits
+            workspace is allocated at this size so that warmup and serving
+            share one allocator block; actual row counts vary with the decode
+            batch, which would otherwise grow torch's reserved memory past
+            what memory profiling measured and churn large blocks every step.
 
     """
     assert token_topk % compress_ratio == 0
@@ -540,7 +546,13 @@ def qsa_select_paged_decode(
     assert visible_blocks.shape == (q.shape[0],)
 
     columns = page_table.shape[1] * k_cache.shape[1]
-    logits = torch.empty((q.shape[0], columns), dtype=torch.float32, device=q.device)
+    num_rows = q.shape[0]
+    # Always allocate the worst case (like the prefill logits workspace): the
+    # block is then cached by the allocator and reused at every batch size.
+    logits_rows = max(num_rows, max_decode_rows or 0)
+    logits = torch.empty((logits_rows, columns), dtype=torch.float32, device=q.device)[
+        :num_rows
+    ]
     tiles_per_program = _decode_tiles_per_program(num_requests, columns)
     grid = (
         num_requests,
