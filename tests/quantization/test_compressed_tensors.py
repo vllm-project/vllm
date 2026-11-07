@@ -1146,3 +1146,114 @@ def test_mxfp4_moe_with_mxfp4_inputs_keeps_w4a4_method(monkeypatch):
     )
 
     assert isinstance(layer.quant_method, CompressedTensorsW4A4Mxfp4MoEMethod)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Marlin MXFP4 preparation requires CUDA"
+)
+@pytest.mark.usefixtures("default_vllm_config")
+def test_mxfp4_marlin_preparation_supports_non_gated_moe():
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm import _custom_ops as ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+        ExpertMapManager,
+    )
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 import (  # noqa: E501
+        CompressedTensorsW4A4Mxfp4MoEMethod,
+    )
+    from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+        prepare_moe_fp4_layer_for_marlin,
+        prepare_moe_mxfp4_layer_for_marlin,
+    )
+    from vllm.model_executor.utils import move_parameter
+
+    moe_config = make_dummy_moe_config(
+        num_experts=2,
+        hidden_dim=64,
+        intermediate_size=64,
+        activation=MoEActivation.RELU2_NO_MUL,
+    )
+    assert moe_config.w13_num_shards == 1
+    expert_map_manager = ExpertMapManager(
+        max_num_batched_tokens=moe_config.max_num_tokens,
+        top_k=moe_config.experts_per_token,
+        global_num_experts=moe_config.num_experts,
+        num_redundant_experts=0,
+        num_expert_group=None,
+        moe_parallel_config=moe_config.moe_parallel_config,
+        placement_strategy="linear",
+        enable_eplb=False,
+    )
+    quant_config = CompressedTensorsConfig.from_config(
+        {
+            "format": "mxfp4-pack-quantized",
+            "config_groups": {
+                "group_0": {
+                    "targets": ["Linear"],
+                    "weights": {
+                        "num_bits": 4,
+                        "type": "float",
+                        "strategy": "group",
+                        "group_size": 32,
+                        "symmetric": True,
+                        "dynamic": False,
+                    },
+                    "input_activations": None,
+                }
+            },
+        }
+    )
+    layer = RoutedExperts(
+        "model.layers.0.ffn.experts",
+        torch.bfloat16,
+        moe_config,
+        quant_config,
+        expert_map_manager=expert_map_manager,
+        ckpt_gate_proj_name="w1",
+        ckpt_down_proj_name="w2",
+        ckpt_up_proj_name=None,
+    )
+    method = layer.quant_method
+    assert isinstance(method, CompressedTensorsW4A4Mxfp4MoEMethod)
+    method.create_weights(
+        layer,
+        num_experts=2,
+        hidden_size=64,
+        intermediate_size_per_partition=64,
+        params_dtype=torch.bfloat16,
+    )
+    layer.to(current_platform.device_type)
+    layer.w13_weight_packed.data.fill_(0x21)
+    layer.w2_weight_packed.data.fill_(0x21)
+    layer.w13_weight_scale.data.fill_(127)
+    layer.w2_weight_scale.data.fill_(127)
+    move_parameter(layer, "w13_weight_packed", "w13_weight")
+    move_parameter(layer, "w2_weight_packed", "w2_weight")
+    original_w13 = layer.w13_weight.detach().clone()
+    original_w2 = layer.w2_weight.detach().clone()
+    original_w13_scale = layer.w13_weight_scale.detach().clone()
+    original_w2_scale = layer.w2_weight_scale.detach().clone()
+
+    prepare_moe_fp4_layer_for_marlin(layer)
+
+    expected_w13 = ops.gptq_marlin_repack(
+        b_q_weight=original_w13[0].view(torch.int32).T.contiguous(),
+        size_k=64,
+        size_n=64,
+        num_bits=4,
+        is_a_8bit=False,
+    )
+    assert torch.equal(layer.w13_weight[0], expected_w13)
+
+    prepared_w13, _, _, _, _, _ = prepare_moe_mxfp4_layer_for_marlin(
+        layer,
+        original_w13,
+        original_w2,
+        original_w13_scale,
+        original_w2_scale,
+        None,
+        None,
+    )
+    assert torch.equal(prepared_w13[0], expected_w13)
