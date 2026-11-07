@@ -109,8 +109,8 @@ spec; do not move a crossover on a microbenchmark alone.
 - Tests live under `tests/models/glm5next/test_specialized_decode_*.py`, compare
   against FP64 or naive PyTorch references, and assert the error is no larger
   than the stock kernel's. They skip off SM100 and the 4-GPU ones with fewer
-  GPUs, so the H200 CI step skips them all; run them locally on GB300 before
-  pushing.
+  GPUs; CI runs them nightly on 4xB200 (no CI agent has GB300), so run them
+  locally on GB300 before pushing.
 
 ## Validation
 
