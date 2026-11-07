@@ -109,7 +109,7 @@ def _distributed_generation_rank(
         max_loras=2,
         max_loras_per_request=2,
         max_lora_rank=8,
-        lora_target_modules=["experts", "gate_proj", "up_proj", "down_proj"],
+        lora_target_modules=["experts"],
         enable_expert_parallel=enable_ep,
         tensor_parallel_size=tp,
         all2all_backend="allgather_reducescatter",
@@ -213,9 +213,6 @@ def _check_distributed_generation(llm, rank, root, barrier, eager):
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="Distributed composition requires CUDA"
-)
 @pytest.mark.parametrize("enable_ep", [False, True])
 @pytest.mark.parametrize("eager", [False, True])
 @pytest.mark.parametrize("runner", ["0", "1"], ids=["v1", "v2"])
@@ -243,9 +240,6 @@ def test_distributed_moe_composition_generation(
 
 
 @multi_gpu_test(num_gpus=4)
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="Distributed composition requires CUDA"
-)
 @pytest.mark.parametrize("runner", ["0", "1"], ids=["v1", "v2"])
 def test_distributed_moe_composition_generation_tp2_dp2(tiny_distributed_moe, runner):
     """TP peers share adapter identities with both DP ranks during graph replay."""

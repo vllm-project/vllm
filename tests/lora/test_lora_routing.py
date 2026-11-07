@@ -131,13 +131,17 @@ def test_distributed_route_buffers_remap_without_changing_addresses():
     assert [tensor.data_ptr() for tensor in tensors] == addresses
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not (torch.cuda.is_available() or torch.xpu.is_available()),
+    reason="Requires CUDA, ROCm or XPU",
+)
 def test_distributed_route_updates_preserve_inflight_snapshots():
     """Queued GPU consumers observe each update, not the next CPU snapshot."""
     from vllm.lora.routing_utils import DistributedLoRAPlan, DistributedLoRATensors
 
     plan = DistributedLoRAPlan((make_lora_request(1), make_lora_request(2)))
-    buffers = DistributedLoRATensors(1024, 1, 2, "cuda")
+    device = "xpu" if torch.xpu.is_available() else "cuda"
+    buffers = DistributedLoRATensors(1024, 1, 2, device)
     snapshots = []
     for step in range(32):
         adapter = 1 + step % 2
@@ -145,6 +149,25 @@ def test_distributed_route_updates_preserve_inflight_snapshots():
         snapshots.append(buffers.local_slots[buffers.indices.long()].clone())
     for step, snapshot in enumerate(snapshots):
         assert torch.all(snapshot == 1 - step % 2).item()
+
+
+@pytest.mark.parametrize("routed", [False, True])
+def test_distributed_kernel_metadata_uses_cpu_slot_mapping(routed):
+    """Shared wrapper preparation preserves scalar slots without device reads."""
+    from vllm.lora.routing_utils import DistributedLoRATensors
+
+    wrapper = PunicaWrapperCPU(4, 4, torch.device("cpu"))
+    wrapper.distributed_lora_tensors = DistributedLoRATensors(4, 2, 2, "cpu")
+    mapping = (
+        LoRARouteMapping(((1, 2), (0, 0)), ((0.7, 0.3), (0.0, 0.0)), (2,), False)
+        if routed
+        else LoRAMapping((1, 0), (2,), False)
+    )
+    tokens, prompts = wrapper._kernel_metadata_mapping(mapping, [2, 1], 3, 64)
+    assert tokens.device.type == prompts.device.type == "cpu"
+    # Multi-route tokens have no scalar adapter; explicit expert routes supply it.
+    assert tokens.tolist() == ([-1, -1] if routed else [1, -1])
+    assert prompts.tolist() == [0]
 
 
 @pytest.mark.parametrize("failure", ["tokens", "routes", "missing"])

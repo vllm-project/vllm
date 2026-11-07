@@ -493,8 +493,15 @@ def _run_routed_expert_ep_rank(pgi, vllm_config, cpu_group, different_slots, use
                             run()
                         torch.accelerator.synchronize()
                         torch.distributed.barrier(group=cpu_group)
-                        graph = torch.cuda.CUDAGraph()
-                        with torch.cuda.graph(graph):
+                        accelerator = (
+                            torch.xpu if current_platform.is_xpu() else torch.cuda
+                        )
+                        graph = (
+                            accelerator.XPUGraph()
+                            if current_platform.is_xpu()
+                            else accelerator.CUDAGraph()
+                        )
+                        with accelerator.graph(graph):
                             actual = run()
                     graph.replay()
                 else:
@@ -537,9 +544,6 @@ def _run_routed_expert_ep_rank(pgi, vllm_config, cpu_group, different_slots, use
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("different_slots", [False, True])
 @pytest.mark.parametrize("use_graph", [False, True])
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="Distributed composition requires CUDA"
-)
 def test_routed_expert_dispatch_dp2_ep2(different_slots, use_graph, tmp_path):
     """Dispatch preserves adapter identity across uneven, changing DP batches."""
     from transformers import OlmoeConfig
@@ -662,9 +666,6 @@ def _run_distributed_residency(pgi, config, cpu_group, adapter_path, missing_pat
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="Distributed composition requires CUDA"
-)
 def test_distributed_lora_residency_and_collective_errors(tmp_path):
     import json
 
