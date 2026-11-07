@@ -451,9 +451,12 @@ def select_fp8_moe_backend(
             ]
             and not allow_vllm_cutlass
         ):
-            raise ValueError(
-                "vLLM CUTLASS FP8 MoE backend is disabled for this configuration."
-            )
+            supported_alternatives = [
+                b.value for b in AVAILABLE_BACKENDS 
+                if b not in [Fp8MoeBackend.VLLM_CUTLASS, Fp8MoeBackend.BATCHED_VLLM_CUTLASS]
+            ]
+            reason = f"the vLLM CUTLASS backend is not enabled for this configuration. Candidates that do support this configuration: {supported_alternatives}"
+            raise ValueError(_make_log_unsupported(requested_backend, reason))
 
         return oracle.return_or_raise(requested_backend, AVAILABLE_BACKENDS)
 
