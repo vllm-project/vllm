@@ -7,11 +7,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config import ParallelConfig
+from vllm.config import LoRAConfig, ParallelConfig
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.gpu import model_runner
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
-from vllm.v1.worker.gpu.spec_decode.dspark.utils import _get_dspark_parallel_config
+from vllm.v1.worker.gpu.spec_decode.dspark.utils import (
+    _get_dspark_parallel_config,
+    load_dspark_model,
+)
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 
@@ -170,3 +173,90 @@ def test_runner_marks_only_replicated_draft_caches(monkeypatch, draft_dcp_size):
 
     assert specs["target"].dcp_sharded
     assert specs["draft"].dcp_sharded == (draft_dcp_size == 4)
+
+
+@dataclass
+class _FakeDraftHFConfig:
+    model_type: str
+    # dflash_has_any_non_causal() walks the draft's layers.
+    num_hidden_layers: int = 0
+
+
+@dataclass
+class _FakeAttentionConfig:
+    backend: object = None
+    use_non_causal: bool = False
+
+
+@dataclass
+class _FakeSpeculativeConfig:
+    draft_model_config: _FakeModelConfig
+    draft_parallel_config: SimpleNamespace
+    attention_backend: object = None
+    kv_cache_dtype: str | None = None
+
+
+@dataclass
+class _FakeVllmConfig:
+    model_config: _FakeModelConfig
+    parallel_config: _FakeParallelConfig
+    attention_config: _FakeAttentionConfig
+    speculative_config: _FakeSpeculativeConfig
+    lora_config: LoRAConfig | None
+    cache_config: SimpleNamespace = field(default_factory=SimpleNamespace)
+    load_config: SimpleNamespace = field(default_factory=SimpleNamespace)
+    quant_config: object = None
+
+
+def test_dspark_drafter_is_built_without_the_targets_lora_config(monkeypatch):
+    """The drafter never gets a LoRA context, so it must not be LoRA-aware.
+
+    With the target's lora_config in place, the drafter's FusedMoE layers are
+    built with is_lora_enabled=True and the MoE oracle picks LoRA-aware experts
+    (e.g. TrtLlmMxfp4LoRAExperts under moe_backend=flashinfer_trtllm). The
+    drafter is not wrapped by the LoRA manager, so its first forward pass dies
+    on `assert lora_context is not None`.
+    """
+    import vllm.model_executor.model_loader as model_loader
+    import vllm.model_executor.models.utils as model_utils
+    import vllm.v1.worker.gpu.spec_decode.dspark.utils as dspark_utils
+
+    draft_model_config = _FakeModelConfig(
+        hf_config=_FakeDraftHFConfig(model_type="deepseek_v41")
+    )
+    vllm_config = _FakeVllmConfig(
+        model_config=draft_model_config,
+        parallel_config=_FakeParallelConfig(
+            enable_eplb=False,
+            eplb_config=_FakeEPLBConfig(num_redundant_experts=0),
+            enable_elastic_ep=False,
+        ),
+        attention_config=_FakeAttentionConfig(),
+        speculative_config=_FakeSpeculativeConfig(
+            draft_model_config=draft_model_config,
+            draft_parallel_config=SimpleNamespace(tensor_parallel_size=4),
+        ),
+        lora_config=LoRAConfig(max_loras=2),
+    )
+
+    class _Captured(Exception):
+        """Stops the load once we hold the config it would have used."""
+
+    def _capture(*, vllm_config, model_config):
+        raise _Captured(vllm_config)
+
+    monkeypatch.setattr(model_loader, "get_model", _capture)
+    monkeypatch.setattr(model_utils, "get_draft_quant_config", lambda cfg: None)
+    monkeypatch.setattr(
+        dspark_utils, "get_draft_load_config", lambda cfg: cfg.load_config
+    )
+    monkeypatch.setattr(
+        dspark_utils, "get_pp_safe_draft_load_config", lambda load_config: load_config
+    )
+
+    with pytest.raises(_Captured) as captured:
+        load_dspark_model(object(), vllm_config)
+
+    assert captured.value.args[0].lora_config is None
+    # The target keeps its own adapters.
+    assert vllm_config.lora_config is not None
