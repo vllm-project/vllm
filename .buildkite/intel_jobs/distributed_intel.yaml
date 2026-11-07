@@ -38,6 +38,7 @@ steps:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
+    PYTHONFAULTHANDLER: "1"
   source_file_dependencies:
     - tests/xpu_debug/
   commands:
@@ -45,7 +46,7 @@ steps:
     - env | grep -i "META_DATA" || true
     - pip install py-spy || true
     - cd tests
-    - '(while sleep 15; do for p in $$(pgrep -f "VLLM::Worker" || true); do a=$$(ps -o etimes= -p $$p 2>/dev/null | tr -d " "); if [ -n "$$a" ] && [ "$$a" -gt 90 ]; then echo "=== WATCHDOG pid=$$p age=$${a}s ==="; py-spy dump --native -p $$p || true; fi; done; done) & WD=$$!; rc=0; pytest -v -s v1/shutdown || rc=$$?; kill $$WD 2>/dev/null || true; exit $$rc'
+    - '(while sleep 15; do for p in $$(pgrep -f "^VLLM::Worker" || true); do a=$$(ps -o etimes= -p $$p 2>/dev/null | tr -d " "); if [ -n "$$a" ] && [ "$$a" -gt 90 ]; then echo "=== WATCHDOG pid=$$p age=$${a}s, SIGABRT ==="; kill -ABRT $$p || true; fi; done; done) & WD=$$!; rc=0; pytest -v -s v1/shutdown || rc=$$?; [ $$rc -eq 0 ] && { pytest -v -s v1/shutdown || rc=$$?; }; kill $$WD 2>/dev/null || true; exit $$rc'
 
 - label: ":intel: (BMG) [DEBUG] xccl repro - pidfd - 2"
   key: debug-xccl-repro-pidfd-2
@@ -58,6 +59,7 @@ steps:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
+    PYTHONFAULTHANDLER: "1"
   source_file_dependencies:
     - tests/xpu_debug/
   commands:
@@ -65,7 +67,7 @@ steps:
     - env | grep -i "META_DATA" || true
     - pip install py-spy || true
     - cd tests 
-    - '(while sleep 15; do for p in $$(pgrep -f "VLLM::Worker" || true); do a=$$(ps -o etimes= -p $$p 2>/dev/null | tr -d " "); if [ -n "$$a" ] && [ "$$a" -gt 90 ]; then echo "=== WATCHDOG pid=$$p age=$${a}s ==="; py-spy dump --native -p $$p || true; fi; done; done) & WD=$$!; rc=0; pytest -v -s v1/shutdown || rc=$$?; kill $$WD 2>/dev/null || true; exit $$rc'
+    - '(while sleep 15; do for p in $$(pgrep -f "^VLLM::Worker" || true); do a=$$(ps -o etimes= -p $$p 2>/dev/null | tr -d " "); if [ -n "$$a" ] && [ "$$a" -gt 90 ]; then echo "=== WATCHDOG pid=$$p age=$${a}s, SIGABRT ==="; kill -ABRT $$p || true; fi; done; done) & WD=$$!; rc=0; pytest -v -s v1/shutdown || rc=$$?; [ $$rc -eq 0 ] && { pytest -v -s v1/shutdown || rc=$$?; }; kill $$WD 2>/dev/null || true; exit $$rc'
 
 - label: ":intel: (BMG) [DEBUG] xccl repro - pidfd - 3"
   key: debug-xccl-repro-pidfd-3
@@ -78,6 +80,7 @@ steps:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
+    PYTHONFAULTHANDLER: "1"
   source_file_dependencies:
     - tests/xpu_debug/
   commands:
@@ -85,10 +88,10 @@ steps:
     - env | grep -i "META_DATA" || true
     - pip install py-spy || true
     - cd tests
-    - '(while sleep 15; do for p in $$(pgrep -f "VLLM::Worker" || true); do a=$$(ps -o etimes= -p $$p 2>/dev/null | tr -d " "); if [ -n "$$a" ] && [ "$$a" -gt 90 ]; then echo "=== WATCHDOG pid=$$p age=$${a}s ==="; py-spy dump --native -p $$p || true; fi; done; done) & WD=$$!; rc=0; pytest -v -s v1/shutdown || rc=$$?; kill $$WD 2>/dev/null || true; exit $$rc'
+    - '(while sleep 15; do for p in $$(pgrep -f "^VLLM::Worker" || true); do a=$$(ps -o etimes= -p $$p 2>/dev/null | tr -d " "); if [ -n "$$a" ] && [ "$$a" -gt 90 ]; then echo "=== WATCHDOG pid=$$p age=$${a}s, SIGABRT ==="; kill -ABRT $$p || true; fi; done; done) & WD=$$!; rc=0; pytest -v -s v1/shutdown || rc=$$?; [ $$rc -eq 0 ] && { pytest -v -s v1/shutdown || rc=$$?; }; kill $$WD 2>/dev/null || true; exit $$rc'
 
-- label: ":intel: (BMG) [DEBUG] xccl repro - sockets"
-  key: debug-xccl-repro-sockets
+- label: ":intel: (BMG) [DEBUG] xccl repro - pidfd - 4"
+  key: debug-xccl-repro-pidfd-4
   timeout_in_minutes: 60
   device: intel_gpu_k8s
   num_devices: 2
@@ -98,12 +101,11 @@ steps:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
-    CCL_ZE_IPC_EXCHANGE: "sockets"
+    PYTHONFAULTHANDLER: "1"
   source_file_dependencies:
     - tests/xpu_debug/
   commands:
     - uname -r && cat /proc/cmdline
     - env | grep -i "META_DATA" || true
-    - pip install py-spy || true
     - cd tests
-    - '(while sleep 15; do for p in $$(pgrep -f "VLLM::Worker" || true); do a=$$(ps -o etimes= -p $$p 2>/dev/null | tr -d " "); if [ -n "$$a" ] && [ "$$a" -gt 90 ]; then echo "=== WATCHDOG pid=$$p age=$${a}s ==="; py-spy dump --native -p $$p || true; fi; done; done) & WD=$$!; rc=0; pytest -v -s v1/shutdown || rc=$$?; kill $$WD 2>/dev/null || true; exit $$rc'
+    - '(while sleep 15; do for p in $$(pgrep -f "^VLLM::Worker" || true); do a=$$(ps -o etimes= -p $$p 2>/dev/null | tr -d " "); if [ -n "$$a" ] && [ "$$a" -gt 90 ]; then echo "=== WATCHDOG pid=$$p age=$${a}s, SIGABRT ==="; kill -ABRT $$p || true; fi; done; done) & WD=$$!; rc=0; pytest -v -s v1/shutdown || rc=$$?; [ $$rc -eq 0 ] && { pytest -v -s v1/shutdown || rc=$$?; }; kill $$WD 2>/dev/null || true; exit $$rc'
