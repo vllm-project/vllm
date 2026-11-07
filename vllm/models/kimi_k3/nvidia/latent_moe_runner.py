@@ -132,26 +132,35 @@ class LatentMoERunner(MoERunner):
                 KimiK3LatentMoETailOp,
             )
 
-            op = KimiK3LatentMoETailOp.initialize(
-                hidden_size=transform.up_proj.weight.shape[0],
-                latent_size=norm.weight.shape[0],
-                experts_per_token=(
-                    self.moe_config.experts_per_token
-                    if self.moe_config.use_deferred_moe_finalize
-                    else 0
-                ),
-                dtype=norm.weight.dtype,
-                device=current_platform.current_device(),
-                rms_eps=norm.variance_epsilon,
-            )
-            self._k3_latent_moe_tail_op = op
-            if self.moe_config.use_deferred_moe_finalize:
-                self.moe_config.limit_deferred_moe_finalize(op.contract.max_num_tokens)
-                logger.info_once(
-                    "K3 latent-MoE tail fusion with deferred top-k finalization "
-                    "is enabled for up to %d tokens.",
-                    op.contract.max_num_tokens,
+            try:
+                op = KimiK3LatentMoETailOp.initialize(
+                    hidden_size=transform.up_proj.weight.shape[0],
+                    latent_size=norm.weight.shape[0],
+                    experts_per_token=(
+                        self.moe_config.experts_per_token
+                        if self.moe_config.use_deferred_moe_finalize
+                        else 0
+                    ),
+                    dtype=norm.weight.dtype,
+                    device=current_platform.current_device(),
+                    rms_eps=norm.variance_epsilon,
                 )
+                self._k3_latent_moe_tail_op = op
+                if self.moe_config.use_deferred_moe_finalize:
+                    self.moe_config.limit_deferred_moe_finalize(op.contract.max_num_tokens)
+                    logger.info_once(
+                        "K3 latent-MoE tail fusion with deferred top-k finalization "
+                        "is enabled for up to %d tokens.",
+                        op.contract.max_num_tokens,
+                    )
+            except RuntimeError as e:
+                logger.warning_once(
+                    "K3 latent-MoE tail fusion initialization failed (%s); "
+                    "falling back to non-fused latent-MoE tail.",
+                    e,
+                )
+                self.enable_k3_latent_moe_tail_fusion = False
+                self._k3_latent_moe_tail_op = None
 
     def _get_zero_residual(
         self,
