@@ -91,6 +91,52 @@ def test_video_canvas_matches_processed_frame_budget(
     assert _num_video_embeds(processed) == canvas.width * canvas.height // (28 * 28)
 
 
+@pytest.mark.parametrize(
+    ("width", "height", "mm_processor_kwargs"),
+    [
+        (540, 960, None),
+        (960, 540, None),
+        (4000, 3000, None),
+        (300, 960, {"max_pixels": 256 * 28 * 28}),
+        (1120, 840, {"videos_kwargs": {"do_resize": False}}),
+        (
+            960,
+            540,
+            {
+                "images_kwargs": {
+                    "size": {
+                        "shortest_edge": 128 * 28 * 28,
+                        "longest_edge": 256 * 28 * 28,
+                    }
+                }
+            },
+        ),
+    ],
+)
+def test_dummy_video_follows_size_hint(
+    width: int, height: int, mm_processor_kwargs: dict[str, Any] | None
+) -> None:
+    ctx = build_model_context(
+        MODEL_ID,
+        model_config_kwargs={"max_model_len": 16384},
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt={
+            "audio": 0,
+            "image": 0,
+            "video": {"count": 1, "num_frames": 2, "width": width, "height": height},
+        },
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    video = np.zeros((2, height, width, 3), dtype=np.uint8)
+    processed = processor(
+        VIDEO_PROMPT,
+        mm_items=processor.info.parse_mm_data({"video": [video]}),
+        hf_processor_mm_kwargs={"videos_kwargs": {"do_sample_frames": False}},
+    )
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+    assert _num_video_embeds(dummy) == _num_video_embeds(processed)
+
+
 def test_image_budget_is_unchanged() -> None:
     ctx = build_model_context(
         MODEL_ID,

@@ -42,11 +42,12 @@ from transformers.models.qwen2_5_omni.processing_qwen2_5_omni import (
     Qwen2_5OmniProcessor,
     Qwen2_5OmniProcessorKwargs,
 )
+from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from transformers.models.whisper import WhisperFeatureExtractor
 from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.logger import init_logger
@@ -449,22 +450,42 @@ class Qwen2_5OmniThinkerProcessingInfo(
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
 
-    def get_video_size_with_most_features(self) -> ImageSize:
+    def _get_videos_kwargs(self) -> dict[str, Any]:
         processor = self.get_hf_processor()
+        return processor._merge_kwargs(
+            self.processor_kwargs_cls,
+            tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
+            **self.ctx.get_merged_mm_kwargs({}),
+        )["videos_kwargs"]
+
+    def _get_video_size(self) -> dict[str, int]:
         merged_kwargs = self.ctx.get_merged_mm_kwargs({})
         if merged_kwargs.keys() & {"size", "min_pixels", "max_pixels"}:
-            video_size = self._get_vision_size(
-                merged_kwargs, default_size=processor.video_processor.size
+            return self._get_vision_size(
+                merged_kwargs,
+                default_size=self.get_hf_processor().video_processor.size,
             )
-        else:
-            video_size = processor._merge_kwargs(
-                self.processor_kwargs_cls,
-                tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
-                **merged_kwargs,
-            )["videos_kwargs"]["size"]
+        return self._get_videos_kwargs()["size"]
+
+    def get_video_size_with_most_features(self) -> ImageSize:
         return self.get_image_size_with_most_features(
-            max_pixels=video_size["longest_edge"]
+            max_pixels=self._get_video_size()["longest_edge"]
         )
+
+    def get_video_frame_size(self, width: int, height: int) -> ImageSize:
+        video_processor = self.get_hf_processor().video_processor
+        if not self._get_videos_kwargs().get("do_resize", video_processor.do_resize):
+            return ImageSize(width=width, height=height)
+        vision_config = self.get_hf_config().vision_config
+        video_size = self._get_video_size()
+        resized_height, resized_width = smart_resize(
+            height=height,
+            width=width,
+            factor=vision_config.patch_size * vision_config.spatial_merge_size,
+            min_pixels=video_size["shortest_edge"],
+            max_pixels=video_size["longest_edge"],
+        )
+        return ImageSize(width=resized_width, height=resized_height)
 
     def get_num_frames_with_most_features(
         self,
@@ -574,6 +595,15 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[_VI]):
 
         target_width, target_height = self.info.get_image_size_with_most_features()
         video_size = self.info.get_video_size_with_most_features()
+        video_overrides = mm_options.get("video")
+        if video_overrides and (video_overrides.width or video_overrides.height):
+            video_size = self.info.get_video_frame_size(
+                video_overrides.width or video_size.width,
+                video_overrides.height or video_size.height,
+            )
+            video_overrides = VideoDummyOptions(
+                count=video_overrides.count, num_frames=video_overrides.num_frames
+            )
 
         mm_data = {
             "audio": self._get_dummy_audios(
@@ -594,7 +624,7 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[_VI]):
                     seq_len, mm_counts
                 ),
                 num_videos=mm_counts.get("video", 0),
-                overrides=mm_options.get("video"),
+                overrides=video_overrides,
             ),
         }
 
