@@ -18,7 +18,6 @@ hides every type error.
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import jinja2.ext
 import jinja2.sandbox
@@ -71,8 +70,9 @@ PYTHONIC_PAIRS = [
         "tool_chat_template_llama3.2_pythonic.jinja",
         "pythonic",
         marks=pytest.mark.xfail(
-            reason="renders string arguments unquoted (city=Paris), which is "
-            "not a Python literal, so the parser rejects the whole call",
+            reason="https://github.com/vllm-project/vllm/issues/66300 renders "
+            "string arguments unquoted (city=Paris), which is not a Python "
+            "literal, so the parser rejects the whole call",
             strict=True,
         ),
     ),
@@ -80,8 +80,9 @@ PYTHONIC_PAIRS = [
         "tool_chat_template_toolace.jinja",
         "pythonic",
         marks=pytest.mark.xfail(
-            reason="renders string arguments unquoted (city=Paris), which is "
-            "not a Python literal, so the parser rejects the whole call",
+            reason="https://github.com/vllm-project/vllm/issues/66300 renders "
+            "string arguments unquoted (city=Paris), which is not a Python "
+            "literal, so the parser rejects the whole call",
             strict=True,
         ),
     ),
@@ -89,8 +90,9 @@ PYTHONIC_PAIRS = [
         "tool_chat_template_llama4_pythonic.jinja",
         "llama4_pythonic",
         marks=pytest.mark.xfail(
-            reason="renders every argument as a string, so bools and ints "
-            "round-trip as 'True' and '3' with no error raised",
+            reason="https://github.com/vllm-project/vllm/issues/66302 renders "
+            "every argument as a string, so bools and ints round-trip as "
+            "'True' and '3' with no error raised",
             strict=True,
         ),
     ),
@@ -184,13 +186,11 @@ def _model_output(template_name: str) -> str:
 
 @pytest.mark.parametrize("template_name, parser_name", PYTHONIC_PAIRS)
 def test_rendered_tool_call_is_readable_by_its_parser(
-    template_name: str, parser_name: str
+    template_name: str, parser_name: str, default_tokenizer: TokenizerLike
 ):
     """A tool call rendered into history parses back to the same call."""
     model_output = _model_output(template_name)
-    parser = ToolParserManager.get_tool_parser(parser_name)(
-        MagicMock(spec=TokenizerLike)
-    )
+    parser = ToolParserManager.get_tool_parser(parser_name)(default_tokenizer)
     request = ChatCompletionRequest(model="test-model", messages=[], tools=TOOLS)
 
     content, tool_calls = run_tool_extraction(parser, model_output, request)
