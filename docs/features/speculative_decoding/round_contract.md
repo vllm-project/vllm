@@ -238,9 +238,9 @@ raises at bind for a cache it cannot describe.
 | `block_table` | `[max_num_reqs, max_blocks]` int32, the group's block table. |
 | `table_block_size` | Tokens per `block_table` block; `block_size` (the backend's kernel block size) may divide it. |
 
-Token `t` of request `b` is kernel token `block_table[b, t // table_block_size]
-* table_block_size + t % table_block_size`, split by `block_size` into block and
-slot.
+Token `t` of request `b` is kernel token
+`block_table[b, t // table_block_size] * table_block_size + t % table_block_size`,
+split by `block_size` into block and slot.
 
 **Capture rules.** `verify` runs inside captured graphs: no host syncs and no
 data-sized allocations. A `commit` kernel that needs a warm-up runs it in `bind`,
