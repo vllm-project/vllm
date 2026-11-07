@@ -499,6 +499,8 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         )
 
         self._workspace_buffer: torch.Tensor | None = None
+        self.bmm1_scale: float | None = None
+        self.bmm2_scale: float | None = None
 
         # Native no-rope MLA additionally requires a per-query-token active
         # top-k length tensor.
@@ -516,6 +518,15 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
     ) -> None:
         if self._workspace_buffer is None:
             self._workspace_buffer = _get_workspace_buffer(device)
+
+        if self.bmm1_scale is None:
+            self.bmm1_scale = self.scale
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
+        if self.bmm2_scale is None:
+            self.bmm2_scale = 1.0
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                self.bmm2_scale *= layer._k_scale_float
 
     def autotune_hisparse_decode(self, layer: AttentionLayer) -> None:
         """Autotune the largest legal HiSparse decode batch."""
@@ -587,13 +598,8 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
         self._prepare_mqa_kernel(layer, q.device)
         assert self._workspace_buffer is not None
-        # Derived at every forward, as in FlashInferImpl: a weight reload can
-        # change the q/k scales.
-        bmm1_scale = self.scale
-        bmm2_scale = 1.0
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            bmm1_scale *= layer._q_scale_float * layer._k_scale_float
-            bmm2_scale *= layer._k_scale_float
+        assert self.bmm1_scale is not None
+        assert self.bmm2_scale is not None
 
         from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
@@ -662,8 +668,8 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 seq_lens=seq_lens[start:end],
                 max_seq_len=sparse_topk_capacity,
                 out=out[start:end].unsqueeze(1),
-                bmm1_scale=bmm1_scale,
-                bmm2_scale=bmm2_scale,
+                bmm1_scale=self.bmm1_scale,
+                bmm2_scale=self.bmm2_scale,
                 sparse_mla_top_k=sparse_topk_capacity,
                 return_lse=lse is not None,
                 **extra_kwargs,
