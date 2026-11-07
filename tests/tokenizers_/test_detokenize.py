@@ -89,7 +89,7 @@ def _run_incremental_decode(
     for i, token_id in enumerate(all_input_ids[starting_index:]):
         detokenizer.update([token_id], False)
         finished = i == len(all_input_ids) - 1
-        output_text += detokenizer.get_next_output_text(finished, delta=True)
+        output_text += detokenizer.get_next_output(finished, delta=True)[0]
 
     return output_text, detokenizer.output_token_ids
 
