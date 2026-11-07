@@ -103,7 +103,7 @@ def _lora_shrink_kernel(
     input_ptr,
     lora_ptr,
     out_ptr,
-    M,
+    MAX_M,
     N,
     K,
     token_indices_sorted_by_lora_ids,
@@ -138,7 +138,7 @@ def _lora_shrink_kernel(
         N = PARTIAL_N
         K = PARTIAL_K
     cta_n_num = tl.cdiv(N, BLOCK_N)
-    cta_m_num = tl.cdiv(M, BLOCK_M)
+    cta_m_num = tl.cdiv(MAX_M, BLOCK_M)
 
     pid_sk_m_n = tl.program_id(axis=0)
     pid_sk = pid_sk_m_n % SPLIT_K
@@ -228,6 +228,8 @@ def _lora_shrink(
     lora_ids: torch.Tensor,  # shape [max-loras + 1]
     no_lora_flag_cpu: torch.Tensor,  # shape [1]
     num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
+    max_tokens_per_lora: torch.Tensor,  # CPU tensor [1], max tokens assigned
+    # to any active LoRA
     scaling: float,
 ) -> None:
     """Args:
@@ -288,6 +290,9 @@ def _lora_shrink(
 
     # metadata sanity check
     M = inputs.size(0)
+    MAX_LORA_M = int(max_tokens_per_lora.item())
+    assert 0 < MAX_LORA_M <= M
+    
     assert token_lora_mapping.size(0) == M
     assert token_lora_mapping.size(0) == token_indices_sorted_by_lora_ids.size(0)
     assert lora_ids.size(0) == num_tokens_per_lora.size(0)
@@ -306,7 +311,7 @@ def _lora_shrink(
     kernel_config = get_lora_op_configs(
         "shrink",
         max_loras=MAX_LORAS,
-        batch=M,
+        batch=MAX_LORA_M,
         hidden_size=K,
         rank=N,
         num_slices=NUM_SLICES,
@@ -326,11 +331,11 @@ def _lora_shrink(
         SPLIT_K = _BI_SPLIT_K
     EVEN_K = K % (BLOCK_K * SPLIT_K) == 0  # type: ignore
 
-    # TODO (varun): This grid formulation maximizes parallelization at the
-    # cost of wasteful thread block launch when only few of the input tokens
-    # require LoRA. This might not be the best in all cases.
+    # The grid uses the maximum number of tokens assigned to any active LoRA.
+    # Using the global token count can result in excessive thread block launches
+    # for fragmented Multi-LoRA workloads.
     grid = (
-        SPLIT_K * triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),
+        SPLIT_K * triton.cdiv(MAX_LORA_M, BLOCK_M) * triton.cdiv(N, BLOCK_N),
         NUM_SLICES,
         num_active_loras.item(),
     )
@@ -354,7 +359,7 @@ def _lora_shrink(
         inputs,
         lora_ptr_tensor,
         first_out,
-        M,
+        MAX_LORA_M,
         N,
         K,
         token_indices_sorted_by_lora_ids,
@@ -388,7 +393,7 @@ def _lora_shrink(
         _lora_shrink_reduce_kernel[(grid[0] // SPLIT_K, *grid[1:])](
             partials,
             output_tensor,
-            M,
+            MAX_LORA_M,
             N,
             token_indices_sorted_by_lora_ids,
             num_tokens_per_lora,
