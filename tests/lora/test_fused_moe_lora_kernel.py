@@ -38,9 +38,6 @@ pytestmark = pytest.mark.skip_global_cleanup
     "capture", [False, True] if current_platform.is_cuda() else [False]
 )
 @ensure_current_vllm_config()
-@pytest.mark.skipif(
-    current_platform.is_xpu(), reason="Routed expert XPU support is not enabled"
-)
 def test_routed_expert_projections_match_composed_weights(
     num_tokens, experts, dtype, capture
 ):
@@ -285,9 +282,6 @@ def _run_routed_expert_tp_rank(local_rank, port, dtype, fully_sharded):
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("fully_sharded", [False, True])
-@pytest.mark.skipif(
-    current_platform.is_xpu(), reason="Routed expert XPU support is not enabled"
-)
 def test_routed_expert_projections_tp2(dtype, fully_sharded):
     """Real projection collectives preserve the composed unsharded result."""
     torch.multiprocessing.spawn(
@@ -431,9 +425,6 @@ def test_marlin_expert_composition(routed, workspace_init):
 @pytest.mark.parametrize("no_adapter", [False, True])
 @pytest.mark.parametrize("add_inputs", [False, True])
 @ensure_current_vllm_config()
-@pytest.mark.skipif(
-    current_platform.is_xpu(), reason="Routed expert XPU support is not enabled"
-)
 def test_single_route_matches_scalar_expert_projections(no_adapter, add_inputs):
     """One route is ordinary LoRA; base-only must also preserve output semantics."""
     from tests.kernels.moe.utils import make_dummy_moe_config

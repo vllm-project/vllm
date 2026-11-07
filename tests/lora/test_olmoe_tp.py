@@ -268,9 +268,6 @@ COMPOSITION_ENGINE_ARGS = dict(
 )
 
 
-@pytest.mark.skipif(
-    current_platform.is_xpu(), reason="Routed expert XPU support is not enabled"
-)
 def test_olmoe_lora_composition_matches_merged_adapter(olmoe_lora_files, tmp_path):
     """Composed expert and attention adapters match the merged adapter."""
     adapters = write_composition_adapters(olmoe_lora_files, tmp_path)

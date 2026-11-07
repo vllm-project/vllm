@@ -48,6 +48,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         self.lora_config = kwargs["lora_config"]
         self.max_loras_per_request = self.lora_config.max_loras_per_request
         self.max_loras = self.lora_config.max_loras
+        self._init_moe_route_metadata(self.max_loras)
 
         # Compute captured LoRA counts for cudagraph specialization.
         captured_lora_counts = get_captured_lora_counts(
@@ -376,21 +377,13 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         read from `self.token_mapping_meta`. This is how EP+LoRA injects the
         per-rank-local token→LoRA map after all-to-all dispatch.
         """
-        if routed:
-            raise NotImplementedError("Routed expert LoRA is not supported on XPU")
-        (
-            token_lora_mapping_meta,
-            _,
-            _,
-            _,
-            lora_ids,
-            _,
-            _,
-        ) = self.token_mapping_meta.meta_args(
-            num_tokens, self.lora_config.specialize_active_lora
+        token_lora_mapping, lora_ids, _, _ = self._get_moe_lora_metadata(
+            self.token_mapping_meta,
+            num_tokens,
+            self.lora_config.specialize_active_lora,
+            token_lora_mapping,
+            routed,
         )
-        if token_lora_mapping is None:
-            token_lora_mapping = token_lora_mapping_meta
         # Under EP the caller passes local_num_experts but topk_ids carries
         # GLOBAL expert indices. The CUDA kernel uses num_experts to size
         # its bucketing table; with EP we must size by global_num_experts
@@ -472,27 +465,17 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         routed: bool = False,
     ):
         """Perform a fused forward computation for a LoRA MoE layer."""
-        if routed:
-            raise NotImplementedError("Routed expert LoRA is not supported on XPU")
-        (
-            token_lora_mapping_meta,
-            _,
-            _,
-            _,
-            lora_ids,
-            no_lora_flag,
-            num_active_loras,
-        ) = self.token_mapping_meta.meta_args(
-            x.size(0), self.lora_config.specialize_active_lora
+        token_lora_mapping, lora_ids, no_lora_flag, num_active_loras = (
+            self._get_moe_lora_metadata(
+                self.token_mapping_meta,
+                x.size(0),
+                self.lora_config.specialize_active_lora,
+                token_lora_mapping,
+                routed,
+            )
         )
-
-        assert no_lora_flag.numel() == 1
-        if no_lora_flag.item():
-            # None of the inputs require LoRA.
+        if not routed and no_lora_flag.item():
             return
-
-        if token_lora_mapping is None:
-            token_lora_mapping = token_lora_mapping_meta
         fused_moe_lora(
             y,
             x,
@@ -557,8 +540,6 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
-        if routed:
-            raise NotImplementedError("Routed expert LoRA is not supported on XPU")
         import functools
 
         from vllm.lora.layers.utils import try_get_optimal_moe_lora_config
@@ -633,6 +614,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             expert_map,
             naive_block_assignment=naive_block_assignment,
             token_lora_mapping=token_lora_mapping,
+            routed=routed,
         )
 
         _sorted = sorted_token_ids_lora
@@ -658,6 +640,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             fully_sharded=fully_sharded,
             token_lora_mapping=token_lora_mapping,
             add_inputs=add_inputs,
+            routed=routed,
         )
 
         return (
@@ -691,8 +674,6 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         add_inputs: bool = True,
         routed: bool = False,
     ) -> None:
-        if routed:
-            raise NotImplementedError("Routed expert LoRA is not supported on XPU")
         import functools
 
         from vllm.lora.layers.utils import try_get_optimal_moe_lora_config
@@ -775,4 +756,5 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             offset=offset,
             token_lora_mapping=token_lora_mapping,
             add_inputs=add_inputs,
+            routed=routed,
         )

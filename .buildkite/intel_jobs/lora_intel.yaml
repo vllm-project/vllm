@@ -52,6 +52,7 @@ steps:
   source_file_dependencies:
     - vllm/lora
     - tests/lora
+    - vllm/model_executor/layers/fused_moe
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -131,6 +132,7 @@ steps:
   source_file_dependencies:
     - vllm/lora
     - tests/lora
+    - vllm/model_executor/layers/fused_moe
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -143,6 +145,7 @@ steps:
       --deselect="tests/lora/test_quant_model.py::test_quant_model_tp_equality[model0]" &&
       pytest -v -s lora/test_transformers_model.py &&
       pytest -v -s lora/test_chatglm3_tp.py &&
+      pytest -v -s lora/test_fused_moe_lora_kernel.py::test_routed_expert_projections_tp2 &&
       pytest -v -s lora/test_llama_tp.py::test_llama_lora'
 
 - label: ":intel: (BMG) LoRA Multimodal"
