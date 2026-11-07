@@ -397,10 +397,9 @@ def _check_layers(rank: int, tp: int, device) -> None:
     # the tuned builds' reference (``MonoBuild.generic``): at TP2 the ratio-2
     # steps take the tuned paths, 12 rows the small-width ones, 36 a partial
     # last token tile; their outputs must match the generic builds' bit for bit.
-    # Only TP2 has tuned builds, so only TP2 makes the reference.
     generic = (
         DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device, generic=True)
-        if tp == 2
+        if runner.build(1, 2).tuned_front
         else None
     )
     gw, bias = moe.gate.weight.float(), moe.gate.e_score_correction_bias.float()
@@ -518,7 +517,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
         swa_of = {}
         runs = (
             (generic, runner)
-            if generic is not None and runner.tuned(M, ratio)
+            if generic is not None and runner.build(M, ratio).tuned_front
             else (runner,)
         )
         for r in runs:
@@ -531,8 +530,9 @@ def _check_layers(rank: int, tp: int, device) -> None:
                 topk_indices=s["topk"], comp_cache=s["comp_cache"],
                 comp_block_table=s["comp_block_table"],
             )  # fmt: skip
-            off = scratch_layout(M, tp, tuned=r.tuned(M, ratio))["normed"][0]
-            normed = r.scratch(M, r.tuned(M, ratio))[off : off + M * HIDDEN * 2]
+            b = r.build(M, ratio)
+            off = scratch_layout(M, tp, tuned=b.tuned, front=b.tuned_front)["normed"][0]
+            normed = r.scratch(M, b.tuned, b.tuned_front)[off : off + M * HIDDEN * 2]
             mid = (r.res_mid, r.post_a, r.comb_a, r.pre_a)
             res_of[r] = [t.clone() for t in (*o, normed, *(t[:M] for t in mid))]
             swa_of[r] = s["swa_cache"].clone()
@@ -568,11 +568,23 @@ def _check_layers(rank: int, tp: int, device) -> None:
         assert tok[same].min() > 0.99, tag
 
         # ---- the FFN launch, from the same unreduced wo_b output
-        f = runner.ffn(mw, part, res, post, comb, attn_pre)
-        torch.testing.assert_close(f[1], res2, rtol=2**-8, atol=1e-6)
-        # the FFN launch is a generic build: it writes the generic scratch
+        # (its seam tuned at TP4 / TP8: bit for bit the generic build's; both
+        # write the generic scratch)
         off = scratch_layout(M, tp)["normed"][0]
-        normed = runner.scratch(M)[off : off + M * HIDDEN * 2].view(bf).view(M, HIDDEN)
+        ffn_of = {}
+        runs = (
+            (generic, runner)
+            if generic is not None and runner.build(M, 0).tuned_seam  # ratio 0
+            else (runner,)
+        )
+        for r in runs:
+            f = r.ffn(mw, part, res, post, comb, attn_pre)
+            normed = r.scratch(M)[off : off + M * HIDDEN * 2]
+            ffn_of[r] = [t.clone() for t in (*f, normed)]
+        if generic in ffn_of:
+            assert all(map(torch.equal, ffn_of[runner], ffn_of[generic])), tag
+        torch.testing.assert_close(f[1], res2, rtol=2**-8, atol=1e-6)
+        normed = normed.view(bf).view(M, HIDDEN)
         torch.testing.assert_close(normed, xf, rtol=2**-7, atol=1e-6)
         # TODO: back to 0.9999 / 0.015 with the one above (ROCm/aiter#6548)
         assert _cos(f[0], out) > 0.9998 and _rel(f[0], out) < 0.02, tag
