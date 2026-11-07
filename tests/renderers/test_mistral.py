@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
+from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.generate.base.protocol import (
     JsonSchemaResponseFormat as OpenAIJsonSchemaResponseFormat,
 )
@@ -18,6 +19,7 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.renderers import ChatParams
 from vllm.renderers.mistral import MistralRenderer, safe_apply_chat_template
+from vllm.renderers.registry import renderer_from_config
 from vllm.tokenizers.mistral import MistralTokenizer
 
 MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
@@ -196,3 +198,57 @@ def test_apply_mistral_chat_template_thinking_chunk():
     )
 
     assert string_tokens == expected_tokens
+
+
+@pytest.mark.asyncio
+async def test_renderer_treats_developer_role_as_system():
+    """The OpenAI `developer` role must render like `system` for mistral-common."""
+    model_config = ModelConfig(MODEL_NAME, tokenizer_mode="mistral")
+    renderer = renderer_from_config(VllmConfig(model_config=model_config))
+    assert isinstance(renderer, MistralRenderer)
+
+    def make_messages(role: str) -> list[dict[str, Any]]:
+        return [
+            {"role": role, "content": "Answer in one word."},
+            {"role": "user", "content": "What colour is the sky?"},
+        ]
+
+    developer_messages = make_messages("developer")
+    _, developer_prompt = await renderer.render_messages_async(
+        developer_messages, ChatParams()
+    )
+    _, system_prompt = await renderer.render_messages_async(
+        make_messages("system"), ChatParams()
+    )
+
+    assert developer_prompt.get("prompt_token_ids")
+    assert developer_prompt == system_prompt
+    assert developer_messages == make_messages("developer")
+
+
+def test_mid_chat_developer_preserves_native_system_message_grouping():
+    """Role normalization must preserve Mistral's native mid-chat grouping."""
+    tokenizer = MistralTokenizer.from_pretrained(MODEL_NAME)
+    messages = [
+        {"role": "user", "content": "First question."},
+        {"role": "developer", "content": "Answer briefly."},
+        {"role": "user", "content": "Second question."},
+    ]
+    system_messages = [
+        messages[0].copy(),
+        {"role": "system", "content": "Answer briefly."},
+        messages[2].copy(),
+    ]
+    expected = tokenizer.apply_chat_template(system_messages)
+    actual = safe_apply_chat_template(tokenizer, messages)
+
+    assert actual == expected
+    rendered = tokenizer.mistral.decode(
+        actual, special_token_policy=SpecialTokenPolicy.KEEP
+    )
+    assert rendered.count("[INST]") == 2
+    assert messages == [
+        {"role": "user", "content": "First question."},
+        {"role": "developer", "content": "Answer briefly."},
+        {"role": "user", "content": "Second question."},
+    ]

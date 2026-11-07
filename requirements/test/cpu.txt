@@ -3204,9 +3204,9 @@ mdurl==0.1.2 \
     --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8 \
     --hash=sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba
     # via markdown-it-py
-mistral-common==1.13.0 \
-    --hash=sha256:6304455b69ae9ca02cddb9bb3bb888ab8dcbe3945a3cafe3368897795611993d \
-    --hash=sha256:8559b6e22e9b15d4d7445ae34db6d27578f3a6c0e3d74c5fd57b4bf2db543333
+mistral-common==1.13.1 \
+    --hash=sha256:98b4d0755b8d90bf4691fa8f1b70cb3b4a8cd4dc1653c4ed08ef3d1c7d2c29af \
+    --hash=sha256:ad8d5b7e866e907925e31274c314fdaa7f7c45a0a43e7d2f543fd7fe65ddcea9
     # via
     #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in
