@@ -39,6 +39,9 @@ This is the same on CUDA, ROCm and XPU.
 
 **Host memory** is what non-parameter state takes, plus any preserved parameters. For example, DeepSeek-V4.1-Flash at TP 4 frees 80 GiB per GPU and backs up 2.35 GiB per rank. An allocation that mixes parameters with other tensors is backed up whole.
 
+!!! warning
+    Models managed by Expert Parallel Load Balancing (EPLB) reject `reload_weights`. Do not use level 2 sleep with `--enable-eplb`, because the weights cannot be restored after waking up.
+
 ## Usage
 
 ### Offline inference
