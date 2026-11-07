@@ -497,6 +497,58 @@ class TestToolCallFilteringNonStreaming:
         )
 
 
+_PARALLEL_SAMPLES = [
+    (p.parser_cls, s)
+    for p in _PARSERS
+    for s in p.samples
+    if s.id.endswith("-think-then-parallel-tools")
+]
+
+
+@pytest.mark.parametrize("chunk_size", [1, None], ids=lambda c: f"chunk{c}")
+@pytest.mark.parametrize(
+    "parser_cls,sample",
+    _PARALLEL_SAMPLES,
+    ids=lambda v: v.id if hasattr(v, "id") else getattr(v, "__name__", ""),
+)
+class TestRejectedToolCallIndex:
+    """A call rejected by name must not shift the streamed index of later calls.
+
+    Only the second of two parallel calls is declared and name validation is
+    on, so non-streaming returns that call alone, at position 0.
+    """
+
+    def test_streamed_index_matches_non_streaming(self, parser_cls, sample, chunk_size):
+        declared = [t.model_dump(exclude_none=True) for t in sample.tools[1:]]
+
+        def make_parser():
+            parser = _make_parser(parser_cls, make_mock_tokenizer(sample), sample)
+            # Force validation on for every parser, not only those enabling it.
+            parser.parser_engine_config = dataclasses.replace(
+                parser.parser_engine_config, validate_tool_names=True
+            )
+            return parser
+
+        expected = parse_non_streaming(
+            make_parser(), sample, _test_request(tools=declared)
+        )
+        deltas = replay_streaming(
+            make_parser(),
+            sample.tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            tools=declared,
+            prompt_token_ids=sample.prompt_token_ids,
+        )
+
+        assert [tc["name"] for tc in expected.tool_calls] == [
+            sample.expected_tool_calls[1]["name"]
+        ]
+        # collect_output groups calls by index, so check the indices directly.
+        assert {tc.index for d in deltas if d for tc in d.tool_calls} == {0}
+        assert collect_output(deltas).tool_calls == expected.tool_calls
+
+
 _WS_TOOL_SAMPLES = [(t[0], t[1]) for t in _TOOL_CALL_SAMPLES if "whitespace" in t[1].id]
 
 
