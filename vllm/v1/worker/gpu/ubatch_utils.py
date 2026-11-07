@@ -4,7 +4,7 @@
 
 import threading
 from collections.abc import Callable
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -26,6 +26,7 @@ from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.green_context_pools import GreenContextPools
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.ubatch_utils import (
@@ -307,6 +308,11 @@ class UBatchRunner:
     holds the GPU at a time; they hand off to each other at the communication
     points inside the model (see `vllm.v1.worker.ubatching`), so one
     microbatch's expert all-to-all overlaps the other's compute.
+
+    Under SubGPU pipelining the handoffs are at the attention boundary instead:
+    the compute stream belongs to the attention SM pool and each microbatch's
+    comm stream to the rest-of-layer pool, so one microbatch's attention
+    overlaps the other's rest of the layer.
     """
 
     def __init__(
@@ -345,13 +351,55 @@ class UBatchRunner:
             else None
             for _ in range(self.num_ubatches)
         ]
-        self.comm_stream = torch.cuda.Stream(device=device)
-        # Threads and graph capture must use the same compute stream.
-        self.capture_stream = torch.cuda.Stream(device=device)
+        self.schedule = (
+            self.parallel_config.subgpu_schedule
+            if self.parallel_config.subgpu_pipelining
+            else "default"
+        )
+        self.subgpu_pools: GreenContextPools | None = None
+        self.comm_streams: list[torch.cuda.Stream] | None = None
+        if self.schedule == "subgpu":
+            self.subgpu_pools = GreenContextPools(
+                device.index
+                if device.index is not None
+                else torch.accelerator.current_device_index(),
+                self.parallel_config.subgpu_attn_sms,
+                self.parallel_config.subgpu_rest_sms,
+                self.parallel_config.subgpu_rest_streams,
+            )
+            # Threads, graph capture and replay all use the attention pool's
+            # stream; each microbatch's rest stage has its own rest-pool stream.
+            self.capture_stream = self.subgpu_pools.attn_stream
+            self.comm_streams = self.subgpu_pools.rest_streams
+            self.comm_stream = self.comm_streams[0]
+            # The pools partition the SMs; DBO's SM reservation does not apply.
+            self.sm_control: Any = nullcontext()
+        else:
+            self.comm_stream = torch.cuda.Stream(device=device)
+            # Threads and graph capture must use the same compute stream.
+            self.capture_stream = torch.cuda.Stream(device=device)
+            self.sm_control = create_sm_control_context(self.parallel_config)
         # The microbatch threads plus the thread that starts them.
         self.ready_barrier = threading.Barrier(self.num_ubatches + 1)
         self._pending_finish: Callable[[], Any] | None = None
-        self.sm_control = create_sm_control_context(self.parallel_config)
+
+    @contextmanager
+    def pool_stream(self):
+        """Run the body on the attention pool's stream under SubGPU pipelining.
+
+        Microbatches run (and their graphs replay) on that stream so that the
+        pools apply; the caller's stream is ordered before and after. A no-op
+        without pools.
+        """
+        if self.subgpu_pools is None:
+            yield
+            return
+        caller_stream = current_stream()
+        stream = self.subgpu_pools.attn_stream
+        stream.wait_stream(caller_stream)
+        with torch.cuda.stream(stream):
+            yield
+        caller_stream.wait_stream(stream)
 
     def prepare(
         self,
@@ -436,21 +484,26 @@ class UBatchRunner:
         The expert all-to-all runs once per microbatch, so each context's DP
         metadata carries that microbatch's token count. Microbatching pads every
         DP rank alike, so each rank can assume that count for the others too.
+        A single rank (SubGPU pipelining) has no DP metadata, as in a whole
+        batch's forward context.
         """
         dp_size = self.parallel_config.data_parallel_size
         forward_contexts = []
         for i, ubatch_slice in enumerate(ubatch_slices):
             num_tokens = ubatch_slice.num_tokens
-            num_tokens_across_dp = torch.full(
-                (dp_size,), num_tokens, dtype=torch.int32, device="cpu"
-            )
+            dp_metadata = None
+            if dp_size > 1:
+                num_tokens_across_dp = torch.full(
+                    (dp_size,), num_tokens, dtype=torch.int32, device="cpu"
+                )
+                dp_metadata = DPMetadata.make(
+                    self.parallel_config, num_tokens, num_tokens_across_dp
+                )
             forward_contexts.append(
                 create_forward_context(
                     attn_metadata[i],
                     self.vllm_config,
-                    dp_metadata=DPMetadata.make(
-                        self.parallel_config, num_tokens, num_tokens_across_dp
-                    ),
+                    dp_metadata=dp_metadata,
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
                     slot_mapping=slot_mappings_by_layer[i],
                     is_padding=is_padding[i],
@@ -464,8 +517,9 @@ class UBatchRunner:
         model_inputs: dict[str, Any],
         ubatch_state: UBatchState,
     ) -> Any:
-        finish = self.begin_capturable_run(model, model_inputs, ubatch_state)
-        return finish()
+        with self.pool_stream():
+            finish = self.begin_capturable_run(model, model_inputs, ubatch_state)
+            return finish()
 
     def begin_capturable_run(
         self,
@@ -494,8 +548,11 @@ class UBatchRunner:
             compute_stream=compute_stream,
             forward_contexts=ubatch_state.forward_contexts,
             ready_barrier=self.ready_barrier,
+            schedule=self.schedule,
             token_offsets=[s.token_slice.start for s in ubatch_slices],
+            comm_streams=self.comm_streams,
         )
+        comm_streams = self.comm_streams or [self.comm_stream]
 
         outputs: dict[int, Any] = {}
         errors: dict[int, BaseException] = {}
@@ -508,7 +565,7 @@ class UBatchRunner:
                 torch.accelerator.set_device_index(self.device.index)
                 if for_capture:
                     # Allocate cuBLAS workspaces before capture.
-                    for stream in (compute_stream, self.comm_stream):
+                    for stream in (compute_stream, *comm_streams):
                         with torch.cuda.stream(stream):
                             torch.cuda.current_blas_handle()
                             if current_platform.is_rocm():
@@ -589,16 +646,21 @@ def maybe_build_ubatch_runner(
     kv_cache_config: KVCacheConfig,
     max_num_reqs: int,
 ) -> UBatchRunner | None:
-    """Build the microbatch runner, or None when DBO is not in use.
+    """Build the microbatch runner, or None when microbatching is not in use.
 
-    Microbatching needs the DP handshake to agree on it, so it is only
-    available with more than one DP rank (as in the V1 runner).
+    DBO needs the DP handshake to agree on it, so it is only available with
+    more than one DP rank (as in the V1 runner). SubGPU pipelining also runs
+    on one rank, where the token thresholds alone decide.
     """
     parallel_config = vllm_config.parallel_config
-    if not parallel_config.use_ubatching or parallel_config.data_parallel_size <= 1:
+    if not parallel_config.use_ubatching:
         return None
-
-    logger.info_once("Dual batch overlap is enabled.")
+    if parallel_config.subgpu_pipelining:
+        logger.info_once("SubGPU pipelining is enabled.")
+    elif parallel_config.data_parallel_size <= 1:
+        return None
+    else:
+        logger.info_once("Dual batch overlap is enabled.")
     return UBatchRunner(
         vllm_config, device, model_state, attn_groups, kv_cache_config, max_num_reqs
     )

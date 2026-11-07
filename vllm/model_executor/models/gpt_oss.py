@@ -52,6 +52,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
+from vllm.v1.worker.ubatching import dbo_subgpu_ensure_attn, dbo_subgpu_ensure_rest
 
 from .interfaces import (
     EagleModelMixin,
@@ -161,6 +162,10 @@ class OAIAttention(nn.Module):
             quant_config=quant_config,
             prefix=prefix,
         )
+        # Under SubGPU pipelining only full attention runs on the attention pool.
+        self.subgpu_attn_stage = (
+            config.sliding_window is None or self.layer_idx % 2 != 0
+        )
 
     def _build_attention(
         self,
@@ -192,7 +197,11 @@ class OAIAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
+        if self.subgpu_attn_stage:
+            dbo_subgpu_ensure_attn()
         attn_output = self.attn(q, k, v)
+        if self.subgpu_attn_stage:
+            dbo_subgpu_ensure_rest()
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -438,6 +447,7 @@ class TransformerBlock(torch.nn.Module):
         cache_config = vllm_config.cache_config
 
         self.layer_idx = extract_layer_index(prefix)
+        self.subgpu_last_layer = self.layer_idx == config.num_hidden_layers - 1
         self.attn = self.attention_cls(
             config,
             prefix=f"{prefix}.attn",
@@ -464,7 +474,13 @@ class TransformerBlock(torch.nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        if self.layer_idx == 0:
+            # Micro-batches start on the attention pool; run the MLP elsewhere.
+            dbo_subgpu_ensure_rest()
         output = self.mlp(hidden_states)
+        if self.subgpu_last_layer:
+            # Micro-batches must end on the stream the graph is captured on.
+            dbo_subgpu_ensure_attn()
         return output, residual
 
 

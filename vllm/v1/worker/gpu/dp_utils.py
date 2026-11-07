@@ -315,6 +315,26 @@ def dispatch_cg_and_sync_dp(
         )
 
     if dp_size == 1:
+        if (
+            allow_ubatching
+            and batch_desc.cg_mode == CUDAGraphMode.FULL
+            and parallel_config is not None
+            and check_ubatch_thresholds(parallel_config, num_tokens, uniform_decode)
+        ):
+            # No other rank to agree with (SubGPU pipelining on one rank): the
+            # thresholds decide, and only a captured microbatched graph is
+            # taken. An eager two-pool step has nothing to gain, so without
+            # one the batch runs whole.
+            assert cudagraph_manager is not None
+            ubatch_desc = cudagraph_manager.dispatch(
+                num_reqs,
+                num_tokens,
+                uniform_token_count,
+                num_active_loras=num_active_loras,
+                num_ubatches=get_num_ubatches(parallel_config),
+            )
+            if ubatch_desc.cg_mode == CUDAGraphMode.FULL:
+                batch_desc = ubatch_desc
         return batch_desc, None
 
     if dp_sync_state is not None:

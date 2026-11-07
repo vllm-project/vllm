@@ -113,6 +113,7 @@ from vllm.config.parallel import (
     DCPCommBackend,
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
+    SubGPUSchedule,
 )
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
@@ -580,6 +581,11 @@ class EngineArgs:
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dp_sync_interval: int = ParallelConfig.dp_sync_interval
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
+    subgpu_pipelining: bool = ParallelConfig.subgpu_pipelining
+    subgpu_attn_sms: int = ParallelConfig.subgpu_attn_sms
+    subgpu_rest_sms: int = ParallelConfig.subgpu_rest_sms
+    subgpu_rest_streams: int = ParallelConfig.subgpu_rest_streams
+    subgpu_schedule: SubGPUSchedule = ParallelConfig.subgpu_schedule
     disable_nccl_for_dp_synchronization: bool | None = (
         ParallelConfig.disable_nccl_for_dp_synchronization
     )
@@ -1359,6 +1365,21 @@ class EngineArgs:
         parallel_group.add_argument(
             "--dbo-prefill-token-threshold",
             **parallel_kwargs["dbo_prefill_token_threshold"],
+        )
+        parallel_group.add_argument(
+            "--subgpu-pipelining", **parallel_kwargs["subgpu_pipelining"]
+        )
+        parallel_group.add_argument(
+            "--subgpu-attn-sms", **parallel_kwargs["subgpu_attn_sms"]
+        )
+        parallel_group.add_argument(
+            "--subgpu-rest-sms", **parallel_kwargs["subgpu_rest_sms"]
+        )
+        parallel_group.add_argument(
+            "--subgpu-rest-streams", **parallel_kwargs["subgpu_rest_streams"]
+        )
+        parallel_group.add_argument(
+            "--subgpu-schedule", **parallel_kwargs["subgpu_schedule"]
         )
         parallel_group.add_argument(
             "--disable-nccl-for-dp-synchronization",
@@ -2632,6 +2653,11 @@ class EngineArgs:
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dp_sync_interval=self.dp_sync_interval,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
+            subgpu_pipelining=self.subgpu_pipelining,
+            subgpu_attn_sms=self.subgpu_attn_sms,
+            subgpu_rest_sms=self.subgpu_rest_sms,
+            subgpu_rest_streams=self.subgpu_rest_streams,
+            subgpu_schedule=self.subgpu_schedule,
             disable_nccl_for_dp_synchronization=self.disable_nccl_for_dp_synchronization,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,

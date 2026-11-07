@@ -614,7 +614,14 @@ class CudaGraphManager:
         # cannot see. Without this, replay could overwrite static buffers
         # while those copies are still in flight.
         get_offloader().sync_prev_onload()
-        self.graphs[desc].replay()
+        if desc.num_ubatches > 1:
+            # On the stream the microbatches were captured on, so that the SM
+            # pools of SubGPU pipelining apply (a no-op without pools).
+            assert self.ubatch_runner is not None
+            with self.ubatch_runner.pool_stream():
+                self.graphs[desc].replay()
+        else:
+            self.graphs[desc].replay()
 
     def init_breakable_cg_runner(
         self, model: nn.Module, key_fn: Callable[..., Hashable] | None = None
