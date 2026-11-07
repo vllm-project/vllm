@@ -82,6 +82,14 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+_BLOCKED_WAITING_STATUSES = frozenset(
+    (
+        RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR,
+        RequestStatus.WAITING_FOR_REMOTE_KVS,
+        RequestStatus.WAITING_FOR_STREAMING_REQ,
+    )
+)
+
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -1092,6 +1100,17 @@ class Scheduler(SchedulerInterface):
                 else:
                     step_skipped_waiting.appendleft(request_to_skip)
 
+            def lora_blocked(request: Request) -> bool:
+                return bool(
+                    self.lora_config
+                    and request.lora_request
+                    and (
+                        len(scheduled_loras) == self.lora_config.max_loras
+                        and request.lora_request.lora_int_id not in scheduled_loras
+                    )
+                )
+
+            fcfs = self.policy == SchedulingPolicy.FCFS
             # Cleared once self.async_kv_waiting's head can't start a load.
             take_async_kv = True
             while True:
@@ -1134,16 +1153,29 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 # Check that adding the request still respects the max_loras constraint.
-                if (
-                    self.lora_config
-                    and request.lora_request
-                    and (
-                        len(scheduled_loras) == self.lora_config.max_loras
-                        and request.lora_request.lora_int_id not in scheduled_loras
-                    )
-                ):
+                if self.lora_config and lora_blocked(request):
                     # Scheduling would exceed max_loras, skip.
                     skip_request(request_queue)
+                    # Under FCFS, defer the requests the scan would only skip.
+                    if (
+                        fcfs
+                        and request_queue is self.waiting
+                        and not (take_async_kv and self.async_kv_waiting)
+                    ):
+                        num_ahead = next(
+                            (
+                                i
+                                for i, r in enumerate(self.waiting)
+                                if r.status in _BLOCKED_WAITING_STATUSES
+                                or not lora_blocked(r)
+                            ),
+                            None,
+                        )
+                        if num_ahead is None:
+                            self.deferred_waiting.update(self.waiting)
+                            break
+                        for _ in range(num_ahead):
+                            skip_request(self.waiting)
                     continue
 
                 num_external_computed_tokens = 0
@@ -2784,11 +2816,7 @@ class Scheduler(SchedulerInterface):
 
     @staticmethod
     def _is_blocked_waiting_status(status: RequestStatus) -> bool:
-        return status in (
-            RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR,
-            RequestStatus.WAITING_FOR_REMOTE_KVS,
-            RequestStatus.WAITING_FOR_STREAMING_REQ,
-        )
+        return status in _BLOCKED_WAITING_STATUSES
 
     @staticmethod
     def _holds_kv_blocks(request: Request) -> bool:

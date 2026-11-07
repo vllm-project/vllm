@@ -57,6 +57,7 @@ from vllm.v1.core.sched.diffusion_scheduler import (
 )
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.request_queue import FCFSRequestQueue
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
@@ -948,6 +949,156 @@ def test_max_loras_counts_running_request_skipped_for_encoder_budget():
     output = scheduler.schedule()
     assert output.num_scheduled_tokens == {"a": 150}
     assert req_c.status == RequestStatus.WAITING
+
+
+def _scheduler_with_lora_slots_full(policy: str = "fcfs", **kwargs) -> Scheduler:
+    """max_loras=1, with the only slot held by a running request."""
+    scheduler = create_scheduler(
+        lora_config=LoRAConfig(max_loras=1), scheduling_policy=policy, **kwargs
+    )
+    (running,) = create_requests(num_requests=1, num_tokens=8, req_ids=["running"])
+    running.lora_request = LoRARequest("lora-1", 1, "/path/1")
+    scheduler.add_request(running)
+    assert scheduler.schedule().num_scheduled_tokens == {"running": 8}
+    return scheduler
+
+
+def _add_requests_with_loras(scheduler: Scheduler, loras: dict[str, int | None]):
+    requests = create_requests(
+        num_requests=len(loras), num_tokens=8, req_ids=list(loras)
+    )
+    for request, lora_id in zip(requests, loras.values()):
+        if lora_id is not None:
+            request.lora_request = LoRARequest(f"lora-{lora_id}", lora_id, "/p")
+        scheduler.add_request(request)
+    return requests
+
+
+def test_max_loras_blocked_waiting_requests_not_rescanned():
+    """Once max_loras adapters are scheduled, the FCFS scan stops when no
+    waiting request can use them, instead of popping and re-queueing every
+    request for another adapter on every step."""
+    scheduler = _scheduler_with_lora_slots_full()
+    blocked = _add_requests_with_loras(scheduler, {f"b{i}": 2 for i in range(8)})
+    pop_request = Mock(wraps=scheduler.waiting.pop_request)
+    scheduler.waiting.pop_request = pop_request
+
+    for _ in range(2):
+        assert scheduler.schedule().scheduled_new_reqs == []
+    assert pop_request.call_count == 2
+    assert list(scheduler.waiting) == blocked
+    assert scheduler.deferred_waiting == set(blocked)
+
+
+def test_max_loras_priority_scan_unchanged():
+    """The priority policy keeps the plain scan, which visits every blocked
+    request itself."""
+    scheduler = _scheduler_with_lora_slots_full("priority")
+    blocked = _add_requests_with_loras(scheduler, {f"b{i}": 2 for i in range(8)})
+    visit = Mock(wraps=scheduler._handle_blocked_waiting_request)
+    scheduler._handle_blocked_waiting_request = visit
+
+    assert scheduler.schedule().scheduled_new_reqs == []
+    assert {call.args[0] for call in visit.call_args_list} == set(blocked)
+    assert list(scheduler.waiting) == blocked
+    assert scheduler.deferred_waiting == set(blocked)
+
+
+def test_max_loras_scan_admits_requests_behind_blocked_ones():
+    """Requests the scheduled adapters admit are still found behind blocked
+    ones; the scan stops once no such request is left."""
+    scheduler = _scheduler_with_lora_slots_full()
+    reqs = _add_requests_with_loras(
+        scheduler, {"b": 2, "c": None, "d": 1, "e": 3, "f": 3}
+    )
+    pop_request = Mock(wraps=scheduler.waiting.pop_request)
+    scheduler.waiting.pop_request = pop_request
+
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["c", "d"]
+    # b, c, d and e are popped; f is left in place.
+    assert pop_request.call_count == 4
+    assert [r.request_id for r in scheduler.waiting] == ["b", "e", "f"]
+    assert scheduler.deferred_waiting == {reqs[0], reqs[3], reqs[4]}
+
+
+def test_max_loras_fcfs_defers_blocked_requests_without_visiting_them():
+    """The lookahead passes the blocked requests in scan order, so they are
+    deferred without a visit each, ahead of the one it found."""
+    scheduler = _scheduler_with_lora_slots_full()
+    reqs = _add_requests_with_loras(
+        scheduler, {"b1": 2, "b2": 2, "b3": 3, "c": None, "b4": 2}
+    )
+    visit = Mock(wraps=scheduler._handle_blocked_waiting_request)
+    scheduler._handle_blocked_waiting_request = visit
+
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["c"]
+    assert [call.args[0].request_id for call in visit.call_args_list] == [
+        "b1",
+        "c",
+        "b4",
+    ]
+    assert [r.request_id for r in scheduler.waiting] == ["b1", "b2", "b3", "b4"]
+    assert scheduler.deferred_waiting == {reqs[0], reqs[1], reqs[2], reqs[4]}
+
+
+def test_max_loras_lookahead_stops_at_next_request_to_visit():
+    """Behind a run of blocked requests, the lookahead stops at the first
+    request the scan must visit, and the scan admits what it would without
+    the lookahead."""
+    scheduler = _scheduler_with_lora_slots_full(max_num_seqs=4)
+    _add_requests_with_loras(
+        scheduler, {f"b{i}": 2 for i in range(10)} | {f"c{i}": None for i in range(20)}
+    )
+    num_looked_at = 0
+    deque_iter = FCFSRequestQueue.__iter__
+
+    def counting_iter(queue):
+        nonlocal num_looked_at
+        for request in deque_iter(queue):
+            num_looked_at += queue is scheduler.waiting
+            yield request
+
+    with patch.object(FCFSRequestQueue, "__iter__", counting_iter):
+        output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["c0", "c1", "c2"]
+    # b1 to b9 and c0.
+    assert num_looked_at == 10
+    assert [r.request_id for r in scheduler.waiting][:10] == [
+        f"b{i}" for i in range(10)
+    ]
+
+
+def test_max_loras_scan_visits_requests_waiting_for_grammar():
+    """A request waiting for its grammar is still visited when its adapter
+    cannot be scheduled, so a failed grammar compilation is reported."""
+    scheduler = _scheduler_with_lora_slots_full()
+    manager = scheduler.structured_output_manager
+    manager.backend = Mock()
+    manager.backend_name = "xgrammar"
+    manager.backend.compile_grammar.side_effect = RuntimeError("bad grammar")
+    manager._use_async_grammar_compilation = False
+    structured_outputs = StructuredOutputsParams(regex="[0-9]+")
+    structured_outputs._backend = "xgrammar"
+    (req_c,) = create_requests(
+        num_requests=1,
+        num_tokens=8,
+        req_ids=["c"],
+        sampling_params=SamplingParams(
+            max_tokens=16, structured_outputs=structured_outputs
+        ),
+    )
+    req_c.lora_request = LoRARequest("lora-2", 2, "/p")
+    assert req_c.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+    manager.grammar_init(req_c)
+    _add_requests_with_loras(scheduler, {"b": 2})
+    scheduler.add_request(req_c)
+    _add_requests_with_loras(scheduler, {"d": 2})
+    assert req_c in scheduler.deferred_waiting
+
+    scheduler.schedule()
+    assert "c" in scheduler.grammar_compile_error_reqs
 
 
 def test_cached_request_data_resumed_all_token_ids_mrv1_only():
