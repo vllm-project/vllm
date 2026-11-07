@@ -554,6 +554,8 @@ class Worker(WorkerBase):
 
             # take current memory snapshot after external weights are ready
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
+            if self.cache_config.enable_extensible_kv_cache:
+                current_platform.record_memory_baseline(self.device)
             self.requested_memory = request_memory(
                 init_snapshot, self.cache_config, external_weight_memory
             )

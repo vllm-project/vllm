@@ -17,6 +17,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from . import rocm_device_memory
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
 
 if TYPE_CHECKING:
@@ -1277,6 +1278,16 @@ class RocmPlatform(Platform):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
         return torch.cuda.max_memory_allocated(device)
+
+    @classmethod
+    def record_memory_baseline(cls, device: torch.device) -> None:
+        rocm_device_memory.record_memory_baseline(device)
+
+    @classmethod
+    def corrected_free_memory(
+        cls, device: torch.device, untracked_bytes: int
+    ) -> tuple[int, int]:
+        return rocm_device_memory.corrected_free_memory(device, untracked_bytes)
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:

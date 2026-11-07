@@ -795,6 +795,7 @@ def _weight_update_worker(
 
     kv_cache = SimpleNamespace(
         buffer=SimpleNamespace(physical_bytes=50 * GiB),
+        free_memory_correction=0,
         release_physical=lambda: log.append("release"),
         recommit=lambda: log.append("recommit"),
         torch_memory_limit=None,
