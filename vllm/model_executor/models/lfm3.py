@@ -268,6 +268,8 @@ class Lfm3DecoderLayer(nn.Module):
 
 @support_torch_compile
 class Lfm3Model(nn.Module, EagleModelMixin):
+    supports_aux_hidden_states_over_pp = True
+
     # HF uses .conv. but vLLM uses .short_conv. to avoid LoRA regex collision
     # with the inner .conv.conv child, see Lfm2Model.
     hf_to_vllm_mapper = WeightsMapper(
@@ -343,6 +345,8 @@ class Lfm3Model(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+
         aux_hidden_states: list[torch.Tensor] = []
         if get_pp_group().is_first_rank:
             self._maybe_add_hidden_state(
@@ -359,9 +363,14 @@ class Lfm3Model(nn.Module, EagleModelMixin):
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
         hidden_states, _ = self.embedding_norm(hidden_states, residual)
+        aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
