@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen3-VL flagship MoE vision-language model with 235B total / 22B active parameters, supporting images, video, and long context."
   date_added: 2025-09-28
-  date_updated: 2026-04-17
+  date_updated: 2026-10-30
   tasks:
     - multimodal
     - text
@@ -55,8 +55,14 @@ features:
       - "1000000"
     env:
       VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+  spec_decoding:
+    description: "RedHatAI EAGLE3 speculator with 3 draft tokens"
+    args:
+      - "--speculative-config"
+      - '{"model":"RedHatAI/Qwen3-VL-235B-A22B-Instruct-speculator.eagle3","num_speculative_tokens":3,"method":"eagle3"}'
 
 opt_in_features:
+  - spec_decoding
   - text_only
   - long_context
 
@@ -336,6 +342,8 @@ guide: |
   - If enabling `--mm-encoder-tp-mode data` raises memory pressure, lower `--gpu-memory-utilization`.
 
   ## References
+
+  - [RedHatAI Qwen3-VL EAGLE3 speculator](https://huggingface.co/RedHatAI/Qwen3-VL-235B-A22B-Instruct-speculator.eagle3)
 
   - [Model card](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct)
   - [FP8 checkpoint](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct-FP8)
