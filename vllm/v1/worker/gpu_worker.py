@@ -1627,10 +1627,13 @@ class Worker(WorkerBase):
 
     def execute_dummy_batch(self) -> None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
+        # Only the v2 runner knows about the idle-DP-rank dummy batch.
+        extra = {"idle_dp_rank": True} if self.use_v2_model_runner else {}
         self.model_runner._dummy_run(
             num_tokens,
             uniform_decode=True,
             randomize_inputs=self.randomize_dummy_inputs,
+            **extra,
         )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
