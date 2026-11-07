@@ -97,7 +97,12 @@ def test_dense_nvfp4_generation_is_deterministic_across_batch_sizes_e2e(backend)
             assert baseline_logprobs is not None
             assert needle_completion.token_ids == baseline_completion.token_ids
             assert needle_completion.text == baseline_completion.text
-            torch.testing.assert_close(needle_logprobs, baseline_logprobs)
+            # Batch invariance means bitwise-identical logprobs, not merely
+            # close ones (see test_batch_invariance.py).
+            assert torch.equal(needle_logprobs, baseline_logprobs), (
+                f"Logprobs differ at batch size {batch_size}: "
+                f"{needle_logprobs.tolist()} vs {baseline_logprobs.tolist()}"
+            )
     finally:
         if llm is not None:
             with contextlib.suppress(Exception):
