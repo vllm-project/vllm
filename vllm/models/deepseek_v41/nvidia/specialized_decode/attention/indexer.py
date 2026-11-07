@@ -30,13 +30,19 @@ the current stream would otherwise wait for them. ``finish_decode_rows``
 scores, selects and gathers once they are ready.
 
 ``CandidateOverlap`` moves the candidate consumers' candidate expansion and
-sparse MQA-logits schedule onto a side stream.
+sparse MQA-logits schedule onto a side stream, and in a replicated step also
+the candidate source's selection of the candidate blocks, which only the
+consumers read; that selection starts once the token top-k has finished.
+``consume_decode_rows`` selects and remaps a candidate consumer's top-k of a
+pure-decode step in one kernel (``sparse_topk_small``).
 
 The row-sharded path issues TP collectives, so its gates read only host state
 that every TP rank shares: the step's row and request counts.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
@@ -63,6 +69,7 @@ from vllm.models.deepseek_v41.common.ops import fused_indexer_q_rope_quant
 from vllm.triton_utils import triton
 from vllm.utils.deep_gemm import (
     fp8_fp4_paged_mqa_logits,
+    fp8_fp4_paged_sparse_mqa_logits,
     get_paged_mqa_logits_metadata,
     get_paged_sparse_mqa_logits_metadata,
     mqa_logits_mx_inputs,
@@ -82,6 +89,7 @@ from .candidate_topk import (
     supports_cooperative_candidates,
 )
 from .decode_topk_cute import decode_topk, supports_decode_topk
+from .sparse_topk_small import sparse_topk_small, supports_sparse_topk_small
 
 if TYPE_CHECKING:
     from ...ops.cute_dsl import LamportAllGather
@@ -89,6 +97,10 @@ if TYPE_CHECKING:
 # Fewest rows of a row-sharded decode step (two requests of six rows): a
 # single request's slices save less than the all-gathers cost.
 ROW_SHARD_MIN_ROWS = 12
+
+# Rows a launch of the deferred candidate-block selection: without PDL it starts
+# beside the attention the token top-k launched early, and holds an SM a CTA.
+DEFERRED_BLOCKS_MAX_ROWS = 2
 
 
 def row_shard_rows(num_rows: int, num_requests: int, world_size: int) -> int | None:
@@ -190,6 +202,12 @@ class DecodeRowsPlan:
     fast_candidates: bool
     # DeepGEMM's paged MQA-logits schedule of rows ``[start, end)``.
     schedule: torch.Tensor
+    # Set by the step when ``CandidateOverlap.fork`` takes the candidate-block
+    # selection: ``_decode_rows`` then leaves it in ``blocks``, with the
+    # tensors it reads in ``block_reads``, instead of running it.
+    defer_blocks: bool = False
+    blocks: Callable[[], None] | None = None
+    block_reads: tuple[torch.Tensor, ...] = ()
 
 
 def decode_rows(
@@ -352,7 +370,20 @@ def _decode_rows(
     if _selects_from_bf16(op, raw, plan.fast_candidates):
         # Straight from the BF16 logits: no upcast.
         if op.candidate_blocks is not None:
-            decode_topk(raw, row_ends, op.candidate_blocks[start:end], block_mode=True)
+            blocks = op.candidate_blocks[start:end]
+            if plan.defer_blocks and plan.shard is None:
+                plan.blocks = partial(
+                    decode_topk,
+                    raw,
+                    row_ends,
+                    blocks,
+                    True,
+                    pdl=False,
+                    max_rows=DEFERRED_BLOCKS_MAX_ROWS,
+                )
+                plan.block_reads = (raw, row_ends)
+            else:
+                decode_topk(raw, row_ends, blocks, block_mode=True)
         decode_topk(raw, row_ends, topk_rows, block_mode=False)
         return
     logits = as_fp32_logits(raw, row_ends)
@@ -442,6 +473,64 @@ def decode_schedule(
     )
 
 
+def consume_decode_rows(
+    op: SparseMQAIndexer,
+    hidden_states: torch.Tensor,
+    q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    weights: torch.Tensor,
+) -> bool:
+    """``op(hidden_states, q_quant, None, weights)`` for a pure-decode step,
+    the decode branch of ``SparseMQAIndexer.forward`` with ``sparse_topk_small``
+    in place of DeepSelect and the remap; False, having issued nothing, for any
+    other step."""
+    attn_metadata = get_forward_context().attn_metadata
+    metadata = (
+        attn_metadata.get(op.k_cache.prefix)
+        if isinstance(attn_metadata, dict)
+        else None
+    )
+    if (
+        not isinstance(metadata, DeepseekV41SparseIndexerMetadata)
+        or metadata.num_prefills > 0
+        or metadata.sparse_decode is None
+    ):
+        return False
+    rows = metadata.sparse_decode
+    num_rows = rows.row_ke.shape[0]
+    sparse_block_kv = metadata.sparse_block_kv
+    num_sparse = rows.sparse_indices.shape[1]
+    if not num_rows or not supports_sparse_topk_small(
+        num_sparse * sparse_block_kv, op.topk_tokens, sparse_block_kv
+    ):
+        return False
+    assert isinstance(q_quant, tuple)
+    if not op.skip_topk_buffer_clear:
+        op.topk_indices_buffer[: hidden_states.shape[0]] = -1
+    if rows.kernel_metadata is None:
+        rows.kernel_metadata = decode_schedule(op, rows, sparse_block_kv)
+    q_values, q_scale = q_quant
+    logits = fp8_fp4_paged_sparse_mqa_logits(
+        (
+            q_values[:num_rows].view(torch.int8).unsqueeze(1),
+            q_scale[:num_rows].unsqueeze(1),
+        ),
+        kv_cache_as_quant_view(op.k_cache.kv_cache, op.head_dim, use_fp4_cache=True),
+        weights[:num_rows],
+        rows.kernel_metadata,
+        num_sparse,
+        sparse_block_kv,
+    )
+    # Paged decode rows start at 0 (``row_ks``): the remap is the table's.
+    sparse_topk_small(
+        logits,
+        rows.end,
+        rows.sparse_indices,
+        sparse_block_kv,
+        op.topk_indices_buffer[:num_rows, : op.topk_tokens],
+    )
+    return True
+
+
 class CandidateOverlap:
     """The candidate consumers' expansion and schedule on a side stream.
 
@@ -456,7 +545,10 @@ class CandidateOverlap:
     The side stream issues no collectives. The fork waits on the main stream,
     so a step's writes to the builder's ``sparse_indices`` / ``end`` cannot
     overtake the previous step's reads, and the schedule allocated on
-    ``stream`` is recorded as used by the main stream.
+    ``stream`` is recorded as used by the main stream. A fork may also take
+    the selection that writes the candidates (``DecodeRowsPlan.blocks``),
+    which then runs first on ``stream``: only the expansion and the consumers'
+    own scoring read the candidates, the latter after their join.
 
     DeepGEMM's schedule kernel keeps a per-stream workspace that it creates on
     first use and refuses to create during a capture, so ``warm`` runs the
@@ -497,23 +589,39 @@ class CandidateOverlap:
         main.wait_stream(self.stream)
         self.warmed = True
 
-    def fork(self) -> None:
+    def can_fork(self) -> bool:
+        """Whether ``fork`` would start the expansion on ``stream`` now."""
+        found = self._decode_rows() if self.warmed else None
+        return found is not None and found[0].kernel_metadata is None
+
+    def fork(
+        self,
+        select: Callable[[], None] | None = None,
+        reads: tuple[torch.Tensor, ...] = (),
+    ) -> None:
         """Start the expansion; the candidate source calls this right after
-        its indexer has written the candidates."""
+        its indexer has written the candidates, or, once ``can_fork`` holds,
+        with ``select``, the selection that writes them (reading ``reads``),
+        which then runs first on ``stream``."""
         found = self._decode_rows()
         if found is None or found[0].kernel_metadata is not None:
+            assert select is None
             return
         rows, sparse_block_kv = found
         main = torch.cuda.current_stream()
         self.stream.wait_stream(main)
         try:
             with torch.cuda.stream(self.stream):
+                if select is not None:
+                    select()
                 schedule = decode_schedule(self.consumer, rows, sparse_block_kv)
                 self.done.record()
         except BaseException:
             # Rejoin so that a capture reports this error, not unjoined work.
             main.wait_stream(self.stream)
             raise
+        for tensor in reads:
+            tensor.record_stream(self.stream)
         schedule.record_stream(main)
         rows.kernel_metadata = schedule
         self._forked = True

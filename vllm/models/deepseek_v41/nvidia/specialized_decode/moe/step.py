@@ -11,9 +11,15 @@ whose boundaries take the kernel's residual-only variant:
   GEMMs (``routed_expert_gemm``);
 - above that, on the runner's own ``_forward_impl`` with the deferral raised to
   the step's rows for the call (``deferred_finalize``).
+
+The DSpark draft's layers finalize their MoE in the layer instead (the fused
+kernel's finalize is built for the target's top-k): up to
+``LOW_BATCH_MAX_ROWS`` rows on the routed-expert GEMMs and their finalize
+kernel, above that on ``_forward_impl``. Either way their output stays
+TP-partial for the next boundary, though their stock layers reduce it.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -30,10 +36,13 @@ from vllm.model_executor.layers.fused_moe.moe_output import (
 )
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _unpack
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
     SharedExpertsOrder,
 )
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.models.deepseek_v41.common.ops.query_quant import can_fuse_query_quant
 
-from .routed_expert_gemm import RoutedExpertGemm, front_applies, padding_mask
+from .routed_expert_gemm import MAX_ROWS, RoutedExpertGemm, front_applies, padding_mask
 
 if TYPE_CHECKING:
     from ...model import DeepseekV4MoE
@@ -71,26 +80,67 @@ def defers_finalize(ffn: "DeepseekV4MoE", max_num_tokens: int) -> bool:
 
 
 class MoEStep:
-    """One MoE layer of the decode step."""
+    """One MoE layer of the decode step; with ``finalize``, one that finalizes
+    its own MoE (the DSpark draft's)."""
 
     def __init__(
-        self, ffn: "DeepseekV4MoE", gemm: RoutedExpertGemm | None, max_rows: int
+        self,
+        ffn: "DeepseekV4MoE",
+        gemm: RoutedExpertGemm | None,
+        max_rows: int,
+        finalize: bool = False,
     ) -> None:
         self.ffn = ffn
         self.runner = ffn.experts
-        self.deferrable = defers_finalize(ffn, max_rows)
-        # The low-batch GEMMs leave the top-k reduction open too.
-        self.gemm = gemm if self.deferrable else None
+        self.finalize = finalize
+        if finalize and (
+            self.runner.routed_scaling_factor != 1.0
+            or self.runner._fused_output_is_reduced
+        ):
+            # _run_finalized adds the shared and routed outputs as the stock
+            # forward does, without its routed scaling or reduced-output paths.
+            raise ValueError(
+                "decode_backend=latency_specialized requires the draft's MoE to have "
+                "routed_scaling_factor == 1.0 and an unreduced fused output"
+            )
+        self.deferrable = not finalize and defers_finalize(ffn, max_rows)
+        # The low-batch GEMMs leave the top-k reduction open too, for the next
+        # boundary or the finalize kernel.
+        self.gemm = gemm if self.deferrable or finalize else None
+        shared = self.runner._shared_experts
+        # The boundary before the MoE also writes its input as MXFP8, which the
+        # shared expert's gate_up reads on its stream.
+        self.mxfp8_input = (
+            self.deferrable
+            and self.gemm is not None
+            and shared is not None
+            and shared._stream is not None
+            and can_fuse_query_quant([shared._layer.gate_up_proj])
+        )
+
+    def takes_mxfp8_input(self, rows: int) -> bool:
+        """Whether ``run`` reads a ``rows``-row input as MXFP8 too: only the
+        low-batch routed GEMMs' path does, where the shared expert's
+        ``gate_up`` overlaps them on its stream."""
+        return self.mxfp8_input and rows <= MAX_ROWS
 
     def run(
-        self, x: torch.Tensor, input_ids: torch.Tensor | None, step: "DecodeStep"
+        self,
+        x: torch.Tensor,
+        input_ids: torch.Tensor | None,
+        step: "DecodeStep",
+        quant: QuantizedActivation | None = None,
     ) -> torch.Tensor | MoEOutput:
-        """The layer's TP-partial output, unfinalized where it can defer."""
+        """The layer's TP-partial output, unfinalized where it can defer;
+        ``quant``, the same input as MXFP8, feeds the shared expert's
+        ``gate_up`` (``mxfp8_input``)."""
+        if self.finalize:
+            return self._run_finalized(x, input_ids, step)
         if not self.deferrable:
             return self.ffn(x, input_ids, None)
         gemm = self.gemm
         if gemm is not None and gemm.accepts(x, self.runner):
-            routed, shared_output = self._forward_low_batch(gemm, x, input_ids)
+            routed, shared_output = self._forward_low_batch(gemm, x, input_ids, quant)
             return MoEOutput(routed=routed, shared_output=shared_output)
         # The runner's custom op returns tensors only, so run its body directly.
         with deferred_finalize(self.runner.moe_config, x.shape[0]):
@@ -103,21 +153,45 @@ class MoEStep:
         # Experts that split the call across launches finalize it.
         return shared_output + routed
 
+    def _run_finalized(
+        self, x: torch.Tensor, input_ids: torch.Tensor | None, step: "DecodeStep"
+    ) -> torch.Tensor:
+        """The layer's TP-partial output with its top-k reduction done here:
+        the shared output plus the finalized routed output, as the stock
+        forward adds them before its all-reduce."""
+        gemm = self.gemm
+        if step.low_batch and gemm is not None and gemm.accepts(x, self.runner):
+            routed, shared_output = self._forward_low_batch(gemm, x, input_ids)
+            return shared_output + gemm.finalize(routed)
+        # The runner's custom op returns tensors only, so run its body directly.
+        shared_output, finalized = _unpack(
+            self.runner._forward_impl(x, x, x, input_ids)
+        )
+        assert shared_output is not None and isinstance(finalized, torch.Tensor)
+        return shared_output + finalized
+
     def _forward_low_batch(
         self,
         gemm: RoutedExpertGemm,
         hidden_states: torch.Tensor,
         input_ids: torch.Tensor | None,
+        quant: QuantizedActivation | None = None,
     ) -> tuple[UnfinalizedMoEOutput, torch.Tensor]:
         """The runner's ``_forward_impl`` with the routed experts on the
         low-batch GEMMs; the gate and the shared experts run as the runner runs
-        them. Returns the unfinalized routed output and the shared output."""
+        them, but the shared experts' stream forks before the router GEMM and
+        their kernels are captured after it, so that the router GEMM follows the
+        boundary's fused kernel in the PDL chain. ``quant`` (the input as MXFP8)
+        feeds the shared ``gate_up``. Returns the unfinalized routed output and
+        the shared output."""
         runner = self.runner
         shared = runner._shared_experts
         assert shared is not None
         runner.routed_experts._ensure_moe_quant_config_init()
-        overlapping = shared.maybe_forward_async(hidden_states)
+        launch = _fork_shared_experts(shared, hidden_states, quant)
         router_logits, _ = runner.gate(hidden_states)
+        if launch is not None:
+            launch()
         runner._maybe_apply_shared_experts(hidden_states, SharedExpertsOrder.NO_OVERLAP)
         if front_applies(gemm, runner):
             # The router's padding mask, as select_experts applies it.
@@ -136,7 +210,38 @@ class MoEStep:
             )
             routing = gemm.route(hidden_states, topk_ids, topk_weights)
         routed = gemm.gemms(routing)
-        if overlapping:
+        if launch is not None:
             shared.wait()
         # Read once: the property hands the output over and clears it.
         return routed, shared.output
+
+
+def _fork_shared_experts(
+    shared: SharedExperts,
+    x: torch.Tensor,
+    quant: QuantizedActivation | None,
+) -> Callable[[], None] | None:
+    """``SharedExperts.maybe_forward_async`` in two halves: the shared-expert
+    stream forks from the current one now, and the returned call enqueues the
+    expert on it, on ``quant`` (``x`` as MXFP8) when given. None where the
+    runner does not overlap the shared expert."""
+    if (
+        shared._determine_shared_experts_order(x)
+        != SharedExpertsOrder.MULTI_STREAM_OVERLAPPED
+    ):
+        return None
+    stream = shared._stream
+    assert stream is not None
+    idx = shared._output_idx
+    assert shared._output[idx] is None
+    ready = shared._input_ready_event[idx]
+    ready.record(torch.cuda.current_stream())
+    layer_input = x if quant is None else quant
+
+    def launch() -> None:
+        with torch.cuda.stream(stream):
+            ready.wait(stream)
+            shared._output[idx] = shared._layer(layer_input)
+            shared._output_ready_event[idx].record(stream)
+
+    return launch
