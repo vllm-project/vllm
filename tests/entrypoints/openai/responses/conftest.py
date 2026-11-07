@@ -63,7 +63,7 @@ async def retry_for_tool_call(
     fire with a clear diagnostic.
     """
     last_response = None
-    for attempt in range(max_retries):
+    for _ in range(max_retries):
         response = await client.responses.create(model=model, **create_kwargs)
         last_response = response
         if any(
@@ -88,7 +88,7 @@ async def retry_streaming_for(
     ``True``.
     """
     last_events: list = []
-    for attempt in range(max_retries):
+    for _ in range(max_retries):
         stream = await client.responses.create(
             model=model, stream=True, **create_kwargs
         )

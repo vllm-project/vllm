@@ -60,8 +60,10 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
         if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
             return (
                 False,
-                f"Quant type ({c.weight_type}) not supported by "
-                f"RDNA3 W4A16 kernel; supported: {cls.SUPPORTED_QUANT_TYPES}",
+                (
+                    f"Quant type ({c.weight_type}) not supported by "
+                    f"RDNA3 W4A16 kernel; supported: {cls.SUPPORTED_QUANT_TYPES}"
+                ),
             )
 
         if c.group_size <= 0:
@@ -73,8 +75,10 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
         if c.full_weight_shape[0] % c.group_size != 0:
             return (
                 False,
-                f"Group size ({c.group_size}) does not evenly divide K "
-                f"({c.full_weight_shape[0]})",
+                (
+                    f"Group size ({c.group_size}) does not evenly divide K "
+                    f"({c.full_weight_shape[0]})"
+                ),
             )
 
         # Output features must be a multiple of the pack factor (8 nibbles per
@@ -83,8 +87,10 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
         if c.partition_weight_shape[1] % 8 != 0:
             return (
                 False,
-                "Output features must be a multiple of 8 for the RDNA3 "
-                "W4A16 kernel (qzeros packing)",
+                (
+                    "Output features must be a multiple of 8 for the RDNA3 "
+                    "W4A16 kernel (qzeros packing)"
+                ),
             )
 
         return True, None

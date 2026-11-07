@@ -61,9 +61,11 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         if c.weight_type not in _CPUWNA16_SUPPORTED_QUANT_TYPES:
             return (
                 False,
-                f"Quant type ({c.weight_type}) not supported by "
-                "CPUWNA16, supported types are: "
-                f"{_CPUWNA16_SUPPORTED_QUANT_TYPES}",
+                (
+                    f"Quant type ({c.weight_type}) not supported by "
+                    "CPUWNA16, supported types are: "
+                    f"{_CPUWNA16_SUPPORTED_QUANT_TYPES}"
+                ),
             )
 
         # -1 is per-channel, one group spanning K. Anything else has to divide
@@ -73,15 +75,19 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
             if c.group_size <= 0 or in_features % c.group_size != 0:
                 return (
                     False,
-                    f"Group size ({c.group_size}) must divide input size "
-                    f"({in_features})",
+                    (
+                        f"Group size ({c.group_size}) must divide input size "
+                        f"({in_features})"
+                    ),
                 )
 
         if not has_zentorch_op(["zentorch_woq_repack_weight", "zentorch_woq_linear"]):
             return (
                 False,
-                "torch.ops.zentorch.{zentorch_woq_repack_weight, "
-                "zentorch_woq_linear} are not registered.",
+                (
+                    "torch.ops.zentorch.{zentorch_woq_repack_weight, "
+                    "zentorch_woq_linear} are not registered."
+                ),
             )
 
         return True, None

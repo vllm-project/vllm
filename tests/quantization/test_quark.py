@@ -2527,13 +2527,17 @@ class TestQuarkInt4Format:
                         torch.zeros(1),
                     ),
                     (
-                        "model.language_model.layers.0.mlp.shared_expert_gate"
-                        ".weight_scale",
+                        (
+                            "model.language_model.layers.0.mlp.shared_expert_gate"
+                            ".weight_scale"
+                        ),
                         torch.zeros(1),
                     ),
                     (
-                        "model.language_model.layers.0.mlp.shared_expert_gate"
-                        ".weight_zero_point",
+                        (
+                            "model.language_model.layers.0.mlp.shared_expert_gate"
+                            ".weight_zero_point"
+                        ),
                         torch.zeros(1),
                     ),
                 ]

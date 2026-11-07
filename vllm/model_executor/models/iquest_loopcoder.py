@@ -386,12 +386,10 @@ class IQuestLoopCoderModel(nn.Module):
         ):
             assert config.max_window_layers == config.num_hidden_layers, (
                 "Sliding window for some but all layers is not supported. "
-                "This model uses sliding window but `max_window_layers` = {} "
-                "is less than `num_hidden_layers` = {}. Please open an issue "
-                "to discuss this feature.".format(
-                    config.max_window_layers,
-                    config.num_hidden_layers,
-                )
+                "This model uses sliding window but `max_window_layers` = "
+                f"{config.max_window_layers} is less than `num_hidden_layers` = "
+                f"{config.num_hidden_layers}. Please open an issue "
+                "to discuss this feature."
             )
 
         self.config = config

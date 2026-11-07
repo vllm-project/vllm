@@ -279,8 +279,8 @@ def test_execute_write_task_writes_every_fanout_target():
     worker = _fake_worker(alloc)
     session_engine_ids: list[str] = []
 
-    worker.get_engine_name_with_dp_tp = (
-        lambda engine_id, dp_rank, tp_rank: f"{engine_id}_dp{dp_rank}_tp{tp_rank}"
+    worker.get_engine_name_with_dp_tp = lambda engine_id, dp_rank, tp_rank: (
+        f"{engine_id}_dp{dp_rank}_tp{tp_rank}"
     )
 
     def _get_built_session(engine_id: str):

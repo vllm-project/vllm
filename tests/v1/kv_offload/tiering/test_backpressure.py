@@ -288,7 +288,7 @@ class TestBackpressure:
         to have taken ``age_s`` seconds when completed."""
         self.manager._processed_jobs_this_step = False
         now = time.monotonic()
-        for job_id, meta in self.manager._jobs.items():
+        for meta in self.manager._jobs.values():
             tj = meta.transfer_job
             if not tj.is_promotion and tj.submit_time > 0:
                 tj.submit_time = now - age_s
@@ -321,8 +321,8 @@ class TestBackpressure:
         reduced = stats.reduce()
         stores_key = TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED
         blocks_key = TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED
-        assert reduced["{}:('1:delayed',)".format(stores_key)] == 6
-        assert reduced["{}:('1:delayed',)".format(blocks_key)] == 12
+        assert reduced[f"{stores_key}:('1:delayed',)"] == 6
+        assert reduced[f"{blocks_key}:('1:delayed',)"] == 12
 
         self._backdate_held_jobs(0.001)
         self.tier.release_jobs()

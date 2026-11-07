@@ -69,7 +69,7 @@ VISION_PROMPT = {
 
 async def _generate(engine: AsyncLLM, request_id: str, n: int = 1) -> RequestOutput:
     async def run() -> RequestOutput:
-        async for out in engine.generate(
+        async for out in engine.generate(  # noqa: B007
             request_id=request_id,
             prompt=TEXT_PROMPT,
             sampling_params=SamplingParams(max_tokens=5, n=n),
@@ -1127,7 +1127,7 @@ async def test_pause_resume_basic():
 
         # Engine should still work after all cycles
         sampling_params = SamplingParams(max_tokens=5)
-        async for out in engine.generate(
+        async for out in engine.generate(  # noqa: B007
             request_id="post-cycles",
             prompt=TEXT_PROMPT,
             sampling_params=sampling_params,
@@ -1238,7 +1238,7 @@ async def test_pause_wait():
 
         async def gen():
             nonlocal request_completed
-            async for out in engine.generate(
+            async for out in engine.generate(  # noqa: B007
                 request_id="test-wait",
                 prompt=TEXT_PROMPT,
                 sampling_params=sampling_params,
@@ -1341,7 +1341,7 @@ async def test_pause_keep_multi_request():
         any_token_generated = asyncio.Event()
 
         async def gen_multi(request_id: str):
-            async for out in engine.generate(
+            async for out in engine.generate(  # noqa: B007
                 request_id=request_id,
                 prompt=TEXT_PROMPT,
                 sampling_params=sampling_params,

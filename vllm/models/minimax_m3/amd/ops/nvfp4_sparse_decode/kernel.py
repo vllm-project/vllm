@@ -389,7 +389,7 @@ def compile_nvfp4_sparse_decode(
         init += load_block(page_of(slot_at(vmask)))
         n_st = 3 + NDT
         results = init
-        for u, st_ in range(  # type: ignore[call-overload]
+        for _, st_ in range(  # type: ignore[call-overload]
             fx.Index(0),
             fx.Index((n_v + 1) // 2),
             fx.Index(1),

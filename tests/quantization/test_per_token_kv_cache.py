@@ -247,7 +247,7 @@ def test_reshape_and_cache_per_token_head(
         if is_int4:
             # Coarser quantization → wider tolerance.
             deq_atol = deq_rtol = 0.5
-            for label, data, cache, sc in [
+            for _, data, cache, sc in [
                 ("key", key, key_cache, k_scale_cache),
                 ("val", value, value_cache, v_scale_cache),
             ]:
@@ -357,7 +357,7 @@ def test_per_token_head_round_trip_accuracy(
         blk = i // block_size
         off = i % block_size
 
-        for label, data, cache, sc in [
+        for _, data, cache, sc in [
             ("key", key, key_cache, k_scale_cache),
             ("val", value, value_cache, v_scale_cache),
         ]:

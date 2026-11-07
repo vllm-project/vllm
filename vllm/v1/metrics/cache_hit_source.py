@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from enum import Enum
+from enum import StrEnum
 
 
-class CacheHitSource(str, Enum):
+class CacheHitSource(StrEnum):
     """Where cached prompt tokens' KV came from.
 
     Members are listed in the order blocks are offloaded: accelerator, then

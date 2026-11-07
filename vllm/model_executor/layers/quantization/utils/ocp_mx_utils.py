@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from vllm.logger import init_logger
@@ -97,7 +97,7 @@ def ocp_mx_weight_dtype_and_rows(
     return None
 
 
-class OCP_MX_Scheme(str, Enum):
+class OCP_MX_Scheme(StrEnum):
     w_mxfp4 = "w_mxfp4"
     w_mxfp4_a_mxfp4 = "w_mxfp4_a_mxfp4"
     w_mxfp4_a_mxfp6_e3m2 = "w_mxfp4_a_mxfp6_e3m2"

@@ -715,10 +715,10 @@ def test_custom_quick_allreduce_variable_input(tp_size, pipeline_parallel_size):
         p = multiprocessing.Process(target=qr_variable_input, args=(rank, tp_size))
         p.start()
         processes.append((rank, p))
-    for rank, p in processes:
+    for _, p in processes:
         p.join(timeout=timeout)
         if p.is_alive():
-            for r, proc in processes:
+            for _, proc in processes:
                 if proc.is_alive():
                     proc.terminate()
                     proc.join()

@@ -64,7 +64,7 @@ def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
     # v2.11 release. In the meantime, the official workaround is to
     # consume the iterator so the tool_calls are correctly deserialized
     # in the OpenAI ChatCompletionAssistantMessageParam object
-    # https://github.com/pydantic/pydantic/issues/9467#issuecomment-2442097291 # noqa: E501
+    # https://github.com/pydantic/pydantic/issues/9467#issuecomment-2442097291
     # Official Pydantic Issues:
     #   - https://github.com/pydantic/pydantic/issues/9541
     # TODO: remove when pydantic v2.11 is released

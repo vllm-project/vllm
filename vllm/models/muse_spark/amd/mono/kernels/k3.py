@@ -323,8 +323,8 @@ def o_gate(xv, gv):
         ss = ss + bf_lo(xv[d]) * bf_lo(xv[d]) + bf_hi(xv[d]) * bf_hi(xv[d])
     ss = butterfly(ss, (1, 2, 4))
     rstd = fx.Float32(1.0) / hw_sqrt(ss * fx.Float32(1.0 / HD) + fx.Float32(PRE_EPS))
-    sig = lambda x: fx.Float32(1.0) / (
-        fx.Float32(1.0) + hw_exp2(x * fx.Float32(-LOG2E))
+    sig = lambda x: (
+        fx.Float32(1.0) / (fx.Float32(1.0) + hw_exp2(x * fx.Float32(-LOG2E)))
     )
     ow = []
     for d in range_constexpr(4):

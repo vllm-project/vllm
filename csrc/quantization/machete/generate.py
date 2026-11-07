@@ -11,13 +11,15 @@ from dataclasses import dataclass, fields
 from functools import reduce
 
 import jinja2
-from vllm_cutlass_library_extension import (
+from cutlass_library import (
     DataType,
     EpilogueScheduleTag,
     EpilogueScheduleType,
-    MixedInputKernelScheduleType,
     TileSchedulerTag,
     TileSchedulerType,
+)
+from vllm_cutlass_library_extension import (
+    MixedInputKernelScheduleType,
     VLLMDataType,
     VLLMDataTypeNames,
     VLLMDataTypeSize,

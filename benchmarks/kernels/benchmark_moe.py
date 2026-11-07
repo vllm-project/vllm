@@ -15,6 +15,7 @@ import ray
 import torch
 from ray.experimental.tqdm_ray import tqdm
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -31,7 +32,13 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import *
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    fused_experts,
+    get_config_file_name,
+    get_default_config,
+    get_moe_configs,
+)
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -95,8 +102,8 @@ def clear_triton_cache():
 
 def ensure_divisibility(numerator, denominator, text):
     """Ensure that numerator is divisible by the denominator."""
-    assert numerator % denominator == 0, "{} {} is not divisible by tp {}.".format(
-        text, numerator, denominator
+    assert numerator % denominator == 0, (
+        f"{text} {numerator} is not divisible by tp {denominator}."
     )
 
 

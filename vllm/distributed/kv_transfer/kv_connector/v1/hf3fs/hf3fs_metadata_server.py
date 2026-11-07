@@ -128,7 +128,7 @@ class GlobalMetadataState:
                 )
 
             allocation_results = {}
-            for i, (key, prefix_key) in enumerate(keys):
+            for i, (key, _) in enumerate(keys):
                 if key in self.key_metadata:
                     key_meta = self.key_metadata[key]
                     if key_meta.is_complete() and rank in key_meta.rank_to_page:

@@ -58,7 +58,7 @@ DEFAULT_FAIL_THRESHOLD = 3
 DEFAULT_EVICTED_TTL = 900.0
 
 
-class InstanceRole(str, enum.Enum):
+class InstanceRole(enum.StrEnum):
     ENCODE = "encode"
     PREFILL = "prefill"
     DECODE = "decode"

@@ -870,8 +870,10 @@ class TestStreamingExtraction:
         indices), not just the first.
         """
         chunks = [
-            '<|tool_call>call:get_weather{location:<|"|>London<|"|>}<tool_call|>'
-            '<|tool_call>call:get_time{timezone:<|"|>GMT<|"|>}<tool_call|>',
+            (
+                '<|tool_call>call:get_weather{location:<|"|>London<|"|>}<tool_call|>'
+                '<|tool_call>call:get_time{timezone:<|"|>GMT<|"|>}<tool_call|>'
+            ),
         ]
 
         results = self._simulate_streaming(parser, mock_request, chunks)
