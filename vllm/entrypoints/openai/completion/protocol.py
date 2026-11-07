@@ -62,7 +62,7 @@ class CompletionRequest(OpenAIBaseModel):
     logit_bias: dict[str, float] | None = None
     logprobs: int | None = None
     max_tokens: int | None = 16
-    n: int = 1
+    n: int | None = Field(default=1, ge=1)
     presence_penalty: float | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: StopParam = []

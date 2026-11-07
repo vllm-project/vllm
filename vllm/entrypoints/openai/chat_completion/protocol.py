@@ -249,7 +249,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "the max_completion_tokens field",
     )
     max_completion_tokens: int | None = None
-    n: int | None = 1
+    n: int | None = Field(default=1, ge=1)
     presence_penalty: float | None = None
     response_format: AnyResponseFormat | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)

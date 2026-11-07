@@ -178,6 +178,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
         request: CompletionRequest,
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
+        if error := self._check_max_num_seqs(request.n):
+            return error
+
         if request.stream and request.use_beam_search:
             return self.create_error_response(
                 "Streaming is not currently supported with beam search"

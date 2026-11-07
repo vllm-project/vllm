@@ -305,6 +305,9 @@ class OpenAIServingChat(GenerateBaseServing):
         request: ChatCompletionRequest,
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
+        if error := self._check_max_num_seqs(request.n):
+            return error
+
         # Streaming response
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None

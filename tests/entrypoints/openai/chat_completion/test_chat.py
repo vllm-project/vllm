@@ -13,6 +13,7 @@ import regex as re
 import requests
 import torch
 from openai import BadRequestError
+from pydantic import ValidationError
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -1074,28 +1075,14 @@ def test_chat_completion_request_n_parameter_various_values():
         )
 
 
-def test_chat_completion_request_n_parameter_exceeds_default_limit(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Test that n values exceeding the default limit are rejected."""
-    import vllm.envs as envs
-
-    monkeypatch.delenv("VLLM_MAX_N_SEQUENCES", raising=False)
-    if hasattr(envs.__getattr__, "cache_clear"):
-        envs.__getattr__.cache_clear()
-
-    max_n = envs.VLLM_MAX_N_SEQUENCES
-    request = ChatCompletionRequest(
-        model="test-model",
-        messages=[{"role": "user", "content": "Test"}],
-        n=max_n + 1,
-        max_tokens=10,
-    )
-
-    with pytest.raises(VLLMValidationError, match="n must be at most"):
-        request.to_sampling_params(
+def test_chat_completion_request_n_parameter_must_be_positive():
+    """The OpenAI Chat Completions n parameter must be positive."""
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test"}],
+            n=0,
             max_tokens=10,
-            default_sampling_params={},
         )
 
 
@@ -1105,11 +1092,11 @@ def test_chat_completion_request_n_parameter_at_limit(
     """Test that n at exactly the limit is accepted."""
     import vllm.envs as envs
 
-    monkeypatch.delenv("VLLM_MAX_N_SEQUENCES", raising=False)
+    monkeypatch.setenv("VLLM_MAX_N_SEQUENCES", "128")
     if hasattr(envs.__getattr__, "cache_clear"):
         envs.__getattr__.cache_clear()
 
-    max_n = envs.VLLM_MAX_N_SEQUENCES
+    max_n = 128
     request = ChatCompletionRequest(
         model="test-model",
         messages=[{"role": "user", "content": "Test"}],
@@ -1130,14 +1117,14 @@ def test_chat_completion_request_n_parameter_custom_limit(
     """Test that VLLM_MAX_N_SEQUENCES env var overrides the default limit."""
     import vllm.envs as envs
 
-    monkeypatch.setenv("VLLM_MAX_N_SEQUENCES", "128")
+    monkeypatch.setenv("VLLM_MAX_N_SEQUENCES", "64")
     if hasattr(envs.__getattr__, "cache_clear"):
         envs.__getattr__.cache_clear()
 
     request = ChatCompletionRequest(
         model="test-model",
         messages=[{"role": "user", "content": "Test"}],
-        n=128,
+        n=64,
         max_tokens=10,
     )
 
@@ -1145,29 +1132,51 @@ def test_chat_completion_request_n_parameter_custom_limit(
         max_tokens=10,
         default_sampling_params={},
     )
-    assert sampling_params.n == 128
+    assert sampling_params.n == 64
 
     request_over = ChatCompletionRequest(
         model="test-model",
         messages=[{"role": "user", "content": "Test"}],
-        n=129,
+        n=65,
         max_tokens=10,
     )
 
-    with pytest.raises(VLLMValidationError, match="n must be at most 128"):
+    with pytest.raises(VLLMValidationError, match="n must be at most 64"):
         request_over.to_sampling_params(
             max_tokens=10,
             default_sampling_params={},
         )
 
 
-def test_chat_completion_request_n_parameter_massive_value(
+def test_chat_completion_request_n_above_128_uses_configured_limit(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Test that astronomically large n values are rejected (CVE fix)."""
     import vllm.envs as envs
 
-    monkeypatch.delenv("VLLM_MAX_N_SEQUENCES", raising=False)
+    monkeypatch.setenv("VLLM_MAX_N_SEQUENCES", "256")
+    if hasattr(envs.__getattr__, "cache_clear"):
+        envs.__getattr__.cache_clear()
+
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test"}],
+        n=129,
+        max_tokens=1,
+    )
+    sampling_params = request.to_sampling_params(
+        max_tokens=1,
+        default_sampling_params={},
+    )
+
+    assert sampling_params.n == 129
+
+
+def test_chat_completion_request_n_above_configured_limit_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import vllm.envs as envs
+
+    monkeypatch.setenv("VLLM_MAX_N_SEQUENCES", "16384")
     if hasattr(envs.__getattr__, "cache_clear"):
         envs.__getattr__.cache_clear()
 

@@ -7,6 +7,7 @@ from typing import TypeVar
 
 from fastapi import Request
 
+import vllm.envs as envs
 from vllm import RequestOutput
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
@@ -156,6 +157,23 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
         self.engine_client.check_admission(n)
+
+    def _check_max_num_seqs(self, n: int | None) -> ErrorResponse | None:
+        if n is None:
+            return None
+        max_num_seqs = self.engine_client.vllm_config.scheduler_config.max_num_seqs
+        max_sequences = min(envs.VLLM_MAX_N_SEQUENCES, max_num_seqs)
+        if n > max_sequences:
+            limit = (
+                f"VLLM_MAX_N_SEQUENCES ({envs.VLLM_MAX_N_SEQUENCES})"
+                if max_num_seqs > envs.VLLM_MAX_N_SEQUENCES
+                else f"the server's max_num_seqs ({max_num_seqs})"
+            )
+            return self.create_error_response(
+                f"n must be at most {limit}, got {n}.",
+                param="n",
+            )
+        return None
 
     def create_streaming_error_response(
         self,
