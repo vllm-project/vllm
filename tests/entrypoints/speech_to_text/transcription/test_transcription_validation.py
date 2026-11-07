@@ -307,3 +307,42 @@ async def test_ming_chunk_policy_prefix_cache(model_name, ming_server, ming_audi
         assert after > before, (
             f"Restoring the chunk policy added no prefix hits: {before=} {after=}"
         )
+
+
+@pytest.mark.asyncio
+async def test_diarized_json_stream_matches_non_stream(mary_had_lamb):
+    model_name = "OpenMOSS-Team/MOSS-Transcribe-Diarize"
+    server_args = [
+        "--enforce-eager",
+        "--trust-remote-code",
+        "--max-model-len",
+        "4096",
+        # Keep the second request from reusing the first one's KV cache.
+        "--no-enable-prefix-caching",
+        *ROCM_EXTRA_ARGS,
+    ]
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        expected = await client.audio.transcriptions.create(
+            model=model_name,
+            file=mary_had_lamb,
+            response_format="diarized_json",
+            temperature=0.0,
+        )
+        mary_had_lamb.seek(0)
+        stream = await client.audio.transcriptions.create(
+            model=model_name,
+            file=mary_had_lamb,
+            response_format="diarized_json",
+            temperature=0.0,
+            stream=True,
+        )
+        events = [event async for event in stream]
+
+    *segments, done = events
+    assert [segment.model_dump() for segment in segments] == [
+        segment.model_dump() for segment in expected.segments
+    ]
+    assert done.type == "transcript.text.done"
+    assert done.text == expected.text
+    assert done.usage.type == "tokens"

@@ -118,7 +118,7 @@ speaker segments. Currently, this is supported by
   "segments": [
     {
       "type": "transcript.text.segment",
-      "id": "segment_0",
+      "id": "seg_0",
       "start": 0.0,
       "end": 2.8,
       "text": "Hello.",
@@ -127,6 +127,24 @@ speaker segments. Currently, this is supported by
   ],
   "usage": {"type": "duration", "seconds": 7}
 }
+```
+
+With `stream=true`, `diarized_json` returns server-sent events: one
+`transcript.text.segment` event per segment, then a `transcript.text.done` event
+with the full text and token usage. `OpenMOSS-Team/MOSS-Transcribe-Diarize`
+sends each segment once the model starts the next one; other models send all
+segments when the output is complete. If the output is not a valid diarized
+transcript, the stream ends with an error event after the segments already
+sent.
+
+```text
+data: {"type":"transcript.text.segment","id":"seg_0","start":0.0,"end":2.8,"text":"Hello.","speaker":"S01"}
+
+data: {"type":"transcript.text.segment","id":"seg_1","start":3.1,"end":5.9,"text":"Hi, how are you?","speaker":"S02"}
+
+data: {"type":"transcript.text.done","text":"Hello. Hi, how are you?","usage":{"type":"tokens","input_tokens":96,"output_tokens":31,"total_tokens":127}}
+
+data: [DONE]
 ```
 
 ### Extra Parameters

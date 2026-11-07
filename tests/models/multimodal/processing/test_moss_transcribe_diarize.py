@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
+
 import numpy as np
 import pytest
 
 from vllm.config.speech_to_text import SpeechToTextConfig, SpeechToTextParams
+from vllm.model_executor.models.interfaces import SupportsTranscription
 from vllm.model_executor.models.moss_transcribe_diarize import (
     DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT,
     MossTranscribeDiarizeForConditionalGeneration,
@@ -151,3 +154,59 @@ def test_parse_diarized_transcript_preserves_overlong_timestamp_markers():
     )
 
     assert [segment.text for segment in segments] == [f"Value {marker}"]
+
+
+def _streaming_parser():
+    model_cls = cast(
+        type[SupportsTranscription], MossTranscribeDiarizeForConditionalGeneration
+    )
+    return model_cls.get_streaming_diarized_parser_cls()(model_cls)
+
+
+def test_streaming_parser_sends_a_segment_once_the_next_one_starts():
+    parser = _streaming_parser()
+    deltas = ["[0.48][S01]Good ", "morning[1.66][12", ".26][S0", "2]Ready[13.81]"]
+
+    sent = [
+        [(s.speaker, s.text) for s in parser.process_delta(delta, finished=False)]
+        for delta in deltas
+    ]
+
+    assert sent == [[], [], [], [("S01", "Good morning")]]
+    assert [(s.speaker, s.text) for s in parser.process_delta("", finished=True)] == [
+        ("S02", "Ready")
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "[0.48][S01]Welcome[1.66][12.26][S02]Ready[13.81]",
+        "[0][S01]First speaker[2][1][S02]Second speaker[3]",
+        "[0][S01]The [2024] report is ready.[4]",
+        "[0][S01]Hello[1]\n [2][S02]Hi[3]",
+        "noise [bad][0.1][S01]Hello[0.9]",
+        "[0][S01][1][2][S02]Complete[3]",
+        "[0][S01]a[1..2][S02]b[1]",
+    ],
+)
+def test_streaming_parser_output_does_not_depend_on_delta_boundaries(text):
+    """Streaming one character at a time gives the non-streaming segments."""
+    parser = _streaming_parser()
+
+    segments = [s for char in text for s in parser.process_delta(char, finished=False)]
+    segments += parser.process_delta("", finished=True)
+
+    assert segments == (
+        MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(text)
+    )
+
+
+def test_streaming_parser_fails_closed_after_sending_complete_segments():
+    parser = _streaming_parser()
+
+    sent = parser.process_delta("[0][S01]Complete[1][2][S02]Incomplete", finished=False)
+
+    assert [s.text for s in sent] == ["Complete"]
+    with pytest.raises(ValueError):
+        parser.process_delta("", finished=True)
