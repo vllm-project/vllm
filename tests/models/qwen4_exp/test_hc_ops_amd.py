@@ -15,6 +15,7 @@ from vllm.models.qwen4_exp.amd.ops.hc import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm() or not HAS_TRITON,
@@ -59,7 +60,7 @@ def _ref_hc_combine(
 @pytest.mark.parametrize("norm_size", NORM_SIZES)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 def test_grouped_gemma_rmsnorm(num_tokens: int, norm_size: int) -> None:
-    torch.manual_seed(0)
+    set_random_seed(0)
     x = _randn(num_tokens, HYPER_HIDDEN_SIZE)
     weight = _randn(norm_size)
 
@@ -71,7 +72,7 @@ def test_grouped_gemma_rmsnorm(num_tokens: int, norm_size: int) -> None:
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 def test_hc_silu(num_tokens: int) -> None:
     # lowrank is a column slice of the merged down+inject output, as in the model.
-    torch.manual_seed(0)
+    set_random_seed(0)
     lowrank = _randn(num_tokens, DOWN_N)[:, :LORA_RANK]
 
     actual = hc_silu(lowrank, HC)
@@ -82,7 +83,7 @@ def test_hc_silu(num_tokens: int) -> None:
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 def test_hc_gate_mix(num_tokens: int) -> None:
-    torch.manual_seed(0)
+    set_random_seed(0)
     x = _randn(num_tokens, HYPER_HIDDEN_SIZE)
     gate = _randn(num_tokens, HYPER_HIDDEN_SIZE)
 
@@ -98,7 +99,7 @@ def test_hc_gate_mix(num_tokens: int) -> None:
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 def test_hc_combine(num_tokens: int) -> None:
     # injection is a column slice of the merged down+inject output, as in the model.
-    torch.manual_seed(0)
+    set_random_seed(0)
     block_output = _randn(num_tokens, HIDDEN_SIZE)
     residual = _randn(num_tokens, HYPER_HIDDEN_SIZE)
     injection = _randn(num_tokens, DOWN_N)[:, LORA_RANK : LORA_RANK + HC]
@@ -113,7 +114,7 @@ def test_hc_combine(num_tokens: int) -> None:
 @pytest.mark.parametrize("norm_size", NORM_SIZES)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 def test_hc_combine_norm(num_tokens: int, norm_size: int) -> None:
-    torch.manual_seed(0)
+    set_random_seed(0)
     block_output = _randn(num_tokens, HIDDEN_SIZE)
     residual = _randn(num_tokens, HYPER_HIDDEN_SIZE)
     injection = _randn(num_tokens, DOWN_N)[:, LORA_RANK : LORA_RANK + HC]
