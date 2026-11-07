@@ -1688,7 +1688,7 @@ def _fp16_partial_linear(
     """FP32-accumulated x @ weight.T, times ``scale``, cast to FP16.
 
     torch.mm has no BF16 -> FP16 output, hence the FP32 output and the cast;
-    bias and scale are applied in place to keep one FP32 buffer at the peak.
+    bias and scale are applied in place so only one FP32 buffer is live.
     Values beyond the FP16 range become inf, as in the quantized kernels.
     """
     out = torch.mm(x.reshape(-1, x.shape[-1]), weight.t(), out_dtype=torch.float32)
@@ -1820,24 +1820,29 @@ class RowParallelLinear(LinearBase):
             self.register_parameter("bias", None)
         self.update_param_tp_status()
 
-        # VLLM_TP_FP16_PARTIAL_SUMS: "gemm" (FP16 GEMM output here), "kernel"
-        # (the quantized kernel reads partial_sum_dtype/scale) or None.
-        self._fp16_partials = self._fp16_partials_mode()
-        self.partial_sum_dtype = (
-            torch.float16 if self._fp16_partials == "kernel" else None
-        )
-        shift = envs.VLLM_TP_FP16_PARTIAL_SUMS_SHIFT if self._fp16_partials else 0
+        self._set_fp16_partials(self._fp16_partials_mode())
+
+    def _set_fp16_partials(self, mode: Literal["gemm", "kernel"] | None) -> None:
+        """Partial sums for VLLM_TP_FP16_PARTIAL_SUMS: "gemm" (FP16 GEMM output
+        in ``forward``), "kernel" (the quantized kernel reads partial_sum_dtype
+        and partial_sum_scale) or None (BF16)."""
+        self._fp16_partials = mode
+        self.partial_sum_dtype = torch.float16 if mode == "kernel" else None
+        shift = envs.VLLM_TP_FP16_PARTIAL_SUMS_SHIFT if mode else 0
         self.partial_sum_scale = 2.0**-shift
         self._partial_sum_unscale = 2.0**shift
-        if self._fp16_partials is not None:
-            # An FP32 factor makes the unscale and the BF16 cast one kernel,
-            # computed in FP32 (an FP16 product could overflow). It must be
-            # 1-D: a 0-dim factor would not promote the product to FP32.
-            self.register_buffer(
-                "_partial_sum_unscale_fp32",
-                torch.tensor([self._partial_sum_unscale], dtype=torch.float32),
-                persistent=False,
-            )
+        if mode is None:
+            if hasattr(self, "_partial_sum_unscale_fp32"):
+                del self._partial_sum_unscale_fp32
+            return
+        # An FP32 factor makes the unscale and the BF16 cast one kernel,
+        # computed in FP32 (an FP16 product could overflow). It must be
+        # 1-D: a 0-dim factor would not promote the product to FP32.
+        self.register_buffer(
+            "_partial_sum_unscale_fp32",
+            torch.tensor([self._partial_sum_unscale], dtype=torch.float32),
+            persistent=False,
+        )
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         input_dim = getattr(param, "input_dim", None)
@@ -1892,7 +1897,7 @@ class RowParallelLinear(LinearBase):
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
             if self._fp16_partials is not None:
-                # one BF16 rounding after the sum, as on a single GPU
+                # Round to BF16 once, after the sum.
                 output = torch.mul(
                     output,
                     self._partial_sum_unscale_fp32,
@@ -1915,28 +1920,29 @@ class RowParallelLinear(LinearBase):
             return None
         if not self.reduce_results:
             logger.warning_once(
-                "VLLM_TP_FP16_PARTIAL_SUMS: row-parallel layers whose all-reduce "
-                "is done by the caller (reduce_results=False, e.g. deferred to "
-                "the next norm) keep BF16 partial sums.",
+                "VLLM_TP_FP16_PARTIAL_SUMS: row-parallel layers with "
+                "reduce_results=False keep BF16 partial sums because the caller "
+                "does the all-reduce.",
                 scope="global",
             )
             return None
         if not current_platform.is_cuda() or envs.VLLM_BATCH_INVARIANT:
             logger.warning_once(
-                "VLLM_TP_FP16_PARTIAL_SUMS is ignored: it needs CUDA and "
-                "VLLM_BATCH_INVARIANT unset.",
+                "VLLM_TP_FP16_PARTIAL_SUMS: row-parallel layers keep BF16 partial "
+                "sums because FP16 partial sums need CUDA and "
+                "VLLM_BATCH_INVARIANT=0.",
                 scope="global",
             )
             return None
         mode: Literal["gemm", "kernel"] | None = None
-        stock_gemms = (default_unquantized_gemm, cuda_unquantized_gemm)
         if type(self.quant_method) is UnquantizedLinearMethod:
             gemm = self.quant_method._gemm_impl
-            if gemm in stock_gemms:
+            if gemm in (default_unquantized_gemm, cuda_unquantized_gemm):
                 mode = "gemm"
             impl = getattr(gemm, "__name__", type(gemm).__name__)
         else:
-            # compressed-tensors keeps its scheme on the layer
+            # Kernels are found under different names per quant method;
+            # compressed-tensors keeps its scheme on the layer.
             scheme = getattr(self, "scheme", None) or getattr(
                 self.quant_method, "scheme", None
             )
@@ -1951,23 +1957,23 @@ class RowParallelLinear(LinearBase):
         if mode is None:
             logger.warning_once(
                 "VLLM_TP_FP16_PARTIAL_SUMS: row-parallel layers using %s keep "
-                "BF16 partial sums (no FP16 output on this path).",
+                "BF16 partial sums because it has no FP16 output.",
                 impl,
                 scope="global",
             )
             return None
         logger.info_once(
-            "VLLM_TP_FP16_PARTIAL_SUMS: row-parallel layers using %s can "
-            "all-reduce FP16 partial sums.",
+            "VLLM_TP_FP16_PARTIAL_SUMS: row-parallel layers using %s all-reduce "
+            "FP16 partial sums.",
             impl,
             scope="global",
         )
         pass_config = get_current_vllm_config().compilation_config.pass_config
         if pass_config.fuse_allreduce_rms:
             logger.warning_once(
-                "VLLM_TP_FP16_PARTIAL_SUMS: the FP16 all-reduce does not match "
-                "the fused all-reduce + RMSNorm pattern, so that fusion does "
-                "not apply to layers with FP16 partial sums.",
+                "VLLM_TP_FP16_PARTIAL_SUMS: fuse_allreduce_rms skips layers with "
+                "FP16 partial sums because their all-reduce does not match its "
+                "pattern.",
                 scope="global",
             )
         return mode
@@ -1975,24 +1981,18 @@ class RowParallelLinear(LinearBase):
     def disable_fp16_partial_sums(self, reason: str) -> None:
         """Go back to BF16 partial sums. For wrappers that call
         ``quant_method.apply`` on this layer and all-reduce the result
-        themselves, bypassing the FP16 -> BF16 step in ``forward``."""
+        themselves, bypassing the unscale in ``forward``."""
         if self._fp16_partials is None:
             return
         logger.warning_once(
-            "VLLM_TP_FP16_PARTIAL_SUMS: %s layers keep BF16 partial sums.",
+            "VLLM_TP_FP16_PARTIAL_SUMS: %s layers keep BF16 partial sums because "
+            "they do the all-reduce themselves.",
             reason,
             scope="global",
         )
-        self._fp16_partials = None
-        self.partial_sum_dtype = None
-        self.partial_sum_scale = 1.0
-        self._partial_sum_unscale = 1.0
-        # Prescaled copies stored after loading by the kernels.
-        for name in (
-            "_partial_sum_unscale_fp32",
-            "partial_sum_alpha",
-            "partial_sum_block_scale",
-        ):
+        self._set_fp16_partials(None)
+        # Prescaled copies stored by the kernels after loading.
+        for name in ("partial_sum_alpha", "partial_sum_block_scale"):
             if hasattr(self, name):
                 delattr(self, name)
 
