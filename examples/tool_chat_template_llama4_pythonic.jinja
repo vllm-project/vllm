@@ -81,9 +81,8 @@
             {%- endif %}
                 {{-  tool_call.name + '(' -}}
             {%- for param in tool_call.arguments %}
-                {{- param + '="' -}}
-                {{- "%s" | format(tool_call.arguments[param]) -}}
-                {{- '"' -}}
+                {{- param + '=' -}}
+                {{- tool_call.arguments[param] | tojson -}}
                 {% if not loop.last %}, {% endif %}
             {%- endfor %}
             {{- ')' -}}

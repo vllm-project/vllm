@@ -82,16 +82,7 @@ PYTHONIC_PAIRS = [
             strict=True,
         ),
     ),
-    pytest.param(
-        "tool_chat_template_llama4_pythonic.jinja",
-        "llama4_pythonic",
-        marks=pytest.mark.xfail(
-            reason="https://github.com/vllm-project/vllm/issues/66302 renders "
-            "every argument as a string, so bools and ints round-trip as "
-            "'True' and '3' with no error raised",
-            strict=True,
-        ),
-    ),
+    ("tool_chat_template_llama4_pythonic.jinja", "llama4_pythonic"),
 ]
 
 
@@ -117,7 +108,7 @@ def _jinja_env() -> jinja2.sandbox.ImmutableSandboxedEnvironment:
     return env
 
 
-def _conversation() -> list[dict]:
+def _conversation(arguments: dict) -> list[dict]:
     messages: list[dict] = [
         {"role": "user", "content": "What is the weather in Paris?"},
         {
@@ -129,7 +120,7 @@ def _conversation() -> list[dict]:
                     "type": "function",
                     "function": {
                         "name": "get_weather",
-                        "arguments": json.dumps(ARGUMENTS),
+                        "arguments": json.dumps(arguments),
                     },
                 }
             ],
@@ -139,7 +130,7 @@ def _conversation() -> list[dict]:
     return messages
 
 
-def _model_output(template_name: str) -> str:
+def _model_output(template_name: str, arguments: dict | None = None) -> str:
     """Render the assistant tool call the way the model would have emitted it.
 
     Rendering the full conversation and the same conversation with a generation
@@ -154,7 +145,7 @@ def _model_output(template_name: str) -> str:
         "unk_token": "<unk>",
         "pad_token": "<pad>",
     }
-    messages = _conversation()
+    messages = _conversation(ARGUMENTS if arguments is None else arguments)
     with_call = template.render(
         messages=messages,
         tools=TOOLS,
@@ -200,3 +191,26 @@ def test_rendered_tool_call_is_readable_by_its_parser(
     )
     assert tool_calls[0].function.name == "get_weather"
     assert json.loads(tool_calls[0].function.arguments) == ARGUMENTS
+
+
+def test_string_argument_containing_a_quote_survives_rendering(
+    default_tokenizer: TokenizerLike,
+):
+    """A quote inside a string argument must not break the call it sits in.
+
+    A template that wraps values in literal quote characters without escaping
+    them emits ``note="say "hi""``, which ``ast.parse`` rejects, so the whole
+    call is dropped rather than just that argument.
+    """
+    arguments = {"city": "Paris", "note": 'say "hi"'}
+    model_output = _model_output("tool_chat_template_llama4_pythonic.jinja", arguments)
+    parser = ToolParserManager.get_tool_parser("llama4_pythonic")(default_tokenizer)
+    request = ChatCompletionRequest(model="test-model", messages=[], tools=TOOLS)
+
+    content, tool_calls = run_tool_extraction(parser, model_output, request)
+
+    assert tool_calls, (
+        f"a quote inside a string argument broke the rendered call, which was "
+        f"returned as content instead: {content!r}"
+    )
+    assert json.loads(tool_calls[0].function.arguments) == arguments
