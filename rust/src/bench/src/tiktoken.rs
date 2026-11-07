@@ -142,7 +142,7 @@ impl TiktokenTokenizer {
             // sequences routinely produce with byte-level BPE vocabularies.)
             let bytes: Vec<u8> =
                 self.bpe._decode_native_and_split(ids.to_vec()).flatten().collect();
-            return Ok(String::from_utf8_lossy(&bytes).into_owned());
+            return Ok(String::from_utf8_lossy_owned(bytes));
         }
         let mut bytes = Vec::new();
         for &id in ids {
@@ -150,7 +150,7 @@ impl TiktokenTokenizer {
                 bytes.extend_from_slice(token_bytes);
             }
         }
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        Ok(String::from_utf8_lossy_owned(bytes))
     }
 
     pub fn vocab_size(&self) -> u32 {

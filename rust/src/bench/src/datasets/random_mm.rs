@@ -56,8 +56,7 @@ pub fn parse_limit_mm_per_prompt(s: &str) -> Result<MmLimitPerPrompt> {
 pub fn parse_bucket_config(s: &str) -> Result<Vec<(MmBucketKey, f64)>> {
     let trimmed = s.trim();
     let inner = trimmed
-        .strip_prefix('{')
-        .and_then(|s| s.strip_suffix('}'))
+        .strip_circumfix('{', '}')
         .ok_or_else(|| BenchError::Config("Bucket config must be wrapped in {}".into()))?;
 
     let mut buckets = Vec::new();

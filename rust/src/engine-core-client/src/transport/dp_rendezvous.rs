@@ -22,8 +22,7 @@ impl DataParallelRendezvous {
     pub(super) fn allocate(host: &str, data_parallel_size: usize) -> Result<Self> {
         // ZMQ endpoints spell IPv6 hosts in brackets; sockets and torch take
         // the bare address.
-        let master_ip =
-            host.strip_prefix('[').and_then(|host| host.strip_suffix(']')).unwrap_or(host);
+        let master_ip = host.strip_circumfix('[', ']').unwrap_or(host);
 
         // Keep every listener bound until all ports are read so that none
         // repeats.

@@ -433,7 +433,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
 
-    use futures::{Stream, StreamExt as _, stream};
+    use futures::{Stream, stream};
     use vllm_engine_core_client::AbortCause;
     use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
     use vllm_llm::GenerateOutput;
