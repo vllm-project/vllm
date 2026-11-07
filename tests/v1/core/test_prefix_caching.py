@@ -6434,6 +6434,38 @@ def test_swa_reachable_block_mask_final_partial_segment():
     assert reachable_blocks(250, use_eagle=True) == {243, 248, 249}
 
 
+def test_swa_reachable_block_mask_eagle_periodic_tail_reaches_sibling():
+    """Under EAGLE, a sibling that diverges right after a periodic boundary hits
+    one alignment unit lower; that run must be cached too."""
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    block_size = 16
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=3 * block_size,  # need = 3, or 4 with the EAGLE peek
+    )
+
+    def retained(use_eagle: bool) -> set[int]:
+        m = SlidingWindowManager.reachable_block_mask(
+            start_block=0,
+            end_block=24,
+            alignment_tokens=2 * block_size,
+            kv_cache_spec=spec,
+            use_eagle=use_eagle,
+            retention_interval=8 * block_size,
+        )
+        assert m is not None
+        return {i for i, v in enumerate(m) if v}
+
+    # Boundary at block 8: the writer's run is 5..8 (peek 8). A sibling's hit
+    # lands at block 6, so it needs 3..6 (peek 6).
+    assert retained(use_eagle=True) == {*range(3, 9), *range(11, 17), *range(19, 24)}
+    assert retained(use_eagle=False) == {5, 6, 7, 13, 14, 15, 21, 22, 23}
+
+
 def test_swa_reachable_block_mask_pins_shared_prefix():
     """SWA analog of the Mamba pin: the shared-prefix junction must keep the
     ``need``-block sliding-window tail ending on that boundary (not a single

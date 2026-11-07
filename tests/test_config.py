@@ -4170,6 +4170,19 @@ def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
     )
 
 
+def test_gemma4_mtp_needs_no_eagle_block_drop():
+    # The Gemma-4 MTP drafter reads the target's KV and writes none of its own.
+    speculative_config = SpeculativeConfig(method="ngram", num_speculative_tokens=3)
+    speculative_config.method = "mtp"
+    speculative_config.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(model_type="gemma4_mtp")
+    )
+
+    assert speculative_config.use_eagle()
+    assert not speculative_config.needs_eagle_block_drop()
+    assert not speculative_config.use_eagle_block_drop()
+
+
 def test_draft_sample_method_gumbel_is_rejected():
     with pytest.raises(ValidationError):
         SpeculativeConfig(

@@ -1813,9 +1813,12 @@ class SpeculativeConfig:
 
         EAGLE-style drafters build a position's draft KV from its hidden state
         and the next token. DFlash/DSpark build it from the target hidden state
-        alone, so only EAGLE/EAGLE3/MTP require the trailing-block drop.
+        alone, and the Gemma-4 MTP drafter writes no KV (it reads the target's),
+        so only the remaining EAGLE/EAGLE3/MTP drafters require the drop.
         """
-        return self.use_eagle() and not (self.use_dflash() or self.use_dspark())
+        return self.use_eagle() and not (
+            self.use_dflash() or self.use_dspark() or self.use_gemma4_mtp()
+        )
 
     def use_eagle_block_drop(self) -> bool:
         """Whether the volatile trailing prefix-cache block should be dropped."""

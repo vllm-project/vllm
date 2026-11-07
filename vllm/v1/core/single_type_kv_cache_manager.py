@@ -1119,11 +1119,17 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         )
         if segment_tokens is not None:
             per_segment = segment_tokens // block_size
-            if need >= per_segment:
+            # Under EAGLE, a sibling that diverges right after a segment boundary
+            # cannot use the peek block past it, so its hit lands one alignment
+            # unit lower. Keep that run too, as the shared-prefix junction does.
+            tail = need
+            if use_eagle and segment_tokens > alignment_tokens:
+                tail += alignment_tokens // block_size
+            if tail >= per_segment:
                 # Every block is reachable; cache them all.
                 return None
             for i in range(start_block, end_block):
-                if i >= shift and (i - shift) % per_segment >= per_segment - need:
+                if i >= shift and (i - shift) % per_segment >= per_segment - tail:
                     mask[i - start_block] = True
 
             if final_segment_end_block is not None and not use_eagle:
