@@ -81,6 +81,7 @@ _TEXT_GENERATION_MODELS = {
     "BailingMoeV2_5ForCausalLM": ("bailing_moe_linear", "BailingMoeV25ForCausalLM"),
     "BailingMoeV3ForCausalLM": ("bailing_moe_v3", "BailingMoeV3ForCausalLM"),
     "BeamForCausalLM": ("vllm.models.beam", "BeamForCausalLM"),
+    "BitNetForCausalLM": ("bitnet", "BitNetForCausalLM"),
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
