@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+import regex as re
 
 from tests.tool_parsers.utils import (
     run_tool_extraction,
     run_tool_extraction_streaming,
 )
+from tests.utils import VLLM_PATH
 from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
@@ -231,3 +234,57 @@ def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLik
         assert content == fake_problematic_input
         assert len(tool_calls) == 0
         mock_regex.match.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "template",
+    ["tool_chat_template_llama3.2_pythonic.jinja", "tool_chat_template_toolace.jinja"],
+)
+def test_template_renders_tool_call_history_as_python(
+    template: str, default_tokenizer: TokenizerLike
+):
+    """Past tool calls replayed by the template must parse back unchanged."""
+    arguments = {
+        "city": 'Martha\'s "Vineyard"\n',
+        "metric": True,
+        "verbose": False,
+        "limit": 3,
+        "unit": None,
+        "tags": ["a", "b"],
+    }
+    messages = [
+        {"role": "user", "content": "What is the weather?"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": arguments,
+                    },
+                }
+            ],
+        },
+    ]
+    prompt = default_tokenizer.apply_chat_template(
+        messages,
+        chat_template=(VLLM_PATH / "examples" / template).read_text(),
+        tokenize=False,
+    )
+    model_output = re.search(
+        r"assistant<\|end_header_id\|>\n\n(.*?)<\|eot_id\|>", prompt, re.DOTALL
+    ).group(1)
+
+    assert model_output == (
+        """[get_weather(city="Martha's \\"Vineyard\\"\\n", metric=True, """
+        """verbose=False, limit=3, unit=None, tags=["a", "b"])]"""
+    )
+    tool_parser = ToolParserManager.get_tool_parser("pythonic")(default_tokenizer)
+    content, tool_calls = run_tool_extraction(tool_parser, model_output)
+    assert content is None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function.name == "get_weather"
+    assert json.loads(tool_calls[0].function.arguments) == arguments
