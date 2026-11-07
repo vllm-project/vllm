@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Which rows the PP sampled-token broadcast must carry."""
+"""PP helpers of the V2 model runner: which rows the sampled-token broadcast
+must carry, and which received-tensor copies lose precision."""
 
 from unittest.mock import Mock
 
 import numpy as np
+import pytest
+import torch
 
 from vllm.v1.worker.gpu import pp_utils
 
@@ -166,3 +169,30 @@ def test_finishing_prefill_row_does_not_drop_a_sibling_row():
 
     assert mask is not None
     assert mask.tolist() == [False, True]
+
+
+@pytest.mark.parametrize(
+    ("received_dtype", "buffer_dtype", "lossy"),
+    [
+        # An FP32 residual stream received into a model-dtype buffer.
+        (torch.float32, torch.bfloat16, True),
+        # Same width, but BF16 has fewer mantissa bits and FP16 less range.
+        (torch.float16, torch.bfloat16, True),
+        (torch.bfloat16, torch.float16, True),
+        (torch.bfloat16, torch.bfloat16, False),
+        (torch.bfloat16, torch.float32, False),
+        (torch.float8_e4m3fn, torch.bfloat16, False),
+    ],
+)
+def test_warns_only_when_the_buffer_narrows(
+    caplog_vllm, received_dtype, buffer_dtype, lossy
+):
+    """A stage boundary may widen a received tensor, but not round it silently."""
+    received = {"hidden_states": torch.zeros(4, 8, dtype=received_dtype)}
+    buffers = {"hidden_states": torch.zeros(4, 8, dtype=buffer_dtype)}
+
+    pp_utils.warn_on_lossy_receive(received, buffers)
+
+    warnings = [r.getMessage() for r in caplog_vllm.records if r.levelname == "WARNING"]
+    assert len(warnings) == int(lossy)
+    assert all("'hidden_states'" in w for w in warnings)

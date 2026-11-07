@@ -10,10 +10,13 @@ import torch
 
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.input_batch import InputBatch
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -33,6 +36,27 @@ class PendingRecv:
     # detect requests aborted since then.
     gen_at_receive_np: np.ndarray  # [num_reqs]
     draft_tokens: torch.Tensor | None = None  # [num_reqs, num_speculative_steps]
+
+
+def warn_on_lossy_receive(
+    received: dict[str, torch.Tensor], buffers: dict[str, torch.Tensor]
+) -> None:
+    """Warn when a persistent buffer has less float precision or range than the
+    tensor received into it, since the per-step copy rounds silently."""
+    for name, buffer in buffers.items():
+        src, dst = received[name].dtype, buffer.dtype
+        if src == dst or not (src.is_floating_point and dst.is_floating_point):
+            continue
+        src_info, dst_info = torch.finfo(src), torch.finfo(dst)
+        if dst_info.eps > src_info.eps or dst_info.max < src_info.max:
+            logger.warning(
+                "PP intermediate tensor %r arrives as %s but its buffer is %s, so "
+                "it loses precision at every stage boundary. Declare the dtype in "
+                "the model's make_empty_intermediate_tensors.",
+                name,
+                src,
+                dst,
+            )
 
 
 def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
@@ -97,9 +121,17 @@ class PPHandler:
         # Whether sampled tokens were broadcast this step.
         self.sampled_tokens_broadcast = False
         self.aux_hidden_state_relay_keys: tuple[str, ...] = ()
+        self.checked_received_dtypes = False
 
     def on_req_idx_freed(self, req_idx: int) -> None:
         self.req_idx_gen_np[req_idx] += 1
+
+    def check_received_dtypes(
+        self, received: dict[str, torch.Tensor], buffers: dict[str, torch.Tensor]
+    ) -> None:
+        if not self.checked_received_dtypes:
+            warn_on_lossy_receive(received, buffers)
+            self.checked_received_dtypes = True
 
     def _sample_len(self, input_batch: InputBatch) -> int:
         # Width of the sampled-token broadcast. Must be the same on all ranks.
