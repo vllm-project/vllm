@@ -2049,6 +2049,37 @@ def test_video_loader_frames_sampling(
     assert frames.shape[0] == expected_num_frames
 
 
+@pytest.mark.parametrize("sampling_fps", [1, 2])
+def test_molmo2_fps_mode_samples_ntsc_video_like_integer_fps(
+    tmp_path: Path, sampling_fps: int
+):
+    """An NTSC clip (30000/1001 fps) must be sampled like the same 30 fps clip.
+
+    Truncating 29.97 to 29 (a prime) made fps-mode sampling raise for
+    ``sampling_fps=2`` and fall back to ~1 fps for ``sampling_fps=1``.
+    """
+    image_path = get_vllm_public_assets(
+        filename="stop_sign.jpg", s3_prefix="vision_model_images"
+    )
+    loader = VIDEO_LOADER_REGISTRY.load("molmo2")
+
+    sampled = {}
+    for name, fps in (("integer", 30.0), ("ntsc", 30000 / 1001)):
+        video_path = tmp_path / f"{name}.mp4"
+        create_video_from_image(
+            str(image_path), str(video_path), num_frames=120, fps=fps
+        )
+        frames, metadata = loader.load_bytes(
+            video_path.read_bytes(),
+            num_frames=32,
+            frame_sample_mode="fps",
+            sampling_fps=sampling_fps,
+        )
+        sampled[name] = (frames.shape[0], list(metadata["frames_indices"]))
+
+    assert sampled["ntsc"] == sampled["integer"]
+
+
 # ============================================================================
 # GLM-4.6V Dynamic FPS Threshold Tests
 # ============================================================================
