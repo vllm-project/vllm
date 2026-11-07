@@ -13,6 +13,7 @@ import random
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from functools import cached_property, partial
 from typing import Any, ClassVar, TypeVar
@@ -191,6 +192,48 @@ class ReadStrategy(ABC):
         """Like read, with questions sharing canvases. Only if joint_reads."""
         raise NotImplementedError
 
+    async def read_input(
+        self,
+        questions: list[Question],
+        instructions: str | None,
+        state: str | list[dict[str, Any]],
+        *,
+        joint: bool = False,
+        **kwargs: Any,
+    ) -> list[QuestionRead]:
+        """Adapt ordered API input only when the model's protocol supports it."""
+        read = self.read_joint if joint else self.read
+        if isinstance(state, str):
+            return await read(questions, instructions, state, **kwargs)
+        if (
+            "image" not in self.modalities
+            or not self.context.engine_client.model_config.is_multimodal_model
+        ):
+            raise StructuredDecisionError("This model does not support image input")
+        images, texts = [], []
+        has_text = False
+        for message in state:
+            message_text = []
+            for part in message["content"]:
+                if part["type"] == "image_url":
+                    if has_text:
+                        raise StructuredDecisionError(
+                            "This strategy requires images before text; "
+                            "interleaved input is unsupported"
+                        )
+                    images.append(part["image_url"]["url"])
+                else:
+                    message_text.append(part["text"])
+                    has_text = has_text or bool(part["text"])
+            texts.append("\n".join(message_text))
+        return await read(
+            questions,
+            instructions,
+            "\n\n".join(texts),
+            media={"image": images},
+            **kwargs,
+        )
+
     @abstractmethod
     async def read(
         self,
@@ -368,6 +411,26 @@ class NextTokenStrategy(ReadStrategy):
         ).token_ids
         return engine_input, list(prompt_ids or [])
 
+    async def read_input(
+        self,
+        questions: list[Question],
+        instructions: str | None,
+        state: str | list[dict[str, Any]],
+        *,
+        joint: bool = False,
+        **kwargs: Any,
+    ) -> list[QuestionRead]:
+        if joint:
+            return await ReadStrategy.read_input(
+                self, questions, instructions, state, joint=True, **kwargs
+            )
+        if (
+            not isinstance(state, str)
+            and not self.context.engine_client.model_config.is_multimodal_model
+        ):
+            raise StructuredDecisionError("This model does not support image input")
+        return await self.read(questions, instructions, state, **kwargs)
+
     async def _warm_shared_prefix(
         self,
         prompts: Sequence[Sequence[int]],
@@ -409,17 +472,20 @@ class NextTokenStrategy(ReadStrategy):
     async def _prompts(
         self,
         read_request: ReadPromptRequest,
-        contents: list[str],
+        contents: Sequence[str | list[dict[str, Any]]],
         instructions: str | None,
         image_parts: list[dict[str, Any]],
     ) -> list[tuple[EngineInput, list[int]]]:
         """Each content rendered as a chat prompt, with the prompt's ids."""
         prompts = []
         for text in contents:
-            content: Any = text
-            if image_parts:
-                content = [*image_parts, {"type": "text", "text": text}]
-            messages = [{"role": "user", "content": content}]
+            if isinstance(text, str):
+                content: Any = text
+                if image_parts:
+                    content = [*image_parts, {"type": "text", "text": text}]
+                messages = [{"role": "user", "content": content}]
+            else:
+                messages = text
             if instructions:
                 messages.insert(0, {"role": "system", "content": instructions})
             engine_input, prompt_ids = await self._render(read_request, messages)
@@ -459,7 +525,7 @@ class NextTokenStrategy(ReadStrategy):
         self,
         questions: list[Question],
         instructions: str | None,
-        state: str,
+        state: str | list[dict[str, Any]],
         *,
         request_id: str,
         chat_template_kwargs: dict[str, Any] | None,
@@ -473,7 +539,16 @@ class NextTokenStrategy(ReadStrategy):
         read_request = self._read_request(chat_template_kwargs, cache_salt)
         image_parts = await self._image_parts((media or {}).get("image", ()))
 
-        contents = [self._content(state, q) for q in questions]
+        contents: list[str | list[dict[str, Any]]] = []
+        for q in questions:
+            if isinstance(state, str):
+                contents.append(self._content(state, q))
+            else:
+                messages = deepcopy(state)
+                messages[-1]["content"].append(
+                    {"type": "text", "text": self._content("", q)}
+                )
+                contents.append(messages)
         rendered = await self._prompts(
             read_request, contents, instructions, image_parts
         )
@@ -486,14 +561,16 @@ class NextTokenStrategy(ReadStrategy):
                 self._sampling_params([i for ids in slots[-1] for i in ids], prompt_ids)
             )
 
-        await self._warm_shared_prefix(
-            [prompt_ids for _, prompt_ids in rendered],
-            request_id,
-            lora_request=lora_request,
-            priority=priority,
-            cache_salt=cache_salt,
-            trace_headers=trace_headers,
-        )
+        # Token-only warmup cannot carry image data or expanded placeholders.
+        if isinstance(state, str) and not image_parts:
+            await self._warm_shared_prefix(
+                [prompt_ids for _, prompt_ids in rendered],
+                request_id,
+                lora_request=lora_request,
+                priority=priority,
+                cache_salt=cache_salt,
+                trace_headers=trace_headers,
+            )
         label_reads = await next_token_label_reads(
             ctx.engine_client,
             engine_inputs,
@@ -763,6 +840,18 @@ class LiquidStrategy(NextTokenStrategy):
 
     # runner.py bounds every picture at 1024 x 1024 pixels before the processor.
     max_image_pixels = 1024 * 1024
+
+    async def read_input(
+        self,
+        questions: list[Question],
+        instructions: str | None,
+        state: str | list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> list[QuestionRead]:
+        # The checkpoint requires an image prefix followed by its fixed text prompt.
+        return await ReadStrategy.read_input(
+            self, questions, instructions, state, **kwargs
+        )
 
     def render_state(self, state: Any) -> str:
         if state is None:
