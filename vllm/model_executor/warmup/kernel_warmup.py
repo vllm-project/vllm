@@ -44,6 +44,7 @@ from vllm.model_executor.warmup.replayssm_warmup import (
     replayssm_autotune_warmup,
     replayssm_lifecycle_warmup,
 )
+from vllm.model_executor.warmup.triton_autotune import triton_autotune
 from vllm.model_executor.warmup.watermark_sample_warmup import (
     watermark_sample_warmup,
 )
@@ -331,6 +332,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if process_local_only:
         return
 
+    triton_autotune(worker)
     if current_platform.is_rocm():
         from vllm.model_executor.warmup.rocm_segmented_attn_autotune_warmup import (
             rocm_segmented_attn_autotune_warmup,
