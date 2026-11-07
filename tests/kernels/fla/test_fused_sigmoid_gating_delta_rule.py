@@ -197,3 +197,75 @@ def test_fused_sigmoid_gating_delta_rule_update_spec(
     torch.testing.assert_close(
         last_recurrent_state, last_recurrent_state_ref, atol=1e-2, rtol=1e-2
     )
+
+
+@pytest.mark.parametrize("num_reqs", [1, 5])
+@pytest.mark.parametrize("num_speculative_tokens", [1, 3, 7])
+def test_fused_sigmoid_gating_delta_rule_update_defer_spec_state(
+    num_reqs: int,
+    num_speculative_tokens: int,
+) -> None:
+    """Deferred spec states give the same outputs, step after step, as states
+    stored after every token."""
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+    num_k_heads, num_v_heads, head_dim = 16, 32, 128
+    max_query_len = num_speculative_tokens + 1
+    A_log = torch.randn(num_v_heads) * 0.5
+    dt_bias = torch.randn(num_v_heads)
+    num_entries = num_reqs * max_query_len
+    ssm_state = 0.1 * torch.randn(
+        num_entries + 1, num_v_heads, head_dim, head_dim, dtype=torch.float32
+    )
+    ssm_state_defer = ssm_state.clone()
+    state_indices = (torch.randperm(num_entries, dtype=torch.int32) + 1).view(
+        num_reqs, max_query_len
+    )
+    query_lens = [1] * num_reqs
+    for step in range(8):
+        # Accept a prefix of the previous step's tokens, then run a new step
+        # of random length.
+        num_accepted_tokens = torch.tensor(
+            [int(torch.randint(1, n + 1, ())) for n in query_lens],
+            dtype=torch.int32,
+        )
+        if step == 0:
+            num_accepted_tokens.fill_(1)
+        query_lens = torch.randint(1, max_query_len + 1, (num_reqs,)).tolist()
+        num_tokens = sum(query_lens)
+        cu_seqlens = torch.tensor([0] + query_lens).cumsum(0).to(torch.int32)
+        q = torch.randn(1, num_tokens, num_k_heads, head_dim, dtype=torch.bfloat16)
+        k = torch.randn(1, num_tokens, num_k_heads, head_dim, dtype=torch.bfloat16)
+        v = torch.randn(1, num_tokens, num_v_heads, head_dim, dtype=torch.bfloat16)
+        a = torch.randn(num_tokens, num_v_heads, dtype=torch.bfloat16)
+        b = torch.randn(num_tokens, num_v_heads, dtype=torch.bfloat16)
+        outs = [
+            fused_sigmoid_gating_delta_rule_update(
+                A_log=A_log,
+                a=a,
+                b=b,
+                dt_bias=dt_bias,
+                q=q,
+                k=k,
+                v=v,
+                initial_state=state,
+                inplace_final_state=True,
+                cu_seqlens=cu_seqlens,
+                ssm_state_indices=state_indices,
+                num_accepted_tokens=num_accepted_tokens,
+                use_qk_l2norm_in_kernel=True,
+                defer_spec_state=defer,
+            )[0]
+            for state, defer in ((ssm_state, False), (ssm_state_defer, True))
+        ]
+        # The modes differ only in launch configuration, hence in the order
+        # of their reductions.
+        torch.testing.assert_close(outs[1], outs[0], atol=2e-3, rtol=2e-3)
+        # Slot 0 holds the state after the first token in both modes.
+        first_slots = state_indices[:, 0].long()
+        torch.testing.assert_close(
+            ssm_state_defer[first_slots],
+            ssm_state[first_slots],
+            atol=1e-4,
+            rtol=1e-4,
+        )
