@@ -32,7 +32,16 @@ logger = init_logger(__name__)
 # Rows of the executor's fused all-reduce + mHC mailbox: the largest FULL
 # decode graph at 64 requests x 6 DSpark tokens.
 FUSED_MHC_MAX_ROWS = 384
-# Rows of the low-batch GEMMs: one DSpark verification step of up to 8 rows
+AMPERE_MAX_ROWS = 192
+
+
+def max_rows() -> int:
+    if current_platform.is_device_capability(80):
+        return AMPERE_MAX_ROWS
+    return FUSED_MHC_MAX_ROWS
+
+
+LOW_BATCH_MAX_ROWS = 8
 # (6 at one request).
 LOW_BATCH_MAX_ROWS = 8
 # Rows up to which the attention projections above LOW_BATCH_MAX_ROWS keep the
@@ -81,29 +90,42 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
     spec = vllm_config.speculative_config
     compilation = vllm_config.compilation_config
     cudagraph_mode = compilation.cudagraph_mode
+    is_sm80 = current_platform.is_device_capability(80)
+    is_sm103 = current_platform.is_device_capability(103)
     requirements = {
-        "a GB300 (SM103) GPU": current_platform.is_device_capability(103),
-        "tensor parallel size 4 without pipeline, data, expert or context "
-        "parallelism or micro-batching": (
-            parallel.tensor_parallel_size == 4
-            and parallel.pipeline_parallel_size == 1
-            and parallel.data_parallel_size == 1
-            and not parallel.enable_expert_parallel
-            and parallel.decode_context_parallel_size == 1
-            and parallel.prefill_context_parallel_size == 1
-            and not parallel.use_ubatching
+        "a GB300 (SM103) or Ampere (SM80) GPU": is_sm103 or is_sm80,
+        "tensor parallel size 8 or 4": (
+            parallel.tensor_parallel_size in (4, 8)
+            if is_sm80
+            else (
+                parallel.tensor_parallel_size == 4
+                and parallel.pipeline_parallel_size == 1
+                and parallel.data_parallel_size == 1
+                and not parallel.enable_expert_parallel
+                and parallel.decode_context_parallel_size == 1
+                and parallel.prefill_context_parallel_size == 1
+                and not parallel.use_ubatching
+            )
         ),
         "DSpark speculative decoding without adaptive verification": (
             spec is not None
             and spec.method == "dspark"
             and not spec.enable_adaptive_verification
         ),
-        "the FLASHINFER_MLA_SPARSE_DSV41 attention backend, an fp8 KV cache "
-        "and the MXFP4 indexer with sparse logits": (
-            attention.backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV41
-            and vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3")
-            and attention.indexer_kv_dtype == "mxfp4"
-            and attention.indexer_sparse_logits
+        "valid sparse MLA attention backend and fp8 KV cache": (
+            (
+                attention.backend
+                in (None, AttentionBackendEnum.TRITON_MLA_SPARSE_DSV41)
+                and vllm_config.cache_config.cache_dtype
+                in ("auto", "fp8", "fp8_ds_mla")
+            )
+            if is_sm80
+            else (
+                attention.backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV41
+                and vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3")
+                and attention.indexer_kv_dtype == "mxfp4"
+                and attention.indexer_sparse_logits
+            )
         ),
         "FULL CUDA graphs for decode batches only (FULL_AND_PIECEWISE or "
         "FULL_DECODE_ONLY)": (

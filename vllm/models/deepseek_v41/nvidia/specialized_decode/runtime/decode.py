@@ -258,6 +258,12 @@ class SpecializedDecode:
         cls, backbone: "DeepseekV4Model", config: DecodeConfig, lm_head: nn.Module
     ) -> "SpecializedDecode":
         """The executor of the target model's backbone."""
+        from vllm.platforms import current_platform
+
+        if current_platform.is_device_capability(80):
+            from ..ampere.decode import AmpereSpecializedDecode
+
+            return AmpereSpecializedDecode(backbone, config, lm_head)
         return cls(backbone, config, lm_head)
 
     def plan(
