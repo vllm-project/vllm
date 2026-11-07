@@ -523,13 +523,12 @@ impl ChatLlm {
             _ if !request.tool_context.effective_tools.is_empty() => Some("tools"),
             _ => None,
         };
-        let (text_request, output_processors, prompt_text) = self
-            .processor
-            .prepare_for_outputs(
-                request,
-                self.text.request_processor(),
-                params.beam_width.get() as usize,
-            )
+        let PreparedChatRequest {
+            text_request,
+            output_processors,
+            prompt_text,
+        } = (self.processor)
+            .prepare(request, params.beam_width, self.text.request_processor())
             .await?;
         // The engine cannot resume a tool output grammar from a beam's
         // tokens. TODO: enforce it per beam with a frontend grammar matcher, as

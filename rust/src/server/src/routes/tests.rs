@@ -12051,7 +12051,7 @@ mod beam_search {
                         }
                         let request: EngineCoreRequest =
                             rmp_serde::from_slice(&message[1]).expect("decode request");
-                        let prompt = request.prompt_token_ids.clone().expect("prompt token ids");
+                        let prompt = decode_prompt_token_ids(&request).expect("prompt token ids");
                         let prompt_len = *prompt_len.get_or_insert(prompt.len());
                         let generated = String::from_utf8(
                             prompt[prompt_len..].iter().map(|&id| id as u8).collect(),
@@ -12117,10 +12117,10 @@ mod beam_search {
                 EngineEvent::Abort(_) => None,
             })
             .map(|request| {
-                let prompt = request.prompt_token_ids.expect("prompt token ids");
+                let prompt = decode_prompt_token_ids(&request).expect("prompt token ids");
                 let params = request.sampling_params.expect("sampling params");
                 (
-                    prompt[prompt_len..].iter().map(|&id| id as u8 as char).collect(),
+                    prompt[prompt_len..].iter().map(|&id| id as u8 as char).collect::<String>(),
                     params.max_tokens,
                     params.logprobs,
                     request
@@ -12480,16 +12480,10 @@ mod beam_search {
                 &completion,
                 json!({"response_format": {"type": "json_object"}}),
             ),
-            ("/v1/completions", &json!({"prompt": "hi"}), json!({"n": 2})),
             (
                 "/v1/completions",
                 &json!({"prompt": "hi"}),
                 json!({"length_penalty": 2.0}),
-            ),
-            (
-                "/v1/chat/completions",
-                &json!({"messages": [{"role": "user", "content": "hi"}]}),
-                json!({"n": 2}),
             ),
         ] {
             let mut body = base.clone();
@@ -12505,7 +12499,7 @@ mod beam_search {
             {"stream":true} -> null "Streaming is not currently supported with beam search"
             {"echo":true,"logprobs":1} -> "echo" "`echo` with `logprobs` is not supported with beam search because beam search does not compute prompt logprobs."
             {"echo":true,"max_tokens":0} -> "max_tokens" "max_tokens=0 is not supported with beam search."
-            {"n":0} -> null "beam_width must be at least 1, got 0."
+            {"n":0} -> "n" "n must be at least 1, got 0."
             {"top_p":0.5} -> "top_p" "`top_p` is not supported with beam search."
             {"stop":["x"]} -> "stop" "`stop` is not supported with beam search."
             {"allowed_token_ids":[1]} -> "allowed_token_ids" "`allowed_token_ids` is not supported with beam search."
@@ -12518,9 +12512,7 @@ mod beam_search {
             {"seed":1} -> "seed" "`seed` is not supported with beam search."
             {"response_format":{"type":"json_object"}} -> "response_format" "`response_format` is not supported with beam search."
             {"response_format":{"type":"json_object"}} -> "response_format" "`response_format` is not supported with beam search."
-            {"n":2} -> "n" "Only n=1 is supported without use_beam_search."
-            {"length_penalty":2.0} -> "length_penalty" "length_penalty is only supported with use_beam_search."
-            {"n":2} -> "n" "Only n=1 is supported without use_beam_search.""#]].assert_eq(&errors.join("\n"));
+            {"length_penalty":2.0} -> "length_penalty" "length_penalty is only supported with use_beam_search.""#]].assert_eq(&errors.join("\n"));
         engine_task.abort_and_join().await;
     }
 

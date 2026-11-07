@@ -220,34 +220,23 @@ async fn beam_search_chat_completion(
     let beams = (state.chat.beam_search(prepared.chat_request, params))
         .await
         .map_err(|error| chat_submit_error("failed to run beam search", error))?;
-    let mut merged: Option<ChatCompletionResponse> = None;
-    for beam in beams {
-        let response = collect_chat_completion(
+    if beams.is_empty() {
+        bail_server_error!("beam search returned no beams");
+    }
+    let responses = future::try_join_all(beams.into_iter().map(|beam| {
+        collect_chat_completion(
             beam,
             prepared.request_id.clone(),
             prepared.response_model.clone(),
             created,
+            state.system_fingerprint.clone(),
             state.api_server_options,
             count_reasoning_tokens,
             prepared.options.clone(),
         )
-        .await?;
-        match &mut merged {
-            None => merged = Some(response),
-            Some(merged) => {
-                if let Some(usage) = &mut merged.usage
-                    && let Some(choice_usage) = &response.usage
-                {
-                    usage.add_choice(choice_usage);
-                }
-                merged.choices.extend(response.choices);
-            }
-        }
-    }
-    let mut merged = merged.ok_or_else(|| server_error!("beam search returned no beams"))?;
-    for (index, choice) in (0..).zip(&mut merged.choices) {
-        choice.index = index;
-    }
+    }))
+    .await?;
+    let mut merged = merge_choice_responses(responses);
     // A search spans many engine requests; Python reports no metrics either.
     merged.metrics = None;
     Ok(merged)
