@@ -450,6 +450,37 @@ def test_ipc_cache_modelopt_fp8(vllm_runner, tmp_path, monkeypatch):
     run_cold_start_and_warm_restart(vllm_runner, MODELOPT_FP8_CASE, tmp_path)
 
 
+COMPRESSED_BLOCK_FP8_CASE = ModelCase(
+    model="RedHatAI/Qwen3-0.6B-FP8-BLOCK",
+    prompts=["The capital of France is", "Hello, my name is"],
+    llm_kwargs=dict(
+        dtype="bfloat16",
+        revision="5def00c475640c0527e3a7067b1a26b94decefb5",
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        max_model_len=512,
+        attention_config={"backend": "TRITON_ATTN"},
+        kernel_config={"linear_backend": "cutlass"},
+    ),
+    daemon_args=[
+        "--revision",
+        "5def00c475640c0527e3a7067b1a26b94decefb5",
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "cutlass"}',
+    ],
+)
+
+
+def test_ipc_cache_compressed_block_fp8(vllm_runner, tmp_path, monkeypatch):
+    """Reuse serialized FP8 weights without transposing or scaling them again."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, COMPRESSED_BLOCK_FP8_CASE, tmp_path)
+
+
 NVFP4_CASE = ModelCase(
     model="nvidia/Qwen3-30B-A3B-NVFP4",
     prompts=["The capital of France is", "Hello, my name is"],
