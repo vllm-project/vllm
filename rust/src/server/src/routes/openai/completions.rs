@@ -49,6 +49,7 @@ use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
+use crate::utils::npy_base64;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
 
 pub(crate) fn lower_completion_request(
@@ -329,7 +330,7 @@ async fn collect_completion(
             prompt_logprobs,
             token_ids: return_token_ids.then(|| collected.token_ids.clone()),
             prompt_token_ids: return_token_ids.then(|| collected.prompt_token_ids.to_vec()),
-            routed_experts: None,
+            routed_experts: collected.routed_experts.as_ref().map(npy_base64).transpose()?,
             weight_versions: collected.weight_versions.filter(|_| return_weight_versions),
         }],
         service_tier: None,
@@ -878,6 +879,7 @@ mod tests {
                             last_token_ts: 10.5,
                         },
                         weight_versions: None,
+                        routed_experts: None,
                     }),
                 )),
             ])
@@ -1016,6 +1018,7 @@ mod tests {
                         last_token_ts: 11.0,
                     },
                     weight_versions: None,
+                    routed_experts: None,
                 }),
             )),
         ]);
@@ -1172,6 +1175,7 @@ mod tests {
                         sampling_mask: None,
                         spec_decode_metrics: None,
                         weight_versions: None,
+                        routed_experts: None,
                         timestamps: vllm_llm::RequestTimestamps::default(),
                     }),
                 ))
@@ -1229,6 +1233,7 @@ mod tests {
                     sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1293,6 +1298,7 @@ mod tests {
                     sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1361,6 +1367,7 @@ mod tests {
                     sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1418,6 +1425,7 @@ mod tests {
                     sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1480,6 +1488,7 @@ mod tests {
                     sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1561,6 +1570,7 @@ mod tests {
                     sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1640,6 +1650,7 @@ mod tests {
                     sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
