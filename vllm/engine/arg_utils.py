@@ -713,6 +713,7 @@ class EngineArgs:
 
     enable_chunked_prefill: bool | None = None
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
+    encoder_cache_size: int | None = None
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
@@ -1815,6 +1816,9 @@ class EngineArgs:
             "--disable-chunked-mm-input", **scheduler_kwargs["disable_chunked_mm_input"]
         )
         scheduler_group.add_argument(
+            "--encoder-cache-size", **scheduler_kwargs["encoder_cache_size"]
+        )
+        scheduler_group.add_argument(
             "--scheduler-cls", **scheduler_kwargs["scheduler_cls"]
         )
         scheduler_group.add_argument(
@@ -2701,6 +2705,7 @@ class EngineArgs:
             max_model_len=model_config.max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
+            encoder_cache_size=self.encoder_cache_size,
             is_multimodal_model=model_config.is_multimodal_model,
             is_encoder_decoder=model_config.is_encoder_decoder,
             policy=self.scheduling_policy,

@@ -738,6 +738,30 @@ def sanity_check_mm_encoder_outputs(
     )
 
 
+def reserve_encoder_cache_residency(
+    encoder_outputs: dict[str, torch.Tensor],
+    dummy_outputs: Sequence[torch.Tensor],
+    encoder_cache_size: int,
+) -> int:
+    """Reserve the encoder cache's resident footprint during profiling, in bytes.
+
+    The dummy run only materialises one compute batch, so a cache larger than the
+    compute budget would be under-reserved and the surplus handed to the KV cache.
+    """
+    if not dummy_outputs:
+        return 0
+
+    # `sanity_check_mm_encoder_outputs` guarantees 2-D (tokens, hidden) outputs.
+    ref = dummy_outputs[0]
+    bytes_per_token = ref.element_size() * ref.shape[1]
+    shortfall = encoder_cache_size - sum(out.shape[0] for out in dummy_outputs)
+    if shortfall > 0:
+        encoder_outputs["tmp_residency"] = torch.empty(
+            (shortfall, ref.shape[1]), dtype=ref.dtype, device=ref.device
+        )
+    return encoder_cache_size * bytes_per_token
+
+
 def request_memory(
     init_snapshot: MemorySnapshot,
     cache_config: CacheConfig,
