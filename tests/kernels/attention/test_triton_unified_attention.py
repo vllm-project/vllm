@@ -14,6 +14,7 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops import triton_unified_attention as attention
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_softcap,
+    compute_kv_seq_mask,
     compute_tile_loop_bounds,
     softmax_step,
 )
@@ -383,6 +384,195 @@ def test_clamped_mm_prefix_preserves_noncausal_right_window(
     assert bounds.tolist() == [3, 68, 4096]
 
 
+def _video_like_spans(
+    num_spans: int, seq_len: int, *, width: int = 66, gap: int = 4
+) -> list[tuple[int, int]]:
+    """``num_spans`` inclusive frame spans in ascending order, with a few
+    adjacent pairs touching (``prev.end == next.start``) to exercise the
+    two-span case of the mask lookup."""
+    spans: list[tuple[int, int]] = []
+    pos = 7
+    for i in range(num_spans):
+        if pos + width > seq_len:
+            break
+        spans.append((pos, pos + width - 1))
+        pos += width - 1 if i % 7 == 3 else width + gap
+    return spans
+
+
+def _padded_spans(spans: list[tuple[int, int]], max_ranges: int) -> torch.Tensor:
+    padded = list(spans) + [(0, 0)] * (max_ranges - len(spans))
+    return torch.tensor([padded], dtype=torch.int32, device=DEVICE_TYPE)
+
+
+@triton.jit
+def _materialize_kv_seq_mask(
+    output_ptr,
+    mm_prefix_range_ptr,
+    seq_len,
+    SLIDING_WINDOW: tl.constexpr,
+    MAX_MM_RANGES: tl.constexpr,
+    MM_PREFIX_CLAMP_SW: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    TILE_SIZE: tl.constexpr,
+):
+    query_abs_pos = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
+    seq_offset = tl.program_id(1) * TILE_SIZE + tl.arange(0, TILE_SIZE)
+    mask = compute_kv_seq_mask(
+        query_abs_pos,
+        seq_offset,
+        0,  # seq_idx
+        seq_len,
+        mm_prefix_range_ptr,
+        SLIDING_WINDOW,
+        True,  # USE_MM_PREFIX
+        MAX_MM_RANGES,
+        MM_PREFIX_CLAMP_SW=MM_PREFIX_CLAMP_SW,
+    )
+    tl.store(
+        output_ptr + query_abs_pos * seq_len + seq_offset[None, :],
+        mask.to(tl.int8),
+    )
+
+
+def _ref_kv_seq_mask(
+    seq_len: int,
+    spans: list[tuple[int, int]],
+    sliding_window: int,
+    clamp_sliding_window: bool,
+) -> torch.Tensor:
+    """``(causal AND window) OR mm_prefix`` as the kernel defines it, with
+    the mm part ANDed with the window when clamping (Gemma 4)."""
+    pos = torch.arange(seq_len, device=DEVICE_TYPE)
+    delta = pos[:, None] - pos[None, :]
+    keep = delta >= 0
+    if sliding_window > 0:
+        keep &= delta < sliding_window
+    for start, end in spans:
+        in_span = (pos >= start) & (pos <= end)
+        mm = in_span[:, None] & in_span[None, :]
+        if clamp_sliding_window and sliding_window > 0:
+            mm &= delta < sliding_window
+        keep |= mm
+    return keep
+
+
+@pytest.mark.parametrize("sliding_window", [0, 128])
+@pytest.mark.parametrize("clamp_sliding_window", [False, True])
+def test_kv_seq_mask_with_many_mm_prefix_spans(
+    sliding_window: int, clamp_sliding_window: bool
+) -> None:
+    """The span lookup must give the same tile mask as the mask definition
+    for a video-like prompt: hundreds of spans, some touching, the last
+    span followed by text."""
+    seq_len, tile_size, block_m = 2048, 32, 16
+    spans = _video_like_spans(300, seq_len - 100)
+    assert len(spans) > 20
+    mm_prefix_ranges = _padded_spans(spans, len(spans) + 3)
+    actual = torch.empty(seq_len, seq_len, dtype=torch.int8, device=DEVICE_TYPE)
+
+    _materialize_kv_seq_mask[(seq_len // block_m, seq_len // tile_size)](
+        actual,
+        mm_prefix_ranges,
+        seq_len,
+        SLIDING_WINDOW=sliding_window,
+        MAX_MM_RANGES=mm_prefix_ranges.shape[1],
+        MM_PREFIX_CLAMP_SW=clamp_sliding_window,
+        BLOCK_M=block_m,
+        TILE_SIZE=tile_size,
+    )
+
+    expected = _ref_kv_seq_mask(seq_len, spans, sliding_window, clamp_sliding_window)
+    assert torch.equal(actual.bool(), expected)
+
+
+@triton.jit
+def _compute_many_mm_tile_bounds(
+    output_ptr,
+    mm_prefix_range_ptr,
+    seq_len,
+    MAX_MM_RANGES: tl.constexpr,
+    TILE_SIZE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_Q: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
+):
+    q_block_local_idx = tl.program_id(0)
+    loop_lo, loop_hi, _ = compute_tile_loop_bounds(
+        0,  # context_len
+        seq_len,
+        seq_len,  # cur_batch_query_len
+        q_block_local_idx,
+        0,  # segm_idx_or_0
+        0,  # tiles_per_segment_or_0
+        TILE_SIZE,
+        BLOCK_M,
+        BLOCK_Q,
+        BLOCK_M // BLOCK_Q,  # num_queries_per_kv
+        SLIDING_WINDOW,
+        True,  # USE_MM_PREFIX
+        False,  # IS_3D
+        MM_PREFIX_CLAMP_SW=True,
+        MAX_MM_RANGES=MAX_MM_RANGES,
+        mm_prefix_range_ptr=mm_prefix_range_ptr,
+        seq_idx=0,
+    )
+    tl.store(output_ptr + q_block_local_idx * 2, loop_lo)
+    tl.store(output_ptr + q_block_local_idx * 2 + 1, loop_hi)
+
+
+def _ref_clamped_mm_tile_bounds(
+    seq_len: int,
+    spans: list[tuple[int, int]],
+    sliding_window: int,
+    tile_size: int,
+    block_q: int,
+) -> list[list[int]]:
+    """Per query block, the union of the left window and every
+    intersecting span, converted to tile indices."""
+    num_tiles = (seq_len + tile_size - 1) // tile_size
+    bounds = []
+    for q_lo in range(0, seq_len, block_q):
+        q_hi = min(q_lo + block_q - 1, seq_len - 1)
+        first_key = q_lo - sliding_window + 1
+        last_key = q_hi
+        for start, end in spans:
+            if start <= q_hi and end >= q_lo:
+                first_key = min(first_key, max(start, q_lo - sliding_window + 1))
+                last_key = max(last_key, end)
+        last_key = min(last_key, seq_len - 1)
+        bounds.append(
+            [max(0, first_key // tile_size), min(last_key // tile_size + 1, num_tiles)]
+        )
+    return bounds
+
+
+def test_clamped_mm_prefix_tile_bounds_with_many_spans() -> None:
+    """Every query block must get the same tile range from the span lookup
+    as from checking each span, for a prompt with hundreds of spans."""
+    seq_len, tile_size, block_m, block_q, sliding_window = 4096, 32, 16, 8, 512
+    spans = _video_like_spans(300, seq_len - 200)
+    mm_prefix_ranges = _padded_spans(spans, len(spans) + 1)
+    num_blocks = seq_len // block_q
+    bounds = torch.empty(num_blocks, 2, dtype=torch.int32, device=DEVICE_TYPE)
+
+    _compute_many_mm_tile_bounds[(num_blocks,)](
+        bounds,
+        mm_prefix_ranges,
+        seq_len,
+        MAX_MM_RANGES=mm_prefix_ranges.shape[1],
+        TILE_SIZE=tile_size,
+        BLOCK_M=block_m,
+        BLOCK_Q=block_q,
+        SLIDING_WINDOW=sliding_window,
+    )
+
+    expected = _ref_clamped_mm_tile_bounds(
+        seq_len, spans, sliding_window, tile_size, block_q
+    )
+    assert bounds.tolist() == expected
+
+
 def ref_paged_attn(
     query: torch.Tensor,
     key_cache: torch.Tensor,
@@ -542,12 +732,21 @@ def ref_paged_clamped_mm_attn(
     return torch.cat(outputs)
 
 
+@pytest.mark.parametrize(
+    "mm_ranges",
+    [
+        [[(32, 351)], [(160, 287)]],
+        # Many short spans per request, as a video prompt carries.
+        [_video_like_spans(40, 384, width=8, gap=1), _video_like_spans(20, 300)],
+    ],
+)
 @torch.inference_mode()
-def test_triton_unified_attn_clamped_mm_matches_dense_reference() -> None:
+def test_triton_unified_attn_clamped_mm_matches_dense_reference(
+    mm_ranges: list[list[tuple[int, int]]],
+) -> None:
     set_random_seed(0)
     query_lens = [384, 96]
     kv_lens_list = [384, 320]
-    mm_ranges = [[(32, 351)], [(160, 287)]]
     sliding_window = 128
     chunk_lookback = 0
     block_size = 16
@@ -597,9 +796,8 @@ def test_triton_unified_attn_clamped_mm_matches_dense_reference() -> None:
         [0] + query_lens, dtype=torch.int32, device=DEVICE_TYPE
     ).cumsum(0, dtype=torch.int32)
     kv_lens = torch.tensor(kv_lens_list, dtype=torch.int32, device=DEVICE_TYPE)
-    mm_prefix_range = torch.tensor(
-        [[[32, 351]], [[160, 287]]], dtype=torch.int32, device=DEVICE_TYPE
-    )
+    max_ranges = max(len(r) for r in mm_ranges)
+    mm_prefix_range = torch.cat([_padded_spans(r, max_ranges) for r in mm_ranges])
     actual = torch.empty_like(query)
 
     unified_attention(
