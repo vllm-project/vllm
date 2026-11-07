@@ -4,9 +4,8 @@
 BF16 input rows) as one CuTe kernel, bit for bit the stock norm
 (`MuseSpark1xRMSNorm.forward`: `fused_rmsnorm_fwd` into BF16).
 
-It is the row norm of `common/row_norm.py` at 8192 columns, one CTA of 256
-threads per row; the weight loads before the PDL wait and the dependents
-launch at the grid's end.
+It is the row norm of `common/row_norm.py` at 8192 columns, one CTA of 256 threads per
+row; the weight loads before the PDL wait and the dependents launch at the grid's end.
 """
 
 import torch
@@ -37,8 +36,7 @@ class InputNorm:
         self.norm = RowNorm(constants, norm.weight if norm.has_weight else None)
 
     def run(self, x: torch.Tensor) -> torch.Tensor:
-        """The norm of `x`, contiguous BF16 [m, 8192], into a new BF16
-        tensor."""
+        """The norm of `x`, contiguous BF16 [m, 8192], into a new BF16 tensor."""
         m = x.shape[0]
         check_operand(x, (m, H), torch.bfloat16, 16, "x")
         out = torch.empty_like(x)

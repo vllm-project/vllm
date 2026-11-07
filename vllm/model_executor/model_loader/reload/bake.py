@@ -4,12 +4,11 @@
 the model's real tensors as `begin_direct_reload` left them, and record each
 `copy_` from a trace and every reason a name cannot be written directly.
 
-A trace has no data, so nothing it feeds reaches memory: its `copy_` is
-recorded, and any other op on it runs on meta copies of its arguments. Ops on
-real tensors alone run for real: `_TargetGuard` makes a loader that reads a
-checkpoint tensor a fallback, and constant writes into one (`fill_`,
-`zero_`) happen, mid-update, and stay out of the plan (post-load processing
-owns padding)."""
+A trace has no data, so nothing it feeds reaches memory: its `copy_` is recorded, and
+any other op on it runs on meta copies of its arguments. Ops on real tensors alone run
+for real: `_TargetGuard` makes a loader that reads a checkpoint tensor a fallback, and
+constant writes into one (`fill_`, `zero_`) happen, mid-update, and stay out of the plan
+(post-load processing owns padding)."""
 
 from collections import defaultdict
 from collections.abc import Callable, Iterator
@@ -100,10 +99,9 @@ class Copy:
 
 @dataclass
 class _PlanSink:
-    """One bake's record. Traces call `accept_copy` for a `copy_` from
-    them, `unsupported` for any other op outside `VIEW_OPS` and
-    `value_read` for `.item()` and the like; it turns these into copies,
-    fallbacks and bake stops."""
+    """One bake's record. Traces call `accept_copy` for a `copy_` from them,
+    `unsupported` for any other op outside `VIEW_OPS` and `value_read` for `.item()` and
+    the like; it turns these into copies, fallbacks and bake stops."""
 
     targets: Targets
     copies: dict[str, list[Copy]] = field(default_factory=lambda: defaultdict(list))
@@ -242,13 +240,12 @@ _CONSTANT_WRITES = {
 
 
 class _TargetGuard(TorchDispatchMode):
-    """Ops on real tensors alone run for real. One that reads a checkpoint
-    tensor (not a view, not only its metadata) makes the last name written
-    into that storage (or the name being loaded) a fallback: the direct path
-    would skip it. For example `composed_weight_loader`'s
-    `param.copy_(fn(param))`, a check such as `torch.equal(param, x)`, or
-    a mirror copied from `param`. Reads that bypass the dispatcher
-    (`tolist()` or `numpy()` of a CPU tensor, a raw kernel launch) go
+    """Ops on real tensors alone run for real. One that reads a checkpoint tensor (not a
+    view, not only its metadata) makes the last name written into that storage (or the
+    name being loaded) a fallback: the direct path would skip it. For example
+    `composed_weight_loader`'s `param.copy_(fn(param))`, a check such as
+    `torch.equal(param, x)`, or a mirror copied from `param`. Reads that bypass the
+    dispatcher (`tolist()` or `numpy()` of a CPU tensor, a raw kernel launch) go
     unseen."""
 
     def __init__(self, sink: _PlanSink):
@@ -287,11 +284,10 @@ class _TargetGuard(TorchDispatchMode):
 def _bake(
     model: torch.nn.Module, metas: dict[str, "ParamMeta"], targets: Targets
 ) -> _PlanSink:
-    """Trace `load_weights` over every name, in one pass. A name that stops
-    the loader (a value read, an op that fails on meta) unwinds the model's
-    `load_weights`; it falls back, and `load_weights` is called again
-    with the names after it, on the same sink. Loaders handle each name as it
-    arrives, so nothing is replayed.
+    """Trace `load_weights` over every name, in one pass. A name that stops the loader
+    (a value read, an op that fails on meta) unwinds the model's `load_weights`; it
+    falls back, and `load_weights` is called again with the names after it, on the same
+    sink. Loaders handle each name as it arrives, so nothing is replayed.
     Module state a loader sets stays: it is what that loader would leave on
     the `load_weights` path."""
     sink = _PlanSink(targets)

@@ -104,13 +104,12 @@ def init_dcp_topk_merge(vllm_config: Any, topk: int) -> int:
     """Set up the exact one-round DCP decode top-k merge at model construction
     and return its N, or 0 to keep the generic (fp32 all-gather) merge.
 
-    Collective: every DCP rank must call it, in the same order, outside CUDA
-    graph capture (only the first call per `topk` runs collectives). The
-    merge is exact only with its rescue workspace (symmetric memory over the
-    DCP group, sized by the decode rows of a step); without one the merge is
-    disabled here (fail closed) rather than run lossy. The ranks agree on
-    that before allocating; a failure of the (collective) allocation itself
-    is fatal. Also registers the merge kernels for JIT warmup.
+    Collective: every DCP rank must call it, in the same order, outside CUDA graph
+    capture (only the first call per `topk` runs collectives). The merge is exact only
+    with its rescue workspace (symmetric memory over the DCP group, sized by the decode
+    rows of a step); without one the merge is disabled here (fail closed) rather than
+    run lossy. The ranks agree on that before allocating; a failure of the (collective)
+    allocation itself is fatal. Also registers the merge kernels for JIT warmup.
     """
     if topk in _MERGE_INIT:
         return _MERGE_INIT[topk]

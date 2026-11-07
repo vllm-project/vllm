@@ -260,13 +260,12 @@ class ParallelConfig:
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
     enable_shm_tensor_arena: bool = False
-    """Route large CPU tensors (e.g. multimodal `pixel_values`) in the
-    engine→worker broadcast through a zero-copy shared-memory arena instead of
-    sending a copy to every reader. **Experimental**: may be reconciled with
-    vLLM's existing multimodal shm tensor caching in a future release. Opt-in;
-    most beneficial for multimodal serving with large images and tensor
-    parallelism. Active only when all queue readers are node-local; reserves
-    slots in `/dev/shm`."""
+    """Route large CPU tensors (e.g. multimodal `pixel_values`) in the engine→worker
+    broadcast through a zero-copy shared-memory arena instead of sending a copy to every
+    reader. **Experimental**: may be reconciled with vLLM's existing multimodal shm
+    tensor caching in a future release. Opt-in; most beneficial for multimodal serving
+    with large images and tensor parallelism. Active only when all queue readers are
+    node-local; reserves slots in `/dev/shm`."""
 
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
@@ -393,11 +392,10 @@ class ParallelConfig:
     assigned_physical_gpu_ids: list[int] | None = None
     """Mapping from vLLM-local logical GPU IDs to physical GPU IDs.
 
-    For example, `[2, 3]` means logical GPU 0 maps to physical GPU 2,
-    and logical GPU 1 maps to physical GPU 3. Physical IDs are used only
-    at platform/topology boundaries such as NVML, NIC affinity, P2P
-    checks, and final CUDA device selection when needed. When None,
-    logical IDs map to visible device IDs in order."""
+    For example, `[2, 3]` means logical GPU 0 maps to physical GPU 2, and logical GPU 1
+    maps to physical GPU 3. Physical IDs are used only at platform/topology boundaries
+    such as NVML, NIC affinity, P2P checks, and final CUDA device selection when needed.
+    When None, logical IDs map to visible device IDs in order."""
 
     distributed_timeout_seconds: int | None = None
     """Timeout in seconds for distributed operations (e.g., init_process_group).

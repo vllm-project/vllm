@@ -40,9 +40,8 @@ class LLFp32WDotprod:
 
     :note: K is handled as vectorized main/tail loops plus scalar remainder.
 
-    :compile-key: `(M, K, bs, epb, act_dtype)` selects the token count,
-        hidden size, CTA thread/K-stripe width, experts per CTA, and activation
-        input type.
+    :compile-key: `(M, K, bs, epb, act_dtype)` selects the token count, hidden size, CTA
+        thread/K-stripe width, experts per CTA, and activation input type.
     """
 
     def __init__(

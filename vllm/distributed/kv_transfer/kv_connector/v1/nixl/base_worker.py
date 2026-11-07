@@ -3091,14 +3091,13 @@ class NixlBaseConnectorWorker:
             * kv_cache_postprocess_blksize_and_layout => convert from small
               block size to large block size and convert from HND to NHD
 
-        The transfer only covers `covered_sub_blocks` remote-sized
-        sub-blocks of each request's local attention blocks; the rest was
-        clipped when pairing local and remote blocks from the last token
-        (`_pair_blocks_by_last_token`). Those blocks were
-        excluded from the scheduler's alloc-time KV zeroing (which would race
-        the RDMA write), so everything outside the covered range is zeroed here.
-        Stale bytes would otherwise surface as garbage or NaNs once decode
-        grows into the untransferred tail.
+        The transfer only covers `covered_sub_blocks` remote-sized sub-blocks of each
+        request's local attention blocks; the rest was clipped when pairing local and
+        remote blocks from the last token (`_pair_blocks_by_last_token`). Those blocks
+        were excluded from the scheduler's alloc-time KV zeroing (which would race the
+        RDMA write), so everything outside the covered range is zeroed here. Stale bytes
+        would otherwise surface as garbage or NaNs once decode grows into the
+        untransferred tail.
         """
         if len(self.device_kv_caches) == 0:
             return
@@ -3632,11 +3631,10 @@ class NixlBaseConnectorWorker:
         token (push, and DCP pulls, which require equal logical block sizes).
         Other pulls pair from the last token in `_pair_blocks_by_last_token`.
 
-        Each local attention block is split into `block_size_ratio`
-        sub-blocks paired 1:1 with remote blocks. Sub-blocks beyond the
-        remote list — the untransferred tail of the last local block — are
-        clipped here and zeroed in the receive post-process. Mamba state
-        blocks are indivisible and transfer 1:1, unexpanded.
+        Each local attention block is split into `block_size_ratio` sub-blocks paired
+        1:1 with remote blocks. Sub-blocks beyond the remote list — the untransferred
+        tail of the last local block — are clipped here and zeroed in the receive
+        post-process. Mamba state blocks are indivisible and transfer 1:1, unexpanded.
 
         ex: remote (prefill) block ids with block_size 4:
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]

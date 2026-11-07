@@ -2,13 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused dynamic per-tensor FP8 quantization of up to three attention inputs.
 
-Each `[tokens, heads, dim]` input (possibly strided, e.g. V as a view of the
-`kv_b_proj` output) gets its own amax and FP32 descale. A partial-amax pass
-and a reduce-and-quantize pass cover all inputs in two launches; the kernel
-boundary is the only global barrier, so no atomics or zero-initialization are
-needed and the ops are CUDA-graph safe. Compile-time specialization does not
-depend on the token counts (only the grid size does), so varying batch shapes
-do not recompile.
+Each `[tokens, heads, dim]` input (possibly strided, e.g. V as a view of the `kv_b_proj`
+output) gets its own amax and FP32 descale. A partial-amax pass and a
+reduce-and-quantize pass cover all inputs in two launches; the kernel boundary is the
+only global barrier, so no atomics or zero-initialization are needed and the ops are
+CUDA-graph safe. Compile-time specialization does not depend on the token counts (only
+the grid size does), so varying batch shapes do not recompile.
 
 One grid covers all the inputs in each launch, so a program can land past the
 end of a smaller input. Such programs do no work and compute no address, and
@@ -194,9 +193,8 @@ def fused_per_tensor_fp8_quant(
         fp8_dtype: The FP8 output dtype.
 
     Returns:
-        `(outputs, descales)`: contiguous FP8 tensors with the input shapes
-        and FP32 shape-`[1]` descales (`amax / fp8_max`, or 1e-6 for
-        all-zero or empty inputs).
+        `(outputs, descales)`: contiguous FP8 tensors with the input shapes and FP32
+        shape-`[1]` descales (`amax / fp8_max`, or 1e-6 for all-zero or empty inputs).
 
     """
     if not 1 <= len(tensors) <= 3:

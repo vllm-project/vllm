@@ -340,9 +340,8 @@ def _mega_moe_expert_weight(
 
 
 def _consumes_mxfp8_128x4(linear: nn.Module) -> bool:
-    """Whether `linear` takes a pre-quantized MXFP8 activation whose UE8M0
-    scales are in FlashInfer's 128x4 swizzled layout (what the MXFP8 norm
-    kernels write)."""
+    """Whether `linear` takes a pre-quantized MXFP8 activation whose UE8M0 scales are in
+    FlashInfer's 128x4 swizzled layout (what the MXFP8 norm kernels write)."""
     if get_input_quant_key(linear) != kMxfp8Dynamic:
         return False
     from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (

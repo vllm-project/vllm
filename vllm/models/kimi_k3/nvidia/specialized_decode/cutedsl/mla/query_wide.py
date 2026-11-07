@@ -74,13 +74,12 @@ def split_query(heads: int, batch: int, dcp: int = 0) -> bool:
 
 def fi_heads(heads: int) -> int:
     """The FlashInfer sparse MLA query heads of `heads` local heads: 64 < H < 128
-    zero-padded to 128 (trtllm-gen takes <= 64 or exactly 128 heads; prims_ts
-    before flashinfer-ai/flashinfer#7984 runs other counts as two M64 tiles that
-    load every KV row twice: at 96 heads 2.0-2.1x slower from 80 rows, GB300 128K,
-    101.9 / 149.3 / 244.7 us at 80 / 160 / 320 rows against 50.7 / 72.4 / 112.6
-    padded). The stock decode pads only on such builds
-    (`FlashInferMLASparseImpl._prims_ts_query_heads`); the pad heads are zero, so
-    both head counts compute the same rows."""
+    zero-padded to 128 (trtllm-gen takes <= 64 or exactly 128 heads; prims_ts before
+    flashinfer-ai/flashinfer#7984 runs other counts as two M64 tiles that load every KV
+    row twice: at 96 heads 2.0-2.1x slower from 80 rows, GB300 128K, 101.9 / 149.3 /
+    244.7 us at 80 / 160 / 320 rows against 50.7 / 72.4 / 112.6 padded). The stock
+    decode pads only on such builds (`FlashInferMLASparseImpl._prims_ts_query_heads`);
+    the pad heads are zero, so both head counts compute the same rows."""
     return 128 if 64 < heads < 128 else heads
 
 

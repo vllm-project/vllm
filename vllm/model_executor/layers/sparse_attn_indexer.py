@@ -118,15 +118,14 @@ def _merge_dcp_topk_global(
 ) -> None:
     """Merge each DCP rank's local top-K into the global top-K.
 
-    `topk_indices` are this rank's local top-K positions into its 1/N KV
-    shard. A token in the global top-K must also be in its owning rank's local
-    top-K (at most `topk_tokens - 1` tokens rank globally above it, hence at
-    most that many on its own rank), so exchanging only the per-rank local
-    candidates is exact -- equivalent to all-gathering the full logit matrix,
-    but it ships `dcp_world_size * topk_tokens` candidates instead of the whole
-    score row. Overwrites `topk_indices` with global token ids (`-1` for
-    padding); the attention backend localizes them back to physical slots per
-    rank.
+    `topk_indices` are this rank's local top-K positions into its 1/N KV shard. A token
+    in the global top-K must also be in its owning rank's local top-K (at most
+    `topk_tokens - 1` tokens rank globally above it, hence at most that many on its own
+    rank), so exchanging only the per-rank local candidates is exact -- equivalent to
+    all-gathering the full logit matrix, but it ships `dcp_world_size * topk_tokens`
+    candidates instead of the whole score row. Overwrites `topk_indices` with global
+    token ids (`-1` for padding); the attention backend localizes them back to physical
+    slots per rank.
     The selector keys only the score bits that `logits_dtype` (the dtype the
     MQA logits were computed in, before the FP32 upcast) carries and the id
     bits that positions below `num_positions` use.
@@ -1436,12 +1435,11 @@ class SparseAttnIndexer(CustomOp):
         k: torch.Tensor | None,
         weights: torch.Tensor,
     ):
-        """CPU sparse attention indexer: cache write stays eager Python glue
-        (own K-cache layout, not shared with the main attention cache
-        write). PREFILL and DECODE both call the ported
-        `fp8_paged_mqa_logits_cpu`/`topk_transform_512_cpu` kernels,
-        which read the paged K-cache directly via `page_table` -- no
-        eager gather step, no per-request Python loop.
+        """CPU sparse attention indexer: cache write stays eager Python glue (own
+        K-cache layout, not shared with the main attention cache write). PREFILL and
+        DECODE both call the ported `fp8_paged_mqa_logits_cpu`/`topk_transform_512_cpu`
+        kernels, which read the paged K-cache directly via `page_table` -- no eager
+        gather step, no per-request Python loop.
 
         `prefill_metadata.chunks` always has exactly one entry here:
         `DeepseekV4CPUIndexerMetadataBuilder` overrides the base chunk split to always

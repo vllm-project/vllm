@@ -13,12 +13,11 @@
 
 """PTX building blocks and launch helpers of the Muse Spark specialized decode.
 
-Every Lamport kernel of the package (the boundary gathers, the attention
-boundary, the MoE tail and the unpooler's zero-copy epilogue) is built from
-these. BF16 negative zero (0x8000) marks a slot that has not been written yet;
-a three-generation stage state (`NEXT_STAGE` written by the consumer,
-`ACTIVE_STAGE` by the publisher) lets a fast rank publish the next call while
-a slow one still reads the current one.
+Every Lamport kernel of the package (the boundary gathers, the attention boundary, the
+MoE tail and the unpooler's zero-copy epilogue) is built from these. BF16 negative zero
+(0x8000) marks a slot that has not been written yet; a three-generation stage state
+(`NEXT_STAGE` written by the consumer, `ACTIVE_STAGE` by the publisher) lets a fast rank
+publish the next call while a slow one still reads the current one.
 """
 
 import cuda.bindings.driver as cuda
@@ -1193,8 +1192,7 @@ def lowest_set_bit(mask: Uint32, *, loc=None, ip=None) -> Int32:
 
 @dsl_user_op
 def sigmoid_f32(x: Float32, *, loc=None, ip=None) -> Float32:
-    """`tl.sigmoid(x)`: x * -log2(e), ex2.approx, + 1, then 1 / that with
-    div.full."""
+    """`tl.sigmoid(x)`: x * -log2(e), ex2.approx, + 1, then 1 / that with div.full."""
     return _f32_op(
         "{\n\t.reg .f32 a, e, d;\n\tmul.f32 a, $1, 0fBFB8AA3B;\n\t"
         "ex2.approx.f32 e, a;\n\tadd.f32 d, e, 0f3F800000;\n\t"
@@ -1369,10 +1367,9 @@ def store_async_cluster_f32x2(
     loc=None,
     ip=None,
 ) -> None:
-    """Store (lo, hi) at cluster address `remote`
-    (`map_shared_address_to_peer`), completing 8 transaction bytes on the
-    peer's mbarrier at cluster address `remote_bar`; with a `predicate`,
-    only if it is true."""
+    """Store (lo, hi) at cluster address `remote` (`map_shared_address_to_peer`),
+    completing 8 transaction bytes on the peer's mbarrier at cluster address
+    `remote_bar`; with a `predicate`, only if it is true."""
     text = (
         "st.async.shared::cluster.mbarrier::complete_tx::bytes.v2.f32 [$0], "
         "{$1, $2}, [$3];"
@@ -1787,6 +1784,5 @@ def cp_async_commit(*, loc=None, ip=None) -> None:
 
 @dsl_user_op
 def cp_async_wait(pending: cutlass.Constexpr[int], *, loc=None, ip=None) -> None:
-    """Wait until at most `pending` of this thread's cp.async groups are in
-    flight."""
+    """Wait until at most `pending` of this thread's cp.async groups are in flight."""
     _ordered(f"cp.async.wait_group {pending};", "~{memory}", (), loc, ip)

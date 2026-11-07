@@ -115,8 +115,7 @@ CONTRACTS: dict[tuple[str, str], bool] = {
 def weight_form(
     has_weight: bool, input_scale: bool, weight_fp32: bool, weight_fp16: bool = False
 ) -> str:
-    """A norm's entry in `WEIGHT_FORMS` (a BF16 weight unless FP32 or
-    FP16)."""
+    """A norm's entry in `WEIGHT_FORMS` (a BF16 weight unless FP32 or FP16)."""
     if not has_weight:
         return "none"
     form = "fp32" if weight_fp32 else "fp16" if weight_fp16 else "bf16"
@@ -171,9 +170,8 @@ def thread_sum(pairs: list) -> Float32:
 
 
 def thread_square_sum(x: list, fused: bool) -> Float32:
-    """A thread's sum of the squares of its values `x` (FP32, register order,
-    whole fragments; traced inline): `thread_sum` of each fragment's
-    `chunk_pair`."""
+    """A thread's sum of the squares of its values `x` (FP32, register order, whole
+    fragments; traced inline): `thread_sum` of each fragment's `chunk_pair`."""
     lanes = [
         _tree(
             [
@@ -226,10 +224,9 @@ def rms_norm_row(
     lane: Int32,
     width: int = H,
 ) -> list:
-    """The RMS norm of one thread's values `x` (FP32, register order) before
-    the output rounding (traced inline). `gamma` is the weight plus its gain
-    center (None: no weight), applied before the norm with `input_scale`,
-    else after it."""
+    """The RMS norm of one thread's values `x` (FP32, register order) before the output
+    rounding (traced inline). `gamma` is the weight plus its gain center (None: no
+    weight), applied before the norm with `input_scale`, else after it."""
     if gamma is not None and input_scale:
         x = [mul_rn(x[i], gamma[i]) for i in range(len(x))]
     total = row_sum(thread_square_sum(x, fused), sums, warp, lane)
@@ -243,9 +240,8 @@ def rms_norm_row(
 def load_gamma(
     weight: cute.Tensor, column: Int64, center: float, fp32: bool, fp16: bool = False
 ) -> list:
-    """The gains of the 8 columns from `column`: the weight (FP32, FP16,
-    else BF16) plus its gain center, added even when 0.0 as the reference does
-    (traced inline)."""
+    """The gains of the 8 columns from `column`: the weight (FP32, FP16, else BF16) plus
+    its gain center, added even when 0.0 as the reference does (traced inline)."""
     if fp32:
         raw = load_f32x8(weight, column)
     elif fp16:
@@ -292,11 +288,10 @@ class RowNormConstants(NamedTuple):
 
 
 def row_norm_constants(norm, *, width: int = H, enable_pdl: bool, **layout):
-    """The constants of the stock norm `norm` (a MuseSpark1xRMSNorm or its
-    input-scaled variant: the arguments its forward hands fused_rmsnorm_fwd)
-    over rows of `width`, with the `layout` fields of RowNormConstants;
-    ValueError where the kernel does not reproduce it or does not take its
-    weight."""
+    """The constants of the stock norm `norm` (a MuseSpark1xRMSNorm or its input-scaled
+    variant: the arguments its forward hands fused_rmsnorm_fwd) over rows of `width`,
+    with the `layout` fields of RowNormConstants; ValueError where the kernel does not
+    reproduce it or does not take its weight."""
     if (
         getattr(norm, "variance_size_override", None) is not None
         or norm.hidden_size != width
@@ -412,10 +407,9 @@ class _RowNormKernel:
 @functools.cache
 def compile_row_norm(constants: RowNormConstants):
     """cute.compile one row norm; the row count is a runtime argument. Call:
-    (x, weight, out, stream_out, aux_out, m, stream) with the rows dynamic
-    views (`host.rows_view`) and the weight an [width] view, None where the
-    constants have no weight, stream or aux. Call before CUDA graph
-    capture."""
+    (x, weight, out, stream_out, aux_out, m, stream) with the rows dynamic views
+    (`host.rows_view`) and the weight an [width] view, None where the constants have no
+    weight, stream or aux. Call before CUDA graph capture."""
     assert_not_capturing("a row norm")
     width = constants.width
     rows_f32 = make_fake_dynamic_compact_tensor(

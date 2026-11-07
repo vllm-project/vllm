@@ -114,11 +114,10 @@ def value_bmm(heads: int, batch: int) -> bool:
 
 
 class MlaGate:
-    """The sigmoid gate of the W_UV output rows: `values` [H, B, 128] BF16 (the
-    batched GEMM's), `gate` [B, H * 128] -> `output` [B, H * 128], as MlaValue
-    rounds and gates them (BF16 value times the FP32 sigmoid, rounded to BF16;
-    rows of empty requests zero). One 256-thread CTA per (16 rows, head): each
-    thread 8 outputs of one row."""
+    """The sigmoid gate of the W_UV output rows: `values` [H, B, 128] BF16 (the batched
+    GEMM's), `gate` [B, H * 128] -> `output` [B, H * 128], as MlaValue rounds and gates
+    them (BF16 value times the FP32 sigmoid, rounded to BF16; rows of empty requests
+    zero). One 256-thread CTA per (16 rows, head): each thread 8 outputs of one row."""
 
     def __init__(self, heads: int, batch: int, q: int = 1):
         self.heads, self.batch, self.q = heads, batch, q

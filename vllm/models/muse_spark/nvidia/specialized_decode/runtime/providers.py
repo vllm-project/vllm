@@ -2,13 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The provider surface of the specialized decode and the seams between providers.
 
-One decode step is: the stock embedding, then per layer the input boundary
-(gather + dual norm into the attention), the attention (QKV front, attention
-core, o_proj partial), the attention boundary (all-reduce + dual norm into the
-MoE) and the MoE (router, routing, pooler, routed experts, tail, unpooler), then
-the final boundary (the last boundary with the final norm). Each block after the
-embedding is implemented by a provider; `LAYOUTS` picks the provider of every
-block per TP size.
+One decode step is: the stock embedding, then per layer the input boundary (gather +
+dual norm into the attention), the attention (QKV front, attention core, o_proj
+partial), the attention boundary (all-reduce + dual norm into the MoE) and the MoE
+(router, routing, pooler, routed experts, tail, unpooler), then the final boundary (the
+last boundary with the final norm). Each block after the embedding is implemented by a
+provider; `LAYOUTS` picks the provider of every block per TP size.
 
 Shapes below use b rows (b <= PREPARED_MAX), H = HIDDEN and P = POOLED. Every
 provider launches on the current stream; one that forks a side stream joins it
@@ -398,18 +397,16 @@ def router_tier(router: nn.Module) -> str | None:
 
 class RoutedMoE:
     """The MoE: the stock router (GateLinear, asserted on a vLLM-native tier), the
-    routing short tail (`RoutedTopk`; the BF16 edge layers route inside the
-    experts op), the pooler (`ExpertsInput` or `ExpertsInputBf16`), the routed
-    experts (`RoutedExpertsOps` -> `UnfinalizedExperts`), the tail and the
-    unpooler GEMM, which publishes this rank's column block zero-copy into the
-    next boundary's mailbox.
+    routing short tail (`RoutedTopk`; the BF16 edge layers route inside the experts op),
+    the pooler (`ExpertsInput` or `ExpertsInputBf16`), the routed experts
+    (`RoutedExpertsOps` -> `UnfinalizedExperts`), the tail and the unpooler GEMM, which
+    publishes this rank's column block zero-copy into the next boundary's mailbox.
 
     With the short tail, the router and the routing run on an aux stream while the
-    pooler runs on the current one, joined before the routed experts. The fork and
-    join are issued directly, not through `maybe_execute_in_parallel`, which runs
-    both sides in series under this model's breakable CUDA graph capture. The BF16
-    edge layers stay in series: their router logits feed the experts op on the
-    current stream."""
+    pooler runs on the current one, joined before the routed experts. The fork and join
+    are issued directly, not through `maybe_execute_in_parallel`, which runs both sides
+    in series under this model's breakable CUDA graph capture. The BF16 edge layers stay
+    in series: their router logits feed the experts op on the current stream."""
 
     def __init__(
         self,

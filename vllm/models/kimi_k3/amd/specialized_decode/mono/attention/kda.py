@@ -382,9 +382,8 @@ def stage_gate(c, t):
 
 
 def mix_src(c, t, src, cc, c0):
-    """Token t's source `src`, slice columns cc .. cc + 4: from `vals`, or
-    (prefix only in LDS) a block re-read from `blocks` -- the same bf16 values
-    `stage_slice` read."""
+    """Token t's source `src`, slice columns cc .. cc + 4: from `vals`, or (prefix only
+    in LDS) a block re-read from `blocks` -- the same bf16 values `stage_slice` read."""
     if const_expr(c["vals_all"]):
         return [
             fx.ptr_load(c["vals"] + ((t * c["NS"] + src) * COLS + cc + j))
@@ -467,10 +466,9 @@ def stage_mix(c, task):
 
 @traced
 def poll_rows_to_lds(c, region, k, n, xl, xrow, ldk, k0, t0):
-    """`gemv.rows_to_lds` from tagged pairs: columns k0 .. k0 + k of rows
-    t0 .. t0 + n of the [S, ldk] bf16 rows a producer put as (word, tag) pairs
-    into `region`, polled (two pairs a spec, every thread's specs one batch)
-    -> LDS rows 0 .. n - 1."""
+    """`gemv.rows_to_lds` from tagged pairs: columns k0 .. k0 + k of rows t0 .. t0 + n
+    of the [S, ldk] bf16 rows a producer put as (word, tag) pairs into `region`, polled
+    (two pairs a spec, every thread's specs one batch) -> LDS rows 0 .. n - 1."""
     tid = c["tid"]
     quads = n * k // 4  # 4 bf16 = 2 pairs a spec
     per = (quads + THREADS - 1) // THREADS

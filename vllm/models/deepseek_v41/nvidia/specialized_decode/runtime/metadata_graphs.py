@@ -187,14 +187,13 @@ class AttnMetadataCudaGraphs:
     ) -> dict[str, Any]:
         """Build the attention groups as concurrent branches on side streams.
 
-        The groups share only read-only inputs, with two exceptions. The sparse
-        MLA and compressor builders clamp their block table in place, so the
-        groups of one block table storage build on one branch, in serial order;
-        the groups that only read the table (`_BLOCK_TABLE_READERS`) then
-        build on branches of their own, each started after that branch. And
-        the first group that needs the token-to-request map builds it into its
-        own buffer, which later groups reuse. Each branch builds its own map;
-        the serial build's producer is also the first of its branch to need
+        The groups share only read-only inputs, with two exceptions. The sparse MLA and
+        compressor builders clamp their block table in place, so the groups of one block
+        table storage build on one branch, in serial order; the groups that only read
+        the table (`_BLOCK_TABLE_READERS`) then build on branches of their own, each
+        started after that branch. And the first group that needs the token-to-request
+        map builds it into its own buffer, which later groups reuse. Each branch builds
+        its own map; the serial build's producer is also the first of its branch to need
         one, so it fills the buffer that the FULL forward graphs read.
         """
         tables: dict[int, tuple[Branch, Branch]] = {}

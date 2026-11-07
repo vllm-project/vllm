@@ -148,9 +148,8 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
         """Round every shard loaded since the last call to UE8M0 1x32 scales,
         in place.
 
-        Runs once a load is complete. A weight update may send a weight and its
-        block scale in separate `load_weights` calls, but both have to be in
-        by then.
+        Runs once a load is complete. A weight update may send a weight and its block
+        scale in separate `load_weights` calls, but both have to be in by then.
         """
         unpaired = self._new_weights ^ self._new_scales
         if unpaired:

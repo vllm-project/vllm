@@ -34,8 +34,7 @@ class EncoderItemSpec:
     path_output_tokens: dict[str, int] = field(default_factory=dict)
     """Per-path output token counts for multi-path encoders.
 
-    Single-path encoders leave this empty and use `output_tokens` for the
-    default path.
+    Single-path encoders leave this empty and use `output_tokens` for the default path.
     """
 
     def get_path_output_tokens(self, path: str) -> int:
@@ -109,10 +108,9 @@ class EncoderCudaGraphCaptureInputs:
     """
 
     values: dict[str, torch.Tensor]
-    """Precomputed tensor buffers that will be recorded into the
-    CUDA graph.  The manager stores references to these exact
-    tensor objects and copies new data into them before each
-    `graph.replay()` call (buffer identity invariant)."""
+    """Precomputed tensor buffers that will be recorded into the CUDA graph. The manager
+    stores references to these exact tensor objects and copies new data into them before
+    each `graph.replay()` call (buffer identity invariant)."""
 
 
 @dataclass
@@ -126,5 +124,4 @@ class EncoderCudaGraphReplayBuffers:
 
     values: dict[str, torch.Tensor | None]
     """Data to copy into the captured buffers before replay.
-    `None` values leave the corresponding captured buffer
-    unchanged."""
+    `None` values leave the corresponding captured buffer unchanged."""

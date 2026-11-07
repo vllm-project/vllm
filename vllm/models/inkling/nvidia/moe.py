@@ -9,10 +9,9 @@ handles TP/EP); the sink experts run in `InklingSinkExperts` -- replicated acros
 EP ranks (every token activates every sink) and always bf16 (the checkpoint excludes
 every `shared_experts` from quantization).
 
-NVFP4 routed experts reuse vLLM's fused-MoE methods; excluded (bf16) layers
-fall back to the unquantized method. Checkpoint fused stacked tensors are
-translated to the standard per-expert loads in
-`InklingMoE.load_expert_weight`.
+NVFP4 routed experts reuse vLLM's fused-MoE methods; excluded (bf16) layers fall back to
+the unquantized method. Checkpoint fused stacked tensors are translated to the standard
+per-expert loads in `InklingMoE.load_expert_weight`.
 """
 
 from __future__ import annotations

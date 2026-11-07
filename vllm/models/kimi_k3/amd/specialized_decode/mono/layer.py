@@ -237,10 +237,9 @@ def k2_rlogp(key: K2Build) -> bool:
 
 
 def tag_layout() -> dict:
-    """(OPT_TAG_X) The tagged rows' scratch region (name -> (byte offset,
-    bytes)), past every launch's layout at its largest (K1's, M1a's,
-    K2's: as `MonoRunner` sizes the scratch), so no other launch's plain
-    word sits where these keep tags."""
+    """(OPT_TAG_X) The tagged rows' scratch region (name -> (byte offset, bytes)), past
+    every launch's layout at its largest (K1's, M1a's, K2's: as `MonoRunner` sizes the
+    scratch), so no other launch's plain word sits where these keep tags."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import kda, mla
 
     S = k2b.MAX_S

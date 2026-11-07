@@ -7,9 +7,8 @@ selected sigmoid scores renormalized and scaled. Writes the global expert ids
 takes.
 
 The result is bitwise equal to `fused_musespark1x_routing`
-(vllm/models/muse_spark/common/ops/fused_routing.py: on CUDA the
-`muse_spark_routing` op, written to match its Triton `_routing_kernel` bit
-for bit) as Muse Spark calls it:
+(vllm/models/muse_spark/common/ops/fused_routing.py: on CUDA the `muse_spark_routing`
+op, written to match its Triton `_routing_kernel` bit for bit) as Muse Spark calls it:
 sigmoid scores, no output multiplier (it is folded into the router weight after
 loading) and router_score_division_eps = 1e-15. With renormalize the weights
 are score * (scale / (sum + 1e-15)), the sum taken in top-k order from 0.0;
@@ -94,9 +93,8 @@ assert META_PERMUTED_TO_TOKEN % 4 == 0
 
 
 def metadata_size(tile_n: int) -> int:
-    """int32 elements of the metadata for GEMM tile `tile_n`: the fields
-    above and the permuted-to-token map (MAX_CTAS CTAs of tile_n rows), plus a
-    guard element."""
+    """int32 elements of the metadata for GEMM tile `tile_n`: the fields above and the
+    permuted-to-token map (MAX_CTAS CTAs of tile_n rows), plus a guard element."""
     return META_PERMUTED_TO_TOKEN + MAX_CTAS * tile_n + 1
 
 
@@ -450,16 +448,14 @@ def route(
     num_local_experts: int = 0,
     tile_n: int = 0,
 ) -> None:
-    """`ids` [b, 8] (global expert ids) and `weights` [b, 8] of the top-8
-    of sigmoid(logits) + bias for FP32 `logits` [b, 256] (1 <= b <= 8, unit
-    column stride, 16-byte aligned rows) and `bias` (contiguous, 16-byte
-    aligned FP32 [256]), on the current stream of the logits' CUDA device (the
-    compiled call switches to it and back). With `metadata` (a contiguous,
-    16-byte aligned int32 vector of at least `metadata_size(tile_n)`
-    elements, aliasing neither ids nor weights), also the routing metadata of
-    the local experts `[local_expert_offset, local_expert_offset +
-    num_local_experts)` for GEMM tile `tile_n` (1 to 256), at the
-    `META_*` offsets.
+    """`ids` [b, 8] (global expert ids) and `weights` [b, 8] of the top-8 of
+    sigmoid(logits) + bias for FP32 `logits` [b, 256] (1 <= b <= 8, unit column stride,
+    16-byte aligned rows) and `bias` (contiguous, 16-byte aligned FP32 [256]), on the
+    current stream of the logits' CUDA device (the compiled call switches to it and
+    back). With `metadata` (a contiguous, 16-byte aligned int32 vector of at least
+    `metadata_size(tile_n)` elements, aliasing neither ids nor weights), also the
+    routing metadata of the local experts `[local_expert_offset, local_expert_offset +
+    num_local_experts)` for GEMM tile `tile_n` (1 to 256), at the `META_*` offsets.
 
     Raises ValueError on arguments outside that contract (some through the
     compiled call's own checks: dtypes, shapes, strides, alignment, devices).

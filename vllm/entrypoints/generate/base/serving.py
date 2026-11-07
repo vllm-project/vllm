@@ -330,11 +330,10 @@ def decode_token_ids(
 def chat_top_logprobs_limit(
     top_logprobs: int | None, return_all: bool = False
 ) -> int | None:
-    """How many of a position's logprob candidates `/v1/chat/completions`
-    returns, in the engine's order (sampled token first): the first
-    `top_logprobs`, none when it is unset, and all of them (`None`) for
-    `top_logprobs=-1` or `logprob_token_ids` (`return_all`). Shared with
-    chat derender so the two cannot drift."""
+    """How many of a position's logprob candidates `/v1/chat/completions` returns, in
+    the engine's order (sampled token first): the first `top_logprobs`, none when it is
+    unset, and all of them (`None`) for `top_logprobs=-1` or `logprob_token_ids`
+    (`return_all`). Shared with chat derender so the two cannot drift."""
     if return_all or top_logprobs == -1:
         return None
     return top_logprobs or 0

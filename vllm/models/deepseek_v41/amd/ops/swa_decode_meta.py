@@ -22,10 +22,9 @@ The DSpark draft's 3 layers build their non-causal block the same way, with
 ComputeDSparkNoncausalSWAIndicesKernel in place of the window kernel. That
 is 3 more builds of 8 launches after every target step.
 
-On gfx942 and gfx950 with --monokernel
-(`ops.monokernel_cdna3_or_4()`), decode batches of up to MAX_ROWS rows,
-causal or the draft block, use it. Other batches take the rest of
-DeepseekV41ROCMAiterSparseSWAMetadataBuilder.build.
+On gfx942 and gfx950 with --monokernel (`ops.monokernel_cdna3_or_4()`), decode batches
+of up to MAX_ROWS rows, causal or the draft block, use it. Other batches take the rest
+of DeepseekV41ROCMAiterSparseSWAMetadataBuilder.build.
 tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py compares it with the vLLM ops
 that it replaces.
 """

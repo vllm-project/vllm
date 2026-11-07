@@ -196,11 +196,10 @@ class SpecializedDecode:
         self.blocks = empty((64, backbone.num_attn_res_blocks, 7168))
 
     def build_dep(self, rounded):
-        """DEP: no full specialized step (its MoE, o-projection and AttnRes
-        providers are TP8 / TP16 ones); every decode or uniform verify step of up
-        to the KV cache dtype's DEP_ROWS rows runs `run_wide` with the DEP_KINDS
-        attention layers specialized at TP1 (runtime.dep.DepAttention), the rest
-        stock."""
+        """DEP: no full specialized step (its MoE, o-projection and AttnRes providers
+        are TP8 / TP16 ones); every decode or uniform verify step of up to the KV cache
+        dtype's DEP_ROWS rows runs `run_wide` with the DEP_KINDS attention layers
+        specialized at TP1 (runtime.dep.DepAttention), the rest stock."""
         from .dep import (
             DEP_KINDS,
             DEP_ROWS,

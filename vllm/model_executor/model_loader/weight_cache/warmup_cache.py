@@ -2,15 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Daemon warmup caches, seeded daemon-to-daemon over the shared transport.
 
-Each warmup-cache object (currently only `FlashInferWarmupCache`)
-drives its own warmup pass on the daemon; the seeding flow itself
-(`seed.SeedTransport`) is shared with future kinds such as weight
-shards. A target daemon installs its rank-matched cache before tuning, so
-both the daemon's own warmup and the later engine start skip re-tuning. The
-disk layout is the index: a request names the cache by the same key the
-layout uses (kind, config hash, dp rank, world rank) and the source resolves
-it to files under the cache root. There is no separate artifact store or
-registry.
+Each warmup-cache object (currently only `FlashInferWarmupCache`) drives its own warmup
+pass on the daemon; the seeding flow itself (`seed.SeedTransport`) is shared with future
+kinds such as weight shards. A target daemon installs its rank-matched cache before
+tuning, so both the daemon's own warmup and the later engine start skip re-tuning. The
+disk layout is the index: a request names the cache by the same key the layout uses
+(kind, config hash, dp rank, world rank) and the source resolves it to files under the
+cache root. There is no separate artifact store or registry.
 
 The FlashInfer payload is a `{filename: parsed JSON}` map rather than a single document
 because upcoming kinds (Triton tuned configs) consist of several JSON files per cache.

@@ -167,9 +167,8 @@ def byte_layout(items, start=0, align=256):
 
 
 def front_scratch(s: int, d: Dims, tuned: bool = False) -> dict:
-    """K1's scratch regions -> (byte offset, bytes): published data (plain
-    words behind a flag) and mailbox pairs (`tuned`: the polled flags'
-    copies)."""
+    """K1's scratch regions -> (byte offset, bytes): published data (plain words behind
+    a flag) and mailbox pairs (`tuned`: the polled flags' copies)."""
     xrdy = WQKV_KPARTS * s  # a flag a (token, K half)
     return byte_layout(
         [

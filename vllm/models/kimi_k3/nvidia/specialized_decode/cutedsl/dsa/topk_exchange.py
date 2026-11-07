@@ -7,19 +7,17 @@ every rank's local top-N B' rows with NCCL (a 1-CTA ring all-gather of ~19 us
 at DCP8 plus its launch gap), then selects (one kernel) and rescues saturated
 rows (a second kernel). Here, instead:
 
-  push   `IndexerLocalTopk`'s epilogue (indexer.py, `exchange`) stores its
-         row's B' words into every rank's symmetric `TopkExchange` slot
-         [parity, source rank, row] as NCCL-LL pairs: each 16-byte store
-         carries two words and the call's epoch twice, `(w0, e, w1, e)`, so
-         a reader checks each 8-byte half's epoch instead of a flag behind a
-         system fence.
-  merge  `ExchangeMerge` (one 512-thread CTA per row, launched early by PDL)
-         polls the W ranks' LL words of its row, then runs the #63 merge's
-         own select (`_make_radix_select`: the same keys, threshold and tie
-         rule, so the same ids and rows in the same order), its saturation
-         word and saturated-rank push (the rescue workspace of
-         `init_dcp_topk_merge`, the same seq2 / flag protocol), and the
-         rescue's second round in the same CTA.
+  push `IndexerLocalTopk`'s epilogue (indexer.py, `exchange`) stores its row's B' words
+         into every rank's symmetric `TopkExchange` slot [parity, source rank, row] as
+         NCCL-LL pairs: each 16-byte store carries two words and the call's epoch twice,
+         `(w0, e, w1, e)`, so a reader checks each 8-byte half's epoch instead of a flag
+         behind a system fence.
+  merge `ExchangeMerge` (one 512-thread CTA per row, launched early by PDL) polls the W
+         ranks' LL words of its row, then runs the #63 merge's own select
+         (`_make_radix_select`: the same keys, threshold and tie rule, so the same ids
+         and rows in the same order), its saturation word and saturated-rank push (the
+         rescue workspace of `init_dcp_topk_merge`, the same seq2 / flag protocol), and
+         the rescue's second round in the same CTA.
 
 The epoch of row t is `epoch[t] + 1` (`epoch`: per rank, bumped by the
 merge after it read the row); every rank runs the same calls over the same

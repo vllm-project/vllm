@@ -120,10 +120,9 @@ def gemma_rmsnorm_mxfp8(
             normed activation.
 
     Returns:
-        `(data, scale)`: with `mxfp8=True`, E4M3 data (num_tokens,
-        hidden) and UE8M0 scales in the 128x4 swizzled layout with zeroed
-        padding rows; with `mxfp8=False`, the BF16 normed activation and
-        None.
+        `(data, scale)`: with `mxfp8=True`, E4M3 data (num_tokens, hidden) and UE8M0
+        scales in the 128x4 swizzled layout with zeroed padding rows; with
+        `mxfp8=False`, the BF16 normed activation and None.
 
     """
     assert x.dim() == 2 and x.stride(1) == 1, x.shape

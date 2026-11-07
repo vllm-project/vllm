@@ -49,9 +49,8 @@ def attend(wrapper, q8, kv_cache, md):
 
 
 def m1c_inputs(wrapper, q, kv_cache, md):
-    """K2's `m1c_in` for M1a's bf16 query `q` [S, 12, 576] and its new
-    partials, o [splits, S, 12, 512] bf16 and LSE [splits, S, 12] f32 (M1b
-    merges the splits)."""
+    """K2's `m1c_in` for M1a's bf16 query `q` [S, 12, 576] and its new partials, o
+    [splits, S, 12, 512] bf16 and LSE [splits, S, 12] f32 (M1b merges the splits)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import mla_attn
     from vllm.platforms import current_platform
 

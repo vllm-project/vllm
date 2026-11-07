@@ -10,29 +10,26 @@ upcast first, and it builds a radix histogram of every value with shared-memory
 atomics. Real indexer logits crowd a few histogram bins (a row of 150K logits
 holds about 200 distinct BF16 values), where those atomics serialize.
 
-What this module computes. `DecodeTopK` writes, for each row, the indices of
-its `k` largest elements in any order (exact: every index whose value exceeds
-the k-th largest, then enough of those equal to it), or `0 .. n-1` and -1
-padding when the row has at most `k` elements. An element is one BF16 logit
-(token mode), or the NaN-propagating maximum of an aligned group of 8 logits
-(block mode, the candidate blocks), with the row's newest block pinned at +inf
-and blocks scoring -inf written as -1. Values are compared through an
-order-preserving 16-bit key of their BF16 bits, so ties are exact.
+What this module computes. `DecodeTopK` writes, for each row, the indices of its `k`
+largest elements in any order (exact: every index whose value exceeds the k-th largest,
+then enough of those equal to it), or `0 .. n-1` and -1 padding when the row has at most
+`k` elements. An element is one BF16 logit (token mode), or the NaN-propagating maximum
+of an aligned group of 8 logits (block mode, the candidate blocks), with the row's
+newest block pinned at +inf and blocks scoring -inf written as -1. Values are compared
+through an order-preserving 16-bit key of their BF16 bits, so ties are exact.
 
-How. One thread block cluster of `C` CTAs per row: 8 CTAs of 512 threads
-while every row's cluster can be resident at once, else 4 of 1024 (a second
-wave of clusters would nearly double the time). Each CTA copies one
-contiguous chunk of the row into shared memory, as 16-byte vectors (8 logits,
-or one block); the chunks split the row's valid length, not its width. A
-thread stages 8 vectors and keeps them in registers too, so a cluster holds
-262,144 logits. Wider rows need more: at a 1M context the ratio-2 layers'
-logits are 524,288 wide, and a second build stages 16 vectors a thread at 8
-CTAs, the other 8 in shared memory only. The candidate source layer scores
-every token (ratio 1), 1,048,576 at a 1M context, so a third build runs 16
-CTAs a row (a non-portable cluster size, which CuTe DSL allows on every
-kernel) with 16 vectors a thread. Rows of the wide builds run in waves when
-they outnumber the resident clusters; the 16-CTA build takes at most two
-waves (`supports_decode_topk`). Two ways to the answer:
+How. One thread block cluster of `C` CTAs per row: 8 CTAs of 512 threads while every
+row's cluster can be resident at once, else 4 of 1024 (a second wave of clusters would
+nearly double the time). Each CTA copies one contiguous chunk of the row into shared
+memory, as 16-byte vectors (8 logits, or one block); the chunks split the row's valid
+length, not its width. A thread stages 8 vectors and keeps them in registers too, so a
+cluster holds 262,144 logits. Wider rows need more: at a 1M context the ratio-2 layers'
+logits are 524,288 wide, and a second build stages 16 vectors a thread at 8 CTAs, the
+other 8 in shared memory only. The candidate source layer scores every token (ratio 1),
+1,048,576 at a 1M context, so a third build runs 16 CTAs a row (a non-portable cluster
+size, which CuTe DSL allows on every kernel) with 16 vectors a thread. Rows of the wide
+builds run in waves when they outnumber the resident clusters; the 16-CTA build takes at
+most two waves (`supports_decode_topk`). Two ways to the answer:
 
 - Sampled (token rows longer than one vector a thread)::
 
@@ -354,10 +351,9 @@ def hist_add(
 
 @cute.jit
 def select_bin(hist: cute.Tensor, q: Uint32, ctl: cute.Tensor, lane: Int32) -> None:
-    """Warp 0: the bin `b` of a 256-bin histogram holding the `q`-th
-    largest entry (q >= 1), into `ctl[BIN]`, and `q` minus the entries
-    in the bins above `b` into `ctl[REMAIN]`. Lane `l` scans bins
-    `255 - 8 l` down to `248 - 8 l`."""
+    """Warp 0: the bin `b` of a 256-bin histogram holding the `q`-th largest entry (q >=
+    1), into `ctl[BIN]`, and `q` minus the entries in the bins above `b` into
+    `ctl[REMAIN]`. Lane `l` scans bins `255 - 8 l` down to `248 - 8 l`."""
     low = shared_load_u32x4(Int32(hist.iterator.toint()) + (248 - 8 * lane) * 4)
     high = shared_load_u32x4(Int32(hist.iterator.toint()) + (252 - 8 * lane) * 4)
     counts = (high[3], high[2], high[1], high[0], low[3], low[2], low[1], low[0])
@@ -526,9 +522,8 @@ class DecodeTopK:
         ctl: cute.Tensor,
         tid: Int32,
     ):
-        """The `q`-th largest of `keys[0:count]` (shared Uint16, q <= count)
-        and how many of the keys equal to it rank within the top `q`. Every
-        thread calls it."""
+        """The `q`-th largest of `keys[0:count]` (shared Uint16, q <= count) and how
+        many of the keys equal to it rank within the top `q`. Every thread calls it."""
         lane = tid & 31
         h1 = Int32(hist.iterator.toint())
         h2 = Int32(hist2.iterator.toint())
@@ -1224,9 +1219,8 @@ def vectors_for(width: int, cluster: int) -> int | None:
 
 @cache
 def _resident_clusters(device_index: int, cluster: int) -> int:
-    """Clusters of `cluster` CTAs the device runs at once, one CTA an SM
-    (the kernel's shared memory allows no more): 36 of 4, 15 of 8 and 7 of 16
-    on a 152-SM GB300."""
+    """Clusters of `cluster` CTAs the device runs at once, one CTA an SM (the kernel's
+    shared memory allows no more): 36 of 4, 15 of 8 and 7 of 16 on a 152-SM GB300."""
     with torch.accelerator.device_index(device_index):
         return cutlass.utils.HardwareInfo(device_index).get_max_active_clusters(cluster)
 

@@ -624,10 +624,9 @@ def _silu_mul(g, u, limit):
 
 @traced
 def stage_shared(c, task, gops, t0, n):
-    """Gate rows 16 task .. (weights `gops`), up rows 576 + 16 task .. against
-    tokens t0 .. t0 + n (their x in LDS; `n` traced: a tile a CTA picks at run
-    time) -> bf16 -> silu x up -> SMID; an odd task then quantizes its group of
-    32 (`smid_quant`)."""
+    """Gate rows 16 task .. (weights `gops`), up rows 576 + 16 task .. against tokens
+    t0 .. t0 + n (their x in LDS; `n` traced: a tile a CTA picks at run time) -> bf16 ->
+    silu x up -> SMID; an odd task then quantizes its group of 32 (`smid_quant`)."""
     tid, red, d = c["tid"], c["red"], c["d"]
     a = c["args"]
     rows = None if isinstance(n, int) else n
@@ -764,10 +763,9 @@ def ug_rounds(k, ks, slices):
 
 
 def fp4_pair_loads(c, w, ws, e, n_rows, k, rg0, scale_cols, sc0, st0, n, sc_steps):
-    """`gemv_fp4_pair`'s loads of a round: the scales of steps sc0 .. sc0 +
-    sc_steps (of the tiles' 32-row block: 128 bytes a step, sc_steps / 2 dwords
-    a lane) and both tiles' weight operands of steps st0 .. st0 + n. Loads
-    only."""
+    """`gemv_fp4_pair`'s loads of a round: the scales of steps sc0 .. sc0 + sc_steps (of
+    the tiles' 32-row block: 128 bytes a step, sc_steps / 2 dwords a lane) and both
+    tiles' weight operands of steps st0 .. st0 + n. Loads only."""
     lane = c["lane"]
     block = (e * n_rows + rg0 * 16) // 32 * (scale_cols * 8)
     words = sc_steps // 2
@@ -915,11 +913,10 @@ def st_dev(v, region, i):
 
 @traced
 def take_ug_task(c):
-    """This CTA's next ug task past the first round, from the launch's queue
-    (`ugq`, a word a tag, counting from 0): the CTAs that ran a shared,
-    router or route task come to it late and so take fewer, where a fixed
-    placement gave every CTA the same count and down waited on theirs. A
-    task's result is the same whichever CTA runs it."""
+    """This CTA's next ug task past the first round, from the launch's queue (`ugq`, a
+    word a tag, counting from 0): the CTAs that ran a shared, router or route task come
+    to it late and so take fewer, where a fixed placement gave every CTA the same count
+    and down waited on theirs. A task's result is the same whichever CTA runs it."""
     if c["tid"] == 0:
         at = c["ugq"].value + fx.Int64(c["tag"] * 4)
         ptr = fx.inttoptr(fx.PointerType.get(T.i32, fx.AddressSpace.Global, 4), at)
@@ -1143,10 +1140,9 @@ def ug_epilogue(c, part0, idx, first, count):
 # ---------------------------------------------------------------- down
 @traced
 def stage_down(c, tasks):
-    """Rows 16 task .. of the hidden output for each of `tasks` (a CTA's one or
-    two, run together: a second pass would double the CTA's time): routed
-    experts of U (a wave each, round robin), the shared expert, their sum ->
-    pushed to every rank."""
+    """Rows 16 task .. of the hidden output for each of `tasks` (a CTA's one or two, run
+    together: a second pass would double the CTA's time): routed experts of U (a wave
+    each, round robin), the shared expert, their sum -> pushed to every rank."""
     s, wave, tab, d = c["S"], c["wave"], c["tab"], c["d"]
     n = len(tasks)
     nu = c["rs"].n_union(tab, s)
@@ -1228,9 +1224,8 @@ def take_down_rank(c):
 
 
 def down_weights(c, tasks, rnd, slots, nu):
-    """Round `rnd`'s weights of `stage_down`: each (task, slot)'s scale block
-    and weight operands, this wave's slots of U (a slot past U: the last's).
-    Loads only."""
+    """Round `rnd`'s weights of `stage_down`: each (task, slot)'s scale block and weight
+    operands, this wave's slots of U (a slot past U: the last's). Loads only."""
     s, wave, tab, a, d = c["S"], c["wave"], c["tab"], c["args"], c["d"]
     us = [wave + WAVES * (slots * rnd + i) for i in range(slots)]
     es = [c["rs"].union_expert(tab, s, fx.min(u, nu - 1)) for u in us]
@@ -1470,9 +1465,8 @@ def contrib_load(c, j, i):
 
 @traced
 def load_smid_tile(c, t0, n, groups):
-    """The shared expert's MXFP8 intermediate of tokens t0 .. t0 + n (SMQ /
-    SMC, `smid_quant`) into LDS `shared_xl` / `shared_xsl` rows 0 .., by every
-    thread."""
+    """The shared expert's MXFP8 intermediate of tokens t0 .. t0 + n (SMQ / SMC,
+    `smid_quant`) into LDS `shared_xl` / `shared_xsl` rows 0 .., by every thread."""
     tid, words = c["tid"], c["d"].sh_inter // 4
     poll_copy(
         c,
@@ -1513,8 +1507,7 @@ def stage_reduce(c, task):
 
 @traced
 def reduce_pair(c, task, idx, how="sum"):
-    """Thread `idx`'s column pair of token idx / 64 (`how`: the
-    `allreduce` way)."""
+    """Thread `idx`'s column pair of token idx / 64 (`how`: the `allreduce` way)."""
     s, d = c["S"], c["d"]
     a = c["args"]
     if idx < s * RED_COLS // 2:

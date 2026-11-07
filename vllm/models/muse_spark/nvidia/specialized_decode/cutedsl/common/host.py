@@ -41,8 +41,7 @@ def on_device(index: int, launch: Callable[..., None], *args) -> None:
 
 
 def fp32(x: float) -> float:
-    """`x` rounded to FP32 (to nearest even), as a Float32 argument takes
-    it."""
+    """`x` rounded to FP32 (to nearest even), as a Float32 argument takes it."""
     return struct.unpack("f", struct.pack("f", x))[0]
 
 
@@ -85,9 +84,8 @@ def check_operand(
     align: int,
     name: str,
 ) -> None:
-    """Raise ValueError unless `tensor` is a contiguous `align`-byte
-    aligned `shape` `dtype` tensor (what a kernel's vector accesses
-    assume)."""
+    """Raise ValueError unless `tensor` is a contiguous `align`-byte aligned `shape`
+    `dtype` tensor (what a kernel's vector accesses assume)."""
     if (
         tuple(tensor.shape) != tuple(shape)
         or tensor.dtype != dtype
@@ -106,12 +104,11 @@ _UNREAD: dict[torch.device, torch.Tensor] = {}
 
 
 def unread_operand(device: torch.device | str, dtype: torch.dtype) -> torch.Tensor:
-    """A contiguous 32 KiB [n] `dtype` tensor for an operand that a kernel
-    variant neither reads nor writes (a norm weight it does not apply, a row it
-    does not store). Every caller on a device gets a view of the same buffer,
-    allocated once and kept for the process, so the operand costs no memory
-    per op. The buffer is all ones bits (NaN in FP32 and BF16), so a kernel
-    that read it would show in its output."""
+    """A contiguous 32 KiB [n] `dtype` tensor for an operand that a kernel variant
+    neither reads nor writes (a norm weight it does not apply, a row it does not store).
+    Every caller on a device gets a view of the same buffer, allocated once and kept for
+    the process, so the operand costs no memory per op. The buffer is all ones bits (NaN
+    in FP32 and BF16), so a kernel that read it would show in its output."""
     device = torch.device(device)
     if device.type == "cuda" and device.index is None:
         device = torch.device("cuda", torch.accelerator.current_device_index())

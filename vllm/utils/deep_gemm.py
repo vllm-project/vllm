@@ -678,11 +678,10 @@ def mqa_logits_mx_inputs(
 ) -> tuple[torch.Tensor | None, torch.Tensor]:
     """Adapt indexer Q scales and weights to the SM100 MQA logits kernels.
 
-    FP8 Q folds its per-(token, head) power-of-two scale into `weights`, so
-    it is passed with unit MX scales, which is exact since relu commutes with
-    a positive scale. `weights` are cast to `logits_dtype`, so BF16 logits
-    reduce in BF16 and FP32 logits in FP32. Returns `(q_scale, weights)`
-    unchanged off SM100.
+    FP8 Q folds its per-(token, head) power-of-two scale into `weights`, so it is passed
+    with unit MX scales, which is exact since relu commutes with a positive scale.
+    `weights` are cast to `logits_dtype`, so BF16 logits reduce in BF16 and FP32 logits
+    in FP32. Returns `(q_scale, weights)` unchanged off SM100.
     """
     if not mqa_logits_use_mx_scales():
         return q_scale, weights

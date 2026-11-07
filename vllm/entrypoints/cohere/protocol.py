@@ -9,9 +9,8 @@ avoid re-declaring the schema. We only own three things locally:
 1. The top-level request body model (the SDK doesn't ship one — its
    `ClientV2.chat` takes the body as kwargs), with vLLM-specific
    extensions (`kv_transfer_params` / `chat_template_kwargs`).
-2. The non-streaming response envelope (the SDK exposes the message
-   shape via `AssistantMessageResponse` but no full response
-   wrapper).
+2. The non-streaming response envelope (the SDK exposes the message shape via
+   `AssistantMessageResponse` but no full response wrapper).
 3. The streaming discriminated union (the SDK exports each event type individually but
    not as a combined `Annotated[Union[...], discriminator]`).
 

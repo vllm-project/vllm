@@ -182,11 +182,10 @@ class QuarkConfig(QuantizationConfig):
     ):
         """Find the linear layers exported with an online input rotation.
 
-        Quark's `RotationConfig` with `online_r1_rotation` (or `r4`)
-        keeps the activation rotation online: the weight is stored rotated
-        along its input dimension, and the layer carries an `input_rotation`
-        tensor (a +-1 int8 Hadamard matrix of size `rotation_size`) that the
-        activation must be multiplied by first.
+        Quark's `RotationConfig` with `online_r1_rotation` (or `r4`) keeps the
+        activation rotation online: the weight is stored rotated along its input
+        dimension, and the layer carries an `input_rotation` tensor (a +-1 int8 Hadamard
+        matrix of size `rotation_size`) that the activation must be multiplied by first.
         """
         algo_configs = self.quant_config.get("algo_config") or []
         if not any(algo.get("name") == "rotation" for algo in algo_configs):

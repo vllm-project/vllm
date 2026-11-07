@@ -22,14 +22,12 @@ full `[b, P]` rows from every rank straight into the expert input:
       y = bf16(x * rsqrt(mean(x**2) + eps) * (weight + gain_center))
       a, a_sf = nvfp4(y, global_scale, block 16)
 
-  `a` is uint8 `[b, P / 2]` (two e2m1 codes per byte, the even column in
-  the low nibble) and `a_sf` float8_e4m3fn `[b, P / 16]`, not swizzled.
-  These are the bytes the stock all-gather + norm + quantize hands the routed
-  experts, bit for bit.
+  `a` is uint8 `[b, P / 2]` (two e2m1 codes per byte, the even column in the low nibble)
+  and `a_sf` float8_e4m3fn `[b, P / 16]`, not swizzled. These are the bytes the stock
+  all-gather + norm + quantize hands the routed experts, bit for bit.
 - BF16 edge layers (`ExpertsInputBf16`): the gathered rows, then `pre_expert_norm`
-  (`expert_norm.ExpertNorm`), bit for bit the stock gather + norm except for
-  the sign of zero: publishers store BF16 -0.0 as +0.0 (-0.0 is the mailbox
-  sentinel).
+  (`expert_norm.ExpertNorm`), bit for bit the stock gather + norm except for the sign of
+  zero: publishers store BF16 -0.0 as +0.0 (-0.0 is the mailbox sentinel).
 
 The pooler GEMM is vLLM's in-tree skinny GEMM (BF16 in and out, FP32
 accumulation) at the launch shape `POOLER_GEMM`. One mailbox serves every

@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """One-shot LL all-reduce fused into the gated residual and the next RMSNorm.
 
-Every rank multicasts its full `[M, H]` BF16 partial sum into slot
-`[stage, rank]` of each rank's mailbox. The consumer sums the TP slots in
-rank order (so every rank gets the same FP32 row) and runs the same dual norm
-as FlashInfer's all-gather variant, optionally also writing the unrounded FP32
-result for the router.
+Every rank multicasts its full `[M, H]` BF16 partial sum into slot `[stage, rank]` of
+each rank's mailbox. The consumer sums the TP slots in rank order (so every rank gets
+the same FP32 row) and runs the same dual norm as FlashInfer's all-gather variant,
+optionally also writing the unrounded FP32 result for the router.
 """
 
 from dataclasses import dataclass

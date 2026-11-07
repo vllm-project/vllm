@@ -34,9 +34,8 @@ def hadamard_matrix(size: int, device: torch.device) -> torch.Tensor:
 
 
 def block_hadamard_rotate(x: torch.Tensor, hadamard: torch.Tensor) -> torch.Tensor:
-    """Rotate each contiguous `hadamard.shape[0]`-wide block of the last
-    dimension of `x` by `hadamard`, computed in fp32 and returned in
-    `x.dtype`."""
+    """Rotate each contiguous `hadamard.shape[0]`-wide block of the last dimension of
+    `x` by `hadamard`, computed in fp32 and returned in `x.dtype`."""
     size = hadamard.shape[0]
     rotated = x.float().unflatten(-1, (-1, size)) @ hadamard
     return rotated.flatten(-2).to(x.dtype)

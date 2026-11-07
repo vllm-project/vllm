@@ -36,10 +36,9 @@ def _schema_types(
 ) -> set[str] | None:
     """JSON types a parameter schema admits, or `None` if it admits any.
 
-    Covers `type`, `const`, `enum`, local `$ref`, `anyOf`/`oneOf`
-    (union) and `allOf` (intersection), so that e.g. pydantic's
-    `Optional[str]` counts as a string. *refs* memoizes each `$ref`, which
-    keeps the walk linear and ends cycles.
+    Covers `type`, `const`, `enum`, local `$ref`, `anyOf`/`oneOf` (union) and `allOf`
+    (intersection), so that e.g. pydantic's `Optional[str]` counts as a string. *refs*
+    memoizes each `$ref`, which keeps the walk linear and ends cycles.
     """
     if not isinstance(schema, dict):
         return None

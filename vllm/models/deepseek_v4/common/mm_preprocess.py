@@ -233,8 +233,7 @@ def build_image_block_pad_free(n_llm_h: int, n_llm_w: int):
 
 
 class DeepseekV4VLImageProcessor:
-    """Per-image transform (the PIL-input equivalent of the reference
-    `load_image`)."""
+    """Per-image transform (the PIL-input equivalent of the reference `load_image`)."""
 
     def __init__(self, config: DeepseekV4Config) -> None:
         super().__init__()

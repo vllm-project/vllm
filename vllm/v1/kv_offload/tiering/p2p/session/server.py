@@ -454,11 +454,10 @@ class ServerRole:
     ) -> None:
         """Enqueue a LookupMsg from a symmetric-P2P consumer.
 
-        Dispatch runs during `session.poll()` where the `ParentManager` handle is
-        not available, so this only records the raw request. It is resolved — querying
-        the tiering manager and emitting the aggregated `LookupRespMsg` — by the next
-        `serve_external_requests`, the sole window in which parent calls are
-        valid.
+        Dispatch runs during `session.poll()` where the `ParentManager` handle is not
+        available, so this only records the raw request. It is resolved — querying the
+        tiering manager and emitting the aggregated `LookupRespMsg` — by the next
+        `serve_external_requests`, the sole window in which parent calls are valid.
         """
         logger.debug(
             "P2P LOOKUP server %s: RECV LookupMsg kv_request_id=%s round=%s keys=%d",

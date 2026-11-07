@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Breakable CUDA graph capture/replay.
 
-This is an alternative to `CUDAGraphWrapper` that replaces vLLM's
-torch.compile-based FX graph splitting with runtime stream-capture
-breaks.
+This is an alternative to `CUDAGraphWrapper` that replaces vLLM's torch.compile-based FX
+graph splitting with runtime stream-capture breaks.
 
 The idea (inspired by sgl-project/sglang#19102): instead of pre-splitting
 the model into many pieces at attention boundaries, a
@@ -252,9 +251,8 @@ class _BreakableEntry:
 
 
 class BreakableCUDAGraphWrapper:
-    """Drop-in replacement for `CUDAGraphWrapper` that uses
-    `BreakableCUDAGraphCapture` instead of a single monolithic
-    `torch.cuda.graph()` capture.
+    """Drop-in replacement for `CUDAGraphWrapper` that uses `BreakableCUDAGraphCapture`
+    instead of a single monolithic `torch.cuda.graph()` capture.
 
     Same dispatch contract as `CUDAGraphWrapper`:
         * If no `forward_context` is available, run the underlying callable eagerly.

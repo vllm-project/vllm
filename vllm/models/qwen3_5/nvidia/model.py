@@ -181,10 +181,9 @@ class Qwen3_5RMSNorm(nn.Module):
     When `residual` is given, the fused add + norm runs in place and the
     updated `(x, residual)` pair is returned.
 
-    `reduce_inputs`: in `forward_fused`, an `x` that comes with a
-    residual is the un-reduced TP partial of a row-parallel linear, and the
-    norm absorbs its all-reduce. An `x` without a residual (first decoder
-    layer, MTP layer) is always complete.
+    `reduce_inputs`: in `forward_fused`, an `x` that comes with a residual is the
+    un-reduced TP partial of a row-parallel linear, and the norm absorbs its all-reduce.
+    An `x` without a residual (first decoder layer, MTP layer) is always complete.
     """
 
     def __init__(

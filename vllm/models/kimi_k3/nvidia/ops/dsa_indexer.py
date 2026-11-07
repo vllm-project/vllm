@@ -211,9 +211,8 @@ def indexer_q_quant_fold_weights(
     weight_scale: float,
     padded_num_heads: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize `index_q` `[T, H, D]` to FP8 per head (ue8m0 scales) and
-    fold each head's scale into `index_weights` `[T, H]` together with
-    `weight_scale`.
+    """Quantize `index_q` `[T, H, D]` to FP8 per head (ue8m0 scales) and fold each
+    head's scale into `index_weights` `[T, H]` together with `weight_scale`.
 
     Returns `(q_fp8 [T, P, D], weights [T, P] fp32)` where `P =
     padded_num_heads`; heads `[H, P)` are zero.

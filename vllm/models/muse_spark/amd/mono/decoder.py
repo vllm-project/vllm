@@ -688,10 +688,9 @@ class _K3Bucket(_Bucket):
 
 
 class _K5Bucket(_Bucket):
-    """24-128 rows: HA (attention boundary, router, pre-expert projection),
-    HM (the local experts) and HB (FFN boundary, next QKV) a layer; between
-    the launches the residual stream lives token-sharded unless the build
-    replicates it (`key.bnd`)."""
+    """24-128 rows: HA (attention boundary, router, pre-expert projection), HM (the
+    local experts) and HB (FFN boundary, next QKV) a layer; between the launches the
+    residual stream lives token-sharded unless the build replicates it (`key.bnd`)."""
 
     def __init__(
         self,

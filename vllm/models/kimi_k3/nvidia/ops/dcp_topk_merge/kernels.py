@@ -2,35 +2,31 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """One-round DCP decode top-k merge for the DSA indexer (CuTe DSL).
 
-Under DCP with interleave 1, rank `r` owns global token `g` iff
-`g % W == r` and scores only its local tokens `g // W`. The global top-K
-is merged from per-rank candidates:
+Under DCP with interleave 1, rank `r` owns global token `g` iff `g % W == r` and scores
+only its local tokens `g // W`. The global top-K is merged from per-rank candidates:
 
 1. Each rank takes its local top-`N` (`N` ~ 1.5x the fair share `K/W`)
    from the bf16 logits and packs every candidate into one 32-bit word,
    `(ord16(score) << 16) | (0xFFFF - local[15:0])`, plus a bit plane
    holding `local[16]` (one word per 32 candidates). Zero is padding.
-2. The `[N + N/32]` int32 rows are all-gathered over the DCP group
-   (`K / N` times fewer bytes than the 8-byte `(score, id)` pairs of the
-   generic merge).
+2. The `[N + N/32]` int32 rows are all-gathered over the DCP group (`K / N` times fewer
+   bytes than the 8-byte `(score, id)` pairs of the generic merge).
 3. Every rank radix-selects the top-`K` of the `W * N` candidates under
    (bf16 score desc, global id asc) and writes their global ids.
 
-The merge is exact: on every rank the selected scores equal, as a multiset,
-the top-`K` of the union of all ranks' bf16 logits (equal scores may resolve
-to either token; the choice is a function of the gathered words, so all ranks
-agree). Round 1 can only miss a token of a *saturated* rank: one that sent
-`N` words, all strictly above the `K`-th selected key `tau`. So the
-select also writes per row `sat_word = (mask << 16) | ord16(tau)`, mask bit
-`r` = rank `r` is saturated (identical on every rank). If the mask is 0,
-round 1 is exact. Otherwise (at most `(K - 1) // N` saturated ranks), each
-saturated rank pushes its local top-`K` of the row into every rank's
-symmetric receive slot (P2P stores, then a release flag) from inside its
-select, which never waits; a persistent rescue kernel then re-selects the
-row over the other ranks' round-1 words at or above `tau` plus the pushed
-lists. The second round is exact without a third: every token it cannot see
-scores at most the `K`-th of what it sees. Unsaturated rows cost the rescue
-one mask load.
+The merge is exact: on every rank the selected scores equal, as a multiset, the top-`K`
+of the union of all ranks' bf16 logits (equal scores may resolve to either token; the
+choice is a function of the gathered words, so all ranks agree). Round 1 can only miss a
+token of a *saturated* rank: one that sent `N` words, all strictly above the `K`-th
+selected key `tau`. So the select also writes per row
+`sat_word = (mask << 16) | ord16(tau)`, mask bit `r` = rank `r` is saturated (identical
+on every rank). If the mask is 0, round 1 is exact. Otherwise (at most `(K - 1) // N`
+saturated ranks), each saturated rank pushes its local top-`K` of the row into every
+rank's symmetric receive slot (P2P stores, then a release flag) from inside its select,
+which never waits; a persistent rescue kernel then re-selects the row over the other
+ranks' round-1 words at or above `tau` plus the pushed lists. The second round is exact
+without a third: every token it cannot see scores at most the `K`-th of what it sees.
+Unsaturated rows cost the rescue one mask load.
 
 The rescue state (`DCPTopkRescueWorkspace`) is built once per DCP group by
 `init_dcp_topk_merge`; the entry points refuse to run without it. Every DCP
@@ -38,13 +34,12 @@ rank must call every merge, the merges of a step must be stream-ordered, and
 no rank may start the round-1 exchange of call `n + 1` before its rescue of
 call `n` has finished (true for the all-gather here).
 
-Non-finite logits never cause an out-of-bounds access: the pack drops local
-ids outside `[0, min(row_end, S, 2**17))` (DeepSelect returns arbitrary ids
-for a row holding a NaN) and candidates with a NaN score, and the select
-never pushes past a row's rescue slots; +-inf scores are ordinary candidates
-(+inf first, -inf last, ties by global id). A row holding a NaN is outside
-the exactness contract: every rank still selects the same set, but it may
-miss top tokens of the rank whose local top-N the NaN disturbed.
+Non-finite logits never cause an out-of-bounds access: the pack drops local ids outside
+`[0, min(row_end, S, 2**17))` (DeepSelect returns arbitrary ids for a row holding a NaN)
+and candidates with a NaN score, and the select never pushes past a row's rescue slots;
++-inf scores are ordinary candidates (+inf first, -inf last, ties by global id). A row
+holding a NaN is outside the exactness contract: every rank still selects the same set,
+but it may miss top tokens of the rank whose local top-N the NaN disturbed.
 """
 
 import functools
@@ -557,11 +552,10 @@ class DCPTopkSelectKernel(VllmCuTeDSLJitKernel["DCPTopkSelectKernel.CompileKey"]
     """Gathered packed rows `[W, T, N + N/32]` -> the global top-K of each
     row as global ids `[T, K]` and/or this rank's owned physical KV rows.
 
-    One CTA per row. Candidates become `(ord16 << gid_bits) | ~gid` keys
-    (unique, so the order is total) and a 9-bit radix select over the
-    `16 + gid_bits` key bits finds the K-th key; ties in the bf16 score are
-    resolved toward the lower global id. Rows with fewer than K candidates
-    keep all of them.
+    One CTA per row. Candidates become `(ord16 << gid_bits) | ~gid` keys (unique, so the
+    order is total) and a 9-bit radix select over the `16 + gid_bits` key bits finds the
+    K-th key; ties in the bf16 score are resolved toward the lower global id. Rows with
+    fewer than K candidates keep all of them.
 
     `emit_ids`: global ids, selected first (in a fixed order: the same ids in
     the same order on every run), then -1.
@@ -1165,12 +1159,11 @@ def _exact_args(exact: _ExactArgs | None, device: torch.device) -> tuple[Any, ..
 class DCPTopkRescueKernel(VllmCuTeDSLJitKernel["DCPTopkRescueKernel.CompileKey"]):
     """Second round of the exact merge, launched after every exact select.
 
-    Persistent grid (G = min(T, #SMs) CTAs strided over rows). A row whose
-    saturation word has an empty mask is skipped (the fast path). Otherwise
-    the CTA waits for the pushes of the mask's ranks, re-selects the top-K of
-    the round-1 words of the other ranks (only ord16 >= tau16) plus the
-    pushed local top-K lists under the same tie rule, overwrites the row's
-    outputs and bumps `seq2[row]`.
+    Persistent grid (G = min(T, #SMs) CTAs strided over rows). A row whose saturation
+    word has an empty mask is skipped (the fast path). Otherwise the CTA waits for the
+    pushes of the mask's ranks, re-selects the top-K of the round-1 words of the other
+    ranks (only ord16 >= tau16) plus the pushed local top-K lists under the same tie
+    rule, overwrites the row's outputs and bumps `seq2[row]`.
     """
 
     tb_size = _TB_SIZE
@@ -1473,9 +1466,8 @@ _DCP_TOPK_RESCUE_KERNEL = DCPTopkRescueKernel()
 
 class DCPTopkRescueWorkspace:
     """Rescue state of the exact merge: per ubatch a symmetric receive buffer
-    `[T_max, S, K + K/32]` int32 (S = `rescue_slots(K, N)` pushed local
-    top-K lists per row), symmetric flags `[W, T_max]`, and local
-    `seq2` / `sat_word` `[T_max]`.
+    `[T_max, S, K + K/32]` int32 (S = `rescue_slots(K, N)` pushed local top-K lists per
+    row), symmetric flags `[W, T_max]`, and local `seq2` / `sat_word` `[T_max]`.
 
     `peer_recv` / `peer_flags` hold every rank's buffer address (this
     rank's included)."""
@@ -1584,9 +1576,8 @@ def register_dcp_topk_merge_warmup(
     """Compile the pack kernel and one select (+ rescue) variant at JIT
     warmup.
 
-    The stock indexer uses the defaults (global ids); a caller of
-    `dcp_topk_merge_rows` passes its `block_size` and whether it also
-    wants the global ids."""
+    The stock indexer uses the defaults (global ids); a caller of `dcp_topk_merge_rows`
+    passes its `block_size` and whether it also wants the global ids."""
     _DCP_TOPK_PACK_KERNEL.register_warmup(local_topk=local_topk, has_row_ends=True)
     _DCP_TOPK_SELECT_KERNEL.register_warmup(
         topk=topk,
@@ -1612,11 +1603,10 @@ def dcp_topk_pack_indices(
     out: torch.Tensor,
     row_ends: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Pack a local top-N (`local_idx` `[T, N]` int32, -1 padded, N a
-    multiple of 32) of the bf16 `logits` `[T, S]` into `out`
-    `[T, N + N/32]` int32 (the B' layout, see `__init__`). Indices at or
-    past `row_ends` (`[T]` int32, optional) or `S` and NaN scores
-    become empty slots."""
+    """Pack a local top-N (`local_idx` `[T, N]` int32, -1 padded, N a multiple of 32) of
+    the bf16 `logits` `[T, S]` into `out` `[T, N + N/32]` int32 (the B' layout, see
+    `__init__`). Indices at or past `row_ends` (`[T]` int32, optional) or `S` and NaN
+    scores become empty slots."""
     _DCP_TOPK_PACK_KERNEL(logits, local_idx, out, row_ends)
     return out
 
@@ -1662,12 +1652,11 @@ def assert_packed_merge_contract(
     row_ends: torch.Tensor,
     local_topk: int,
 ) -> None:
-    """Check a packed-mode producer against the contract of
-    `dcp_topk_merge_rows` (raises `AssertionError`; syncs, for tests and
-    debugging): per row, exactly `min(N, v)` words (`v` the non-NaN
-    tokens below `row_ends`) of distinct local ids below `row_ends`, each
-    word's score the logit's bf16 bits, and no unsent non-NaN token scoring
-    above the lowest sent one."""
+    """Check a packed-mode producer against the contract of `dcp_topk_merge_rows`
+    (raises `AssertionError`; syncs, for tests and debugging): per row, exactly
+    `min(N, v)` words (`v` the non-NaN tokens below `row_ends`) of distinct local ids
+    below `row_ends`, each word's score the logit's bf16 bits, and no unsent non-NaN
+    token scoring above the lowest sent one."""
     num_rows = packed.shape[0]
     assert packed.dtype == torch.int32
     assert packed.shape[1] == packed_row_words(local_topk), packed.shape
@@ -1857,10 +1846,9 @@ def dcp_topk_merge(
     """Exact global top-K ids over the DCP group from this rank's bf16
     `logits` (the stock indexer hook). Collective over the DCP group.
 
-    `logits` is `[T, S]` bf16 (row stride 1024-byte aligned for
-    DeepSelect), `row_ends` the per-row local lengths (at most
-    `max_local_len`, see `dcp_topk_pack`), `topk_indices` the
-    `[T, K]` int32 output (global token ids, -1 padded).
+    `logits` is `[T, S]` bf16 (row stride 1024-byte aligned for DeepSelect), `row_ends`
+    the per-row local lengths (at most `max_local_len`, see `dcp_topk_pack`),
+    `topk_indices` the `[T, K]` int32 output (global token ids, -1 padded).
     """
     logits = _bound_logits(logits, max_local_len)
     packed = dcp_topk_pack(logits, row_ends, local_topk)
@@ -1893,24 +1881,21 @@ def dcp_topk_merge_rows(
 ) -> None:
     """Exact DCP top-K merge straight to this rank's physical KV rows.
 
-    Input: `logits` `[T, S]` bf16 (row stride 1024-byte aligned, as
-    DeepGEMM emits it) and `row_ends` `[T]` int32 local lengths, plus
-    optionally `packed` `[T, N + N/32]` int32 (this rank's local top-N
-    already in the B' layout); without `packed` the merge takes the local
-    top-N itself (DeepSelect).
+    Input: `logits` `[T, S]` bf16 (row stride 1024-byte aligned, as DeepGEMM emits it)
+    and `row_ends` `[T]` int32 local lengths, plus optionally `packed` `[T, N + N/32]`
+    int32 (this rank's local top-N already in the B' layout); without `packed` the merge
+    takes the local top-N itself (DeepSelect).
 
-    Packed mode still requires `logits` and `row_ends`: a saturated rank
-    re-reads its row's logits for the second round. The producer guarantees
-    that `packed[t]` holds `min(N, v_t)` distinct local ids below
-    `row_ends[t]` (`v_t` its non-NaN tokens), that they are a top-N by
-    score of `logits[t, :row_ends[t]]`, that each word's score is that
-    bf16 logit bit for bit, and that `logits` stays unmodified until this
-    call returns (in stream order).
+    Packed mode still requires `logits` and `row_ends`: a saturated rank re-reads its
+    row's logits for the second round. The producer guarantees that `packed[t]` holds
+    `min(N, v_t)` distinct local ids below `row_ends[t]` (`v_t` its non-NaN tokens),
+    that they are a top-N by score of `logits[t, :row_ends[t]]`, that each word's score
+    is that bf16 logit bit for bit, and that `logits` stays unmodified until this call
+    returns (in stream order).
 
-    Output (caller buffers, written for rows `[0, T)`): `rows_out`
-    `[T, >= topk]` int32 owned physical rows (compacted, -1 after; a rank
-    may own up to `topk` of a row), `valid_out` `[T]` their count,
-    `ids_out` `[T, topk]` the global ids (optional).
+    Output (caller buffers, written for rows `[0, T)`): `rows_out` `[T, >= topk]` int32
+    owned physical rows (compacted, -1 after; a rank may own up to `topk` of a row),
+    `valid_out` `[T]` their count, `ids_out` `[T, topk]` the global ids (optional).
 
     Collective over the DCP group (see the module docstring).
     """

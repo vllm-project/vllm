@@ -91,15 +91,13 @@ WIDTHS = tuple(w for w in (8, 16, 32, 64, 128, 192) if w <= MAX_ROWS)
 
 
 def width(rows: int) -> int:
-    """The kernels' build for calls of `rows` rows: the narrowest that
-    fits."""
+    """The kernels' build for calls of `rows` rows: the narrowest that fits."""
     return next(w for w in WIDTHS if rows <= w)
 
 
 def padding_mask(rows: int) -> torch.Tensor | None:
-    """The CUDA graph padding rows of this forward's first `rows` (bool),
-    the mask the stock router applies with `VLLM_MOE_SKIP_PADDING`; None
-    without one."""
+    """The CUDA graph padding rows of this forward's first `rows` (bool), the mask the
+    stock router applies with `VLLM_MOE_SKIP_PADDING`; None without one."""
     if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
         is_padding = get_forward_context().is_padding
         return is_padding[:rows] if is_padding is not None else None
@@ -361,8 +359,7 @@ def _fake(dtype: type[cutlass.Numeric], align: int):
 
 @cache
 def _route_kernel(device_index: int, built: int):
-    """`RoutedExpertRoute` compiled for a device and calls of up to
-    `built` rows."""
+    """`RoutedExpertRoute` compiled for a device and calls of up to `built` rows."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
             RoutedExpertRoute(levels_for(built)),

@@ -148,11 +148,10 @@ def _fused_indexer_q_rope_quant_cpu(
     index_weights_softmax_scale: float,
     index_weights_head_scale: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """CPU-only equivalent of `fused_indexer_q_rope_quant`'s FP8 path
-    (CPU never reaches its MXFP4 arm -- Blackwell-only). Returns
-    `(q_fp8, weights_out)`, folding the per-token q scale into
-    `index_weights`. `positions`/`index_q_cos_sin_cache` are already
-    contiguous int64/fp32, so no conversion is needed here.
+    """CPU-only equivalent of `fused_indexer_q_rope_quant`'s FP8 path (CPU never reaches
+    its MXFP4 arm -- Blackwell-only). Returns `(q_fp8, weights_out)`, folding the
+    per-token q scale into `index_weights`. `positions`/`index_q_cos_sin_cache` are
+    already contiguous int64/fp32, so no conversion is needed here.
     """
     assert positions.ndim == 1
     assert index_q.ndim == 3

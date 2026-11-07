@@ -377,14 +377,13 @@ def router_task_weights(c, task):
 
 @traced
 def stage_router(c, task, wvs=None):
-    """Router task (token group, row tile, K part): K part `part` of rows
-    16 `tile` .. of the bf16 gate weight [experts, 5120] times the group's
-    tokens (`RouteShape.router_groups`), a token tile at a time -- the
-    decode router's tile (`router`), the
-    same tiles in the same order -> the part's f32 sum (`route` sums the
-    parts in order, rounds to bf16). Every tile's x loads issue first: a task
-    over every token's tiles in series read their x serially (48 rows: a router
-    CTA 9 us, 8 of them x)."""
+    """Router task (token group, row tile, K part): K part `part` of rows 16 `tile` ..
+    of the bf16 gate weight [experts, 5120] times the group's tokens
+    (`RouteShape.router_groups`), a token tile at a time -- the decode router's tile
+    (`router`), the same tiles in the same order -> the part's f32 sum (`route` sums the
+    parts in order, rounds to bf16). Every tile's x loads issue first: a task over every
+    token's tiles in series read their x serially (48 rows: a router CTA 9 us, 8 of them
+    x)."""
     s, tid, red, lane, wave = c["S"], c["tid"], c["red"], c["lane"], c["wave"]
     a = c["args"]
     experts = c["rs"].experts
@@ -650,10 +649,9 @@ def _silu_mul(g, u):
 
 @traced
 def stage_shared(c, task, gops, t0, n, uops=None):
-    """Gate rows 16 task .. (weights `gops`), up rows 576 + 16 task .. against
-    tokens t0 .. t0 + n (their x in LDS; `n` traced: a tile a CTA picks at run
-    time) -> bf16 -> silu x up -> SMID; an odd task then quantizes its group of
-    32 (`smid_quant`)."""
+    """Gate rows 16 task .. (weights `gops`), up rows 576 + 16 task .. against tokens
+    t0 .. t0 + n (their x in LDS; `n` traced: a tile a CTA picks at run time) -> bf16 ->
+    silu x up -> SMID; an odd task then quantizes its group of 32 (`smid_quant`)."""
     tid, red, d = c["tid"], c["red"], c["d"]
     a = c["args"]
     rows = None if isinstance(n, int) else n
@@ -789,10 +787,9 @@ def ug_rounds(k, ks, slices):
 
 
 def fp4_pair_loads(c, w, ws, e, n_rows, k, rg0, scale_cols, sc0, st0, n, sc_steps):
-    """`gemv_fp4_pair`'s loads of a round: the scales of steps sc0 .. sc0 +
-    sc_steps (of the tiles' 32-row block: 128 bytes a step, sc_steps / 2 dwords
-    a lane) and both tiles' weight operands of steps st0 .. st0 + n. Loads
-    only."""
+    """`gemv_fp4_pair`'s loads of a round: the scales of steps sc0 .. sc0 + sc_steps (of
+    the tiles' 32-row block: 128 bytes a step, sc_steps / 2 dwords a lane) and both
+    tiles' weight operands of steps st0 .. st0 + n. Loads only."""
     lane = c["lane"]
     block = udiv(e * n_rows + rg0 * 16, 32, c["rs"].tuned) * (scale_cols * 8)
     words = sc_steps // 2
@@ -960,11 +957,10 @@ def st_dev(v, region, i):
 
 @traced
 def take_ug_task(c):
-    """This CTA's next ug task past the first round, from the launch's queue
-    (`ugq`, a word a tag, counting from 0): the CTAs that ran a shared,
-    router or route task come to it late and so take fewer, where a fixed
-    placement gave every CTA the same count and down waited on theirs. A
-    task's result is the same whichever CTA runs it."""
+    """This CTA's next ug task past the first round, from the launch's queue (`ugq`, a
+    word a tag, counting from 0): the CTAs that ran a shared, router or route task come
+    to it late and so take fewer, where a fixed placement gave every CTA the same count
+    and down waited on theirs. A task's result is the same whichever CTA runs it."""
     if c["tid"] == 0:
         at = c["ugq"].value + fx.Int64(c["tag"] * 4)
         ptr = fx.inttoptr(fx.PointerType.get(T.i32, fx.AddressSpace.Global, 4), at)
@@ -1005,12 +1001,11 @@ def stage_ug(c, task):
 
 
 def ug_wave_pair(c, part0):
-    """This wave's share of an ug task from group `part0`: group p of its
-    `ug_groups` (wave / (2 slices)), its 16-column half bb = wave % 2 -- w13's
-    gate tile 2 b and up tile 2 b + 1 (aiter GUGU interleaves them a 16-row
-    tile; b = 2 (part0 + p) + bb), one 32-row scale block -- over K slice ks =
-    wave / 2 % slices (`gemv_fp4_pair`): (p, 2 b, ks, whether the group is in
-    the real width)."""
+    """This wave's share of an ug task from group `part0`: group p of its `ug_groups`
+    (wave / (2 slices)), its 16-column half bb = wave % 2 -- w13's gate tile 2 b and up
+    tile 2 b + 1 (aiter GUGU interleaves them a 16-row tile; b = 2 (part0 + p) + bb),
+    one 32-row scale block -- over K slice ks = wave / 2 % slices (`gemv_fp4_pair`): (p,
+    2 b, ks, whether the group is in the real width)."""
     wave, slices, tuned = c["wave"], c["rs"].ug_k_slices, c["rs"].tuned
     p = udiv(wave, 2 * slices, tuned)
     b = (part0 + p) * 2 + umod(wave, 2, tuned)
@@ -1352,12 +1347,11 @@ def code_byte(words, i):
 
 @traced
 def gemv_fp4_pair_942(c, w, ws, e, n_rows, k, rg0, ks, xl, xsl, col):
-    """gfx942 `gemv_fp4_pair`: tiles rg0 and rg0 + 1 of expert e's MXFP4
-    weight against up to TILE MXFP8 rows in LDS over this wave's K slice
-    `ks` -> both tiles' partial C, a Vector of 8 (tile t's rows
-    4 (lane / 16) + q, column lane % 16, whose LDS row is `col`). The
-    activations hold each 8-value chunk even K first (`put_mxfp8_group`).
-    A block's B operand and code, read once from LDS, feed both tiles' MFMAs."""
+    """gfx942 `gemv_fp4_pair`: tiles rg0 and rg0 + 1 of expert e's MXFP4 weight against
+    up to TILE MXFP8 rows in LDS over this wave's K slice `ks` -> both tiles' partial C,
+    a Vector of 8 (tile t's rows 4 (lane / 16) + q, column lane % 16, whose LDS row is
+    `col`). The activations hold each 8-value chunk even K first (`put_mxfp8_group`). A
+    block's B operand and code, read once from LDS, feed both tiles' MFMAs."""
     lane = c["lane"]
     j = lane // 16
     slices = c["rs"].ug_k_slices
@@ -1595,12 +1589,11 @@ def down_mfma_942(c, j, task, mid, first, count, wop, live):
 
 
 def fresh_wop(wop):
-    """A down task's packed weight words and codes (`down_weights_942`)
-    through opaque moves, for a slot's later passes. Each of them then
-    converts the FP4 words and unpacks the code bytes again. Without the
-    copies LLVM keeps the first pass's converted words and unpacked codes for
-    the later passes, and from 18 rows the kernel needs more than 256 VGPRs
-    and spills."""
+    """A down task's packed weight words and codes (`down_weights_942`) through opaque
+    moves, for a slot's later passes. Each of them then converts the FP4 words and
+    unpacks the code bytes again. Without the copies LLVM keeps the first pass's
+    converted words and unpacked codes for the later passes, and from 18 rows the kernel
+    needs more than 256 VGPRs and spills."""
     wd, sc = wop
     return [fresh(w) for w in wd], [fresh(w) for w in sc]
 
@@ -1740,9 +1733,8 @@ def down_sums(c, tasks, dsh_rank):
 
 
 def mid_rows_to_lds(c, row0, rows, r0, live):
-    """MID and MIDS rows row0 .. row0 + rows (a slot's picks) -> LDS `dmid` /
-    `dmids` at row - r0, 16 bytes a lane, at device scope. `live`: a slot
-    of U."""
+    """MID and MIDS rows row0 .. row0 + rows (a slot's picks) -> LDS `dmid` / `dmids` at
+    row - r0, 16 bytes a lane, at device scope. `live`: a slot of U."""
     d = c["d"]
     rows_to_lds(c, c["mid"], c["dmid"], d.mid_words * 4, row0, rows, r0, live)
     rows_to_lds(c, c["mids"], c["dmids"], d.inter // 32 * 4, row0, rows, r0, live)
@@ -1950,9 +1942,8 @@ def take_down_rank(c):
 
 
 def down_weights(c, tasks, rnd, slots, nu):
-    """Round `rnd`'s weights of `stage_down`: each (task, slot)'s scale block
-    and weight operands, this wave's slots of U (a slot past U: the last's).
-    Loads only."""
+    """Round `rnd`'s weights of `stage_down`: each (task, slot)'s scale block and weight
+    operands, this wave's slots of U (a slot past U: the last's). Loads only."""
     s, wave, tab, a, d = c["S"], c["wave"], c["tab"], c["args"], c["d"]
     us = [wave + WAVES * (slots * rnd + i) for i in range(slots)]
     es = [c["rs"].union_expert(tab, s, fx.min(u, nu - 1)) for u in us]
@@ -2293,9 +2284,8 @@ def contrib_load_942(c, j, pick, r):
 
 @traced
 def load_smid_tile(c, t0, n, groups):
-    """The shared expert's MXFP8 intermediate of tokens t0 .. t0 + n (SMQ /
-    SMC, `smid_quant`) into LDS `shared_xl` / `shared_xsl` rows 0 .., by every
-    thread."""
+    """The shared expert's MXFP8 intermediate of tokens t0 .. t0 + n (SMQ / SMC,
+    `smid_quant`) into LDS `shared_xl` / `shared_xsl` rows 0 .., by every thread."""
     tid, words = c["tid"], c["d"].sh_inter // 4
     poll_copy(
         c,

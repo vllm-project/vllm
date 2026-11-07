@@ -33,12 +33,10 @@ if TYPE_CHECKING:
 
 
 class ParserEngineReasoningAdapter(ReasoningParser):
-    """Adapts a `ParserEngine` to the `ReasoningParser`
-    interface so parser engines can be used as reasoning parsers in the
-    existing serving code.
+    """Adapts a `ParserEngine` to the `ReasoningParser` interface so parser engines can
+    be used as reasoning parsers in the existing serving code.
 
-    Subclasses set `_parser_engine_cls` to the concrete
-    `ParserEngine` class.
+    Subclasses set `_parser_engine_cls` to the concrete `ParserEngine` class.
     """
 
     _parser_engine_cls: type[ParserEngine]
@@ -173,21 +171,17 @@ class ParserEngineReasoningAdapter(ReasoningParser):
 class ParserEngineToolAdapter(ToolParser):
     """Adapts a `ParserEngine` to the `ToolParser` interface.
 
-    `extract_tool_calls` starts the parser engine in `CONTENT`
-    state so it can parse reasoning-stripped content (i.e. the output of
-    `ReasoningParser.extract_reasoning`).
+    `extract_tool_calls` starts the parser engine in `CONTENT` state so it can parse
+    reasoning-stripped content (i.e. the output of `ReasoningParser.extract_reasoning`).
 
-    When no reasoning parser is configured at the serving layer, the
-    owning `Parser` sets
-    `skip_reasoning_parsing` so reasoning markup — plain content
-    in that configuration — passes through verbatim instead of being
-    consumed or reclassified by the engine. The engine honors the flag
-    only for markers that are reasoning-exclusive in its config; a
-    grammar like Inkling, whose block closer is shared with text and
+    When no reasoning parser is configured at the serving layer, the owning `Parser`
+    sets `skip_reasoning_parsing` so reasoning markup — plain content in that
+    configuration — passes through verbatim instead of being consumed or reclassified by
+    the engine. The engine honors the flag only for markers that are reasoning-exclusive
+    in its config; a grammar like Inkling, whose block closer is shared with text and
     tool blocks, keeps parsing unchanged.
 
-    Subclasses set `_parser_engine_cls` to the concrete
-    `ParserEngine` class.
+    Subclasses set `_parser_engine_cls` to the concrete `ParserEngine` class.
     """
 
     _parser_engine_cls: type[ParserEngine]

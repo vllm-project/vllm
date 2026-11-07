@@ -143,9 +143,8 @@ class KdaSplit:
     Every step has the precision of the composed decode production runs (next to its
     speculative config, at q = 1 too), Triton `causal_conv1d_update` ->
     `fused_recurrent_kda` -> `rms_norm_gated`: the convolution's Q/K/V and the
-    recurrence's output round to BF16, and every step uses the Triton formula
-    (x / (1 + exp(-x)), q / sqrt(|q|^2 + eps) * scale, 1 / sqrt(var + eps)) and
-    instructions."""
+    recurrence's output round to BF16, and every step uses the Triton formula (x / (1 +
+    exp(-x)), q / sqrt(|q|^2 + eps) * scale, 1 / sqrt(var + eps)) and instructions."""
 
     def __init__(
         self,

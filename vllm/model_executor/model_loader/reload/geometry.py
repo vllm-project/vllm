@@ -39,9 +39,8 @@ def box_and_region(
     src_offset: int,
     dims: list[tuple[int, int, int]],
 ) -> tuple[Box, tuple[int, ...], tuple[int, ...]]:
-    """Reduce one `copy_` to a box of the (contiguous) checkpoint tensor and
-    the destination shape and strides of the box's elements, in row-major box
-    order.
+    """Reduce one `copy_` to a box of the (contiguous) checkpoint tensor and the
+    destination shape and strides of the box's elements, in row-major box order.
 
     `dims` are the copied tensor's (size, source stride, destination
     stride); `src_offset` is where its first element sits in the checkpoint
@@ -49,11 +48,10 @@ def box_and_region(
     through, split where it spans several (`flatten`); the parts assigned to
     one checkpoint dim must tile a contiguous range of it.
 
-    Example: `P.copy_(W.t())` with `W` [4, 6] and `P` [6, 4] contiguous
-    has dims `[(6, 1, 4), (4, 6, 1)]`: the box is `((0, 4), (0, 6))` and
-    the destination `shape (4, 6), stride (1, 4)`. A box dim the loader
-    splits and sends to unrelated places stays split: `6` becomes
-    `(2, 3)` with two destination strides.
+    Example: `P.copy_(W.t())` with `W` [4, 6] and `P` [6, 4] contiguous has dims
+    `[(6, 1, 4), (4, 6, 1)]`: the box is `((0, 4), (0, 6))` and the destination
+    `shape (4, 6), stride (1, 4)`. A box dim the loader splits and sends to unrelated
+    places stays split: `6` becomes `(2, 3)` with two destination strides.
 
     Raises:
         Fallback: the copy is not a view of a box (step slice, expand, ...).

@@ -77,11 +77,10 @@ logger = init_logger(__name__)
 def _wo_a_block_scale_to_e8m0(scale: torch.Tensor) -> torch.Tensor | None:
     """Normalize checkpoint WO_A scales to raw OCP MX E8M0 bytes.
 
-    E8M0 is an unsigned exponent-only scale format with bias 127. A finite
-    encoded byte `b` in `[0, 254]` represents `2 ** (b - 127)`;
-    `0xFF` is reserved for NaN. This is the vendor-neutral OCP encoding used
-    by AMD AITER/OPUS, not an NVIDIA-specific convention. Reference: OCP
-    Microscaling Formats (MX) Specification, section 5.4.1:
+    E8M0 is an unsigned exponent-only scale format with bias 127. A finite encoded byte
+    `b` in `[0, 254]` represents `2 ** (b - 127)`; `0xFF` is reserved for NaN. This is
+    the vendor-neutral OCP encoding used by AMD AITER/OPUS, not an NVIDIA-specific
+    convention. Reference: OCP Microscaling Formats (MX) Specification, section 5.4.1:
     https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
 
     Loaders may preserve the encoded byte as `float8_e8m0fnu`/`uint8`,

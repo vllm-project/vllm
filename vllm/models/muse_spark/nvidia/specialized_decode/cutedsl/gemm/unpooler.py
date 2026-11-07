@@ -25,10 +25,9 @@ FP32 partial goes to cluster rank 0's shared memory, which sums the partials in
 a fixed order, rounds to BF16 and stores y. The summation order depends only on
 the launch shape, so runs are bitwise reproducible.
 
-Zero-copy epilogue (`zerocopy`): rank 0 also multicasts y (-0.0 stored as
-+0.0) into this rank's slot of the next boundary's LamportMailbox at stage
-NEXT_STAGE and sets ACTIVE_STAGE, the same bytes and stage word the mailbox's
-own publisher would write.
+Zero-copy epilogue (`zerocopy`): rank 0 also multicasts y (-0.0 stored as +0.0) into
+this rank's slot of the next boundary's LamportMailbox at stage NEXT_STAGE and sets
+ACTIVE_STAGE, the same bytes and stage word the mailbox's own publisher would write.
 
 Ticket stage (`ticket_stage`, with `zerocopy`): the stage is instead the
 upper 16 bits of the draft boundary's ticket word, and no stage word is stored;
@@ -406,15 +405,14 @@ class Unpooler:
     graph capture): the [N, K] BF16 weight shard (this rank's rows of the
     replicated unpooler weight) and the kernels of both token tiles compiled.
 
-    With `mailbox` (the next boundary's LamportMailbox, width N) the epilogue
-    also publishes y into it (zero-copy); without, y is only stored and the
-    boundary publishes it. With `ticket` (int32 [1], stage << 16: the draft
-    boundary's ticket on that mailbox) the slot's stage is the ticket's, and the
-    mailbox's own stage state is not used. With `rows` only the token tiles
-    those row counts take are compiled at build (default: every row count); a
-    call with another row count compiles its tile then, which must not happen
-    under CUDA graph capture. `run` is graph-capturable and allocates
-    nothing.
+    With `mailbox` (the next boundary's LamportMailbox, width N) the epilogue also
+    publishes y into it (zero-copy); without, y is only stored and the boundary
+    publishes it. With `ticket` (int32 [1], stage << 16: the draft boundary's ticket on
+    that mailbox) the slot's stage is the ticket's, and the mailbox's own stage state is
+    not used. With `rows` only the token tiles those row counts take are compiled at
+    build (default: every row count); a call with another row count compiles its tile
+    then, which must not happen under CUDA graph capture. `run` is graph-capturable and
+    allocates nothing.
     """
 
     def __init__(
@@ -492,9 +490,8 @@ class Unpooler:
     def unsupported(
         weight: torch.Tensor, shape: UnpoolerShape = UNPOOLER
     ) -> str | None:
-        """Why the GEMM cannot take `weight` (an [N, K] shard) at launch
-        shape `shape`, or None: the constructor's checks of both, which it
-        raises as ValueError."""
+        """Why the GEMM cannot take `weight` (an [N, K] shard) at launch shape `shape`,
+        or None: the constructor's checks of both, which it raises as ValueError."""
         if weight.dim() != 2:
             return f"unpooler shard must be 2-D, got {tuple(weight.shape)}"
         n, k = map(int, weight.shape)

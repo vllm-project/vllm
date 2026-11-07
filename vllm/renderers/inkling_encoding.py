@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inkling chat-encoding core.
 
-Pure implementation of Inkling chat rendering, kept deliberately free of
-vLLM imports: it depends only on the `InklingTextTokenizer` protocol
-and speaks OpenAI-style message dicts. If a standalone Inkling
-input-processing library becomes available, this module is the unit to
-swap out — the swap point is marked in `vllm/renderers/inkling.py`.
+Pure implementation of Inkling chat rendering, kept deliberately free of vLLM imports:
+it depends only on the `InklingTextTokenizer` protocol and speaks OpenAI-style message
+dicts. If a standalone Inkling input-processing library becomes available, this module
+is the unit to swap out — the swap point is marked in `vllm/renderers/inkling.py`.
 
 Multimodal parts follow the contract of vLLM's Inkling multimodal processor
 (`InklingMultiModalProcessor` anchors prompt updates on the bare

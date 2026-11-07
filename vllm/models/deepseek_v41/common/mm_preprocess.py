@@ -174,8 +174,7 @@ def image_token_types(n_llm_h: int, n_llm_w: int) -> torch.Tensor:
 
 
 class DeepseekV4VLImageProcessor:
-    """Per-image transform (the PIL-input equivalent of the reference
-    `load_image`)."""
+    """Per-image transform (the PIL-input equivalent of the reference `load_image`)."""
 
     def __init__(self, config: DeepseekV41Config) -> None:
         super().__init__()

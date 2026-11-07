@@ -33,9 +33,8 @@ from vllm.parser.nemotron_v3 import NemotronV3Parser
 class GraniteToolCallParser(NemotronV3Parser):
     """Granite 4.2 tool-call parser.
 
-    Subclass of `NemotronV3Parser` (whose tool-call and reasoning format
-    Granite 4.2 shares) exposed as a standalone tool parser. The tool adapter
-    generated from this class extracts tool calls through the shared grammar;
-    reasoning/content splitting, when enabled, is handled by the separately
-    configured reasoning parser.
+    Subclass of `NemotronV3Parser` (whose tool-call and reasoning format Granite 4.2
+    shares) exposed as a standalone tool parser. The tool adapter generated from this
+    class extracts tool calls through the shared grammar; reasoning/content splitting,
+    when enabled, is handled by the separately configured reasoning parser.
     """

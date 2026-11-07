@@ -93,10 +93,9 @@ _STREAM = fx.Stream(None)
 
 
 def sent_on(c, which="ar"):
-    """(OPT_SENTS) This build's all-reduce `which` ("ar": o_proj's,
-    "latr", "final") goes through its sentinel region (`layer.k2_sent`; a
-    plain call: a method call on `c` inside a traced branch would make FlyDSL
-    carry `c` as branch state)."""
+    """(OPT_SENTS) This build's all-reduce `which` ("ar": o_proj's, "latr", "final")
+    goes through its sentinel region (`layer.k2_sent`; a plain call: a method call on
+    `c` inside a traced branch would make FlyDSL carry `c` as branch state)."""
     return c.get("sent_" + which, False)
 
 

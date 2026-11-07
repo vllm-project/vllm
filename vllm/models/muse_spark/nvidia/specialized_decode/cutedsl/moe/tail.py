@@ -33,10 +33,9 @@ is bitwise the stock MNNVL MoE finalize's for the same rows, identical on every
 rank. It takes two kernels over one Lamport mailbox: a publisher that
 multicasts each token's partial, and a reduction that sums the `tp` slots.
 
-Under expert TP (`TpTail`) every rank holds a K-partial of every route's
-GEMM2 row instead. The rows are summed across ranks before the norm, bitwise
-as the stock TP finalize (`tp_moe_finalize_rmsnorm`) on its single-launch
-token-owner path::
+Under expert TP (`TpTail`) every rank holds a K-partial of every route's GEMM2 row
+instead. The rows are summed across ranks before the norm, bitwise as the stock TP
+finalize (`tp_moe_finalize_rmsnorm`) on its single-launch token-owner path::
 
     x_r = bf16(sum over ranks, in rank order, of the K-partials)  # FP32 sum
     out = bf16(sum_r fp32(w_r * norm(x_r)))    # routes in order, from 0.0
@@ -390,10 +389,9 @@ def tp_split(m: int, tp: int, nsm: int) -> int:
 
 
 class _TpTailKernel:
-    """The expert-TP MoE tail, one launch: grid (split, slots, tp), clusters of
-    the `split` H bands of one (slot, d), `TOP_K` x `band_threads`
-    threads; CTA (b, g, d) works on H band b of token t = g * tp + d. Rank
-    `t % tp` owns token `t`.
+    """The expert-TP MoE tail, one launch: grid (split, slots, tp), clusters of the
+    `split` H bands of one (slot, d), `TOP_K` x `band_threads` threads; CTA (b, g, d)
+    works on H band b of token t = g * tp + d. Rank `t % tp` owns token `t`.
 
     - Send: every rank sends its K-partial rows of token t's routes to the
       owner's route mailbox (unicast), -0.0 as +0.0.
@@ -1142,9 +1140,8 @@ class TpTail:
         return kernel
 
     def bind(self, norm) -> BoundTail:
-        """One layer's tail: `norm` is its post_expert_norm. The splits of
-        `batches` are compiled here for both route-weight dtypes, before
-        capture."""
+        """One layer's tail: `norm` is its post_expert_norm. The splits of `batches` are
+        compiled here for both route-weight dtypes, before capture."""
         constants = tail_constants(norm)
         for dtype in ROUTE_WEIGHT_DTYPES:
             for m in self.batches:

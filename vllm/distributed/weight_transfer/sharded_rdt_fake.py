@@ -42,9 +42,8 @@ class _UnsupportedFakeOp(NotImplementedError):
 
 @dataclass
 class _Scatter:
-    """One recorded scatter: pull `src`, copy it into `layer`'s
-    `param_name` at the recorded strided region. The bake's output unit; see
-    the engine module's Data flow.
+    """One recorded scatter: pull `src`, copy it into `layer`'s `param_name` at the
+    recorded strided region. The bake's output unit; see the engine module's Data flow.
 
     Self-contained so replay needs no lookups. Destination geometry is read off
     the meta view and rebuilt each sync as `as_strided(shape, stride, offset)`

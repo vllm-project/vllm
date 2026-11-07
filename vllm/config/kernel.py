@@ -407,9 +407,8 @@ class KernelConfig:
     linear_backend_per_quant: dict[str, LinearBackend] | None = Field(
         default=None, min_length=1
     )
-    """Backend overrides keyed by linear quantization scheme. Overrides take
-    precedence over `linear_backend`; for example,
-    `{"nvfp4_w4a16": "humming"}`."""
+    """Backend overrides keyed by linear quantization scheme. Overrides take precedence
+    over `linear_backend`; for example, `{"nvfp4_w4a16": "humming"}`."""
 
     rdna_hybrid_w4a16_prefill_dequant: RDNAHybridW4A16PrefillDequantMode = "disable"
     """Cache a dense dequantized copy of each weight for the RDNA hybrid W4A16

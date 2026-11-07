@@ -216,8 +216,7 @@ def _resolve_gdn_prefill_backend(
     The HIP GDN prefill kernel is chosen when:
     * "hip" is requested on RDNA3.5 (gfx1150-gfx1153), or "auto" on gfx1151;
     * the build includes `_rocm_C.rdna35_gdn_chunked`;
-    * the model uses BF16 or FP16 activations with
-      `head_k_dim == head_v_dim == 128`.
+    * the model uses BF16 or FP16 activations with `head_k_dim == head_v_dim == 128`.
     """
     additional_config = vllm_config.additional_config
     backend_cfg = (

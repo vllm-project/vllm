@@ -5,10 +5,9 @@
 A draft step of up to 64 query rows on one TP4 rank (layout `layout.W_*`). The
 differences from `layer`:
 
-- GEMVs: token tiles of 16 rows (a runtime loop; two tiles' activations loaded
-  together) reuse each CTA's weights in the same wave split and order, so a row's
-  result matches `layer`'s bitwise; o_proj / down partials go to the row's owner
-  rank (row % 4) only.
+- GEMVs: token tiles of 16 rows (a runtime loop; two tiles' activations loaded together)
+  reuse each CTA's weights in the same wave split and order, so a row's result matches
+  `layer`'s bitwise; o_proj / down partials go to the row's owner rank (row % 4) only.
 - Attention: request r gets 48 // n CTAs; CTA c takes a contiguous range of the
   window's blocks, newest first (the first two hold the new K / V rows), with an
   online softmax and the next block's K / V loaded during the current one; one

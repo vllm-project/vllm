@@ -203,12 +203,11 @@ def candidate_blocks_to_sparse_indices(
             shaped [rows, K * ratio] and [rows], both int32.
 
     Returns:
-        sparse_indices: [rows, K * ratio] int32 block ids for DeepGEMM,
-            sorted ascending per row with the valid prefix first (unique in
-            production, where candidates are unique) and the remaining slots
-            repeating the last valid block (the kernel's padding convention).
-            With the unaligned-ks variant, block `i` starts at
-            `i * sparse_block_kv + ks % sparse_block_kv`.
+        sparse_indices: [rows, K * ratio] int32 block ids for DeepGEMM, sorted ascending
+            per row with the valid prefix first (unique in production, where candidates
+            are unique) and the remaining slots repeating the last valid block (the
+            kernel's padding convention). With the unaligned-ks variant, block `i`
+            starts at `i * sparse_block_kv + ks % sparse_block_kv`.
         end: [rows] int32 count of valid sparse-token columns; valid columns
             always form a prefix because the block ids are sorted.
 

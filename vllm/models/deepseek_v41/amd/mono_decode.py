@@ -170,11 +170,10 @@ def _capture_plain_experts(experts) -> None:
 
 
 def _keep_copies(layer, copies: tuple[torch.Tensor, ...]) -> None:
-    """Store a layer's gfx942 copies as `layer.mono942`. A reload of the
-    weights (`reload_weights`, or a weight update in RL) runs
-    `process_weights_after_loading` again, and the kernels and captured
-    CUDA graphs read the first copies by their addresses. So the copies of a
-    reload are written into the first copies in place."""
+    """Store a layer's gfx942 copies as `layer.mono942`. A reload of the weights
+    (`reload_weights`, or a weight update in RL) runs `process_weights_after_loading`
+    again, and the kernels and captured CUDA graphs read the first copies by their
+    addresses. So the copies of a reload are written into the first copies in place."""
     kept = getattr(layer, "mono942", None)
     if kept is None:
         layer.mono942 = copies
@@ -189,11 +188,10 @@ ATTN_LINEARS_942 = ("fused_wqa_wkv", "wq_b", "wo_a", "wo_b")
 
 
 def _copy_linear_at_load(linear) -> None:
-    """gfx942: make the dense MXFP8 linear's `weights942.linear_copy` right
-    after vLLM has processed its weights at load. By default
-    (VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD) vLLM dequantizes them to bf16
-    there, and the copy re-encodes them as the gfx942 kernels read them.
-    Weights that stay e4m3 are copied as they are."""
+    """gfx942: make the dense MXFP8 linear's `weights942.linear_copy` right after vLLM
+    has processed its weights at load. By default (VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD)
+    vLLM dequantizes them to bf16 there, and the copy re-encodes them as the gfx942
+    kernels read them. Weights that stay e4m3 are copied as they are."""
     qm = linear.quant_method
     original = qm.process_weights_after_loading
 
@@ -269,9 +267,8 @@ def _select(
     normed: torch.Tensor,
     qr: torch.Tensor,
 ) -> None:
-    """An index source's compressor and top-k selection, from K1's normed input
-    and bf16 qr: `_forward_csa2_full` / `_forward_csa2_reindex` and the
-    indexer op, serial."""
+    """An index source's compressor and top-k selection, from K1's normed input and bf16
+    qr: `_forward_csa2_full` / `_forward_csa2_reindex` and the indexer op, serial."""
     attn = layer.attn
     comp, indexer = attn.compressor, attn.indexer
     assert indexer is not None

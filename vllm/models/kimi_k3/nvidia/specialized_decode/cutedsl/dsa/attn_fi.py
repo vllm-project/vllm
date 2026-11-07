@@ -193,10 +193,9 @@ class FlashInferCore:
     row (the q mailbox's padded heads under DCP); `buffers`: the model's shared
     flat rows [R, K], their counts [R], the latent [R * heads * 512] (BF16) and,
     under DCP, the LSE [R * heads] (FP32); `kernels`: {rows: kernel}; `dcp`,
-    `rank`: the KV cache's DCP sharding; `capacities`: the stock decode's
-    prims_ts row capacities (`plan_rows_for`); `widths`: the index widths
-    `decode` may get (default the buffers' top-k; e.g. also the DCP top-k
-    merge's rows)."""
+    `rank`: the KV cache's DCP sharding; `capacities`: the stock decode's prims_ts row
+    capacities (`plan_rows_for`); `widths`: the index widths `decode` may get (default
+    the buffers' top-k; e.g. also the DCP top-k merge's rows)."""
 
     def __init__(
         self,

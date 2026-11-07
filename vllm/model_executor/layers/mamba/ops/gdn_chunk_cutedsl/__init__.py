@@ -169,10 +169,9 @@ def chunk_gated_delta_rule_cutedsl(
         core_attn_out: Optional output buffer with shape `[T, Hv, V]`.
 
     Returns:
-        A tuple `(output, final_state)` where `output` has shape
-        `[1, T, Hv, V]` and `final_state` has shape `[N, Hv, V, K]`.
-        When `core_attn_out` is provided, `output` is an unsqueezed view of
-        that buffer.
+        A tuple `(output, final_state)` where `output` has shape `[1, T, Hv, V]` and
+        `final_state` has shape `[N, Hv, V, K]`. When `core_attn_out` is provided,
+        `output` is an unsqueezed view of that buffer.
 
     """
     q = q.squeeze(0)

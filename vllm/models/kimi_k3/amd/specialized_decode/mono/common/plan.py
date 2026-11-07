@@ -96,9 +96,8 @@ LDS_BYTES = 160 * 1024  # a CU's LDS: one CTA's whole
 
 
 def first_task(bid, base):
-    """CTA `bid`'s first task of a stage placed from CTA `base` (any count of
-    CTAs past 0: placements that add task counts run past the grid), then every
-    BLOCKS-th."""
+    """CTA `bid`'s first task of a stage placed from CTA `base` (any count of CTAs past
+    0: placements that add task counts run past the grid), then every BLOCKS-th."""
     return (bid - base % BLOCKS + BLOCKS) % BLOCKS
 
 

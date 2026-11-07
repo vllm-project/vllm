@@ -118,8 +118,7 @@ def sreg(base, offset, region):
 
 
 def preg(base, offset, region):
-    """Peer-symmetric region `region` at byte `offset` of a rank's buffer
-    `base`."""
+    """Peer-symmetric region `region` at byte `offset` of a rank's buffer `base`."""
     return Addr(region, Space.PEER, base + fx.Int64(offset))
 
 
@@ -265,8 +264,7 @@ SENT_NAN = -4128832  # 0xFFC0FFC0
 
 
 def sent_word(w):
-    """A pushed bf16-pair word (an f32-typed `bf16_pair`), never the
-    sentinel."""
+    """A pushed bf16-pair word (an f32-typed `bf16_pair`), never the sentinel."""
     w = w.bitcast(fx.Int32) if isinstance(w, fx.Float32) else fx.Int32(w)
     return (w == fx.Int32(SENT)).select(fx.Int32(SENT_NAN), w)
 

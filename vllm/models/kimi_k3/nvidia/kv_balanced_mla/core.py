@@ -2,13 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FP8 MLA decode over the paged FP8 cache with a device-planned split-KV work list.
 
-The kernel is TokenSpeed's FP8 MLA decode (vendored in `kernel.py`): query rows
-packed into 128-row tiles (heads x q tokens), one 2-CTA cluster per (query tile,
-request, KV split), FP16 (or, as TokenSpeed's own decode, FP32) partials merged by its
-reduction kernel. A planner kernel
-picks each request's split count from its KV length and lists exactly the planned
-clusters; one wave of persistent clusters walks the list. Nothing is read on the
-host, so a plan can be captured in a CUDA graph.
+The kernel is TokenSpeed's FP8 MLA decode (vendored in `kernel.py`): query rows packed
+into 128-row tiles (heads x q tokens), one 2-CTA cluster per (query tile, request, KV
+split), FP16 (or, as TokenSpeed's own decode, FP32) partials merged by its reduction
+kernel. A planner kernel picks each request's split count from its KV length and lists
+exactly the planned clusters; one wave of persistent clusters walks the list. Nothing is
+read on the host, so a plan can be captured in a CUDA graph.
 """
 
 from functools import cache
@@ -370,13 +369,12 @@ class KvBalancedMla:
         out: torch.Tensor | None = None,
         pdl: bool = False,
     ) -> torch.Tensor:
-        """BF16 latent [T, H, 512] of the FP8 `query` [T, H, 576] (`q` rows per
-        request) over the FP8 `cache` [blocks, page, 576] with the plan in
-        `counts` and `work`. With `lse` [requests, q, H] FP32 it also writes
-        each row's log2 LSE. Under DCP (`cp` = world, rank, interleave),
-        `seq_lens` are this rank's shard lengths and `causal_lens` the global
-        ones. An empty request gets a zero output and an LSE of -inf. `out`: a
-        caller-owned BF16 [T, H, 512] output; `pdl`: PDL chained (see
+        """BF16 latent [T, H, 512] of the FP8 `query` [T, H, 576] (`q` rows per request)
+        over the FP8 `cache` [blocks, page, 576] with the plan in `counts` and `work`.
+        With `lse` [requests, q, H] FP32 it also writes each row's log2 LSE. Under DCP
+        (`cp` = world, rank, interleave), `seq_lens` are this rank's shard lengths and
+        `causal_lens` the global ones. An empty request gets a zero output and an LSE of
+        -inf. `out`: a caller-owned BF16 [T, H, 512] output; `pdl`: PDL chained (see
         `_compile`)."""
         requests = seq_lens.numel()
         assert cache.shape[-1] == LATENT + ROPE, cache.shape

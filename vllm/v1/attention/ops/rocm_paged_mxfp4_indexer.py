@@ -145,9 +145,8 @@ def rocm_mxfp4_indexer_k_store(
     *,
     num_heads: int,
 ) -> None:
-    """`indexer_k_norm_rope_store` for the ROCm MXFP4 cache: aiter's cache op
-    writes the key in the order its MQA-logits kernel reads with `num_heads`
-    query heads."""
+    """`indexer_k_norm_rope_store` for the ROCm MXFP4 cache: aiter's cache op writes the
+    key in the order its MQA-logits kernel reads with `num_heads` query heads."""
     assert use_fp4_cache, "the ROCm indexer cache op writes MXFP4 only"
     layout = rocm_paged_mxfp4_cache_layout(num_heads, k_pre.shape[1], k_cache.shape[1])
     k_norm_rope_mxfp4_cache, _ = _aiter_indexer_cache_ops()

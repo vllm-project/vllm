@@ -138,9 +138,8 @@ def _swizzled(row, chunk: int):
 
 
 class QkvFrontKernel:
-    """One variant: `tiles` 8-token column tiles, a `stages`-deep ring, K
-    split `splits` (the cluster size) and `fixed_m` (8: M == 8, 0: any M of
-    the tile count)."""
+    """One variant: `tiles` 8-token column tiles, a `stages`-deep ring, K split `splits`
+    (the cluster size) and `fixed_m` (8: M == 8, 0: any M of the tile count)."""
 
     def __init__(self, tiles: int, stages: int, splits: int, fixed_m: int) -> None:
         if tiles not in (1, 2) or splits not in SPLITS or fixed_m not in (0, 8):
@@ -479,10 +478,9 @@ class QkvFrontKernel:
 
     @cute.jit
     def consume(self, sbase, fb, eb, warp, lane, acc) -> None:
-        """Consumer warp `warp`: W rows 16 warp .. 16 warp + 15 over all 128 k
-        of every stage. The 32-k block b lives in box b / 2 at 16-byte chunks
-        2 t + (b & 1); A and B take the same k permutation. One accumulator set
-        per k block."""
+        """Consumer warp `warp`: W rows 16 warp .. 16 warp + 15 over all 128 k of every
+        stage. The 32-k block b lives in box b / 2 at 16-byte chunks 2 t + (b & 1); A
+        and B take the same k permutation. One accumulator set per k block."""
         g = lane >> 2
         t = lane & 3
         a_off = []
@@ -757,8 +755,7 @@ def unsupported(
     kv_cache: torch.Tensor,
     out: torch.Tensor | None = None,
 ) -> str | None:
-    """Why the kernel cannot take this call (with `out`, also its output),
-    or None."""
+    """Why the kernel cannot take this call (with `out`, also its output), or None."""
     if not x.is_cuda:
         return "x must be a CUDA tensor"
     if not hidden_rows_ok(x):
@@ -822,8 +819,7 @@ def launch(
     out: torch.Tensor,
     eps: float,
 ) -> None:
-    """`qkv_front` without its checks: for a call `unsupported` took with
-    this `out`."""
+    """`qkv_front` without its checks: for a call `unsupported` took with this `out`."""
     m, n = x.shape[0], weight.shape[0]
     hkv = kv_cache.shape[1]
     device = x.get_device()
@@ -866,11 +862,10 @@ def qkv_front(
     eps: float,
 ) -> None:
     """Out [M, N] = x [M, 8192] @ weight [N, 8192]^T with the q and k heads
-    RMS-normalized (and rotated when `cos_sin_cache` is given), and the
-    normalized k and raw v heads written to the kv_cache rows of
-    `slot_mapping` (-1: none). N = (2 HQ + 2 HKV) * 64, HKV =
-    kv_cache.size(1). Launched with PDL on the current stream of x's device;
-    raises ValueError for a call outside the kernel (`unsupported`).
+    RMS-normalized (and rotated when `cos_sin_cache` is given), and the normalized k and
+    raw v heads written to the kv_cache rows of `slot_mapping` (-1: none). N = (2 HQ + 2
+    HKV) * 64, HKV = kv_cache.size(1). Launched with PDL on the current stream of x's
+    device; raises ValueError for a call outside the kernel (`unsupported`).
     Graph-capturable once `prepare` has compiled the variant."""
     reason = unsupported(
         x, weight, positions, cos_sin_cache, slot_mapping, kv_cache, out

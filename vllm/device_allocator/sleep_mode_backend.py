@@ -52,11 +52,10 @@ class SleepModeBackend(ABC):
     def suspend(self, discardable: Collection[int] = ()) -> None:
         """Free GPU state, so that `resume` restores it at the same addresses.
 
-        `discardable` holds the storage addresses of the tensors the caller
-        rewrites after `resume`, so they need no backup: the parameters not
-        selected for preservation at level 2, nothing at level 1. A backend
-        doesn't need to know the level. KV cache and workspace scratch are never
-        restored.
+        `discardable` holds the storage addresses of the tensors the caller rewrites
+        after `resume`, so they need no backup: the parameters not selected for
+        preservation at level 2, nothing at level 1. A backend doesn't need to know the
+        level. KV cache and workspace scratch are never restored.
         """
         raise NotImplementedError
 

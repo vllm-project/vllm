@@ -886,16 +886,14 @@ class DerenderStreamState(BaseModel):
     """
 
     logprob_context_token_ids: list[int] = Field(default_factory=list, max_length=4)
-    """Trailing sampled token IDs carried across chunks so byte-fallback
-    (U+FFFD) correction during logprob placeholder resolution has context
-    at chunk boundaries. Bounded to the 4-token window that
-    `_correct_decoded_token` reads."""
+    """Trailing sampled token IDs carried across chunks so byte-fallback (U+FFFD)
+    correction during logprob placeholder resolution has context at chunk boundaries.
+    Bounded to the 4-token window that `_correct_decoded_token` reads."""
 
     logprob_text_offset: int = Field(default=0, ge=0)
-    """Cumulative length of reported logprob tokens, including special tokens.
-    Seeds `text_offset` for completion
-    streaming logprobs so offsets stay absolute across chunks, mirroring
-    `initial_text_offset` in the generate streaming path."""
+    """Cumulative length of reported logprob tokens, including special tokens. Seeds
+    `text_offset` for completion streaming logprobs so offsets stay absolute across
+    chunks, mirroring `initial_text_offset` in the generate streaming path."""
 
     output_token_ids: list[int] = Field(default_factory=list)
     """All output tokens seen so far. Parser path only.

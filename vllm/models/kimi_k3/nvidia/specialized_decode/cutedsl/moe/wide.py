@@ -110,13 +110,12 @@ def engine(batch, defers):
 
 
 class WideRoute(RouteSitu):
-    """The listed wide engine's front: CTA t routes token t (`RouteSitu`'s exact
-    top16 and renormalized weights) and appends its 16 (token, slot) pairs to their
-    experts' routing lists (relaxed GPU-scope counter claims; this call's parity is
-    the experts workspace's grouped-call generation & 1); CTA b + t writes token t's
-    MXFP8 plan row from the BF16 latent (`plan_chunk`: bit-identical to
-    `ExpertsPlanKernel`). The experts release at the end (late: they must not take
-    SMs from routing)."""
+    """The listed wide engine's front: CTA t routes token t (`RouteSitu`'s exact top16
+    and renormalized weights) and appends its 16 (token, slot) pairs to their experts'
+    routing lists (relaxed GPU-scope counter claims; this call's parity is the experts
+    workspace's grouped-call generation & 1); CTA b + t writes token t's MXFP8 plan row
+    from the BF16 latent (`plan_chunk`: bit-identical to `ExpertsPlanKernel`). The
+    experts release at the end (late: they must not take SMs from routing)."""
 
     def __init__(self, batch, renorm, tp):
         super().__init__(batch, 1, renorm, False, (True, True, False), False)

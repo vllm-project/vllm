@@ -1085,10 +1085,9 @@ def ll_weights_from_layers(
     shared_down: nn.Module,
     experts: FlintMoEWeights,
 ) -> LLMoEWeights:
-    """`LLMoEWeights` viewing the loaded layers' tensors: the shared-expert
-    linears are vLLM linear layers holding the FlashInfer-prepared NVFP4
-    tensors (ModelOpt-packed weight, 128x4-swizzled scales, fp32 global
-    scale)."""
+    """`LLMoEWeights` viewing the loaded layers' tensors: the shared-expert linears are
+    vLLM linear layers holding the FlashInfer-prepared NVFP4 tensors (ModelOpt-packed
+    weight, 128x4-swizzled scales, fp32 global scale)."""
 
     def nvfp4(layer: nn.Module) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         weight = layer.weight

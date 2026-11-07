@@ -219,8 +219,7 @@ def get_shared_cp_decode(**kwargs) -> IndexerCPDecode:
 class MiniMaxM3IndexerTritonCPImpl(MiniMaxM3IndexerTritonImpl):
     """Triton indexer with context-parallel decode scoring for ROCm.
 
-    Decode runs through `IndexerCPDecode`. Prefill uses the base Triton
-    kernels.
+    Decode runs through `IndexerCPDecode`. Prefill uses the base Triton kernels.
 
     CUDAGraph: v2 FULL capture records the model with `cudagraph_runtime_mode=NONE` (see
     `ModelCudaGraphManager.capture`), so a `CUDAGraphMode.FULL` guard never fires and a

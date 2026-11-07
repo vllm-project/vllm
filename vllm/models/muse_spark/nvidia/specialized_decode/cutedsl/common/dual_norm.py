@@ -22,13 +22,12 @@ next branch::
     r2 = rsqrt(mean(stream**2) + next_eps)
     out = bf16(stream * r2 * (next_weight + next_gain_center))
 
-`dual_norm_fragment` is the device function: one thread's 8 columns of one
-row, with the two row statistics supplied by a cluster reduction. The
-standalone kernel (`DualNorm`) uses the reduction of the public
-`gated_residual_next_rmsnorm` (`tree_row_sum`: a butterfly over the
-cluster's 32 warp sums); the boundary all-gathers use the one of the public
-all-gather dual norm (`serial_row_sum`: the 32 warp sums added in order).
-Each matches its reference bit for bit; the two differ in their last bits.
+`dual_norm_fragment` is the device function: one thread's 8 columns of one row, with the
+two row statistics supplied by a cluster reduction. The standalone kernel (`DualNorm`)
+uses the reduction of the public `gated_residual_next_rmsnorm` (`tree_row_sum`: a
+butterfly over the cluster's 32 warp sums); the boundary all-gathers use the one of the
+public all-gather dual norm (`serial_row_sum`: the 32 warp sums added in order). Each
+matches its reference bit for bit; the two differ in their last bits.
 
 Both use grid (rows, 8), cluster (1, 8, 1), 128 threads, 8 columns per thread
 (H = 8192). The stream may be updated in place: each thread reads its 8
@@ -196,10 +195,9 @@ def cluster_row_sum(
 ) -> Float32:
     """Sum one value per thread over the cluster; every thread gets the total.
 
-    Each warp scatters its sum into `slots[cluster_rank, warp]` of every peer
-    CTA, then the slots are added in order. The caller must complete one
-    cluster barrier before the first call (a remote store to a peer CTA that
-    has not started faults).
+    Each warp scatters its sum into `slots[cluster_rank, warp]` of every peer CTA, then
+    the slots are added in order. The caller must complete one cluster barrier before
+    the first call (a remote store to a peer CTA that has not started faults).
     """
     for offset in (16, 8, 4, 2, 1):
         value = value + cute.arch.shuffle_sync_bfly(value, offset=offset)
@@ -271,12 +269,11 @@ def dual_norm_fragment(
 ):
     """One thread's 8 columns of the dual norm (traced inline).
 
-    `branch` (the BF16 branch widened), `stream`, `beta` and
-    `next_gamma` = next_weight + next_gain_center are FP32x8; `alpha` is
-    FP32x8, a Float32 scalar or None (1.0); `post_gamma` = post_weight +
-    post_gain_center is FP32x8 or None (no post weight). `row_sum(value,
-    round_index)` sums one value per thread over the row (round 0: the
-    branch's squares, round 1: the stream's). Returns (stream, out), the FP32
+    `branch` (the BF16 branch widened), `stream`, `beta` and `next_gamma` =
+    next_weight + next_gain_center are FP32x8; `alpha` is FP32x8, a Float32 scalar or
+    None (1.0); `post_gamma` = post_weight + post_gain_center is FP32x8 or None (no post
+    weight). `row_sum(value, round_index)` sums one value per thread over the row (round
+    0: the branch's squares, round 1: the stream's). Returns (stream, out), the FP32
     updated stream and the unrounded FP32 next-norm output.
     """
     b = branch

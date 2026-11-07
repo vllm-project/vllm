@@ -381,12 +381,11 @@ class Platform:
     def register_triton_kernel_overrides(cls) -> None:
         """Override core Triton kernels with platform implementations.
 
-        Platforms whose Triton kernels need replacement implementations
-        (e.g. CPU fallbacks when the Triton-CPU backend is unavailable)
-        override this method and call
-        `vllm.triton_utils.dispatcher.register_kernels`
-        with their overrides. It runs during model runner init, before any
-        kernel launch. The default implementation does nothing.
+        Platforms whose Triton kernels need replacement implementations (e.g. CPU
+        fallbacks when the Triton-CPU backend is unavailable) override this method and
+        call `vllm.triton_utils.dispatcher.register_kernels` with their overrides. It
+        runs during model runner init, before any kernel launch. The default
+        implementation does nothing.
         """
         return
 
@@ -1494,9 +1493,8 @@ class Platform:
         The builder supplies grouping (`get_kv_cache_groups`) and tensor placement
         (`get_kv_cache_config_from_groups`). Vendors may override this to return a
         platform-specific builder. The default builder honors a model implementing
-        `SupportsKVCacheGrouping`; a
-        builder that overrides `get_kv_cache_groups` owns grouping and bypasses that
-        model hook unless it calls `super()`.
+        `SupportsKVCacheGrouping`; a builder that overrides `get_kv_cache_groups` owns
+        grouping and bypasses that model hook unless it calls `super()`.
 
         Returns:
             Fully-qualified class path of a `KVCacheConfigBuilder` subclass.

@@ -1338,9 +1338,8 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_impl(
     """Fused AllReduce + add-RMSNorm + per-group FP8 quant + bf16 normed act.
 
     Wraps the same AITER launcher as `_rocm_aiter_fused_allreduce_rmsnorm_
-    quant_per_group_impl` with `emit_bf16=True`, emitting the pre-quant
-    bf16/fp16 normed activation for a parallel consumer (DeepSeek V3.2 sparse
-    indexer `wk_weights_proj`).
+    quant_per_group_impl` with `emit_bf16=True`, emitting the pre-quant bf16/fp16 normed
+    activation for a parallel consumer (DeepSeek V3.2 sparse indexer `wk_weights_proj`).
     """
     aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
     assert aiter_ar is not None, "aiter allreduce must be initialized"

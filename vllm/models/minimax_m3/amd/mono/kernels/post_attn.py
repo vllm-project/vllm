@@ -387,9 +387,8 @@ def build_post_attn_kernel(
             )
 
         def route_key(v, e):
-            """Signed-orderable i32 of score `v` with its low 7 bits replaced by
-            127 - expert `e`: a pick is one integer max, a tie goes to the lower
-            expert."""
+            """Signed-orderable i32 of score `v` with its low 7 bits replaced by 127 -
+            expert `e`: a pick is one integer max, a tie goes to the lower expert."""
             b = v.bitcast(fx.Int32)
             b = (b < 0).select(b ^ fx.Int32(0x7FFFFFFF), b)
             return (b & fx.Int32(-128)) | (127 - e)

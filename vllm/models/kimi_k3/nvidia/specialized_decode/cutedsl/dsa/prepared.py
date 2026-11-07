@@ -140,12 +140,11 @@ def compile_core(
     """CuTe kernels (query, index, value) of one batch of rows (`q` per request).
     `specs`: the layouts of the weights, the MLA cache and the indexer cache.
     Under DCP (`dcp`: its size, `q_heads`: the gathered query's padded heads,
-    `cap`: the DcpBox rows) the query also publishes into the q mailbox and the
-    value is DcpValue. `fp8`: a per-tensor FP8 query [B, H, 576] and cache, and
-    the value reads FlashInfer's [B, H, 512] latent (under DCP: an FP8 q mailbox,
-    and an LSE in base e if
-    `lse_base_e`, else base 2). `nvfp4`: that FP8 query over an nvfp4_ds_mla
-    cache (FlashInfer prims_ts). `overlap`: the query overlap mode (overlap.py).
+    `cap`: the DcpBox rows) the query also publishes into the q mailbox and the value is
+    DcpValue. `fp8`: a per-tensor FP8 query [B, H, 576] and cache, and the value reads
+    FlashInfer's [B, H, 512] latent (under DCP: an FP8 q mailbox, and an LSE in base e
+    if `lse_base_e`, else base 2). `nvfp4`: that FP8 query over an nvfp4_ds_mla cache
+    (FlashInfer prims_ts). `overlap`: the query overlap mode (overlap.py).
     `partials`: the DcpBox's partial rows. `release`: the query launches the
     next kernel early (PDL). `pushed`: DcpValue only merges (the sparse decode
     pushes the rows, attn_sparse)."""
@@ -473,13 +472,12 @@ class PreparedDsa:
         return self.box.mailbox(batch).format != PROJECTED
 
     def held(self, modes):
-        """The shapes on a FlashInfer kernel (HELD_KERNELS) whose overlap mode is
-        one of `modes`: the kernel right before their sparse decode (TP: the
-        fused indexer's select, or the late query) must not launch it early.
-        prims_ts' split-KV decode launches with PDL but reads its query and rows
-        before its PDL wait, so it would read the previous layer's; trtllm-gen
-        reads its per-row counts early too (a CUDA graph with only the counts
-        poisoned before each layer hangs at 60 rows)."""
+        """The shapes on a FlashInfer kernel (HELD_KERNELS) whose overlap mode is one of
+        `modes`: the kernel right before their sparse decode (TP: the fused indexer's
+        select, or the late query) must not launch it early. prims_ts' split-KV decode
+        launches with PDL but reads its query and rows before its PDL wait, so it would
+        read the previous layer's; trtllm-gen reads its per-row counts early too (a CUDA
+        graph with only the counts poisoned before each layer hangs at 60 rows)."""
         return {
             shape
             for shape, core in self.cores.items()

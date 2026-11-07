@@ -3,11 +3,10 @@
 """Fused replay verify (KdaFused): the RecoverSSM commit of the previous step and the
 verify of this step in one pass over the FP32 state, the verify in chunked form.
 
-Deferred RecoverSSM. After sampling, the runner no longer folds the accepted tokens
-into the checkpoint; it records per request (its request-state slot) how many of the
-last verify's tokens were accepted (`pending`). The verify records of a request
-stay in its request-indexed record slot. The next verify of that request, per
-(request, head):
+Deferred RecoverSSM. After sampling, the runner no longer folds the accepted tokens into
+the checkpoint; it records per request (its request-state slot) how many of the last
+verify's tokens were accepted (`pending`). The verify records of a request stay in its
+request-indexed record slot. The next verify of that request, per (request, head):
 
 1. reads the checkpoint S_0 and replays the `n = pending` accepted tokens of the
    previous step from its records in the commit's closed form,
@@ -95,11 +94,10 @@ def b_index(tokens, t, s):
 
 
 class KdaFused:
-    """`tokens` q, `gate_mode` the F_B chain order (KdaWide's), `split` CTAs
-    per (request, head). Operands: PreparedKda's RecoverSSM verify operands, then
-    `record_rows` [B] (each request's record / pending slot; < 0: none) and
-    `pending` [slots] (accepted tokens of the last verify not yet in the
-    checkpoint)."""
+    """`tokens` q, `gate_mode` the F_B chain order (KdaWide's), `split` CTAs per
+    (request, head). Operands: PreparedKda's RecoverSSM verify operands, then
+    `record_rows` [B] (each request's record / pending slot; < 0: none) and `pending`
+    [slots] (accepted tokens of the last verify not yet in the checkpoint)."""
 
     def __init__(self, heads, tokens, gate_mode, has_bias, split):
         assert 2 <= tokens <= 8 and gate_mode in (0, 1) and split in (1, 2, 4, 8)

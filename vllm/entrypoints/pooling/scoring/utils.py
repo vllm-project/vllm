@@ -243,10 +243,9 @@ def parse_score_data(
     """Parse a query-document pair into text prompts and shared multi-modal
     data.
 
-    Uses a **single** `MultiModalItemTracker` so that multi-modal
-    items from both inputs are merged into one `mm_data` dict.  This is
-    the correct behaviour for cross-encoder scoring, where query and
-    document are concatenated into a single model prompt.
+    Uses a **single** `MultiModalItemTracker` so that multi-modal items from both inputs
+    are merged into one `mm_data` dict. This is the correct behaviour for cross-encoder
+    scoring, where query and document are concatenated into a single model prompt.
     """
     mm_tracker = MultiModalItemTracker(model_config)
 

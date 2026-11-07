@@ -171,9 +171,8 @@ def mxfp4_k_norm_quant_insert(
     topk_indices_buffer: torch.Tensor,
     num_tokens: int,
 ) -> None:
-    """`indexer_k_norm_quant_insert` for the MXFP4 cache: LayerNorm + MXFP4
-    quant + cache insert of the indexer key, and the -1 fill of the top-k rows
-    `[:num_tokens]`.
+    """`indexer_k_norm_quant_insert` for the MXFP4 cache: LayerNorm + MXFP4 quant +
+    cache insert of the indexer key, and the -1 fill of the top-k rows `[:num_tokens]`.
 
     `kv_cache` is `[num_blocks, block_size, indexer_cache_entry_bytes]` uint8,
     possibly a strided page view of a packed cache. Rows past `slot_mapping` or
@@ -442,10 +441,9 @@ def mxfp4_fused_prologue(
     index_cache: torch.Tensor | None,
     index_slot_mapping: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """`dsa_fused_prologue` for the MXFP4 indexer cache, in one launch: the
-    q_a / kv_a RMSNorms, the fp8_ds_mla insert of `[kv_c_normed | k_pe]` and
-    the -1 fill of the top-k rows (the stock kernel's code), and the indexer key
-    LayerNorm + MXFP4 insert.
+    """`dsa_fused_prologue` for the MXFP4 indexer cache, in one launch: the q_a / kv_a
+    RMSNorms, the fp8_ds_mla insert of `[kv_c_normed | k_pe]` and the -1 fill of the
+    top-k rows (the stock kernel's code), and the indexer key LayerNorm + MXFP4 insert.
 
     `mla_cache` (`[num_blocks, block_size, 656]`) and `index_cache`
     (`[num_blocks, block_size, indexer_cache_entry_bytes]`) are uint8, possibly

@@ -45,9 +45,8 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
     **Integration:**
 
     1. Inherit from both `ColBERTMixin` and `nn.Module`.
-    2. In `__init__`: call `super().__init__()`, then
-       `_init_colbert_components`, then create `self.model`
-       (the backbone) and `self.pooler` via `_build_colbert_pooler`.
+    2. In `__init__`: call `super().__init__()`, then `_init_colbert_components`, then
+       create `self.model` (the backbone) and `self.pooler` via `_build_colbert_pooler`.
     3. In `load_weights`: use `_load_colbert_weights` to separate
        the ColBERT projection weight, then delegate the rest to the backbone.
     """

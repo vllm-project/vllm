@@ -22,24 +22,22 @@ routing kernel with precomputed ids and an 8-token tile:
       [4 + 2C, 4 + 2C + 8 M)   padded row -> token (GEMM1 only)
       [4 + 2C + 8 M, + C)      tile -> GEMM1 items done (the ready words), zero
 
-  where `M` is `max_tiles` (the most tiles any routing of the call's
-  slots needs) and `C` is `M` rounded up to a multiple of four. GEMM1
-  counts up the ready words and GEMM2 waits on them
-  (`routed_expert_gemm_cute.py`), so a record serves one GEMM1 and GEMM2
+  where `M` is `max_tiles` (the most tiles any routing of the call's slots needs) and
+  `C` is `M` rounded up to a multiple of four. GEMM1 counts up the ready words and GEMM2
+  waits on them (`routed_expert_gemm_cute.py`), so a record serves one GEMM1 and GEMM2
   pair.
 
 The ids come from a top-k selection, so the valid ids of one row are distinct:
-an expert is chosen by at most `rows` slots, and a slot's rank is the number
-of earlier rows that chose the expert (a row mask per expert, one 32-bit word
-per 32 rows). Up to eight rows every chosen expert owns exactly one tile, so
-its first tile is the number of distinct selected experts below it (a
-presence bitmap). Above eight rows an expert chosen by `n` rows owns
-`ceil(n / 8)` tiles: level `l` of the bitmap marks the experts chosen by
-more than `8 l` rows, and the first tile is the sum over levels of the
-marked experts below it. Either way the record takes a few population
-counts, no scans. Above two levels, one warp first sums each bitmap word's
-counts over the levels and prefixes them over the words, so a slot reads its
-expert's word's prefix instead of summing every level's words.
+an expert is chosen by at most `rows` slots, and a slot's rank is the number of earlier
+rows that chose the expert (a row mask per expert, one 32-bit word per 32 rows). Up to
+eight rows every chosen expert owns exactly one tile, so its first tile is the number of
+distinct selected experts below it (a presence bitmap). Above eight rows an expert
+chosen by `n` rows owns `ceil(n / 8)` tiles: level `l` of the bitmap marks the experts
+chosen by more than `8 l` rows, and the first tile is the sum over levels of the marked
+experts below it. Either way the record takes a few population counts, no scans. Above
+two levels, one warp first sums each bitmap word's counts over the levels and prefixes
+them over the words, so a slot reads its expert's word's prefix instead of summing every
+level's words.
 
 `RoutedExpertRoute` builds the record from precomputed ids in one CTA
 (64 threads per level, at most 1,024; above 16 levels a thread takes two

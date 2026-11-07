@@ -1348,9 +1348,8 @@ class MLADualRMSGroupQuantPattern(
 
 
 class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
-    """Post-grad PatternMatcher pass that fuses paired q / kv RMS norms in
-    MLA attention into `fused_mla_dual_rms_norm` backed by aiter's
-    `fused_qk_rmsnorm` HIP kernel.
+    """Post-grad PatternMatcher pass that fuses paired q / kv RMS norms in MLA attention
+    into `fused_mla_dual_rms_norm` backed by aiter's `fused_qk_rmsnorm` HIP kernel.
 
     The FP8 attention path is also handled via
     `MLADualRMSPerTokenQuantPattern` or `MLADualRMSGroupQuantPattern`,

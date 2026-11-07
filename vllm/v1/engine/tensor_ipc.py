@@ -3,11 +3,10 @@
 
 """Tensor IPC transport via torch.multiprocessing.Queue.
 
-This module contains the queue-based transport logic for sharing tensors
-between processes (e.g., API server -> engine core). The msgpack layer
-emits/consumes lightweight `TensorIpcData` values, while transport
-state such as request association, handle generation, queue routing, buffering,
-and cleanup lives here.
+This module contains the queue-based transport logic for sharing tensors between
+processes (e.g., API server -> engine core). The msgpack layer emits/consumes
+lightweight `TensorIpcData` values, while transport state such as request association,
+handle generation, queue routing, buffering, and cleanup lives here.
 """
 
 import dataclasses

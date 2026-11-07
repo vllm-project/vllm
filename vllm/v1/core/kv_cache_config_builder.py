@@ -44,10 +44,9 @@ class KVCacheConfigBuilder(ABC):
         Planning passes all workers' layers; profiling passes one worker's.
         Core rejects a result that does not put each layer in exactly one group.
 
-        The default builder honors a model's
-        `SupportsKVCacheGrouping`
-        declaration here before falling back to the default grouping; a
-        platform-specific builder decides its own grouping.
+        The default builder honors a model's `SupportsKVCacheGrouping` declaration here
+        before falling back to the default grouping; a platform-specific builder decides
+        its own grouping.
         """
         raise NotImplementedError
 

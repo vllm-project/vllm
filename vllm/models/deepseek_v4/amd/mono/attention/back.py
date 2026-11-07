@@ -239,11 +239,10 @@ def q_head_rstd(c):
 
 @traced
 def split_chunk(c, t, ch):
-    """Flash-decoding over chunk `ch` of token `t`, every head of the rank
-    -> the chunk's partial and (max, sum) per head. Wave (head group hg, key
-    tile kt): keys 16 kt .. of the chunk (loaded and dequantized once) against
-    the group's head tiles; then dims 64 w .. of the PV over every key and
-    head."""
+    """Flash-decoding over chunk `ch` of token `t`, every head of the rank -> the
+    chunk's partial and (max, sum) per head. Wave (head group hg, key tile kt): keys 16
+    kt .. of the chunk (loaded and dequantized once) against the group's head tiles;
+    then dims 64 w .. of the PV over every key and head."""
     tid, lane, wave, d, s = c["tid"], c["lane"], c["wave"], c["d"], c["S"]
     a, sl = c["args"], c["sl"]
     nchunk = c["nchunk"]

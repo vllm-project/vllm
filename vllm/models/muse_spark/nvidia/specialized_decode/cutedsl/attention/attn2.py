@@ -305,9 +305,8 @@ def _attend_page(cur, qf, pos, lim0, lim1, low0, low1, sl2, state, o, windowed):
 
 
 def _stash_partial(so, sm, sl, g, t, o, m0, m1, l0, l1) -> None:
-    """A warp's softmax state (lane: dims [16 t, 16 t + 16) of rows g and
-    g + 8) as rows of logical dims at `so`, with the row maxima at `sm`
-    and sums at `sl`."""
+    """A warp's softmax state (lane: dims [16 t, 16 t + 16) of rows g and g + 8) as rows
+    of logical dims at `so`, with the row maxima at `sm` and sums at `sl`."""
     for offset in (1, 2):
         l0 = add_ftz_f32(l0, cute.arch.shuffle_sync_bfly(l0, offset=offset))
         l1 = add_ftz_f32(l1, cute.arch.shuffle_sync_bfly(l1, offset=offset))
@@ -497,12 +496,11 @@ def _short_path(
     rolled: cutlass.Constexpr[bool],
     rounds: cutlass.Constexpr[int],
 ) -> None:
-    """The one-cluster computation of the cluster's 16 rows: pages
-    `first_page` + [0, num_pages) of the request (their first two
-    block-table entries of this warp read: e_first, e_second), at most two
-    rounds of the cluster's warps in the one-cluster kernel, SHORT_ROUNDS in
-    the split kernel (`rounds` > 0: a window's at most `rounds` rounds,
-    straight-line; else a loop the compiler unrolls, or a rolled loop in the
+    """The one-cluster computation of the cluster's 16 rows: pages `first_page` + [0,
+    num_pages) of the request (their first two block-table entries of this warp read:
+    e_first, e_second), at most two rounds of the cluster's warps in the one-cluster
+    kernel, SHORT_ROUNDS in the split kernel (`rounds` > 0: a window's at most `rounds`
+    rounds, straight-line; else a loop the compiler unrolls, or a rolled loop in the
     one-cluster kernel or with `rolled`)."""
     windowed = window > 0
     g = lane >> 2
@@ -734,9 +732,8 @@ def _attend_group(
     s: cute.Tensor,
     windowed: cutlass.Constexpr[bool],
 ):
-    """`_attend_page` for up to GROUP_PAGES pages staged in the ring (the
-    slots from shared address `group`, pages page0 + p) in one
-    online-softmax step."""
+    """`_attend_page` for up to GROUP_PAGES pages staged in the ring (the slots from
+    shared address `group`, pages page0 + p) in one online-softmax step."""
     qf = _read_qf(qf_frag)
     for i in cutlass.range_constexpr(GROUP_PAGES * 8):
         s[i] = Float32(NEG_INF)
@@ -851,9 +848,8 @@ def _merge_rows_m(
     active: Int32,
     lane: Int32,
 ):
-    """`_merge_rows` with the m of each of the `slots` partials loaded at
-    once (those from `active` on read partial active - 1 and are not
-    merged)."""
+    """`_merge_rows` with the m of each of the `slots` partials loaded at once (those
+    from `active` on read partial active - 1 and are not merged)."""
     ms = []
     for z in cutlass.range_constexpr(slots):
         part = row_partials + Int64(cutlass.min(Int32(z), active - 1)) * SLOT_BYTES
@@ -922,11 +918,10 @@ def _merge_partials(
     oy: Float32,
     merge: cutlass.Constexpr[str],
 ):
-    """Publish this cluster's (o, m, l) of a row, one of `active`; the warp
-    that completes the row's count returns (1, l, o[2 lane], o[2 lane + 1]),
-    the merge of every partial in cluster order (whichever warp is last,
-    loading them as `merge` says), after resetting the counter for the next
-    launch; the others return 0."""
+    """Publish this cluster's (o, m, l) of a row, one of `active`; the warp that
+    completes the row's count returns (1, l, o[2 lane], o[2 lane + 1]), the merge of
+    every partial in cluster order (whichever warp is last, loading them as `merge`
+    says), after resetting the counter for the next launch; the others return 0."""
     row_partials = partials + row_id * (slots * SLOT_BYTES)
     mine = row_partials + Int64(split) * SLOT_BYTES
     store_global_f32x2_address(mine + 8 * Int64(lane), ox, oy)
@@ -989,13 +984,12 @@ def _long_context(
     num_z: cutlass.Constexpr[int],
     merge: cutlass.Constexpr[str],
 ) -> None:
-    """A request of `n` pages from page `first` (more than SHORT_ROUNDS
-    rounds of a cluster's warps): the GROUPS * num_z clusters of the
-    (request, KV head) each take an equal contiguous page range; CTA r streams
-    its sixteenth of the range through the ring and warp w attends the 16 rows
-    of group w, so each page is read once per KV head. CTA r owns row
-    16 w + r of every group w, gathers the cluster's partials of it over
-    distributed shared memory and merges the clusters through the workspace."""
+    """A request of `n` pages from page `first` (more than SHORT_ROUNDS rounds of a
+    cluster's warps): the GROUPS * num_z clusters of the (request, KV head) each take an
+    equal contiguous page range; CTA r streams its sixteenth of the range through the
+    ring and warp w attends the 16 rows of group w, so each page is read once per KV
+    head. CTA r owns row 16 w + r of every group w, gathers the cluster's partials of it
+    over distributed shared memory and merges the clusters through the workspace."""
     slots = num_z * GROUPS
     split = z * GROUPS + rg
     pages_per_cluster = CLUSTER * MIN_CTA_PAGES
@@ -1459,11 +1453,10 @@ def compile_attn2(
 ):
     """cute.compile one variant of the kernel for `kv_heads` KV heads,
     `num_splits` z slices (1 for the one-cluster kernel) and `window` (0:
-    none), with these extra compile `options`, before CUDA graph capture.
-    The result takes q, gate, kv_cache, block_table, seq_lens, out and the
-    workspace (None for the one-cluster kernel), checks their dtypes, ranks,
-    the static extents, unit strides, row-stride divisibility and alignment,
-    and launches on the current stream."""
+    none), with these extra compile `options`, before CUDA graph capture. The result
+    takes q, gate, kv_cache, block_table, seq_lens, out and the workspace (None for the
+    one-cluster kernel), checks their dtypes, ranks, the static extents, unit strides,
+    row-stride divisibility and alignment, and launches on the current stream."""
     assert_not_capturing("the attn2 kernel")
     rows = cute.sym_int32()
     width = kv_heads * HEADS * HEAD_DIM
@@ -1518,9 +1511,8 @@ def split_kernel(max_seq_len: int, window: int) -> bool:
 
 
 def window_pages(window: int) -> int:
-    """The most pages from row 0's first visible key to a request's last
-    with `window` (0: no window, no bound): ceil(L / 16) - (L - 7 - W) // 16
-    at most."""
+    """The most pages from row 0's first visible key to a request's last with `window`
+    (0: no window, no bound): ceil(L / 16) - (L - 7 - W) // 16 at most."""
     return (window + QUERY_ROWS + 2 * PAGE - 3) // PAGE if window > 0 else 1 << 30
 
 
@@ -1676,15 +1668,14 @@ def attn2(
     layer's BF16 [pages, kv_heads, 16, 128] cache. Lengths must be
     8..max_seq_len and covered by the first ceil(L / 16) block_table entries
     (device values, not checked here). max_seq_len is the deployment's maximum
-    length: above 2048, or with `window` > 0 (row t of a request sees keys
-    [L - 8 + t - window + 1, L - 8 + t]), the split kernel runs over
-    `num_splits` z slices and needs `workspace`, uint8 of at least
-    `workspace_bytes` whose counters are zero before the first call (every
-    call leaves them zero). Launched on the current stream of the inputs'
-    device (the compiled call switches to q's device and back), with PDL when
-    `enable_pdl`. Raises ValueError on inputs outside this contract (some
-    through the compiled call's own checks); allocates nothing, so a call is
-    graph-capturable once `prepare` has compiled its variant."""
+    length: above 2048, or with `window` > 0 (row t of a request sees keys [L - 8 + t -
+    window + 1, L - 8 + t]), the split kernel runs over `num_splits` z slices and needs
+    `workspace`, uint8 of at least `workspace_bytes` whose counters are zero before the
+    first call (every call leaves them zero). Launched on the current stream of the
+    inputs' device (the compiled call switches to q's device and back), with PDL when
+    `enable_pdl`. Raises ValueError on inputs outside this contract (some through the
+    compiled call's own checks); allocates nothing, so a call is graph-capturable once
+    `prepare` has compiled its variant."""
     split = _check(
         q,
         kv_cache,

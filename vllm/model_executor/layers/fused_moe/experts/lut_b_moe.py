@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """LUT-B weight x MXFP8 activation MoE experts.
 
-`LutBSm107Experts` runs the native Rubin (SM107) grouped GEMM, where the
-tensor core decodes the 3-bit LUT-B weights. `LutBEmulationTritonExperts`
-reproduces the same arithmetic on any GPU for accuracy validation: weights are
-dequantized to the model dtype once at load time and activations are MXFP8
-quantize-dequantized before each GEMM.
+`LutBSm107Experts` runs the native Rubin (SM107) grouped GEMM, where the tensor core
+decodes the 3-bit LUT-B weights. `LutBEmulationTritonExperts` reproduces the same
+arithmetic on any GPU for accuracy validation: weights are dequantized to the model
+dtype once at load time and activations are MXFP8 quantize-dequantized before each GEMM.
 """
 
 import torch

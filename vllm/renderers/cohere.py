@@ -502,10 +502,9 @@ def _conversation_to_melody_messages(
     """Convert vLLM `ConversationMessage`s into melody's message dict shape.
 
     `messages_citations` is an optional index-keyed lookup of per-message citations from
-    the request, populated by `CohereServingChatV2` under the
-    `MESSAGES_CITATIONS_KEY` chat_template_kwargs entry. Values must already be in
-    melody's `FilterCitation` dict shape (see
-    `CohereServingChatV2._sdk_citation_to_melody`).
+    the request, populated by `CohereServingChatV2` under the `MESSAGES_CITATIONS_KEY`
+    chat_template_kwargs entry. Values must already be in melody's `FilterCitation` dict
+    shape (see `CohereServingChatV2._sdk_citation_to_melody`).
 
     `tool_message_v2_content` is an optional index-keyed lookup of the original Cohere
     v2 tool-message content blocks (as plain dicts), populated by `CohereServingChatV2`

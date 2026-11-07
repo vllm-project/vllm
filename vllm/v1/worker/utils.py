@@ -105,9 +105,8 @@ def _zero_kv_blocks_kernel(
 class KVBlockZeroer:
     """Manages efficient zeroing of KV cache blocks via a Triton kernel.
 
-    Construct once after KV caches are allocated to precompute segment
-    addresses, then call `zero_block_ids` each step to zero
-    newly-allocated blocks.
+    Construct once after KV caches are allocated to precompute segment addresses, then
+    call `zero_block_ids` each step to zero newly-allocated blocks.
     """
 
     def __init__(
