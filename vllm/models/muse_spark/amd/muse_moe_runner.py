@@ -531,12 +531,14 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
             activation=activation,
             expert_mask=expert_map,
             quant_config=self.quant_config,
+            quant_type=self._AITER_QUANT_TYPE,
             moe_config=self.moe_config,
             a1q_scale=a1q_scale,
             num_local_tokens=num_local_tokens,
             output_dtype=output.dtype,
             moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
             apply_router_weight_on_input=False,
+            **self._extra_fused_moe_kwargs(),
         )
         self._park_route_output(route_output.view_as(output))
 

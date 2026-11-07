@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import builtins
 import functools
 import hashlib
 import json
@@ -24,8 +23,8 @@ from vllm.compilation.backends import VllmBackend
 from vllm.compilation.caching import (
     StandaloneCompiledArtifacts,
     VllmSerializableFunction,
-    _compute_code_hash,
-    _compute_code_hash_with_content,
+    get_code_factors,
+    read_code_files,
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
@@ -200,8 +199,34 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda() or not is_torch_equal_or_newer("2.10.0"),
-    reason="requires CUDA and torch 2.10",
+    current_platform.device_count() < 2 or not is_torch_equal_or_newer("2.14.0.dev"),
+    reason="requires 2 GPUs and torch 2.14",
+)
+def test_load_on_another_device(monkeypatch: pytest.MonkeyPatch, vllm_tmp_cache: Path):
+    # With --device-ids, a rank can load a cache compiled on another device.
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    monkeypatch.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
+    monkeypatch.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
+    monkeypatch.setenv("VLLM_COMPILE_ON_ONE_RANK", "1")
+    for device_index, loaded in ((0, 0), (1, 1)):
+        monkeypatch.setenv("VLLM_FORCE_AOT_LOAD", str(loaded))
+        disable_envs_cache()
+        x = torch.randn(10, 10, device=f"cuda:{device_index}")
+        vllm_config = make_vllm_config()
+        with (
+            torch.accelerator.device_index(device_index),
+            use_vllm_config(vllm_config),
+            compilation_counter.expect(
+                num_aot_compiles=1 - loaded, num_aot_artifacts_loaded=loaded
+            ),
+        ):
+            out = CompiledMod(vllm_config=vllm_config)(x)
+        torch.testing.assert_close(out, reference_fn(x))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike() or not is_torch_equal_or_newer("2.10.0"),
+    reason="requires CUDA/ROCm and torch 2.10",
 )
 def test_sparse_activation_standalone_aot_preserves_dependencies(
     monkeypatch: pytest.MonkeyPatch, vllm_tmp_cache: Path
@@ -1072,22 +1097,22 @@ def test_compile_opt_out_respected_in_dynamo_trace_once(monkeypatch, fresh_vllm_
         assert counters["unique_graphs"] == traced
 
 
-def test_compute_code_hash_uses_source_encoding(
+def test_read_code_files_uses_source_encoding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """UTF-8 traced sources must not depend on the locale default."""
     source = "# non-ASCII: ✓\n"
     traced_file = tmp_path / "traced.py"
     traced_file.write_text(source, encoding="utf-8")
-    real_open = builtins.open
+    real_open = Path.open
 
-    def open_with_cp1252(file, mode="r", *args, **kwargs):
+    def open_with_cp1252(self, mode="r", *args, **kwargs):
         if "b" not in mode:
-            kwargs.setdefault("encoding", "cp1252")
-        return real_open(file, mode, *args, **kwargs)
+            kwargs["encoding"] = "cp1252"
+        return real_open(self, mode, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "open", open_with_cp1252)
+    monkeypatch.setattr(Path, "open", open_with_cp1252)
 
-    assert _compute_code_hash({str(traced_file)}) == _compute_code_hash_with_content(
-        {str(traced_file): source}
-    )
+    contents = read_code_files({traced_file})
+    assert contents == {traced_file: source}
+    assert get_code_factors(contents) == get_code_factors({traced_file: source})
