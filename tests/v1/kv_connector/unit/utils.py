@@ -86,6 +86,8 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert not scheduler._kv_fetch_stages
     assert not any(scheduler._kv_fetch_counts.values())
     assert not scheduler._aborted_kv_loads
+    assert len(scheduler._kv_recovery_block_owners) == 0
+    assert len(scheduler._kv_recovery_dependencies) == 0
 
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0
