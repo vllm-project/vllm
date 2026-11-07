@@ -30,8 +30,8 @@ MAX_SPLIT_ROWS = 1024
 
 
 @functools.cache
-def _get_kernel(splits: int, topk: int, xcds: int):
-    return _kernel.compile_nvfp4_sparse_decode(splits, topk, xcds)
+def _get_kernel(splits: int, topk: int, xcds: int, fp8_out: bool = False):
+    return _kernel.compile_nvfp4_sparse_decode(splits, topk, xcds, fp8_out)
 
 
 def _query_xcd_count(device_index: int) -> int:
@@ -129,17 +129,23 @@ def minimax_m3_nvfp4_sparse_decode_fly(
     block_table: torch.Tensor,  # [reqs, max_blocks] int32
     seq_lens: torch.Tensor,  # [reqs] int32
     sm_scale: float,
-    output: torch.Tensor,  # [rows, H, 128] bf16
+    output: torch.Tensor | None,  # [rows, H, 128] bf16; None with out_q
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
     decode_query_len: int = 1,
     splits: int | None = None,
     xcd_count: int | None = None,
+    out_q: torch.Tensor | None = None,  # [rows, H * 128] float8_e4m3fn
+    out_scale: torch.Tensor | None = None,  # [rows, H * 4] uint8 (E8M0)
 ) -> None:
     """Sparse decode attention over the NVFP4 K/V pages.
 
     Row i is query row i % decode_query_len of request i // decode_query_len
     and attends to the tokens of its ``topk_idx`` blocks up to its position.
+
+    With ``out_q`` and ``out_scale`` the output is written as MXFP8 (E4M3 values
+    and row-major E8M0 scales per 32 dims, equal to ``mxfp8_e4m3_quantize`` of
+    the bf16 output) instead of bf16 into ``output``, which is then unused.
     """
     rows, num_heads, head_dim = q.shape
     if rows == 0:
@@ -148,8 +154,29 @@ def minimax_m3_nvfp4_sparse_decode_fly(
     topk = topk_idx.shape[-1]
     assert rows == seq_lens.shape[0] * decode_query_len
     assert head_dim == _kernel.D and num_heads == num_kv_heads * _kernel.HG
-    assert q.dtype == torch.bfloat16 and output.dtype == torch.bfloat16
-    assert q.is_contiguous() and output.is_contiguous()
+    fp8_out = out_q is not None
+    assert fp8_out == (out_scale is not None) and fp8_out == (output is None)
+    assert q.dtype == torch.bfloat16
+    assert q.is_contiguous()
+    if out_q is not None and out_scale is not None:
+        assert out_q.dtype == torch.float8_e4m3fn and out_scale.dtype == torch.uint8
+        assert out_q.is_contiguous() and out_scale.is_contiguous()
+        assert out_q.shape[0] >= rows and out_q.shape[1] == num_heads * head_dim
+        assert out_scale.shape[0] >= rows
+        assert out_scale.shape[1] == num_heads * head_dim // 32
+        out_ptr, out_q_ptr, out_scale_ptr = (
+            q.data_ptr(),
+            out_q.data_ptr(),
+            out_scale.data_ptr(),
+        )
+    else:
+        assert output is not None
+        assert output.dtype == torch.bfloat16 and output.is_contiguous()
+        out_ptr, out_q_ptr, out_scale_ptr = (
+            output.data_ptr(),
+            q.data_ptr(),
+            q.data_ptr(),
+        )
     assert kv_cache.dtype == torch.uint8 and kv_cache.stride(1) == _kernel.BLK * 72
     assert kv_cache.stride(3) == 1 and kv_cache.stride(0) < 2**31
     assert topk_idx.dtype == torch.int32 and topk_idx.shape[0] == num_kv_heads
@@ -182,13 +209,15 @@ def minimax_m3_nvfp4_sparse_decode_fly(
     vs = unit if v_scale is None else v_scale
     c = float(np.float32(sm_scale) * np.float32(LOG2E))
     run_compiled(
-        _get_kernel(splits, topk, xcds),
+        _get_kernel(splits, topk, xcds, fp8_out),
         q.data_ptr(),
         kv_cache.data_ptr(),
         topk_idx.data_ptr(),
         block_table.data_ptr(),
         seq_lens.data_ptr(),
-        output.data_ptr(),
+        out_ptr,
+        out_q_ptr,
+        out_scale_ptr,
         ks.data_ptr(),
         vs.data_ptr(),
         nvfp4_e4m3_lut(q.device).data_ptr(),

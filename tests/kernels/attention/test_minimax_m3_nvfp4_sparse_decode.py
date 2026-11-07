@@ -243,6 +243,151 @@ def test_decode_block_outer_pages_bitwise(num_kv_heads, decode_query_len):
     assert torch.equal(outs[0], outs[1])
 
 
+def _quantized_decode(q, cache, topk, table, seq_lens, qlen, extra_rows=0, **kw):
+    """The kernel's MXFP8 output (values, scales) of the rows plus ``extra_rows``
+    sentinel rows that must stay untouched."""
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        MXFP8_BLOCK_SIZE,
+    )
+
+    k_scale, v_scale = _scales()
+    rows, heads, dim = q.shape
+    out_q = torch.full(
+        (rows + extra_rows, heads * dim), 0x5A, dtype=torch.uint8, device="cuda"
+    ).view(torch.float8_e4m3fn)
+    out_s = torch.full(
+        (rows + extra_rows, heads * dim // MXFP8_BLOCK_SIZE),
+        0xA5,
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    minimax_m3_nvfp4_sparse_decode_fly(
+        q, cache, topk, table, seq_lens, SM_SCALE, None, k_scale=k_scale,
+        v_scale=v_scale, decode_query_len=qlen, out_q=out_q, out_scale=out_s, **kw,
+    )  # fmt: skip
+    return out_q, out_s
+
+
+def _assert_mxfp8_equals_quantized_bf16(q, cache, topk, table, seq_lens, qlen, **kw):
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+
+    rows = q.shape[0]
+    out_bf16 = _decode(q, cache, topk, table, seq_lens, qlen, **kw)
+    assert torch.isfinite(out_bf16).all()
+    ref_q, ref_s = mxfp8_e4m3_quantize(out_bf16.view(rows, -1))
+    got_q, got_s = _quantized_decode(
+        q, cache, topk, table, seq_lens, qlen, extra_rows=3, **kw
+    )
+    assert torch.equal(got_q[:rows].view(torch.uint8), ref_q.view(torch.uint8))
+    assert torch.equal(got_s[:rows], ref_s)
+    # Nothing past the rows is written.
+    assert (got_q[rows:].view(torch.uint8) == 0x5A).all()
+    assert (got_s[rows:] == 0xA5).all()
+
+
+def _assert_multi_request_mxfp8(num_reqs, qlen, ctx, **kw):
+    torch.manual_seed(num_reqs * 7 + qlen)
+    nb = (ctx + BLOCK - 1) // BLOCK
+    # Every request reads the same pages (read-only): a small cache at any context.
+    cache = torch.randint(
+        0, 256, (nb + 3, 2, BLOCK, 72), dtype=torch.uint8, device="cuda"
+    )
+    for side in range(2):
+        sf = cache.view(nb + 3, -1)[:, side * 9216 + 8192 : (side + 1) * 9216]
+        sf.masked_fill_((sf & 0x7F) == 0x7F, 0x38)  # no NaN scales
+    lens = [ctx - 97 * r for r in range(num_reqs)]
+    table = torch.arange(nb, dtype=torch.int32, device="cuda").repeat(num_reqs, 1)
+    seq_lens = torch.tensor(lens, dtype=torch.int32, device="cuda")
+    topk = _selections(lens, qlen)
+    q = (torch.randn(num_reqs * qlen, GROUP, D, device="cuda") * 0.02).bfloat16()
+    _assert_mxfp8_equals_quantized_bf16(q, cache, topk, table, seq_lens, qlen, **kw)
+
+
+@pytest.mark.parametrize("ctx", [30_000, 150_000, 500_000])
+@pytest.mark.parametrize("qlen", [4, 8])
+@pytest.mark.parametrize("num_reqs", [1, 2, 3, 5, 8, 12, 16, 24])
+def test_decode_mxfp8_output_matches_quantized_bf16(num_reqs, qlen, ctx):
+    """The MXFP8 epilogue equals ``mxfp8_e4m3_quantize`` of the same kernel's
+    bf16 output, bit for bit, at the default split choice for each batch."""
+    _assert_multi_request_mxfp8(num_reqs, qlen, ctx)
+
+
+@pytest.mark.parametrize("splits", [2, 4])
+@pytest.mark.parametrize("num_reqs", [1, 5, 8, 9, 16, 17, 24])
+def test_decode_mxfp8_output_multi_request_xcd_splits(num_reqs, splits):
+    """DSpark 7 rows (8 per request) on the 8-XCD grid, explicit split counts
+    across the request ranges a split heuristic distinguishes."""
+    _assert_multi_request_mxfp8(num_reqs, 8, 150_000, splits=splits, xcd_count=8)
+
+
+@pytest.mark.parametrize("splits", [1, 2, 4, 8])
+@pytest.mark.parametrize("xcd_count", [0, 8])
+@pytest.mark.parametrize("num_kv_heads", [1, 4])
+@pytest.mark.parametrize("qlen", [1, 4, 8])
+def test_decode_mxfp8_output_splits_and_heads(qlen, num_kv_heads, xcd_count, splits):
+    """Every split count (the last workgroup quantizes the merged O), XCD grid
+    and KV-head count; padding requests (seq_len 0) give zero values and scale 0,
+    like the quantized bf16 zeros."""
+    torch.manual_seed(3)
+    lens = [700, 0, 3000, 20000, 0, 129]
+    table, num_blocks = _block_table([max(s, 1) for s in lens])
+    seq_lens = torch.tensor(lens, dtype=torch.int32, device="cuda")
+    topk = _selections([max(s, 1) for s in lens], qlen, num_kv_heads)
+    cache = _nvfp4_cache(num_blocks, _scales(), num_kv_heads)
+    # Magnitudes over many binades, so block scales cover a wide E8M0 range.
+    mag = torch.pow(2.0, torch.randint(-6, 7, (topk.shape[1], GROUP * num_kv_heads, 1)))
+    q = (torch.randn(topk.shape[1], GROUP * num_kv_heads, D) * mag).cuda().bfloat16()
+    _assert_mxfp8_equals_quantized_bf16(
+        q, cache, topk, table, seq_lens, qlen, splits=splits, xcd_count=xcd_count
+    )
+
+
+@pytest.mark.parametrize(
+    "mode,prefills,decodes,fused",
+    [
+        ("NONE", 0, 8, True),  # decode-only, eager
+        ("FULL", 0, 8, True),  # decode-only, full graph
+        ("NONE", 2, 8, False),  # mixed batch
+        ("NONE", 3, 0, False),  # prefill-only
+        ("PIECEWISE", 0, 8, False),  # captured piecewise graph
+        ("NONE", 0, 0, False),  # no sparse decode work
+    ],
+)
+def test_o_proj_mxfp8_handoff_is_decode_only(
+    monkeypatch, mode, prefills, decodes, fused
+):
+    """Only a decode-only step outside a piecewise graph hands MXFP8 to o_proj;
+    mixed, prefill and piecewise steps keep the bf16 output and the linear's
+    own quant."""
+    from types import SimpleNamespace
+
+    from vllm.config import CUDAGraphMode
+    from vllm.models.minimax_m3.amd import model
+    from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseMetadata
+
+    md = object.__new__(MiniMaxM3SparseMetadata)
+    md.num_prefills, md.num_decodes = prefills, decodes
+    ctx = SimpleNamespace(
+        cudagraph_runtime_mode=CUDAGraphMode[mode], attn_metadata={"layer": md}
+    )
+    monkeypatch.setattr(model, "get_forward_context", lambda: ctx)
+    monkeypatch.setattr(model, "_can_fuse_input_norm_mxfp8", lambda _: True)
+    layer = SimpleNamespace(
+        _o_proj_mxfp8=None,
+        impl=SimpleNamespace(forward_decode_mxfp8=None),
+        o_proj=None,
+        layer_name="layer",
+    )
+    emits = model.MiniMaxM3SparseAttention._emits_o_proj_mxfp8
+    assert emits(layer) is fused
+    assert layer._o_proj_mxfp8 is True  # static, cached across steps
+
+    ctx.attn_metadata = {}  # no sparse metadata for this layer
+    assert emits(layer) is False
+
+
 def test_xcd_splits_table():
     """Splits of the XCD-aware grid: 4 up to 8 requests (one per XCD) and for
     17-24, 2 for 9-16, the cost model beyond and off the tuned shape."""
@@ -302,7 +447,7 @@ def _record_kernels(monkeypatch, host):
     real = host._get_kernel
 
     def record(*args):
-        chosen.append(args)
+        chosen.append(args[:3])  # not the kernel variant (fp8_out)
         return real(*args)
 
     monkeypatch.setattr(host, "_get_kernel", record)
