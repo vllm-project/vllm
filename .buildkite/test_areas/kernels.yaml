@@ -907,6 +907,7 @@ steps:
 #   - vllm/model_executor/layers/quantization/modelopt.py
 #   - vllm/model_executor/layers/quantization/mxfp4.py
 #   - vllm/model_executor/layers/quantization/utils/b12x_moe.py
+#   - vllm/model_executor/layers/quantization/utils/mxfp4_csf.py
 #   - vllm/model_executor/warmup/b12x_warmup.py
 #   - vllm/utils/b12x.py
 #   - tests/kernels/moe/test_b12x.py
