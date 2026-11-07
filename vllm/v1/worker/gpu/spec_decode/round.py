@@ -13,6 +13,24 @@ import numpy as np
 import torch
 
 
+def check_rows(
+    name: str, t: torch.Tensor, ndim: int, dtype: torch.dtype | None = torch.int32
+) -> None:
+    """Raise unless ``t`` is an ``ndim``-D tensor of ``dtype`` (any dtype for
+    None) with unit stride along its last dimension, the layout the round's
+    kernels index."""
+    if (
+        (dtype is not None and t.dtype != dtype)
+        or t.dim() != ndim
+        or (t.shape[-1] > 1 and t.stride(-1) != 1)
+    ):
+        raise ValueError(
+            f"{name} must be a {ndim}-D {dtype or ''} tensor with unit stride "
+            f"along its last dimension; got shape {tuple(t.shape)}, {t.dtype}, "
+            f"strides {t.stride()}"
+        )
+
+
 @dataclass
 class VerifyPlan:
     """The rows the target verifies this step, per scheduled request.
@@ -38,6 +56,11 @@ class VerifyPlan:
     verifies every scheduled row."""
 
     def __post_init__(self) -> None:
+        check_rows("VerifyPlan.parent", self.parent, 2)
+        if self.tokens is not None:
+            check_rows("VerifyPlan.tokens", self.tokens, 2)
+            if self.tokens.shape != self.parent.shape:
+                raise ValueError("a plan's tokens must have the shape of its parents")
         if not self.is_chain and self.tokens is None:
             raise ValueError("a plan that is not a chain must carry tokens")
         if self.is_chain and self.tokens is not None:

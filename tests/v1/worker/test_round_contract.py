@@ -101,6 +101,11 @@ _PARENT = [[-1, 0, 0, 1]]
             ),
             "chain",
         ),
+        (
+            lambda: VerifyPlan(parent=_t(_PARENT, torch.int64), tokens=_t(_PARENT)),
+            "VerifyPlan.parent",
+        ),
+        (lambda: VerifyPlan(parent=_t(_PARENT), tokens=_t([[0, 7, 8]])), "shape"),
         (lambda: SpecResources(capture_rows=()), "capture_rows"),
         (lambda: SpecResources(capture_rows=(0,)), "capture_rows"),
         (lambda: SpecResources(capture_rows=(None,)), "capture_rows"),
@@ -109,6 +114,8 @@ _PARENT = [[-1, 0, 0, 1]]
     ids=[
         "plan-no-tokens",
         "chain-tokens",
+        "int64-parent",
+        "tokens-shape",
         "no-rows",
         "zero-rows",
         "none-rows",
@@ -380,6 +387,46 @@ def _check(parent, counts, path, path_len):
 
 
 _TREE = [[-1, 0, 0, 1], [-1, 0, 1, 2]]
+
+
+def _every_other(values, dtype=torch.int32):
+    """``values`` as the even columns of a buffer twice as wide: the right
+    shape, but its last dimension has stride 2."""
+    t = torch.tensor(values, dtype=dtype)
+    return torch.stack([t, torch.full_like(t, 99)], dim=-1).flatten(-2)[..., ::2]
+
+
+def test_round_tensors_need_unit_row_stride():
+    """The round's kernels step through each row of a plan or an accept result
+    one element at a time, so a column slice is rejected before a kernel would
+    misread it (parents [-1, 0, 0, 1] would read as [-1, 99, 0, 99])."""
+    parent = _every_other(_PARENT)
+    assert parent.tolist() == _PARENT
+    with pytest.raises(ValueError, match="VerifyPlan.parent .* unit stride"):
+        VerifyPlan(parent=parent, tokens=torch.zeros_like(parent))
+    with pytest.raises(ValueError, match="VerifyPlan.tokens"):
+        VerifyPlan(parent=_t(_PARENT), tokens=_every_other([[0, 7, 8, 9]]))
+
+    counts = [4, 3]
+    row_start = torch.tensor(np.concatenate([[0], np.cumsum(counts)])).int()
+    tokens = torch.zeros(int(row_start[-1]), dtype=torch.int64)
+    target = TargetTokens(tokens=tokens, drafted=tokens, row_start=row_start)
+    tree = torch.tensor(_TREE, dtype=torch.int32)
+    plan = VerifyPlan(parent=tree, tokens=torch.zeros_like(tree))
+    fields = dict(
+        path=[[0, 1, 3, 0], [0, 1, 2, 0]],
+        path_len=[3, 3],
+        sampled=[[5, 6, 7, 0], [5, 6, 7, 0]],
+    )
+    for name in fields:
+        result = {
+            field: (_every_other if field == name else torch.tensor)(
+                values, dtype=torch.int64 if field == "sampled" else torch.int32
+            )
+            for field, values in fields.items()
+        }
+        with pytest.raises(ValueError, match=f"AcceptResult.{name} "):
+            check_accept_result(plan, target, AcceptResult(**result))
 
 
 @pytest.mark.skipif(

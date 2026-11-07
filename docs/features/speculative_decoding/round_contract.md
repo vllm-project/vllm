@@ -138,7 +138,9 @@ A `VerifyPlan` holds device tensors per scheduled request, with `R` requests and
 Row 0 is the root, the request's last committed token. Plan buffers belong to the
 speculator and must stay valid until the commit returns. A plan that is not a chain
 needs `max_branching > 1` and a batch that is not `chain_only`; a plan has at most
-`num_speculative_tokens + 1` rows.
+`num_speculative_tokens + 1` rows. The kernels index each tensor of a plan or an
+`AcceptResult` row by row, so its last dimension must have unit stride (a slice of
+whole rows, not of columns); vLLM raises a `ValueError` otherwise.
 
 ### 3. Verify
 

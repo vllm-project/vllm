@@ -12,6 +12,7 @@ from vllm.v1.worker.gpu.spec_decode.round import (
     AcceptResult,
     TargetTokens,
     VerifyPlan,
+    check_rows,
 )
 
 
@@ -203,7 +204,11 @@ def check_accept_result(
 ) -> None:
     """Assert on device, without a host sync, that ``result`` is a path of
     ``plan``: it starts at the root, each row's parent is the row before it,
-    and ``path_len`` is in ``[1, rows]``. One kernel and one async assert."""
+    and ``path_len`` is in ``[1, rows]``. One kernel and one async assert, after
+    host checks of the tensors' layout."""
+    check_rows("AcceptResult.path", result.path, 2)
+    check_rows("AcceptResult.path_len", result.path_len, 1)
+    check_rows("AcceptResult.sampled", result.sampled, 2, dtype=None)
     num_reqs = target.row_start.shape[0] - 1
     width = plan.parent.shape[1]
     ok = torch.empty(1, dtype=torch.int32, device=result.path.device)
