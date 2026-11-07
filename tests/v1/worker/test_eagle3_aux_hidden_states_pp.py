@@ -174,7 +174,6 @@ def minimax_pp_stage(monkeypatch):
                 quant_config=None,
                 speculative_config=None,
                 kernel_config=SimpleNamespace(moe_backend="auto"),
-                use_v2_model_runner=True,
             )
         )
         model._set_aux_hidden_state_layers(taps)

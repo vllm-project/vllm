@@ -220,7 +220,7 @@ class Gemma4MTPAttention(nn.Module):
         )
 
         # kv_sharing_target_layer_name is set after model construction
-        # by Gemma4Proposer._setup_gemma4_kv_sharing().
+        # by Gemma4Speculator._setup_gemma4_kv_sharing().
         self.is_kv_shared_layer = True
         self.attn = Attention(
             self.num_heads,

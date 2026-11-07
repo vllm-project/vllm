@@ -47,7 +47,6 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.multimodal.processing.processor import HFMultiModalInputs
-from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
@@ -59,10 +58,6 @@ from vllm.transformers_utils.processors.deepseek_ocr import (
     count_tiles,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.v1.sample.logits_processor import (
-    AdapterLogitsProcessor,
-    RequestLogitsProcessor,
-)
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphCaptureInputs,
     EncoderCudaGraphConfig,
@@ -97,101 +92,6 @@ class DeepseekOCRImagePixelInputs(TensorSchema):
         TensorShape("bnp", 3, "image_size", "image_size", dynamic_dims={"bnp"}),
     ]
     images_spatial_crop: Annotated[torch.Tensor, TensorShape("bn", 2)]
-
-
-class NoRepeatNGramLogitsProcessor:
-    def __init__(
-        self,
-        ngram_size: int,
-        window_size: int,
-        whitelist_token_ids: set[int] | None = None,
-    ):
-        self.ngram_size = ngram_size
-        self.window_size = window_size
-        self.whitelist_token_ids = whitelist_token_ids or set()
-
-    def __call__(
-        self,
-        output_ids: list[int],
-        logits: torch.Tensor,
-    ) -> torch.Tensor:
-        if len(output_ids) < self.ngram_size:
-            return logits
-
-        current_prefix = tuple(output_ids[-(self.ngram_size - 1) :])
-
-        search_start = max(0, len(output_ids) - self.window_size)
-        search_end = len(output_ids) - self.ngram_size + 1
-
-        banned_tokens = set()
-        for i in range(search_start, search_end):
-            ngram = tuple(output_ids[i : i + self.ngram_size])
-            if ngram[:-1] == current_prefix:
-                banned_tokens.add(ngram[-1])
-
-        banned_tokens = banned_tokens - self.whitelist_token_ids
-
-        if banned_tokens:
-            logits[list(banned_tokens)] = -float("inf")
-
-        return logits
-
-
-class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
-    """Example of overriding the wrapper class `__init__()` in order to utilize
-    info about the device type"""
-
-    @classmethod
-    def validate_params(cls, params: SamplingParams):
-        ngram_size = params.extra_args and params.extra_args.get("ngram_size")
-        window_size = params.extra_args and params.extra_args.get("window_size", 100)
-        whitelist_token_ids = params.extra_args and params.extra_args.get(
-            "whitelist_token_ids", None
-        )
-        # if ngram_size is not provided, skip validation because the processor
-        # will not be used.
-        if ngram_size is None:
-            return None
-
-        if not isinstance(ngram_size, int) or ngram_size <= 0:
-            raise ValueError(
-                f"`ngram_size` has to be a strictly positive integer, got {ngram_size}."
-            )
-        if not isinstance(window_size, int) or window_size <= 0:
-            raise ValueError(
-                "`window_size` has to be a strictly positive integer, "
-                f"got {window_size}."
-            )
-        if whitelist_token_ids is not None and not isinstance(
-            whitelist_token_ids, Iterable
-        ):
-            raise ValueError(
-                "`whitelist_token_ids` has to be a sequence of integers, "
-                f"got {whitelist_token_ids}."
-            )
-
-    def is_argmax_invariant(self) -> bool:
-        return False
-
-    def new_req_logits_processor(
-        self,
-        params: SamplingParams,
-    ) -> RequestLogitsProcessor | None:
-        ngram_size = params.extra_args and params.extra_args.get("ngram_size")
-        window_size = params.extra_args and params.extra_args.get("window_size", 100)
-        whitelist_token_ids = params.extra_args and params.extra_args.get(
-            "whitelist_token_ids", None
-        )
-        if ngram_size is None:
-            return None
-        assert isinstance(ngram_size, int) and isinstance(window_size, int)
-
-        whitelist_token_ids = set(whitelist_token_ids) if whitelist_token_ids else None
-        return NoRepeatNGramLogitsProcessor(
-            ngram_size=ngram_size,
-            window_size=window_size,
-            whitelist_token_ids=whitelist_token_ids,
-        )
 
 
 class DeepseekOCRProcessingInfo(BaseProcessingInfo):

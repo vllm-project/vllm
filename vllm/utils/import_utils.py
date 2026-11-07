@@ -609,11 +609,6 @@ def has_tilelang() -> bool:
     return True
 
 
-def has_arctic_inference() -> bool:
-    """Whether the optional `arctic_inference` package is available."""
-    return _has_module("arctic_inference")
-
-
 def has_helion() -> bool:
     """Whether the optional `helion` package is available.
 

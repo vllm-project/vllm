@@ -1753,30 +1753,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         tokenizer="Qwen/Qwen3-8B",
         use_original_num_layers=True,
     ),
-    # [PEagle]
-    "PEagleDraftModel": _HfExamplesInfo(
-        "Qwen/Qwen3-8B",
-        trust_remote_code=True,
-        speculative_model="nm-testing/qwen3-8b-peagle-speculators",
-        tokenizer="Qwen/Qwen3-8B",
-        use_original_num_layers=True,
-    ),
-    "PeagleLlamaForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-8B",
-        trust_remote_code=True,
-        speculative_model="nm-testing/qwen3-8b-peagle-speculators",
-        tokenizer="Qwen/Qwen3-8B",
-        use_original_num_layers=True,
-    ),
-    "PeagleQwen3ForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-8B",
-        trust_remote_code=True,
-        speculative_model=(
-            "inference-optimization/Qwen3-8B-speculators.peagle-qwen3arch-ckpt4"
-        ),
-        tokenizer="Qwen/Qwen3-8B",
-        use_original_num_layers=True,
-    ),
     # [MTP]
     "BailingMoeV25MTPModel": _HfExamplesInfo(
         "inclusionAI/Ring-2.5-1T",

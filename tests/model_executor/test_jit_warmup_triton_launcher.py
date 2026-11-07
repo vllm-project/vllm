@@ -625,37 +625,3 @@ def test_triton_key_derivation_covers_autotune_configs_and_jit_identity(
     }
     assert {key.jit_function_id for key in autotune_keys} == {id(_binder_test_kernel)}
     assert autotune_keys.isdisjoint(other_kernel_keys)
-
-
-def test_compute_slot_mapping_uses_named_launcher_inputs(monkeypatch) -> None:
-    from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-    from vllm.v1.worker.block_table import ComputeSlotMappingKernel
-
-    owner = ComputeSlotMappingKernel()
-    compile_key = owner.CompileKey(
-        kv_cache_block_size=16,
-        total_cp_world_size=2,
-        total_cp_rank=1,
-        cp_kv_cache_interleave_size=1,
-        block_table_stride=128,
-    )
-    launches: list[tuple[Any, ...]] = []
-
-    def launch(launch_spec: Any, inputs: Any) -> None:
-        launches.append((launch_spec, inputs))
-
-    monkeypatch.setattr(owner, "launch", launch)
-    owner.compile(compile_key)
-
-    (grid, kwargs), inputs = launches[0]
-    assert grid == (2,)
-    assert inputs["num_tokens"] == 2
-    assert inputs["block_table_stride"] == 128
-    assert kwargs == {
-        "KV_CACHE_BLOCK_SIZE": 16,
-        "TOTAL_CP_WORLD_SIZE": 2,
-        "TOTAL_CP_RANK": 1,
-        "CP_KV_CACHE_INTERLEAVE_SIZE": 1,
-        "PAD_ID": PAD_SLOT_ID,
-        "BLOCK_SIZE": owner.triton_block_size,
-    }

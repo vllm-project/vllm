@@ -38,8 +38,8 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
+    get_block_table_width,
 )
-from vllm.v1.worker.block_table import get_block_table_width
 
 logger = init_logger(__name__)
 
@@ -356,13 +356,6 @@ class AttentionGroup:
     ) -> Any:
         return self.get_metadata_builder(ubatch_idx).build_for_cudagraph_capture(
             self._with_kernel_block_table(common_attn_metadata, ubatch_idx)
-        )
-
-    def build_metadata_for_drafting(
-        self, common_attn_metadata: CommonAttentionMetadata, draft_index: int
-    ) -> Any:
-        return self.get_metadata_builder().build_for_drafting(
-            self._with_kernel_block_table(common_attn_metadata), draft_index
         )
 
     def _with_kernel_block_table(

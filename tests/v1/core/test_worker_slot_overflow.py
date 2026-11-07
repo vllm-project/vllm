@@ -64,7 +64,6 @@ class WorkerSlots:
 def _model_runner_output(req_ids: list[str], sampled: list[list[int]]):
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
         sampled_token_ids=sampled,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -82,7 +81,7 @@ def test_streaming_pause_does_not_over_admit_worker_slot():
     is admitted into the single slot.
     """
     STOP_TOKEN = 7
-    scheduler = create_scheduler(max_num_seqs=1, use_v2_model_runner=True)
+    scheduler = create_scheduler(max_num_seqs=1)
     slots = WorkerSlots(max_num_reqs=1)
 
     # A resumable streaming session.
@@ -136,7 +135,7 @@ def test_reset_prefix_cache_priority_does_not_over_admit_worker_slot():
     is admitted.
     """
     scheduler = create_scheduler_with_priority(
-        max_num_seqs=1, enable_prefix_caching=True, use_v2_model_runner=True
+        max_num_seqs=1, enable_prefix_caching=True
     )
     slots = WorkerSlots(max_num_reqs=1)
 
@@ -182,7 +181,7 @@ def test_reset_prefix_cache_same_step_resume_purges_then_re_adds():
     scheduled_new_reqs. The worker runs finish_requests before add_requests, so
     the request's slot is purged and then cleanly re-added.
     """
-    scheduler = create_scheduler(max_num_seqs=1, use_v2_model_runner=True)
+    scheduler = create_scheduler(max_num_seqs=1)
     slots = WorkerSlots(max_num_reqs=1)
 
     (req_a,) = create_requests(

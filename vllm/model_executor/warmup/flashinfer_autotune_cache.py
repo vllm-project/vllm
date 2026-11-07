@@ -15,7 +15,7 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 

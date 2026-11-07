@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from datetime import timedelta
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import torch
 from torch.distributed import TCPStore
@@ -40,7 +40,6 @@ from vllm.v1.worker.sentinel.eplb_redistribute import (
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
@@ -107,11 +106,6 @@ class WorkerSentinel:
             raise ValueError("Fault tolerance does not support MoE draft models yet.")
         if worker.parallel_config.prefill_context_parallel_size > 1:
             raise ValueError("Fault tolerance does not support PCP yet.")
-        if not worker.vllm_config.use_v2_model_runner:
-            raise ValueError(
-                "Fault tolerance requires the v2 model runner "
-                "(VLLM_USE_V2_MODEL_RUNNER=1)."
-            )
 
     def handle_command(self, ft_request: FaultToleranceRequest):
         """Dispatch an FT command by instruction name."""
@@ -297,6 +291,5 @@ class WorkerSentinel:
     def _clean_worker_state(self):
         model_runner = self.worker.model_runner
         model_runner.execute_model_state = None
-        runner = cast("GPUModelRunnerV2", model_runner)
-        for req_id in list(runner.req_states.req_id_to_index):
-            runner._remove_request(req_id)
+        for req_id in list(model_runner.req_states.req_id_to_index):
+            model_runner._remove_request(req_id)

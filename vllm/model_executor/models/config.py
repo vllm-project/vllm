@@ -418,11 +418,6 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
         from vllm.config.compilation import CompilationMode, CUDAGraphMode
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-        if not vllm_config.use_v2_model_runner:
-            raise ValueError(
-                "Unlimited-OCR-2 requires Model Runner V2; set "
-                "VLLM_USE_V2_MODEL_RUNNER=1"
-            )
         # Generic JIT warmup submits text-only requests, which DASH cannot use.
         vllm_config.kernel_config.enable_jit_warmup = False
         compilation = vllm_config.compilation_config
@@ -809,9 +804,8 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
         from vllm.platforms import current_platform
 
         compilation_config = vllm_config.compilation_config
-        use_v2_model_runner = vllm_config.use_v2_model_runner
         # Only override when the user has not set any capture size, and not on
-        # SM100 with model runner V2, whose defaults are already wider.
+        # SM100, whose defaults are already wider.
         if all(
             getattr(compilation_config, name) is None
             for name in (
@@ -822,32 +816,25 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
                 "decode_cudagraph_capture_request_sizes",
                 "max_decode_cudagraph_capture_requests",
             )
-        ) and not (
-            use_v2_model_runner and current_platform.is_device_capability_family(100)
-        ):
-            if use_v2_model_runner:
-                # Cover every target decode query length as the legacy 1024-token cap
-                # does. Data parallelism turns dynamic speculative decoding off later.
-                query_lens = (
-                    vllm_config.get_decode_cudagraph_query_lens(
-                        vllm_config.uniform_decode_query_len
-                    )
-                    if vllm_config.parallel_config.data_parallel_size == 1
-                    else [vllm_config.uniform_decode_query_len]
+        ) and not current_platform.is_device_capability_family(100):
+            # Cover every target decode query length as the legacy 1024-token cap
+            # does. Data parallelism turns dynamic speculative decoding off later.
+            query_lens = (
+                vllm_config.get_decode_cudagraph_query_lens(
+                    vllm_config.uniform_decode_query_len
                 )
-                # The token sizes the legacy 1024-token cap captures.
-                max_tokens = min(
-                    vllm_config.scheduler_config.max_num_batched_tokens, 1024
-                )
-                sizes = {1, 2, 4, *range(8, 256, 8), *range(256, 1024, 16)}
-                compilation_config.prefill_cudagraph_capture_token_sizes = sorted(
-                    {s for s in sizes if s < max_tokens} | {max_tokens}
-                )
-                compilation_config.max_decode_cudagraph_capture_requests = 1024 // min(
-                    query_lens
-                )
-            else:
-                compilation_config.max_cudagraph_capture_size = 1024
+                if vllm_config.parallel_config.data_parallel_size == 1
+                else [vllm_config.uniform_decode_query_len]
+            )
+            # The token sizes the legacy 1024-token cap captures.
+            max_tokens = min(vllm_config.scheduler_config.max_num_batched_tokens, 1024)
+            sizes = {1, 2, 4, *range(8, 256, 8), *range(256, 1024, 16)}
+            compilation_config.prefill_cudagraph_capture_token_sizes = sorted(
+                {s for s in sizes if s < max_tokens} | {max_tokens}
+            )
+            compilation_config.max_decode_cudagraph_capture_requests = 1024 // min(
+                query_lens
+            )
             logger.info(
                 "Overriding max cuda graph capture size to %d for performance.", 1024
             )

@@ -6056,6 +6056,7 @@ class TestEagle:
                 block_ids=(full_block_ids, swa_block_ids),
                 num_computed_tokens=0,
                 lora_request=None,
+                prefill_token_ids=[],
             )
         ]
         first_output.num_scheduled_tokens = {"req": 1000}
@@ -6961,7 +6962,6 @@ def test_lookahead_partial_store_uses_checkpoint_hash(lookahead):
             step,
             ModelRunnerOutput(
                 req_ids=[request.request_id],
-                req_id_to_index={request.request_id: 0},
                 sampled_token_ids=[[99] if final else []],
             ),
         )

@@ -105,8 +105,6 @@ def unsupported(vllm_config) -> str | None:
             vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe",
             "the MegaMoE backend",
         ),
-        # The runner's ModelState hooks build the executor and bind the KV caches.
-        (not vllm_config.use_v2_model_runner, "the V1 model runner"),
         # The decode loop runs in forward; a compiled forward would trace it.
         # The DSpark draft's fused layers are exact to its eager layers only,
         # and a compiled draft would trace their call checks.

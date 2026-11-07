@@ -275,9 +275,7 @@ class MiniMaxM3MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        self._tracks_own_embed = (
-            vllm_config.use_v2_model_runner and get_pp_group().world_size > 1
-        )
+        self._tracks_own_embed = get_pp_group().world_size > 1
         if self._tracks_own_embed:
             # Preserve embeddings from loaders that bypass load_weights.
             self.has_own_embed_tokens = vllm_config.load_config.load_format != "dummy"

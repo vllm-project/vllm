@@ -60,8 +60,7 @@ def get_captured_lora_counts(max_loras: int, specialize: bool) -> list[int]:
     When specialize=True: powers of 2 up to max_loras, plus max_loras + 1.
     When specialize=False: just [max_loras + 1].
 
-    This is the single source of truth for LoRA capture cases, used by both
-    CudagraphDispatcher and PunicaWrapperGPU.
+    This is the single source of truth for LoRA capture cases.
     """
     if not specialize:
         return [max_loras + 1]

@@ -126,7 +126,6 @@ def _vllm_config(layers=60, **parallel):
             uva=SimpleNamespace(cpu_offload_gb=0),
             prefetch=SimpleNamespace(offload_group_size=0),
         ),
-        use_v2_model_runner=True,
         model_config=SimpleNamespace(
             enable_sleep_mode=False,
             hf_text_config=SimpleNamespace(

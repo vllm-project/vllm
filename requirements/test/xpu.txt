@@ -256,9 +256,6 @@ apache-tvm-ffi==0.1.13.post3 \
     --hash=sha256:f571b636af7ce906200dbd31402762eceff099013de17963a4a2d2ae9b05e400 \
     --hash=sha256:fbbab8aa62ba0afe996197267c3d7ff999c0747ba479b636589e52baf754f79e
     # via xgrammar
-arctic-inference==0.2.0 \
-    --hash=sha256:242755ae3662527dd842b4c3bd0c921e5a969e270daff0c9436b412505af4c4d
-    # via -r requirements/test/xpu.in
 astor==0.8.1 \
     --hash=sha256:070a54e890cefb5b3739d19f30f5a5ec840ffc9c50ffa7d23cc9fc1a38ebbfc5 \
     --hash=sha256:6a6effda93f4e1ce9f618779b2dd1d9d84f1e32812c23a29b3fff6fd7f63fa5e

@@ -252,9 +252,6 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP, SupportsMultiModalEmbeddings):
         )
         self.lm_head: nn.Module | None = None
 
-    def share_lm_head(self, lm_head: nn.Module) -> None:
-        self.lm_head = lm_head
-
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,

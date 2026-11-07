@@ -51,7 +51,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.counter import Counter
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
-from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.v1.worker.gpu.sample.logits_processor.interface import LogitsProcessor
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -121,7 +121,7 @@ class LLM(
         enable_extensible_kv_cache: Reserve the KV cache address range with
             device virtual memory and commit physical pages after warmup, so
             the cache is sized from the memory actually free after CUDA graph
-            capture. Defaults to on for CUDA and ROCm with the V2 model runner.
+            capture. Defaults to on for CUDA and ROCm.
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data

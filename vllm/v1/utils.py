@@ -672,19 +672,6 @@ def _shutdown_processes_and_cleanup_listeners(
             listener.cleanup()
 
 
-def copy_slice(
-    from_tensor: torch.Tensor, to_tensor: torch.Tensor, length: int
-) -> torch.Tensor:
-    """Copy the first length elements of a tensor into another tensor in a
-    non-blocking manner.
-
-    Used to copy pinned CPU tensor data to pre-allocated GPU tensors.
-
-    Returns the sliced target tensor.
-    """
-    return to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)
-
-
 def report_usage_stats(
     vllm_config, usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
 ) -> None:
