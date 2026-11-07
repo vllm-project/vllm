@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -313,6 +314,10 @@ class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V41_INDEXER"
+
+    @staticmethod
+    def get_builder_cls() -> type["DeepseekV32IndexerMetadataBuilder"]:
+        return DeepseekV41IndexerMetadataBuilder
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
@@ -986,6 +991,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
 
+    @classmethod
+    def get_prefill_buffer_size(
+        cls, vllm_config: VllmConfig, compress_ratio: int
+    ) -> int:
+        """K-gather rows the indexer layer reserves for one prefill chunk, in
+        compressed rows. Also the splitter's workspace bound."""
+        return get_max_prefill_buffer_size(vllm_config) // compress_ratio
+
     def __init__(self, *args, block_table_width: int, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         scheduler_config = self.vllm_config.scheduler_config
@@ -1018,8 +1031,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
         # Counted in compressed rows, like the chunker's seq_lens and the
         # workspace.
-        self.max_prefill_buffer_size = (
-            get_max_prefill_buffer_size(self.vllm_config) // self.compress_ratio
+        self.max_prefill_buffer_size = self.get_prefill_buffer_size(
+            self.vllm_config, self.compress_ratio
         )
         self.num_speculative_tokens = (
             self.vllm_config.speculative_config.num_speculative_tokens
@@ -1924,6 +1937,21 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
             assert schedule_metadata.shape == decode.schedule_metadata.shape
             decode.schedule_metadata.copy_(schedule_metadata)
+
+
+class DeepseekV41IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
+    @classmethod
+    def get_prefill_buffer_size(
+        cls, vllm_config: VllmConfig, compress_ratio: int
+    ) -> int:
+        """Only the rows a chunk can reach: the logits budget caps a multi-request
+        chunk at isqrt(max_logits_elems * max_len) keys, one request at max_len."""
+        max_len = vllm_config.model_config.max_model_len // compress_ratio
+        max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024 // 4
+        return min(
+            super().get_prefill_buffer_size(vllm_config, compress_ratio),
+            max(max_len, math.isqrt(max_logits_elems * max_len)),
+        )
 
 
 def build_prefill_chunk_metadata(
