@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""int64 row offsets in the MRV2 staged-write and idx-mapping kernels.
+"""int64 row offsets in the MRV2 staged-write, idx-mapping and grammar-bitmask
+kernels.
 
 With int32 request-slot indices, `slot * stride` wraps once the product
 crosses 2**31 (issue #57030): at max_model_len=1M from row 2148, and from
@@ -12,6 +13,7 @@ Requires CUDA/ROCm and ~11 GiB free device memory: the tensors must exceed
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -21,6 +23,7 @@ from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor
 from vllm.v1.worker.gpu.input_batch import post_update
 from vllm.v1.worker.gpu.mm.rope import RopeState
 from vllm.v1.worker.gpu.sample.penalties import bincount
+from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 
 STRIDE = 1_000_000  # max_model_len
 ROW = 2559  # ROW * STRIDE > 2**31 (first overflowing row at 1M: 2148)
@@ -201,3 +204,32 @@ def test_rope_positions_high_row():
     assert torch.equal(rope.positions[:, PREFILL_LEN : 2 * PREFILL_LEN], expect_target)
     # Padding column stays zero.
     assert bool((rope.positions[:, 2 * PREFILL_LEN :] == 0).all())
+
+
+def test_grammar_bitmask_high_row():
+    """The grammar bitmask must mask its logits row past the int32 offset limit,
+    e.g. under wide spec-decode verification with a large batch."""
+    device = torch.device("cuda:0")
+    high_row = 2**31 // VOCAB_SIZE + 1  # high_row * VOCAB_SIZE > 2**31
+    logits = torch.zeros(high_row + 1, VOCAB_SIZE, dtype=torch.bfloat16, device=device)
+    allowed_token = 5
+    bitmask = np.zeros((2, VOCAB_SIZE // 32), dtype=np.int32)
+    bitmask[:, 0] = 1 << allowed_token
+    # Request "low" owns rows [0, high_row), request "high" owns row high_row.
+    input_batch = SimpleNamespace(
+        req_ids=["low", "high"],
+        cu_num_logits=torch.tensor(
+            [0, high_row, high_row + 1], dtype=torch.int32, device=device
+        ),
+    )
+
+    worker = StructuredOutputsWorker(
+        max_num_logits=2, vocab_size=VOCAB_SIZE, device=device, mask_stride=1
+    )
+    worker.apply_grammar_bitmask(logits, input_batch, ["low", "high"], bitmask)
+    torch.accelerator.synchronize()
+
+    for row in (0, high_row):
+        masked = logits[row].isinf()
+        assert not masked[allowed_token]
+        assert int(masked.sum()) == VOCAB_SIZE - 1
