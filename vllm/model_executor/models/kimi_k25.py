@@ -503,18 +503,6 @@ class KimiK25ForConditionalGeneration(
             padding_logics={"cu_seqlens": pad_cu_seqlens},
         )
 
-    def get_encoder_cudagraph_budget_range(
-        self,
-        vllm_config: VllmConfig,
-    ) -> tuple[int, int]:
-        # Min: 64 output tokens (e.g. ~128×128 image with patch 14 + merge 2×2).
-        min_budget = 64
-        max_budget = min(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            vllm_config.model_config.max_model_len,
-        )
-        return (min_budget, max_budget)
-
     def _get_grid_thw_list(
         self,
         mm_kwargs: dict[str, Any],

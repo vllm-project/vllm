@@ -16,7 +16,6 @@ import torch
 from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
     from vllm.config.multimodal import MultiModalConfig
     from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
     from vllm.v1.worker.encoder_cudagraph_defs import (
@@ -101,17 +100,6 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
                 "rotary_sin": pad_rope_planes,
             },
         )
-
-    def get_encoder_cudagraph_budget_range(
-        self,
-        vllm_config: "VllmConfig",
-    ) -> tuple[int, int]:
-        min_budget = 64
-        max_budget = min(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            vllm_config.model_config.max_model_len,
-        )
-        return (min_budget, max_budget)
 
     @staticmethod
     def _get_grid_thw_list(mm_kwargs: dict[str, Any]) -> list[list[int]]:
