@@ -17,6 +17,11 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import RocmSparseAttnIndexer
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    refill_derived,
+    replace_parameter,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
@@ -1100,7 +1105,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             _upcast_e8m0_to_fp32,
             get_fp8_block_weight_scale,
         )
-        from vllm.model_executor.utils import replace_parameter
 
         def _prep(linear) -> torch.Tensor | None:
             w = getattr(linear, "weight", None)
@@ -1116,16 +1120,22 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 ws = _upcast_e8m0_to_fp32(ws).contiguous()
             # Shuffle the weight in place (single weight, no unshuffled copy),
             # unless the linear kernel already B-preshuffled it at load time.
-            if not getattr(linear, "aiter_bpreshuffled", False):
+            if not (
+                getattr(linear, "aiter_bpreshuffled", False)
+                or is_weights_pre_processed()
+            ):
                 replace_parameter(
                     linear,
                     "weight",
                     rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
                 )
-            return ws
+            # A plain tensor: assigning the scale Parameter itself would register
+            # it a second time on this module, under the name below.
+            return ws.detach()
 
-        self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
-        self._wo_b_scale = _prep(self.wo_b)
+        # Refilled in place on reloads: captured CUDA graphs read them.
+        refill_derived(self, "_wqa_wkv_scale", _prep(self.fused_wqa_wkv))
+        refill_derived(self, "_wo_b_scale", _prep(self.wo_b))
         if _ON_GFX950 and envs.VLLM_ROCM_USE_AITER_FP8BMM:
             self._prepare_fp8_wo_a()
 
@@ -1204,15 +1214,18 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             return
 
         self._wo_a_fp8_weight = weight.view(groups, out_per_group, in_features)
-        self._wo_a_e8m0_scale = e8m0_scale.view(
-            groups, out_per_group // 128, in_features // 128
+        # Refilled in place on reloads: captured CUDA graphs read them.
+        refill_derived(
+            self,
+            "_wo_a_e8m0_scale",
+            e8m0_scale.view(groups, out_per_group // 128, in_features // 128),
         )
         cache = getattr(self.rotary_emb, "cos_sin_cache_bf16", None)
         if cache is None:
             cache = self.rotary_emb.cos_sin_cache.to(dtype=torch.bfloat16)
         cos_cache, sin_cache = cache.chunk(2, dim=-1)
-        self._wo_a_cos_cache = cos_cache.contiguous()
-        self._wo_a_sin_cache = sin_cache.contiguous()
+        refill_derived(self, "_wo_a_cos_cache", cos_cache.contiguous())
+        refill_derived(self, "_wo_a_sin_cache", sin_cache.contiguous())
 
     def prepare_compressor_gemm_fusion(self) -> bool:
         if self._fused_compressor_weight is not None:

@@ -13,10 +13,20 @@ Prefetch points (``fork(point, layer, batch)``), each with its batches per TP:
 - ``oproj_down``: after the o-projection (B3-8), the MoE front's packed
   router + latent-down rows.
 - ``attention_moe``: at TP8 only, after the KDA input projection (B5-8) or the MLA
-  core (B8), the same front rows plus the shared expert's weights.
+  core (B8), this layer's o-projection, the same front rows, the shared expert's
+  weights and this rank's shard of the latent up projection (the MoE tail's weights,
+  which otherwise stream from HBM on the critical path beside the next-attention
+  prefetch). GB300 TP8 K3.1 DSpark k=4 R1 (B5) 32K step, ms: front + shared 10.28,
+  + up projection 10.03, + o-projection 9.89.
 - ``next_attention``: once the routed experts are launched, the next layer's
   attention weights, capped in MiB per batch (``NEXT_ATTENTION``). Not above B8,
   where the HBM-bound experts lose more bandwidth than the attention gains.
+
+At the ``EXPERTS_AHEAD`` batches the next layer's attention weights are not a side
+stream launch: the routed experts' producers prefetch them (``ahead``), each CTA its
+share, once its last weight stage is issued. The experts' drain (FC2 hand-off,
+finalize) leaves HBM idle for ~10 us, and no extra CTAs hold SMs the WaveMoeTail
+clusters need when the experts exit.
 
 The front and shared-expert ranges are on the critical path. They launch with the
 highest stream priority and the maximum shared-memory carveout, which needs a driver
@@ -41,15 +51,33 @@ from vllm.models.common.ops.moe_tail_fusion.primitives import to_cute
 from ..cutedsl.common.host import _checked, resolve_kernel
 from ..cutedsl.common.policy import batch_table
 from ..cutedsl.common.prefetch import compile_kernel
+from ..cutedsl.moe.experts import PREFETCH_ROWS
 
 # Per-TP batch -> MiB cap (or cap.carveout) of the next layer's attention weights,
 # prefetched once the routed experts finish.
 # Not at B>8: the HBM-bound experts lose more bandwidth than the attention gains.
 NEXT_ATTENTION = {8: "1:96.100,2-3:96,4-7:64,8:32", 16: "1-8:1024"}
+# Per-TP batch -> MiB cap of the next layer's attention weights that the routed
+# experts prefetch in-kernel instead (``PrefetchController.ahead``); these batches
+# take no ``next_attention`` launch. GB300 TP8 K3.1 DSpark k=4 step, 32K, ms
+# (side-stream launch after the experts -> in-kernel): R1 (B5) 10.03 -> 9.73 (both with
+# the up projection in ``attention_moe``); B20 / B60 with 112 MiB: 16.31 / 28.47 ->
+# 16.43 / 28.83 (the experts' drain is too short for it): none.
+# The table starts with this layer's MoE tail up-projection shard (read right after the
+# experts). K3.1 DSpark k=4 DCP8 R1 136.5K step, ms, cap 64 / 32 / 16 / 8 MiB (+ up
+# shard): 10.18 / 10.01 / 9.94 / 9.99; no ahead and no next_attention: 10.12. Large
+# ahead prefetches still in flight when the experts exit delay the MoE tail's first
+# loads (its latent and weights land ~0.4 us later per layer, in-kernel stamps).
+EXPERTS_AHEAD = {8: "4-7:16", 16: ""}
 
 
 def attention_weights(attention):
     """Next-attention weights in their consumption order."""
+    packed = getattr(attention, "packed_projection", None)
+    if packed is not None:  # K3.1 DSA
+        layer, wq = attention.mla_attn.mla_attn, attention.dsa_indexer.wq_index
+        query = (packed, attention.q_b_proj.weight, layer.W_UK_T, wq.weight)
+        return (*query, layer.W_UV, attention.o_proj.weight)
     names = (
         *("in_proj_qkvgfab", "fused_qkv_a_g_proj", "fused_qkv_a_proj", "q_proj"),
         *("kv_a_proj_with_mqa", "f_b_proj", "q_b_proj", "g_proj"),
@@ -60,27 +88,34 @@ def attention_weights(attention):
     return (*weights, attention.o_proj.weight)
 
 
+def weight_ranges(weights, byte_cap=0):
+    """(address, bytes) of each weight's span in order, the total capped at
+    ``byte_cap`` bytes (0: uncapped)."""
+    ranges, remaining = [], byte_cap
+    for weight in weights:
+        if weight.numel() == 0:
+            continue
+        if weight.data_ptr() % 16:  # the kernels walk 16-byte aligned chunks
+            raise ValueError("L2 prefetch ranges must start 16-byte aligned")
+        span = 1 + sum((n - 1) * s for n, s in zip(weight.shape, weight.stride()))
+        size = span * weight.element_size()
+        if byte_cap:
+            size = min(size, remaining) // 16 * 16
+            remaining -= size
+        if size:
+            ranges.append((weight.data_ptr(), size))
+        if byte_cap and remaining < 16:
+            break
+    return ranges
+
+
 class PreparedWeightRanges:
     """One owner retains weights, immutable range table, executable and launch ABI."""
 
     def __init__(self, weights, *, byte_cap=0, grid=32, carveout=None, priority=False):
         self.weights = weights = tuple(weights)
         device = weights[0].device
-        ranges, remaining = [], byte_cap
-        for weight in weights:
-            if weight.numel() == 0:
-                continue
-            if weight.data_ptr() % 16:  # the kernel walks 16-byte aligned chunks
-                raise ValueError("L2 prefetch ranges must start 16-byte aligned")
-            span = 1 + sum((n - 1) * s for n, s in zip(weight.shape, weight.stride()))
-            size = span * weight.element_size()
-            if byte_cap:
-                size = min(size, remaining) // 16 * 16
-                remaining -= size
-            if size:
-                ranges.append((weight.data_ptr(), size))
-            if byte_cap and remaining < 16:
-                break
+        ranges = weight_ranges(weights, byte_cap)
         self.table = torch.tensor(ranges, dtype=torch.int64, device=device)
         self.compiled = compile_kernel(len(ranges), grid, carveout, device.index)
         self.config = None
@@ -124,24 +159,50 @@ class PrefetchController:
         self.device, tp = runtime.device, runtime.tp
         self.stream = torch.cuda.Stream(device=self.device)
         self.events, self.pending, self.tables = {}, False, {}
+        self.ahead_tables: dict[tuple[int, int], torch.Tensor] = {}
         urgent = partial(PreparedWeightRanges, carveout=100, priority=True)
+        ahead = batch_table(EXPERTS_AHEAD[tp])
         following = batch_table(NEXT_ATTENTION[tp])
+        following = {b: cap for b, cap in following.items() if b not in ahead}
         for position, layer in enumerate(layers):
             if not layer.is_moe_layer:
                 continue
             index, moe, attention = layer.layer_idx, layer.mlp, layer.self_attn
+            up: tuple = ()
             # The front GEMM reads [router shard; down shard] from the packed copy.
             ranges = urgent((packed[index],), grid=8)
             self._add("oproj_down", index, range(3, 9), ranges)
             if tp == 8:
                 shared = moe.shared_experts
                 shared = shared.gate_up_proj.weight, shared.down_proj.weight
-                ranges = urgent((packed[index], *shared), grid=32)
+                # The MoE tail's K-split up projection reads this rank's rows.
+                up_weight = moe.routed_expert_up_proj.weight
+                rows = up_weight.shape[0] // tp
+                up = (up_weight[runtime.rank * rows : (runtime.rank + 1) * rows],)
+                # This layer's o-projection first: it runs right after the core.
+                weights = (attention.o_proj.weight, packed[index], *shared, *up)
+                ranges = urgent(weights, grid=32)
                 batches = range(5, 9) if hasattr(attention, "in_proj_qkvgfab") else (8,)
                 self._add("attention_moe", index, batches, ranges)
             if position + 1 < len(layers):
                 weights = attention_weights(layers[position + 1].self_attn)
                 self._add_capped("next_attention", index, weights, following)
+                for batch, cap in ahead.items():
+                    self._add_ahead(index, batch, weights, cap, up)
+
+    def _add_ahead(self, layer, batch, weights, cap, first=()):
+        ranges = weight_ranges(first) + weight_ranges(weights, cap * 1024**2)
+        ranges = ranges[:PREFETCH_ROWS]
+        table = torch.zeros((PREFETCH_ROWS, 2), dtype=torch.int64, device=self.device)
+        if ranges:
+            table[: len(ranges)] = torch.tensor(ranges, dtype=torch.int64)
+        self.ahead_tables[layer, batch] = table
+
+    def ahead(self, layer, batch):
+        """The [PREFETCH_ROWS, 2] (address, bytes) table of the next layer's attention
+        weights the routed experts of (layer, batch) prefetch in-kernel, or None
+        (``EXPERTS_AHEAD``)."""
+        return self.ahead_tables.get((layer, batch))
 
     def _add_capped(self, point, layer, weights, table):
         groups: dict[tuple, list[int]] = {}

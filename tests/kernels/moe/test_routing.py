@@ -77,6 +77,24 @@ def test_degenerate_grouped_config_uses_standard_topk() -> None:
     )
 
 
+def test_select_experts_rejects_noncontiguous_custom_routing() -> None:
+    """A custom routing function returning column slices of one packed tensor
+    would otherwise reach every MoE backend with the wrong row stride."""
+
+    def packed_routing(hidden_states, gating_output, topk, renormalize):
+        return gating_output[:, :topk], gating_output[:, topk:].to(torch.int32)
+
+    router = create_fused_moe_router(
+        top_k=1,
+        global_num_experts=4,
+        custom_routing_function=packed_routing,
+    )
+    routing = torch.tensor([[0.5, 3.0], [0.25, 1.0]], device=DEVICE)
+
+    with pytest.raises(ValueError, match="non-contiguous"):
+        router.select_experts(torch.empty((2, 8), device=DEVICE), routing)
+
+
 def test_multiple_expert_groups_use_grouped_topk() -> None:
     router = create_fused_moe_router(
         top_k=4,

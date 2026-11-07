@@ -92,6 +92,13 @@ def test_watermark_config_cli():
     assert config.deduplicate_contexts == "none"
     assert config.deduplicate_contexts_max_history == 32
 
+    args = parser.parse_args(
+        ["--model", "dummy", "--watermark-config", '{"key":42,"enforce":true}']
+    )
+    config = EngineArgs.from_cli_args(args).create_watermark_config()
+    assert config is not None
+    assert config.enforce is True
+
 
 @pytest.mark.parametrize(
     "option",

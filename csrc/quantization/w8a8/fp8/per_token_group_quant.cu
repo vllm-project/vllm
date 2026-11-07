@@ -13,6 +13,7 @@
   #include <cuda_fp8.h>
 #endif
 
+#include "core/cuda_compat.h"
 #include "quantization/vectorization.cuh"
 #include "quantization/vectorization_utils.cuh"
 #include "dispatch_utils.h"
@@ -667,7 +668,7 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
       sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
 
   uint4 packed_out;
-#if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if VLLM_FP8_CVT_X2
   if constexpr (std::is_same_v<T, c10::BFloat16> &&
                 std::is_same_v<DST_DTYPE, c10::Float8_e4m3fn> &&
                 GROUP_SIZE == 128) {

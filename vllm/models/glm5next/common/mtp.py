@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
+from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -211,6 +212,9 @@ class Glm5NextMultiTokenPredictor(nn.Module):
 class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        self.use_mega_moe = (
+            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        )
         self.config = vllm_config.model_config.hf_text_config
         self.quant_config = vllm_config.quant_config
         self.model = Glm5NextMultiTokenPredictor(
@@ -316,6 +320,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
             num_experts=self.config.n_routed_experts + num_fused_shared,
             num_redundant_experts=self.num_redundant_experts,
+            routed_experts_prefix="" if self.use_mega_moe else "routed_experts",
         )
 
         params_dict = dict(self.named_parameters())
@@ -339,6 +344,12 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             if spec_layer is None:
                 continue
             name = self._rewrite_spec_layer_name(spec_layer, name)
+            if self.use_mega_moe and ".shared_experts." in name:
+                mlp = self.get_submodule(name.partition(".shared_experts.")[0])
+                loaded_params.add(
+                    mlp.experts.load_shared_expert_weight(name, loaded_weight)
+                )
+                continue
             # Only parse the layer index when FSE is enabled.
             if (
                 "mlp.shared_experts." in name
@@ -447,3 +458,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                     f"missing from checkpoint."
                 )
         return loaded_params
+
+    def process_weights_after_loading(self) -> None:
+        for mlp in self.moe_mlp_layers:
+            mlp.finalize_mega_moe_weights()

@@ -230,9 +230,8 @@ class MoESwiGLUFFNFP8(MoESwiGLUFFN):
 
     @torch.no_grad()
     def process_weights_after_loading(self) -> None:
-        if hasattr(self, "_fused_w13_fp8"):
-            return
-
+        # Reruns after every reload: rebuild the fused FP8 experts from the
+        # checkpoint experts, refilling the fused buffers in place.
         w13_weights = []
         w13_scales = []
         w2_weights = []
@@ -246,27 +245,18 @@ class MoESwiGLUFFNFP8(MoESwiGLUFFN):
             w2_weights.append(w2)
             w2_scales.append(s2)
 
-        self.register_buffer(
-            "_fused_w13_fp8",
-            torch.stack(w13_weights).contiguous(),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_fused_w13_scale",
-            torch.stack(w13_scales).contiguous(),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_fused_w2_fp8",
-            torch.stack(w2_weights).contiguous(),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_fused_w2_scale",
-            torch.stack(w2_scales).contiguous(),
-            persistent=False,
-        )
-        del self.experts
+        # The checkpoint experts stay registered: a reload writes into them.
+        for name, parts in (
+            ("_fused_w13_fp8", w13_weights),
+            ("_fused_w13_scale", w13_scales),
+            ("_fused_w2_fp8", w2_weights),
+            ("_fused_w2_scale", w2_scales),
+        ):
+            fused = torch.stack(parts).contiguous()
+            if name in self._buffers:
+                self._buffers[name].copy_(fused)
+            else:
+                self.register_buffer(name, fused, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not hasattr(self, "_fused_w13_fp8"):
@@ -547,9 +537,6 @@ class DotsMoEVitModel(PreTrainedModel):
         return self.patch_embed.proj.weight.device
 
     def process_weights_after_loading(self) -> None:
-        for block in self.blocks:
-            if isinstance(block.mlp, MoESwiGLUFFNFP8):
-                block.mlp.process_weights_after_loading()
         if self.config.enable_torch_compile:
             self.compile_block_modules()
 

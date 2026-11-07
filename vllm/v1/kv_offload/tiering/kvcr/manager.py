@@ -244,16 +244,22 @@ class _FrameworkPinAdapter:
 
 
 class _VllmKeyAdapter:
-    """Adapt vLLM's local key format to KVCR."""
+    """Convert between KVCR keys and vLLM key representations."""
 
-    def encode(self, framework_key: object) -> BlockKey:
+    def encode_to_framework(self, key: BlockKey) -> object:
+        raise NotImplementedError("Not used")
+
+    def decode_from_framework(self, framework_key: object) -> BlockKey:
         if not isinstance(framework_key, bytes):
             raise TypeError("vLLM offload keys must be bytes")
         return BlockKey(framework_key)
 
-    def decode(self, key: BlockKey) -> int | bytes:
+    def encode_to_router(self, key: BlockKey) -> int | bytes:
         block_hash = BlockHash(get_offload_block_hash(OffloadKey(key)))
         return maybe_convert_block_hash(block_hash)
+
+    def decode_from_router(self, router_key: int | bytes) -> BlockKey:
+        raise NotImplementedError("Not used")
 
 
 # Job metadata, remaining blocks, aggregate success, and successful load keys.
@@ -479,7 +485,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        block_key = self._key_adapter.encode(key)
+        block_key = self._key_adapter.decode_from_framework(key)
         status, _ = self._kvcr.query((block_key,), req_context.req_id)[0]
         if status is QueryStatus.FETCHING:
             return LookupResult.RETRY
@@ -490,7 +496,9 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
         blocks = {
-            self._key_adapter.encode(key): [self._make_descriptor(chunk_id)]
+            self._key_adapter.decode_from_framework(key): [
+                self._make_descriptor(chunk_id)
+            ]
             for key, chunk_id in zip(
                 job_metadata.keys, job_metadata.chunk_ids.tolist(), strict=True
             )
@@ -514,7 +522,9 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
         blocks = {
-            self._key_adapter.encode(key): [self._make_descriptor(chunk_id)]
+            self._key_adapter.decode_from_framework(key): [
+                self._make_descriptor(chunk_id)
+            ]
             for key, chunk_id in zip(
                 job_metadata.keys, job_metadata.chunk_ids.tolist(), strict=True
             )
@@ -621,10 +631,6 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             )
         return RequestOffloadingContext()
 
-    @override
-    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
-        self._align_sequence(keys, req_context, use_current_time=True)
-
     def _align_sequence(
         self,
         keys: Collection[OffloadKey],
@@ -635,7 +641,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             return
         ordered_keys = order_request_keys((list(keys),), req_context)
         self._kvcr.align_sequence(
-            [self._key_adapter.encode(key) for key in ordered_keys],
+            [self._key_adapter.decode_from_framework(key) for key in ordered_keys],
             use_current_time=use_current_time,
         )
 
@@ -663,7 +669,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             for key, position in req_context._offload_key_positions.items()
             if processed_tokens is None or position <= processed_tokens
         ]
-        self.touch(keys, req_context)
+        self._align_sequence(keys, req_context, use_current_time=True)
         self._kvcr.discard_hint(req_context.req_id)
 
     @override

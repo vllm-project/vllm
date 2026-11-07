@@ -53,11 +53,22 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
+    gather_initial_states,
+)
+from vllm.model_executor.layers.mamba.ops.hip_gdn_chunk import (
+    chunk_gdn_hip_fwd,
+    is_hip_gdn_available,
+    is_hip_gdn_supported,
+)
+from vllm.model_executor.layers.mamba.ops.scatter_states import (
+    scatter_states,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
-from vllm.model_executor.layers.utils import default_unquantized_gemm
+from vllm.model_executor.layers.utils import cuda_unquantized_gemm
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
@@ -111,7 +122,7 @@ if GDN_AITER_TRITON_AVAILABLE:
 
 logger = init_logger(__name__)
 
-MAX_FUSED_GDN_MTP_TOKENS = 8
+MAX_FUSED_GDN_MTP_TOKENS = 9  # kMaxMtpTokens in fused_gdn_decode_kernel.cu
 # Below this conservative threshold, overlap in_proj_ba with in_proj_qkvz on the aux
 # stream. On GB300, across Qwen3.5/3.8 shapes, quant formats and TP 1-8, the first
 # regression was at 272 tokens (27B BF16 TP8).
@@ -154,9 +165,30 @@ def _aiter_flydsl_unsupported_reasons(
     return reasons
 
 
+def _hip_gdn_unsupported_reasons(
+    vllm_config: VllmConfig, head_k_dim: int | None, head_v_dim: int | None
+) -> list[str]:
+    """Every reason the HIP GDN prefill kernel cannot serve this model, or an
+    empty list if it can."""
+    reasons = []
+    if head_k_dim != 128 or head_v_dim != 128:
+        reasons.append(
+            f"linear head dims are K={head_k_dim} V={head_v_dim}; "
+            "the HIP kernel requires 128/128"
+        )
+    dtype = vllm_config.model_config.dtype
+    if dtype not in (torch.bfloat16, torch.float16):
+        reasons.append(
+            f"model dtype is {dtype}; the HIP kernel requires bfloat16 or float16"
+        )
+    return reasons
+
+
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
-) -> tuple[str, Literal["triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl"]]:
+) -> tuple[
+    str, Literal["triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl", "hip"]
+]:
     """Resolve GDN prefill backend.
 
     The SYCL kernel is chosen when ``requested in ["sycl", "auto"]``, the
@@ -174,12 +206,19 @@ def _resolve_gdn_prefill_backend(
 
     In-tree CuteDSL GDN prefill kernel is chosen when:
     * "cutedsl" is requested; (opt-in only)
-    * Blackwell (SM10.x) with ``head_k_dim == 128``;
+    * Blackwell (SM10.x or SM11.x) with ``head_k_dim == 128``,
+      ``cuda_runtime >= 13``;
 
     AITER FlyDSL GDN prefill kernels are chosen when:
     * "aiter_flydsl" is requested, or "auto" is requested on gfx942/gfx950;
     * ROCm AITER exposes the optimized VK prefill API and FlyDSL kernels;
     * the model uses BF16 activations with ``head_k_dim == head_v_dim == 128``.
+
+    The HIP GDN prefill kernel is chosen when:
+    * "hip" is requested on RDNA3.5 (gfx1150-gfx1153), or "auto" on gfx1151;
+    * the build includes ``_rocm_C.rdna35_gdn_chunked``;
+    * the model uses BF16 or FP16 activations with
+      ``head_k_dim == head_v_dim == 128``.
     """
     additional_config = vllm_config.additional_config
     backend_cfg = (
@@ -230,8 +269,24 @@ def _resolve_gdn_prefill_backend(
                 )
                 return backend, "triton"
             return backend, "aiter_flydsl"
+        if backend == "hip":
+            if not is_hip_gdn_available():
+                raise RuntimeError(
+                    "GDN prefill backend 'hip' was requested but "
+                    "_rocm_C.rdna35_gdn_chunked is unavailable. It is built "
+                    "and registered only for RDNA3.5 (gfx1150-gfx1153)."
+                )
+            reasons = _hip_gdn_unsupported_reasons(vllm_config, head_k_dim, head_v_dim)
+            if reasons:
+                logger.warning_once(
+                    "GDN prefill backend 'hip' was requested but %s. "
+                    "Falling back to Triton/FLA.",
+                    "; ".join(reasons),
+                )
+                return backend, "triton"
+            return backend, "hip"
         if backend == "auto":
-            from vllm.platforms.rocm import on_mi3xx
+            from vllm.platforms.rocm import on_gfx1151, on_mi3xx
 
             if (
                 on_mi3xx()
@@ -241,12 +296,20 @@ def _resolve_gdn_prefill_backend(
                 and rocm_aiter_ops.is_gdn_flydsl_prefill_available()
             ):
                 return backend, "aiter_flydsl"
+            if (
+                on_gfx1151()
+                and not _hip_gdn_unsupported_reasons(
+                    vllm_config, head_k_dim, head_v_dim
+                )
+                and is_hip_gdn_available()
+            ):
+                return backend, "hip"
         return backend, "triton"
 
-    if backend == "aiter_flydsl":
+    if backend in ("aiter_flydsl", "hip"):
         raise RuntimeError(
-            "GDN prefill backend 'aiter_flydsl' was requested but it is a ROCm "
-            f"AITER backend and the current platform is {current_platform.device_name}."
+            f"GDN prefill backend '{backend}' was requested but it is a ROCm "
+            f"backend and the current platform is {current_platform.device_name}."
         )
 
     if not current_platform.is_cuda():
@@ -265,11 +328,17 @@ def _resolve_gdn_prefill_backend(
         supports_flashinfer = True
         supports_cutedsl = True
     elif (
+        current_platform.is_device_capability_family(110)
+        and head_k_dim == 128
+        and current_platform.get_cuda_runtime_major() >= 13
+    ):
+        supports_cutedsl = True
+    elif (
         current_platform.is_device_capability_family(120)
         and head_k_dim == 128
         and current_platform.get_cuda_runtime_major() >= 13
     ):
-        # The in-tree CuteDSL kernel targets SM100 only, so it stays off here.
+        # The in-tree CuteDSL kernel targets SM100/SM110 only, so it stays off here.
         supports_flashinfer = True
 
     if backend in ["flashinfer", "auto"] and supports_flashinfer:
@@ -303,6 +372,7 @@ def _log_gdn_backend_decision(
         "flashinfer": "FlashInfer",
         "cutedsl": "CuteDSL",
         "aiter_flydsl": "AITER FlyDSL",
+        "hip": "HIP",
         "triton": "Triton/FLA",
         "sycl": "SYCL",
     }[active_backend]
@@ -407,6 +477,8 @@ class ChunkGatedDeltaRule(CustomOp):
             self._forward_method = self.forward_cutedsl
         elif active_backend == "aiter_flydsl":
             self._forward_method = self.forward_aiter_flydsl
+        elif active_backend == "hip":
+            self._forward_method = self.forward_hip
         else:
             self._forward_method = self.forward_native
 
@@ -554,6 +626,58 @@ class ChunkGatedDeltaRule(CustomOp):
             core_attn_out.reshape(-1)[: o_flat.numel()].copy_(o_flat)
         return o, final_state
 
+    def forward_hip(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        output_final_state: bool,
+        cu_seqlens: torch.Tensor | None = None,
+        chunk_indices: torch.Tensor | None = None,
+        chunk_offsets: torch.Tensor | None = None,
+        use_qk_l2norm_in_kernel: bool = True,
+        core_attn_out: torch.Tensor | None = None,
+        aiter_prefill_metadata: object | None = None,
+    ):
+        if not is_hip_gdn_supported(q, v, cu_seqlens):
+            return self.forward_native(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+                chunk_offsets=chunk_offsets,
+                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+                core_attn_out=core_attn_out,
+            )
+
+        if use_qk_l2norm_in_kernel:
+            q = l2norm_fwd(q)
+            k = l2norm_fwd(k)
+
+        assert cu_seqlens is not None
+        o, final_state = chunk_gdn_hip_fwd(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            scale=k.shape[-1] ** -0.5,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+            core_attn_out=core_attn_out,
+        )
+        if not output_final_state:
+            final_state = None
+        return o, final_state
+
 
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -653,7 +777,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             overlap_ba_proj
             and current_platform.is_cuda()
             and isinstance(ba_method, UnquantizedLinearMethod)
-            and ba_method._gemm_impl is default_unquantized_gemm
+            and ba_method._gemm_impl is cuda_unquantized_gemm
             and not vllm_config.parallel_config.use_ubatching
             and vllm_config.lora_config is None
         ):
@@ -1925,8 +2049,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
                 prefill_in_place = prefill_out is not None
             else:
-                initial_state = ssm_state[prefill_state_indices]
-                initial_state[~prefill_has_initial_state, ...] = 0
+                initial_state = gather_initial_states(
+                    ssm_state, prefill_state_indices, prefill_has_initial_state
+                )
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
@@ -1945,7 +2070,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     aiter_prefill_metadata=attn_metadata.aiter_prefill_metadata,
                 )
             # Init cache
-            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            scatter_states(ssm_state, last_recurrent_state, prefill_state_indices)
 
             if split_non_spec and prefill_in_place:
                 core_attn_out[:num_decode_tokens] = core_attn_out_decode.squeeze(0)
@@ -2010,9 +2135,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         rows' final states.
         """
         has_initial_state = attn_metadata.prefill_has_initial_state
+        state_indices = attn_metadata.prefill_state_indices
         assert has_initial_state is not None
-        initial_state = ssm_state[attn_metadata.prefill_state_indices]
-        initial_state[~has_initial_state, ...] = 0
+        assert state_indices is not None
+        initial_state = gather_initial_states(
+            ssm_state, state_indices, has_initial_state
+        )
         plan = attn_metadata.flashinfer_checkpoint_plan
         if plan is None:
             return fi_chunk_gated_delta_rule(

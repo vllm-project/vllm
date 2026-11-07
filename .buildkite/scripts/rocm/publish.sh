@@ -20,7 +20,7 @@
 # Optional:
 #   HUB            — Docker Hub repo for nightly images (default: vllm/vllm-openai-rocm)
 #   NIGHTLY        — set to 1 to push nightly Hub tags (default: 0)
-#   DOCKERHUB_USERNAME — Hub username for cleanup script (default: vllmbot)
+#   DOCKERHUB_USERNAME — Hub username for cleanup script (default: vllm)
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -159,7 +159,7 @@ EOF
     fi
 
     # --- Nightly: Docker Hub -------------------------------------------------
-    export DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME:-vllmbot}
+    export DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME:-vllm}
 
     # The default stack (rocm) owns the unqualified :nightly / :base-nightly tags.
     # All stacks own the variant-qualified :nightly-<variant> tags.

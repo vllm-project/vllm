@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     backend_to_kernel_cls,
@@ -13,8 +13,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
-
-logger = init_logger(__name__)
 
 # Ordered by priority.
 _SUPPORTED_BACKENDS = (
@@ -78,31 +76,26 @@ def _mxfp8_backend_to_kernel_cls(
     return backend_to_kernel_cls(backend)
 
 
+class Mxfp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
+    """MXFP8 MoE backend selection for one deployment configuration."""
+
+    name = "Mxfp8"
+
+    def backend_to_kernel_cls(
+        self, backend: Fp8MoeBackend
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return _mxfp8_backend_to_kernel_cls(backend)
+
+
 def _select_kernel_cls(
     backend: Fp8MoeBackend,
     config: FusedMoEConfig,
 ) -> type[mk.FusedMoEExperts]:
     """Select the first supported expert class for the MXFP8 config."""
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
-    last_reason: str | None = None
-    for cls in _mxfp8_backend_to_kernel_cls(backend):
-        supported, reason = cls.is_supported_config(
-            cls,
-            config,
-            kMxfp8Static,
-            kMxfp8Dynamic,
-            activation_format,
-        )
-        if supported:
-            return cls
-        last_reason = reason
-    raise ValueError(
-        f"No supported MXFP8 expert class for {backend.value}: {last_reason}"
-    )
+    _, experts_cls = Mxfp8MoEKernelOracle(
+        config, kMxfp8Static, kMxfp8Dynamic
+    ).return_or_raise(backend)
+    return experts_cls
 
 
 def select_mxfp8_moe_backend(
@@ -123,10 +116,6 @@ def select_mxfp8_moe_backend(
                 f"MXFP8 MoE. Expected one of "
                 f"{list(_BACKEND_NAME_MAP.keys())}."
             )
-        logger.info_once(
-            "Using '%s' MxFp8 MoE backend (user-requested).",
-            backend.value,
-        )
         return backend, _select_kernel_cls(backend, config)
 
     # Auto-select: pick the first supported backend.
@@ -136,8 +125,6 @@ def select_mxfp8_moe_backend(
             experts_cls = _select_kernel_cls(backend, config)
         except ValueError:
             continue
-        logger.info_once("Using '%s' MxFp8 MoE backend.", backend.value)
         return backend, experts_cls
 
-    # TODO: add debug log with reason.
     raise ValueError("No MXFP8 MoE backends available.")

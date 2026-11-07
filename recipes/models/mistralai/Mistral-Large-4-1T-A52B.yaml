@@ -9,7 +9,7 @@ meta:
   provider: "Mistral AI"
   description: "Mistral Large 4: a 1T-total / 49B-active multimodal MoE with sparse MLA attention, a built-in DSpark drafter, tool calling and reasoning, in FP8, NVFP4 and AMD MXFP4 checkpoints."
   date_added: 2026-10-28
-  date_updated: 2026-10-29
+  date_updated: 2026-10-30
   tasks:
     - multimodal
   performance_headline: "8x GB300, NVFP4 + DSpark: TP8 c1 TPOT 3.1 ms; 1P1D (4+4) P DP4/EP → D TP4 reaches 241 output tok/s/GPU at 32k input"
@@ -142,9 +142,11 @@ variants:
       mi350x:
         install:
           pip: false
+        docker_serve_command: "vllm serve"
       mi355x:
         install:
           pip: false
+        docker_serve_command: "vllm serve"
   mxfp4:
     model_id: "amd/Mistral-Large-4-1T-A52B-Quark-MXFP4"
     precision: mxfp4
@@ -157,9 +159,11 @@ variants:
       mi350x:
         install:
           pip: false
+        docker_serve_command: "vllm serve"
       mi355x:
         install:
           pip: false
+        docker_serve_command: "vllm serve"
     description: "AMD Quark OCP MXFP4 routed experts (static weight, dynamic activation scales); attention, shared experts, dense layers, router, head, vision encoder and the DSpark drafter keep the original precision. ~578 GB, fits four MI350 Series GPUs."
 
 # Only the validated layouts are offered:
@@ -594,11 +598,88 @@ presets:
 
       With DSpark only single-request verify blocks run fused: at c1 it is
       1.09x faster per token than DSpark on the standard decode, at c8 equal.
-
-      `--max-num-seqs 64` is required for now: with vLLM's default batch
-      limits and `AITER_CUSTOM_AR_MAX_SIZE`, CUDA graph capture aborts at
-      startup. The specialized decode only runs 1–4-request steps, so the cap
-      costs this preset nothing.
+  mi350x_mxfp4_tp4:
+    label: "TP4 (two replicas per node)"
+    hardware: mi350x
+    strategy: single_node_tp
+    variants: [mxfp4]
+    workload: "Interactive and mid concurrency"
+    select:
+      features:
+        spec_decoding: dspark
+    description: "MXFP4 experts fit four MI350X GPUs, so one 8-GPU node runs two TP4 replicas (run the second in its own container on GPUs 4-7, e.g. `docker run -e ROCR_VISIBLE_DEVICES=4,5,6,7`, on another port)."
+    tp: 4
+  mi350x_mxfp4_tp4_specialized:
+    label: "TP4 specialized decode (lowest latency)"
+    hardware: mi350x
+    strategy: single_node_tp
+    variants: [mxfp4]
+    workload: "1–4 concurrent requests"
+    description: "Runs every MoE layer of a 1-, 2- or 4-request decode step as one persistent FlyDSL kernel (attention, indexer, router, MXFP4 experts and both all-reduces in one launch). Larger batches and prefill run the standard path. Needs TP4 and a4w4 experts; refuses to start otherwise."
+    tp: 4
+    args:
+      - "--additional-config"
+      - '{"decode_backend":"latency_specialized"}'
+      - "--max-num-seqs"
+      - "64"
+  mi355x_tp4:
+    label: "TP4 (two replicas per node)"
+    hardware: mi355x
+    strategy: single_node_tp
+    variants: [fp8]
+    workload: "Interactive and mid concurrency"
+    select:
+      features:
+        spec_decoding: dspark
+    description: "MXFP4 experts fit four MI355X GPUs, so one 8-GPU node runs two TP4 replicas (run the second in its own container on GPUs 4-7, e.g. `docker run -e ROCR_VISIBLE_DEVICES=4,5,6,7`, on another port). Validated with DSpark and the FP8 KV cache."
+    tp: 4
+    runbook: |
+      Measured on MI355X, a8w4 experts, FP8 KV cache, DSpark: c1 / c4 TPOT p50
+      3.75 / 6.26 ms on real prompts.
+  mi355x_tp4_specialized:
+    label: "TP4 specialized decode (lowest latency)"
+    hardware: mi355x
+    strategy: single_node_tp
+    variants: [fp8]
+    workload: "1–4 concurrent requests"
+    description: "Runs every MoE layer of a 1-, 2- or 4-request decode step as one persistent FlyDSL kernel (attention, indexer, router, MXFP4 experts and both all-reduces in one launch). Larger batches and prefill run the standard path. Needs TP4 and a4w4 experts; refuses to start otherwise."
+    tp: 4
+    args:
+      - "--additional-config"
+      - '{"decode_backend":"latency_specialized"}'
+    env:
+      VLLM_FP8_MOE_REQUANT_ACT: "a4w4"
+    runbook: |
+      Measured on MI355X, a4w4 experts, FP8 KV cache, DSpark: c1 / c4 TPOT p50
+      3.56 / 6.14 ms on real prompts (1.05x / 1.02x vs the TP4 preset).
+  mi355x_mxfp4_tp4:
+    label: "TP4 (two replicas per node)"
+    hardware: mi355x
+    strategy: single_node_tp
+    variants: [mxfp4]
+    workload: "Interactive and mid concurrency"
+    select:
+      features:
+        spec_decoding: dspark
+    description: "MXFP4 experts fit four MI355X GPUs, so one 8-GPU node runs two TP4 replicas (run the second in its own container on GPUs 4-7, e.g. `docker run -e ROCR_VISIBLE_DEVICES=4,5,6,7`, on another port). Validated with DSpark and the FP8 KV cache."
+    tp: 4
+    runbook: |
+      Measured on MI355X, FP8 KV cache, DSpark: c1 / c4 TPOT p50 3.85 / 6.05 ms
+      on real prompts.
+  mi355x_mxfp4_tp4_specialized:
+    label: "TP4 specialized decode (lowest latency)"
+    hardware: mi355x
+    strategy: single_node_tp
+    variants: [mxfp4]
+    workload: "1–4 concurrent requests"
+    description: "Runs every MoE layer of a 1-, 2- or 4-request decode step as one persistent FlyDSL kernel (attention, indexer, router, MXFP4 experts and both all-reduces in one launch). Larger batches and prefill run the standard path. Needs TP4 and a4w4 experts; refuses to start otherwise."
+    tp: 4
+    args:
+      - "--additional-config"
+      - '{"decode_backend":"latency_specialized"}'
+    runbook: |
+      Measured on MI355X, FP8 KV cache, DSpark: c1 / c4 TPOT p50 3.60 / 6.03 ms
+      on real prompts (1.07x / 1.00x vs the TP4 preset).
 
 notes:
   - title: "Two GB300 trays per 8-GPU instance"
@@ -717,13 +798,6 @@ troubleshooting:
       Not supported yet: a P/D decode node with `--decode-context-parallel-size`
       can't run DSpark. DCP prefill → TP decode with DSpark on both sides works,
       and colocated DCP works with DSpark.
-  - title: "Custom allreduce is capturing on the registered path, but a collective buffer cannot be IPC-exported"
-    when:
-      hardware: [amd]
-    body: |
-      Startup abort during CUDA graph capture with the specialized decode,
-      `AITER_CUSTOM_AR_MAX_SIZE` and vLLM's default batch limits. Add
-      `--max-num-seqs 64` (the specialized-decode preset sets it).
   - title: "Mistral Large 4 specialized decode unsupported: …"
     when:
       hardware: [amd]

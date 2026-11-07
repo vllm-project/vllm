@@ -15,6 +15,7 @@ use serde_json_fmt::JsonFormat;
 
 use crate::error::{Error, Result};
 use crate::reasoning::ReasoningControl;
+use crate::renderer::tool_call_arguments_or_empty;
 use crate::request::{ChatContent, ChatMessage, ChatRequest, ChatRole, ChatTool};
 use crate::{AssistantContentBlock, AssistantMessageExt, AssistantToolCall};
 
@@ -433,19 +434,10 @@ fn render_tool_call(out: &mut String, tool_call: &AssistantToolCall) -> Result<(
 /// String values are emitted raw with `string="true"`, while all other JSON
 /// values are rendered with JSON syntax and `string="false"`.
 fn encode_arguments_to_dsml(out: &mut String, tool_call: &AssistantToolCall) -> Result<()> {
-    let arguments: Value = serde_json::from_str(&tool_call.arguments).map_err(|error| {
-        Error::ChatTemplate(format!(
-            "assistant tool call has invalid JSON arguments for DeepSeek V3.2: {error}"
-        ))
-    })?;
-    let Some(arguments) = arguments.as_object() else {
-        return Err(Error::ChatTemplate(
-            "assistant tool call arguments for DeepSeek V3.2 must be a JSON object".to_string(),
-        ));
-    };
+    let arguments = tool_call_arguments_or_empty(&tool_call.arguments);
 
     let mut wrote_parameter = false;
-    for (key, value) in arguments {
+    for (key, value) in &arguments {
         if wrote_parameter {
             out.push('\n');
         }

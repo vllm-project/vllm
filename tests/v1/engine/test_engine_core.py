@@ -44,10 +44,12 @@ from vllm.v1.outputs import ModelRunnerOutput
 
 from ...utils import create_new_process_for_each_test, multi_gpu_test
 
-if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
+if not current_platform.is_cuda_alike():
+    pytest.skip(
+        reason="V1 currently only supported on CUDA and ROCm.", allow_module_level=True
+    )
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 # test_engine_core_concurrent_batches assumes exactly 12 tokens per prompt.
 # Adjust prompt if changing model to maintain 12-token length.
@@ -426,6 +428,7 @@ def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
     sampled.set_result(None if encoder_only else output)
     core.model_executor.execute_model.return_value = executed
     core.model_executor.sample_tokens.return_value = sampled
+    core._wait_for_output.side_effect = lambda future: future.result()
 
     EngineCore.step_with_batch_queue(core)
     if core.batch_queue:
@@ -539,6 +542,7 @@ def test_encoder_instance_zero_kv_cache(
         trust_remote_code=True,
         dtype="float16",
         seed=42,
+        max_model_len=512,
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=10,
@@ -753,6 +757,7 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     """A bare EngineCoreProc holding just the state pause_scheduler touches."""
     core = object.__new__(EngineCoreProc)
     core.model_executor = MagicMock()
+    core.model_executor.vllm_config.cache_config.enable_extensible_kv_cache = False
     core.scheduler = MagicMock()
     core.scheduler.has_requests.return_value = False
     core.batch_queue = None

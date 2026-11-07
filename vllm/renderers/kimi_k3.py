@@ -24,6 +24,7 @@ from .params import ChatParams
 # and request-level media_io_kwargs still take precedence over this default.
 _K3_MEDIA_IO_DEFAULTS: dict[str, dict[str, Any]] = {"image": {"image_mode": None}}
 _K3_THINKING_EFFORTS = ("low", "high", "max")
+_K31_THINKING_EFFORTS = ("low", "medium", "high", "max")
 
 
 def _merge_k3_media_io_kwargs(
@@ -44,7 +45,9 @@ def _dump_k3_template_value(value: Any) -> Any:
     return value
 
 
-def _apply_k3_thinking_kwargs(kwargs: dict[str, Any]) -> None:
+def _apply_k3_thinking_kwargs(
+    kwargs: dict[str, Any], thinking_efforts: tuple[str, ...]
+) -> None:
     if (enable_thinking := kwargs.pop("enable_thinking", None)) is not None:
         kwargs.setdefault("thinking", enable_thinking)
 
@@ -55,10 +58,10 @@ def _apply_k3_thinking_kwargs(kwargs: dict[str, Any]) -> None:
         kwargs.setdefault("thinking_effort", reasoning_effort)
 
     thinking_effort = kwargs.get("thinking_effort")
-    if thinking_effort is not None and thinking_effort not in _K3_THINKING_EFFORTS:
-        supported = ", ".join(_K3_THINKING_EFFORTS)
+    if thinking_effort is not None and thinking_effort not in thinking_efforts:
+        supported = ", ".join(thinking_efforts)
         raise VLLMValidationError(
-            f"Kimi K3 supports thinking_effort values: {supported}",
+            f"This model supports thinking_effort values: {supported}",
             parameter="thinking_effort",
             value=thinking_effort,
         )
@@ -151,6 +154,11 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
     def __init__(self, config: VllmConfig, tokenizer: HfTokenizer | None) -> None:
         super().__init__(config, tokenizer)
 
+        self._thinking_efforts = (
+            _K31_THINKING_EFFORTS
+            if self.model_config.hf_config.model_type == "kimi_k31"
+            else _K3_THINKING_EFFORTS
+        )
         self._apply_chat_template_async = make_async(
             self._apply_chat_template, executor=self._executor
         )
@@ -164,7 +172,7 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         # user/tool text as ordinary tokens, so we cannot defer to a plain
         # re-tokenization of the rendered string downstream.
         kwargs = params.get_apply_chat_template_kwargs()
-        _apply_k3_thinking_kwargs(kwargs)
+        _apply_k3_thinking_kwargs(kwargs, self._thinking_efforts)
         if params.tool_choice not in (None, "auto"):
             kwargs["tool_choice"] = _dump_k3_template_value(params.tool_choice)
         if params.response_format is not None:

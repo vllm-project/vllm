@@ -70,6 +70,7 @@ class MockModelConfig:
     task = "generate"
     runner_type = "generate"
     model = _MODEL
+    served_model_name = _MODEL
     tokenizer = _MODEL
     trust_remote_code = False
     tokenizer_mode = "auto"

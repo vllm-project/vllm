@@ -4,7 +4,7 @@
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, TypeAlias
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import torch
 
@@ -20,9 +20,17 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
 logger = init_logger(__name__)
 
 ConvStateLayoutType = Literal["SD", "DS"]
+
+
+def mamba_state_alignment(vllm_config: "VllmConfig") -> int:
+    # FlashInfer loads state and ring caches with 16-byte cp.async instructions.
+    return 16 if vllm_config.use_flashinfer_replayssm else 1
 
 
 @functools.lru_cache

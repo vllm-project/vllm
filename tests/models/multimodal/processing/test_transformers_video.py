@@ -222,7 +222,9 @@ def test_video_unsupported_when_processor_cannot_count_tokens(monkeypatch):
 def test_merged_token_fields_split_per_video():
     """VideoLLaMA3's compression mask has one row per merged token, not per patch."""
     mm_processor = MULTIMODAL_REGISTRY.create_processor(
-        ModelConfig(model="lkhl/VideoLLaMA3-2B-Image-HF", model_impl="transformers")
+        ModelConfig(
+            model="vllm-project/VideoLLaMA3-2B-Image-HF", model_impl="transformers"
+        )
     )
 
     result = mm_processor(

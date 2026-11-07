@@ -37,8 +37,9 @@ use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopolog
 use vllm_server::{
     AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
     CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogConfig,
-    OutputLogging, ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
+    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, FingerprintMode, HttpListenerMode,
+    LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
+    RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 
@@ -143,6 +144,10 @@ pub struct RenderArgs {
         default_value = "0"
     )]
     skip_model_name_validation: bool,
+    /// Upper bound on a request's `n` (default 16384). Like Python, it is set
+    /// only through `VLLM_MAX_N_SEQUENCES`.
+    #[arg(long, hide = true, env = "VLLM_MAX_N_SEQUENCES", value_parser = parse_int)]
+    max_n_sequences: Option<i64>,
     /// Select the tool-call parser. Use `auto` to infer from the model or
     /// `none` to disable parsing.
     #[arg(long, default_value_t)]
@@ -204,6 +209,7 @@ impl RenderArgs {
             model,
             tokenizer,
             hf_config,
+            skip_tokenizer_init,
         } = self.model.file_sources();
 
         RenderConfig {
@@ -211,9 +217,11 @@ impl RenderArgs {
             revision: model.revision,
             tokenizer,
             hf_config,
+            skip_tokenizer_init,
             hf_overrides: self.hf_overrides,
             served_model_name: self.served_model_name,
             skip_model_name_validation: self.skip_model_name_validation,
+            max_n_sequences: self.max_n_sequences.unwrap_or(DEFAULT_MAX_N_SEQUENCES),
             host: self.host,
             port: self.port,
             tool_call_parser: self.tool_call_parser,
@@ -471,6 +479,12 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_request_id_headers: bool,
 
+    /// If set to True, log the stack trace of error responses. Defaults to
+    /// `VLLM_SERVER_DEV_MODE`.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub log_error_stack: Option<bool>,
+
     /// Register the scale-out `/inference/v1/generate` endpoint.
     #[arg(
         long,
@@ -500,6 +514,18 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
     pub sse_keep_alive_interval: u64,
+
+    /// Controls the `system_fingerprint` field on responses: `full`
+    /// (`vllm-<version>[-<parallelism>]-<config hash>`), `hash` (without the
+    /// parallelism), `custom` (`--fingerprint-value`), or `none`.
+    #[arg(long, value_enum, default_value_t)]
+    #[serde(default)]
+    pub fingerprint_mode: FingerprintModeArg,
+
+    /// Literal fingerprint string used when `--fingerprint-mode=custom`.
+    #[arg(long)]
+    #[serde(default)]
+    pub fingerprint_value: Option<String>,
 
     /// If provided, the server will require one of these keys to be presented
     /// in the Authorization header.
@@ -574,6 +600,26 @@ pub struct SharedRuntimeArgs {
     )]
     #[serde(skip)]
     pub skip_model_name_validation: bool,
+
+    /// Register the development routes and default `--log-error-stack`. Like
+    /// Python, it is set only through `VLLM_SERVER_DEV_MODE`, which must be an
+    /// integer.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_SERVER_DEV_MODE",
+        action = ArgAction::Set,
+        value_parser = parse_int_flag,
+        default_value = "0"
+    )]
+    #[serde(skip)]
+    pub server_dev_mode: bool,
+
+    /// Upper bound on a request's `n` (default 16384). Like Python, it is set
+    /// only through `VLLM_MAX_N_SEQUENCES`.
+    #[arg(long, hide = true, env = "VLLM_MAX_N_SEQUENCES", value_parser = parse_int)]
+    #[serde(skip)]
+    pub max_n_sequences: Option<i64>,
 
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
@@ -759,6 +805,15 @@ impl SharedRuntimeArgs {
         if let Some(value) = lookup("VLLM_SKIP_MODEL_NAME_VALIDATION") {
             self.skip_model_name_validation = parse_truthy_flag(&value)?;
         }
+        if let Some(value) = lookup("VLLM_SERVER_DEV_MODE") {
+            self.server_dev_mode = parse_int_flag(&value)
+                .map_err(|error| format!("invalid VLLM_SERVER_DEV_MODE: {error}"))?;
+        }
+        if let Some(value) = lookup("VLLM_MAX_N_SEQUENCES") {
+            let max_n_sequences = parse_int(&value)
+                .map_err(|error| format!("invalid VLLM_MAX_N_SEQUENCES: {error}"))?;
+            self.max_n_sequences = Some(max_n_sequences);
+        }
         Ok(())
     }
 
@@ -782,6 +837,7 @@ impl SharedRuntimeArgs {
         let keep_alive_timeout = self.keep_alive_timeout();
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
+        let fingerprint_mode = self.fingerprint_mode_config();
         let cors = self.cors_config();
         let access_log = self.access_log_config();
         let tls = self.ssl.tls_config();
@@ -791,6 +847,7 @@ impl SharedRuntimeArgs {
             model,
             tokenizer,
             hf_config,
+            skip_tokenizer_init,
         } = self.model.file_sources();
 
         Config {
@@ -810,6 +867,7 @@ impl SharedRuntimeArgs {
             revision: model.revision,
             tokenizer,
             hf_config,
+            skip_tokenizer_init,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
@@ -832,6 +890,7 @@ impl SharedRuntimeArgs {
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
             api_server_options,
+            fingerprint_mode,
             cors,
             access_log,
             tls,
@@ -867,6 +926,7 @@ impl SharedRuntimeArgs {
         let keep_alive_timeout = self.keep_alive_timeout();
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
+        let fingerprint_mode = self.fingerprint_mode_config();
         let cors = self.cors_config();
         let access_log = self.access_log_config();
         let tls = self.ssl.tls_config();
@@ -876,6 +936,7 @@ impl SharedRuntimeArgs {
             model,
             tokenizer,
             hf_config,
+            skip_tokenizer_init,
         } = self.model.file_sources();
 
         Config {
@@ -894,6 +955,7 @@ impl SharedRuntimeArgs {
             revision: model.revision,
             tokenizer,
             hf_config,
+            skip_tokenizer_init,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
@@ -916,6 +978,7 @@ impl SharedRuntimeArgs {
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
             api_server_options,
+            fingerprint_mode,
             cors,
             access_log,
             tls,
@@ -947,9 +1010,11 @@ impl SharedRuntimeArgs {
             default_return_tokens_as_token_ids: self.return_tokens_as_token_ids,
             enable_per_request_metrics: self.enable_per_request_metrics,
             enable_request_id_headers: self.enable_request_id_headers,
+            log_error_stack: self.log_error_stack.unwrap_or(self.server_dev_mode),
             enable_scale_out: self.enable_scale_out,
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
             skip_model_name_validation: self.skip_model_name_validation,
+            server_dev_mode: self.server_dev_mode,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
                 .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
             request_body_limit_bytes: match self.http_max_request_body_size {
@@ -957,6 +1022,18 @@ impl SharedRuntimeArgs {
                 Some(0) => None,
                 Some(limit) => Some(limit),
             },
+            max_n_sequences: self.max_n_sequences.unwrap_or(DEFAULT_MAX_N_SEQUENCES),
+        }
+    }
+
+    fn fingerprint_mode_config(&self) -> FingerprintMode {
+        match self.fingerprint_mode {
+            FingerprintModeArg::Full => FingerprintMode::Full,
+            FingerprintModeArg::Hash => FingerprintMode::Hash,
+            // Like Python, `custom` without a value reports no fingerprint.
+            FingerprintModeArg::Custom => (self.fingerprint_value.clone())
+                .map_or(FingerprintMode::None, FingerprintMode::Custom),
+            FingerprintModeArg::None => FingerprintMode::None,
         }
     }
 
@@ -980,6 +1057,17 @@ impl SharedRuntimeArgs {
             allow_credentials: self.allow_credentials,
         }
     }
+}
+
+/// `--fingerprint-mode` values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FingerprintModeArg {
+    #[default]
+    Full,
+    Hash,
+    Custom,
+    None,
 }
 
 fn default_engine_ready_timeout_secs() -> u64 {
@@ -1066,11 +1154,16 @@ impl FromStr for LogStatsInterval {
     }
 }
 
+/// Parse an integer environment variable as Python's `int(value)`, for
+/// decimal integers in the `i64` range.
+fn parse_int(value: &str) -> Result<i64, String> {
+    value.trim().parse().map_err(|_| format!("`{value}` is not an integer"))
+}
+
 /// Parse an integer flag environment variable as Python's `bool(int(value))`,
 /// for decimal integers in the `i64` range.
 fn parse_int_flag(value: &str) -> Result<bool, String> {
-    let value: i64 = value.trim().parse().map_err(|_| format!("`{value}` is not an integer"))?;
-    Ok(value != 0)
+    Ok(parse_int(value)? != 0)
 }
 
 /// Parse a boolean flag environment variable as Python's

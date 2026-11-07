@@ -138,7 +138,7 @@ class SpeculatorConfig:
         return None
 
     def hash_factors(self) -> list[Any]:
-        """Extra factors of `SpeculativeConfig.compute_hash`."""
+        """Extra factors of `SpeculativeConfig.compile_factors`."""
         return []
 
     def pcp_unsupported_reason(self, parallel_config: "ParallelConfig") -> str | None:
@@ -291,6 +291,7 @@ _CONFIG_BY_METHOD: dict[str, str] = {
     "draft_model": _builtin("standalone_ar.config", "StandaloneARSpeculatorConfig"),
     "ngram": _builtin("ngram.config", "NgramSpeculatorConfig"),
     "ngram_gpu": _builtin("ngram.config", "NgramGPUSpeculatorConfig"),
+    "suffix": _builtin("suffix.config", "SuffixSpeculatorConfig"),
     "eagle": _builtin("eagle.config", "EagleSpeculatorConfig"),
     "eagle3": _builtin("eagle.config", "Eagle3SpeculatorConfig"),
     "mtp": _builtin("mtp.config", "MTPSpeculatorConfig"),
@@ -300,7 +301,7 @@ _CONFIG_BY_METHOD: dict[str, str] = {
 
 
 # V1 model runner only (see `v1_speculator_configs`).
-_V1_ONLY_METHODS = ("suffix", "custom_class")
+_V1_ONLY_METHODS = ("custom_class",)
 
 # Custom speculative methods' configs (or their qualified names), by name.
 _CUSTOM_CONFIGS: dict[str, "type[SpeculatorConfig] | str"] = {}
@@ -364,12 +365,9 @@ def get_method_config_class(spec_config: "SpeculativeConfig") -> type[Speculator
         method = "draft_model"
     if method in _V1_ONLY_METHODS:
         from vllm.v1.worker.gpu.spec_decode.v1_speculator_configs import (
-            SuffixSpeculatorConfig,
             V1CustomProposerConfig,
         )
 
-        if method == "suffix":
-            return SuffixSpeculatorConfig
         return V1CustomProposerConfig
     if method not in _CONFIG_BY_METHOD:
         raise ValueError(f"Unsupported speculative method: '{method}'")

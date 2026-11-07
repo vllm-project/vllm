@@ -40,6 +40,8 @@ If other strategies don't solve the problem, it's likely that the vLLM instance 
 - `export NCCL_DEBUG=TRACE` to turn on more logging for NCCL.
 - `export VLLM_TRACE_FUNCTION=1` to record all function calls for inspection in the log files to tell which function crashes or hangs. (WARNING: This flag will slow down the token generation by **over 100x**. Do not use unless absolutely needed.)
 
+The DP coordinator's `Received stats for out-of-order step` diagnostic is logged at DEBUG level. Statistics from different engines can arrive in a different step order; this message alone does not indicate a failed request. Set `VLLM_LOGGING_LEVEL=DEBUG` to inspect these reports.
+
 ## Breakpoints
 
 Setting normal `pdb` breakpoints may not work in vLLM's codebase if they are executed in a subprocess. You will experience something like:

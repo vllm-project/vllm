@@ -62,7 +62,8 @@ The Transcriptions API supports uploading audio files in various formats includi
 
 - `file`: The audio file to transcribe (required)
 - `model`: The model to use for transcription (required)
-- `language`: The language code (e.g., "en", "zh") (optional)
+- `language`: The language code (e.g., "en", "zh") (optional; required by
+  `nvidia/canary-1b-v2`, which cannot detect the language)
 - `prompt`: Optional text to guide the transcription style (optional)
 - `response_format`: Format of the response ("json", "text", "verbose_json", or
   "diarized_json") (optional)
@@ -152,6 +153,7 @@ Our Translation API is compatible with [OpenAI's Translations API](https://platf
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 Whisper models can translate audio from one of the 55 non-English supported languages into English.
 Please mind that the popular `openai/whisper-large-v3-turbo` model does not support translating.
+`nvidia/canary-1b-v2` translates to or from English only and needs both `language` and `to_language`.
 
 !!! note
     To use the Translation API, please install with extra audio dependencies using `pip install vllm[audio]`.

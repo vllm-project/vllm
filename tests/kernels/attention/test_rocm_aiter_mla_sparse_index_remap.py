@@ -71,6 +71,8 @@ def _patch_init_deps(monkeypatch, *, speculative: bool = False):
         model_config=SimpleNamespace(dtype=torch.bfloat16),
         speculative_config=SimpleNamespace() if speculative else None,
         attention_config=SimpleNamespace(hisparse_config=None),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        compilation_config=SimpleNamespace(cudagraph_mode=None),
     )
     monkeypatch.setattr(sparse_mod, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(sparse_mla_mod, "get_current_vllm_config", lambda: vllm_config)

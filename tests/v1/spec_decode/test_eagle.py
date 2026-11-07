@@ -38,8 +38,8 @@ from vllm.v1.spec_decode.utils import extend_all_queries_by_N
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
-eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
-eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
+eagle_dir = "vllm-project/EAGLE-LLaMA3.1-Instruct-8B"
+eagle3_dir = "vllm-project/EAGLE3-LLaMA3.1-Instruct-8B"
 ar_draft_model_dir = "amd/PARD-Llama-3.2-1B"  # Compatible with parallel and AR drafting
 dflash_target_dir = "Qwen/Qwen3-8B"
 dflash_dir = "z-lab/Qwen3-8B-DFlash-b16"

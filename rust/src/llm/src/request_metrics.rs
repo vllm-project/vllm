@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_engine_core_client::protocol::output::{
@@ -10,7 +11,7 @@ use vllm_engine_core_client::protocol::output::{
 use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_metrics::{
     EngineLabels, FinishedReasonLabels, HistogramMetric, METRICS, PromptTokenSourceLabels,
-    U64Counter,
+    U64Counter, WatermarkStatusLabels,
 };
 
 use crate::FinishReason;
@@ -47,7 +48,10 @@ pub(crate) struct RequestMetricsTracker {
     arrival_time: f64,
     prompt_len: u32,
     max_tokens_param: Option<u32>,
-    n_param: u32,
+    /// Set when this request is one child of a parallel-sampling request.
+    parallel_sampling: Option<Arc<ParallelSamplingStats>>,
+    /// Whether the request asked for watermarking (not opted out).
+    watermark_requested: bool,
     is_prefilling: bool,
     queued_ts: f64,
     scheduled_ts: f64,
@@ -58,6 +62,42 @@ pub(crate) struct RequestMetricsTracker {
     num_preemptions: u64,
     latest_num_cached_tokens: u32,
     is_corrupted: bool,
+    /// `vllm:watermark_requests` series to count at finish, resolved when the
+    /// engine reports the request's watermarking.
+    watermark_requests: Option<U64Counter>,
+}
+
+/// Request-level metric state shared by the `n` children of one
+/// parallel-sampling request.
+///
+/// Like Python's `ParentRequest`, the `n` and max-generation-tokens histograms
+/// describe the whole request: they are observed once, when the last child
+/// finishes, while every other request metric is per child.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/913fccd11847f5b4d4769e3a69c8925f955bc29e/vllm/v1/engine/parallel_sampling.py#L134-L156>
+pub(crate) struct ParallelSamplingStats {
+    n: u32,
+    unfinished_children: AtomicU32,
+    max_generation_tokens: AtomicU32,
+}
+
+impl ParallelSamplingStats {
+    pub(crate) fn new(n: u32) -> Self {
+        Self {
+            n,
+            unfinished_children: AtomicU32::new(n),
+            max_generation_tokens: AtomicU32::new(0),
+        }
+    }
+
+    /// Record one finished child, returning the request's max generation
+    /// token count once the last child has finished.
+    fn observe_finished_child(&self, num_generation_tokens: u32) -> Option<u32> {
+        self.max_generation_tokens.fetch_max(num_generation_tokens, Ordering::AcqRel);
+        (self.unfinished_children.fetch_sub(1, Ordering::AcqRel) == 1)
+            .then(|| self.max_generation_tokens.load(Ordering::Acquire))
+    }
 }
 
 /// Cached request metric handles for one model and engine index.
@@ -66,6 +106,9 @@ pub(crate) struct RequestMetricsTracker {
 /// with zero values before the first request, like the Python frontend's
 /// `PrometheusStatLogger`.
 pub(crate) struct RequestMetricHandles {
+    /// Labels of the series created on first use.
+    labels: EngineLabels,
+
     // Request-derived counters.
     prompt_tokens: U64Counter,
     prompt_tokens_local_compute: U64Counter,
@@ -74,6 +117,11 @@ pub(crate) struct RequestMetricHandles {
     prompt_tokens_cached: U64Counter,
     generation_tokens: U64Counter,
     corrupted_requests: U64Counter,
+    /// Created when the engine first reports a request's watermarking, which
+    /// it does only with a `watermark_config`. The frontend has no other
+    /// source for that engine config, so unlike Python the series do not
+    /// exist before the first such report.
+    watermark_requests: OnceLock<WatermarkRequestCounters>,
 
     // Request lifecycle counters and histograms.
     request_success: RequestSuccessCounters,
@@ -134,6 +182,45 @@ impl RequestSuccessCounters {
     }
 }
 
+/// `vllm:watermark_requests` counters, one per status.
+struct WatermarkRequestCounters {
+    watermarked: U64Counter,
+    skipped: U64Counter,
+    not_watermarked: U64Counter,
+}
+
+impl WatermarkRequestCounters {
+    /// Create the series for every status, like Python's `PrometheusStatLogger`.
+    fn resolve(labels: &EngineLabels) -> Self {
+        let counter = |status| {
+            METRICS.request.watermark_requests.get_or_create_owned(&WatermarkStatusLabels {
+                model_name: labels.model_name.clone(),
+                engine: labels.engine,
+                status,
+            })
+        };
+        Self {
+            watermarked: counter("watermarked"),
+            skipped: counter("skipped"),
+            not_watermarked: counter("not_watermarked"),
+        }
+    }
+
+    /// Counter for a request the engine watermarks (`applied`) or not, given
+    /// whether it asked for watermarking.
+    ///
+    /// A request that asked but is not watermarked, such as a greedy one, is
+    /// `skipped`; an opt-out is `not_watermarked` unless the engine enforced
+    /// watermarking on it.
+    fn get(&self, requested: bool, applied: bool) -> &U64Counter {
+        match (requested, applied) {
+            (_, true) => &self.watermarked,
+            (true, false) => &self.skipped,
+            (false, false) => &self.not_watermarked,
+        }
+    }
+}
+
 /// Cached handles for request metrics derived from engine-core lifecycle
 /// events (`QUEUED`, `SCHEDULED`, `PREEMPTED`), which engines only emit when
 /// they record stats.
@@ -153,14 +240,16 @@ impl RequestMetricsTracker {
         arrival_time: f64,
         prompt_len: u32,
         max_tokens_param: Option<u32>,
-        n_param: u32,
+        parallel_sampling: Option<Arc<ParallelSamplingStats>>,
+        watermark_requested: bool,
     ) -> Self {
         Self {
             handles,
             arrival_time,
             prompt_len,
             max_tokens_param,
-            n_param,
+            parallel_sampling,
+            watermark_requested,
             is_prefilling: true,
             queued_ts: 0.0,
             scheduled_ts: 0.0,
@@ -171,6 +260,7 @@ impl RequestMetricsTracker {
             num_preemptions: 0,
             latest_num_cached_tokens: 0,
             is_corrupted: false,
+            watermark_requests: None,
         }
     }
 
@@ -190,6 +280,12 @@ impl RequestMetricsTracker {
         self.num_generation_tokens += output.new_token_ids.len() as u32;
         self.handles.generation_tokens.inc_by(output.new_token_ids.len() as u64);
         self.is_corrupted |= output.num_nans_in_logits > 0;
+        // EngineCore reports what it applied, including enforced opt-outs.
+        if let Some(applied) = output.watermarking {
+            let counters = (self.handles.watermark_requests)
+                .get_or_init(|| WatermarkRequestCounters::resolve(&self.handles.labels));
+            self.watermark_requests = Some(counters.get(self.watermark_requested, applied).clone());
+        }
 
         if let Some(events) = &output.events {
             self.observe_events(events);
@@ -239,18 +335,32 @@ impl RequestMetricsTracker {
         if self.is_corrupted {
             self.handles.corrupted_requests.inc();
         }
+        if let Some(watermark_requests) = &self.watermark_requests {
+            watermark_requests.inc();
+        }
 
         self.handles.request_prompt_tokens.observe(self.prompt_len as f64);
         self.handles
             .request_generation_tokens
             .observe(self.num_generation_tokens as f64);
-        self.handles
-            .request_max_num_generation_tokens
-            .observe(self.num_generation_tokens as f64);
+        // (max generation tokens, n), once per request.
+        let request_level = match &self.parallel_sampling {
+            None => Some((self.num_generation_tokens, 1)),
+            Some(parallel_sampling) => parallel_sampling
+                .observe_finished_child(self.num_generation_tokens)
+                .map(|max_generation_tokens| (max_generation_tokens, parallel_sampling.n)),
+        };
+        if let Some((max_generation_tokens, _)) = request_level {
+            self.handles
+                .request_max_num_generation_tokens
+                .observe(max_generation_tokens as f64);
+        }
         if let Some(max_tokens_param) = self.max_tokens_param {
             self.handles.request_params_max_tokens.observe(max_tokens_param as f64);
         }
-        self.handles.request_params_n.observe(self.n_param as f64);
+        if let Some((_, n)) = request_level {
+            self.handles.request_params_n.observe(n as f64);
+        }
         self.handles
             .request_prefill_kv_computed_tokens
             .observe(prefill_kv_computed_tokens as f64);
@@ -349,6 +459,7 @@ pub(crate) fn resolve_request_metric_handles(
         prompt_tokens_cached: metrics.prompt_tokens_cached.get_or_create_owned(&labels),
         generation_tokens: metrics.generation_tokens.get_or_create_owned(&labels),
         corrupted_requests: metrics.corrupted_requests.get_or_create_owned(&labels),
+        watermark_requests: OnceLock::new(),
         request_success: RequestSuccessCounters::resolve(model_name, engine),
         request_prompt_tokens: metrics.request_prompt_tokens.get_or_create_owned(&labels),
         request_generation_tokens: metrics.request_generation_tokens.get_or_create_owned(&labels),
@@ -388,6 +499,7 @@ pub(crate) fn resolve_request_metric_handles(
                 .request_inference_time_seconds
                 .get_or_create_owned(&labels),
         }),
+        labels,
     }
 }
 
@@ -442,7 +554,7 @@ mod tests {
     fn tracker_updates_timing_state_across_prefill_decode_and_finish() {
         METRICS.request.set_max_model_len(4096);
         let handles = Arc::new(resolve_request_metric_handles("model", 2, true));
-        let mut tracker = RequestMetricsTracker::new(handles, 100.0, 64, Some(128), 1);
+        let mut tracker = RequestMetricsTracker::new(handles, 100.0, 64, Some(128), None, true);
 
         tracker.observe_output(
             10.0,

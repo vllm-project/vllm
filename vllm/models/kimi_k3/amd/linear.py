@@ -275,11 +275,16 @@ class KimiMoE(nn.Module):
         self.routed_expert_up_proj: ReplicatedLinear | ColumnParallelLinear | None
         self.routed_output_transform: KimiRoutedOutputTransform | None
         if self.use_latent_moe:
+            # The checkpoint stores this layer in BF16 even when its quant config
+            # targets every Linear, so only online quantization may apply.
+            down_quant_config = quant_config
+            if quant_config is not None and quant_config.get_name() != "online":
+                down_quant_config = quant_config.online_quantization_config
             self.routed_expert_down_proj = ReplicatedLinear(
                 hidden_size,
                 self.moe_hidden_size,
                 bias=False,
-                quant_config=None,
+                quant_config=down_quant_config,
                 prefix=f"{prefix}.routed_expert_down_proj",
             )
             self.routed_expert_norm = (
@@ -1170,11 +1175,6 @@ class KimiLinearForCausalLM(
         cls,
     ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
         return MambaStateCopyFuncCalculator.kda_state_copy_func()
-
-    def process_weights_after_loading(self) -> None:
-        for module in self.modules():
-            if isinstance(module, KimiK3MultiHeadLatentAttentionWrapper):
-                module.process_weights_after_loading()
 
     def compute_logits(
         self,

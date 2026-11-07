@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Self
 
 from pydantic import model_validator
 
-from vllm.config.utils import config, get_hash_factors, hash_factors
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 
 if TYPE_CHECKING:
     from vllm.config.model import ModelConfig
@@ -128,6 +128,6 @@ class EngramConfig:
             size *= parallel_config.data_parallel_size
         return size
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """Hash settings that affect embedding execution and graph structure."""
-        return hash_factors(get_hash_factors(self, set()))
+        return get_compile_factors(self, set())

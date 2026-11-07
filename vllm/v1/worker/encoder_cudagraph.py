@@ -245,6 +245,10 @@ class EncoderCudaGraphManager:
 
     def capture(self, graph_pool: Any):
         """Capture CUDA graphs for every configured path and token budget."""
+        if not self.config.modalities:
+            logger.info("Encoder CUDA graph capture skipped: no supported modalities.")
+            return
+
         self.graph_pool = graph_pool
 
         num_graphs = self.get_num_graphs_to_capture()
@@ -277,6 +281,8 @@ class EncoderCudaGraphManager:
         return num_budgets * math.prod(len(axis) for axis in self._capture_axes)
 
     def get_num_graphs_to_capture(self) -> int:
+        if not self.config.modalities:
+            return 0
         return sum(
             self._num_graphs_for_budgets(budgets)
             for budgets in self.path_token_budgets.values()
@@ -297,12 +303,15 @@ class EncoderCudaGraphManager:
         axis_keys: CaptureAxisKeys = (),
     ):
         """Capture CUDA graph for a single token budget."""
+        # Every frame yields at least one token, so a batch that fits the
+        # budget has at most token_budget frames.
+        max_frames_per_batch = min(self.max_frames_per_batch, token_budget)
         logger.debug(
             "Capturing encoder cudagraph for budget=%d, max_batch_size=%d, "
             "max_frames_per_batch=%d, axis_keys=%s",
             token_budget,
             self.max_batch_size,
-            self.max_frames_per_batch,
+            max_frames_per_batch,
             axis_keys,
         )
 
@@ -311,7 +320,7 @@ class EncoderCudaGraphManager:
         capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
             token_budget,
             self.max_batch_size,
-            self.max_frames_per_batch,
+            max_frames_per_batch,
             self.device,
             self.dtype,
             path,
@@ -338,7 +347,7 @@ class EncoderCudaGraphManager:
         graph_set[graph_map_key] = BudgetGraphMetadata(
             token_budget=token_budget,
             max_batch_size=self.max_batch_size,
-            max_frames_per_batch=self.max_frames_per_batch,
+            max_frames_per_batch=max_frames_per_batch,
             graph=graph,
             input_buffers=values,
             output_buffer=output_buffer,
@@ -434,7 +443,7 @@ class EncoderCudaGraphManager:
         replay = self.model.prepare_encoder_cudagraph_replay_buffers(
             mm_kwargs,
             self.max_batch_size,
-            self.max_frames_per_batch,
+            graph_meta.max_frames_per_batch,
             path,
         )
 

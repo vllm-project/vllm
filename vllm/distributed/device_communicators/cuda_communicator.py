@@ -119,6 +119,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.fi_pcie_ipc_ar_comm: FlashInferPcieIpcAllReduce | None = None
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
         self.use_aiter_ag_rs: bool = False
+        self.use_aiter_tp_all_gather: bool = False
 
         # cuMem graph buffers cannot be IPC-registered; capture copies them instead.
         config = get_current_vllm_config_or_none()
@@ -187,6 +188,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.aiter_ar_comm = None
             else:
                 self.use_aiter_ag_rs = True
+        elif self.aiter_ar_comm is not None and self.world_size in (2, 4, 8):
+            from vllm.platforms.rocm import get_cdna_version
+
+            self.use_aiter_tp_all_gather = get_cdna_version() in (3, 4)
 
         if (
             use_custom_allreduce
@@ -224,10 +229,21 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = DeepEPLLAll2AllManager(
                     self.cpu_group, tcp_store_group
                 )
+            elif self.all2all_backend == "mori" and self._mori_ep_v2():
+                from .all2all import MoriEPv2All2AllManager
+
+                self.all2all_manager = MoriEPv2All2AllManager(self.cpu_group)
             elif self.all2all_backend in (
                 "mori_high_throughput",
                 "mori_low_latency",
+                "mori",
             ):
+                if self.all2all_backend != "mori":
+                    logger.warning_once(
+                        "'%s' is deprecated and will be removed in a future release. "
+                        "Use 'mori', which picks the MoRI kernels automatically.",
+                        self.all2all_backend,
+                    )
                 from .all2all import MoriAll2AllManager
 
                 self.all2all_manager = MoriAll2AllManager(
@@ -288,6 +304,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager.__class__.__name__,
                 scope="global",
             )
+
+    @staticmethod
+    def _mori_ep_v2() -> bool:
+        config = get_current_vllm_config_or_none()
+        return config is not None and bool(config.parallel_config.mori_ep_v2)
 
     def _log_all_reduce_backend_selection(self) -> None:
         """Log the all-reduce backends that are active for this group.
@@ -483,6 +504,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # copy on every step. This is on the hot path for TP forward passes, so
         # keep ROCm on the base-class collective to avoid a decode regression.
         if current_platform.is_rocm():
+            out = self._maybe_aiter_all_gather(input_, dim)
+            if out is not None:
+                return out
             return super().all_gather(input_, dim)
 
         input_size = input_.size()
@@ -494,6 +518,32 @@ class CudaCommunicator(DeviceCommunicatorBase):
         output_tensor = output_tensor.reshape((self.world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
         return output_tensor.reshape(
+            input_size[:dim]
+            + (self.world_size * input_size[dim],)
+            + input_size[dim + 1 :]
+        )
+
+    def _maybe_aiter_all_gather(
+        self, input_: torch.Tensor, dim: int
+    ) -> torch.Tensor | None:
+        aiter_comm = self.aiter_ar_comm
+        if (
+            not self.use_aiter_tp_all_gather
+            or aiter_comm is None
+            or input_.dtype not in (torch.bfloat16, torch.float16, torch.float32)
+            or input_.numel() == 0
+            or not input_.is_contiguous()
+            or not aiter_comm.should_custom_ag(input_)
+        ):
+            return None
+        input_size = input_.size()
+        if dim > 0:
+            row = input_size[dim:].numel()
+            if row * input_.element_size() % 16 != 0:
+                return None
+            input_ = input_.view(-1, row)
+        output = aiter_comm.all_gather_unreg(input_, dim=0 if dim == 0 else -1)
+        return output.view(
             input_size[:dim]
             + (self.world_size * input_size[dim],)
             + input_size[dim + 1 :]

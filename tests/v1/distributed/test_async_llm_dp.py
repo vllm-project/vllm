@@ -17,7 +17,6 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.exceptions import RetryableRequestError
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
-from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine import EngineCoreRequestType
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -69,7 +68,7 @@ async def generate(
     "model",
     [
         "ibm-research/PowerMoE-3b",
-        "hmellor/tiny-random-LlamaForCausalLM",
+        "vllm-project/tiny-random-LlamaForCausalLM",
     ],
 )
 @pytest.mark.parametrize(
@@ -91,10 +90,6 @@ async def test_load(
     if async_scheduling and data_parallel_backend == "ray":
         # TODO(NickLucche) Re-enable when async scheduling is supported
         pytest.skip("Async scheduling is not supported with ray")
-    elif data_parallel_backend == "ray" and current_platform.is_rocm():
-        pytest.skip(
-            "Ray as the distributed executor backend is not supported with ROCm."
-        )
     stats_loggers = {}
 
     @dataclass
@@ -277,7 +272,7 @@ async def test_dp_prefill_schedule_interval(prefill_schedule_interval: int):
 # When expert_parallel=False: uses non-MoE model (DP replicas as separate engines).
 # When expert_parallel=True: uses MoE model + EP (DPEngineCoreProc, sync pause path).
 
-DP_PAUSE_MODEL = "hmellor/tiny-random-LlamaForCausalLM"
+DP_PAUSE_MODEL = "vllm-project/tiny-random-LlamaForCausalLM"
 DP_PAUSE_MODEL_MOE = "ibm-research/PowerMoE-3b"
 DP_PAUSE_PROMPT = "This is a test of data parallel pause"
 

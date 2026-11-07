@@ -160,6 +160,13 @@ def _install_fake_groups(dcp_size: int, cp_rank: int, tp_size: int = 1) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _use_v2_model_runner(monkeypatch):
+    """max_decode_query_len reads use_v2_model_runner, which would otherwise
+    inspect the stand-in speculative config from _make_vllm_config."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+
+
+@pytest.fixture(autouse=True)
 def _restore_parallel_groups():
     """Undo _install_fake_groups after every test.
 
@@ -299,7 +306,9 @@ def _make_vllm_config(heads_per_rank: int):
     # never reached. _init_reorder_batch_threshold reads exactly these two
     # fields, so a stand-in is enough and avoids pulling in a draft model.
     vllm_config.speculative_config = SimpleNamespace(
-        num_speculative_tokens=QLEN - 1, parallel_drafting=False
+        num_speculative_tokens=QLEN - 1,
+        parallel_drafting=False,
+        max_num_new_slots_for_drafting=0,
     )
     vllm_config.cache_config.cache_dtype = "fp8"
     vllm_config.parallel_config.decode_context_parallel_size = DCP

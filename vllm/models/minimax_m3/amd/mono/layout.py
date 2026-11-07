@@ -110,8 +110,9 @@ SCRATCH_BYTES = SCRATCH["_bytes"]
 
 
 def sym_layout(npes: int):
-    """Per-rank symmetric buffer: attn / ffn partial regions, [src rank][token][HIDDEN],
-    and the peers' index-selection candidates (``sel_cp``)."""
+    """Per-rank symmetric buffer: attn / ffn partial regions,
+    `[src rank][token][HIDDEN]`, and the peers' index-selection candidates
+    (``sel_cp``)."""
     rows = npes * MAX_TOKENS * HIDDEN // 2
     # a_ag / ffn_ag: the finished attention / FFN all-reduce rows, each written by
     # its owner rank (the reduce-scatter + all-gather form, S >= AG_RS_FROM)
