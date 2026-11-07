@@ -5,7 +5,10 @@
 import bisect
 from dataclasses import dataclass, field
 
+import numpy as np
 import torch
+
+from vllm.utils.platform_utils import is_pin_memory_available
 
 
 @dataclass
@@ -163,6 +166,77 @@ class LoRAKernelMeta:
         self.lora_token_start_loc[1 : 1 + lora_token_start_loc.size(0)].copy_(
             lora_token_start_loc, non_blocking=True
         )
+
+    def prepare_tensors_from_numpy(self, token_lora_mapping: np.ndarray) -> None:
+        """Same result as ``prepare_tensors`` but computed on the host from a
+        numpy mapping, then copied to the device with non-blocking copies. It
+        never reads from the device, so it does not synchronize with it.
+
+        Args:
+            token_lora_mapping (np.ndarray): LoRA slot index (-1 for no LoRA)
+                for each input token.
+
+        """
+        num_tokens = token_lora_mapping.shape[0]
+        no_lora = bool((token_lora_mapping == -1).all())
+        self.no_lora_flag_cpu[0] = no_lora
+
+        max_slots = self.active_lora_ids.shape[0]
+        active_lora_ids = np.full(max_slots, -1, dtype=np.int32)
+        num_tokens_per_lora = np.zeros(max_slots, dtype=np.int32)
+        lora_token_start_loc = np.zeros(self.lora_token_start_loc.shape[0], np.int32)
+        num_active_loras = 0
+        sorted_indices = None
+
+        if not no_lora:
+            # Slots are in [-1, max_loras - 1], so bincount replaces unique.
+            counts = np.bincount(token_lora_mapping + 1, minlength=max_slots)
+            present = np.flatnonzero(counts)
+            num_active_loras = present.shape[0]
+            active_lora_ids[:num_active_loras] = present - 1
+            num_tokens_per_lora[:num_active_loras] = counts[present]
+            lora_token_start_loc[1 : 1 + num_active_loras] = np.cumsum(counts[present])
+            sorted_indices = np.argsort(token_lora_mapping, kind="stable").astype(
+                np.int32
+            )
+
+        # Round up num_active_loras to match cudagraph capture keys.
+        if self.captured_lora_counts and num_active_loras > 0:
+            idx = bisect.bisect_left(self.captured_lora_counts, num_active_loras)
+            if idx < len(self.captured_lora_counts):
+                num_active_loras = self.captured_lora_counts[idx]
+        self.num_active_loras_cpu[0] = num_active_loras
+
+        # Stage everything in one fresh pinned buffer, so a copy still queued
+        # from the previous step can never see it overwritten.
+        small = np.concatenate(
+            [active_lora_ids, num_tokens_per_lora, lora_token_start_loc]
+        )
+        n_small = small.shape[0]
+        staged = torch.empty(
+            n_small + (0 if no_lora else 2 * num_tokens),
+            dtype=torch.int32,
+            pin_memory=is_pin_memory_available(),
+        )
+        staged_np = staged.numpy()
+        staged_np[:n_small] = small
+        if not no_lora:
+            staged_np[n_small : n_small + num_tokens] = token_lora_mapping
+            staged_np[n_small + num_tokens :] = sorted_indices
+
+        dev = self.active_lora_ids.device
+        staged = staged.to(dev, non_blocking=True)
+        a, b = max_slots, 2 * max_slots
+        self.active_lora_ids.copy_(staged[:a])
+        self.num_tokens_per_lora.copy_(staged[a:b])
+        self.lora_token_start_loc.copy_(staged[b:n_small])
+        if not no_lora:
+            self.token_lora_mapping[:num_tokens].copy_(
+                staged[n_small : n_small + num_tokens]
+            )
+            self.token_indices_sorted_by_lora_ids[:num_tokens].copy_(
+                staged[n_small + num_tokens :]
+            )
 
     def meta_args(
         self,

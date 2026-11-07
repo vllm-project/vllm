@@ -3,6 +3,7 @@
 
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -48,13 +49,51 @@ def compute_meta(
     )
 
 
-# TODO see if this can be vectorized
+def _lora_ids_to_slots(
+    lora_ids: np.ndarray, lora_index_to_id: list[int | None]
+) -> np.ndarray:
+    """Map LoRA ids to their slot index; ids <= 0 (no LoRA) map to -1."""
+    has_lora = lora_ids > 0
+    slots = np.full(lora_ids.shape, -1, dtype=np.int64)
+    if not has_lora.any():
+        return slots
+    slot_ids = np.array(
+        [-1 if x is None else x for x in lora_index_to_id], dtype=np.int64
+    )
+    order = np.argsort(slot_ids, kind="stable")
+    sorted_ids = slot_ids[order]
+    wanted = lora_ids[has_lora]
+    pos = np.searchsorted(sorted_ids, wanted).clip(max=len(sorted_ids) - 1)
+    unknown = sorted_ids[pos] != wanted
+    if unknown.any():
+        raise KeyError(int(wanted[unknown][0]))
+    slots[has_lora] = order[pos]
+    return slots
+
+
+def convert_mapping_cpu(
+    mapping: "LoRAMapping", lora_index_to_id: list[int | None]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Host-side part of convert_mapping, fully vectorized.
+
+    Returns (index_mapping, token_lora_indices, embedding_indices,
+    sampler_indices) as int64 numpy arrays.
+    """
+    index_mapping = np.asarray(mapping.index_mapping, dtype=np.int64)
+    prompt_mapping = np.asarray(mapping.prompt_mapping, dtype=np.int64)
+    lora_indices = _lora_ids_to_slots(index_mapping, lora_index_to_id)
+    sampler_indices = _lora_ids_to_slots(prompt_mapping, lora_index_to_id)
+    embedding_indices = np.where(index_mapping > 0, lora_indices, 0)
+    return index_mapping, lora_indices, embedding_indices, sampler_indices
+
+
 def convert_mapping(
     mapping: "LoRAMapping",
     lora_index_to_id: list[int | None],
     max_loras: int,
     vocab_size: int,
     device: torch.device,
+    cpu_indices: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[int]]:
     """Converts LoRAMapping to index tensors.
 
@@ -64,6 +103,8 @@ def convert_mapping(
         max_loras: Maximum number of LoRAs.
         vocab_size: Model vocab size.
         device: Device the returned index tensors are created on.
+        cpu_indices: Optional result of ``convert_mapping_cpu``, if the caller
+            already computed it.
 
     Returns:
         A tuple of tensors:
@@ -84,41 +125,18 @@ def convert_mapping(
                 embeddings_indices).
 
     """
-    index_mapping_indices: list[int] = list(mapping.index_mapping).copy()
-    embedding_indices = index_mapping_indices.copy()
-    lora_indices = index_mapping_indices.copy()
+    if cpu_indices is None:
+        cpu_indices = convert_mapping_cpu(mapping, lora_index_to_id)
+    index_mapping, lora_indices, embedding_indices, sampler_cpu = cpu_indices
 
-    # Build a reverse lookup (LoRA id -> index) once instead of repeatedly
-    # calling list.index(), which is an O(num_loras) linear scan performed for
-    # every prompt token and every batch token on each step.
-    lora_id_to_index = {
-        lora_id: index
-        for index, lora_id in enumerate(lora_index_to_id)
-        if lora_id is not None
-    }
-
-    prompt_mapping: list[int] = [
-        lora_id_to_index[x] if x > 0 else -1 for x in mapping.prompt_mapping
-    ]
-    lora_idx = None
-    for i in range(len(index_mapping_indices)):
-        lora_idx = (
-            lora_id_to_index[index_mapping_indices[i]]
-            if index_mapping_indices[i] > 0
-            else -1
-        )
-        embedding_indices[i] = lora_idx if index_mapping_indices[i] > 0 else 0
-        lora_indices[i] = lora_idx
-
-    indices_list: list[list[int] | torch.Tensor] = [
-        index_mapping_indices,
-        lora_indices,
-        embedding_indices,
-    ]
-
-    indices = async_tensor_h2d(indices_list, dtype=torch.long, device=device)
+    # One pinned staging buffer and one host-to-device copy for all three.
+    indices = async_tensor_h2d(
+        np.stack([index_mapping, lora_indices, embedding_indices]),
+        dtype=torch.long,
+        device=device,
+    )
     prompt_mapping_tensor = async_tensor_h2d(
-        prompt_mapping, dtype=torch.long, device=device
+        sampler_cpu, dtype=torch.long, device=device
     )
     embeddings_indices = indices[2] * vocab_size
     base_indices = indices[1]

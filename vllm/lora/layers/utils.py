@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 from enum import Enum
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -32,14 +33,26 @@ class LoRAMappingType(Enum):
 
 @dataclass
 class LoRAMapping:
-    index_mapping: tuple[int, ...]
-    prompt_mapping: tuple[int, ...]
+    index_mapping: np.ndarray | tuple[int, ...]
+    prompt_mapping: np.ndarray | tuple[int, ...]
     is_prefill: bool = False
     type: LoRAMappingType = LoRAMappingType.LANGUAGE
 
     def __post_init__(self):
-        self.index_mapping = tuple(self.index_mapping)
-        self.prompt_mapping = tuple(self.prompt_mapping)
+        # Kept as arrays so the per-step mapping never goes through a
+        # Python-level tuple of scalars.
+        self.index_mapping = np.asarray(self.index_mapping, dtype=np.int64)
+        self.prompt_mapping = np.asarray(self.prompt_mapping, dtype=np.int64)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, LoRAMapping):
+            return NotImplemented
+        return (
+            self.is_prefill == other.is_prefill
+            and self.type == other.type
+            and np.array_equal(self.index_mapping, other.index_mapping)
+            and np.array_equal(self.prompt_mapping, other.prompt_mapping)
+        )
 
 
 def _get_lora_device(base_layer: nn.Module) -> torch.device:
