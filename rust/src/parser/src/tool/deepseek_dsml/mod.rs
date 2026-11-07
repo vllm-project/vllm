@@ -89,18 +89,8 @@ struct DsmlMarkers {
 impl DsmlMarkers {
     /// Resolve `tokens` against the `｜DSML｜` token of `tokenizer`.
     fn new(tokens: DsmlTokens, tokenizer: &dyn Tokenizer) -> Self {
-        let dsml = tokenizer.token_to_id(DSML).map(|id| SpecialToken {
-            text: DSML.to_string(),
-            id,
-        });
-        let marker = |spelling: &str| {
-            let Some(dsml) = &dsml else {
-                return Marker::text(spelling);
-            };
-            let (before, after) =
-                spelling.split_once(DSML).expect("every DSML marker contains `｜DSML｜`");
-            Marker::text(before).then_special(dsml).then_text(after)
-        };
+        let dsml = dsml_token(tokenizer);
+        let marker = |spelling: &str| dsml_marker(dsml.as_ref(), spelling);
         Self {
             tool_calls_start: marker(tokens.tool_calls_start),
             framed_tool_calls_start: marker(tokens.framed_tool_calls_start),
@@ -111,6 +101,24 @@ impl DsmlMarkers {
             parameter_end: tokens.parameter_end,
         }
     }
+}
+
+/// The `｜DSML｜` token of `tokenizer`, if it has one.
+fn dsml_token(tokenizer: &dyn Tokenizer) -> Option<SpecialToken> {
+    tokenizer.token_to_id(DSML).map(|id| SpecialToken {
+        text: DSML.to_string(),
+        id,
+    })
+}
+
+/// Guard the `｜DSML｜` inside `spelling` by `dsml`, or match by spelling
+/// without the token.
+fn dsml_marker(dsml: Option<&SpecialToken>, spelling: &str) -> Marker {
+    let Some(dsml) = dsml else {
+        return Marker::text(spelling);
+    };
+    let (before, after) = spelling.split_once(DSML).expect("every DSML marker contains `｜DSML｜`");
+    Marker::text(before).then_special(dsml).then_text(after)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
