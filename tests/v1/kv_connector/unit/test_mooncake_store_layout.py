@@ -21,7 +21,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (
     TokenMajorStoreLayout,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
-from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
@@ -259,7 +258,7 @@ def _rank_local_reference(
         for index, base_addr in enumerate(layout.kv_caches_base_addr)
     ]
     sizes = [
-        layout.block_len[index % length] * cdiv(end - start, layout.block_size)
+        layout.block_len[index % length]
         for index in range(len(layout.kv_caches_base_addr))
     ]
     return addrs, sizes, block_id
@@ -268,14 +267,15 @@ def _rank_local_reference(
 @pytest.mark.parametrize("num_regions,num_block_lens", [(96, 96), (96, 2), (1, 1)])
 def test_rank_local_descriptors_match_reference(num_regions: int, num_block_lens: int):
     layout = _rank_local_layout(num_regions, num_block_lens)
+    layout.hash_block_size = BLOCK_SIZE // 2
     rng = random.Random(0)
     block_ids = [rng.randrange(0, 1 << 20) for _ in range(300)]
     chunks = []
     block = 0
-    while block < len(block_ids) - 4:
-        span = rng.choice([1, 1, 1, 2, 4])
-        chunks.append((block * BLOCK_SIZE, (block + span) * BLOCK_SIZE))
-        block += span + rng.choice([0, 1])
+    while block < len(block_ids):
+        span = rng.choice([BLOCK_SIZE // 2, BLOCK_SIZE])
+        chunks.append((block * BLOCK_SIZE, block * BLOCK_SIZE + span))
+        block += rng.choice([1, 1, 1, 2, 4])
 
     addrs, sizes, selected_blocks = layout.prepare_values(
         chunks, block_ids, [0] * len(chunks)
@@ -293,9 +293,105 @@ def test_rank_local_descriptors_match_reference(num_regions: int, num_block_lens
 
 def test_rank_local_descriptors_handle_empty_and_invalid_chunks():
     layout = _rank_local_layout(4, 4)
+    layout.hash_block_size = BLOCK_SIZE // 2
     assert layout.prepare_values([], [1, 2, 3], []) == ([], [], [])
-    with pytest.raises(AssertionError):
-        layout.prepare_values([(0, BLOCK_SIZE + 1)], [0, 1], [0])
+    for chunk in (
+        (0, BLOCK_SIZE + 1),
+        (0, 2 * BLOCK_SIZE),
+        (BLOCK_SIZE // 2, 3 * BLOCK_SIZE // 2),
+        (0, 0),
+    ):
+        with pytest.raises(AssertionError):
+            layout.prepare_values([chunk], [0, 1], [0])
+
+
+@pytest.mark.parametrize(
+    "component_slice,kernel_blocks_per_manager",
+    [(slice(16, 24), 1), (slice(None, None, 2), 1), (slice(0, 16), 2)],
+    ids=["offset", "strided", "grouped-kernel-blocks"],
+)
+def test_component_layout_round_trip_preserves_neighboring_blocks(
+    component_slice, kernel_blocks_per_manager
+):
+    """Copy a component without changing padding or neighboring blocks."""
+    count = kernel_blocks_per_manager
+    source = torch.arange(5 * count * 32).to(torch.uint8).view(5 * count, 32)
+    destination = torch.full_like(source, 255)
+    expected = destination.clone()
+    expected[count : 2 * count, component_slice] = source[
+        3 * count : 4 * count, component_slice
+    ]
+    layouts = [
+        RankLocalStoreLayout(KeyMetadata("test-model", 0, 0, 0, 0), 16, 16)
+        for _ in range(2)
+    ]
+    for layout, cache in zip(layouts, (source, destination), strict=True):
+        layout.register_kv_caches([cache[: 4 * count, component_slice]], 4)
+    source_addrs, sizes, _ = layouts[0].prepare_values([(0, 16)], [3], [0])
+    destination_addrs, destination_sizes, _ = layouts[1].prepare_values(
+        [(0, 16)], [1], [0]
+    )
+    assert sizes == destination_sizes
+    for src, dst, size in zip(
+        source_addrs[0], destination_addrs[0], sizes[0], strict=True
+    ):
+        ctypes.memmove(dst, ctypes.string_at(src, size), size)
+    assert torch.equal(destination, expected)
+
+
+def test_component_layout_deduplicates_full_page_aliases_and_skips_empty_views():
+    raw = torch.zeros(4, 32, dtype=torch.uint8)
+    layout = RankLocalStoreLayout(KeyMetadata("test-model", 0, 0, 0, 0), 16, 16)
+    layout.register_kv_caches([raw[:, :16], raw[:, 16:], raw, raw[:, :0]], 4)
+    assert layout.prepare_values([(0, 16)], [3], [0]) == (
+        [[raw.data_ptr() + 96]],
+        [[32]],
+        [3],
+    )
+
+
+@pytest.mark.parametrize(
+    "regions,expected_sizes",
+    [
+        ([(0, 32), (8, 32), (16, 32)], [24]),
+        ([(0, 32), (16, 32)], [8, 8]),
+        ([(8, 32), (0, 32)], [8, 8]),
+        ([(0, 32), (8, 16)], [8, 8]),
+        ([(0, 8), (8, 8)], [8, 8]),
+    ],
+    ids=["adjacent", "gap", "reversed", "different-strides", "block-boundary"],
+)
+def test_component_layout_coalesces_regions_without_changing_payload(
+    regions, expected_sizes
+):
+    raw = torch.arange(128, dtype=torch.uint8)
+    views = [raw.as_strided((4, 8), (stride, 1), offset) for offset, stride in regions]
+    layout = RankLocalStoreLayout(KeyMetadata("test-model", 0, 0, 0, 0), 16, 16)
+    layout.register_kv_caches(views, 4)
+    addrs, sizes, blocks = layout.prepare_values([(0, 16), (16, 32)], [3, 1], [0, 0])
+    assert sizes == [expected_sizes, expected_sizes]
+    for addresses, lengths, block in zip(addrs, sizes, blocks, strict=True):
+        assert _read_segments(addresses, lengths) == b"".join(
+            view[block].numpy().tobytes() for view in views
+        )
+
+
+def test_component_layout_does_not_coalesce_across_registered_storage_bounds():
+    raw = bytearray(range(16))
+    views = [
+        torch.frombuffer(raw, dtype=torch.uint8, count=8, offset=offset).as_strided(
+            (1, 8), (16, 1)
+        )
+        for offset in (0, 8)
+    ]
+    assert views[0].data_ptr() + 8 == views[1].data_ptr()
+    layout = RankLocalStoreLayout(KeyMetadata("test-model", 0, 0, 0, 0), 16, 16)
+    layout.register_kv_caches(views, 1)
+    assert layout.prepare_values([(0, 16)], [0], [0]) == (
+        [[view.data_ptr() for view in views]],
+        [[8, 8]],
+        [0],
+    )
 
 
 def test_rank_local_layout_skips_block_padding():
@@ -323,14 +419,14 @@ def test_rank_local_layout_skips_block_padding():
     assert layout.block_stride == [page] * num_layers
     assert layout.block_len == [state] * num_layers
     addrs, sizes, _ = layout.prepare_values(
-        [(0, BLOCK_SIZE), (BLOCK_SIZE, 3 * BLOCK_SIZE)], [2, 0, 1], [0, 0]
+        [(0, BLOCK_SIZE), (BLOCK_SIZE, 2 * BLOCK_SIZE)], [2, 0], [0, 0]
     )
     assert addrs == [
         [view.data_ptr() + 2 * page for view in views],
         [view.data_ptr() for view in views],
     ]
-    # A two-block chunk copies the padding between its blocks.
-    assert sizes == [[state] * num_layers, [page + state] * num_layers]
+    # Separate chunks leave every block's padding untouched.
+    assert sizes == [[state] * num_layers, [state] * num_layers]
     addrs, sizes, _ = layout.prepare_values([(0, BLOCK_SIZE)], [1], [0])
     assert addrs == [[view.data_ptr() + page for view in views]]
     assert sizes == [[state] * num_layers]

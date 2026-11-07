@@ -307,11 +307,18 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 | Variable | Description | Default |
 | --- | --- | --- |
 | `MOONCAKE_CONFIG_PATH` | Path to Mooncake JSON config file | (required) |
+| `MOONCAKE_MASTER` | Override `master_server_address` from the JSON config | JSON value |
+| `MOONCAKE_GLOBAL_SEGMENT_SIZE` | Override `global_segment_size`; accepts bytes or size strings such as `50GB` | JSON value, or 4 GiB if omitted |
 | `VLLM_MOONCAKE_BOOTSTRAP_PORT` | Bootstrap port for MooncakeConnector P2P transfer (disagg mode only) | 8998 |
 | `MOONCAKE_PREFERRED_SEGMENT` | Pin this rank's replicas to a specific owner segment (`host:port`); used in `standalone-store` mode | — |
 | `MOONCAKE_REQUESTER_LOCAL_HOSTNAME` | Override the hostname the vLLM rank registers with Mooncake as a requester. Defaults to the rank's resolved IP. | — |
 | `VLLM_MOONCAKE_STORE_TIER_LOG` | When `1`, logs a per-batch tier summary (memory vs disk hits) for observability | disabled |
 | `VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO` | Fraction of the owner's DirectIO staging buffer that the requester will fill in a single `batch_get_into_multi_buffers` call. Lower → more conservative pre-split, more round trips. | 0.9 |
+
+Environment overrides take precedence over JSON fields. The resulting segment
+size must still match the JSON `mode`: positive for `embedded`, zero for
+`standalone-store`. Setting `MOONCAKE_GLOBAL_SEGMENT_SIZE=0` does not change the
+mode automatically.
 
 ## KV Transfer Config
 
