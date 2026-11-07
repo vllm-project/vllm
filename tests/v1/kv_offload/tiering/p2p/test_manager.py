@@ -3426,6 +3426,7 @@ def test_reset_cache_releases_parked_p2p_slots(drain_peers):
         rank=0,
         kv_bytes_per_chunk=mmap.PAGESIZE,
         cpu_page_size=mmap.PAGESIZE,
+        unlink_owner=True,
     )
     tiering = TieringOffloadingManager(
         CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=region),
@@ -3506,6 +3507,7 @@ def test_reset_symmetric_lookup_rounds(drain_peers, fetch_before_reset):
         rank=0,
         kv_bytes_per_chunk=mmap.PAGESIZE,
         cpu_page_size=mmap.PAGESIZE,
+        unlink_owner=True,
     )
     tiering = TieringOffloadingManager(
         CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=region),

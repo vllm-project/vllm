@@ -160,7 +160,9 @@ def init_hisparse_kv_cache(
         )
         return kv_caches
     except Exception:
-        release_pinned_state(host_pool.pinned, host_pool.shared_region)
+        release_pinned_state(
+            host_pool.pinned, host_pool.shared_region, abort_startup=True
+        )
         unbind_hisparse_caches(forward_context)
         drop_hisparse_host_pool(vllm_config)
         raise
