@@ -637,6 +637,23 @@ class Qwen3_5ModelArchConfigConvertor(ModelArchConfigConvertorBase):
                 hf_config.joint_head_config = get_hf_file_to_dict(
                     "joint_head_config.json", model_path, revision
                 )
+            elif model_path and file_or_path_exists(
+                model_path, "decision_config.json", revision
+            ):
+                decision_config = get_hf_file_to_dict(
+                    "decision_config.json", model_path, revision
+                )
+                if (
+                    isinstance(decision_config, dict)
+                    and decision_config.get("format_id") == "d3-code-readout-v1"
+                ):
+                    logger.warning(
+                        "Detected a D3 code-readout checkpoint configured as "
+                        "Qwen3_5ForConditionalGeneration, which selects the "
+                        "generation architecture instead of native D3 "
+                        "classification. If you supplied an architectures "
+                        "override, remove it to preserve native D3 detection."
+                    )
         elif getattr(hf_config, "architectures", None) == ["Qwen3_5Model"]:
             # Decision 3.0 checkpoints are a bare backbone plus a code readout
             # described by decision_config.json.
