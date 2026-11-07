@@ -19,6 +19,27 @@ Example: [examples/rl/batch_invariance/reproducibility_offline.py](../../example
     Even with the above settings, vLLM only provides reproducibility
     when it runs on the same hardware and the same vLLM version.
 
+## NVSwitch (NVLS) non-determinism on Hopper
+
+On Hopper nodes with NVSwitch (e.g. H100, H20, H800), NVLS all-reduce results
+can differ between runs when the kernel driver or Fabric Manager is older than
+550.144.03 (or 570+). This causes run-to-run output differences even for a
+single request on an otherwise idle server. Upgrading CUDA or NCCL alone does
+**not** fix this — the fix is in the kernel driver / Fabric Manager (see
+[NCCL#2360](https://github.com/NVIDIA/nccl/issues/2360)).
+
+If you only need the same request to produce the same output (fixed-batch
+reproducibility) and do not need full batch invariance, you can set
+`NCCL_NVLS_ENABLE=0` instead of enabling the full batch-invariance mode. This
+resolves NVLS-induced divergence with approximately 1% latency overhead,
+compared to ~76% for the full set of batch-invariance NCCL overrides.
+
+| Setting | Divergence | Latency cost |
+|---|---|---|
+| default | ~25% of reruns diverge | 1× |
+| `NCCL_NVLS_ENABLE=0` | 0% | ~1.01× |
+| Full batch invariance (`VLLM_BATCH_INVARIANT=1`) | 0% | ~1.76× |
+
 ## Setting the global seed
 
 The `seed` parameter in vLLM is used to control the random states for various random number generators.
