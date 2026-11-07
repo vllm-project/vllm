@@ -109,6 +109,7 @@ tests/models/flint/test_flint_ops.py  # CI jobs disabled pending locked gguf ins
 tests/models/flint/test_gguf_nvfp4.py  # CI jobs disabled pending locked gguf installation
 tests/models/flint/test_qk_norm_rope.py  # CI jobs disabled pending locked gguf installation
 tests/models/flint/test_qkv_fused.py  # CI jobs disabled pending locked gguf installation
+tests/models/muse_spark/amd_specialized_decode/test_layer_tp8.py  # needs 8 gfx942 GPUs (TP8 = EP8); CI has no 8-GPU MI300 device
 tests/parser/cohere/test_citations.py  # CI jobs disabled pending locked cmake installation
 tests/parser/cohere/test_reasoning.py  # CI jobs disabled pending locked cmake installation
 tests/parser/cohere/test_structural_tags.py  # CI jobs disabled pending locked cmake installation
