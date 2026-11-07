@@ -49,7 +49,7 @@ from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
-from vllm.config.utils import get_field
+from vllm.config.utils import get_field, hash_config
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import CpuArchEnum, Platform, PlatformEnum, current_platform
 from vllm.sampling_params import BeamSearchParams
@@ -106,9 +106,56 @@ def test_dspark_adaptive_verification_separates_graph_cache():
     config.method = "dspark"
     config.draft_model_config = None
     config.enable_adaptive_verification = False
-    fixed_hash = config.compute_hash()
+    fixed_hash = hash_config(config)
     config.enable_adaptive_verification = True
-    assert config.compute_hash() != fixed_hash
+    assert hash_config(config) != fixed_hash
+
+
+@pytest.mark.parametrize(
+    ("mode", "input_dtype", "use_ubatching", "pp_size", "error"),
+    [
+        ("align", torch.bfloat16, False, 1, None),
+        ("align", torch.float16, False, 1, "bfloat16 model inputs"),
+        ("none", torch.float16, False, 1, None),
+        ("align", torch.bfloat16, True, 1, "ReplaySSM does not support microbatching"),
+        ("align", torch.bfloat16, False, 2, "pipeline_parallel_size=1"),
+    ],
+    ids=[
+        "align-bf16",
+        "align-fp16-rejected",
+        "none-fp16",
+        "microbatch-rejected",
+        "pp-rejected",
+    ],
+)
+def test_flashinfer_replayssm_validates_config(
+    mode, input_dtype, use_ubatching, pp_size, error
+):
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            use_replayssm=True,
+            mamba_cache_mode=mode,
+            mamba_ssm_cache_dtype="float16",
+            replayssm_buffer_len=16,
+        ),
+        num_speculative_tokens=3,
+        model_config=SimpleNamespace(
+            supports_replayssm=True,
+            architecture="NemotronHForCausalLM",
+            dtype=input_dtype,
+        ),
+        mamba_config=SimpleNamespace(backend=MambaBackendEnum.FLASHINFER),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=pp_size, use_ubatching=use_ubatching
+        ),
+        kv_transfer_config=None,
+        use_v2_model_runner=True,
+    )
+    if error:
+        with pytest.raises(ValueError, match=error):
+            VllmConfig.validate_mamba_cached_kernel(config)
+    else:
+        VllmConfig.validate_mamba_cached_kernel(config)
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -295,7 +342,10 @@ def test_kda_recoverssm_derivation_is_revalidated():
             backend=MambaBackendEnum.TRITON,
             enable_stochastic_rounding=False,
         ),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            use_ubatching=False,
+        ),
         kv_transfer_config=None,
         use_v2_model_runner=True,
     )
@@ -318,9 +368,17 @@ def test_kda_recoverssm_derivation_is_revalidated():
     assert not config.cache_config.use_kda_recoverssm
 
     config.model_config.architecture = "KimiLinearForCausalLM"
+    config.mamba_config.backend = MambaBackendEnum.TRITON
     config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
+
+    # Ordinary Triton ReplaySSM keeps its pre-existing PP support surface.
+    config.model_config.architecture = "NemotronHForCausalLM"
+    config.num_speculative_tokens = 0
+    config.cache_config.use_kda_recoverssm = False
+    config.use_v2_model_runner = False
+    VllmConfig.validate_mamba_cached_kernel(config)
 
 
 @pytest.mark.parametrize("supported", [True, False])
@@ -2103,7 +2161,7 @@ def test_engram_cpu_offload_default():
 def test_engram_config_defaults_to_none():
     config = VllmConfig()
     assert config.engram_config is None
-    assert config.compute_hash()
+    assert hash_config(config)
 
 
 @pytest.mark.parametrize("explicit", [False, True])
@@ -2226,7 +2284,7 @@ def test_engram_hash_tracks_execution_options():
         EngramConfig(cpu_offload=True, dp_shared_memory=True),
         EngramConfig(disk_offload=True),
     ]
-    assert len({config.compute_hash() for config in configs}) == len(configs)
+    assert len({hash_config(config) for config in configs}) == len(configs)
 
 
 @pytest.mark.parametrize("port", [1, 29550, 65535])
@@ -2643,9 +2701,6 @@ def test_disable_sliding_window(model_id_expected):
     assert model_config.max_model_len == expected
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
-)
 def test_get_pooling_config():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
     model_config = ModelConfig(model_id)
@@ -2753,9 +2808,6 @@ def test_get_dense_modules_supports_sentence_transformers_schemas(
     ]
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
-)
 def test_get_pooling_config_from_args():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
     pooler_config = PoolerConfig(seq_pooling_type="CLS", use_activation=False)
@@ -2827,9 +2879,6 @@ def test_is_quantized(model_id, quantized):
     assert model_config.is_quantized == quantized
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
-)
 def test_get_bert_tokenization_sentence_transformer_config():
     model_id = "BAAI/bge-base-en-v1.5"
     bge_model_config = ModelConfig(model_id)
@@ -2942,9 +2991,6 @@ def test_model_class_overrides_registers_target():
         ModelRegistry.models.pop(arch, None)
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(), reason="Encoder Decoder models not supported on ROCm."
-)
 @pytest.mark.parametrize(
     ("model_id", "is_encoder_decoder"),
     [
@@ -4773,3 +4819,24 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
             )
             == len(layer_types) - expected_attention
         )
+
+
+def test_layer_range_with_prefill_context_parallel(monkeypatch):
+    """Workers are laid out as PP x PCP x TP: every PCP and TP rank of a
+    stage gets that stage's layers, so layer counts match under an uneven
+    partition."""
+    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "5,7")
+    model_config = ModelConfig("facebook/opt-125m")  # 12 layers
+    ranges = [
+        model_config.get_layers_start_end_indices(
+            ParallelConfig(
+                tensor_parallel_size=2,
+                prefill_context_parallel_size=2,
+                pipeline_parallel_size=2,
+                distributed_executor_backend="mp",
+                rank=rank,
+            )
+        )
+        for rank in range(8)
+    ]
+    assert ranges == [(0, 5)] * 4 + [(5, 12)] * 4
