@@ -55,7 +55,6 @@ def load_aria(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "rhymes-ai/Aria"
     engine_args = EngineArgs(
         model=model_name,
-        trust_remote_code=True,
         dtype="bfloat16",
         limit_mm_per_prompt={"image": len(image_urls)},
     )
@@ -451,80 +450,6 @@ def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
         prompt=prompt,
         stop_token_ids=stop_token_ids,
         image_data=[fetch_image(url) for url in image_urls],
-    )
-
-
-def load_keye_vl(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "Kwai-Keye/Keye-VL-8B-Preview"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=8192,
-        max_num_seqs=5,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    placeholders = [{"type": "image", "image": url} for url in image_urls]
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        },
-    ]
-
-    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-
-    prompt = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-
-    image_data = [fetch_image(url) for url in image_urls]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
-    )
-
-
-def load_keye_vl1_5(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "Kwai-Keye/Keye-VL-1_5-8B"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=32768,
-        max_num_seqs=5,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    placeholders = [{"type": "image", "image": url} for url in image_urls]
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        },
-    ]
-
-    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-
-    prompt = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-
-    image_data = [fetch_image(url) for url in image_urls]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
     )
 
 
@@ -1335,6 +1260,28 @@ def load_molmo2(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_unlimited_ocr2(question: str, image_urls: list[str]) -> ModelRequestData:
+    engine_args = EngineArgs(
+        model="baidu/Unlimited-OCR-2",
+        attention_config={"backend": "FLASH_ATTN"},
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        max_model_len=32768,
+        max_num_batched_tokens=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        mm_encoder_attn_backend="TORCH_SDPA",
+    )
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt="<PAGE><image>" * len(image_urls) + "Multi page parsing.",
+        image_data=[fetch_image(url) for url in image_urls],
+        sampling_params=SamplingParams(
+            temperature=0, max_tokens=4096, skip_special_tokens=False
+        ),
+    )
+
+
 model_example_map = {
     "aria": load_aria,
     "bee": load_bee,
@@ -1349,8 +1296,6 @@ model_example_map = {
     "idefics3": load_idefics3,
     "interns1": load_interns1,
     "internvl_chat": load_internvl,
-    "keye_vl": load_keye_vl,
-    "keye_vl1_5": load_keye_vl1_5,
     "kimi_vl": load_kimi_vl,
     "llama4": load_llama4,
     "llava": load_llava,
@@ -1373,6 +1318,7 @@ model_example_map = {
     "smolvlm": load_smolvlm,
     "step3": load_step3,
     "stepvl": load_step_vl,
+    "unlimited_ocr2": load_unlimited_ocr2,
     "glm4_1v": load_glm4_1v,
     "glm4_5v": load_glm4_5v,
     "glm4_5v_fp8": load_glm4_5v_fp8,
@@ -1396,8 +1342,12 @@ def run_generate(
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     llm = LLM.from_engine_args(engine_args)
 
-    sampling_params = SamplingParams(
-        temperature=0.0, max_tokens=256, stop_token_ids=req_data.stop_token_ids
+    sampling_params = (
+        SamplingParams(
+            temperature=0.0, max_tokens=256, stop_token_ids=req_data.stop_token_ids
+        )
+        if req_data.sampling_params is None
+        else req_data.sampling_params
     )
 
     outputs = llm.generate(

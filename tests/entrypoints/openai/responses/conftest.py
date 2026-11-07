@@ -37,7 +37,6 @@ def pairs_of_event_types() -> dict[str, str]:
         "response.content_part.done": "response.content_part.added",
         "response.output_text.done": "response.output_text.delta",
         "response.reasoning_text.done": "response.reasoning_text.delta",
-        "response.reasoning_part.done": "response.reasoning_part.added",
         "response.mcp_call_arguments.done": "response.mcp_call_arguments.delta",
         "response.mcp_call.completed": "response.mcp_call.in_progress",
         "response.function_call_arguments.done": "response.function_call_arguments.delta", # noqa: E501
@@ -64,7 +63,7 @@ async def retry_for_tool_call(
     fire with a clear diagnostic.
     """
     last_response = None
-    for attempt in range(max_retries):
+    for _ in range(max_retries):
         response = await client.responses.create(model=model, **create_kwargs)
         last_response = response
         if any(
@@ -89,7 +88,7 @@ async def retry_streaming_for(
     ``True``.
     """
     last_events: list = []
-    for attempt in range(max_retries):
+    for _ in range(max_retries):
         stream = await client.responses.create(
             model=model, stream=True, **create_kwargs
         )
@@ -126,6 +125,11 @@ def _validate_event_pairing(events: list, pairs_of_event_types: dict[str, str]) 
         etype = event.type
         if etype in end_events:
             expected_start = pairs_of_event_types[etype]
+            # Deltas are optional, e.g. a function call with no arguments.
+            if expected_start.endswith(".delta") and (
+                not stack or stack[-1] != expected_start
+            ):
+                continue
             assert stack and stack[-1] == expected_start, (
                 f"Stack mismatch for {etype}: "
                 f"expected {expected_start}, "
@@ -245,11 +249,8 @@ def _validate_field_consistency(events: list) -> None:
             active_content_index = None
             continue
 
-        # --- content_part / reasoning_part added: sets content_index
-        if etype in (
-            "response.content_part.added",
-            "response.reasoning_part.added",
-        ):
+        # --- content_part added: sets content_index
+        if etype == "response.content_part.added":
             _assert_item_fields(event, etype, active_item_id, active_output_index)
             content_index = getattr(event, "content_index", None)
             if active_content_index is None:

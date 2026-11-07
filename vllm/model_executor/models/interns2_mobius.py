@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
 )
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
@@ -417,12 +418,6 @@ class InternS2MobiusForCausalLM(Qwen3_5ForCausalLMBase):
         self.quant_config = vllm_config.quant_config
         self.scheduler_config = vllm_config.scheduler_config
 
-        if vllm_config.cache_config.mamba_cache_mode == "all":
-            raise NotImplementedError(
-                "Intern-S2-Mobius does not support 'all' prefix caching; "
-                "use '--mamba-cache-mode=align' instead."
-            )
-
         nn.Module.__init__(self)
         self.config = config
         self.model = InternS2MobiusModel(
@@ -496,6 +491,7 @@ class InternS2MobiusForConditionalGeneration(InternS2PreviewForConditionalGenera
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
+                input_norm=build_mm_input_norm(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 

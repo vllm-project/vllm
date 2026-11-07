@@ -6,7 +6,9 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
+from vllm.v1.attention.ops.common import pack_ue8m0_x4
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 # Cache of tiny 1-element dummy tensors (per device, dtype) reused by the
 # has_indexer=False path so the indexer args don't allocate every call.
@@ -87,6 +89,7 @@ def _fp8_quant_and_cache_write(
     SHUFFLE: tl.constexpr,
     BLOCK_TILE: tl.constexpr,
     HEAD_TILE: tl.constexpr,
+    MX_SCALE: tl.constexpr,
     FP8_MAX: tl.constexpr,
     USE_FNUZ: tl.constexpr,
 ):
@@ -111,6 +114,8 @@ def _fp8_quant_and_cache_write(
 
     tl.store(kv_cache_ptr + block_start + value_off, k_fp8, mask=mask)
     scale_byte_off = block_start + cache_block_size * HEAD_DIM + block_offset * 4
+    if MX_SCALE:
+        scale = pack_ue8m0_x4(scale)
     tl.store(kv_cache_scale_ptr + scale_byte_off // 4, scale)
 
 
@@ -167,12 +172,14 @@ def _fused_norm_rope_kernel(
     INDEXER_CACHE_SHUFFLE: tl.constexpr,
     INDEXER_CACHE_BLOCK_TILE: tl.constexpr,
     INDEXER_CACHE_HEAD_TILE: tl.constexpr,
+    INDEXER_CACHE_MX_SCALE: tl.constexpr,
     # MLA KV cache (concat kv_c_normed + k_pe_roped, uses slot_mapping_ptr)
     mla_cache_ptr,
     mla_cache_block_stride,
     mla_cache_entry_stride,
     MLA_CACHE_BLOCK_SIZE: tl.constexpr,
     MLA_CACHE_FP8: tl.constexpr,
+    SKIP_MLA_SCALE: tl.constexpr,
     mla_cache_scale_ptr,
     # fp8_ds_mla cache views (block-scaled fp8 NoPE + unquantized bf16 RoPE).
     # mla_cache_ptr is the fp8 (1-byte) view, so the block/entry strides above
@@ -383,18 +390,19 @@ def _fused_norm_rope_kernel(
             )
             # kv_c_normed (KV_DIM elements)
             if MLA_CACHE_FP8:
-                scale = tl.load(mla_cache_scale_ptr)
-                kv_c_fp8 = (kv_c.to(tl.float32) / scale).to(fp8_dtype)
+                scale = 1.0
+                if not SKIP_MLA_SCALE:
+                    scale = tl.load(mla_cache_scale_ptr)
+                    kv_c_fp8 = (kv_c.to(tl.float32) / scale).to(fp8_dtype)
+                else:
+                    kv_c_fp8 = kv_c.to(tl.float32).to(fp8_dtype)
                 tl.store(dst + kv_block, kv_c_fp8)
             else:
                 tl.store(dst + kv_block, kv_c)
             # k_pe_roped (from registers, interleaved layout)
             if MLA_CACHE_FP8:
                 tl.store(dst + KV_DIM + dim_off * 2, (r1 / scale).to(fp8_dtype))
-                tl.store(
-                    dst + KV_DIM + dim_off * 2 + 1,
-                    (r2 / scale).to(fp8_dtype),
-                )
+                tl.store(dst + KV_DIM + dim_off * 2 + 1, (r2 / scale).to(fp8_dtype))
             else:
                 tl.store(dst + KV_DIM + dim_off * 2, r1)
                 tl.store(dst + KV_DIM + dim_off * 2 + 1, r2)
@@ -501,6 +509,7 @@ def _fused_norm_rope_kernel(
                 INDEXER_CACHE_SHUFFLE,
                 INDEXER_CACHE_BLOCK_TILE,
                 INDEXER_CACHE_HEAD_TILE,
+                INDEXER_CACHE_MX_SCALE,
                 FP8_MAX,
                 USE_FNUZ,
             )
@@ -536,6 +545,7 @@ def fused_norm_rope(
     kv_c_out: torch.Tensor | None = None,
     k_pe_out: torch.Tensor | None = None,
     index_k_out: torch.Tensor | None = None,
+    skip_scale: bool = False,
 ) -> torch.Tensor:
     assert positions.ndim == 1
     assert q_c.ndim == 2
@@ -571,7 +581,10 @@ def fused_norm_rope(
         assert slot_mapping is not None
         if indexer_slot_mapping is None:
             indexer_slot_mapping = slot_mapping
-        idx_cache_scale_view = indexer_k_cache.view(torch.uint8).view(torch.float32)
+        idx_cache_mx_scale = mqa_logits_use_mx_scales()
+        idx_cache_scale_view = indexer_k_cache.view(torch.uint8).view(
+            torch.int32 if idx_cache_mx_scale else torch.float32
+        )
         idx_cache_block_size = indexer_k_cache.shape[1]
         idx_cache_stride = indexer_k_cache.shape[2]
         # The caller's cache reports whether its reader expects the shuffled
@@ -591,6 +604,7 @@ def fused_norm_rope(
         )
     else:
         idx_cache_scale_view = None
+        idx_cache_mx_scale = False
         idx_cache_block_size = 1
         idx_cache_stride = 0
         idx_cache_shuffle = False
@@ -701,12 +715,14 @@ def fused_norm_rope(
         idx_cache_shuffle,
         _INDEXER_CACHE_BLOCK_TILE,
         idx_cache_head_tile,
+        idx_cache_mx_scale,
         # MLA KV cache (uses same slot_mapping)
         mla_kv_cache,
         mla_block_stride,
         mla_entry_stride,
         mla_block_size,
         mla_cache_fp8,
+        mla_cache_fp8 and skip_scale,
         mla_k_scale,
         mla_ds_scale_view,
         mla_ds_rope_view,
@@ -1052,6 +1068,7 @@ def fused_q(
             index_weights_out,
             has_indexer=has_indexer,
             index_rope_interleave=index_rope_interleave,
+            quantize_mqa=quantize_mqa,
         )
         return index_q_fp8, index_weights_out, mqa_q
 

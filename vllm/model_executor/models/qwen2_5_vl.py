@@ -1612,7 +1612,7 @@ class Qwen2_5_VLForConditionalGeneration(
         merge_size = self.visual.spatial_merge_size
 
         # Cast to long to match the original code
-        # https://github.com/huggingface/transformers/blob/41980ce93e775f6c88500c51c8db7946fc6a2add/src/transformers/models/qwen2_5_vl/modular_qwen2_5_vl.py#L491 # noqa
+        # https://github.com/huggingface/transformers/blob/41980ce93e775f6c88500c51c8db7946fc6a2add/src/transformers/models/qwen2_5_vl/modular_qwen2_5_vl.py#L491
         second_per_grid_ts = video_input.get("second_per_grid_ts")
         if second_per_grid_ts is None:
             raise ValueError(
@@ -1976,7 +1976,8 @@ class Qwen2_5_VLForConditionalGeneration(
                 for _ in range(max_batch_size)
             ]
 
-        # Create dummy pixel_values
+        # Create dummy pixel_values; uint8 when normalization is fused
+        # on-device. Contents are overwritten before every replay.
         patch_embed = self.visual.patch_embed
         in_channels = patch_embed.proj.in_channels
         patch_size = patch_embed.patch_size
@@ -1985,8 +1986,11 @@ class Qwen2_5_VLForConditionalGeneration(
         flattened_patch_size = (
             in_channels * temporal_patch_size * patch_size * patch_size
         )
-        dummy_pixel_values = torch.randn(
-            total_patches, flattened_patch_size, device=device, dtype=dtype
+        dummy_pixel_values = torch.zeros(
+            total_patches,
+            flattened_patch_size,
+            device=device,
+            dtype=self.visual.input_norm.input_dtype or dtype,
         )
 
         # Override max_seqlen with a safe upper bound for capture.

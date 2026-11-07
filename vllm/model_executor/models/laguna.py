@@ -14,7 +14,6 @@ from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
@@ -36,6 +35,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     SupportsEagle3,
@@ -354,9 +354,7 @@ class LagunaAttention(nn.Module):
         # Attention sinks (learnable per-head bias for SWA layers)
         sinks = None
         if attention_sink:
-            self.sink = torch.nn.Parameter(
-                torch.empty(self.total_num_heads // tp_size, requires_grad=False)
-            )
+            self.sink = make_attention_sink(self.total_num_heads // tp_size)
             sinks = self.sink
 
         # Resolve rope params per-layer-type. ``config.rope_parameters`` is
@@ -677,22 +675,6 @@ class LagunaModel(nn.Module, EagleModelMixin):
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def _slice_sink(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        for name, loaded_weight in weights:
-            # Handle attention sinks (distributed across ranks). Derive the
-            # per-rank slice from the parameter's own shape so per-layer
-            # variations in head count are handled correctly.
-            if "sink" in name:
-                heads_per_rank = loaded_weight.shape[0] // tp_size
-                loaded_weight = loaded_weight.narrow(
-                    0, tp_rank * heads_per_rank, heads_per_rank
-                )
-            yield name, loaded_weight
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
@@ -709,9 +691,7 @@ class LagunaModel(nn.Module, EagleModelMixin):
                 "_input_scale",
             ],
         )
-        return loader.load_weights(
-            self._slice_sink(weights), mapper=self.hf_to_vllm_mapper
-        )
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class LagunaForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3):

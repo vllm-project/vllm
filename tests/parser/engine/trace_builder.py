@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -28,6 +29,7 @@ from tests.parser.engine.replay_harness import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
+from vllm.parser import plamo3
 from vllm.parser.engine.registered_adapters import (
     DeepSeekV4Parser,
     DeepSeekV32Parser,
@@ -38,10 +40,16 @@ from vllm.parser.engine.registered_adapters import (
     GraniteThinkingParser,
     InklingParser,
     KimiK2Parser,
+    MiMoParser,
     MinimaxM2Parser,
+    MinimaxM3Parser,
     NemotronV3Parser,
+    Plamo3Parser,
     Qwen3Parser,
+    RippleParser,
     SeedOssParser,
+    Step3p5Parser,
+    ZayaParser,
 )
 
 # ── Data structures ──────────────────────────────────────────────────
@@ -354,7 +362,12 @@ def _qwen3_tool_segments(tc: ToolCallSpec) -> list[tuple[str, bool]]:
     ]
 
 
-def _qwen3_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+def _qwen3_segments(
+    scenario: Scenario,
+    tool_segments: Callable[[ToolCallSpec], list[tuple[str, bool]]] = (
+        _qwen3_tool_segments
+    ),
+) -> list[tuple[str, bool]]:
     segs: list[tuple[str, bool]] = []
     if scenario.reasoning is not None:
         segs.append((scenario.reasoning, False))
@@ -367,7 +380,7 @@ def _qwen3_segments(scenario: Scenario) -> list[tuple[str, bool]]:
         segs.append((scenario.content, False))
     if scenario.tool_calls:
         for tc in scenario.tool_calls:
-            segs.extend(_qwen3_tool_segments(tc))
+            segs.extend(tool_segments(tc))
     return segs
 
 
@@ -387,6 +400,9 @@ def _build_qwen3(
     parser_cls: type = Qwen3Parser,
     strip_trailing_ws: bool = False,
     validate: bool = True,
+    tool_segments: Callable[[ToolCallSpec], list[tuple[str, bool]]] = (
+        _qwen3_tool_segments
+    ),
 ) -> Sample:
     expected_reasoning: str | None
     if scenario.reasoning is not None:
@@ -401,7 +417,7 @@ def _build_qwen3(
         sample_id=f"{name}-{scenario.id}",
         description=scenario.description,
         vocab=_QWEN3_VOCAB,
-        segments=_qwen3_segments(scenario),
+        segments=_qwen3_segments(scenario, tool_segments),
         expected_reasoning=expected_reasoning,
         expected_content=_qwen3_expected_content(scenario),
         expected_tool_calls=_expected_tc(scenario),
@@ -409,6 +425,58 @@ def _build_qwen3(
     )
     if validate:
         _validate_sample(sample, parser_cls)
+    return sample
+
+
+# ── MiMo (compact Qwen3 XML, no newlines between tags) ───────────────
+
+
+def _mimo_tool_segments(tc: ToolCallSpec) -> list[tuple[str, bool]]:
+    parts = [f"<function={tc.name}>"]
+    for key, value in tc.arguments.items():
+        parts.append(f"<parameter={key}>{_qwen3_arg_value(value)}</parameter>")
+    parts.append("</function>")
+    return [
+        ("<tool_call>", True),
+        ("".join(parts), False),
+        ("</tool_call>", True),
+    ]
+
+
+def _build_mimo(scenario: Scenario, validate: bool = True) -> Sample:
+    return _build_qwen3(
+        scenario,
+        name="mimo",
+        parser_cls=MiMoParser,
+        validate=validate,
+        tool_segments=_mimo_tool_segments,
+    )
+
+
+# ── Step-3.5 (Qwen3 XML, trailing reasoning whitespace stripped) ────
+
+
+def _build_step3p5(scenario: Scenario, validate: bool = True) -> Sample:
+    return _build_qwen3(
+        scenario,
+        name="step3p5",
+        parser_cls=Step3p5Parser,
+        strip_trailing_ws=True,
+        validate=validate,
+    )
+
+
+def _build_zaya(scenario: Scenario, validate: bool = True) -> Sample:
+    """ZAYA1: the Qwen3 grammar with ``<zyphra_tool_call>`` tags."""
+    sample = _build_qwen3(scenario, name="zaya", validate=False)
+    rename = {"<tool_call>": ZayaParser.TOOL_START, "</tool_call>": ZayaParser.TOOL_END}
+    sample = replace(
+        sample,
+        vocab={rename.get(text, text): tid for text, tid in sample.vocab.items()},
+        tokens=[(tid, rename.get(text, text)) for tid, text in sample.tokens],
+    )
+    if validate:
+        _validate_sample(sample, ZayaParser)
     return sample
 
 
@@ -439,9 +507,11 @@ def _minimax_m2_tool_segments(tool_calls: list[ToolCallSpec]) -> list[tuple[str,
         for key, value in tc.arguments.items():
             segs.append(
                 (
-                    f'<parameter name="{key}">'
-                    f"{_minimax_m2_arg_value(value)}"
-                    "</parameter>",
+                    (
+                        f'<parameter name="{key}">'
+                        f"{_minimax_m2_arg_value(value)}"
+                        "</parameter>"
+                    ),
                     False,
                 )
             )
@@ -485,6 +555,66 @@ def _build_minimax_m2(scenario: Scenario, validate: bool = True) -> Sample:
     )
     if validate:
         _validate_sample(sample, MinimaxM2Parser)
+    return sample
+
+
+# ── MiniMax M3 (namespaced XML elements, no reasoning) ───────────────
+
+_MINIMAX_M3_NS = "]<]minimax[>["
+
+
+def _minimax_m3_value(value: Any) -> str:
+    """Render a value the way the M3 chat template's ``to_xml`` does."""
+    ns = _MINIMAX_M3_NS
+    if isinstance(value, dict):
+        return "".join(
+            f"{ns}<{key}>{_minimax_m3_value(item)}{ns}</{key}>"
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return "".join(
+            f"{ns}<item>{_minimax_m3_value(item)}{ns}</item>" for item in value
+        )
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _minimax_m3_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    ns = _MINIMAX_M3_NS
+    segs: list[tuple[str, bool]] = []
+    if scenario.content:
+        # The tool parser receives reasoning-stripped content.
+        segs.append((scenario.content, False))
+    if scenario.tool_calls:
+        invokes = "".join(
+            f'{ns}<invoke name="{tc.name}">'
+            f"{_minimax_m3_value(tc.arguments)}{ns}</invoke>\n"
+            for tc in scenario.tool_calls
+        )
+        segs.append((f"{ns}<tool_call>\n{invokes}{ns}</tool_call>", False))
+    return segs
+
+
+def _minimax_m3_expected_content(scenario: Scenario) -> str | None:
+    if scenario.tool_calls and not (scenario.content or "").strip():
+        return None
+    return scenario.content
+
+
+def _build_minimax_m3(scenario: Scenario, validate: bool = True) -> Sample:
+    sample = _make_sample(
+        sample_id=f"minimax_m3-{scenario.id}",
+        description=scenario.description,
+        vocab={},
+        segments=_minimax_m3_segments(scenario),
+        expected_reasoning=None,
+        expected_content=_minimax_m3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, MinimaxM3Parser)
     return sample
 
 
@@ -1068,6 +1198,106 @@ def _build_inkling(scenario: Scenario, validate: bool = True) -> Sample:
     return sample
 
 
+# ── PLaMo3 (literal nested tool-request wrappers) ───────────────────
+
+_PLAMO3_MARKERS = (
+    plamo3.BEGIN_THINK,
+    plamo3.END_THINK,
+    plamo3.BEGIN_TOOL_REQUESTS,
+    plamo3.END_TOOL_REQUESTS,
+    plamo3.BEGIN_TOOL_REQUEST,
+    plamo3.END_TOOL_REQUEST,
+    plamo3.BEGIN_TOOL_NAME,
+    plamo3.END_TOOL_NAME,
+    plamo3.BEGIN_TOOL_ARGUMENTS,
+    plamo3.END_TOOL_ARGUMENTS,
+    plamo3.EOT,
+)
+_PLAMO3_VOCAB = {marker: 300 + i for i, marker in enumerate(_PLAMO3_MARKERS)}
+
+
+def _plamo3_tool_segments(tc: ToolCallSpec) -> list[tuple[str, bool]]:
+    args = json.dumps(tc.arguments, ensure_ascii=False, separators=(",", ":"))
+    return [
+        (plamo3.BEGIN_TOOL_REQUEST, True),
+        (plamo3.BEGIN_TOOL_NAME, True),
+        (tc.name, False),
+        (plamo3.END_TOOL_NAME, True),
+        (plamo3.BEGIN_TOOL_ARGUMENTS, True),
+        (args, False),
+        (plamo3.END_TOOL_ARGUMENTS, True),
+        (plamo3.END_TOOL_REQUEST, True),
+    ]
+
+
+def _plamo3_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = [
+        (plamo3.BEGIN_THINK, True),
+        (scenario.reasoning or "", False),
+        (plamo3.END_THINK, True),
+    ]
+    if scenario.content is not None:
+        segs.append((scenario.content, False))
+    if scenario.tool_calls is not None:
+        segs.append((plamo3.BEGIN_TOOL_REQUESTS, True))
+        for tool_call in scenario.tool_calls:
+            segs.extend(_plamo3_tool_segments(tool_call))
+        segs.append((plamo3.END_TOOL_REQUESTS, True))
+    return segs
+
+
+def _build_plamo3(scenario: Scenario, validate: bool = True) -> Sample:
+    sample = _make_sample(
+        sample_id=f"plamo3-{scenario.id}",
+        description=scenario.description,
+        vocab=_PLAMO3_VOCAB,
+        segments=_plamo3_segments(scenario),
+        expected_reasoning=scenario.reasoning or "",
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, Plamo3Parser)
+    return sample
+
+
+# ── Ripple (optional plain-text <think>, JSON tool calls) ────────────
+
+
+def _ripple_segments(scenario: Scenario) -> list[tuple[str, bool]] | None:
+    if scenario.tool_calls is not None and not scenario.tool_calls:
+        return None
+    text = ""
+    if scenario.reasoning is not None:
+        text += f"<think>\n{scenario.reasoning}\n</think>\n"
+    text += scenario.content or ""
+    for tc in scenario.tool_calls or []:
+        body = json.dumps({"name": tc.name, "arguments": tc.arguments})
+        text += f"\n<tool_call>\n{body}\n</tool_call>"
+    return [(text, False)]
+
+
+def _build_ripple(scenario: Scenario, validate: bool = True) -> Sample | None:
+    segments = _ripple_segments(scenario)
+    if segments is None:
+        # Ripple's template never emits an empty tool block.
+        return None
+    sample = _make_sample(
+        sample_id=f"ripple-{scenario.id}",
+        description=scenario.description,
+        vocab={},
+        segments=segments,
+        expected_reasoning=scenario.reasoning or "",
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, RippleParser)
+    return sample
+
+
 # ── Granite (JSON-array tool bodies, no reasoning) ───────────────────────
 
 _GRANITE_VOCAB: dict[str, int] = {
@@ -1160,13 +1390,19 @@ _BUILDERS: dict[str, Any] = {
     "gemma4": _build_gemma4,
     "granite": _build_granite,
     "minimax_m2": _build_minimax_m2,
+    "minimax_m3": _build_minimax_m3,
     "nemotron_v3": _build_nemotron_v3,
     "granite_thinking_parser": _build_granite_thinking,
     "seed_oss": _build_seed_oss,
     "glm47_moe": _build_glm47_moe,
     "kimi_k2": _build_kimi_k2,
     "qwen3": _build_qwen3,
+    "mimo": _build_mimo,
+    "step3p5": _build_step3p5,
     "inkling": _build_inkling,
+    "plamo3": _build_plamo3,
+    "ripple": _build_ripple,
+    "zaya": _build_zaya,
 }
 
 

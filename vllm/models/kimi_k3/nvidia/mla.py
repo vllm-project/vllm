@@ -35,7 +35,6 @@ import math
 from typing import TYPE_CHECKING, cast
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from vllm import _custom_ops as ops
@@ -75,22 +74,25 @@ from vllm.model_executor.layers.quantization import (
     resolve_quant_method,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    refill_derived,
+    replace_parameter,
+)
 from vllm.models.common.ops import fused_q_kv_rmsnorm
-from vllm.models.kimi_k3.nvidia.low_latency_gemm import try_low_latency_gemm
+from vllm.models.kimi_k3.nvidia.low_latency_gemm import low_latency_linear
 from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_decode_q_concat_kv_cache_insert,
     fused_mla_key_concat_ds_mla_insert,
     fused_mla_key_concat_kv_cache_insert,
     fused_mla_kv_concat,
-    fused_mla_kv_concat_quant_fp8,
+    fused_mla_kv_pack_quant_fp8,
     fused_mla_qkv_quant_kv_cache_fp8_insert,
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import (
-    is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
@@ -102,7 +104,12 @@ from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec, get_kv_quant_mode
+from vllm.v1.kv_cache_interface import (
+    KVCacheSpec,
+    MLAAttentionSpec,
+    get_kv_quant_mode,
+    is_quantized_kv_cache,
+)
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
@@ -317,6 +324,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             self.kv_cache_dtype = "auto"
 
         dtype = torch.get_default_dtype()
+        self.act_dtype = dtype
         self.attn_backend = get_attn_backend(
             self.head_size,
             dtype,
@@ -369,6 +377,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         )
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_manager: MLADCPManager | None = None
+        self.W_UV_dcp: torch.Tensor | None = None
         if self.dcp_world_size > 1:
             query_dtype = (
                 torch.float8_e4m3fn
@@ -422,6 +431,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         return MLAAttentionSpec(  # type: ignore[call-arg]
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.head_size,
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
@@ -431,7 +441,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self) -> None:
         """Absorb ``kv_b_proj`` into decode-time ``W_UK_T`` / ``W_UV`` bmm weights.
 
         ``kv_b_proj`` produces ``[k_nope; v]`` per head from the ``kv_lora_rank``
@@ -439,18 +449,30 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         projected into latent space by ``W_UK_T`` and the attention output is
         projected back to ``v`` by ``W_UV`` -- avoiding materializing full K/V.
         """
-        W_UK, W_UV = split_kv_b_proj(
-            self.kv_b_proj,
-            act_dtype,
-            self.kv_lora_rank,
-            self.num_local_heads,
-            self.qk_nope_head_dim,
-            self.v_head_dim,
-        )
-        # (L, N, V) -> (N, L, V)
-        replace_parameter(self, "W_UV", W_UV.transpose(0, 1), prefer_copy=True)
-        # (L, N, P) -> (N, P, L)
-        replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
+        # The weight cache daemon exports the absorbed weights. Repeating the
+        # absorption would mutate its shared CUDA allocation.
+        if not (is_weights_pre_processed() and getattr(self, "W_UV", None) is not None):
+            W_UK, W_UV = split_kv_b_proj(
+                self.kv_b_proj,
+                self.act_dtype,
+                self.kv_lora_rank,
+                self.num_local_heads,
+                self.qk_nope_head_dim,
+                self.v_head_dim,
+            )
+            # (L, N, V) -> (N, L, V)
+            replace_parameter(self, "W_UV", W_UV.transpose(0, 1))
+            # (L, N, P) -> (N, P, L)
+            replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0))
+            if (
+                self.dcp_manager is not None
+                and self.dcp_manager.v_up_proj_combine is not None
+            ):
+                replace_parameter(
+                    self,
+                    "W_UV_dcp",
+                    self.dcp_manager.group.all_gather(self.W_UV.contiguous(), dim=0),
+                )
 
         quant_method = (
             resolve_quant_method(self.quant_config, self, prefix=self.layer_name)
@@ -463,13 +485,9 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         # Precompute reciprocal scales once here (scales are final after load;
         # K3 has no runtime calculate_kv_scales path) so the fp8 fused kernels
         # in the decode/prefill hot path take a ready inverse instead of
-        # launching a per-step reciprocal kernel.
-        self.register_buffer(
-            "_q_scale_inv", self._q_scale.reciprocal().reshape(1), persistent=False
-        )
-        self.register_buffer(
-            "_k_scale_inv", self._k_scale.reciprocal().reshape(1), persistent=False
-        )
+        # launching a per-step reciprocal kernel. Reloads refill them in place.
+        refill_derived(self, "_q_scale_inv", self._q_scale.reciprocal().reshape(1))
+        refill_derived(self, "_k_scale_inv", self._k_scale.reciprocal().reshape(1))
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor) -> None:
         """Project latent attention output back to ``v`` via ``W_UV`` (bmm)."""
@@ -499,12 +517,6 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
-    def _unquantized_gemm(
-        self, hidden_states: torch.Tensor, weight: torch.Tensor
-    ) -> torch.Tensor:
-        out = try_low_latency_gemm(hidden_states, weight)
-        return out if out is not None else F.linear(hidden_states, weight)
-
     def _apply_q_lora_attention(
         self,
         positions: torch.Tensor,
@@ -559,9 +571,9 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 lambda: self._apply_q_lora_attention(
                     positions,
                     hidden_states,
-                    self._unquantized_gemm(hidden_states, qkv_a_weight),
+                    low_latency_linear(hidden_states, qkv_a_weight),
                 ),
-                lambda: self._unquantized_gemm(hidden_states, gate_weight),
+                lambda: low_latency_linear(hidden_states, gate_weight),
                 start_event,
                 end_event,
                 self.aux_stream,
@@ -715,13 +727,26 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 assert lse is not None
                 assert self.dcp_manager is not None
                 assert attn_metadata.decode is not None
+                seq_lens = attn_metadata.decode.seq_lens
+                query_start_loc = attn_metadata.query_start_loc[
+                    : attn_metadata.num_decodes + 1
+                ]
+                if self.W_UV_dcp is not None:
+                    assert self.dcp_manager.v_up_proj_combine is not None
+                    self.dcp_manager.v_up_proj_combine(
+                        latent_out,
+                        lse,
+                        self.W_UV_dcp,
+                        attn_out[:num_mqa_tokens],
+                        seq_lens=seq_lens,
+                        query_start_loc=query_start_loc,
+                    )
+                    return
                 latent_out = self.dcp_manager.combine(
                     latent_out,
                     lse,
-                    seq_lens=attn_metadata.decode.seq_lens,
-                    query_start_loc=attn_metadata.query_start_loc[
-                        : attn_metadata.num_decodes + 1
-                    ],
+                    seq_lens=seq_lens,
+                    query_start_loc=query_start_loc,
                 )
             self._v_up_proj(latent_out, out=attn_out[:num_mqa_tokens])
 
@@ -785,6 +810,17 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             cos_sin_cache=cos_sin_cache,
         )
 
+    def _fused_mla_kv_concat(
+        self, kv_nope: torch.Tensor, k_pe: torch.Tensor, use_fp8_prefill: bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pack one DCP context chunk's ``(k, v)`` with the fused kernels."""
+        if use_fp8_prefill:
+            return fused_mla_kv_pack_quant_fp8(
+                kv_nope, k_pe, nope_dim=self.qk_nope_head_dim
+            )
+        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        return fused_mla_kv_concat(k_nope, k_pe), v
+
     def _compute_prefill_context(
         self,
         q: torch.Tensor,
@@ -795,7 +831,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         Per chunk the impl gathers the paged latent, up-projects it, then casts
         and concatenates K (and casts V) in two or three more launches. Here that
         tail is one fused kernel per chunk -- ``fused_mla_kv_concat`` for a bf16
-        query, ``fused_mla_kv_concat_quant_fp8`` when the query is fp8 -- reading
+        query, ``fused_mla_kv_pack_quant_fp8`` when the query is fp8 -- reading
         the strided ``kv_b_proj`` output in place and writing a contiguous key, so
         only the gather and ``kv_b_proj`` remain.
 
@@ -814,8 +850,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         copied per chunk.
 
         Decode context parallelism keeps using
-        ``impl._context_parallel_compute_prefill_context``; its extra allgather
-        and reorg are not fused here.
+        ``impl._context_parallel_compute_prefill_context`` for its allgather and
+        reorg, with this layer's ``_fused_mla_kv_concat`` as its per-chunk pack.
         """
         prefill = attn_metadata.prefill
         assert prefill is not None
@@ -844,11 +880,15 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim
             )
-            k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k_pe = gathered[..., self.kv_lora_rank :]
             if fp8_prefill:
-                k, v = fused_mla_kv_concat_quant_fp8(k_nope, k_pe, v)
+                k, v = fused_mla_kv_pack_quant_fp8(
+                    kv_nope, k_pe, nope_dim=self.qk_nope_head_dim
+                )
             else:
+                k_nope, v = kv_nope.split(
+                    [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+                )
                 k = fused_mla_kv_concat(k_nope, k_pe)
             attn_output, attn_lse = prefill_backend.run_prefill_context_chunk(
                 chunk=chunk, q=q[chunk.token_slice], k=k, v=v, out=out
@@ -1074,6 +1114,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                         attn_metadata,
                         k_scale=self._k_scale,
                         dcp_world_size=self.dcp_world_size,
+                        fused_mla_kv_concat_fn=self._fused_mla_kv_concat,
                     )
                 )
             else:

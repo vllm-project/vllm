@@ -2,8 +2,10 @@ group: Disaggregated Mooncake
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (B200) Distributed MooncakeConnector PD accuracy"
+- label: ":nvidia: (B200) [Nightly] Distributed MooncakeConnector PD accuracy"
   key: distributed-mooncakeconnector-pd-accuracy-4-gpus
+  # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 10
   working_dir: "/vllm-workspace/tests"
   # Runs on b200-k8s because it is the only NVIDIA pool that can carry mooncake
@@ -17,11 +19,12 @@ steps:
     - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
     - tests/v1/kv_connector/mooncake_integration/
   commands:
-    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
     - bash v1/kv_connector/mooncake_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
       label: ":amd: (MI355) Distributed MooncakeConnector HIP PD accuracy"
+      optional: true
       dind: false
       device: mi355_4
       num_devices: 4
@@ -38,9 +41,8 @@ steps:
         - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
         - vllm/platforms/rocm.py
         - requirements/common.txt
-        - requirements/kv_connectors_rocm.txt
+        - requirements/test/rocm.txt
       commands:
-        - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
         # Same full accuracy/TP sweep, using same-host HIP GPU transport.
         - pytest -v -s v1/kv_connector/mooncake_integration/test_accuracy_rocm.py
 
@@ -74,7 +76,7 @@ steps:
     - tests/models/multimodal/generation/test_vit_cudagraph.py
     - examples/disaggregated/disaggregated_encoder/
     - tests/v1/ec_connector/
-    - requirements/kv_connectors.txt
+    - requirements/test/kv_connectors_cuda.txt
   env:
     PYTHON_BIN: "/vllm-workspace/.venv/bin/python"
     PYTHONUNBUFFERED: "1"
@@ -91,21 +93,9 @@ steps:
     LOG_PATH: "/tmp/mooncake-ec-e2e"
     BASELINE_FILE: "/tmp/mooncake-ec-e2e/baseline.json"
   commands:
+    # Mooncake comes from the CI image (requirements/test/kv_connectors_cuda.txt).
     - uv venv --system-site-packages --python 3.12 .venv
-    - |
-      uv pip install --python .venv/bin/python "$(.venv/bin/python - <<'PY'
-      from pathlib import Path
-      import torch
-
-      requirement = next(
-          line for line in Path("requirements/kv_connectors.txt").read_text().splitlines()
-          if line.startswith("mooncake-transfer-engine ")
-      )
-      if torch.version.cuda.split(".")[0] == "13":
-          requirement = requirement.replace("mooncake-transfer-engine", "mooncake-transfer-engine-cuda13")
-      print(requirement)
-      PY
-      )"
+    - bash .buildkite/scripts/check-kv-connectors.sh
     - bash tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh
   mirror:
     amd:

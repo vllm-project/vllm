@@ -11,10 +11,6 @@ from torch import nn
 from transformers import PreTrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -744,11 +740,6 @@ class HYV4MTP(nn.Module):
         }
 
         num_experts = getattr(self.config, "n_routed_experts", 0)
-        sink_tp_size = get_tensor_model_parallel_world_size()
-        sink_tp_rank = get_tensor_model_parallel_rank()
-        n_local_head = self.config.num_attention_heads // sink_tp_size
-        head_rank_start = n_local_head * sink_tp_rank
-        head_rank_end = n_local_head * (sink_tp_rank + 1)
 
         # Routed-expert weights come in two checkpoint layouts:
         #   split: mlp.experts.<id>.gate_proj.weight
@@ -883,15 +874,6 @@ class HYV4MTP(nn.Module):
             if is_loaded:
                 continue
 
-            if "learnable_sink_param" in name:
-                if name in params_dict:
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    with torch.no_grad():
-                        params_dict[name][:n].copy_(narrow_weight)
-                    loaded_params.add(name)
-                continue
-
             remapped_name = maybe_remap_kv_scale_name(name, params_dict)
             if remapped_name is None:
                 continue
@@ -910,32 +892,4 @@ class HYV4MTP(nn.Module):
             loaded_params.add(name)
 
         logger.info_once("HYV4 MTP draft model loaded: %d params", len(loaded_params))
-        unassigned_all = sorted(set(params_dict) - loaded_params)
-        # KVCacheScaleParameter (``k_scale`` / ``v_scale`` / ``q_scale`` /
-        # ``prob_scale``) is created by ``BaseKVCacheMethod.create_weights`` for
-        # every Attention layer that runs on an fp8-family quant method, and
-        # its -1.0 sentinel is replaced by the runtime default (1.0) in
-        # ``process_weights_after_loading`` -- which runs *after* this method.
-        # HY V4 checkpoints intentionally omit these (``kv_cache_quant_algo:
-        # null``); silence them only when the parameter is actually the
-        # sentinel type so a genuine mismatch on a same-named tensor still
-        # reaches the warning.
-        from vllm.model_executor.layers.quantization.kv_cache import (
-            KVCacheScaleParameter,
-        )
-
-        unassigned = [
-            name
-            for name in unassigned_all
-            if not isinstance(params_dict.get(name), KVCacheScaleParameter)
-        ]
-        if unassigned:
-            # A draft parameter with no checkpoint source keeps its sentinel
-            # init value (FP8 scales start at finfo(float32).min), which
-            # silently destroys draft quality instead of failing the load.
-            logger.warning(
-                "HYV4 MTP draft model: %d parameters received no checkpoint value: %s",
-                len(unassigned),
-                ", ".join(unassigned),
-            )
         return loaded_params

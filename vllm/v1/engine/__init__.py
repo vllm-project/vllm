@@ -5,7 +5,7 @@ import enum
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
 import numpy as np
@@ -14,6 +14,7 @@ import torch
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.outputs import RequestError
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.kv_hints import KvHintsEnvelope
@@ -38,6 +39,26 @@ FINISH_REASON_STRINGS = ("stop", "length", "abort", "error", "repetition")
 EEP_NOTIFICATION_CALL_ID = -1
 
 FT_STATUS_CALL_ID = -2
+
+
+class CheckpointState(enum.StrEnum):
+    """Process checkpoint lifecycle of an engine. It serves only while
+    RUNNING, and may go through the cycle any number of times."""
+
+    RUNNING = "running"
+    # Draining, then releasing what a checkpoint must not contain.
+    PREPARING = "preparing"
+    # Safe to capture.
+    PREPARED = "prepared"
+    # Bringing back what preparing released.
+    RESTORING = "restoring"
+    FAILED = "failed"
+
+    @property
+    def is_restored(self) -> bool:
+        """Whether released state is back or coming back, so memory may wake and
+        scheduling resume."""
+        return self in (CheckpointState.RUNNING, CheckpointState.RESTORING)
 
 
 class EEPNotificationType(enum.Enum):
@@ -67,6 +88,22 @@ class FinishReason(enum.IntEnum):
 
     def __str__(self):
         return FINISH_REASON_STRINGS[self.value]
+
+
+@dataclass
+class PrefixHashConfig:
+    """What a frontend needs to compute a request's prompt block hashes itself
+    (see `EngineCoreRequest.block_hashes`)."""
+
+    # The --prefix-caching-hash-algo name, e.g. "sha256".
+    hash_algo: str
+    # Tokens per hashed block.
+    hash_block_size: int
+    # Parent hash of the first block.
+    none_hash: bytes
+    # Tokens after each block that its hash also covers (as extra keys), so a
+    # block is hashed only once they exist.
+    num_lookahead_tokens: int = 0
 
 
 @dataclass
@@ -104,6 +141,24 @@ class EngineCoreReadyResponse:
     supports_draft_weight_updates: bool = False
     # Full-attention block size in tokens after initialization, or unavailable.
     effective_attention_block_size: int | None = None
+    coord_store_port: int = 0
+    coordinator_input_address: str | None = None
+    coordinator_output_address: str | None = None
+    # JSON-mode dump of this engine's VllmConfig, for frontends that serve
+    # `/server_info` without holding the config themselves (the Rust frontend).
+    # Sent only with VLLM_SERVER_DEV_MODE, the same gate as `/server_info`.
+    vllm_config: dict[str, Any] | None = None
+    # Set when the engine hashes request blocks (prefix caching or a KV
+    # connector), so that a frontend can send prompt block hashes.
+    prefix_hash_config: PrefixHashConfig | None = None
+    # `CacheConfig.metrics_info()` after initialization, the labels of the
+    # frontend's `vllm:cache_config_info`.
+    cache_config_info: dict[str, str] | None = None
+    # `system_fingerprint` inputs for frontends without a VllmConfig (the Rust
+    # frontend): `hash_config()` of the engine's initialized config (None if
+    # hashing failed) and whether expert parallelism is enabled.
+    config_hash: str | None = None
+    enable_expert_parallel: bool = False
 
 
 class EngineCoreRequest(
@@ -113,7 +168,13 @@ class EngineCoreRequest(
     gc=False,
 ):  # type: ignore[call-arg]
     request_id: str
-    prompt_token_ids: list[int] | None
+    if TYPE_CHECKING:
+        prompt_token_ids: list[int] | None
+    else:
+        # Both frontends send a 32-bit int ndarray, out of band when long, which
+        # decodes as a view of the received frame; Request copies it into a
+        # TokenBuffer. In-process clients pass the list.
+        prompt_token_ids: np.ndarray | None
     mm_features: list[MultiModalFeatureSpec] | None
     sampling_params: SamplingParams | None
     pooling_params: PoolingParams | None
@@ -159,6 +220,10 @@ class EngineCoreRequest(
 
     session_id: str | None = None
     kv_hints: KvHintsEnvelope | None = None
+
+    # Prompt block hashes computed by the frontend with the engine's
+    # PrefixHashConfig, including any extra keys (LoRA, multimodal, cache salt).
+    block_hashes: list[bytes] | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
@@ -236,6 +301,17 @@ class EngineCoreOutput(
     # Appended last so `array_like` positional serialization stays compatible.
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
+    # [num_scored_rows, num_token_ids]; appended last for array_like compatibility.
+    prompt_token_id_logprobs: torch.Tensor | None = None
+
+    # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
+    error: RequestError | None = None
+
+    # Whether the sampler watermarks this request, after EngineCore enforcement.
+    # Sent once, on the first output, when watermark_config is set. Appended last
+    # for array_like compatibility.
+    watermarking: bool | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -279,6 +355,9 @@ class EngineCoreOutputs(
     # "old" wave, so the next wave needs to be started in other engines.
     start_wave: int | None = None
 
+    # Weight version used for this step.
+    weight_version: str | None = None
+
     def __post_init__(self):
         if self.timestamp == 0.0:
             self.timestamp = time.monotonic()
@@ -320,3 +399,5 @@ class EngineStatusType(enum.IntEnum):
     HEALTHY = 0
     DEAD = 1
     UNHEALTHY = 2
+    # Faulted; querying the workers' all2all mask before going UNHEALTHY.
+    DIAGNOSING = 3

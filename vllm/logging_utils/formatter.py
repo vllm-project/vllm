@@ -4,6 +4,10 @@
 import logging
 from pathlib import Path
 
+JSON_FORMAT = (
+    "%(asctime)s %(levelname)s %(name)s %(processName)s %(process)d %(message)s"
+)
+
 
 class NewLineFormatter(logging.Formatter):
     """Adds logging prefix to newlines to align multi-line messages."""

@@ -25,10 +25,12 @@ from vllm.model_executor.models.utils import (
     get_draft_quant_config,
     maybe_prefix,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.models.kimi_k3.nvidia.model import KimiMLP
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
+from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 from vllm.v1.worker.workspace import current_workspace_manager
 
 _GROUPED_KV_CACHE_DTYPES = frozenset(
@@ -222,8 +224,6 @@ class K3DSparkModel(nn.Module):
         context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
     ) -> None:
         """Project target-derived context into each draft layer's latent cache."""
-        if not hasattr(self, "_num_context_layers"):
-            self._build_fused_context_kv_metadata()
         self._precompute_fused_context_kv(
             context_states, context_positions, context_slot_mapping
         )
@@ -244,21 +244,21 @@ class K3DSparkModel(nn.Module):
                 and attn.kv_a_layernorm.variance_epsilon
                 == attn0.kv_a_layernorm.variance_epsilon
             ), "All MLA DSpark layers must share their latent KV geometry."
-        self._context_kv_norm_weights = torch.stack(
-            [attn.kv_a_layernorm.weight.detach() for attn in attentions], dim=0
-        ).contiguous()
+        norms = [attn.kv_a_layernorm.weight.detach() for attn in attentions]
+        refill_derived(
+            self, "_context_kv_norm_weights", torch.stack(norms, dim=0).contiguous()
+        )
         self._num_context_layers = len(attentions)
         self._context_kv_width = kv_width
         self._context_kv_lora_rank = attn0.kv_lora_rank
         self._context_rope_dim = attn0.qk_rope_head_dim
         self._context_rms_norm_eps = attn0.kv_a_layernorm.variance_epsilon
-        self._context_kv_scales: torch.Tensor | None = None
+        kv_scales = None
         if attn0.kv_cache_dtype in _GROUPED_KV_CACHE_DTYPES and is_quantized_kv_cache(
             attn0.kv_cache_dtype
         ):
-            self._context_kv_scales = torch.stack(
-                [attn._k_scale.reshape(()) for attn in attentions]
-            )
+            kv_scales = torch.stack([attn._k_scale.reshape(()) for attn in attentions])
+        refill_derived(self, "_context_kv_scales", kv_scales)
 
     def _precompute_fused_context_kv(
         self,
@@ -376,7 +376,12 @@ class K3DSparkModel(nn.Module):
         self,
         cache_layers: list[MultiHeadLatentAttention],
     ) -> bool:
-        if not hasattr(self, "_layers_share_kv_block_layout"):
+        key = tuple(cl.kv_cache.data_ptr() for cl in cache_layers)
+        if getattr(self, "_kv_cache_ptrs_key", None) != key:
+            assert not torch.cuda.is_current_stream_capturing()
+            self._kv_cache_ptrs_key = key
+            if hasattr(self, "_context_cache_ptrs"):
+                del self._context_cache_ptrs
             ref_cache = cache_layers[0].kv_cache
             self._layers_share_kv_block_layout = all(
                 cl.kv_cache.size(1) == ref_cache.size(1)
@@ -426,6 +431,9 @@ class K3DSparkModel(nn.Module):
 
 
 class K3DSparkForCausalLM(nn.Module):
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = DSparkSpeculatorConfig
+
     has_own_embed_tokens = False
     has_own_lm_head = False
     draft_id_to_target_id = None

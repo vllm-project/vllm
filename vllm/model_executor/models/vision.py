@@ -5,7 +5,7 @@ import itertools
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
+from typing import Generic, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 from transformers import PreTrainedConfig
@@ -24,10 +24,12 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 logger = init_logger(__name__)
 
 _C = TypeVar("_C", bound=PreTrainedConfig)
+_C_co = TypeVar("_C_co", bound=PreTrainedConfig, covariant=True)
 
 
-class _RootConfig(Protocol[_C]):
-    vision_config: _C
+class _RootConfig(Protocol[_C_co]):
+    @property
+    def vision_config(self) -> _C_co: ...
 
 
 class VisionEncoderInfo(ABC, Generic[_C]):
@@ -60,7 +62,8 @@ class VisionEncoderInfo(ABC, Generic[_C]):
 
 
 class VisionLanguageConfig(Protocol):
-    vision_config: Final[PreTrainedConfig]
+    @property
+    def vision_config(self) -> PreTrainedConfig: ...
 
 
 def get_vision_encoder_info(hf_config: VisionLanguageConfig) -> VisionEncoderInfo:
@@ -479,7 +482,12 @@ def run_dp_sharded_mrope_vision_model(
     # to work
     max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
-    embed_dtype = next(vision_model.parameters()).dtype
+    # Ranks without images all-gather placeholders of this dtype, so it must
+    # match the output dtype of ranks with images; the first parameter's dtype
+    # can differ (e.g. an fp32 patch embedding in a bf16 tower).
+    embed_dtype = (
+        getattr(vision_model, "dtype", None) or next(vision_model.parameters()).dtype
+    )
 
     # Run the vision model on the local pixel_values_local
     if rope_type == "rope_2d":
