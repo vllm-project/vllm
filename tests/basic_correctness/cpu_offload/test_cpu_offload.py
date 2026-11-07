@@ -141,3 +141,50 @@ def test_tower_weight_offloading(vllm_runner, monkeypatch, disable_uva):
     finally:
         set_offloader(original_offloader)
         envs.disable_envs_cache()
+
+
+def test_gdn_weight_offloading_without_uva(vllm_runner, monkeypatch):
+    """The Qwen GDN warmup must not pass CPU-resident weights to Triton.
+
+    Regression test: without UVA, offloaded `A_log` and `dt_bias` stay on the
+    CPU outside the layer's forward, and the warmup read them directly, so the
+    engine failed to start.
+    """
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "1")
+    envs.disable_envs_cache()
+    original_offloader = get_offloader()
+    model_kwargs = dict(
+        enforce_eager=True,
+        gpu_memory_utilization=0.3,
+        max_model_len=128,
+        max_num_seqs=1,
+        enable_prefix_caching=False,
+    )
+    prompts = ["The capital of France is"]
+
+    try:
+        with vllm_runner("Qwen/Qwen3.5-0.8B", **model_kwargs) as vllm_model:
+            expected = vllm_model.generate_greedy(prompts, max_tokens=8)
+
+        with vllm_runner(
+            "Qwen/Qwen3.5-0.8B",
+            cpu_offload_gb=1,
+            cpu_offload_params={"A_log", "dt_bias"},
+            **model_kwargs,
+        ) as vllm_model:
+            engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
+            model_runner = engine_core.model_executor.driver_worker.worker.model_runner
+
+            params = [
+                p
+                for name, p in model_runner.get_model().named_parameters()
+                if name.endswith((".A_log", ".dt_bias"))
+            ]
+            assert params
+            assert all(p.device.type == "cpu" for p in params)
+
+            assert vllm_model.generate_greedy(prompts, max_tokens=8) == expected
+    finally:
+        set_offloader(original_offloader)
+        envs.disable_envs_cache()
