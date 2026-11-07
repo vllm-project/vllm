@@ -1546,7 +1546,7 @@ presets:
     variants: [mxfp4]
     workload: "Agentic (InferenceX AgentX)"
     description: "One TP4 prefill engine with a host-DRAM KV tier feeds two TP4 decode engines on one node over MoRI-IO RDMA WRITE, behind vllm-router with consistent-hash routing (12 GPUs). Seven-token DSpark, NVFP4 KV and indexer K caches, and the nightly's opt-in MiniMax-M3.1 ROCm switches on both roles."
-    source: { label: "ROCm/ATOM MoRI-IO 1P2D", href: "https://github.com/ROCm/ATOM/blob/d9e56bbd8615eb48dcf014fb7a54a1e25f8fc9ae/.github/benchmark/models_atomesh.yaml", key: "m31-flash-vllm-moriio-rdma-1p2d-n4fab", revision: d9e56bbd8615eb48dcf014fb7a54a1e25f8fc9ae }
+    source: { label: "ROCm/ATOM MoRI-IO 1P2D", href: "https://github.com/ROCm/ATOM/blob/7e0e199ffd45e2c5cb451e171ac2a05a1e973420/.github/benchmark/models_atomesh.yaml", key: "m31-flash-vllm-moriio-rdma-1p2d-s65822", revision: 7e0e199ffd45e2c5cb451e171ac2a05a1e973420 }
     image: "vllm/vllm-openai-rocm:nightly-4fab5a07475822c6eaa971dceb2e2220d0446808@sha256:6f126f27a3b58959da3c16076248fc99eb31e26d0a3ae9f8563bda7317d6a7e6"
     select:
       pd_connector: moriio
@@ -1671,8 +1671,9 @@ presets:
       A 1P2D AgentX lane on 12 MI355X GPUs, on the Quark MXFP4 checkpoint: one TP4 prefill
       engine (GPUs 0-3 of its node) and two TP4 decode engines (GPUs 0-3 and 4-7 of a second
       node), with KV moved from prefill to decode by MoRI-IO RDMA WRITE. Measured in
-      [ROCm/ATOM](https://github.com/ROCm/ATOM/blob/d9e56bbd8615eb48dcf014fb7a54a1e25f8fc9ae/.github/benchmark/models_atomesh.yaml)
-      (`m31-flash-vllm-moriio-rdma-1p2d-n4fab-*`) with agentx-harness 1.0.12 on the
+      [ROCm/ATOM](https://github.com/ROCm/ATOM/blob/7e0e199ffd45e2c5cb451e171ac2a05a1e973420/.github/benchmark/models_atomesh.yaml)
+      (`m31-flash-vllm-moriio-rdma-1p2d-s65822-*`, and `-n4fab-c96-dcap16-cpu19-nodbo` for
+      concurrency 96) with agentx-harness 1.0.12 on the
       `semianalysis_cc_traces_weka_062126` traces, 3600 s per point. Throughput runs replaced
       block verification with synthetic rejection at the golden DSpark acceptance length
       (4.04); the commands above keep block verification.
@@ -1706,20 +1707,18 @@ presets:
 
       | Concurrency | Decode cap | Total tokens/s per GPU | Interactivity p50 / p90 (tokens/s/user) | TTFT p90 | E2E latency p90 |
       | ---: | ---: | ---: | ---: | ---: | ---: |
-      | 40 | 10 | 24,876 | 313.5 / 243.3 | 0.8 s | 9.7 s |
-      | 48 | 12 | 29,615 | 278.0 / 230.4 | 1.2 s | 9.8 s |
-      | 64 | 16 | 39,676 | 231.3 / 197.6 | 2.3 s | 11.8 s |
+      | 40 | 10 | 24,884 | 312.7 / 241.0 | 0.8 s | 9.8 s |
+      | 48 | 12 | 29,553 | 277.3 / 229.9 | 1.1 s | 9.8 s |
+      | 64 | 16 | 39,616 | 231.5 / 200.4 | 2.4 s | 11.6 s |
       | 96 | 16 | 46,295 | 200.7 / 189.0 | 7.1 s | 16.4 s |
-      | 112 | 20 | 51,131 | 186.5 / 168.6 | 7.7 s | 17.2 s |
-      | 128 | 24 | 53,400 | 176.8 / 160.0 | 10.3 s | 20.6 s |
+      | 112 | 20 | 50,561 | 187.0 / 168.4 | 9.6 s | 18.4 s |
+      | 128 | 24 | 52,889 | 178.4 / 159.7 | 11.3 s | 21.5 s |
 
-      Single runs. Concurrency 96 ran exactly this command. The other points also ran
-      dual-batch overlap on prefill (`--enable-dbo --dbo-prefill-token-threshold 16384
-      --dbo-decode-token-threshold 32768`, with
-      [vllm-project/vllm#63483](https://github.com/vllm-project/vllm/pull/63483)), which at
-      concurrency 96 measured the same as without it (46,057 tokens/s per GPU at 189.8 p90,
-      TTFT p90 8.1 s), so the preset leaves it off. Concurrency 64 also ran
-      `VLLM_USE_BREAKABLE_CUDAGRAPH=1` on decode.
+      Single runs of the rendered commands. Dual-batch overlap on prefill
+      (`--enable-dbo --dbo-prefill-token-threshold 16384 --dbo-decode-token-threshold 32768`,
+      [vllm-project/vllm#63483](https://github.com/vllm-project/vllm/pull/63483)) gave the
+      same throughput and interactivity at every point and lowered TTFT p90 by 1-2 s at 112
+      and 128, so the preset leaves it off.
 
       A worker can fail at startup with mori's `tcp.cpp` "Address already in use": MoRI-IO
       picks its RDMA port with a probe-and-release, and another process on a busy node can
