@@ -4,11 +4,11 @@
 
 import pytest
 import regex as re
+from transformers import MiniMaxM3VLConfig
 
 from vllm.config import ModelConfig
 from vllm.models.minimax_m3.amd.model import _should_skip_index_topk
 from vllm.platforms import current_platform
-from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3Config
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="MiniMax-M3 AMD model"
@@ -18,8 +18,11 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def checkpoint(tmp_path_factory):
     path = tmp_path_factory.mktemp("minimax_m3")
-    MiniMaxM3Config(
-        architectures=["MiniMaxM3SparseForConditionalGeneration"]
+    MiniMaxM3VLConfig(
+        architectures=["MiniMaxM3SparseForConditionalGeneration"],
+        text_config={
+            "layer_types": ["full_attention"] * 3 + ["minimax_m3_sparse"] * 57
+        },
     ).save_pretrained(path)
     return str(path)
 
