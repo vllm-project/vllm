@@ -1251,3 +1251,66 @@ def test_softcap_does_not_overflow_on_large_scores() -> None:
     ref = soft_cap * torch.tanh(scores / soft_cap)
     assert torch.isfinite(out).all(), out
     torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("causal_mode", ["causal", "noncausal", "mixed"])
+@pytest.mark.parametrize("gqa", [1, 3, 5, 7])
+@torch.inference_mode()
+def test_sliding_window_preserves_values_for_later_query_rows(dtype, causal_mode, gqa):
+    """Each query averages exactly its visible consecutive key positions."""
+    device = DEVICE_TYPE
+    query_len, context_len, head_size, block_size = 19, 21, 64, 16
+    kv_len, num_kv_heads = context_len + query_len, 2
+    num_heads = num_kv_heads * gqa
+    batch = 2 if causal_mode == "mixed" else 1
+    blocks = triton.cdiv(kv_len, block_size)
+    query = torch.zeros(
+        batch * query_len, num_heads, head_size, device=device, dtype=dtype
+    )
+    key = torch.zeros(
+        batch * blocks, block_size, num_kv_heads, head_size, device=device, dtype=dtype
+    )
+    value = torch.arange(blocks * block_size, device=device, dtype=dtype)
+    value = (
+        value.view(1, blocks, block_size, 1, 1)
+        .expand(batch, blocks, block_size, num_kv_heads, head_size)
+        .reshape_as(key)
+        .contiguous()
+    )
+    output = torch.empty_like(query)
+    causal = (
+        torch.tensor([True, False], device=device)
+        if causal_mode == "mixed"
+        else causal_mode == "causal"
+    )
+    unified_attention(
+        q=query,
+        k=key,
+        v=value,
+        out=output,
+        cu_seqlens_q=torch.arange(batch + 1, device=device, dtype=torch.int32)
+        * query_len,
+        max_seqlen_q=query_len,
+        seqused_k=torch.full((batch,), kv_len, device=device, dtype=torch.int32),
+        max_seqlen_k=kv_len,
+        softmax_scale=head_size**-0.5,
+        causal=causal,
+        window_size=(3, 3),
+        block_table=torch.arange(batch * blocks, device=device, dtype=torch.int32).view(
+            batch, blocks
+        ),
+        softcap=0.0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+    )
+    position = context_len + torch.arange(query_len, device=device)
+    first = position - 3
+    last = (position + 3).clamp_max(kv_len - 1)
+    means = []
+    for i in range(batch):
+        is_causal = causal_mode == "causal" or (causal_mode == "mixed" and i == 0)
+        means.append((first + (position if is_causal else last)) / 2)
+    expected = torch.cat(means).to(dtype)[:, None, None].expand_as(output)
+    torch.testing.assert_close(output, expected, atol=0, rtol=0)

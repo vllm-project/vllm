@@ -56,6 +56,13 @@ llm = LLM(
 
 ## Backend Selection Behavior
 
+### Triton Sliding-Window Attention
+
+With `TRITON_ATTN`, a model's ordinary non-causal sliding-window attention
+includes visible keys on both sides of each query, including later queries
+within the same kernel tile. The window and causal mode come from the model's
+attention configuration; no additional option is needed.
+
 ### Triton/FlashAttention Composite
 
 On Hopper, `TRITON_FLASH_ATTN` is preferred for compatible multimodal-prefix
