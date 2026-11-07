@@ -486,6 +486,7 @@ def _attn_packed(
         SLIDING_WINDOW,
         USE_MM_PREFIX,
         IS_3D,
+        NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS_PER_SEQ,
     )
 
     # Tile loop.  Per-tile: load packed KV + scales, dequantize into
