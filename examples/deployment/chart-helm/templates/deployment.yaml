@@ -11,7 +11,7 @@ spec:
   selector:
     matchLabels:
       {{- include "chart.labels" . | nindent 6 }}
-  progressDeadlineSeconds: 1200
+  progressDeadlineSeconds: {{ .Values.progressDeadlineSeconds }}
   template:
     metadata:
       labels:
