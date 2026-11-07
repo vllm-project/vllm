@@ -73,6 +73,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import (
+    _in_own_storage,
     is_weights_pre_processed,
     replace_parameter,
     retire_parameter,
@@ -528,7 +529,10 @@ class Fp8DequantLinearMethod(LinearMethodBase):
                 weight[i * block_n : i * block_n + rows.shape[0]] = (
                     rows * s[:, : rows.shape[1]]
                 )
-            _into_own_storage(layer, weight)
+            # into the loaded storage (allocated BF16-sized): one allocation
+            layer.weight.data = _in_own_storage(
+                layer.weight, weight, whole_storage=True
+            )
         for name, _ in layer.named_parameters(recurse=False):
             if name not in ("weight", "bias"):
                 retire_parameter(layer, name)
@@ -553,16 +557,6 @@ def _view_as(param: torch.Tensor, dtype: torch.dtype) -> torch.Tensor | None:
     ):
         return storage_view(storage, 0, param.shape, param.stride(), dtype)
     return None
-
-
-def _into_own_storage(layer: torch.nn.Module, weight: torch.Tensor) -> None:
-    """Make the dequantized ``weight`` the layer's weight, in the loaded FP8
-    weight's storage (allocated BF16-sized): one allocation in every mode."""
-    view = _view_as(layer.weight, weight.dtype)
-    if view is None:
-        replace_parameter(layer, "weight", weight)
-    else:
-        layer.weight.data = view.copy_(weight)
 
 
 def _load_weight_in_sent_dtype(layer: torch.nn.Module) -> None:

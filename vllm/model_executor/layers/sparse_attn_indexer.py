@@ -1694,22 +1694,16 @@ def init_indexer_wk_weights_proj(
 
 def fuse_indexer_wk_weights_proj(indexer: nn.Module) -> None:
     """Fill the fused BF16 ``wk_weights_proj`` weight in place (captured CUDA
-    graphs keep its address) from ``wk`` and ``weights_proj``. A part already
-    in its rows is left alone; one in its own storage (dequantized or
-    restaged outside direct reload) is copied there and viewed from there."""
-    fused = indexer.wk_weights_proj.weight
+    graphs keep its address) from ``wk`` and ``weights_proj``, copying only a
+    part that is not already a view of its rows (e.g. dots3's own
+    ``weights_proj``)."""
+    proj = indexer.wk_weights_proj
+    if proj.weight.is_meta:  # weight cache IPC load: only parameters arrive
+        proj.weight = torch.empty_like(proj.weight, device=indexer.wk.weight.device)
     row = 0
     for layer in (indexer.wk, indexer.weights_proj):
-        part = get_and_maybe_dequant_weights(layer, out_dtype=fused.dtype)
-        rows = fused[row : row + part.shape[0]]
+        part = get_and_maybe_dequant_weights(layer, out_dtype=proj.weight.dtype)
+        rows = proj.weight[row : row + part.shape[0]]
         row += part.shape[0]
-        if part.data_ptr() == rows.data_ptr() and part.stride() == rows.stride():
-            continue
-        rows.copy_(part)
-        weight = layer.weight
-        if (weight.shape, weight.stride(), weight.dtype) == (
-            rows.shape,
-            rows.stride(),
-            rows.dtype,
-        ):
-            weight.data = rows
+        if part.data_ptr() != rows.data_ptr() or part.stride() != rows.stride():
+            rows.copy_(part)

@@ -24,14 +24,12 @@ from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     dequantized_fp8_config,
 )
-from vllm.model_executor.model_loader.reload.direct import (
-    begin_direct_reload,
-    finish_direct_reload,
-)
 from vllm.model_executor.model_loader.reload.layerwise import (
-    finalize_layerwise_reload,
-    initialize_layerwise_reload,
     record_metadata_for_reloading,
+)
+from vllm.model_executor.model_loader.reload.lifecycle import (
+    finish_reload,
+    start_reload,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.utils import get_live_param
@@ -80,17 +78,11 @@ def _reload(model, ckpt, mode, model_config, monkeypatch, reverse=False):
     """Send every tensor in its own ``load_weights`` call, as RL updates do
     (``reverse``: weights before their scales)."""
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
-    if mode == "direct":
-        begin_direct_reload(model)
-    else:
-        initialize_layerwise_reload(model)
+    start_reload(model)
     items = list(ckpt.items())
     for item in reversed(items) if reverse else items:
         model.load_weights([item])
-    if mode == "direct":
-        finish_direct_reload(model, model_config, _DEVICE)
-    else:
-        finalize_layerwise_reload(model, model_config)
+    finish_reload(model, model_config, _DEVICE)
 
 
 class _MlaModel(torch.nn.Module):
@@ -373,9 +365,10 @@ def _glm5_mla_params() -> dict:
     }
 
 
-def test_glm5next_attn_loader_accepts_quark_weight_scale():
-    # Quark names the block scale ``weight_scale``; the projection's scale
-    # parameter is ``weight_scale_inv``.
+def test_glm5next_attn_loader_renames_weight_scale():
+    # Some exporters name the block scale ``weight_scale``; under Fp8Config
+    # the projection's scale parameter is ``weight_scale_inv`` (Quark-configured
+    # models are not covered: their projections are built BF16).
     from transformers import Glm5NextTextConfig
 
     from vllm.models.glm5next.common.model import _mla_proj_checkpoint_tensor
@@ -430,23 +423,6 @@ def test_indexer_wk_stays_bf16_under_online_quantization(model_config):
     torch.testing.assert_close(fused, expected, rtol=0, atol=0)
 
 
-def test_indexer_in_place_reload_refreshes_fused_weight(model_config):
-    """An in-place reload of the runtime weights (no post-load processing)
-    refills the derived fused weight through `refresh_derived_weights`."""
-    from vllm.model_executor.model_loader.weight_utils import refresh_derived_weights
-
-    model = _indexer_cold_start(
-        _indexer_checkpoint(10, "block")[0], "block", model_config
-    )
-    _, expected = _indexer_checkpoint(11, "bf16")
-    model.indexer.wk.weight.data.copy_(expected[:_WK])
-    model.indexer.weights_proj.weight.data.copy_(expected[_WK:])
-    refresh_derived_weights(model)
-    torch.testing.assert_close(
-        model.indexer.wk_weights_proj.weight, expected, rtol=0, atol=0
-    )
-
-
 def test_layerwise_metadata_does_not_keep_layers_alive(model_config):
     """`wk`'s weight loader must not pin the layer through the layerwise
     reload metadata (a WeakKeyDictionary keyed by the layer)."""
@@ -459,3 +435,16 @@ def test_layerwise_metadata_does_not_keep_layers_alive(model_config):
     del model
     gc.collect()
     assert wk() is None
+
+
+def test_indexer_fuse_allocates_weight_left_on_meta(model_config):
+    """The weight cache IPC loader builds the model on the meta device and
+    hands over parameters only: the fill allocates the fused weight."""
+    ckpt, expected = _indexer_checkpoint(10, "block")
+    model = _indexer_cold_start(ckpt, "block", model_config)
+    indexer = model.indexer
+    indexer.wk_weights_proj.weight = indexer.wk_weights_proj.weight.to("meta")
+    indexer.process_weights_after_loading()
+    fused = indexer.wk_weights_proj.weight
+    assert fused.device == _DEVICE
+    torch.testing.assert_close(fused, expected, rtol=0, atol=0)
