@@ -39,6 +39,7 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
+SubGPUSchedule = Literal["subgpu", "dbo"]
 EPLBCommunicatorBackend = Literal[
     "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl", "symm_mem"
 ]
@@ -288,6 +289,29 @@ class ParallelConfig:
     prefills. If the number of tokens in the request is greater than this
     threshold, microbatching will be used. Otherwise, the request will be
     processed in a single batch."""
+
+    subgpu_pipelining: bool = False
+    """Enable SubGPU pipelining (experimental, Model Runner V2 only). Each batch
+    above the DBO token thresholds is split into two micro-batches and the SMs
+    into two CUDA green-context pools: the attention of one micro-batch runs on
+    the attention pool while the rest of the layer of the other runs on the
+    rest pool. Uses the dual batch overlap runtime, so it is mutually exclusive
+    with `enable_dbo`. With expert parallelism the all-to-all backend must be
+    `deepep_low_latency`, `deepep_v2` or `nixl_ep`. Pays off only with FULL
+    CUDA graphs, which need CUDA 13.4 or later to capture green-context
+    streams."""
+    subgpu_attn_sms: int = Field(default=64, ge=8)
+    """Number of SMs in the attention pool. One of `subgpu_attn_sms` and
+    `subgpu_rest_sms` must be a multiple of 8."""
+    subgpu_rest_sms: int = Field(default=84, ge=8)
+    """Number of SMs in the rest-of-layer pool."""
+    subgpu_rest_streams: int = Field(default=2, ge=1, le=2)
+    """Number of streams in the rest pool. With 2, each micro-batch has its own
+    stream, so one micro-batch's all-to-all does not block the other's kernels.
+    """
+    subgpu_schedule: SubGPUSchedule = "subgpu"
+    """`subgpu` runs the two-pool schedule. `dbo` runs the same micro-batching
+    on the whole GPU without pools or stage switches, as a baseline."""
 
     disable_nccl_for_dp_synchronization: bool | None = None
     """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py 
@@ -718,11 +742,13 @@ class ParallelConfig:
 
     @property
     def use_ubatching(self) -> bool:
-        return self.enable_dbo or self.ubatch_size > 1
+        return self.enable_dbo or self.ubatch_size > 1 or self.subgpu_pipelining
 
     @property
     def num_ubatches(self) -> int:
-        return 2 if self.enable_dbo else self.ubatch_size
+        if self.enable_dbo or self.subgpu_pipelining:
+            return 2
+        return self.ubatch_size
 
     @property
     def local_engines_only(self) -> bool:
@@ -1278,6 +1304,18 @@ class ParallelConfig:
                 "dbo_decode_token_threshold and dbo_prefill_token_threshold must "
                 f"be at least the number of microbatches ({self.num_ubatches})."
             )
+
+        if self.subgpu_pipelining:
+            if self.enable_dbo:
+                raise ValueError(
+                    "subgpu_pipelining and enable_dbo are mutually exclusive."
+                )
+            if self.subgpu_attn_sms % 8 and self.subgpu_rest_sms % 8:
+                raise ValueError(
+                    "One of subgpu_attn_sms and subgpu_rest_sms must be a "
+                    f"multiple of 8, got {self.subgpu_attn_sms} and "
+                    f"{self.subgpu_rest_sms}."
+                )
 
         return self
 

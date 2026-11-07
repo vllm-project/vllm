@@ -300,9 +300,22 @@ def maybe_make_prepare_finalize(
         handle = all2all_manager.get_handle(all_to_all_args)
         vllm_config = get_current_vllm_config()
         use_cudagraph = not vllm_config.model_config.enforce_eager
+        # One buffer per micro-batch (DBO, SubGPU pipelining): the
+        # prepare/finalize picks the current micro-batch's buffer.
+        parallel_config = vllm_config.parallel_config
+        num_ubatches = (
+            max(2, parallel_config.ubatch_size)
+            if parallel_config.use_ubatching
+            else 1
+        )
+        buffers = [handle] + [
+            all2all_manager.get_handle(dict(all_to_all_args, ubatch_idx=i))
+            for i in range(1, num_ubatches)
+        ]
 
         prepare_finalize = DeepEPV2PrepareAndFinalize(
             buffer=handle,
+            buffers=buffers,
             num_dispatchers=all2all_manager.world_size,
             dp_size=all2all_manager.dp_world_size,
             rank_expert_offset=all2all_manager.rank * moe.num_local_experts,

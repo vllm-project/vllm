@@ -126,7 +126,7 @@ class Step5MegaMoEExperts(nn.Module):
             raise ValueError("DeepGEMM MegaMoE requires expert parallelism")
         if parallel.enable_eplb or parallel.eplb_config.num_redundant_experts:
             raise ValueError("Step5 MegaMoE does not yet support EPLB")
-        if parallel.enable_dbo or getattr(parallel, "ubatch_size", 1) > 1:
+        if parallel.use_ubatching:
             raise ValueError("Shared MegaMoE buffers require serial microbatches")
         if hidden_size % 128 or intermediate_size % 128:
             raise ValueError("MegaMoE dimensions must be multiples of 128")
