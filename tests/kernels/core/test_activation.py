@@ -279,8 +279,10 @@ def test_silu_and_mul_with_clamp(
         # forward_hip is always dispatched; the alpha/beta gate is checked
         # inside it at call time rather than picked at construction time, so
         # verify the actual routing by spying on the two candidate methods.
+        # The AITER kernel has its own tests below.
         assert layer._forward_method == layer.forward_hip
         with (
+            patch.object(layer, "_aiter_applies", return_value=False),
             patch.object(layer, "forward_cuda", wraps=layer.forward_cuda) as cuda_spy,
             patch.object(
                 layer, "forward_native", wraps=layer.forward_native
@@ -564,4 +566,97 @@ def test_humming_activation_matches_framework(
         expected,
         atol=get_default_atol(expected),
         rtol=get_default_rtol(expected),
+    )
+
+
+@pytest.mark.parametrize(
+    ("alpha", "beta", "d", "aiter_enabled", "expect_fused"),
+    [
+        (1.0, 0.0, 128, True, True),
+        (1.0, 0.0, 128, False, False),
+        (1.1, 0.0, 128, True, False),
+        (1.0, 1.0, 128, True, False),
+        (1.0, 0.0, 64, True, False),
+        (1.0, 0.0, 192, True, False),
+    ],
+)
+def test_rocm_aiter_clamped_swiglu_gates(
+    default_vllm_config,
+    monkeypatch,
+    alpha: float,
+    beta: float,
+    d: int,
+    aiter_enabled: bool,
+    expect_fused: bool,
+) -> None:
+    """forward_hip takes AITER's fused kernel only where it computes the same
+    function, and otherwise keeps the existing ROCm routing."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    layer = SiluAndMulWithClamp(
+        swiglu_limit=7.0, alpha=alpha, beta=beta, compile_native=False
+    )
+    x = torch.randn(2, 3, 2 * d)
+    calls = []
+
+    def fused(x_2d: torch.Tensor, swiglu_limit: float) -> torch.Tensor:
+        calls.append((x_2d.shape, swiglu_limit))
+        return layer.forward_native(x_2d)
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: aiter_enabled)
+    monkeypatch.setattr(rocm_aiter_ops, "clamp_act_mul", fused)
+    # The _C kernel needs a GPU; only the routing matters here.
+    monkeypatch.setattr(layer, "forward_cuda", layer.forward_native)
+
+    torch.testing.assert_close(layer.forward_hip(x), layer.forward_native(x))
+    assert calls == ([(torch.Size([6, 2 * d]), 7.0)] if expect_fused else [])
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm/AITER only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("d", [128, 512, 3072])
+@torch.inference_mode()
+def test_rocm_aiter_clamped_swiglu_numerics_and_graph(
+    default_vllm_config,
+    monkeypatch,
+    d: int,
+    dtype: torch.dtype,
+) -> None:
+    """AITER's fused clamped SwiGLU matches the native reference, also when
+    replayed from a CUDA graph."""
+    pytest.importorskip("aiter.ops.triton.fusions.fused_clamp_act_mul")
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: True)
+    rocm_aiter_ops.register_ops_once()
+
+    limit = 7.0
+    layer = SiluAndMulWithClamp(limit, compile_native=False)
+    x = torch.randn(3, 5, 2 * d, dtype=dtype, device="cuda") * (limit * 2)
+    assert layer._aiter_applies(x)
+    rtol = 2e-3 if dtype == torch.float16 else 2e-2
+
+    out = layer.forward_hip(x)
+    torch.testing.assert_close(
+        out, layer.forward_native(x), atol=get_default_atol(out), rtol=rtol
+    )
+    # A row-strided view, as a slice of a wider projection output.
+    wide = torch.randn(15, 2 * d + 64, dtype=dtype, device="cuda") * (limit * 2)
+    view = wide[:, : 2 * d]
+    out = layer.forward_hip(view)
+    torch.testing.assert_close(
+        out, layer.forward_native(view), atol=get_default_atol(out), rtol=rtol
+    )
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_out = layer.forward_hip(x)
+    x.normal_().mul_(limit * 2)
+    graph.replay()
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(
+        graph_out,
+        layer.forward_native(x),
+        atol=get_default_atol(graph_out),
+        rtol=rtol,
     )
