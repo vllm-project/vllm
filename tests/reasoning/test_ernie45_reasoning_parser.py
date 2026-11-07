@@ -122,3 +122,54 @@ def test_reasoning(
 
     assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
+
+
+# A streaming delta can carry <think> together with following tokens (for
+# example under speculative decoding). The marker must be stripped the same
+# way the non-streaming path strips it.
+MULTI_TOKEN_DELTAS = [
+    pytest.param(
+        ["<think>abc", "</think>", "def"],
+        id="start_marker_with_reasoning",
+    ),
+    pytest.param(
+        ["<think>abc</think>def"],
+        id="start_and_end_marker_in_one_delta",
+    ),
+]
+
+
+@pytest.mark.parametrize("deltas", MULTI_TOKEN_DELTAS)
+def test_streaming_strips_start_marker_from_multi_token_delta(
+    deltas: list[str],
+    ernie45_tokenizer,
+):
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+
+    expected = run_reasoning_extraction(
+        parser_cls(ernie45_tokenizer), deltas, streaming=False
+    )
+    assert expected == ("abc", "def")
+
+    # Drive the streaming path by hand: the shared helper rejects a delta that
+    # carries both reasoning and content, which the one-delta case produces.
+    parser = parser_cls(ernie45_tokenizer)
+    reasoning_parts: list[str] = []
+    content_parts: list[str] = []
+    previous_text = ""
+    previous_ids: list[int] = []
+    for delta in deltas:
+        delta_ids = [parser.vocab[tok] for tok in ernie45_tokenizer.tokenize(delta)]
+        current_text = previous_text + delta
+        current_ids = previous_ids + delta_ids
+        message = parser.extract_reasoning_streaming(
+            previous_text, current_text, delta, previous_ids, current_ids, delta_ids
+        )
+        if message is not None:
+            if message.reasoning:
+                reasoning_parts.append(message.reasoning)
+            if message.content:
+                content_parts.append(message.content)
+        previous_text, previous_ids = current_text, current_ids
+
+    assert ("".join(reasoning_parts), "".join(content_parts)) == expected
