@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import argparse
+import io
+
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.cli.openai import ChatCommand
 
 # any model with a chat template defined in tokenizer_config should work here
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -34,6 +38,39 @@ def server(default_server_args):
 async def client(server):
     async with server.get_async_client() as async_client:
         yield async_client
+
+
+@pytest.fixture(scope="module")
+def cli_server():
+    with RemoteOpenAIServer(
+        "HuggingFaceTB/SmolLM2-135M-Instruct",
+        [
+            "--max-model-len",
+            "512",
+            "--max-num-seqs",
+            "4",
+            "--gpu-memory-utilization",
+            "0.1",
+            "--enforce-eager",
+        ],
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.parametrize("flag", ["-i", "--interactive"])
+def test_chat_cli_recovers_from_context_overflow(cli_server, monkeypatch, capsys, flag):
+    """A rejected prompt must still allow local recovery commands."""
+    parser = ChatCommand.add_cli_args(argparse.ArgumentParser())
+    args = parser.parse_args(["--url", cli_server.url_for("v1"), flag])
+    monkeypatch.setattr("sys.stdin", io.StringIO("hello " * 4096 + "\n/clear\n/exit\n"))
+
+    ChatCommand.cmd(args)
+
+    captured = capsys.readouterr()
+    assert "Error code: 400" in captured.err
+    assert "context length" in captured.err
+    assert "Previous conversation is unchanged" in captured.err
+    assert "Conversation cleared; system prompt preserved." in captured.out
 
 
 @pytest.mark.asyncio
