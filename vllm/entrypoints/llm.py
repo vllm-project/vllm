@@ -843,7 +843,9 @@ class LLM(
             reset_running_requests, reset_connector
         )
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+    def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ):
         """Put the engine to sleep. The engine should not process any requests.
         The caller should guarantee that no requests are being processed
         during the sleep period, before `wake_up` is called.
@@ -865,17 +867,25 @@ class LLM(
                            CPU memory pressure.
             mode: How to handle any existing requests, can be "abort", "wait",
                 or "keep".
+            reset_connector: Also reset the KV connector's cache, such as
+                blocks offloaded to CPU. Set ``False`` only if the weights do
+                not change before ``wake_up``. Ignored at level 0.
 
         """
-        self.llm_engine.sleep(level=level, mode=mode)
+        self.llm_engine.sleep(level=level, mode=mode, reset_connector=reset_connector)
 
-    def release_kv_cache_memory(self) -> None:
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         """Release the GPU physical memory backing the KV cache.
 
         Requires a completed ``sleep(level=0)`` and resident executor memory.
         Restore with ``wake_up(tags=["kv_cache"])``; kept requests are recomputed.
+
+        Args:
+            reset_connector: Also reset the KV connector's cache; see
+                [sleep][vllm.LLM.sleep].
+
         """
-        self.llm_engine.release_kv_cache_memory()
+        self.llm_engine.release_kv_cache_memory(reset_connector)
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
         """Wake up the engine from sleep mode. See the [sleep][vllm.LLM.sleep]

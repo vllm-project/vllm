@@ -200,12 +200,14 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def sleep(self, level: int = 1, mode: "PauseMode" = "abort") -> None:
+    async def sleep(
+        self, level: int = 1, mode: "PauseMode" = "abort", reset_connector: bool = True
+    ) -> None:
         """Sleep the engine."""
         ...
 
     @abstractmethod
-    async def release_kv_cache_memory(self) -> None:
+    async def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         """Discard KV cache physical GPU memory. Requires a completed pause."""
         ...
 

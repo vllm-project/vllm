@@ -3335,16 +3335,19 @@ async fn sleep_and_wake_calls_record_engine_sleep_state() {
     .await;
 
     let mut series = vec![("connected", engine_sleep_state_series(MODEL))];
-    client.sleep(SleepLevel::OffloadWeights, PauseMode::default()).await.unwrap();
+    client
+        .sleep(SleepLevel::OffloadWeights, PauseMode::default(), true)
+        .await
+        .unwrap();
     series.push(("sleep level 1", engine_sleep_state_series(MODEL)));
     assert!(!client.wake_up(Some(vec!["weights".to_owned()])).await.unwrap());
     series.push(("partial wake", engine_sleep_state_series(MODEL)));
     assert!(client.wake_up(None).await.unwrap());
     series.push(("full wake", engine_sleep_state_series(MODEL)));
-    client.release_kv_cache_memory().await.unwrap();
+    client.release_kv_cache_memory(true).await.unwrap();
     series.push(("release kv cache", engine_sleep_state_series(MODEL)));
     assert!(client.wake_up(None).await.unwrap());
-    client.sleep(SleepLevel::DiscardAll, PauseMode::default()).await.unwrap();
+    client.sleep(SleepLevel::DiscardAll, PauseMode::default(), true).await.unwrap();
     series.push(("sleep level 2", engine_sleep_state_series(MODEL)));
 
     expect_test::expect![[r#"
