@@ -29,6 +29,17 @@ We currently support the following OpenAI APIs:
 
 - Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)
 
+When the final `assistant` message contains non-empty text and no `tool_use`
+blocks, `/v1/messages` continues that message instead of starting another
+assistant turn. For example, a final
+`{"role": "assistant", "content": "The answer is ("}` lets the model complete
+the supplied prefix. The response contains only the newly generated text,
+including when streaming. `/v1/messages/count_tokens` counts the same continuation
+prompt. This requires a model chat template that supports continuing the final
+message. Final assistant messages containing `tool_use` blocks or no non-empty
+text (including messages with only `thinking` blocks) keep the normal behavior:
+the message is closed and a new assistant turn is started.
+
 ## Cohere APIs
 
 - [Cohere Embed API](../../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
