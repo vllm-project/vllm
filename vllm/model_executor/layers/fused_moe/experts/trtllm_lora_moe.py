@@ -623,9 +623,12 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        # DP gathers tokens, but the no-LoRA fast path reads the local batch.
+        # Same support matrix as TrtLlmBf16LoRAExperts: the DP dispatch is
+        # handled by _batch_has_no_lora() and the all-slot MoE-LoRA kernels.
         p = moe_parallel_config
-        return p.dp_size == 1 and not p.use_all2all_kernels and not p.enable_eplb
+        return (
+            not p.use_all2all_kernels or p.use_ag_rs_all2all_kernels
+        ) and not p.enable_eplb
 
     def workspace_shapes(
         self,
