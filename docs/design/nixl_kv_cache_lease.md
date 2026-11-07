@@ -99,6 +99,33 @@ The heartbeat is deferred to the next step once the handshake completes --- the 
 
 **On P (receiving):** In `_get_new_notifs()`, P's worker checks incoming NIXL notifications. Messages starting with `"HB:"` are routed to `_handle_heartbeat()`, which extends the lease expiry for each referenced request using `max(old_expiry, now + lease_extension)`. This ensures leases are never accidentally shortened.
 
+### Pull transfer completion
+
+Every READ carries a native NIXL completion notification encoded as
+`request_id:expected_readers:transfers_from_this_reader`, so a reader sends one
+notification per transfer it issues, not one per request: a read split across
+memory types (a mixed DRAM/device read posts one READ per nonempty slice)
+produces one notification per READ. The `transfers_from_this_reader` field
+declares, in every notification from that reader, how many transfers it will
+issue for that producer. NIXL identifies the sending agent, so P counts
+notifications down separately for each reader and retires a reader only after
+its declared count has arrived. These counts can differ between readers: a
+reader with a single transfer declares one, while a reader with a fully local
+cache hit posts no READ at all and instead sends one immediate standalone
+acknowledgement with a transfer count of zero, which retires it right away.
+
+Topology determines how many readers (`expected_readers`) must finish before P
+may release the request's blocks. A mixed DRAM/device read attaches the same
+declared count to both transfer handles, so P can release its blocks only after
+both complete and every other expected reader has finished. Notification
+delivery does not require D to poll completion. If a split read only partially
+posts or completes, its missing notification keeps P's blocks retained until
+lease expiry; successful siblings do not authorize an early release.
+
+This wire format requires matching NIXL connector protocol versions on P and D.
+It does not establish pause/resume safety for queued reads, lease renewal, local
+receive postprocessing, or cache invalidation.
+
 ## Bidirectional KV Transfer
 
 For multi-turn conversations, [bidirectional KV transfer](../features/disagg_prefill.md) allows D to cache KV blocks that P can pull from on subsequent turns. Since the timing of the next conversational turn is **client-dependent** (not controlled by the system), the heartbeat-based lease mechanism does not apply here. Instead, a separate `decoder_kv_blocks_ttl` (default 480s) provides a simple fixed timeout for blocks cached on D. If the client takes too long to continue the conversation, the blocks expire. D communicates back the expiry time so P can know when blocks are expired and recompute. Because the deadline is a `perf_counter` value produced on D and the two engines run in separate processes (with unrelated clocks), P estimates the clock offset to D from the handshake round-trip and applies it before comparing the deadline against its own `perf_counter`. Future work may extend a symmetric heartbeat mechanism to this case.
