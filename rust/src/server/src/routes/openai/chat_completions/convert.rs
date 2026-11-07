@@ -130,11 +130,11 @@ pub(super) fn prepare_chat_request(
     let is_named_tool_choice = matches!(&request.tool_choice, Some(ToolChoice::Function { .. }));
 
     // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's
-    // behavior.
+    // behavior. Python's beam search computes none, so echo does not ask for them.
     let top_logprobs = request.top_logprobs.unwrap_or(0);
     let prompt_logprobs = request
         .prompt_logprobs
-        .or((request.echo && !request.stream).then_some(top_logprobs));
+        .or((request.echo && !request.stream && !request.use_beam_search).then_some(top_logprobs));
     let include_prompt_logprobs = prompt_logprobs.is_some();
     let logprob_token_ids = request.logprob_token_ids.filter(|ids| !ids.is_empty());
     let logprobs = (request.logprobs && logprob_token_ids.is_none()).then_some(top_logprobs);

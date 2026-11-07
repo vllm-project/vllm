@@ -125,8 +125,11 @@ impl BeamSelector {
             let Some(position) = position else {
                 continue;
             };
+            // Like Python, only the sampled token and the top `2 * beam_width`
+            // are candidates; further entries are for the requested logprobs.
             // The sampled token may repeat among the top-k.
-            for entry in position.entries.iter().unique_by(|entry| entry.token_id) {
+            let entries = position.entries.iter().take(2 * self.beam_width + 1);
+            for entry in entries.unique_by(|entry| entry.token_id) {
                 let cum_logprob = beam.cum_logprob + f64::from(entry.logprob);
                 if !self.ignore_eos && self.eos_token_ids.contains(&entry.token_id) {
                     completed.push(beam.extend(
@@ -287,7 +290,18 @@ fn reject_unsupported_params(request: &TextRequest) -> Result<()> {
 
 /// Sampling parameters of every per-step request. The neutral values are
 /// explicit so generation config defaults do not apply, as in Python.
+///
+/// Each step asks for the `2 * beam_width` logprobs that rank candidates, or
+/// the requested number if larger. Python asks for the former only, so it
+/// returns fewer logprobs than requested when `logprobs > 2 * beam_width`.
 fn step_sampling_params(request: &SamplingParams, beam_width: NonZeroU32) -> SamplingParams {
+    let candidates = beam_width.get().saturating_mul(2).try_into().unwrap_or(i32::MAX);
+    let logprobs = match request.logprobs {
+        // `-1` (the whole vocabulary) is validated like any other request.
+        Some(requested) if requested < 0 => requested,
+        Some(requested) => requested.max(candidates),
+        None => candidates,
+    };
     SamplingParams {
         temperature: request.temperature,
         watermarking: Some(false),
@@ -298,7 +312,7 @@ fn step_sampling_params(request: &SamplingParams, beam_width: NonZeroU32) -> Sam
         presence_penalty: Some(0.0),
         repetition_penalty: Some(1.0),
         max_tokens: Some(1),
-        logprobs: Some(beam_width.get().saturating_mul(2).try_into().unwrap_or(i32::MAX)),
+        logprobs: Some(logprobs),
         skip_reading_prefix_cache: request.skip_reading_prefix_cache,
         ..SamplingParams::default()
     }
@@ -423,6 +437,8 @@ impl TextLlm {
                 prompt_token_ids,
                 // Stamped at submission, like Python.
                 arrival_time: None,
+                // Unlike Python, steps keep the request's `data_parallel_rank`,
+                // so a routed request stays on its rank and reuses its prefix cache.
                 ..template.clone()
             };
             async move { Ok(self.llm.generate(request).await?.collect_output().await?) }
@@ -696,6 +712,34 @@ mod tests {
         );
         assert_eq!(summary(&beams), [(vec![0], "-0.10".to_string(), None)]);
         assert!(completed.is_empty());
+    }
+
+    /// Logprobs requested beyond the top `2 * beam_width` do not become
+    /// candidates, even when EOS candidates leave fewer than `beam_width`.
+    #[test]
+    fn only_the_top_2n_entries_are_candidates() {
+        let selector = BeamSelector {
+            eos_token_ids: BTreeSet::from([0, 5, 6]),
+            ..selector(2)
+        };
+        let mut completed = Vec::new();
+        let beams = selector.expand(
+            &[BeamSequence::root()],
+            &[Some(position(&[
+                (0, -0.1),
+                (0, -0.1),
+                (5, -0.2),
+                (6, -0.3),
+                (1, -1.0),
+                // Requested by the user only.
+                (2, -2.0),
+            ]))],
+            &mut completed,
+        );
+        assert_eq!(summary(&beams), [(vec![1], "-1.00".to_string(), None)]);
+        assert_eq!(completed.len(), 3);
+        // The beam still reports every returned entry.
+        assert_eq!(beams[0].logprobs[0].entries.len(), 6);
     }
 
     #[test]

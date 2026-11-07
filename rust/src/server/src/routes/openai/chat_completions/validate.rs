@@ -4,6 +4,7 @@
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::model_names::ServedModelNames;
+use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{ChatMessage, Tool};
 use crate::routes::openai::utils::{validate_beam_search, validate_generation_prompt_truncation};
 
@@ -69,9 +70,13 @@ pub(super) fn validate_request_compat(
         request.use_beam_search,
         request.length_penalty,
         request.logprob_token_ids.as_deref(),
-        [
+        &[
             ("kv_transfer_params", request.kv_transfer_params.is_some()),
             ("ec_transfer_params", request.ec_transfer_params.is_some()),
+            (
+                "response_format",
+                !matches!(request.response_format, None | Some(ResponseFormat::Text)),
+            ),
         ],
     )?;
     // TODO: Python streams the final beams once the search finishes.

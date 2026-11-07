@@ -85,9 +85,15 @@ pub(super) fn validate_request_compat(
         request.use_beam_search,
         request.length_penalty,
         request.logprob_token_ids.as_deref(),
-        [
+        &[
             ("kv_transfer_params", request.kv_transfer_params.is_some()),
             ("ec_transfer_params", request.ec_transfer_params.is_some()),
+            (
+                "response_format",
+                request.response_format.as_ref().is_some_and(|format| {
+                    format.get("type").and_then(|kind| kind.as_str()) != Some("text")
+                }),
+            ),
         ],
     )?;
     if request.use_beam_search {

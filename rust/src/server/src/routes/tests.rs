@@ -12256,6 +12256,61 @@ mod beam_search {
         engine_task.abort_and_join().await;
     }
 
+    /// Like Python, echo prepends the final assistant message to every beam
+    /// without asking for prompt logprobs, which beam search does not compute.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn chat_beam_search_echoes_the_final_message() {
+        let (mut app, engine_task, _events) = beam_test_app(two_step_script).await;
+        let (status, body) = post_json(
+            &mut app,
+            "/v1/chat/completions",
+            json!({"messages": [{"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "ok "}],
+                "add_generation_prompt": false, "continue_final_message": true,
+                "echo": true, "max_tokens": 2, "n": 2, "use_beam_search": true,
+                "response_format": {"type": "text"}}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let contents = (body["choices"].as_array().unwrap().iter())
+            .map(|choice| choice["message"]["content"].clone())
+            .collect::<Vec<_>>();
+        expect_test::expect![[r#"["ok bz","ok b"]"#]].assert_eq(&json!(contents).to_string());
+        assert!(body["prompt_logprobs"].is_null(), "{body}");
+        engine_task.abort_and_join().await;
+    }
+
+    /// Steps ask for the requested logprobs when more than the `2 * n` that rank
+    /// candidates, so every position reports as many as a non-beam request.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn beam_search_steps_request_the_larger_logprobs() {
+        let mut results = Vec::new();
+        for logprobs in [1, 5] {
+            let (mut app, engine_task, mut events) = beam_test_app(two_step_script).await;
+            let (status, body) = post_json(
+                &mut app,
+                "/v1/completions",
+                json!({"prompt": "hi", "max_tokens": 1, "n": 1, "use_beam_search": true,
+                    "logprobs": logprobs, "add_special_tokens": false}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let steps = step_requests(&mut events, 2);
+            results.push(format!(
+                "logprobs={logprobs}: step logprobs {:?}",
+                steps[0].2
+            ));
+            engine_task.abort_and_join().await;
+        }
+        expect_test::expect![[r#"
+            logprobs=1: step logprobs Some(2)
+            logprobs=5: step logprobs Some(5)"#]]
+        .assert_eq(&results.join("\n"));
+    }
+
     /// A beam that stops at EOS on its first token reports empty logprobs.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
@@ -12394,6 +12449,7 @@ mod beam_search {
                 json!({"allowed_token_ids": [1]}),
             ),
             ("/v1/completions", &completion, json!({"n": 100})),
+            ("/v1/completions", &completion, json!({"logprobs": 21})),
             (
                 "/v1/completions",
                 &completion,
@@ -12414,6 +12470,11 @@ mod beam_search {
             (
                 "/v1/chat/completions",
                 &chat,
+                json!({"response_format": {"type": "json_object"}}),
+            ),
+            (
+                "/v1/completions",
+                &completion,
                 json!({"response_format": {"type": "json_object"}}),
             ),
             ("/v1/completions", &json!({"prompt": "hi"}), json!({"n": 2})),
@@ -12446,12 +12507,14 @@ mod beam_search {
             {"stop":["x"]} -> "stop" "`stop` is not supported with beam search."
             {"allowed_token_ids":[1]} -> "allowed_token_ids" "`allowed_token_ids` is not supported with beam search."
             {"n":100} -> null "requested logprobs of 200, which is greater than max allowed: 20"
+            {"logprobs":21} -> null "requested logprobs of 21, which is greater than max allowed: 20"
             {"logprobs":1,"logprob_token_ids":[1]} -> "logprob_token_ids" "`logprob_token_ids` is not supported with beam search."
             {"kv_transfer_params":{"do_remote_decode":true}} -> "kv_transfer_params" "`kv_transfer_params` is not supported with beam search."
             {"stream":true} -> "stream" "Streaming is not supported with beam search."
             {"ec_transfer_params":{"do_remote_encode":true}} -> "ec_transfer_params" "`ec_transfer_params` is not supported with beam search."
             {"seed":1} -> "seed" "`seed` is not supported with beam search."
-            {"response_format":{"type":"json_object"}} -> "structured_outputs" "`structured_outputs` is not supported with beam search."
+            {"response_format":{"type":"json_object"}} -> "response_format" "`response_format` is not supported with beam search."
+            {"response_format":{"type":"json_object"}} -> "response_format" "`response_format` is not supported with beam search."
             {"n":2} -> "n" "Only n=1 is supported without use_beam_search."
             {"length_penalty":2.0} -> "length_penalty" "length_penalty is only supported with use_beam_search."
             {"n":2} -> "n" "Only n=1 is supported without use_beam_search.""#]].assert_eq(&errors.join("\n"));

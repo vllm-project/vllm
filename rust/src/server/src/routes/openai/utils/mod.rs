@@ -85,7 +85,7 @@ pub(crate) fn validate_beam_search(
     use_beam_search: bool,
     length_penalty: Option<f64>,
     logprob_token_ids: Option<&[u32]>,
-    transfer_params: [(&'static str, bool); 2],
+    unsupported_params: &[(&'static str, bool)],
 ) -> Result<(), ApiError> {
     if !use_beam_search {
         // Python's default is 1.0, which SDKs may send explicitly.
@@ -103,8 +103,10 @@ pub(crate) fn validate_beam_search(
             "`logprob_token_ids` is not supported with beam search."
         );
     }
-    // Checked here, since they reach the text crate merged into `vllm_xargs`.
-    if let Some((param, _)) = transfer_params.into_iter().find(|(_, set)| *set) {
+    // Checked here, since they reach the text crate under other names:
+    // `vllm_xargs` for the transfer params, `structured_outputs` for
+    // `response_format`.
+    if let Some(&(param, _)) = unsupported_params.iter().find(|(_, set)| *set) {
         bail_invalid_request!(
             param = param,
             "`{param}` is not supported with beam search."
