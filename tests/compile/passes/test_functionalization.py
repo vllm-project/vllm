@@ -26,9 +26,12 @@ from vllm.config import (
     get_current_vllm_config,
     set_current_vllm_config,
 )
+from vllm.model_executor.kernels.linear import TritonFp8BlockScaledMMKernel
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -130,6 +133,27 @@ class TestFusedAddRMSNorm(torch.nn.Module):
 
     def ops_not_in_model(self):
         return []
+
+
+class TestFusedAddRMSNormBlockQuant(TestFusedAddRMSNorm):
+    def __init__(self, hidden_size=128, intermediate_size=256):
+        super().__init__(hidden_size, intermediate_size)
+        if TEST_FP8:
+            self.fp8_linear = TestFP8Layer(
+                # square: TestFP8Layer builds square block scales
+                weight_shape=(intermediate_size, intermediate_size),
+                activation_quant_key=kFp8Dynamic128Sym,
+                weight_quant_key=kFp8Static128BlockSym,
+                # a kernel that quantizes activations, so there is a quant to fuse
+                force_kernel=TritonFp8BlockScaledMMKernel,
+                input_dtype=get_current_vllm_config().model_config.dtype,
+            )
+
+    def ops_in_model(self, do_fusion):
+        if TEST_FP8 and do_fusion:
+            return [torch.ops._C.rms_norm_per_block_quant.default]
+        else:
+            return []
 
 
 class TestRotaryEmbedding(torch.nn.Module):
@@ -254,6 +278,7 @@ class TestFunctionWithMutatedArgsAndReturn(torch.nn.Module):
 MODELS_AND_DO_FUSION = {
     TestSiluMul: [True, False],
     TestFusedAddRMSNorm: [True, False],
+    TestFusedAddRMSNormBlockQuant: [True, False],
     TestRotaryEmbedding: [False],
     TestRotaryEmbeddingSliceScatter: [False],
     TestFunctionWithMutatedArgsAndReturn: [False],
