@@ -430,7 +430,12 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         token->LoRA mapping. Reading it is a host-only check (no device sync),
         and under CUDA graphs the branch is frozen at capture time against the
         graph's ``has_lora`` dispatch key, so it stays correct on replay.
+
+        With DP+EP the batch holds every DP rank's tokens, and the local flag
+        does not describe them, so the fast path is not available.
         """
+        if lora_context.local_token_lora_mapping is not None:
+            return False
         meta = getattr(lora_context.punica_wrapper, "token_mapping_meta", None)
         if meta is None:
             return False
@@ -618,9 +623,12 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        # DP gathers tokens, but the no-LoRA fast path reads the local batch.
+        # Same support matrix as TrtLlmBf16LoRAExperts: the DP dispatch is
+        # handled by _batch_has_no_lora() and the all-slot MoE-LoRA kernels.
         p = moe_parallel_config
-        return p.dp_size == 1 and not p.use_all2all_kernels and not p.enable_eplb
+        return (
+            not p.use_all2all_kernels or p.use_ag_rs_all2all_kernels
+        ) and not p.enable_eplb
 
     def workspace_shapes(
         self,
