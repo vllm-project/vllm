@@ -45,6 +45,125 @@ NUM_BLOCKS = [32768, 2048]
 SEQ_THRESHOLD_3D_VALUES = [0, 8]
 
 
+@pytest.mark.parametrize("block_m", [16, 32, 128])
+@pytest.mark.parametrize("is_3d", [False, True])
+@torch.inference_mode()
+def test_gqa_query_tile_does_not_write_next_block(block_m: int, is_3d: bool) -> None:
+    """Launching only the first tile must leave the next query untouched."""
+    gqa, head_size, block_size = 7, 64, 32
+    block_q = block_m // gqa
+    query_len = block_q + 1
+    query = torch.zeros(
+        query_len, gqa, head_size, dtype=torch.float16, device=DEVICE_TYPE
+    )
+    key = torch.zeros(1, block_size, 1, head_size, device=DEVICE_TYPE).half()
+    value = torch.ones_like(key)
+    output = torch.full_like(query, -1)
+    partial = torch.full(
+        (query_len, gqa, 1, head_size), -1, dtype=torch.float32, device=DEVICE_TYPE
+    )
+    maxima = torch.full(
+        (query_len, gqa, 1), -1, dtype=torch.float32, device=DEVICE_TYPE
+    )
+    sums = torch.full_like(maxima, -1)
+    starts = torch.tensor([0, query_len], dtype=torch.int32, device=DEVICE_TYPE)
+    lengths = torch.tensor([query_len], dtype=torch.int32, device=DEVICE_TYPE)
+    blocks = torch.zeros(1, 1, dtype=torch.int32, device=DEVICE_TYPE)
+
+    attention.kernel_unified_attention[(1, 1, 1)](
+        output_ptr=output,
+        query_ptr=query,
+        key_cache_ptr=key,
+        value_cache_ptr=value,
+        sink_ptr=None,
+        block_tables_ptr=blocks,
+        seq_lens_ptr=lengths,
+        alibi_slopes_ptr=None,
+        qq_bias_ptr=None,
+        scale=head_size**-0.5,
+        q_scale=None,
+        k_scale=None,
+        v_scale=None,
+        out_scale=1.0,
+        softcap=0.0,
+        num_query_heads=gqa,
+        num_queries_per_kv=gqa,
+        block_table_stride=1,
+        query_stride_0=query.stride(0),
+        query_stride_1=query.stride(1),
+        output_stride_0=output.stride(0),
+        output_stride_1=output.stride(1),
+        qq_bias_stride_0=0,
+        BLOCK_SIZE=block_size,
+        TILE_SIZE=block_size,
+        HEAD_SIZE=head_size,
+        HEAD_SIZE_PADDED=head_size,
+        USE_ALIBI_SLOPES=False,
+        USE_ALIBI_SQRT=False,
+        USE_QQ_BIAS=False,
+        USE_SOFTCAP=False,
+        USE_SINKS=False,
+        SLIDING_WINDOW=0,
+        USE_CAUSAL=True,
+        USE_PER_SEQ_CAUSAL=False,
+        per_seq_causal_ptr=None,
+        USE_MM_PREFIX=False,
+        MAX_MM_RANGES=0,
+        mm_prefix_range_ptr=None,
+        rswa_prefix_lens_ptr=lengths,
+        R_SWA_WINDOW=0,
+        USE_R_SWA=False,
+        stride_k_cache_0=key.stride(0),
+        stride_k_cache_1=key.stride(1),
+        stride_k_cache_2=key.stride(2),
+        stride_k_cache_3=key.stride(3),
+        stride_v_cache_0=value.stride(0),
+        stride_v_cache_1=value.stride(1),
+        stride_v_cache_2=value.stride(2),
+        stride_v_cache_3=value.stride(3),
+        query_start_len_ptr=starts,
+        BLOCK_Q=block_q,
+        num_seqs=1,
+        BLOCK_M=block_m,
+        NUM_SEGMENTS_PER_SEQ=1,
+        USE_FP8=False,
+        IS_3D=is_3d,
+        segm_output_ptr=partial,
+        segm_max_ptr=maxima,
+        segm_expsum_ptr=sums,
+    )
+    targets = (partial, maxima, sums) if is_3d else (output,)
+    for target in targets:
+        torch.testing.assert_close(
+            target[block_q:], torch.full_like(target[block_q:], -1), atol=0, rtol=0
+        )
+        assert torch.all(target[:block_q] != -1)
+    if not is_3d:
+        torch.testing.assert_close(
+            output[0], torch.ones_like(output[0]), atol=0, rtol=0
+        )
+
+
+@pytest.mark.parametrize("query_len", [1, 2, 3, 4])
+@pytest.mark.parametrize("batch_size", [1, 4])
+@pytest.mark.parametrize("seq_threshold_3d", [0, 8])
+def test_non_power_of_two_gqa_matches_reference(
+    query_len: int, batch_size: int, seq_threshold_3d: int
+) -> None:
+    test_triton_unified_attn(
+        seq_lens=[(query_len, 96)] * batch_size,
+        num_heads=(14, 2),
+        head_size=64,
+        sliding_window=None,
+        dtype=torch.float16,
+        block_size=16,
+        soft_cap=None,
+        num_blocks=64,
+        q_dtype=None,
+        seq_threshold_3D=seq_threshold_3d,
+    )
+
+
 def _scratch(rows):
     shapes = [(rows, 8, 16, 128), (rows, 8, 16), (rows, 8, 16)]
     return [torch.empty(shape, dtype=torch.float32, device="cpu") for shape in shapes]
