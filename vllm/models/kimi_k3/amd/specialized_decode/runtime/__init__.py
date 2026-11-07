@@ -256,8 +256,8 @@ def m1c_serves(q: int, seqs: int) -> bool:
 
 def step_reasons(vllm_config, check_m1c: bool = True) -> list[str]:
     """The (max_num_seqs, speculative tokens) pairs served: a full step fits one
-    launch, and at DCP1 every step runs M1c (``check_m1c``: M1c's geometry needs
-    the kernels' modules, so only on a supported platform)."""
+    launch, and at DCP1 with M1 every step runs M1c (``check_m1c``: M1c's
+    geometry needs the kernels' modules, so only on a supported platform)."""
     k = vllm_config.speculative_config.num_speculative_tokens
     seqs = vllm_config.scheduler_config.max_num_seqs
     if seqs not in MAX_SEQS or seqs * (k + 1) > MAX_ROWS:
@@ -267,9 +267,10 @@ def step_reasons(vllm_config, check_m1c: bool = True) -> list[str]:
         ]
     if vllm_config.parallel_config.decode_context_parallel_size != 1:
         return []
-    m1 = m1_reasons(vllm_config)
-    if m1:
-        return ["DCP1 without M1 (" + "; ".join(m1) + ")"]
+    # Without M1 (e.g. Kimi-K3.1's DSA layers, whose fp8_ds_mla KV M1 cannot
+    # read) the MLA layers run vLLM's attention ops, then K2, as at DCP8
+    if m1_reasons(vllm_config):
+        return []
     if check_m1c and not m1c_serves(k + 1, seqs):
         return [
             f"DCP1 at {k} speculative tokens, max_num_seqs {seqs} (DCP1 runs M1c "
