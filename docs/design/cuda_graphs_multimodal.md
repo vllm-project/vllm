@@ -73,6 +73,8 @@ class BudgetGraphMetadata:
 
 Budgets are auto-generated as power-of-2 levels from a model-provided range via `get_encoder_cudagraph_budget_range()`, with the maximum budget always included even if it does not fall on a power-of-2 boundary. Budgets can also be explicitly specified by the user via `encoder_cudagraph_token_budgets` in `CompilationConfig`.
 
+**Shared capture buffers.** Graphs of the same path and capture-axis keys never replay concurrently, so they share their buffers. Budgets are captured largest first, and each smaller budget records a leading-dim prefix view of the largest budget's buffer instead of allocating its own. With power-of-2 budgets, this halves the persistent buffer memory. Sharing applies to the output buffer and to the `buffer_keys` inputs that are contiguous, non-scalar device tensors differing only in the leading dim; others, such as the CPU `max_seqlen` scalar, stay per budget. Because a shared buffer's capture-time contents are overwritten by other budgets, replay must provide values for every shared key.
+
 Each entry in `EncoderCudaGraphConfig.paths` defines an independently captured encoder path. A path can provide its own minimum token budget and opt into zero-token batches; the manager generates and stores a separate budget graph set for every configured path.
 
 ### Multi-Path Graph Capture
@@ -113,7 +115,7 @@ For each graph replay:
 1. Call `prepare_encoder_cudagraph_replay_buffers()` to compute buffer values (including `pixel_values` and precomputed metadata) from actual batch inputs.
 2. Zero the pre-allocated `input_buffers`, then slice-copy the replay values into them.
 3. Replay the CUDA Graph.
-4. Clone outputs from `output_buffer` (cloning is necessary since the buffer is reused across replays).
+4. Clone outputs from `output_buffer` (cloning is necessary since the buffer is reused across replays, including replays of other budgets on the same path).
 
 **Budget-cliff deferral:**
 
@@ -157,7 +159,7 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 * `prepare_encoder_cudagraph_replay_buffers(mm_kwargs, max_batch_size, max_frames_per_batch, path="default")` — computes buffer values from actual batch inputs. The `path` parameter selects which modality keys to extract from `mm_kwargs`. Returns `EncoderCudaGraphReplayBuffers` with a `values` dict whose keys match the captured graph's `input_buffers.keys()`.
 * `encoder_cudagraph_forward(inputs: dict[str, torch.Tensor], path="default")` — forward pass accepting only fixed-shaped input tensors (the captured `values` dict). Called during both capture and replay. The `path` parameter dispatches to the correct encoder sub-module (e.g., global vs. local path for DeepSeek-OCR).
 * `encoder_eager_forward(mm_kwargs, path="default")` — fallback eager forward when no graph fits. When `path` is `"global"` or `"local"`, runs only that encoder path without graph capture.
-* `postprocess_encoder_output(outputs, ...)` — post-process encoder outputs keyed by path name, enabling multi-path models to assemble their path-specific features into the final per-item embedding.
+* `postprocess_encoder_output(outputs, ...)` — post-process encoder outputs keyed by path name, enabling multi-path models to assemble their path-specific features into the final per-item embedding. With `clone=True`, the per-item results must not be views of `outputs`, since the next replay overwrites the shared output buffer.
 
 !!! note
     The `SupportsEncoderCudaGraph` protocol is designed to be model-agnostic. New vision encoder models can opt-in by implementing the protocol methods without modifying the manager.

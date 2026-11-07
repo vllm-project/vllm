@@ -37,6 +37,10 @@ CaptureAxisKeys: TypeAlias = tuple[Hashable, ...]
 
 BudgetGraphMapKey: TypeAlias = int | tuple[int, CaptureAxisKeys]
 
+# (path, axis_keys, buffer key) of a capture buffer shared across budgets; the
+# buffer key is None for the output buffer.
+SharedBufferSlot: TypeAlias = tuple[str, CaptureAxisKeys, str | None]
+
 # Warn when capture axes multiply the captured graph count past this point.
 _CAPTURE_GRAPH_COUNT_WARNING_THRESHOLD = 64
 
@@ -181,6 +185,14 @@ class EncoderCudaGraphManager:
         )
 
         self.budget_graphs: dict[str, dict[BudgetGraphMapKey, BudgetGraphMetadata]] = {}
+        # Graphs of one path and axis keys never replay concurrently, so they
+        # share each capture buffer: budgets are captured largest first, and
+        # smaller budgets record leading-dim prefix views of its buffers. This
+        # relies on postprocess_encoder_output copying outputs when clone=True.
+        self._shared_buffers: dict[SharedBufferSlot, torch.Tensor] = {}
+        # Slots whose buffer several graphs record, so replay must refill them
+        # rather than rely on capture-time contents.
+        self._aliased_slots: set[SharedBufferSlot] = set()
         self.graph_pool: Any | None = None
         self.graph_hits = 0
         self.graph_misses = 0
@@ -241,6 +253,8 @@ class EncoderCudaGraphManager:
         """Release captured encoder CUDA graphs and the manager-local pool."""
         for graph_set in self.budget_graphs.values():
             graph_set.clear()
+        self._shared_buffers.clear()
+        self._aliased_slots.clear()
         self.graph_pool = None
 
     def capture(self, graph_pool: Any):
@@ -330,8 +344,21 @@ class EncoderCudaGraphManager:
         values = capture_inputs.values
 
         with torch.inference_mode():
+            for key in self.config.buffer_keys:
+                buf = values.get(key)
+                if buf is None:
+                    continue
+                shared = self._get_shared_buffer((path, axis_keys, key), buf)
+                if shared is not None and shared is not buf:
+                    shared.copy_(buf)
+                    values[key] = shared
+
             output = self.model.encoder_cudagraph_forward({**values}, path=path)
-            output_buffer = torch.empty_like(output)
+            output_buffer = self._get_shared_buffer(
+                (path, axis_keys, None), output, allocate=True
+            )
+            if output_buffer is None:
+                output_buffer = torch.empty_like(output)
 
         graph = torch.cuda.CUDAGraph()
         with (
@@ -353,6 +380,37 @@ class EncoderCudaGraphManager:
             output_buffer=output_buffer,
             axis_keys=axis_keys,
         )
+
+    def _get_shared_buffer(
+        self,
+        slot: SharedBufferSlot,
+        like: torch.Tensor,
+        allocate: bool = False,
+    ) -> torch.Tensor | None:
+        """Return the slot's shared buffer, viewed to the shape of ``like``.
+
+        The first eligible request of a slot, from its largest budget, makes
+        ``like`` the shared buffer (or a new empty one when ``allocate``).
+        Returns None when ``like`` cannot alias it: CPU and 0-dim tensors (e.g.
+        ``max_seqlen``, whose value is baked at capture), non-contiguous
+        tensors, and tensors that differ beyond a shorter leading dim.
+        """
+        if like.ndim == 0 or like.device.type == "cpu" or not like.is_contiguous():
+            return None
+        shared = self._shared_buffers.get(slot)
+        if shared is None:
+            shared = torch.empty_like(like) if allocate else like
+            self._shared_buffers[slot] = shared
+            return shared
+        if (
+            shared.dtype != like.dtype
+            or shared.device != like.device
+            or shared.shape[1:] != like.shape[1:]
+            or shared.shape[0] < like.shape[0]
+        ):
+            return None
+        self._aliased_slots.add(slot)
+        return shared[: like.shape[0]]
 
     def _find_smallest_fitting_budget_given_tokens(
         self, total_tokens: int, budgets: list[int] | None = None
@@ -451,6 +509,11 @@ class EncoderCudaGraphManager:
         for key, buf in graph_meta.input_buffers.items():
             src = replay.values.get(key)
             if src is None:
+                if (path, axis_keys, key) in self._aliased_slots:
+                    raise RuntimeError(
+                        f"Encoder CUDA graph buffer {key!r} is shared across "
+                        "token budgets, so replay must provide its values."
+                    )
                 continue
             if src.ndim == 0:
                 buf.copy_(src)

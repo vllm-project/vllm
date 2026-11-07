@@ -13,6 +13,7 @@ Test organization:
 """
 
 from collections.abc import Hashable
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -631,6 +632,8 @@ def _make_manager_for_gpu(
     )
     mgr.use_dp = False
     mgr.budget_graphs = {"default": {}}
+    mgr._shared_buffers = {}
+    mgr._aliased_slots = set()
     mgr.graph_pool = None
     mgr._capture_axes = ()
     mgr.graph_hits = 0
@@ -769,6 +772,62 @@ class TestEncoderCudaGraphCaptureReplay:
         assert len(result) == n_images
         for out in result:
             assert out.shape == (4, _HIDDEN)
+
+
+@pytest.mark.skipif(not HAS_DEVICE_GRAPH, reason="Requires CUDA, ROCm or XPU graph")
+def test_shared_capture_buffers_match_unshared_capture():
+    """Smaller budgets view the largest budget's buffers. One execute() whose
+    batches replay budget 64 then 16 rewrites the shared output prefix before
+    returning the first batch, and must still match an unshared capture."""
+    device, dtype = torch.device(current_platform.device_type, 0), torch.float16
+    model = SimpleMockViTModel().to(device, dtype)
+
+    def capture(share: bool) -> EncoderCudaGraphManager:
+        mgr = _make_manager_for_gpu(model, [16, 32, 64], _MAX_BATCH, device, dtype)
+        mgr.config.buffer_keys = ["pixel_values", "dummy_buf"]
+        unshared = patch.object(mgr, "_get_shared_buffer", return_value=None)
+        with nullcontext() if share else unshared:
+            mgr.capture(graph_pool=current_platform.graph_pool_handle())
+        return mgr
+
+    shared, reference = capture(share=True), capture(share=False)
+    small, large = (shared.budget_graphs["default"][b] for b in (16, 64))
+    for a, b in zip(
+        [*small.input_buffers.values(), small.output_buffer],
+        [*large.input_buffers.values(), large.output_buffer],
+        strict=True,
+    ):
+        assert a.data_ptr() == b.data_ptr()
+
+    grid_thw = [[1, 8, 8]] * _MAX_BATCH + [[1, 4, 4]]
+    mm_kwargs = _make_mm_kwargs(grid_thw, device, dtype)
+    run = patch.object(shared, "_run_budget_graph", wraps=shared._run_budget_graph)
+    with run as run_budget_graph:
+        out = shared.execute(mm_kwargs)
+    assert [c.args[1] for c in run_budget_graph.call_args_list] == [64, 16]
+    for o, r in zip(out, reference.execute(mm_kwargs), strict=True):
+        assert torch.equal(o, r)
+
+
+def test_step3_vl_postprocess_clones_global_only_item():
+    """With clone=True, an image without local patches must not alias the
+    global graph output, which later replays overwrite."""
+    from vllm.model_executor.models.step3_vl import Step3VLForConditionalGeneration
+
+    model = SimpleNamespace(img_output_tokens=4, patch_output_tokens=1)
+    global_out = torch.randn(4, _HIDDEN)
+    dest: dict[int, torch.Tensor] = {}
+    Step3VLForConditionalGeneration.postprocess_encoder_output(
+        model,  # type: ignore[arg-type]
+        {"global": global_out},
+        indices=[0],
+        per_item_out_tokens=[],
+        dest=dest,
+        clone=True,
+        batch_mm_kwargs={"num_patches": [0]},
+    )
+    assert torch.equal(dest[0], global_out)
+    assert dest[0].data_ptr() != global_out.data_ptr()
 
 
 # ---------------------------------------------------------------------------
