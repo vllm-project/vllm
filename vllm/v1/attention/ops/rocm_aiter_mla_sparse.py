@@ -13,6 +13,7 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode, get_current_vllm_config
+from vllm.distributed.parallel_state import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -20,6 +21,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
@@ -1318,6 +1320,8 @@ def rocm_aiter_sparse_attn_indexer_fake(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    use_pcp: bool = False,
+    pcp_shard_decode_requests: bool = False,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -1342,6 +1346,8 @@ def rocm_aiter_sparse_attn_indexer(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    use_pcp: bool = False,
+    pcp_shard_decode_requests: bool = False,
 ) -> torch.Tensor:
     from vllm._aiter_ops import rocm_aiter_ops
 
@@ -1409,6 +1415,8 @@ def rocm_aiter_sparse_attn_indexer(
             candidate_blocks,
             candidate_block_size,
             candidate_write,
+            use_pcp,
+            pcp_shard_decode_requests,
         )
     layer_attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
@@ -1422,13 +1430,23 @@ def rocm_aiter_sparse_attn_indexer(
 
     # during speculative decoding, k may be padded to the CUDA graph batch
     # size while slot_mapping only covers actual tokens.
+    # Keep PCP padding so every rank contributes the same all-gather shape.
     num_tokens = slot_mapping.shape[0]
     if k is not None:
+        if use_pcp and num_tokens > k.shape[0]:
+            num_tokens //= get_pcp_group().world_size
         k = k[:num_tokens]
     elif not skip_k_cache_insert:
         raise ValueError("k must be provided when skip_k_cache_insert is False")
 
     if not skip_k_cache_insert:
+        k, slot_mapping = maybe_gather_indexer_k(
+            k,
+            slot_mapping,
+            num_decode_tokens,
+            use_pcp,
+            pcp_shard_decode_requests=pcp_shard_decode_requests,
+        )
         indexer_k_quant_and_cache_triton(
             k,
             kv_cache,
