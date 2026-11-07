@@ -566,6 +566,7 @@ steps:
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_dcp_direct_a2a_lse_reduce.py -k direct_a2a_matches_reference
     - pytest -v -s tests/v1/attention/test_shardq.py
+    - pytest -v -s tests/distributed/test_dcp_a2a.py -k v_up_proj
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer_m2n.py
@@ -608,9 +609,12 @@ steps:
       - tests/distributed/test_packed_tensor.py
       - tests/v1/attention/test_rocm_mla_dcp_context.py
       - vllm/v1/attention/ops/rocm_aiter_mla_prefill.py
+      - vllm/v1/attention/ops/dcp.py
+      - tests/distributed/test_dcp_a2a.py
       commands:
       - pytest -v -s tests/distributed/test_context_parallel.py
       - pytest -v -s tests/v1/attention/test_rocm_mla_dcp_context.py
+      - pytest -v -s tests/distributed/test_dcp_a2a.py -k v_up_proj
       - pytest -v -s tests/v1/distributed/test_dbo.py
       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
       - pytest -v -s tests/distributed/test_packed_tensor.py
