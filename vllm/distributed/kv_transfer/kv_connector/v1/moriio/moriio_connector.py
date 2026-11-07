@@ -777,6 +777,11 @@ class MoRIIOConnectorScheduler:
         self.paths: dict[str, zmq.Socket] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
         self.request_id_to_transfer_id: dict[ReqId, TransferId] = {}
+        # WRITE consumer: requests whose producer push has not been reported
+        # in finished_recving yet, mapped to whether the request already
+        # finished (e.g. aborted). A finished one keeps its transfer_id mapping
+        # so the late write_done can still release its delayed-free blocks.
+        self._write_recvs_in_flight: dict[ReqId, bool] = {}
 
     def get_exchange_clipped_blocks(
         self,
@@ -1057,6 +1062,13 @@ class MoRIIOConnectorScheduler:
         params.setdefault("transfer_id", transfer_id)
         request_id = request.request_id
         self.map_request_id(request_id, transfer_id)
+        if (
+            not self.is_producer
+            and self.mode == MoRIIOMode.WRITE
+            and params.get("do_remote_prefill")
+            and num_external_tokens > 0
+        ):
+            self._write_recvs_in_flight.setdefault(request_id, False)
         if params.get("do_remote_decode") and self.mode == MoRIIOMode.WRITE:
             local_block_ids: BlockIds = blocks.get_block_ids()
             self._reqs_need_save[request.request_id] = (request, local_block_ids)
@@ -1586,13 +1598,27 @@ class MoRIIOConnectorScheduler:
         """
         request_id = request.request_id
         params = request.kv_transfer_params
-        # Consumer: can unmap transfer_id<->request_id immediately since done_recving
-        #   has fired at this point (i.e. KV has been transferred)
+        # Consumer: can unmap transfer_id<->request_id once done_recving has
+        #   fired (i.e. KV has been transferred). A WRITE request finished while
+        #   still waiting keeps the mapping: the scheduler holds its blocks until
+        #   finished_recving, which the worker can only report for a mapped
+        #   transfer_id. update_connector_output unmaps it then.
         # Producer: must keep the mapping until we get notification that blocks can
         #   be freed, which may be several scheduler steps later.
         if not self.is_producer:
             transfer_id = params.get("transfer_id") if params else None
-            self.unmap_request_id(request_id, transfer_id=transfer_id)
+            owner = (
+                self.transfer_id_to_request_id.get(transfer_id)
+                if transfer_id is not None
+                else None
+            )
+            if owner != request_id and owner in self._write_recvs_in_flight:
+                # Rejection cleanup must not unmap or release an active receive.
+                return False, None
+            if request_id in self._write_recvs_in_flight:
+                self._write_recvs_in_flight[request_id] = True
+            else:
+                self.unmap_request_id(request_id, transfer_id=transfer_id)
         logger.debug(
             "MoriioConnector request_finished, request_status=%s, "
             "kv_transfer_params=%s",
@@ -1721,10 +1747,14 @@ class MoRIIOConnectorScheduler:
           send was already reaped) and is dropped.
 
         Consumers never populate finished_sending (they report
-        finished_recving), and they unmap in request_finished, so this is a
-        no-op for them.
+        finished_recving). They unmap in request_finished, except for a WRITE
+        request that finished while still waiting, which is unmapped here once
+        its finished_recving arrives.
         """
         if not self.is_producer:
+            for req_id in connector_output.finished_recving or ():
+                if self._write_recvs_in_flight.pop(req_id, False):
+                    self.unmap_request_id(req_id)
             return
 
         incoming = set(connector_output.finished_sending or ())
