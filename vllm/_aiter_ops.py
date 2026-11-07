@@ -922,6 +922,110 @@ def _rocm_aiter_w8a8_gemm_fake(
     return Y
 
 
+def _rocm_aiter_mxfp4_gemm_dynamic_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    rocm_use_aiter_fp4_asm_gemm: bool = False,
+    out_dtype: torch.dtype | None = torch.bfloat16,
+    x_scales: torch.Tensor | None = None,
+) -> torch.Tensor:
+    from aiter.ops.triton.gemm_afp4wfp4 import (
+        gemm_afp4wfp4,
+        gemm_afp4wfp4_preshuffle,
+    )
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    if rocm_use_aiter_fp4_asm_gemm:
+        from aiter import gemm_a4w4, per_1x32_f4_quant_hip
+
+    M = x.shape[0]
+    N = weight.shape[0]
+    K = weight.shape[1]
+    if rocm_use_aiter_fp4_asm_gemm:
+        # The preshuffle kernel's tuned configs split K in some M buckets.
+        if (
+            M <= 64
+            and not envs.VLLM_BATCH_INVARIANT
+            and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K)
+        ):
+            if x_scales is None:
+                # use hip quant kernel for performance
+                if M >= 32:
+                    x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
+                else:
+                    x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=False)
+            else:
+                x_q = x
+                x_s = x_scales
+
+            if M >= 32:
+                x_s = x_s.view(torch.uint8).view(x_s.shape[0] // 32, -1)
+            else:
+                x_s = x_s[:M, ...].view(torch.uint8)
+
+            y = torch.empty(M, N, device=x_q.device, dtype=out_dtype)
+            gemm_afp4wfp4_preshuffle(
+                x_q.view(torch.uint8),
+                weight.view(torch.uint8).view(weight.shape[0] // 16, -1),
+                x_s,
+                weight_scale.view(torch.uint8).view(weight_scale.shape[0] // 32, -1),
+                out_dtype,
+                y,
+            )
+        else:
+            if x_scales is None:
+                # use hip quant kernel for performance
+                x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
+            else:
+                x_q = x
+                x_s = x_scales
+
+            y = gemm_a4w4(
+                x_q,
+                weight.view(x_q.dtype),
+                x_s,
+                weight_scale.view(x_s.dtype),
+                dtype=out_dtype,
+                bpreshuffle=True,
+            )
+        return y[:M]
+    else:
+        if x_scales is None:
+            x_q, x_s = dynamic_mxfp4_quant(x)
+        else:
+            x_q = x
+            x_s = x_scales
+        y = torch.empty(
+            x_q.shape[0], weight.shape[0], device=x_q.device, dtype=out_dtype
+        )
+
+        config = None
+        if envs.VLLM_BATCH_INVARIANT:
+            # The configs split K in some M buckets (up to M <= 256 for
+            # tuned shapes). Keep the tile, drop the split.
+            from aiter.ops.triton.gemm_afp4wfp4 import _get_config
+
+            config, _ = _get_config(M, N, K)
+            config = dict(config, NUM_KSPLIT=1)
+
+        gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y, config)
+        return y
+
+
+def _rocm_aiter_mxfp4_gemm_dynamic_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    rocm_use_aiter_fp4_asm_gemm: bool = False,
+    out_dtype: torch.dtype | None = torch.bfloat16,
+    x_scales: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.empty(
+        (*x.shape[:-1], weight.shape[0]), dtype=out_dtype, device=x.device
+    )
+
+
 def _rocm_aiter_preshuffled_per_token_w8a8_gemm_impl(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -3164,6 +3268,14 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_mxfp4_gemm_dynamic_quant",
+                op_func=_rocm_aiter_mxfp4_gemm_dynamic_quant_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_mxfp4_gemm_dynamic_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="_rocm_aiter_preshuffled_per_token_w8a8_gemm",
                 op_func=_rocm_aiter_preshuffled_per_token_w8a8_gemm_impl,
                 fake_impl=_rocm_aiter_preshuffled_per_token_w8a8_gemm_fake,
@@ -3489,6 +3601,19 @@ class rocm_aiter_ops:
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_w8a8_gemm(A, B, As, Bs, bias, output_dtype)
+
+    @staticmethod
+    def mxfp4_gemm_dynamic_quant(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        rocm_use_aiter_fp4_asm_gemm: bool = False,
+        out_dtype: torch.dtype | None = torch.bfloat16,
+        x_scales: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_mxfp4_gemm_dynamic_quant(
+            x, weight, weight_scale, rocm_use_aiter_fp4_asm_gemm, out_dtype, x_scales
+        )
 
     @staticmethod
     def preshuffled_per_token_w8a8_gemm(

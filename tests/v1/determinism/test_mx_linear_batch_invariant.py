@@ -116,8 +116,7 @@ def _mxfp8_weights(n: int, k: int):
 def test_mxfp4_linear_is_batch_invariant(n: int, k: int, use_asm_gemm: bool):
     pytest.importorskip("aiter")
 
-    # Importing the module registers torch.ops.vllm.gemm_with_dynamic_quant.
-    import vllm.model_executor.kernels.linear.mxfp4.aiter  # noqa: F401
+    from vllm._aiter_ops import rocm_aiter_ops
 
     set_random_seed(SEED)
     weight, weight_scale = _mxfp4_weights(n, k, use_asm_gemm)
@@ -125,7 +124,7 @@ def test_mxfp4_linear_is_batch_invariant(n: int, k: int, use_asm_gemm: bool):
 
     probes = {
         num_tokens: _probe(
-            torch.ops.vllm.gemm_with_dynamic_quant(
+            rocm_aiter_ops.mxfp4_gemm_dynamic_quant(
                 x[:num_tokens], weight, weight_scale, use_asm_gemm, torch.bfloat16
             )
         )

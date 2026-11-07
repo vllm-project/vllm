@@ -4,7 +4,7 @@
 import torch
 
 import vllm.envs as envs
-from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
@@ -29,128 +29,6 @@ def _asm_fp4_scale_swizzle_supported(weight_scale: torch.Tensor) -> bool:
     sm, sn = weight_scale.shape
     return (
         sm % _ASM_FP4_SCALE_ROW_MULTIPLE == 0 and sn % _ASM_FP4_SCALE_COL_MULTIPLE == 0
-    )
-
-
-# NOTE: Do not import aiter at module scope. Importing aiter eagerly initializes HIP
-# which can force the engine core to spawn instead of fork.
-# is_aiter_found_and_supported() checks platform + arch + library availability via
-# find_spec/amdsmi, so it stays HIP-free.
-# Actual aiter imports are deferred to the functions/methods that need them,
-# where HIP initialization is expected.
-if is_aiter_found_and_supported():
-    from vllm.utils.torch_utils import direct_register_custom_op
-
-    def gemm_with_dynamic_quant(
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
-        rocm_use_aiter_fp4_asm_gemm: bool = False,
-        out_dtype: torch.dtype | None = torch.bfloat16,
-        x_scales: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        from aiter.ops.triton.gemm_afp4wfp4 import (
-            gemm_afp4wfp4,
-            gemm_afp4wfp4_preshuffle,
-        )
-        from aiter.ops.triton.quant import dynamic_mxfp4_quant
-
-        if rocm_use_aiter_fp4_asm_gemm:
-            from aiter import gemm_a4w4, per_1x32_f4_quant_hip
-
-        M = x.shape[0]
-        N = weight.shape[0]
-        K = weight.shape[1]
-        if rocm_use_aiter_fp4_asm_gemm:
-            # The preshuffle kernel's tuned configs split K in some M buckets.
-            if (
-                M <= 64
-                and not envs.VLLM_BATCH_INVARIANT
-                and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K)
-            ):
-                if x_scales is None:
-                    # use hip quant kernel for performance
-                    if M >= 32:
-                        x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
-                    else:
-                        x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=False)
-                else:
-                    x_q = x
-                    x_s = x_scales
-
-                if M >= 32:
-                    x_s = x_s.view(torch.uint8).view(x_s.shape[0] // 32, -1)
-                else:
-                    x_s = x_s[:M, ...].view(torch.uint8)
-
-                y = torch.empty(M, N, device=x_q.device, dtype=out_dtype)
-                gemm_afp4wfp4_preshuffle(
-                    x_q.view(torch.uint8),
-                    weight.view(torch.uint8).view(weight.shape[0] // 16, -1),
-                    x_s,
-                    weight_scale.view(torch.uint8).view(
-                        weight_scale.shape[0] // 32, -1
-                    ),
-                    out_dtype,
-                    y,
-                )
-            else:
-                if x_scales is None:
-                    # use hip quant kernel for performance
-                    x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
-                else:
-                    x_q = x
-                    x_s = x_scales
-
-                y = gemm_a4w4(
-                    x_q,
-                    weight.view(x_q.dtype),
-                    x_s,
-                    weight_scale.view(x_s.dtype),
-                    dtype=out_dtype,
-                    bpreshuffle=True,
-                )
-            return y[:M]
-        else:
-            if x_scales is None:
-                x_q, x_s = dynamic_mxfp4_quant(x)
-            else:
-                x_q = x
-                x_s = x_scales
-            y = torch.empty(
-                x_q.shape[0], weight.shape[0], device=x_q.device, dtype=out_dtype
-            )
-
-            config = None
-            if envs.VLLM_BATCH_INVARIANT:
-                # The configs split K in some M buckets (up to M <= 256 for
-                # tuned shapes). Keep the tile, drop the split.
-                from aiter.ops.triton.gemm_afp4wfp4 import _get_config
-
-                config, _ = _get_config(M, N, K)
-                config = dict(config, NUM_KSPLIT=1)
-
-            gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y, config)
-            return y
-
-    def gemm_with_dynamic_quant_fake(
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
-        x_scales: torch.Tensor = None,
-        rocm_use_aiter_fp4_asm_gemm: bool = False,
-        out_dtype: torch.dtype | None = torch.bfloat16,
-    ) -> torch.Tensor:
-        return torch.empty(
-            (*x.shape[:-1], weight.shape[0]), dtype=out_dtype, device=x.device
-        )
-
-    direct_register_custom_op(
-        op_name="gemm_with_dynamic_quant",
-        op_func=gemm_with_dynamic_quant,
-        mutates_args=[],
-        fake_impl=gemm_with_dynamic_quant_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
 
@@ -244,7 +122,7 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        y = torch.ops.vllm.gemm_with_dynamic_quant(
+        y = rocm_aiter_ops.mxfp4_gemm_dynamic_quant(
             x,
             layer.weight,
             layer.weight_scale,
