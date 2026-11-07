@@ -424,7 +424,8 @@ def test_deep_gemm_mega_moe_load_plan_is_direct_and_matches_cold_start(
 
     weights = list(checkpoint(model, seed=2).items())
     start_reload(model)
-    model.load_weights(weights[i] for i in torch.randperm(len(weights)).tolist())
+    order = torch.randperm(len(weights), generator=torch.Generator().manual_seed(2))
+    model.load_weights(weights[i] for i in order.tolist())
     finish_reload(model, model_config, device)
     assert_matches_cold_start(model, seed=2)
 
