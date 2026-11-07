@@ -8,6 +8,7 @@ import torch
 import vllm._custom_ops as ops
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
+    moe_align_block_size_pair,
 )
 from vllm.triton_utils import triton
 from vllm.utils.torch_utils import set_random_seed
@@ -147,9 +148,116 @@ def benchmark_batched(
     return 1000 * ms, 1000 * max_ms, 1000 * min_ms
 
 
+def benchmark_paired_alignment():
+    """Compare two native alignments with paired dispatch using cold-L2 CUPTI."""
+    import json
+    import statistics
+
+    from flashinfer.testing import bench_gpu_time_with_cupti
+
+    cases = itertools.product(
+        [(1, 1), (1, 6), (2, 8), (8, 6), (8, 8), (13, 5), (512, 8)],
+        [16, 64, 384],
+        [(8, 40), (128, 32), (64, 64)],
+        [1, 2],
+    )
+    set_random_seed(0)
+    for (num_tokens, topk), num_experts, blocks, ep_size in cases:
+        topk_ids = torch.randint(
+            0, num_experts, (num_tokens, topk), device="cuda", dtype=torch.int32
+        )
+        expert_map = None
+        if ep_size > 1:
+            expert_map = torch.full(
+                (num_experts,), -1, device="cuda", dtype=torch.int32
+            )
+            local_experts = torch.randperm(num_experts, device="cuda")[::ep_size]
+            expert_map[local_experts] = torch.arange(
+                local_experts.numel(), device="cuda", dtype=torch.int32
+            )
+
+        def baseline(
+            topk_ids=topk_ids,
+            blocks=blocks,
+            num_experts=num_experts,
+            expert_map=expert_map,
+        ):
+            first = moe_align_block_size(
+                topk_ids,
+                blocks[0],
+                num_experts,
+                expert_map,
+                ignore_invalid_experts=True,
+            )
+            second = (
+                first
+                if blocks[0] == blocks[1]
+                else moe_align_block_size(
+                    topk_ids,
+                    blocks[1],
+                    num_experts,
+                    expert_map,
+                    ignore_invalid_experts=True,
+                )
+            )
+            return first, second
+
+        def paired(
+            topk_ids=topk_ids,
+            blocks=blocks,
+            num_experts=num_experts,
+            expert_map=expert_map,
+        ):
+            return moe_align_block_size_pair(topk_ids, *blocks, num_experts, expert_map)
+
+        for block, reference, candidate in zip(blocks, baseline(), paired()):
+            torch.testing.assert_close(candidate[2], reference[2], atol=0, rtol=0)
+            num_blocks = candidate[2].item() // block
+            torch.testing.assert_close(
+                candidate[1][:num_blocks], reference[1][:num_blocks], atol=0, rtol=0
+            )
+
+        samples = {"baseline": [], "paired": []}
+        for name, fn in [
+            ("baseline", baseline),
+            ("paired", paired),
+            ("paired", paired),
+            ("baseline", baseline),
+        ]:
+            fn()
+            torch.accelerator.synchronize()
+            samples[name].extend(
+                bench_gpu_time_with_cupti(
+                    fn,
+                    dry_run_iters=5,
+                    repeat_iters=100,
+                    use_cuda_graph=True,
+                    cold_l2_cache=True,
+                )
+            )
+        baseline_us = statistics.median(samples["baseline"]) * 1000
+        paired_us = statistics.median(samples["paired"]) * 1000
+        print(
+            json.dumps(
+                dict(
+                    num_tokens=num_tokens,
+                    topk=topk,
+                    num_experts=num_experts,
+                    blocks=blocks,
+                    ep_size=ep_size,
+                    baseline_us=baseline_us,
+                    paired_us=paired_us,
+                    speedup=baseline_us / paired_us,
+                )
+            ),
+            flush=True,
+        )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--batched", action="store_true")
+    parser.add_argument("--paired", action="store_true")
     parser.add_argument(
         "--num_experts",
         type=int,
@@ -165,5 +273,8 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    selected_benchmark = benchmark_batched if args.batched else benchmark
-    selected_benchmark.run(print_data=True, show_plots=True)
+    if args.paired:
+        benchmark_paired_alignment()
+    else:
+        selected_benchmark = benchmark_batched if args.batched else benchmark
+        selected_benchmark.run(print_data=True, show_plots=True)
