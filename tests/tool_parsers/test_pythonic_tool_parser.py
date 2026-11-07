@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -58,6 +59,65 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
     name="get_weather",
     arguments='{"city": "Martha\'s Vineyard", "metric": "\\"cool units\\""}',
 )
+# A raw (unescaped) newline inside a string argument is invalid Python, but the
+# intent is unambiguous; the parser escapes control chars before parsing.
+RAW_NEWLINE_FUNCTION_OUTPUT = "write_file(content='line1\nline2')"
+RAW_NEWLINE_FUNCTION_CALL = FunctionCall(
+    name="write_file",
+    arguments='{"content": "line1\\nline2"}',
+)
+RAW_NEWLINE_PARALLEL_FUNCTION_OUTPUT = (
+    "write_file(content='line1\nline2'), get_weather(city='SF')"
+)
+
+
+@pytest.mark.parametrize("parser_name", ["pythonic", "llama4_pythonic"])
+@pytest.mark.parametrize(
+    "model_output, expected",
+    [
+        ("[f(x=r'a\tb')]", ["a\tb"]),
+        ("[f(x=R'''line1\nline2''')]", ["line1\nline2"]),
+        ("[f(x='''it's\n[ok]'''),\n f(x='done')]", ["it's\n[ok]", "done"]),
+        ('[f(x="""a\r\nb""")]', ["a\nb"]),
+        ("[f(x=r'a\tb'), f(x='c\nd')]", ["a\tb", "c\nd"]),
+        ("[f(x=r'\\n'), f(x='c\nd')]", [r"\n", "c\nd"]),
+        ("[f(x='a\\\nb'), f(x='c\nd')]", ["ab", "c\nd"]),
+        ("[f(x='a\\\r\nb'), f(x='c\nd')]", ["ab", "c\nd"]),
+    ],
+    ids=[
+        "raw-tab",
+        "raw-triple",
+        "triple-apostrophe",
+        "triple-crlf",
+        "mixed-raw-and-repaired",
+        "raw-escape",
+        "line-continuation",
+        "crlf-line-continuation",
+    ],
+)
+def test_string_literal_chunk_boundaries(parser_name, model_output, expected):
+    # These parsers inspect cumulative text, not token IDs. Exercise every split
+    # (including within quote delimiters, escapes and CRLF) without a model.
+    tokenizer = MagicMock()
+    tokenizer.get_vocab.return_value = {}
+    parser_cls = ToolParserManager.get_tool_parser(parser_name)
+    _, calls = run_tool_extraction(parser_cls(tokenizer), model_output)
+    assert [json.loads(call.function.arguments)["x"] for call in calls] == expected
+
+    chunks_to_test = [[model_output], list(model_output)]
+    chunks_to_test.extend(
+        [model_output[:split], model_output[split:]]
+        for split in range(1, len(model_output))
+    )
+    for chunks in chunks_to_test:
+        reconstructor = run_tool_extraction_streaming(
+            parser_cls(tokenizer), chunks, assert_one_tool_per_delta=False
+        )
+        assert not reconstructor.other_content
+        assert [
+            json.loads(call.function.arguments)["x"]
+            for call in reconstructor.tool_calls
+        ] == expected, chunks
 
 
 @pytest.mark.parametrize("streaming", [True, False])
@@ -150,6 +210,36 @@ TEST_CASES = [
     ),
     pytest.param(
         True,
+        f"[{RAW_NEWLINE_FUNCTION_OUTPUT}]",
+        [RAW_NEWLINE_FUNCTION_CALL],
+        id="raw_newline_in_string_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{RAW_NEWLINE_FUNCTION_OUTPUT}]",
+        [RAW_NEWLINE_FUNCTION_CALL],
+        id="raw_newline_in_string_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"[{RAW_NEWLINE_PARALLEL_FUNCTION_OUTPUT}]",
+        [
+            RAW_NEWLINE_FUNCTION_CALL,
+            FunctionCall(name="get_weather", arguments='{"city": "SF"}'),
+        ],
+        id="raw_newline_parallel_calls_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{RAW_NEWLINE_PARALLEL_FUNCTION_OUTPUT}]",
+        [
+            RAW_NEWLINE_FUNCTION_CALL,
+            FunctionCall(name="get_weather", arguments='{"city": "SF"}'),
+        ],
+        id="raw_newline_parallel_calls_nonstreaming",
+    ),
+    pytest.param(
+        True,
         f"[{SIMPLE_FUNCTION_OUTPUT}, {MORE_TYPES_FUNCTION_OUTPUT}]",
         [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
         id="parallel_calls_streaming",
@@ -190,10 +280,12 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
         default_tokenizer
     )
     model_output_deltas = [
-        "[get_weather(city='San",
-        " Francisco', metric='celsius'), "
-        f"{PARAMETERLESS_FUNCTION_OUTPUT}, "
-        f"{EMPTY_LIST_FUNCTION_OUTPUT}]",
+        (
+            "[get_weather(city='San"
+            " Francisco', metric='celsius'), "
+            f"{PARAMETERLESS_FUNCTION_OUTPUT}, "
+            f"{EMPTY_LIST_FUNCTION_OUTPUT}]"
+        ),
     ]
 
     reconstructor = run_tool_extraction_streaming(
