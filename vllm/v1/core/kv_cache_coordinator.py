@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import NamedTuple
@@ -60,6 +61,9 @@ def _validate_prefix_cache_retention_interval(
             "must be non-negative and a multiple of scheduler_block_size "
             f"({scheduler_block_size})."
         )
+
+
+logger = logging.getLogger(__name__)
 
 
 def replay_boundaries(
@@ -130,9 +134,20 @@ class KVCacheCoordinator(ABC):
         self.eagle_group_ids: set[int] = {
             i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group
         }
-        # Conservatively fall back to flag all groups when no group is flagged.
+        # The EAGLE trailing-block drop exists because the draft model writes
+        # its own KV whose last block depends on the next token. When no KV
+        # group is flagged as an eagle group, the drafter shares KV with the
+        # target (e.g. Gemma-4 MTP with num_kv_shared_layers) and writes no
+        # draft KV, so dropping the trailing block would discard valid target
+        # cache. Flag no groups in that case.
         if use_eagle and not self.eagle_group_ids:
-            self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+            logger.warning(
+                "EAGLE/MTP is enabled but no KV cache group was identified as "
+                "a draft group; assuming the drafter shares KV with the target "
+                "model and skipping the trailing-block drop. If this model has "
+                "independent draft KV layers, mark them with "
+                "non_causal_multi_token_decode=True."
+            )
         # Lookahead hashes clear ``use_eagle``: groups stay flagged, none drops.
         self.drop_eagle_group_ids = self.eagle_group_ids if use_eagle else set()
 
