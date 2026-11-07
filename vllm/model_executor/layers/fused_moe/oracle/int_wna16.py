@@ -10,6 +10,7 @@ from compressed_tensors.quantization import (
     QuantizationStrategy,
 )
 
+import vllm._cpu_ops as cpu_ops
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
@@ -882,7 +883,7 @@ def _process_weights_cpu(
     )
 
     if isinstance(quant_config, AutoAWQConfig):
-        cpu_quant_algo = ops.CPUQuantAlgo.AWQ
+        cpu_quant_algo = cpu_ops.CPUQuantAlgo.AWQ
     elif isinstance(quant_config, (AutoGPTQConfig, QuantizationArgs)):
         if isinstance(quant_config, AutoGPTQConfig) and quant_config.desc_act:
             raise NotImplementedError(
@@ -890,7 +891,7 @@ def _process_weights_cpu(
                 "desc_act=True. The fused MoE kernel has no activation "
                 "reordering support."
             )
-        cpu_quant_algo = ops.CPUQuantAlgo.GPTQ
+        cpu_quant_algo = cpu_ops.CPUQuantAlgo.GPTQ
         # Canonical N-first → K-first for CPU kernel.
         w13 = w13.transpose(1, 2).contiguous()
         w2 = w2.transpose(1, 2).contiguous()
