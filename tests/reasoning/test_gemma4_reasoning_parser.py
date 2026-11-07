@@ -86,7 +86,19 @@ EMPTY = {
     "content": None,
     "is_reasoning_end": True,
 }
+# Non-streaming parsing sees the complete output and can reattribute text
+# before an explicit reasoning opener. Streaming parsing cannot retroactively
+# retract a prefix that was already emitted as content.
 NEW_LINE_NONSTREAMING = {
+    "output": (
+        "Before\n<|channel>This is a reasoning section<channel|>\nThis is the rest"
+    ),
+    "reasoning": "Before\nThis is a reasoning section",
+    "content": "\nThis is the rest",
+    "is_reasoning_end": True,
+}
+
+NEW_LINE_STREAMING = {
     "output": (
         "Before\n<|channel>This is a reasoning section<channel|>\nThis is the rest"
     ),
@@ -94,12 +106,15 @@ NEW_LINE_NONSTREAMING = {
     "content": "Before\n\nThis is the rest",
     "is_reasoning_end": True,
 }
-NEW_LINE_STREAMING = {
+
+PREAMBLE_BEFORE_REASONING_NONSTREAMING = {
     "output": (
-        "Before\n<|channel>This is a reasoning section<channel|>\nThis is the rest"
+        "---\n"
+        "<|channel>thought\nActual reasoning here"
+        '<channel|>{"ok": true}'
     ),
-    "reasoning": "This is a reasoning section",
-    "content": "Before\n\nThis is the rest",
+    "reasoning": "---\nActual reasoning here",
+    "content": '{"ok": true}',
     "is_reasoning_end": True,
 }
 
@@ -156,6 +171,11 @@ TEST_CASES = [
     pytest.param(False, EMPTY, id="empty"),
     pytest.param(False, NEW_LINE_NONSTREAMING, id="new_line"),
     pytest.param(True, NEW_LINE_STREAMING, id="new_line_streaming"),
+    pytest.param(
+        False,
+        PREAMBLE_BEFORE_REASONING_NONSTREAMING,
+        id="preamble_before_reasoning",
+    ),
     pytest.param(False, THOUGHT_PREFIX, id="thought_prefix"),
     pytest.param(True, THOUGHT_PREFIX, id="thought_prefix_streaming"),
     pytest.param(False, THOUGHT_PREFIX_ONLY, id="thought_prefix_only"),
