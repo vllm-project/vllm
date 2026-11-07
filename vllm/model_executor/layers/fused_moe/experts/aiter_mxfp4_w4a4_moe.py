@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
 )
+from vllm.triton_utils import triton
 
 __all__ = [
     "AiterW4A4ExpertsMonolithic",
@@ -28,6 +29,97 @@ def _aiter_raw(t):
     if t is None or isinstance(t, torch.Tensor):
         return t
     return t.storage.data if hasattr(t, "storage") else t
+
+
+def _aiter_ep_local_routing(
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    expert_map: torch.Tensor,
+    num_local_experts: int,
+    *,
+    score_mode: str | None,
+    bias: torch.Tensor | None,
+    routed_scaling_factor: float,
+    num_expert_group: int | None,
+    topk_group: int | None,
+    input_ids: torch.Tensor | None,
+    hash_indices_table: torch.Tensor | None,
+):
+    from aiter.ops.triton.moe.moe_routing.routing import (
+        ExptData,
+        RoutingData,
+        _compute_expt_data_internal,
+        ep_sort_routing,
+    )
+    from aiter.ops.triton.moe.moe_routing.topk import (
+        grouped_topk,
+        hash_routing,
+    )
+    from aiter.ops.triton.moe.moe_routing.topk import (
+        topk as aiter_topk,
+    )
+
+    n_tokens, n_experts = gating_output.shape
+    if hash_indices_table is not None:
+        assert score_mode == "sqrtsoftplus" and input_ids is not None
+        expt_scal, expt_indx, _ = hash_routing(
+            gating_output,
+            hash_indices_table,
+            input_ids.to(hash_indices_table.dtype),
+            n_expts_act=topk,
+            HIST_BLOCK_M=32,
+            score_mode=score_mode,
+            renorm=renormalize,
+            routed_scaling_factor=routed_scaling_factor,
+        )
+    elif score_mode is not None:
+        kwargs = dict(
+            apply_softmax=False,
+            score_mode=score_mode,
+            bias=bias.float() if bias is not None else None,
+            renorm=renormalize,
+            routed_scaling_factor=routed_scaling_factor,
+            HIST_BLOCK_M=32,
+        )
+        if num_expert_group is not None and num_expert_group > 1:
+            expt_scal, expt_indx, _ = grouped_topk(
+                gating_output,
+                topk,
+                num_expert_group=num_expert_group,
+                topk_group=topk_group,
+                **kwargs,
+            )
+        else:
+            expt_scal, expt_indx, _ = aiter_topk(gating_output, topk, **kwargs)
+    else:
+        logits = gating_output if renormalize else torch.softmax(gating_output, -1)
+        expt_scal, expt_indx, _ = aiter_topk(
+            logits, topk, apply_softmax=renormalize, HIST_BLOCK_M=32
+        )
+
+    n_gates = n_tokens * topk
+    block_m = max(16, min(triton.next_power_of_2(max(1, n_gates // n_experts)), 128))
+    expt_data_bufs = _compute_expt_data_internal(
+        num_local_experts, n_gates, block_m, gating_output.device
+    )
+    hist, gather_idx, scatter_idx, gate_scal, gate_valid, _ = ep_sort_routing(
+        expt_scal,
+        expt_indx,
+        expert_map,
+        num_local_experts,
+        None,
+        n_tokens,
+        topk,
+        n_gates,
+        expt_data_bufs,
+    )
+    hist = hist[:num_local_experts]
+    expt_data = ExptData(hist, *expt_data_bufs[:3])
+    routing_data = RoutingData(
+        block_m, gate_scal, hist, num_local_experts, topk, expt_data
+    )
+    return routing_data, gather_idx, scatter_idx, gate_valid
 
 
 def aiter_triton_kernel_w4a4_moe_forward(
@@ -74,7 +166,29 @@ def aiter_triton_kernel_w4a4_moe_forward(
 
     gating_output = torch.nan_to_num(gating_output, nan=0.0, posinf=0.0, neginf=0.0)
 
-    if hash_indices_table is not None:
+    gate_valid = None
+    if expert_map is not None:
+        routing_data, gather_idx, scatter_idx, gate_valid = _aiter_ep_local_routing(
+            gating_output,
+            topk,
+            renormalize,
+            expert_map,
+            _aiter_raw(w1).shape[0],
+            score_mode=(
+                (score_mode or "sqrtsoftplus")
+                if hash_indices_table is not None
+                else score_mode
+            ),
+            bias=e_score_correction_bias,
+            routed_scaling_factor=(
+                routed_scaling_factor if routed_scaling_factor is not None else 1.0
+            ),
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            input_ids=input_ids,
+            hash_indices_table=hash_indices_table,
+        )
+    elif hash_indices_table is not None:
         assert input_ids is not None, "hash routing requires input_ids"
         n_tokens, n_expts_tot = gating_output.shape
         tokens_per_expt = max(1, n_tokens * topk // n_expts_tot)
@@ -116,7 +230,10 @@ def aiter_triton_kernel_w4a4_moe_forward(
         )
 
     if on_gfx1250():
-        gather_src = gather_idx.to(torch.long) // topk
+        # EP leaves gather slots past the live gates unwritten.
+        gather_src = (gather_idx.to(torch.long) // topk).clamp_(
+            0, hidden_states.shape[0] - 1
+        )
         hidden_states = hidden_states[gather_src]
         gather_idx = None
 
@@ -215,6 +332,7 @@ def aiter_triton_kernel_w4a4_moe_forward(
         gammas=None if apply_router_weight_on_input else gammas,
         swizzle_mx_scale=swizzle_mx_scale,
         apply_swiglu=False,
+        gate_valid=gate_valid,
     )
 
     return out
