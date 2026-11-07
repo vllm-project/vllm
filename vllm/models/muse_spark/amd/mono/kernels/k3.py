@@ -75,12 +75,14 @@ from .dev import (
     bf_lo,
     bpermute,
     butterfly,
+    e4m3_dword,
     e8m0_f32,
     fp4x8_bf16,
     fresh,
     hw_exp2,
     hw_rsq,
     hw_sqrt,
+    inv_kv_scale,
     lanes_below,
     ld_f32,
     ld_i32,
@@ -406,6 +408,7 @@ class Build:
     S: int = 8  # rows (8 or 16)
     next_rope: bool = True  # the next layer has RoPE (SWA) or not (full, NoPE)
     attn: str = ""  # this layer's verify attention fused at the head ("swa" / "full"); "" = run before the launch
+    kv_fp8: bool = False  # e4m3 KV cache (insert and fused attention); else bf16
 
 
 def _lay(items):
@@ -587,7 +590,7 @@ def build(key: Build):
         from . import attn_frag
 
         assert key.attn in ("swa", "full"), key
-        FA = attn_frag.make(S // 8, key.attn == "swa")
+        FA = attn_frag.make(S // 8, key.attn == "swa", kv_fp8=key.kv_fp8)
         FaLds = FA.Lds
         # the fragment's source hash: the disk cache does not follow FA.run
         _KEYSTR = _KEYSTR + FA.key
@@ -1909,7 +1912,9 @@ def build(key: Build):
         return out
 
     @traced
-    def vllm_finish(w2, hh, tt, p, q_out, k_cache, v_cache, slots, cos_sin, pos):
+    def vllm_finish(
+        w2, hh, tt, p, q_out, k_cache, v_cache, slots, cos_sin, pos, k_scale, v_scale
+    ):
         """The owner's head finish: head hh (uniform), token tt (uniform in the wave), lane p = pair
         (2p, 2p + 1) of the head; w2 = the bf16 pair of the qkv GEMV.
         q / k as vLLM's fused_muse_spark_qknorm_rope_kv_insert: weightless qk-norm, then GPT-J RoPE in
@@ -1917,7 +1922,8 @@ def build(key: Build):
         through (the bf16 GEMV). K / V pairs go as one bf16 dword into the LBHNC cache, element
         ((slot >> 4) * bstride + (kv * 16 + (slot & 15)) * 128 + 64 isv + 2p), bstride = v_cache (the
         block stride in elements, a value, not a pointer); slot < 0 (padded rows) skipped. The block
-        base is 64-bit and wave-uniform (one buffer resource a wave)."""
+        base is 64-bit and wave-uniform (one buffer resource a wave). kv_fp8: e4m3 bytes (element =
+        byte) scaled by 1 / *k_scale or *v_scale, one dword a lane pair (e4m3_dword)."""
         x0 = bf_lo(w2)
         x1 = bf_hi(w2)
         ss = butterfly(x0 * x0 + x1 * x1, (1, 2, 4, 8, 16))
@@ -1943,14 +1949,19 @@ def build(key: Build):
             kv = hh - HQ - isv.select(fx.Int32(HKV), fx.Int32(0))
             # int64 slot_mapping: low word (-1 = padding)
             slot = uniform(ld_i32(slots, tt * 2))
+            if const_expr(key.kv_fp8):
+                w8 = e4m3_dword(o0, o1, inv_kv_scale(isv.select(v_scale, k_scale)))
             if slot >= 0:
                 eoff = fx.Int64(slot >> 4) * v_cache + fx.Int64(
                     (kv * 16 + (slot & 15)) * 128
                     + isv.select(fx.Int32(HD), fx.Int32(0))
                 )
-                bo.buffer_store(
-                    bf16_pair(o0, o1), rsrc(k_cache + eoff * fx.Int64(2)), p
-                )
+                if const_expr(key.kv_fp8):
+                    st_if(p % 2 == 0, w8, k_cache + eoff, p // 2)
+                else:
+                    bo.buffer_store(
+                        bf16_pair(o0, o1), rsrc(k_cache + eoff * fx.Int64(2)), p
+                    )
 
     @traced
     def stage_qkv8(
@@ -1963,6 +1974,8 @@ def build(key: Build):
         slots,
         cos_sin,
         pos,
+        k_scale,
+        v_scale,
         tag,
         health,
         tid,
@@ -2082,7 +2095,20 @@ def build(key: Build):
             else:
                 st_if(row < QKVG_ROWS, w2, g_out, (tt * QROWS + row - QKV_ROWS) // 2)
             if head & (p < 32):
-                vllm_finish(w2, gq, tt, p, q_out, k_cache, v_cache, slots, cos_sin, pos)
+                vllm_finish(
+                    w2,
+                    gq,
+                    tt,
+                    p,
+                    q_out,
+                    k_cache,
+                    v_cache,
+                    slots,
+                    cos_sin,
+                    pos,
+                    k_scale,
+                    v_scale,
+                )
 
     # ------------------------------------------------------------ kernel
     @traced
@@ -2153,6 +2179,8 @@ def build(key: Build):
         slots: Int64,
         cos_sin: Int64,
         pos: Int64,
+        k_scale: Int64,
+        v_scale: Int64,
         scratch: Int64,
         epoch: Int64,
         health: Int64,
@@ -2377,6 +2405,8 @@ def build(key: Build):
             slots,
             cos_sin,
             pos,
+            k_scale,
+            v_scale,
             tag,
             health,
             tid,
@@ -2433,6 +2463,8 @@ def build(key: Build):
         slots: Int64,
         cos_sin: Int64,
         pos: Int64,
+        k_scale: Int64,
+        v_scale: Int64,
         scratch: Int64,
         epoch: Int64,
         health: Int64,
@@ -2489,6 +2521,8 @@ def build(key: Build):
             slots,
             cos_sin,
             pos,
+            k_scale,
+            v_scale,
             scratch,
             epoch,
             health,
@@ -2515,8 +2549,9 @@ def build(key: Build):
     return launch
 
 
-def build_vllm(S=8, W=8, next_rope=True, attn=""):
+def build_vllm(S=8, W=8, next_rope=True, attn="", kv_fp8=False):
     """The K3 build vLLM launches for S rows (8 / 16) of a TP = EP = 8 group; next_rope: the next
-    layer has RoPE; attn = "swa" / "full": this layer's verify attention fused at the head."""
+    layer has RoPE; attn = "swa" / "full": this layer's verify attention fused at the head;
+    kv_fp8: e4m3 KV cache."""
     assert W == 8 and S in (8, 16), (S, W)
-    return Build(S=S, next_rope=bool(next_rope), attn=attn)
+    return Build(S=S, next_rope=bool(next_rope), attn=attn, kv_fp8=bool(kv_fp8))
