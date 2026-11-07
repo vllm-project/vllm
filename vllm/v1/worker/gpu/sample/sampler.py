@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -38,6 +39,9 @@ from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 from vllm.v1.worker.gpu.sample.trace_replay import TraceReplayState
 from vllm.v1.worker.gpu.states import RequestState
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
+
 
 class Sampler:
     def __init__(
@@ -52,6 +56,7 @@ class Sampler:
         use_fp64_gumbel: bool = False,
         enable_trace_replay: bool = False,
         return_sampling_mask: bool = False,
+        prompt_embeds_state: "PromptEmbedsState | None" = None,
         custom_logits_processors: Sequence[LogitsProcessor] = (),
     ):
         self.logprobs_mode = logprobs_mode
@@ -62,7 +67,9 @@ class Sampler:
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
 
         lp_req_state = LogitsProcRequestState.from_request_state(req_states)
-        self.penalties_state = PenaltiesState(vllm_config, lp_req_state)
+        self.penalties_state = PenaltiesState(
+            vllm_config, lp_req_state, prompt_embeds_state
+        )
         logit_bias_state = LogitBiasState(vllm_config, lp_req_state)
         bad_words_state = BadWordsState(vllm_config, lp_req_state)
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import torch
 import torch.nn as nn
@@ -24,6 +24,9 @@ from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
+
 
 class ModelSpecificAttnMetadata:
     """Base class for model-specific attention metadata."""
@@ -42,6 +45,10 @@ class ModelSpecificAttnMetadata:
 class ModelState(ABC):
     supports_prompt_embeds: ClassVar[bool] = False
     """Whether this state implements user-provided prompt embeddings."""
+
+    prompt_embeds_state: "PromptEmbedsState | None" = None
+    """GPU state for prompt-embeds overlays; only set by states that support
+    user-provided prompt embeddings."""
 
     def __init__(
         self,
