@@ -36,7 +36,8 @@ class GateLinear(ReplicatedLinear):
     5. ROCm bf16x3 router GEMM (gfx950, bf16 in, fp32 weight, fp32 out,
        M>=2048)
     6. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype); gfx950
-       routes low M through the tier 2 kernel
+       routes low M through the tier 2 kernel and tuned shapes up to M=256
+       through a split-K Triton kernel
     7. F.linear via ReplicatedLinear (ultimate fallback)
 
     The ``out_dtype`` attribute is mutable and can be set after init
@@ -540,6 +541,13 @@ def fp32_router_gemm_dispatch_impl(
             if can_use_rocm_fp32_router_gemm(x, weight):
                 return rocm_fp32_router_gemm(x, weight)
         if weight.dtype == torch.bfloat16:
+            from vllm.model_executor.layers.fused_moe.router.rocm_bf16_router_gemm import (  # noqa: E501
+                rocm_bf16_router_gemm,
+            )
+
+            output = rocm_bf16_router_gemm(x, weight)
+            if output is not None:
+                return output
             return torch.mm(x, weight.T, out_dtype=torch.float32)
         return torch.nn.functional.linear(x.float(), weight)
     max_tokens = _FP32_ROUTER_GEMM_MAX_TOKENS
