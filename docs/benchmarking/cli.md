@@ -682,6 +682,10 @@ vllm bench serve \
 
 `openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`, `ArtificialAnalysis/Earnings22-Cleaned-AA`, `D4nt3/esb-datasets-earnings22-validation-tiny-filtered`
 
+Use `--asr-min-audio-len-sec` and `--asr-max-audio-len-sec` to filter ASR samples
+by duration in seconds. These bounds apply equally to local paths and embedded
+audio bytes, including mono and multichannel WAVs.
+
 ```bash
 vllm bench serve \
     --model openai/whisper-large-v3-turbo \
