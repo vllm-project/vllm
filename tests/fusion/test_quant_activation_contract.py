@@ -24,11 +24,15 @@ from vllm.model_executor.kernels.linear.nvfp4.base import (
     NvFp4LinearKernel,
     NvFp4LinearLayerConfig,
 )
+from vllm.model_executor.kernels.linear.nvfp4.cutlass import CutlassNvFp4LinearKernel
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+    FlashInferB12xNvFp4LinearKernel,
+    FlashInferCudnnNvFp4LinearKernel,
     FlashInferCuteDslNvFp4LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
     FlashInferTrtllmNvFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.nvfp4.pytorch import TorchNvFp4LinearKernel
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
     AiterPerTokenFp8ScaledMMLinearKernel,
@@ -73,6 +77,10 @@ SUPPORTING = {
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
     RocmDotScaledMxfp8LinearKernel,
+    CutlassNvFp4LinearKernel,
+    TorchNvFp4LinearKernel,
+    FlashInferCudnnNvFp4LinearKernel,
+    FlashInferB12xNvFp4LinearKernel,
 }
 if current_platform.is_cuda():
     SUPPORTING.add(TorchMxFp8LinearKernel)
@@ -129,7 +137,13 @@ def test_only_known_backends_support_prequantized_input():
 def test_supporting_backend_declares_consume_via_helper():
     for cls in SUPPORTING:
         fn = _resolved_apply_weights(cls)
-        assert "as_quantized_activation" in fn.__code__.co_names, cls.__name__
+        names = fn.__code__.co_names
+        if "as_quantized_activation" in names:
+            continue
+        assert "prepare_input" in names, cls.__name__
+        assert "as_quantized_activation" in cls.prepare_input.__code__.co_names, (
+            cls.__name__
+        )
 
 
 def test_bridge_marks_supporting_and_skips_others():
