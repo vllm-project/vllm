@@ -131,6 +131,7 @@ steps:
       - tests/models/test_deepseek_v41_decoder_replay_layers.py
       - tests/models/test_deepseek_v41_replay_batch.py
       - tests/models/test_deepseek_v41_amd_replay_forward.py
+      - tests/models/test_deepseek_v41_amd_csa_stream_threshold.py
       - tests/models/test_deepseek_v4_dspark_rocm.py
       - tests/models/test_deepseek_v4_rocm_wo_a.py
       - tests/models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
@@ -157,6 +158,7 @@ steps:
         models/test_deepseek_v41_decoder_replay_layers.py
         models/test_deepseek_v41_replay_batch.py
         models/test_deepseek_v41_amd_replay_forward.py
+        models/test_deepseek_v41_amd_csa_stream_threshold.py
         models/test_deepseek_v4_dspark_rocm.py
         models/test_deepseek_v4_rocm_wo_a.py
         models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
