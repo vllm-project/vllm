@@ -17,7 +17,7 @@ Declare supported languages and capabilities:
 ??? code "supported_languages and supports_transcription_only"
 
     ```python
-    from typing import ClassVar, Mapping, Literal
+    from typing import ClassVar, Mapping, Literal, cast
     import numpy as np
     import torch
     from torch import nn
