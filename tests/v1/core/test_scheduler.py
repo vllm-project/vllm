@@ -7036,6 +7036,67 @@ def test_delayed_kv_connector_free_keeps_scheduler_active():
     assert not scheduler.has_finished_requests()
 
 
+def test_scheduler_side_completion_releases_blocks_on_empty_worker_output(monkeypatch):
+    """A scheduler-side ACK must release a finished request on a V2 empty step."""
+    scheduler = create_scheduler(
+        use_kv_connector=mock_kv(0, False),
+        num_blocks=8,
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        use_v2_model_runner=True,
+    )
+    request = create_requests(num_requests=1, num_tokens=16, max_tokens=1)[0]
+    connector = scheduler.connector
+    assert connector is not None
+    pending_ack = set()
+
+    # Only the external transfer boundary is mocked, not scheduler/block freeing.
+    monkeypatch.setattr(connector, "request_finished", lambda *_: (True, None))
+
+    def consume_scheduler_ack(output):
+        output.finished_sending = set(pending_ack) or None
+        pending_ack.clear()
+
+    monkeypatch.setattr(connector, "update_connector_output", consume_scheduler_ack)
+    pool = scheduler.kv_cache_manager.block_pool
+    free_before = pool.get_num_free_blocks()
+    scheduler.add_request(request)
+    scheduled = scheduler.schedule()
+    blocks = list(scheduler.kv_cache_manager.get_blocks(request.request_id).blocks[0])
+    scheduler.update_from_output(
+        scheduled,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[42]],
+        ),
+    )
+    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert request.request_id in scheduler.requests
+    assert blocks and all(block.ref_cnt > 0 for block in blocks)
+    assert not scheduler.defer_block_free
+    assert scheduler.has_requests()
+
+    pending_ack.add(request.request_id)
+    scheduled = scheduler.schedule()
+    assert scheduled.total_num_scheduled_tokens == 0
+    output = ModelRunnerOutput.with_kv_conn_output_only(KVConnectorOutput())
+    scheduler.update_from_output(scheduled, output)
+
+    assert {
+        "request_retained": request.request_id in scheduler.requests,
+        "block_ref_counts": [block.ref_cnt for block in blocks],
+        "free_blocks": pool.get_num_free_blocks(),
+        "ack_pending": bool(pending_ack),
+    } == {
+        "request_retained": False,
+        "block_ref_counts": [0] * len(blocks),
+        "free_blocks": free_before,
+        "ack_pending": False,
+    }
+    assert not scheduler.has_requests()
+
+
 def test_scheduler_kv_connector_stats():
     """Test worker-side, scheduler-side, and combined KV connector stats."""
 

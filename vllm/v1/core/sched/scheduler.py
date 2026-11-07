@@ -2675,6 +2675,11 @@ class Scheduler(SchedulerInterface):
                 )
 
         # KV Connector: update state for finished KV Transfers.
+        if kv_connector_output is None and self.connector is not None:
+            # Retained finished requests can complete without new worker events.
+            num_running, num_waiting = self.get_request_counts()
+            if len(self.requests) > num_running + num_waiting:
+                kv_connector_output = KVConnectorOutput()
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
 
