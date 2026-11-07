@@ -32,12 +32,12 @@ logger = init_logger(__name__)
 # Rows of the executor's fused all-reduce + mHC mailbox: the largest FULL
 # decode graph at 64 requests x 6 DSpark tokens.
 FUSED_MHC_MAX_ROWS = 384
-# Rows whose next mHC coefficients run on the side stream; larger steps compute
-# them inline after the fused kernel.
-MHC_OVERLAP_MAX_ROWS = 48
 # Rows of the low-batch GEMMs: one DSpark verification step of up to 8 rows
 # (6 at one request).
 LOW_BATCH_MAX_ROWS = 8
+# Rows up to which the attention projections above LOW_BATCH_MAX_ROWS keep the
+# low-latency MXFP8 GEMM, with a 16-, 32- or 48-row activation tile.
+WIDE_LOW_LATENCY_MAX_ROWS = 48
 # The oldest FlashInfer whose internals the publishing wo_b GEMM and the MXFP8
 # layer input were checked against. Newer releases run them too: test_numerics.py
 # compares both with FlashInfer's own GEMM and quantize bitwise on the release
@@ -118,6 +118,8 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
         ),
         # The routed-expert GEMMs and the publishing wo_b bind weight addresses.
         "no sleep mode": not vllm_config.model_config.enable_sleep_mode,
+        # The replicated embedding table is copied from the shards once, at load.
+        "no runtime weight updates": vllm_config.weight_transfer_config is None,
         "no LoRA, KV transfer or batch invariance": (
             vllm_config.lora_config is None
             and vllm_config.kv_transfer_config is None
