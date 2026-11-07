@@ -313,9 +313,12 @@ def test_w8a8_block_fp8_fused_moe(
 @pytest.mark.parametrize("M", [24, 1024])
 @pytest.mark.parametrize("modular", [False, True])
 @torch.inference_mode()
-def test_h200_block_fp8_up_and_down_tma_matches_pointer(M, modular, workspace_init):
-    if "H200" not in torch.cuda.get_device_name():
-        pytest.skip("This block FP8 TMA test targets H200")
+def test_block_fp8_up_and_down_tma_matches_pointer(M, modular, workspace_init):
+    if not (
+        current_platform.is_device_capability_family(90)
+        or current_platform.is_device_capability_family(100)
+    ):
+        pytest.skip("This block FP8 TMA test requires SM90 or SM100")
 
     E, N, K, topk = 256, 256, 128, 8
     torch.manual_seed(123)
@@ -356,7 +359,13 @@ def test_h200_block_fp8_up_and_down_tma_matches_pointer(M, modular, workspace_in
     with set_current_vllm_config(vllm_config):
         with override_config({**config, "USE_TMA": False}):
             pointer_output = run()
-        tma_output = run()
+        from triton.tools.tensor_descriptor import TensorDescriptor
+
+        with patch.object(
+            TensorDescriptor, "from_tensor", wraps=TensorDescriptor.from_tensor
+        ) as descriptors:
+            tma_output = run()
+        assert descriptors.call_count == 2
 
     torch.testing.assert_close(tma_output, pointer_output, atol=0, rtol=0)
 
