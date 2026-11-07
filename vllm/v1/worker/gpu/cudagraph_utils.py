@@ -173,6 +173,7 @@ class CudaGraphManager:
         varlen_decode: bool = False,
         ubatch_runner: "UBatchRunner | None" = None,
         decode_request_sizes: Sequence[int] | None = None,
+        max_varlen_decode_reqs: int | None = None,
     ):
         self.vllm_config = vllm_config
         self.decode_request_sizes = decode_request_sizes
@@ -189,6 +190,12 @@ class CudaGraphManager:
         # Widest decode query; varlen decode graphs take 1..this many per request.
         self.decode_query_len = max(self.decode_max_reqs)
         self.varlen_decode = varlen_decode
+        # Requests a varlen decode graph pads to.
+        self.max_varlen_decode_reqs = (
+            self.max_num_reqs
+            if max_varlen_decode_reqs is None
+            else min(self.max_num_reqs, max_varlen_decode_reqs)
+        )
         # DBO supports FULL CUDA graphs only.
         self.ubatch_runner = ubatch_runner
 
@@ -312,18 +319,23 @@ class CudaGraphManager:
         capture_decode = separate_decode_routine and decode_mode != CUDAGraphMode.NONE
         if capture_decode and self.varlen_decode:
             # Varlen decode graphs take any mix of 1..decode_query_len tokens per
-            # request, worst case 1 token per request (or max_num_reqs).
+            # request, worst case 1 token per request (or max_varlen_decode_reqs).
             varlen_sizes = self.vllm_config.get_varlen_decode_cudagraph_token_sizes(
                 self.decode_query_len
+            )
+            max_varlen_decode_tokens = (
+                self.max_varlen_decode_reqs * self.decode_query_len
             )
             for num_tokens, num_active_loras in product(
                 varlen_sizes, self.lora_capture_cases
             ):
+                if num_tokens > max_varlen_decode_tokens:
+                    continue
                 token_keyed_descs.append(
                     BatchExecutionDescriptor(
                         cg_mode=decode_mode,
                         num_tokens=num_tokens,
-                        num_reqs=min(num_tokens, self.max_num_reqs),
+                        num_reqs=min(num_tokens, self.max_varlen_decode_reqs),
                         max_query_len=self.decode_query_len,
                         num_active_loras=num_active_loras,
                     )
@@ -644,6 +656,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
         ubatch_runner: "UBatchRunner | None" = None,
+        max_varlen_decode_reqs: int | None = None,
     ):
         super().__init__(
             vllm_config,
@@ -653,6 +666,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,
             ubatch_runner=ubatch_runner,
+            max_varlen_decode_reqs=max_varlen_decode_reqs,
         )
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []

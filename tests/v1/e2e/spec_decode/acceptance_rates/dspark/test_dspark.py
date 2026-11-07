@@ -154,3 +154,36 @@ def test_dspark_correctness_and_acceptance_rate(
         assert (
             acceptance_len >= config.reference_acceptance_len * REGRESSION_TOLERANCE
         ), f"{context}: {metrics_summary}"
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Adaptive verification with TRITON_ATTN is only validated on CUDA",
+)
+def test_dspark_adaptive_verification_with_small_token_budget(vllm_runner):
+    """Adaptive verification must start and draft when the draft pass fits
+    fewer requests than max_num_seqs (256 * 7 query rows > 512)."""
+    config = QWEN3_DSPARK_DEEPSPEC
+    speculative_config = {
+        "method": "dspark",
+        "model": config.draft_model,
+        "num_speculative_tokens": config.num_speculative_tokens,
+        "enable_adaptive_verification": True,
+    }
+    with vllm_runner(
+        config.model,
+        speculative_config=speculative_config,
+        max_num_seqs=256,
+        max_num_batched_tokens=512,
+        # Pre-Hopper FlashAttention cannot replay varlen decode graphs.
+        attention_backend="TRITON_ATTN",
+        enable_chunked_prefill=None,
+        disable_log_stats=False,
+        # Keep the default capture sizes: vllm_runner's [4, K + 1] never pad
+        # past the cap.
+        compilation_config=CompilationConfig(),
+    ) as runner:
+        # More requests than the cap (512 // 7 = 73), so decode steps replay
+        # varlen graphs padded to the cap.
+        runner.generate_greedy(["The capital of France is"] * 80, max_tokens=32)
+        assert compute_acceptance_len(runner.llm.get_metrics()) > 1
