@@ -77,6 +77,10 @@ def _config_refusal(vllm_config: VllmConfig, model) -> str | None:
             "shared expert neither fused nor a separate MLP",
         ),
         (_dense_prefix_ok(model.layers), "layer mix"),
+        (
+            not getattr(vllm_config.quant_config, "moe_input_rotation_sizes", None),
+            "MoE input rotation",
+        ),
     )
     for ok, why in checks:
         if not ok:

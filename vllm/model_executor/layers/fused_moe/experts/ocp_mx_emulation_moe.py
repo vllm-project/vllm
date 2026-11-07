@@ -20,6 +20,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+from vllm.model_executor.layers.quantization.input_hadamard import (
+    block_hadamard_rotate,
+    hadamard_matrix,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
@@ -218,6 +222,85 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             a1q_scale=None,
+            a2_scale=a2_scale,
+            workspace13=workspace13,
+            workspace2=workspace2,
+            expert_tokens_meta=expert_tokens_meta,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+        )
+
+
+class InputHadamardOCPMXEmulationExperts(OCP_MXQuantizationEmulationTritonExperts):
+    """Emulated MXFP4 MoE with a block Hadamard rotation before each GEMM.
+
+    The checkpoint stores w13 and w2 already rotated, so only the activations
+    are rotated here: the hidden states before the first GEMM, and the SwiGLU
+    output before it is quantized for the second. Fused kernels quantize that
+    second activation internally, so this is the fallback when AITER's W4A4
+    path (which takes the rotation as ``inter_hadamard``) is unavailable.
+    """
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(moe_config, quant_config)
+        size = getattr(quant_config, "input_rotation_size", None)
+        if not isinstance(size, int) or size <= 0:
+            raise ValueError("input_rotation_size must be set for a rotated MoE")
+        self.rotation_size = size
+
+    def _rotate(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[-1] % self.rotation_size != 0:
+            raise ValueError(
+                f"Dimension {x.shape[-1]} is not divisible by the Hadamard "
+                f"size {self.rotation_size}."
+            )
+        hadamard = hadamard_matrix(self.rotation_size, x.device)
+        return block_hadamard_rotate(x, hadamard).contiguous()
+
+    def activation(
+        self,
+        activation: MoEActivation,
+        output: torch.Tensor,
+        input: torch.Tensor,
+        **kwargs,
+    ) -> None:
+        super().activation(activation, output, input, **kwargs)
+        # SwiGLU has run; quantize_input for w2 happens after this returns.
+        output.copy_(self._rotate(output))
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        hidden_states = self._rotate(hidden_states)
+        super().apply(
+            output=output,
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            a1q_scale=a1q_scale,
             a2_scale=a2_scale,
             workspace13=workspace13,
             workspace2=workspace2,
