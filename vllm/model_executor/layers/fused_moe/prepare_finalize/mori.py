@@ -5,6 +5,7 @@ import mori
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.platforms import current_platform
@@ -50,6 +51,27 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def supports_async(self) -> bool:
         return False
+
+    def _num_live_dispatch_rows(self, num_local_tokens: int, num_rows: int) -> int:
+        """Rows of the dispatch output that can hold a received token.
+
+        dispatch() returns MoRI's whole receive buffer, sized
+        num_dispatchers * max_tokens_per_rank, and the modular kernel sizes
+        the expert GEMMs from its row count. Each source rank sends this rank
+        at most one copy of each of its tokens, and received tokens are packed
+        from row 0, so only num_dispatchers * (max tokens on any rank) rows
+        can be live. The bound has to cover every source rank, so it comes
+        from the DP token counts rather than this rank's batch alone.
+        """
+        if not is_forward_context_available():
+            return num_rows
+        dp_metadata = get_forward_context().dp_metadata
+        if dp_metadata is None:
+            return num_rows
+        max_tokens = max(
+            int(dp_metadata.num_tokens_across_dp_cpu.max()), num_local_tokens
+        )
+        return min(self.num_dispatchers_ * max_tokens, num_rows)
 
     def prepare(
         self,
@@ -117,6 +139,15 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             dispatch_ids,
             dispatch_recv_token_num,
         ) = self.mori_op.dispatch(a1, topk_weights, scale, topk_ids)
+
+        num_rows = self._num_live_dispatch_rows(a1.shape[0], dispatch_a1.shape[0])
+        if num_rows < dispatch_a1.shape[0]:
+            dispatch_a1 = dispatch_a1[:num_rows]
+            dispatch_ids = dispatch_ids[:num_rows]
+            if dispatch_weights is not None:
+                dispatch_weights = dispatch_weights[:num_rows]
+            if dispatch_scale is not None:
+                dispatch_scale = dispatch_scale[:num_rows]
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=dispatch_recv_token_num, expert_num_tokens_cpu=None

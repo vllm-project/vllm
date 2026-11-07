@@ -54,6 +54,53 @@ class _FakeMoriOp:
         return (fused_expert_output,)
 
 
+def _prepare_with_dp_counts(monkeypatch, num_dispatchers, dp_counts):
+    from vllm.forward_context import override_forward_context
+
+    mori_module = _import_mori_prepare_finalize(monkeypatch)
+    adapter = mori_module.MoriPrepareAndFinalize(
+        mori_op=_FakeMoriOp(),
+        max_tokens_per_rank=16,
+        num_dispatchers=num_dispatchers,
+    )
+    hidden_states = torch.randn(2, 4)
+    topk_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+    quant_config = SimpleNamespace(is_block_quantized=False, is_per_act_token=False)
+    forward_context = SimpleNamespace(
+        dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=torch.tensor(dp_counts))
+    )
+    with override_forward_context(forward_context):  # type: ignore[arg-type]
+        return adapter.prepare(
+            hidden_states,
+            torch.ones(2, 2),
+            topk_ids,
+            num_experts=4,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+            quant_config=quant_config,
+        )
+
+
+def test_mori_dispatch_trimmed_to_live_rows(monkeypatch):
+    # The fake op hands back 32 rows (2 tokens x 16). With 4 dispatchers and at
+    # most 2 tokens on any rank, only 4 * 2 = 8 rows can hold a token.
+    dispatch_a1, _, _, dispatch_ids, dispatch_weights = _prepare_with_dp_counts(
+        monkeypatch, num_dispatchers=4, dp_counts=[1, 2, 1, 1]
+    )
+    assert dispatch_a1.shape[0] == 8
+    assert dispatch_ids.shape[0] == 8
+    assert dispatch_weights.shape[0] == 8
+
+
+def test_mori_dispatch_untrimmed_when_buffer_is_full(monkeypatch):
+    # 16 dispatchers x 2 tokens covers all 32 rows, so nothing is sliced.
+    dispatch_a1, _, _, dispatch_ids, _ = _prepare_with_dp_counts(
+        monkeypatch, num_dispatchers=16, dp_counts=[2] * 16
+    )
+    assert dispatch_a1.shape[0] == 32
+    assert dispatch_ids.shape[0] == 32
+
+
 def test_mori_combine_uses_original_per_rank_topk_ids(monkeypatch):
     mori_module = _import_mori_prepare_finalize(monkeypatch)
     mori_op = _FakeMoriOp()
