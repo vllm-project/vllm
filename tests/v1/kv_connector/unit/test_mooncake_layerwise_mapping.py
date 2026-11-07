@@ -14,7 +14,7 @@ pytestmark = pytest.mark.cpu_test
 
 class BlockMappingTests(unittest.TestCase):
     def test_chunk_boundary_prefix_and_tail(self):
-        plan = mapping._map_pending_blocks
+        plan = mapping._build_pending_block_slice
         for size in (16, 32, 64):
             with self.subTest(size=size):
                 result = plan(
@@ -44,7 +44,7 @@ class BlockMappingTests(unittest.TestCase):
 
     def test_empty_destination_is_already_satisfied(self):
         self.assertIsNone(
-            mapping._map_pending_blocks(
+            mapping._build_pending_block_slice(
                 [11],
                 [],
                 token_end=15,
@@ -56,30 +56,32 @@ class BlockMappingTests(unittest.TestCase):
         )
 
     def test_window_does_not_compact_logical_null_positions(self):
-        result = mapping._map_window_blocks(
+        result = mapping._build_window_block_slice(
             [0, 0, 12, 13], [0, 22, 23], token_end=63, block_size=16, null_block=0
         )
         self.assertEqual(result.source, (12, 13))
         self.assertEqual(result.destination, (22, 23))
         with self.assertRaisesRegex(ValueError, "retired"):
-            mapping._map_window_blocks(
+            mapping._build_window_block_slice(
                 [0, 0, 0, 13], [22, 23], token_end=63, block_size=16, null_block=0
             )
 
     def test_state_boundary_and_missing_slot(self):
-        result = mapping._map_state_blocks(
+        result = mapping._build_state_block_slice(
             [0, 12, 0, 13], [0, 23], token_end=543, null_block=0
         )
         self.assertEqual(result.source, (13,))
         self.assertEqual(result.destination, (23,))
         self.assertEqual(result.end_tokens, 543)
         with self.assertRaisesRegex(ValueError, "missing"):
-            mapping._map_state_blocks([13], [22, 23], token_end=543, null_block=0)
+            mapping._build_state_block_slice(
+                [13], [22, 23], token_end=543, null_block=0
+            )
 
     def test_ring_does_not_expand_with_prompt_length(self):
         for tokens in (1, 63, 64, 65, 4097):
             with self.subTest(tokens=tokens):
-                result = mapping._map_state_blocks(
+                result = mapping._build_state_block_slice(
                     [12], [23], token_end=tokens, null_block=0
                 )
                 self.assertEqual(result.source, (12,))
@@ -88,7 +90,7 @@ class BlockMappingTests(unittest.TestCase):
 
     def test_reject_incomplete_source(self):
         with self.assertRaisesRegex(ValueError, "Incomplete"):
-            mapping._map_pending_blocks(
+            mapping._build_pending_block_slice(
                 [11],
                 [21, 22],
                 token_end=17,

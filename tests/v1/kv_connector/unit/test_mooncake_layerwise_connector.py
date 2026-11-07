@@ -91,6 +91,7 @@ def _copy_destination_metadata(worker, destinations, requests):
             d_req_id=req_id,
             transfer_id=req_id,
             local_block_ids=[list(blocks)],
+            num_external_tokens=len(blocks) * worker.logical_block_size,
             remote_engine_id=worker.engine_id,
             remote_bootstrap_addr="http://bootstrap:8998",
         )
@@ -184,6 +185,55 @@ async def test_layerwise_prefix_copy_waits_for_complete_blocks_and_destination(
         worker.save_kv_layer(name)
         worker.wait_for_save()
         assert torch.equal(destination[3:5], source[1:3])
+
+
+@pytest.mark.asyncio
+async def test_layerwise_reuses_slices_across_hooks_and_refreshes_next_forward():
+    names = ("model.layers.0.self_attn", "model.layers.1.self_attn")
+    with _layerwise_copy_worker(names=names) as worker:
+        sources = [worker.device_kv_caches[name] for name in names]
+        destinations = [torch.zeros_like(source) for source in sources]
+        for source in sources:
+            source[1].fill_(7)
+            source[2].fill_(9)
+            source[5].fill_(11)
+        remote = _copy_destination_metadata(worker, destinations, {"a": (3, 4)})
+        await worker.send_kv_to_decode(b"decode", AsyncMock(), remote)
+        size = worker.logical_block_size
+        metadata = MooncakeConnectorMetadata()
+        metadata.requests = (
+            mooncake_connector.PushReqMeta("a", "a", ((1, 2),), size, 2 * size),
+        )
+        worker.start_load_kv(metadata)
+        worker.save_kv_layer(names[0])
+        worker._finish_pending_send(wait=True)
+        (first_slice,) = (
+            value for value in worker.cached_block_slices.values() if value is not None
+        )
+        worker.save_kv_layer(names[1])
+        worker._finish_pending_send(wait=True)
+        (reused_slice,) = (
+            value for value in worker.cached_block_slices.values() if value is not None
+        )
+        assert reused_slice is first_slice
+        worker.wait_for_save()
+        assert not worker.cached_block_slices
+        for destination in destinations:
+            assert torch.all(destination[3] == 7)
+            assert not torch.any(destination[4])
+
+        # The next chunk uses a replacement block and must not reuse old IDs.
+        metadata.requests = (
+            mooncake_connector.PushReqMeta("a", "a", ((1, 5),), 2 * size, 2 * size),
+        )
+        worker.start_load_kv(metadata)
+        for name in names:
+            worker.save_kv_layer(name)
+        worker.wait_for_save()
+        assert not worker.cached_block_slices
+        for destination in destinations:
+            assert torch.all(destination[3] == 7)
+            assert torch.all(destination[4] == 11)
 
 
 @pytest.mark.asyncio
