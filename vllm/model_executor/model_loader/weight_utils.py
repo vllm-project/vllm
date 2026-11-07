@@ -11,6 +11,7 @@ import inspect
 import json
 import os
 import random
+import shutil
 import sys
 import tempfile
 import threading
@@ -878,6 +879,51 @@ def enable_tqdm(use_tqdm_on_load: bool):
     )
 
 
+def _npcache_source_manifest(hf_weights_files: list[str]) -> list[dict]:
+    """Return a list of {path, size, mtime_ns} dicts for each source shard.
+
+    Used to detect whether the on-disk checkpoint has changed since the NumPy
+    cache was written. mtime_ns is stored as an int (os.stat st_mtime_ns) to
+    capture sub-second modifications; size is stored as an int.
+    """
+    manifest = []
+    for p in sorted(hf_weights_files):
+        stat = os.stat(p)
+        manifest.append(
+            {
+                "path": p,
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+            }
+        )
+    return manifest
+
+
+def _npcache_is_stale(
+    cached: list[dict],
+    current: list[dict],
+) -> bool:
+    """Return True when *current* differs from *cached* in any shard."""
+    if len(cached) != len(current):
+        return True
+    for c, d in zip(cached, current):
+        if c.get("path") != d.get("path") or c.get("size") != d.get("size"):
+            return True
+        # Compare nanosecond mtimes when available, falling back to legacy float mtime.
+        if "mtime_ns" in c and "mtime_ns" in d:
+            if c["mtime_ns"] != d["mtime_ns"]:
+                return True
+        elif abs(c.get("mtime", 0.0) - d.get("mtime", 0.0)) > 1e-6:
+            return True
+    return False
+
+
+def _npcache_manifest_hash(manifest: list[dict]) -> str:
+    """Return a deterministic hash of the source manifest for versioning."""
+    data = json.dumps(manifest, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
 def np_cache_weights_iterator(
     model_name_or_path: str,
     cache_dir: str | None,
@@ -888,37 +934,89 @@ def np_cache_weights_iterator(
     """Iterate over the weights in the model np files.
 
     Will dump the model weights to numpy files if they are not already dumped.
+    The cache is invalidated and rebuilt whenever any source shard's size or
+    modification time changes, preventing a stale-cache correctness failure
+    after an in-place checkpoint update.
+    Rebuilds are isolated into content-addressed version subdirectories to
+    ensure in-flight readers never observe mixed weights across checkpoints.
     """
     # Convert the model weights from torch tensors to numpy arrays for
     # faster loading.
     np_folder = os.path.join(hf_folder, "np")
     os.makedirs(np_folder, exist_ok=True)
     weight_names_file = os.path.join(np_folder, "weight_names.json")
-    # Use file lock to prevent multiple processes from
-    # dumping the same model weights to numpy at the same time.
-    with get_lock(model_name_or_path, cache_dir):
-        if not os.path.exists(weight_names_file):
-            weight_names: list[str] = []
-            for bin_file in tqdm(
-                hf_weights_files,
-                desc="Loading np_cache checkpoint shards",
-                disable=not enable_tqdm(use_tqdm_on_load),
-                bar_format=_BAR_FORMAT,
-            ):
-                state = torch.load(bin_file, map_location="cpu", weights_only=True)
-                for name, param in state.items():
-                    param_path = os.path.join(np_folder, name)
-                    with open(param_path, "wb") as f:
-                        np.save(f, param.cpu().detach().numpy())
-                    weight_names.append(name)
-            with open(weight_names_file, "w") as f:
-                json.dump(weight_names, f)
 
-    with open(weight_names_file) as f:
-        weight_names = json.load(f)
+    current_manifest = _npcache_source_manifest(hf_weights_files)
+    version_hash = _npcache_manifest_hash(current_manifest)
+    version_folder = os.path.join(np_folder, version_hash)
+    version_manifest_file = os.path.join(version_folder, "weight_names.json")
+
+    if not os.path.exists(version_manifest_file):
+        with get_lock(model_name_or_path, cache_dir):
+            if not os.path.exists(version_manifest_file):
+                # Dump into staging directory to avoid partial reads by
+                # concurrent processes.
+                staging_folder = tempfile.mkdtemp(
+                    prefix=f".tmp_{version_hash}_", dir=np_folder
+                )
+                try:
+                    weight_names: list[str] = []
+                    for bin_file in tqdm(
+                        hf_weights_files,
+                        desc="Loading np_cache checkpoint shards",
+                        disable=not enable_tqdm(use_tqdm_on_load),
+                        bar_format=_BAR_FORMAT,
+                    ):
+                        state = torch.load(
+                            bin_file, map_location="cpu", weights_only=True
+                        )
+                        for name, param in state.items():
+                            param_path = os.path.join(staging_folder, name)
+                            with open(param_path, "wb") as f:
+                                np.save(f, param.cpu().detach().numpy())
+                            weight_names.append(name)
+
+                    staging_manifest = os.path.join(
+                        staging_folder, "weight_names.json"
+                    )
+                    with open(staging_manifest, "w") as f:
+                        json.dump(
+                            {
+                                "weight_names": weight_names,
+                                "source_manifest": current_manifest,
+                                "version_hash": version_hash,
+                            },
+                            f,
+                        )
+
+                    # Atomically promote staging directory into target version folder.
+                    os.replace(staging_folder, version_folder)
+
+                    # Atomically write/update top-level weight_names_file for
+                    # backward compatibility.
+                    with atomic_writer(weight_names_file) as f:
+                        json.dump(
+                            {
+                                "weight_names": weight_names,
+                                "source_manifest": current_manifest,
+                                "version_hash": version_hash,
+                            },
+                            f,
+                        )
+                finally:
+                    if os.path.exists(staging_folder):
+                        shutil.rmtree(staging_folder, ignore_errors=True)
+
+    with open(version_manifest_file) as f:
+        cached_data = json.load(f)
+
+    if isinstance(cached_data, dict):
+        weight_names = cached_data["weight_names"]
+    else:
+        weight_names = cached_data
 
     for name in weight_names:
-        param_path = os.path.join(np_folder, name)
+        param_path = os.path.join(version_folder, name)
         with open(param_path, "rb") as f:
             param = np.load(f)
         yield name, torch.from_numpy(param)
