@@ -9,7 +9,7 @@ import torch
 
 import vllm._custom_ops as ops
 from tests.kernels.utils import fp8_allclose, fp8_ulp_distance, opcheck
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -424,3 +424,44 @@ def test_rms_norm(
                 True,  # is_scale_transposed
             ),
         )
+
+
+@pytest.mark.parametrize(
+    "num_tokens,hidden_size", [(1, 2048), (257, 4096), (2048, 5120)]
+)
+@pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
+@pytest.mark.parametrize("group_size", GROUP_SIZES)
+@torch.inference_mode()
+def test_rms_norm_per_block_quant_fp32_weight(
+    default_vllm_config,
+    num_tokens: int,
+    hidden_size: int,
+    add_residual: bool,
+    group_size: list[int],
+) -> None:
+    """GemmaRMSNorm passes an fp32 weight with a bf16 input; the fused kernel
+    must match the unfused norm followed by group quant."""
+    set_random_seed(0)
+    torch.set_default_device("cuda")
+    fp8_dtype = current_platform.fp8_dtype()
+
+    layer = GemmaRMSNorm(hidden_size, EPS).to(dtype=torch.bfloat16)
+    layer.weight.data.normal_(mean=0.0, std=0.1)
+    fp32_weight = layer.weight.float() + 1.0
+    x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16) / hidden_size
+    residual = torch.randn_like(x) / hidden_size if add_residual else None
+
+    ref_out, ref_scales, ref_residual = ref_impl(
+        layer, x, fp8_dtype, residual, None, group_size
+    )
+    ops_out, ops_scales, ops_residual = ops_impl(
+        fp32_weight, x, fp8_dtype, residual, None, group_size, 0
+    )
+
+    # Reduction order can flip an isolated bf16 abs-max and fp8 code by one ULP.
+    torch.testing.assert_close(ops_scales, ref_scales, rtol=1e-2, atol=1e-8)
+    ulp = fp8_ulp_distance(ref_out, ops_out)
+    assert int(ulp.max()) <= 1
+    assert int((ulp > 0).sum()) <= ulp.numel() // 100_000 + 8
+    if add_residual:
+        torch.testing.assert_close(ops_residual, ref_residual, atol=0, rtol=0)

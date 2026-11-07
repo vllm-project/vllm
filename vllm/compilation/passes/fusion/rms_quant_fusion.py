@@ -111,10 +111,10 @@ if (
         )
 
 
-# TODO: extend rmsnorm quant kernels to support mixed input/weight dtypes,
-# and remove this check.
-def _rms_input_weight_dtype_match(match: pm.Match) -> bool:
-    """Prevent fusion when rms_norm input and weight dtypes differ."""
+def _rms_input_weight_dtypes(
+    match: pm.Match,
+) -> tuple[torch.dtype, torch.dtype] | None:
+    """Return the (input, weight) dtypes of the matched rms_norm, if known."""
     for node in match.nodes:
         if node.target == _RMS_NORM_OP:
             # rms_norm(x, weight, epsilon, variance_size)
@@ -125,8 +125,22 @@ def _rms_input_weight_dtype_match(match: pm.Match) -> bool:
         else:
             continue
         if isinstance(x, fx.Node) and isinstance(weight, fx.Node):
-            return x.meta["val"].dtype == weight.meta["val"].dtype
-    return True
+            return x.meta["val"].dtype, weight.meta["val"].dtype
+    return None
+
+
+# TODO: extend the static and per-token rmsnorm quant kernels to support mixed
+# input/weight dtypes, and remove this check.
+def _rms_input_weight_dtype_match(match: pm.Match) -> bool:
+    """Prevent fusion when rms_norm input and weight dtypes differ."""
+    dtypes = _rms_input_weight_dtypes(match)
+    return dtypes is None or dtypes[0] == dtypes[1]
+
+
+def _rms_weight_dtype_supported_by_block_quant(match: pm.Match) -> bool:
+    """Allow fusion for matching dtypes or an fp32 weight (e.g. GemmaRMSNorm)."""
+    dtypes = _rms_input_weight_dtypes(match)
+    return dtypes is None or dtypes[1] in (dtypes[0], torch.float32)
 
 
 def empty_bf16(*args: Any, **kwargs: Any) -> torch.Tensor:
@@ -456,7 +470,7 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
             inputs,
             pm.fwd_only,
             pm_pass,
-            extra_check=_rms_input_weight_dtype_match,
+            extra_check=_rms_weight_dtype_supported_by_block_quant,
         )
 
 
@@ -550,7 +564,7 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
             ],
             pm.fwd_only,
             pm_pass,
-            extra_check=_rms_input_weight_dtype_match,
+            extra_check=_rms_weight_dtype_supported_by_block_quant,
         )
 
 
