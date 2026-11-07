@@ -635,7 +635,7 @@ class KimiAudioForConditionalGeneration(
         )
 
     @classmethod
-    def post_process_output(cls, text: str) -> str:
+    def post_process_output(cls, text: str, model_config: ModelConfig) -> str:
         if not text:
             return ""
         return text.strip()

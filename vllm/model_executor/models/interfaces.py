@@ -1445,7 +1445,7 @@ class SupportsTranscription(Protocol):
         return None
 
     @classmethod
-    def post_process_output(cls, text: str) -> str:
+    def post_process_output(cls, text: str, model_config: "ModelConfig") -> str:
         """Post-process the raw model output text.
 
         Some ASR models output structured formats (e.g., language tags,
@@ -1453,6 +1453,7 @@ class SupportsTranscription(Protocol):
 
         Args:
             text: Raw decoded text from the model.
+            model_config: The config of the model.
 
         Returns:
             Cleaned transcription text.
@@ -1461,11 +1462,15 @@ class SupportsTranscription(Protocol):
         return text
 
     @classmethod
-    def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
+    def parse_diarized_transcript(
+        cls, text: str, model_config: "ModelConfig"
+    ) -> list[DiarizedTranscriptionSegment]:
         """Parse the model-specific diarized transcript format.
 
-        Only models that set ``supports_diarized_transcription`` must override
-        this method.
+        Receives the raw decoded output of one audio chunk, without
+        `post_process_output` applied, and returns timestamps relative to that
+        chunk. Only models that set `supports_diarized_transcription` must
+        override this method.
         """
         raise NotImplementedError
 

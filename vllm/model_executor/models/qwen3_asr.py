@@ -746,7 +746,7 @@ class Qwen3ASRForConditionalGeneration(
         )
 
     @classmethod
-    def post_process_output(cls, text: str) -> str:
+    def post_process_output(cls, text: str, model_config: ModelConfig) -> str:
         """Post-process Qwen3-ASR raw output to extract clean transcription.
 
         The model outputs in format: "language {lang}<asr_text>{transcription}"
