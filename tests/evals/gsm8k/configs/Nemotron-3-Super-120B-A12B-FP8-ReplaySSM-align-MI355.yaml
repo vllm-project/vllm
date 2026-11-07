@@ -16,9 +16,6 @@ server_args: >-
   --tensor-parallel-size 2
   --enable-expert-parallel
   --dtype bfloat16
-  --mamba-backend triton
-  --moe-backend triton
-  --attention-backend ROCM_AITER_FA
   --mamba-ssm-cache-dtype float16
   --use-replayssm
   --replayssm-buffer-len 16
