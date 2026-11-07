@@ -56,7 +56,7 @@ _NUM_BLOCKS = 8
 DEVICE_TYPE = current_platform.device_type
 
 _requires_accelerator = pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_xpu()),
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
     reason="exercises real accelerator stream/event coordination in ECCPUWorker",
 )
 
