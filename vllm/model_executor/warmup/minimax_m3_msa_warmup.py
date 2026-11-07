@@ -48,7 +48,11 @@ def _msa_prebuild_kwargs(
     if isinstance(indexer, MiniMaxM3IndexerNvfp4Impl):
         index_cache_dtype = "nvfp4"
     elif isinstance(indexer, MiniMaxM3IndexerMSAImpl):
-        index_cache_dtype = module.indexer_kv_dtype
+        # A TP-sharded NVFP4 index cache prefills from pages staged to FP8, so
+        # it takes the FP8 index-score kernels.
+        index_cache_dtype = (
+            "fp8" if module.indexer_kv_dtype == "nvfp4" else module.indexer_kv_dtype
+        )
     else:
         index_cache_dtype = None
     if not attention and index_cache_dtype is None:

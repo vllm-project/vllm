@@ -138,6 +138,127 @@ def fp8x4_to_fp16x4(x: Uint32, *, loc=None, ip=None) -> cute.TensorSSA:
 
 
 @dsl_user_op
+def nvfp4x8_to_fp16x8(x: Uint32, scale: Uint32, *, loc=None, ip=None) -> cute.TensorSSA:
+    # Eight e2m1 codes, low nibble first, times one {scale, scale} f16x2 pair.
+    # e2m1 x e4m3 is exact in f16 (<= 6 significant bits, 2^-10..2688).
+    out = llvm.inline_asm(
+        llvm.StructType.get_literal([T.i32()] * 4),
+        [x.ir_value(loc=loc, ip=ip), scale.ir_value(loc=loc, ip=ip)],
+        "{\n\t"
+        ".reg .b8 x0, x1, x2, x3;\n\t"
+        ".reg .b32 h0, h1, h2, h3;\n\t"
+        "mov.b32 {x0, x1, x2, x3}, $4;\n\t"
+        "cvt.rn.f16x2.e2m1x2 h0, x0;\n\t"
+        "cvt.rn.f16x2.e2m1x2 h1, x1;\n\t"
+        "cvt.rn.f16x2.e2m1x2 h2, x2;\n\t"
+        "cvt.rn.f16x2.e2m1x2 h3, x3;\n\t"
+        "mul.rn.f16x2 $0, h0, $5;\n\t"
+        "mul.rn.f16x2 $1, h1, $5;\n\t"
+        "mul.rn.f16x2 $2, h2, $5;\n\t"
+        "mul.rn.f16x2 $3, h3, $5;\n\t"
+        "}\n",
+        "=r,=r,=r,=r,r,r",
+        has_side_effects=False,
+        is_align_stack=False,
+        loc=loc,
+        ip=ip,
+    )
+    vec = vector.from_elements(
+        ir.VectorType.get([4], T.i32(), loc=loc),
+        [llvm.extractvalue(T.i32(), out, [i], loc=loc, ip=ip) for i in range(4)],
+        loc=loc,
+        ip=ip,
+    )
+    return cute.TensorSSA(vec, 4, Uint32)
+
+
+@dsl_user_op
+def nvfp4x8_to_e4m3_fp16x8(
+    x: Uint32, scale: Uint32, *, loc=None, ip=None
+) -> cute.TensorSSA:
+    # Eight e2m1 codes, low nibble first, times one {scale, scale} f16x2 pair,
+    # rounded to e4m3 (RN, saturating at 448) and returned as f16. The f16
+    # product is exact (<= 6 significant bits, 2^-10..2688), so this rounds once,
+    # like the Q8KV4 kernel's e2m1 x e4m3 -> e4m3 multiply.
+    out = llvm.inline_asm(
+        llvm.StructType.get_literal([T.i32()] * 4),
+        [x.ir_value(loc=loc, ip=ip), scale.ir_value(loc=loc, ip=ip)],
+        "{\n\t"
+        ".reg .b8 x0, x1, x2, x3;\n\t"
+        ".reg .b16 e0, e1, e2, e3;\n\t"
+        ".reg .b32 h0, h1, h2, h3;\n\t"
+        "mov.b32 {x0, x1, x2, x3}, $4;\n\t"
+        "cvt.rn.f16x2.e2m1x2 h0, x0;\n\t"
+        "cvt.rn.f16x2.e2m1x2 h1, x1;\n\t"
+        "cvt.rn.f16x2.e2m1x2 h2, x2;\n\t"
+        "cvt.rn.f16x2.e2m1x2 h3, x3;\n\t"
+        "mul.rn.f16x2 h0, h0, $5;\n\t"
+        "mul.rn.f16x2 h1, h1, $5;\n\t"
+        "mul.rn.f16x2 h2, h2, $5;\n\t"
+        "mul.rn.f16x2 h3, h3, $5;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f16x2 e0, h0;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f16x2 e1, h1;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f16x2 e2, h2;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f16x2 e3, h3;\n\t"
+        "cvt.rn.f16x2.e4m3x2 $0, e0;\n\t"
+        "cvt.rn.f16x2.e4m3x2 $1, e1;\n\t"
+        "cvt.rn.f16x2.e4m3x2 $2, e2;\n\t"
+        "cvt.rn.f16x2.e4m3x2 $3, e3;\n\t"
+        "}\n",
+        "=r,=r,=r,=r,r,r",
+        has_side_effects=False,
+        is_align_stack=False,
+        loc=loc,
+        ip=ip,
+    )
+    vec = vector.from_elements(
+        ir.VectorType.get([4], T.i32(), loc=loc),
+        [llvm.extractvalue(T.i32(), out, [i], loc=loc, ip=ip) for i in range(4)],
+        loc=loc,
+        ip=ip,
+    )
+    return cute.TensorSSA(vec, 4, Uint32)
+
+
+@dsl_user_op
+def e4m3x4_select_to_fp16x2x4(
+    a: Uint32, b: Uint32, sel: Uint32, *, loc=None, ip=None
+) -> tuple[Uint32, Uint32, Uint32, Uint32]:
+    # Bytes sel[3:0], sel[7:4], sel[11:8] and sel[15:12] of {b, a} (a holds bytes
+    # 0-3) as e4m3, each broadcast to an f16x2 pair.
+    out = llvm.inline_asm(
+        llvm.StructType.get_literal([T.i32()] * 4),
+        [
+            a.ir_value(loc=loc, ip=ip),
+            b.ir_value(loc=loc, ip=ip),
+            sel.ir_value(loc=loc, ip=ip),
+        ],
+        "{\n\t"
+        ".reg .b32 picked, h01, h23;\n\t"
+        ".reg .b16 lo, hi, s0, s1, s2, s3;\n\t"
+        "prmt.b32 picked, $4, $5, $6;\n\t"
+        "mov.b32 {lo, hi}, picked;\n\t"
+        "cvt.rn.f16x2.e4m3x2 h01, lo;\n\t"
+        "cvt.rn.f16x2.e4m3x2 h23, hi;\n\t"
+        "mov.b32 {s0, s1}, h01;\n\t"
+        "mov.b32 {s2, s3}, h23;\n\t"
+        "mov.b32 $0, {s0, s0};\n\t"
+        "mov.b32 $1, {s1, s1};\n\t"
+        "mov.b32 $2, {s2, s2};\n\t"
+        "mov.b32 $3, {s3, s3};\n\t"
+        "}\n",
+        "=r,=r,=r,=r,r,r,r",
+        has_side_effects=False,
+        is_align_stack=False,
+        loc=loc,
+        ip=ip,
+    )
+    return tuple(
+        Uint32(llvm.extractvalue(T.i32(), out, [i], loc=loc, ip=ip)) for i in range(4)
+    )
+
+
+@dsl_user_op
 def fp32x4_to_fp8x4(
     a0: Float32,
     a1: Float32,

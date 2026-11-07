@@ -516,3 +516,39 @@ If you observe that GPU utilization is lower than expected, CPU contention may b
 vLLM supports multiple attention backends optimized for different hardware and use cases. The backend is automatically selected based on your GPU architecture, model type, and configuration, but you can also manually specify one for optimal performance.
 
 For detailed information on available backends, their feature support, and how to configure them, see the [Attention Backend Feature Support](../design/attention_backends.md) documentation.
+
+## MiniMax M3 indexer context parallelism
+
+With `--attention-config '{"indexer_kv_dtype":"fp8","indexer_cache_sharding":"on"}'`, the MSA backend
+can shard FP8 index K over single-node NVLink TP2 or TP4 with 128-token pages.
+Prefill defaults to gathering index K and scoring the local query heads.
+To score local K and exchange Top16 candidates instead, use
+`--attention-config '{"indexer_kv_dtype":"fp8","indexer_cache_sharding":"on","indexer_prefill_cp":"local_score"}'`.
+Set `indexer_prefill_cp` to `gather` for the comparison path on the same cache layout.
+The experimental `local_score_unified` mode also includes decode queries in the
+local-score exchange during mixed batches; pure decode keeps its existing path.
+All modes preserve logical 128-token block IDs and main attention.
+Local prefill scores bounded query chunks and accumulates candidates
+in reusable buffers for one NCCL exchange per layer.
+There is no automatic path selection; compare full-model performance for your workload.
+
+With an NVFP4 main KV cache, `--block-size 256` uses contiguous index-K
+shards within each physical page. Logical ranking blocks remain 128 tokens:
+TP2 owns a full block per rank, while TP4 owns half a block. Candidate exchange
+is still required to route results to the query-head owners. Page size and
+layout are fixed at startup; `gather` and `local_score` share that layout.
+P256 requires the corresponding MSA P256 NVFP4 kernel support.
+
+An NVFP4 index cache (MiniMax-M3.1) shards the same way with
+`--attention-config '{"indexer_kv_dtype":"nvfp4","indexer_cache_sharding":"on"}'`.
+Decode scores each rank's NVFP4 rows directly. The `gather` prefill, the only
+prefill mode it supports, dequantizes each rank's shard pages to FP8 as the
+unsharded NVFP4 prefill does and then all-gathers them, so it moves FP8 rather
+than NVFP4 bytes over NVLink. Other prefill modes, or `indexer_decode_cp` at
+TP4, keep a replicated NVFP4 index cache and log why.
+At TP2 with `--block-size 256`, each rank's half of a page is itself a stock
+128-row NVFP4 index page, so decode with eight queries per request (seven
+speculative tokens) scores it with the unsharded indexer's MSA Q8KV4 kernel
+over all index heads, with the same numerics. Other query lengths, TP sizes
+and page sizes use the sharded scorer; set
+`VLLM_MINIMAX_M3_ICP_Q8KV4_DECODE=0` to use it everywhere.

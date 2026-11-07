@@ -4,7 +4,8 @@
 
 A packed NVFP4 page ``[128, 72]`` holds the E2M1 codes of all 128 tokens (64 B
 per token, low nibble first) followed by their E4M3 16-element block scales
-(``token * 8 + group``), with no global scale. Each element dequantizes to
+(``token * 8 + group``), with no global scale. A TP-sharded index cache keeps
+the same layout over its share of each page's rows. Each element dequantizes to
 ``e4m3_rn_satfinite(e2m1 * scale)``, the value the Q8KV4 decode indexer scores,
 so prefill and decode rank pages from identical keys.
 
@@ -73,8 +74,10 @@ def _gather_nvfp4_index_k_fp8_kernel(
     E4M3_MAX: tl.constexpr,
     USE_QMUL4: tl.constexpr,
 ):
-    req = tl.program_id(0)
-    col = tl.program_id(1)
+    # Pages on grid x, which is not capped at 65535: a sharded gather passes
+    # every page of a step as one request.
+    col = tl.program_id(0)
+    req = tl.program_id(1)
     if col >= tl.load(num_pages + req):
         return
     page = tl.load(block_table + req * block_table_stride + col).to(tl.int64)
@@ -134,30 +137,33 @@ def minimax_m3_gather_nvfp4_index_k_fp8(
     """Dequantize each request's leading NVFP4 pages into contiguous FP8 pages.
 
     Args:
-        kv_cache: ``[num_blocks, 128, 72]`` uint8 packed NVFP4 pages.
+        kv_cache: ``[num_blocks, rows, 72]`` uint8 packed NVFP4 pages: 128
+            rows, or block_size / TP rows (32, 64 or 128) of a TP-sharded
+            index cache.
         block_table: ``[num_reqs, max_blocks]`` int32 physical page ids.
         num_pages: ``[num_reqs]`` int32 pages to gather per request (its first
             ``num_pages[r]`` logical pages).
         page_offsets: ``[num_reqs]`` int32 first output page of each request.
         max_num_pages: Host upper bound of ``num_pages``.
-        out: ``[>= sum(num_pages), 128, 128]`` contiguous float8_e4m3fn.
+        out: ``[>= sum(num_pages), rows, 128]`` contiguous float8_e4m3fn.
 
     Returns:
         ``out``.
 
     """
-    assert kv_cache.dtype == torch.uint8 and kv_cache.shape[1:] == (
-        PAGE_SIZE,
-        HEAD_DIM // 2 + HEAD_DIM // 16,
+    rows = kv_cache.shape[1]
+    assert kv_cache.dtype == torch.uint8 and kv_cache.shape[2] == (
+        HEAD_DIM // 2 + HEAD_DIM // 16
     )
+    assert rows in (32, 64, PAGE_SIZE)
     assert kv_cache.stride(1) == kv_cache.shape[2] and kv_cache.stride(2) == 1
     assert out.dtype == torch.float8_e4m3fn and out.is_contiguous()
-    assert out.shape[1:] == (PAGE_SIZE, HEAD_DIM)
+    assert out.shape[1:] == (rows, HEAD_DIM)
     assert block_table.stride(1) == 1
     num_reqs = block_table.shape[0]
     if num_reqs == 0 or max_num_pages == 0:
         return out
-    _gather_nvfp4_index_k_fp8_kernel[(num_reqs, max_num_pages)](
+    _gather_nvfp4_index_k_fp8_kernel[(max_num_pages, num_reqs)](
         kv_cache,
         block_table,
         num_pages,
@@ -165,7 +171,7 @@ def minimax_m3_gather_nvfp4_index_k_fp8(
         out,
         kv_cache.stride(0),
         block_table.stride(0),
-        PAGE_SIZE=PAGE_SIZE,
+        PAGE_SIZE=rows,
         HEAD_DIM=HEAD_DIM,
         E4M3_MAX=E4M3_MAX,
         USE_QMUL4=_qmul4_supported(kv_cache.device.index or 0),
