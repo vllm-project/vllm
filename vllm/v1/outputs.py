@@ -310,6 +310,10 @@ class ModelRunnerOutput:
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
 
+    # Ready (iteration_id, elapsed_ms) samples can lag their scheduler iteration.
+    # EngineCore associates them by iteration_id.
+    iteration_timing_samples: tuple[tuple[int, float], ...] = ()
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,

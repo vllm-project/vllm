@@ -158,6 +158,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.metrics.iteration_timing import time_model_execution
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -245,6 +246,7 @@ from .utils import (
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+    from vllm.v1.metrics.iteration_timing import IterationTimer
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
@@ -285,8 +287,10 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         vocab_size: int,
         check_ep_fault: bool = False,
         num_nans: torch.Tensor | None = None,
+        iteration_timer: "IterationTimer | None" = None,
     ):
         self._model_runner_output = model_runner_output
+        self._iteration_timer = iteration_timer
         self._invalid_req_indices = invalid_req_indices
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
@@ -369,7 +373,8 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 f"Mask: {mask.cpu().tolist()}"
             )
 
-        return output
+        timer = self._iteration_timer
+        return output if timer is None else timer.drain_into(output)
 
     def get_kv_connector_output(self) -> KVConnectorOutput | None:
         """Get the KV connector output for this async output."""
@@ -500,6 +505,8 @@ class GPUModelRunner(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        # Initialized by GPUWorker only on the model-output rank.
+        self.iteration_timer: IterationTimer | None = None
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -3997,6 +4004,7 @@ class GPUModelRunner(
         num_reqs = self.input_batch.num_reqs
         return bool(self.discard_request_mask.np[:num_reqs].all())
 
+    @time_model_execution
     @torch.inference_mode()
     def execute_model(
         self,
@@ -4607,6 +4615,7 @@ class GPUModelRunner(
                 vocab_size=self.input_batch.vocab_size,
                 check_ep_fault=self.check_ep_fault,
                 num_nans=num_nans_device,
+                iteration_timer=self.iteration_timer,
             )
         with record_function_or_nullcontext(
             "gpu_model_runner: set_async_sampled_token_ids"

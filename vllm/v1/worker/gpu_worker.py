@@ -105,6 +105,11 @@ from vllm.utils.vmm_driver import vmm_unavailable_reason
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.metrics.iteration_timing import (
+    finish_iteration_timing,
+    make_iteration_timer,
+    time_dummy_batch,
+)
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     DraftTokenIds,
@@ -578,6 +583,9 @@ class Worker(WorkerBase):
             alloc_context=lambda: self._maybe_get_memory_pool_context("workspace"),
         )
         self.model_runner: GPUModelRunner = self._make_model_runner()
+        self.model_runner.iteration_timer = make_iteration_timer(
+            self.vllm_config, self.rank
+        )
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
@@ -1486,6 +1494,7 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     @with_gpu_sync_check
+    @finish_iteration_timing
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
@@ -1552,6 +1561,11 @@ class Worker(WorkerBase):
         if self.use_v2_model_runner and self.model_runner.is_pooling_model:
             return self.model_runner.pool()  # type: ignore
         return None
+
+    def poll_iteration_timing(self) -> tuple[tuple[int, float], ...]:
+        """Return ready output-rank timings without waiting for GPU work."""
+        timer = self.model_runner.iteration_timer
+        return () if timer is None else timer.drain_samples()
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
@@ -1625,10 +1639,10 @@ class Worker(WorkerBase):
             and self.parallel_config.data_parallel_size > 1
         )
 
-    def execute_dummy_batch(self) -> None:
-        num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
+    @time_dummy_batch
+    def execute_dummy_batch(self, iteration_metrics_id: int | None = None) -> None:
         self.model_runner._dummy_run(
-            num_tokens,
+            getattr(self.model_runner, "uniform_decode_query_len", 1),
             uniform_decode=True,
             randomize_inputs=self.randomize_dummy_inputs,
         )
