@@ -300,6 +300,7 @@ def _capture_diffkv_launch(
     with (
         patch.object(diffkv_module, "kernel_unified_attention_diffkv") as mock_kernel,
         patch.object(diffkv_module, "kernel_reduce_segments_diffkv") as mock_reduce,
+        patch.object(diffkv_module, "num_compute_units", return_value=64),
     ):
         unified_attention_diffkv(
             q=query,
@@ -341,6 +342,13 @@ def test_spec_verify_block_m_grouping_and_launch_kwargs() -> None:
     assert verify_kwargs["num_warps"] == 4
     assert "num_stages" not in verify_kwargs
     assert verify_reduce
+
+    # A single verify keeps the default tile: 8 tokens x 2 KV heads x 16
+    # segments stay within 4 waves of the 64 mocked SMs.
+    _, single_kwargs, _ = _capture_diffkv_launch(
+        query_lens=[8], max_seqlen_q=8, segm_first_dim=16
+    )
+    assert single_kwargs["BLOCK_M"] == 16
 
     decode_grid, decode_kwargs, decode_reduce = _capture_diffkv_launch(
         query_lens=[1], max_seqlen_q=1, segm_first_dim=8
