@@ -47,9 +47,12 @@ async def create_structured_decision(
 ):
     handler = structured_decisions(raw_request)
     if handler is None:
-        raise NotImplementedError(
-            "The model does not support the structured decision API"
+        reason = getattr(
+            raw_request.app.state,
+            "structured_decisions_disabled_reason",
+            "the model does not support it",
         )
+        raise NotImplementedError(f"/v1/systemone is disabled: {reason}")
     result = await handler.create_decision(request, raw_request)
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)

@@ -42,8 +42,13 @@ async def create_decision(request: DecisionRequest, raw_request: Request):
         raw_request.app.state, "openai_serving_decisions", None
     )
     if handler is None:
+        reason = getattr(
+            raw_request.app.state,
+            "structured_decisions_disabled_reason",
+            "the model does not support it",
+        )
         error = create_error_response(
-            NotImplementedError("The model does not support the Decisions API")
+            NotImplementedError(f"/v1/decisions is disabled: {reason}")
         )
         return JSONResponse(content=error.model_dump(), status_code=error.error.code)
     result = await handler.create_decisions(request, raw_request)
