@@ -320,7 +320,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.g_b_proj",
         )
-        self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
+        # No @support_torch_compile region reaches this layer, so Inductor never
+        # fuses forward_native's decomposition; keep the fused kernel even when
+        # custom ops are off by default (VLLM_COMPILE, e.g. on ROCm).
+        self.o_norm = FusedRMSNormGated(
+            self.head_dim, activation="sigmoid", enforce_enable=True
+        )
         self.o_proj = RowParallelLinear(
             projection_size,
             self.hidden_size,

@@ -10,6 +10,8 @@ import sys
 import pytest
 import torch
 
+from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+from vllm.config.compilation import CompilationMode
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.fused_norm_gate import (
     FusedRMSNormGated,
@@ -137,3 +139,35 @@ def test_compiled_vs_eager_multidim(
     native_out = compiled_native(x.clone(), g.clone())
 
     torch.testing.assert_close(native_out, cuda_out, atol=1e-3, rtol=1e-2)
+
+
+@pytest.mark.parametrize("enforce_enable", [False, True])
+@pytest.mark.parametrize("num_tokens", [1, 37])
+@torch.inference_mode()
+def test_enforce_enable_with_custom_ops_off(enforce_enable: bool, num_tokens: int):
+    """enforce_enable keeps the fused kernel when Inductor disables custom ops."""
+    set_random_seed(0)
+    device = torch.device(DEVICE)
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE, custom_ops=["none"]
+        )
+    )
+    with set_current_vllm_config(config):
+        module = FusedRMSNormGated(
+            128,
+            activation="sigmoid",
+            device=device,
+            dtype=torch.bfloat16,
+            enforce_enable=enforce_enable,
+        )
+    is_native = module._forward_method.__func__ is FusedRMSNormGated.forward_native
+    assert is_native != enforce_enable
+
+    module.weight.uniform_(-1, 1)
+    # KDA layout: x is (1, T, H, D), the gate (T, H, D).
+    x = torch.randn(1, num_tokens, 12, 128, dtype=torch.bfloat16, device=device)
+    g = torch.randn(num_tokens, 12, 128, dtype=torch.bfloat16, device=device)
+    ref = module.forward_native(x, g)
+    out = module(x.clone(), g)
+    torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
