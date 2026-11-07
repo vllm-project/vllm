@@ -51,8 +51,10 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  13: Add packed-member layouts and order-independent packed-push backend hashes
 #  14: Add Qwen3.8-Flash-Next PLE page length - #59997
 #  15: Add remote_registration_generation to kv_transfer_params
+#  16: Pair regions by the layers both sides hold: every peer advertises
+#      region_members and the cache group of each layer
 #
-NIXL_CONNECTOR_VERSION: int = 15
+NIXL_CONNECTOR_VERSION: int = 16
 
 
 @dataclass
@@ -79,6 +81,8 @@ class NixlAgentMetadata:
     ple_block_len: int | None = None
     # Layer names sharing each advertised region, in region order.
     region_members: list[list[str]] = field(default_factory=list)
+    # Cache group of each layer in region_members.
+    layer_group_ids: dict[str, int] = field(default_factory=dict)
     # Packed member -> (byte offset in its region's block, bytes per page).
     packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
 
@@ -264,6 +268,9 @@ class ReqMeta:
     # Worker-only, per-region physical pages to zero after a successful pull.
     # None selects group-based completion; empty lists mean no zeroing.
     region_blocks_to_zero: BlockIds | None = None
+    # Worker-only, per-group range of the remote-sized sub-blocks of each local
+    # group a pull covers. None derives it from the block counts.
+    covered_sub_blocks: list[range] | None = None
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):

@@ -31,11 +31,14 @@ from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
     TrtLlmMxint4ExpertsMonolithic,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import (
+    MoEKernelOracle,
+    make_moe_kernel,
+)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_config,
-    marlin_act_int8_process_scales,
     marlin_moe_padded_intermediate,
     marlin_moe_permute_scales,
     marlin_permute_bias,
@@ -103,10 +106,10 @@ def backend_to_kernel_cls(
         return [CPUExpertsInt4]
     elif backend == WNA16MoEBackend.ZEN_CPU:
         from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
-            ZentorchExpertsInt4,
+            ZentorchExpertsWNA16,
         )
 
-        return [ZentorchExpertsInt4]
+        return [ZentorchExpertsWNA16]
     elif backend == WNA16MoEBackend.EMULATION:
         from vllm.model_executor.layers.fused_moe.experts.int4_emulation_moe import (
             Int4EmulationTritonExperts,
@@ -143,6 +146,26 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
     return prioritize_humming(backends)
 
 
+# int4 runs as DA8W4 and int8 as DA8W8. The op infers which from the pack factor
+# K // weight.size(-1), so the decode below has to land on the exact layout.
+_ZEN_CPU_NUM_BITS = (4, 8)
+
+
+def _zen_cpu_num_bits(
+    quant_config: QuantizationConfig | QuantizationArgs,
+) -> int | None:
+    """Weight bit width for the Zen CPU path, or None for a checkpoint format
+    it cannot read one from; AWQ and GPTQ call it weight_bits."""
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+
+    if isinstance(quant_config, AutoAWQConfig | AutoGPTQConfig):
+        return quant_config.weight_bits
+    if isinstance(quant_config, QuantizationArgs):
+        return quant_config.num_bits
+    return None
+
+
 def _backend_incompatibility_reason(
     backend: WNA16MoEBackend,
     moe_config: FusedMoEConfig,
@@ -172,7 +195,7 @@ def _backend_incompatibility_reason(
 
     if backend == WNA16MoEBackend.ZEN_CPU:
         if not envs.VLLM_CPU_INT4_W4A8:
-            return "VLLM_CPU_INT4_W4A8=0 disables the DA8W4 path"
+            return "VLLM_CPU_INT4_W4A8=0 disables the dynamic-activation path"
         if may_have_zp:
             return "zero points are not supported"
         if isinstance(quant_config, MoeWNA16Config):
@@ -184,9 +207,14 @@ def _backend_incompatibility_reason(
             and quant_config.actorder == "group"
         ):
             return "group activation ordering is not supported"
+        num_bits = _zen_cpu_num_bits(quant_config)
+        if num_bits is None:
+            return f"cannot read a weight width from {type(quant_config).__name__}"
+        if num_bits not in _ZEN_CPU_NUM_BITS:
+            return f"unsupported weight width W{num_bits}A16"
         group_size = getattr(quant_config, "group_size", None)
         if group_size is None or group_size <= 0:
-            return "DA8W4 requires group-quantized weights"
+            return "the dynamic-quant path requires group-quantized weights"
         # AOCL sym_quant requires the group size to be a multiple of 4.
         if group_size % 4 != 0:
             return f"group size {group_size} is not a multiple of 4"
@@ -253,6 +281,17 @@ def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
     )
 
 
+class WNA16MoEKernelOracle(MoEKernelOracle[WNA16MoEBackend]):
+    """WNA16 MoE backend selection for one deployment configuration."""
+
+    name = "WNA16"
+
+    def backend_to_kernel_cls(
+        self, backend: WNA16MoEBackend
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return backend_to_kernel_cls(backend)
+
+
 def select_wna16_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey,
@@ -277,42 +316,8 @@ def select_wna16_moe_backend(
         A tuple of (``WNA16MoEBackend``, experts class or ``None``).
 
     """
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
-
-    def _make_log_backend(backend: WNA16MoEBackend):
-        return f"Using '{backend.value}' WNA16 MoE backend."
-
-    def _make_log_unsupported(backend: WNA16MoEBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"WNA16 MoE backend '{backend.value}' does not support the "
-                f"deployment configuration since {reason}."
-            )
-        return (
-            f"WNA16 MoE backend '{backend.value}' does not support the "
-            "deployment configuration."
-        )
-
-    def _return_or_raise(
-        backend: WNA16MoEBackend,
-        config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
-        reason: str | None = None
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
+    # WNA16 MoE always runs BF16 activations.
+    oracle = WNA16MoEKernelOracle(config, weight_key, None)
 
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend
@@ -327,10 +332,8 @@ def select_wna16_moe_backend(
             allow_tile_padding,
         )
         if reason is not None:
-            raise ValueError(_make_log_unsupported(requested_backend, reason))
-        return _return_or_raise(
-            requested_backend, config, weight_key, None, activation_format
-        )
+            raise ValueError(oracle.make_log_unsupported(requested_backend, reason))
+        return oracle.return_or_raise(requested_backend)
 
     # Select kernels in order of backend.
     AVAILABLE_BACKENDS = _get_priority_backends()
@@ -345,18 +348,12 @@ def select_wna16_moe_backend(
             allow_tile_padding,
         )
         if reason is not None:
-            logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+            logger.debug_once(oracle.make_log_unsupported(backend, reason))
             continue
-        activation_key = None  # always BF16 activation for WNA16 MoE
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-            else:
-                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+        kernel_cls, _ = oracle.try_backend(backend)
+        if kernel_cls is not None:
+            logger.info_once(oracle.make_log_backend(backend))
+            return backend, kernel_cls
 
     raise NotImplementedError(
         "No WNA16 MoE backend supports the deployment configuration."
@@ -372,8 +369,6 @@ def make_wna16_moe_quant_config(
     w2_zp: torch.Tensor | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    a1_gscale: torch.Tensor | None = None,
-    a2_gscale: torch.Tensor | None = None,
     gemm1_clamp_limit: float | None = None,
     gemm1_alpha: float | None = None,
     gemm1_beta: float | None = None,
@@ -388,8 +383,6 @@ def make_wna16_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,
             block_shape=[0, group_size],
-            a1_gscale=a1_gscale,
-            a2_gscale=a2_gscale,
             gemm1_clamp_limit=gemm1_clamp_limit,
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
@@ -404,8 +397,6 @@ def make_wna16_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,
             block_shape=[0, group_size],
-            a1_gscale=a1_gscale,
-            a2_gscale=a2_gscale,
             gemm1_clamp_limit=gemm1_clamp_limit,
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
@@ -419,9 +410,6 @@ def make_wna16_moe_kernel(
     backend: WNA16MoEBackend = WNA16MoEBackend.MARLIN,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
-    from vllm.model_executor.layers.fused_moe.all2all_utils import (
-        maybe_make_prepare_finalize,
-    )
     from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
         CPUExpertsInt4,
     )
@@ -435,12 +423,12 @@ def make_wna16_moe_kernel(
         XPUExpertsWNA16,
     )
     from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
-        ZentorchExpertsInt4,
+        ZentorchExpertsWNA16,
     )
 
     # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts,
     # BatchedMarlinExperts, XPUExpertsWNA16, CPUExpertsInt4,
-    # ZentorchExpertsInt4, the Humming grouped/indexed experts, and
+    # ZentorchExpertsWNA16, the Humming grouped/indexed experts, and
     # Int4EmulationTritonExperts
     allowed_experts: tuple[type[mk.FusedMoEExperts], ...] = (
         MarlinExperts,
@@ -449,7 +437,7 @@ def make_wna16_moe_kernel(
         TrtLlmMxint4ExpertsMonolithic,
         XPUExpertsWNA16,
         CPUExpertsInt4,
-        ZentorchExpertsInt4,
+        ZentorchExpertsWNA16,
         Int4EmulationTritonExperts,
         Rdna3WNA16Experts,
     )
@@ -457,36 +445,12 @@ def make_wna16_moe_kernel(
         allowed_experts += tuple(backend_to_kernel_cls(WNA16MoEBackend.HUMMING))
     assert experts_cls in allowed_experts
 
-    is_monolithic = experts_cls.is_monolithic()
-
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=is_monolithic,
-    )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
-    logger.info_once("Using %s", experts_cls.__name__, scope="local")
-
-    extra_args: dict[str, Any] = {}
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens is not None
-        extra_args["max_num_tokens"] = max_num_tokens
-        extra_args["num_dispatchers"] = prepare_finalize.num_dispatchers()
-
-    experts = experts_cls(
-        moe_config=moe_config,
-        quant_config=moe_quant_config,
-        **extra_args,
-    )
-
-    return mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
+    return make_moe_kernel(
+        moe_quant_config,
+        moe_config,
+        experts_cls,
+        routing_tables,
+        experts_log="Using %s",
     )
 
 
@@ -509,8 +473,6 @@ def _process_weights_flashinfer(
     torch.Tensor,  # w2_scales
     torch.Tensor | None,  # w13_qzeros
     torch.Tensor | None,  # w2_qzeros
-    torch.Tensor | None,  # w13_input_global_scale
-    torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
 ]:
@@ -537,8 +499,6 @@ def _process_weights_flashinfer(
         dict_weights_mxint4["gemm2_weights"],
         dict_weights_mxint4["gemm1_scales"],
         dict_weights_mxint4["gemm2_scales"],
-        None,
-        None,
         None,
         None,
         w13_bias,
@@ -576,7 +536,6 @@ def _pad_w13_bias(bias: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
 
 def _process_weights_marlin(
     layer: torch.nn.Module,
-    input_dtype: torch.dtype | None,
     num_bits: int,
     pack_factor: int,
     group_size: int,
@@ -595,8 +554,6 @@ def _process_weights_marlin(
     torch.Tensor,  # w2_scales
     torch.Tensor | None,  # w13_qzeros
     torch.Tensor | None,  # w2_qzeros
-    torch.Tensor | None,  # w13_input_global_scale
-    torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
 ]:
@@ -608,10 +565,9 @@ def _process_weights_marlin(
     Steps
     -----
     1. Transpose canonical N-first to K-first for Marlin.
-    2. Optional FP8 preprocessing of packed weights / scales.
-    3. Repack weights via ``gptq_marlin_moe_repack``.
-    4. Permute scales (and optionally extract INT8 global scales).
-    5. Permute bias tensors.
+    2. Repack weights via ``gptq_marlin_moe_repack``.
+    3. Permute scales.
+    4. Permute bias tensors.
     """
     # Canonical N-first → K-first for Marlin.
     w13_qweight = w13_qweight.transpose(1, 2).contiguous()
@@ -623,29 +579,12 @@ def _process_weights_marlin(
     if w2_qzeros is not None:
         w2_qzeros = w2_qzeros.transpose(1, 2).contiguous()
 
-    is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
-
-    marlin_w13_qweight: torch.Tensor
-    marlin_w2_qweight: torch.Tensor
-    marlin_w13_scales: torch.Tensor
-    marlin_w2_scales: torch.Tensor
-    w13_input_global_scale: torch.Tensor | None = None
-    w2_input_global_scale: torch.Tensor | None = None
+    marlin_w13_qweight = w13_qweight
+    marlin_w2_qweight = w2_qweight
+    marlin_w13_scales = w13_scales
+    marlin_w2_scales = w2_scales
     w13_bias_out: torch.Tensor | None = None
     w2_bias_out: torch.Tensor | None = None
-
-    # --- FP8 weight / scale adjustment ---
-    if input_dtype == torch.float8_e4m3fn:
-        # NOTE: for non-zp quantization format only
-        marlin_w13_qweight = ops.marlin_int4_fp8_preprocess(w13_qweight, inplace=False)
-        marlin_w2_qweight = ops.marlin_int4_fp8_preprocess(w2_qweight, inplace=False)
-        marlin_w13_scales = w13_scales.data * 512
-        marlin_w2_scales = w2_scales.data * 512
-    else:
-        marlin_w13_qweight = w13_qweight
-        marlin_w2_qweight = w2_qweight
-        marlin_w13_scales = w13_scales
-        marlin_w2_scales = w2_scales
 
     # --- Pad the intermediate size to a valid Marlin thread tile ---
     # GPTQ packs along K: w13's N is in the (shard) columns, w2's N in the rows.
@@ -672,14 +611,12 @@ def _process_weights_marlin(
         marlin_w13_qweight.shape[1] * pack_factor,
         marlin_w13_qweight.shape[2],
         num_bits,
-        is_a_8bit=is_a_8bit,
     )
     marlin_w2_qweight = ops.gptq_marlin_moe_repack(
         marlin_w2_qweight,
         marlin_w2_qweight.shape[1] * pack_factor,
         marlin_w2_qweight.shape[2],
         num_bits,
-        is_a_8bit=is_a_8bit,
     )
 
     # --- Permute scales ---
@@ -688,7 +625,6 @@ def _process_weights_marlin(
         size_k=layer.intermediate_size_per_partition,
         size_n=marlin_w13_scales.shape[2],
         group_size=group_size,
-        is_a_8bit=is_a_8bit,
     )
     group_size_or_pack_factor = group_size if group_size != -1 else pack_factor
     marlin_w2_scales = marlin_moe_permute_scales(
@@ -696,18 +632,7 @@ def _process_weights_marlin(
         size_k=marlin_w2_scales.shape[1] * group_size_or_pack_factor,
         size_n=marlin_w2_scales.shape[2],
         group_size=group_size,
-        is_a_8bit=is_a_8bit,
     )
-
-    if input_dtype == torch.int8:
-        if layer.num_groups_w13 > 1:
-            marlin_w13_scales, w13_input_global_scale = marlin_act_int8_process_scales(
-                marlin_w13_scales
-            )
-        if layer.num_groups_w2 > 1:
-            marlin_w2_scales, w2_input_global_scale = marlin_act_int8_process_scales(
-                marlin_w2_scales
-            )
 
     # --- Permute zero points ---
     if w13_qzeros is not None and w2_qzeros is not None:
@@ -716,14 +641,12 @@ def _process_weights_marlin(
             size_k=w13_qzeros.shape[1],
             size_n=w13_qzeros.shape[2] * pack_factor,
             num_bits=num_bits,
-            is_a_8bit=is_a_8bit,
         )
         w2_qzeros = moe_packed_to_marlin_zero_points(
             w2_qzeros,
             size_k=w2_qzeros.shape[1],
             size_n=w2_qzeros.shape[2] * pack_factor,
             num_bits=num_bits,
-            is_a_8bit=is_a_8bit,
         )
 
     # --- Permute bias ---
@@ -739,8 +662,6 @@ def _process_weights_marlin(
         marlin_w2_scales,
         w13_qzeros,
         w2_qzeros,
-        w13_input_global_scale,
-        w2_input_global_scale,
         w13_bias_out,
         w2_bias_out,
     )
@@ -751,7 +672,6 @@ def _process_awq_weights_marlin(
     weight_bits: int,
     pack_factor: int,
     group_size: int,
-    input_dtype: torch.dtype | None,
     w13_qweight: torch.Tensor,
     w2_qweight: torch.Tensor,
     w13_scales: torch.Tensor,
@@ -767,8 +687,6 @@ def _process_awq_weights_marlin(
     torch.Tensor,  # w2_scales
     torch.Tensor | None,  # w13_qzeros
     torch.Tensor | None,  # w2_qzeros
-    torch.Tensor | None,  # w13_input_global_scale
-    torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
 ]:
@@ -777,25 +695,8 @@ def _process_awq_weights_marlin(
     AWQ checkpoints use a different packing order than GPTQ, so they need
     AWQ-specific weight repacking and zero-point conversion before Marlin runs.
     """
-    is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
-    w13_input_global_scale: torch.Tensor | None = None
-    w2_input_global_scale: torch.Tensor | None = None
     w13_bias_out: torch.Tensor | None = None
     w2_bias_out: torch.Tensor | None = None
-
-    if input_dtype == torch.float8_e4m3fn:
-        ops.marlin_int4_fp8_preprocess(
-            w13_qweight.view(-1, w13_qweight.size(2)),
-            w13_qzeros.view(-1, w13_qzeros.size(2)),
-            inplace=True,
-        )
-        ops.marlin_int4_fp8_preprocess(
-            w2_qweight.view(-1, w2_qweight.size(2)),
-            w2_qzeros.view(-1, w2_qzeros.size(2)),
-            inplace=True,
-        )
-        w13_scales = w13_scales.data * 512
-        w2_scales = w2_scales.data * 512
 
     # --- Pad the intermediate size to a valid Marlin thread tile ---
     # AWQ packs along N: w13's N is in the (shard) columns, w2's N in the rows.
@@ -821,14 +722,12 @@ def _process_awq_weights_marlin(
         size_k=w13_qweight.shape[1],
         size_n=w13_qweight.shape[2] * pack_factor,
         num_bits=weight_bits,
-        is_a_8bit=is_a_8bit,
     )
     marlin_w2_qweight = ops.awq_marlin_moe_repack(
         w2_qweight,
         size_k=w2_qweight.shape[1],
         size_n=w2_qweight.shape[2] * pack_factor,
         num_bits=weight_bits,
-        is_a_8bit=is_a_8bit,
     )
 
     marlin_w13_scales = marlin_moe_permute_scales(
@@ -836,38 +735,26 @@ def _process_awq_weights_marlin(
         size_k=layer.intermediate_size_per_partition,
         size_n=w13_scales.shape[2],
         group_size=group_size,
-        is_a_8bit=is_a_8bit,
     )
-    if input_dtype == torch.int8 and layer.num_groups_w13 > 1:
-        marlin_w13_scales, w13_input_global_scale = marlin_act_int8_process_scales(
-            marlin_w13_scales
-        )
 
     marlin_w2_scales = marlin_moe_permute_scales(
         s=w2_scales,
         size_k=layer.intermediate_size_per_partition,
         size_n=w2_scales.shape[2],
         group_size=group_size,
-        is_a_8bit=is_a_8bit,
     )
-    if input_dtype == torch.int8 and layer.num_groups_w2 > 1:
-        marlin_w2_scales, w2_input_global_scale = marlin_act_int8_process_scales(
-            marlin_w2_scales
-        )
 
     marlin_w13_qzeros = moe_awq_to_marlin_zero_points(
         w13_qzeros,
         size_k=w13_qzeros.shape[1],
         size_n=w13_qzeros.shape[2] * pack_factor,
         num_bits=weight_bits,
-        is_a_8bit=is_a_8bit,
     )
     marlin_w2_qzeros = moe_awq_to_marlin_zero_points(
         w2_qzeros,
         size_k=w2_qzeros.shape[1],
         size_n=w2_qzeros.shape[2] * pack_factor,
         num_bits=weight_bits,
-        is_a_8bit=is_a_8bit,
     )
 
     if w13_bias is not None:
@@ -882,8 +769,6 @@ def _process_awq_weights_marlin(
         marlin_w2_scales,
         marlin_w13_qzeros,
         marlin_w2_qzeros,
-        w13_input_global_scale,
-        w2_input_global_scale,
         w13_bias_out,
         w2_bias_out,
     )
@@ -919,8 +804,6 @@ def _process_weights_rdna3(
     torch.Tensor,  # w2_scales
     torch.Tensor | None,  # w13_qzeros
     torch.Tensor | None,  # w2_qzeros
-    torch.Tensor | None,  # w13_input_global_scale
-    torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
 ]:
@@ -957,8 +840,6 @@ def _process_weights_rdna3(
         w2_scale.transpose(1, 2).contiguous(),
         _qzeros(w13),
         _qzeros(w2),
-        None,  # w13_input_global_scale
-        None,  # w2_input_global_scale
         None,  # w13_bias
         None,  # w2_bias
     )
@@ -981,8 +862,6 @@ def _process_weights_cpu(
     torch.Tensor,  # w2_scales
     torch.Tensor | None,  # w13_qzeros
     torch.Tensor | None,  # w2_qzeros
-    torch.Tensor | None,  # w13_input_global_scale
-    torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
 ]:
@@ -1066,15 +945,17 @@ def _process_weights_cpu(
         blocked_s2,
         blocked_z13,
         blocked_z2,
-        None,  # w13_input_global_scale
-        None,  # w2_input_global_scale
         w13_bias.to(torch.float32) if w13_bias is not None else None,
         w2_bias.to(torch.float32) if w2_bias is not None else None,
     )
 
 
-def _zen_repack_s4(packed: torch.Tensor, in_features: int) -> torch.Tensor:
-    """Repack CT int4 ``[E, N, K//8]`` into zentorch s4 ``[E, N, K//8]``."""
+def _zen_decode_weight(
+    packed: torch.Tensor, in_features: int, num_bits: int
+) -> torch.Tensor:
+    """Decode a CT ``[E, N, K//pack_factor]`` weight into the layout the op
+    reads: packed s4 ``[E, N, K//8]`` for int4, plain s8 ``[E, N, K]`` for
+    int8. The trailing dim is what makes the op pick DA8W4 over DA8W8."""
     from vllm.model_executor.kernels.linear.mixed_precision.zentorch import (
         _import_unpack_from_int32,
     )
@@ -1083,11 +964,13 @@ def _zen_repack_s4(packed: torch.Tensor, in_features: int) -> torch.Tensor:
     # packed_dim indexes the 2D expert slice, which is N-first, so K is dim 1.
     unpacked = _import_unpack_from_int32()(
         packed,
-        4,
+        num_bits,
         torch.Size([num_experts, out_features, in_features]),
         packed_dim=1,
     )
     # CT is already N-first, which is what the repack consumes.
+    if num_bits == 8:
+        return unpacked.to(torch.int8).contiguous()
     repack_op = torch.ops.zentorch.zentorch_woq_repack_weight.default
     return torch.stack([repack_op(w) for w in unpacked])
 
@@ -1099,6 +982,7 @@ def _process_weights_zen_cpu(
     w2_scale: torch.Tensor,
     w13_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    num_bits: int = 4,
 ) -> tuple[
     torch.Tensor,  # w13_qweight
     torch.Tensor,  # w2_qweight
@@ -1106,26 +990,22 @@ def _process_weights_zen_cpu(
     torch.Tensor,  # w2_scales
     torch.Tensor | None,  # w13_qzeros
     torch.Tensor | None,  # w2_qzeros
-    torch.Tensor | None,  # w13_input_global_scale
-    torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
 ]:
-    """Zen CPU INT4 DA8W4 (W4A8) weight post-processing."""
+    """Zen CPU DA8W4 (W4A8) / DA8W8 (W8A8) weight post-processing."""
     # CT WNA16 buffers are N-first, so the scales are [E, N, G].
     hidden_size = w2_scale.shape[1]
     intermediate_size = w13_scale.shape[1] // 2
 
     # The kernel reads per-group scales as [E, G, N], so N-first needs a swap.
     return (
-        _zen_repack_s4(w13.data, hidden_size),
-        _zen_repack_s4(w2.data, intermediate_size),
+        _zen_decode_weight(w13.data, hidden_size, num_bits),
+        _zen_decode_weight(w2.data, intermediate_size, num_bits),
         w13_scale.data.transpose(1, 2).to(torch.bfloat16).contiguous(),
         w2_scale.data.transpose(1, 2).to(torch.bfloat16).contiguous(),
         None,  # w13_qzeros (symmetric)
         None,  # w2_qzeros (symmetric)
-        None,  # w13_input_global_scale
-        None,  # w2_input_global_scale
         w13_bias,
         w2_bias,
     )
@@ -1459,8 +1339,6 @@ def _process_weights_emulation_gptq(
         dummy,  # w2_scales    (unused)
         None,  # w13_qzeros
         None,  # w2_qzeros
-        None,  # w13_input_global_scale
-        None,  # w2_input_global_scale
         None,  # w13_bias
         None,  # w2_bias
     )
@@ -1512,8 +1390,6 @@ def _process_weights_emulation_awq(
         None,
         None,
         None,
-        None,
-        None,
     )
 
 
@@ -1521,7 +1397,6 @@ def convert_to_wna16_moe_kernel_format(
     backend: WNA16MoEBackend,
     layer: torch.nn.Module,
     quant_config: QuantizationConfig | QuantizationArgs | None,
-    input_dtype: torch.dtype | None,
     w13: torch.Tensor,
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
@@ -1538,8 +1413,6 @@ def convert_to_wna16_moe_kernel_format(
         torch.Tensor,  # w2_scales
         torch.Tensor | None,  # w13_qzeros
         torch.Tensor | None,  # w2_qzeros
-        torch.Tensor | None,  # w13_input_global_scale
-        torch.Tensor | None,  # w2_input_global_scale
         torch.Tensor | None,  # w13_bias
         torch.Tensor | None,  # w2_bias
     ]
@@ -1559,7 +1432,6 @@ def convert_to_wna16_moe_kernel_format(
         backend: the selected ``WNA16MoEBackend``.
         layer: the ``MoERunner`` layer whose parameters are being prepared.
         quant_config: the ``QuantizationConfig`` for this layer.
-        input_dtype: optional activation dtype, usually should be 16 bit.
         w13: fused gate/up expert weights.
         w2: down-projection expert weights.
         w13_scale: quantization scales for ``w13``.
@@ -1634,7 +1506,6 @@ def convert_to_wna16_moe_kernel_format(
                 num_bits,
                 pack_factor,
                 group_size,
-                input_dtype,
                 w13,
                 w2,
                 w13_scale,
@@ -1647,7 +1518,6 @@ def convert_to_wna16_moe_kernel_format(
         else:
             return _process_weights_marlin(
                 layer,
-                input_dtype,
                 num_bits,
                 pack_factor,
                 group_size,
@@ -1682,6 +1552,15 @@ def convert_to_wna16_moe_kernel_format(
             w2_bias,
         )
     elif backend == WNA16MoEBackend.ZEN_CPU:
+        # Backend selection already rejected widths outside _ZEN_CPU_NUM_BITS.
+        zen_num_bits = _zen_cpu_num_bits(quant_config)
+        assert zen_num_bits is not None
+        # Names the width, since VLLM_CPU_INT4_W4A8 reads as int4-only.
+        logger.info_once(
+            "[zen_cpu] Using zentorch_fused_moe for DA8W%d MoE (W%dA16 checkpoint)",
+            zen_num_bits,
+            zen_num_bits,
+        )
         return _process_weights_zen_cpu(
             w13,
             w2,
@@ -1689,6 +1568,7 @@ def convert_to_wna16_moe_kernel_format(
             w2_scale,
             w13_bias,
             w2_bias,
+            num_bits=zen_num_bits,
         )
     elif backend == WNA16MoEBackend.FLASHINFER_TRTLLM:
         return _process_weights_flashinfer(
@@ -1725,8 +1605,6 @@ def convert_to_wna16_moe_kernel_format(
             w2_scale_xpu,
             None,  # w13_qzeros — sym int4 on XPU has none; kernel does uint4b8→s4
             None,  # w2_qzeros
-            None,  # w13_input_global_scale
-            None,  # w2_input_global_scale
             w13_bias_out,
             w2_bias_out,
         )
@@ -1785,8 +1663,6 @@ def convert_to_wna16_moe_kernel_format(
             w2_scale,
             w13_qzeros,
             w2_qzeros,
-            None,
-            None,
             w13_bias,
             w2_bias,
         )
