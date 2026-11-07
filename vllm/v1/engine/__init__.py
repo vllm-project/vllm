@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from vllm.config.kv_events import KVEventsConfig
+from vllm.distributed.aux_output_connector.outputs import AuxOutputs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.outputs import RequestError
@@ -306,6 +307,7 @@ class EngineCoreOutput(
 
     # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
     error: RequestError | None = None
+    aux_outputs: AuxOutputs | None = None
 
     # Whether the sampler watermarks this request, after EngineCore enforcement.
     # Sent once, on the first output, when watermark_config is set. Appended last

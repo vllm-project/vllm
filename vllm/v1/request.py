@@ -370,11 +370,16 @@ class Request:
         if params is not None and params.skip_reading_prefix_cache:
             return 0
         sp = self.sampling_params
-        if sp is not None and (
-            sp.prompt_logprobs is not None or sp.prompt_logprob_token_ids is not None
-        ):
-            return sp.prompt_logprob_start or 0
-        return None
+        if sp is None:
+            return None
+        from vllm.distributed.aux_output_connector.hidden_states import (
+            prompt_capture_start,
+        )
+
+        limits = [prompt_capture_start(sp, self.num_prompt_tokens)]
+        if sp.prompt_logprobs is not None or sp.prompt_logprob_token_ids is not None:
+            limits.append(sp.prompt_logprob_start or 0)
+        return min((limit for limit in limits if limit is not None), default=None)
 
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)

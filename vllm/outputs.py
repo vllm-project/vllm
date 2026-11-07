@@ -4,7 +4,7 @@
 from collections.abc import MutableSequence
 from collections.abc import Sequence as GenericSequence
 from dataclasses import dataclass
-from typing import Any, Generic
+from typing import TYPE_CHECKING, Any, Generic
 
 import numpy as np
 import torch
@@ -15,6 +15,9 @@ from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats
+
+if TYPE_CHECKING:
+    from vllm.distributed.aux_output_connector.outputs import AuxOutputs
 
 logger = init_logger(__name__)
 
@@ -163,6 +166,7 @@ class RequestOutput:
             prefix-cache writes for this request.
         kv_transfer_params: The params for remote K/V transfer.
         ec_transfer_params: The params for remote encoder-cache transfer.
+        aux_outputs: Settled AuxOutput Connector outputs, such as hidden capture.
 
     """
 
@@ -184,6 +188,7 @@ class RequestOutput:
         prompt_token_id_logprobs: np.ndarray | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
+        aux_outputs: "AuxOutputs | None" = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
@@ -207,12 +212,15 @@ class RequestOutput:
         self.num_cache_creation_tokens = num_cache_creation_tokens
         self.kv_transfer_params = kv_transfer_params
         self.ec_transfer_params = ec_transfer_params
+        self.aux_outputs = aux_outputs
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
         self.ec_transfer_params = next_output.ec_transfer_params
+        if next_output.aux_outputs is not None:
+            self.aux_outputs = next_output.aux_outputs.combine(self.aux_outputs)
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):

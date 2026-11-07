@@ -46,6 +46,67 @@ _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
 
 
+class HiddenStateCaptureRequest(OpenAIBaseModel):
+    start: int = Field(ge=0, strict=True)
+    end: int = Field(gt=0, strict=True)
+    collection_id: str
+    coordinate: Literal["response", "absolute"] = Field(
+        default="response",
+        description="'response' counts rows from the first generated token; "
+        "'absolute' counts prompt rows too, so prompt rows can be captured.",
+    )
+    min_rows: int = Field(default=1, ge=1, strict=True)
+    aux_layer_ids: list[int] = Field(default_factory=list)
+    hidden_layout: Literal["final", "aux_final", "dflash_aux"] | None = None
+    logprob_topk: int = Field(default=0, ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "HiddenStateCaptureRequest":
+        if self.end <= self.start or self.min_rows > self.end - self.start:
+            raise ValueError("Invalid hidden-state capture window or min_rows")
+        return self
+
+
+class CaptureTensor(OpenAIBaseModel):
+    data: str = Field(description="Base64-encoded contiguous CPU tensor bytes.")
+    dtype: str
+    shape: list[int]
+
+
+class CaptureSegmentResponse(OpenAIBaseModel):
+    kind: Literal["prompt", "output"]
+    start: int
+    end: int
+
+
+class HiddenStateCaptureResponse(OpenAIBaseModel):
+    tensors: dict[str, CaptureTensor] = Field(
+        description="'hidden_states', plus 'logprobs' and 'logprob_token_ids' "
+        "when logprob_topk is set."
+    )
+    hidden_positions: list[int]
+    hidden_position_start: int
+    hidden_position_end: int
+    hidden_window_start: int
+    hidden_window_end: int
+    hidden_layout: str
+    layer_ids: list[int]
+    includes_final_layer: bool
+    request_id: str
+    collection_id: str
+    copied_bytes: int
+    copy_ms: float = Field(
+        description="CPU allocation and asynchronous-copy submission time "
+        "in milliseconds; "
+        "not completed GPU-to-CPU transfer time."
+    )
+    segments: list[CaptureSegmentResponse]
+    logits_contract: dict[str, Any] | None = Field(
+        default=None,
+        description="Parameters for rebuilding logits from the final layer.",
+    )
+
+
 class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
@@ -114,6 +175,7 @@ class CompletionRequest(OpenAIBaseModel):
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
+    hidden_state_capture: HiddenStateCaptureRequest | None = None
     prompt_embeds: bytes | list[bytes] | None = None
     add_special_tokens: bool = Field(
         default=True,
@@ -398,6 +460,11 @@ class CompletionRequest(OpenAIBaseModel):
             )
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
+        if self.hidden_state_capture is not None:
+            extra_args = dict(extra_args)
+            extra_args["hidden_state_capture"] = self.hidden_state_capture.model_dump(
+                exclude_none=True
+            )
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
@@ -434,6 +501,16 @@ class CompletionRequest(OpenAIBaseModel):
             thinking_token_budget=self.thinking_token_budget,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
         )
+
+    @model_validator(mode="after")
+    def validate_hidden_capture_mode(self) -> "CompletionRequest":
+        if self.hidden_state_capture is not None and (
+            self.stream or self.use_beam_search or self.n != 1
+        ):
+            raise ValueError(
+                "hidden_state_capture requires stream=false, use_beam_search=false, n=1"
+            )
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -700,6 +777,9 @@ class CompletionResponseChoice(OpenAIBaseModel):
     routed_experts: str | None = None
     # Contiguous weight version spans over output-token indexes.
     weight_versions: list[WeightVersionSpan] | None = None
+
+    hidden_state_capture: HiddenStateCaptureResponse | None = None
+    hidden_capture_skip_reason: str | None = None
 
 
 class CompletionResponse(OpenAIBaseModel):

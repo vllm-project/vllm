@@ -2797,7 +2797,7 @@ def test_preemption_processes_stale_aux_output():
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
     scheduler.running.remove(request)
-    scheduler.aux_output_connector = Mock()
+    scheduler.aux_output_connector = Mock(take_outputs=Mock(return_value=(None, None)))
     scheduler._preempt_request(request, 0.0)
     scheduler.aux_output_connector.request_finished.assert_called_once_with(request)
 
@@ -2813,7 +2813,9 @@ def test_preemption_processes_stale_aux_output():
         ),
     )
 
-    scheduler.aux_output_connector.take_output.assert_called_once_with(request, None)
+    scheduler.aux_output_connector.take_outputs.assert_called_once_with(
+        request, None, False
+    )
 
 
 def test_prefix_cache_stats_not_recorded_when_caching_disabled():

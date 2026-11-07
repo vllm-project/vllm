@@ -21,7 +21,7 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.utils import raise_if_nan_logits
 
 if TYPE_CHECKING:
-    from vllm.distributed.aux_output_connector.worker import PendingAuxOutput
+    from vllm.distributed.aux_output_connector.worker import PendingCombinedAuxOutput
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -122,7 +122,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
         check_ep_fault: bool,
-        pending_aux_output: "PendingAuxOutput | None",
+        pending_aux_output: "PendingCombinedAuxOutput | None",
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than

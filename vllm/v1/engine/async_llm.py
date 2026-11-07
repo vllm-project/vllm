@@ -485,6 +485,7 @@ class AsyncLLM(EngineClient):
                     "latter will be used, and the former will be ignored."
                 )
             request_params = request.params
+            self.input_processor.validate_engine_core_request(request)
             if isinstance(request_params, SamplingParams):
                 # This request object is owned by the engine from here on.
                 self.input_processor.apply_watermarking(
@@ -725,11 +726,12 @@ class AsyncLLM(EngineClient):
             or params.n > 1
             or params.output_kind == RequestOutputKind.FINAL_ONLY
             or params.stop
+            or "hidden_state_capture" in (params.extra_args or {})
         ):
             raise VLLMValidationError(
                 "Input streaming not currently supported "
-                "for pooling models, n > 1, request_kind = FINAL_ONLY "
-                "or with stop strings."
+                "for pooling models, n > 1, request_kind = FINAL_ONLY, "
+                "stop strings or hidden_state_capture."
             )
 
     # TODO: we should support multiple prompts in one call, as you

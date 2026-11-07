@@ -261,6 +261,7 @@ class LLMEngine:
                     "latter will be used, and the former will be ignored."
                 )
             request_params = request.params
+            self.input_processor.validate_engine_core_request(request)
             if isinstance(request_params, SamplingParams):
                 # This request object is owned by the engine from here on.
                 self.input_processor.apply_watermarking(
