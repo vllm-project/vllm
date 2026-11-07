@@ -42,7 +42,7 @@ Engine events that do not occur on their own in a short test are triggered throu
 | X0 | Output sanity; KV capacity; where an R3 KV layer can attach | real numbers | pass |
 | X1 | Correctness per design | 0 missing, 0 wrong | all five designs pass |
 | X1b | Row determinism across schedules | bitwise identical | `auto` pass; `deep_gemm_mega_moe` failed, fixed |
-| X2 | Throughput with aux outputs on; engine-local store vs Mooncake at 8 replicas; each hop vs its ceiling | measured | R3 −22% from running every row through the replay layers; −5.4% with the trim kept, −10.7% for all outputs |
+| X2 | Throughput with aux outputs on; engine-local store vs Mooncake at 8 replicas; each hop vs its ceiling | measured | as built about −41% at the top scenario; with partial capture and CUDA graph `FULL` −0.6% (R3) and −3.8% (all outputs) |
 | X4/X5 | Requested means delivered; freed once used | 0 missing, 0 leaks | pass down to a 16 MB pool |
 | X6 | Indexer compression | ratio, speed | 4.6–6.7× |
 | X7 | Hidden states fp8 vs bf16 | KL | fp8 chosen |
@@ -101,24 +101,36 @@ Output tokens/s on X1; differences are within run-to-run noise.
 
 ### Engine overhead relative to R3 off
 
-Every overhead here is measured against R3 off, with a fixed workload: 512 closed-loop agents, 16 turns growing to 14.6K tokens, 256 output tokens per turn, TP4, CUDA graph FULL, batch invariance on, no preemption. Prefix hits were identical in all arms (48.8M of 62.2M tokens). Run-to-run resolution is about ±1%.
+Every overhead is measured against R3 off, with a fixed workload, CUDA graph `FULL`, batch invariance on and no preemption.
 
-| Arm | Generation time | Throughput vs R3 off |
-|---|---|---|
-| R3 off | 1,034 s | — |
-| R3 in the response, as built | 1,332 s | −22.4% |
-| Same, with the capture hook removed (timing only) | 1,326 s | −22% |
-| Same, hook removed and every-row rule off (timing only) | 1,049 s | −1.5% |
-| R3 in the response, replay trim kept | 1,093 s | −5.4% |
-| R3 + indexer + hidden through Mooncake, replay trim kept | 1,159 s | −10.7% |
+**Cause.** On DeepSeek-V4.1 the layers past the last KV source (rest of 20, and 21–39) run in eager prefill steps only on each request's trailing rows. The build reads R3 as needing exact rows at every prompt position, so every new row of every request runs through those layers. Removing only the capture hook leaves the cost unchanged; removing that rule removes it. No process shows a Python hot spot; GPU utilization rises from 79% to 90%.
 
-**Cause.** On DeepSeek-V4.1 the layers past the last KV source (21–39) run in eager prefill steps only on each request's trailing rows, which saves most of the replayed window's work. Enabling R3 makes every row of every request run through those layers, because the build reads R3 as needing all prompt rows. That rule accounts for about 21 of the 22 points. No process shows a Python hot spot, GPU utilization rises from 79% to 90%, and the two arms match until contexts pass the replay window, then separate until the window saturates.
+**Top scenario.** 5 TP4 replicas plus a pool node (700 GB, and 160 GB per replica node), 512K context, 16 turns, 51 sessions in flight per replica, a weight update every step, 4× GB300 per replica. Arms run in sequence on the same nodes; median replica generation time; each arm once.
 
-**Fix.** A request needs exact rows only from `min(prefix hit, block of aux_start)`: rows below that are already in the pool. Each replay stage keeps its usual rows plus `max(0, needed rows − window)`, so the needed rows come out exact at every layer, and the capture writes trimmed layers by batch row. Rows the stage did not run are left as a sentinel; a block holding a sentinel that is not already published is reported missing rather than written.
+| Capture | CUDA graph | R3 in the response | R3 + indexer + hidden through Mooncake |
+|---|---|---|---|
+| R3 off | `FULL` | 1,977.7 s | — |
+| every row through layers 20–39 (as built) | `FULL` | −41.2% | −41.4% |
+| replay trim: only rows not yet in the pool run through those layers | `FULL` | −39.5% | −40.9% |
+| partial capture, blocks only (§6.11 without cone patches) | `FULL` | −0.6% | −3.8% |
+| partial capture, blocks only | `FULL_AND_PIECEWISE` | −40.5% | −41.0% |
 
-**Exactness.** With the trim on and off over the workload above, all 512 sessions had identical R3 rows and generated tokens. On forks with speculative decoding and a weight update every step, every counter matched between trim on and off. Delayed fork and forced preemption had 0 mismatches against the first-computation reference. Groups stayed at the level of runs without the fix (siblings only), and injected write failures were all reported.
+At this scale nearly all prompt rows are new, so trimming rows already in the pool saves almost nothing. Both conditions are needed: partial capture, and CUDA graph `FULL` (with piecewise graphs the eager stages cost as much as the full rows). Generated tokens per arm differ by a few percent at this scale. The cost of the cone patches at this scale is being measured.
 
-**What remains.** The newly computed prompt rows must still run through layers 21–39, which R3 off skips; that is most of the remaining 5%. The capture path and host work are about 1.5%. The full arm adds about 5 points; breaking this down is in progress. These numbers are from one node. The fix is an overlay on the build below, not yet on this branch.
+**One node.** 512 closed-loop agents, 16 turns growing to 14.6K tokens, 256 output tokens per turn, same prompts and prefix hits in every arm. In three builds with partial capture and cone patches, run with one arm per node:
+
+| Arm | Range over three runs |
+|---|---|
+| R3 in the response | −1.5% to −6.1% |
+| R3 through Mooncake, cone patches | −2.4% to −4.7% |
+| R3 + indexer + hidden through Mooncake | −8.8% to −16.7% |
+| No trim (every row through layers 20–39) | −24.5% to −25.7% |
+
+These ranges are mostly node and run noise. The all-outputs arm of two builds on the same node differs by 0.2% (1,144.6 s and 1,147.2 s), the same builds on another node run 4.3% slower, and one build repeated on one node differs by 4%. A same-node measurement of all arms is in progress. Cone patches for R3 are about 1.7 GB for 512 sessions (2.1M generated tokens).
+
+**Exactness.** Against a run without trimming, same prompts, no weight updates: every cell a sampled token depends on, plus all columns below layer 20, is bitwise identical for R3 and the indexer, in 512/512 plain sessions, 16/16 forks and 16/16 forks inside a parent's rows. 0 of 137.6M R3 cells and 0 of 36.0M indexer cells missing. With speculative decoding and a weight update every step, groups, forks, delayed forks, forced preemption and injected write failures stay at the same counts as without partial capture.
+
+**Trainer replay of the delivered bytes.** A BF16 trainer replays the delivered rows (no-replay cells run their own routing) and, separately, the exact rows of the untrimmed run. Over 8 forked samples (14,848 generated tokens), plain and interior forks, the two replays give bitwise identical logprobs, and a repeat is bitwise identical too. The trainer's own indexer top-k overlaps the delivered cells by 0.90 on average (0.67 against the previous row, which checks alignment); the trainer has no indexer replay path yet.
 
 ### Engine-local store vs Mooncake, 8 replicas
 
@@ -154,8 +166,6 @@ At the top scenario (512K, 51 sessions in flight per replica, 8 replicas) each r
 - **Writer thread:** moving indexer encoding to a 4-thread pool and batching ready puts cut the writer's wait on encoding from 1,517 s to 310 s, R3 queueing from 1.5 s to 0.056 s, and scheduling pauses on writer backlog from 78–102 s to 0.
 - **Engine host time:** in the 512-agent workload above, committing outputs on the output thread averages 29 ms per step, and the full arm moves about 70 MB per step from GPU to host. Neither shows on the main loop's stacks.
 - **Trainer read:** 126–207 s to read back the 51 sessions (down from 857–914 s), with indexer decoding on the GPU where replay runs (protocol §7).
-
-A top-scenario comparison against R3 off with the replay trim is still running.
 
 ## Indexer (X6) and hidden states (X7)
 
@@ -232,6 +242,8 @@ Each row is a defect found by test or review, the test that exposes it, and the 
 | Rows a fork served from a prefix hit were labelled with the version inherited from the parent | fork | 10 version-segment failures; 1.69M indexer rows missing | 0 |
 | `invalid_from` was lost across a preemption; a parked finish used only the first block of a multi-block tail; hidden chunk metadata assumed full chunks; an abort and a preemption in the same step left a stash | review; forced preemption | — | 89–167 preemptions per run, 0 missing, 0 wrong; 72/72 hidden chunk records exact |
 | In-flight weight update combined with preemption | one weight change per step while paused, ~110 preemptions | — | 0 wrong of 4.53M with per-trajectory copies |
+| Partial capture: a patch floor at `aux_start` lost cells of forks inside a parent's rows and of shrinking prompts; earlier patches past a fork point shadowed the fork's own cells; one version per patch lost per-cell provenance | review; interior fork arm | cells lost silently in unit cases | patches clipped per request, per-cell versions; interior forks 16/16 bitwise |
+| Partial capture: the position `aux_start` computed by the previous request, preemption before the first sampled token, holes before a long generation, a second release batch, more than 256 versions in one request | review, two rounds, four reviewers each | unit cases | fixed; each fix has a unit case; regressions unchanged |
 
 KV-load rewind (block-level failure recovery) cannot occur on this model: vLLM refuses block-level recovery with 9 KV cache groups. For single-group models the protocol reports rows from the rewind point as invalid.
 

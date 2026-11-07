@@ -1,6 +1,6 @@
 # Aux Outputs for RL: Delivery Protocol
 
-Status: draft (v4). Measurements behind each rule are in [experiments](experiments.md); sizes in [scenarios](scenarios.md); alternatives in [design space](design_space.md).
+Status: draft (v5). Measurements behind each rule are in [experiments](experiments.md); sizes in [scenarios](scenarios.md); alternatives in [design space](design_space.md).
 
 ## 1. What a row is
 
@@ -164,6 +164,28 @@ Block-level KV-load failure recovery rewinds a request's computed tokens. vLLM r
 
 A normal abort writes a manifest for the computed positions. Request-private objects of responses that cannot be delivered are deleted by the engine; session-shared blocks are left to session release.
 
+### 6.11 Partial capture on models with replay layers
+
+**Why.** On DeepSeek-V4.1 only layers up to 20 write KV for every row. The rest of layer 20 and layers 21–39 run in eager prefill steps on each request's trailing rows only, in stages that shrink by 127 rows per layer from a 128-row window. Asking for exact KV-following rows at every position forces every new prompt row through those layers. That is where the cost of R3 comes from on this model (experiments: engine overhead). Partial capture keeps the stages as they are and delivers only the cells some sampled token depends on.
+
+**Which cells are exact.** A prefill step ending at `e` computes a cell at layer `L ≥ 20` exactly only for its last `cone(L) = 128 + (39 − max(L, 21)) × 127` rows. When the step replays from a start `r > 0` inside the context (a prefix hit), cells below `r + (L + 1) × 127` are not exact either. A step of at most 128 rows (decode) is exact on every layer.
+
+**Blocks and tails** keep the rules of §4–§6. Their columns below layer 20 are exact and are delivered as before. Readers ignore their columns from layer 20 up.
+
+**Cone patches.** Each request collects, per step, the deep cells inside that step's exact range, first computation first, for R3 and for the indexer slots of layers 20 and up. At finish it writes one patch object per output (`<req>/t/c/r3`, `<req>/t/c/idx`) holding the cells the cones of its sampled tokens need that no earlier patch of the trajectory holds. Each cell carries its weight version.
+
+**The patch list.** The manifest field `r3_cone` lists every patch of the trajectory in request order, each with the end up to which its rows belong to this trajectory:
+
+- At finish, earlier patches are clipped to the request's cut: `aux_start`, or `aux_start + 1` when the previous request (or the parent, for a fork) computed position `aux_start` itself. That is the same rule as the shallow splice (§6.3), including a position that completed a block. When a fork's fork-point tail is gone, the cut is `aux_start` and the parent's cells below it stay.
+- A fork starts from the parent's list clipped at the fork point.
+- `uncovered` counts the needed cells that no patch holds (for example, cells of a window the request did not compute). Nothing is substituted for them.
+
+**Reader.** Set every deep cell to no-replay (R3 `65535`, indexer `−2`), then overlay the listed patches in order, each up to its end, first written wins. The trainer runs its own routing (or indexer) at no-replay cells, cell by cell. A replay hook that gathers at the sentinel instead is wrong.
+
+**Preemption.** The request's cells are stashed and restored on resume, so cells computed before the preemption win over the recompute. A recompute of the same step adds nothing.
+
+Partial capture changes what is stored, not the invariants: every cell a sampled token depends on is delivered from its first computation, with its version, or counted in `uncovered`.
+
 ## 7. Training side
 
 ```python
@@ -178,6 +200,7 @@ aux.release_session(job, session)  # after the session is consumed and the step 
   - verify each block's tokens against the sample;
   - R3 sanity: the 6 expert ids in a row are distinct; an all-zero row is an error;
   - replay compares expert sets; rows whose set is unchanged keep the trainer's own ids and weights;
+  - with partial capture (§6.11), overlay the cone patches; no-replay cells run the trainer's own routing;
   - a failed read fails the step collectively: all ranks all-reduce a success flag and retry or skip together;
   - decode on the GPU: copy the packed indexer bytes (5 bytes per pair of values, 37% fewer than int32) and unpack them where replay runs. A single CPU thread decoding numpy is the bottleneck of the whole path: about 180 MB/s, against more than 10 GB/s for the store's get.
 - **release** deletes everything under `<job>/<session>/` (Mooncake `remove_by_regex`), once the session will not grow, all reads are done and the step has committed. It also tells the writer to drop the session's bookkeeping (a release marker), so writer memory is bounded by live sessions.
@@ -231,4 +254,7 @@ Training framework:
 ## 12. Known limits
 
 - **A prefix hit does not say which computation produced the KV it hits.** The session's first copy of a block is listed for every hit on that hash. This is wrong only if all three of the following happen: the KV of the first computation is evicted from every cache tier; another trajectory recomputes the block at a different weight version (it keeps its own copy, and its KV is now the cached one); and a third trajectory hits that KV. Two fixes are possible. One is to follow vLLM's KV cache events (stored / removed, per block hash) so the worker knows which object the cached KV belongs to. The other is to carry R3 in the KV cache itself (#64383), which makes rows follow the KV by construction. The indexer would still need the first.
+- **Partial capture, window-carrying KV loads.** The worker takes a request's first captured position as its replay start. A KV load that restores the sliding window computes from the hit without replaying, so its exact cells are masked and reported in `uncovered`, not delivered. The scheduler's replay start has to reach the worker to fix this. Such loads are not used with the P-S design.
+- **Partial capture, forks after a regeneration.** A fork takes the parent's current patch list. If the parent regenerated below the fork point after the fork's snapshot, the fork would read the other branch's cells. Blocks pick the branch by content hash; patches are positional. A branch id per patch fixes it.
+- **Partial capture, `uncovered` is per request.** A hole is reported by the request whose tokens needed it, not again by later requests of the trajectory.
 - **The engine-local row cache (c1)** reads hit rows from a generation-scoped base store. Its version records describe spliced rows rather than the base payload, and a request parked across a generation change reads the new generation. The P-S design (§6.2) does not use this path.
