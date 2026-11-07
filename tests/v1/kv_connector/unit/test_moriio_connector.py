@@ -624,6 +624,10 @@ def test_register_kv_caches(mock_parallel_groups):
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector.threading.Thread"
         ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine.MoRIIOWrapper.async_wait_reqid",
+            return_value=None,
+        ),
     ):
         # Create connector
         assert vllm_config.kv_transfer_config is not None
