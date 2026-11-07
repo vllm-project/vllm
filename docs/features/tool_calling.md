@@ -504,6 +504,32 @@ Supported models:
 
 Flags: `--tool-call-parser glm47`
 
+### Poolside Models (`poolside_v1`)
+
+Supported models:
+
+* `poolside/Laguna-XS-2.1`
+
+Flags: `--tool-call-parser poolside_v1`
+
+The Rust frontend also supports Poolside's XML tool calls. Start it with
+reasoning disabled, since the Rust Poolside reasoning parser is separate work:
+
+```bash
+VLLM_USE_RUST_FRONTEND=1 vllm serve poolside/Laguna-XS-2.1 \
+    --enable-auto-tool-choice \
+    --tool-call-parser poolside_v1 \
+    --default-chat-template-kwargs '{"enable_thinking": false}'
+```
+
+For arguments whose schema declares `type: "string"`, the Rust parser returns
+text as it arrives. Other values wait until the end of the argument so the
+parser can select the correct JSON type. This preserves spaces and newlines in
+file contents and other string arguments.
+
+The Rust parser does not enforce a tool grammar, including for `required` and
+named tool choices. Check the returned call and its arguments before use.
+
 ### FunctionGemma Models (`functiongemma`)
 
 Google's FunctionGemma is a lightweight (270M parameter) model specifically designed for function calling.

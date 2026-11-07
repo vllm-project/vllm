@@ -149,6 +149,28 @@ Tokyo
 }
 
 #[test]
+fn factory_parses_poolside_xml() {
+    let factory = ToolParserFactory::new();
+    let text =
+        "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>";
+
+    for mut parser in [
+        factory.create(names::POOLSIDE_V1, &[], tokenizer()).unwrap(),
+        factory.create_for_model("poolside/Laguna-XS-2.1", &[], tokenizer()).unwrap(),
+    ] {
+        let mut output = ToolParserOutput::default();
+        parser.parse_into(DecodedText::unattributed(text), &mut output).unwrap();
+        output.append(parser.finish().unwrap());
+        let output = output.coalesce();
+
+        assert!(output.normal_text().is_empty());
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls()[0].arguments, r#"{"city":"Paris"}"#);
+    }
+}
+
+#[test]
 fn factory_new_resolves_default_patterns() {
     let factory = ToolParserFactory::new();
 

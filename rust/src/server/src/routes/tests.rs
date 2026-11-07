@@ -7874,6 +7874,143 @@ async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn poolside_tool_calls_reach_chat_responses() {
+    for stream in [false, true] {
+        for tool_choice in [
+            json!("auto"),
+            json!("required"),
+            json!({"type": "function", "function": {"name": "get_weather"}}),
+            json!("none"),
+        ] {
+            let chunks = [
+                "<tool_",
+                "call>get_weather<arg_key>city</arg_key><arg_value>Pa",
+                "ris</arg_value><arg_key>days</arg_key><arg_value>2</arg_value></tool_call>",
+            ];
+            let output_specs = chunks
+                .iter()
+                .enumerate()
+                .map(|(index, text)| {
+                    let finished = index == chunks.len() - 1;
+                    let mut ids = token_ids(text);
+                    if finished {
+                        // A stop update includes its final stop token. The text
+                        // decoder removes this byte before the parser sees it.
+                        ids.push(0);
+                    }
+                    (ids, finished.then_some(EngineCoreFinishReason::Stop))
+                })
+                .collect();
+            let (mut app, engine_task) = test_app_with_backend_and_stream_output_specs(
+                Arc::new(FakeChatBackend::with_model_id("poolside/Laguna-XS-2.1")),
+                output_specs,
+            )
+            .await;
+            let response = app
+                .call(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/chat/completions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({
+                                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                                "stream": stream,
+                                "messages": [{"role": "user", "content": "Weather in Paris for two days?"}],
+                                "tools": [{
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_weather",
+                                        "parameters": {
+                                            "type": "object",
+                                            "properties": {
+                                                "city": {"type": "string"},
+                                                "days": {"type": "integer"}
+                                            }
+                                        }
+                                    }
+                                }],
+                                "tool_choice": tool_choice,
+                                "chat_template_kwargs": {"enable_thinking": false}
+                            })
+                            .to_string(),
+                        ))
+                        .expect("build request"),
+                )
+                .await
+                .expect("call app");
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+            engine_task.await.expect("mock engine task");
+            let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+            let choices = if stream {
+                sse_json_payloads(&text)
+                    .into_iter()
+                    .map(|payload| payload["choices"][0].clone())
+                    .collect::<Vec<_>>()
+            } else {
+                let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+                vec![response["choices"][0].clone()]
+            };
+            let field = if stream { "delta" } else { "message" };
+            let mut content = String::new();
+            let mut arguments = String::new();
+            let mut names = Vec::new();
+            let mut ids = Vec::new();
+            for choice in &choices {
+                if let Some(part) = choice[field]["content"].as_str() {
+                    content.push_str(part);
+                }
+                if let Some(calls) = choice[field]["tool_calls"].as_array() {
+                    for call in calls {
+                        if stream {
+                            assert_eq!(call["index"], 0);
+                        }
+                        if let Some(id) = call["id"].as_str() {
+                            assert!(!id.is_empty());
+                            ids.push(id);
+                        }
+                        if let Some(name) = call["function"]["name"].as_str() {
+                            names.push(name);
+                        }
+                        if let Some(part) = call["function"]["arguments"].as_str() {
+                            arguments.push_str(part);
+                        }
+                    }
+                }
+            }
+            let expected_finish = if tool_choice.is_object() || tool_choice == "none" {
+                "stop"
+            } else {
+                "tool_calls"
+            };
+            assert_eq!(
+                choices.last().unwrap()["finish_reason"],
+                expected_finish,
+                "stream={stream}, tool_choice={tool_choice}: {text}"
+            );
+            if tool_choice == "none" {
+                assert!(content.is_empty());
+                assert!(names.is_empty());
+                assert!(arguments.is_empty());
+            } else {
+                assert!(content.is_empty());
+                assert_eq!(names, ["get_weather"]);
+                assert_eq!(ids.len(), 1);
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&arguments).unwrap_or_else(|error| {
+                        panic!("stream={stream}, tool_choice={tool_choice}: {error}; {text}")
+                    }),
+                    json!({"city": "Paris", "days": 2})
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn named_tool_choice_uses_stop_finish_reason() {
     for stream in [false, true] {
         let (app, engine_task) = test_app_with_backend_and_stream_output_specs(

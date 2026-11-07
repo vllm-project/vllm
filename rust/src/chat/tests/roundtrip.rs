@@ -365,6 +365,20 @@ impl RoundtripCase {
         }
     }
 
+    /// Laguna XML tool calls, with the model's optional reasoning disabled.
+    fn poolside() -> Self {
+        Self {
+            model_id: "poolside/Laguna-XS-2.1",
+            assistant_stop_suffix: "</assistant>\n",
+            tool_call_parser: ParserSelection::Explicit("poolside_v1".to_string()),
+            reasoning_parser: ParserSelection::None,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+            with_schema: &[],
+        }
+    }
+
     /// GLM-5.2 XML-like argument format with `<think>` reasoning tags.
     fn glm52() -> Self {
         Self {
@@ -621,6 +635,7 @@ roundtrip_tests! {
     deepseek_v32 => [tool_call_mix],
     glm45 => [reasoning_and_content, tool_call_mix],
     glm47 => [reasoning_and_content, tool_call_mix],
+    poolside => [poolside_tools],
     glm52 => [reasoning_and_content, tool_call_mix],
     seed_oss => [reasoning_and_content, tool_call_mix],
     step3p5 => [reasoning_and_content],
@@ -638,6 +653,70 @@ roundtrip_tests! {
     muse_glimmer => [reasoning_and_content], // Glimmer drops content on tool-call turns in history
     gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
     inkling => [reasoning_and_content, tool_call_mix],
+}
+
+/// Check Laguna's tool format without a separate reasoning parser.
+async fn run_roundtrip_poolside_tools(
+    case: &RoundtripCase,
+    backends: &vllm_chat::LoadedModelBackends,
+) -> Result<()> {
+    let weather_arguments = serde_json::json!({"location": "  上海 \n\"中心\"\\ "});
+    let add_arguments = serde_json::json!({"y": 1.5, "x": 2, "items": ["left", "right"]});
+    for &variant in ToolCallMixVariant::WITHOUT_SCHEMA {
+        let request = roundtrip_request(
+            "roundtrip-poolside-tools",
+            vec![ChatMessage::text(
+                ChatRole::User,
+                "Check the weather and add 1.5 plus 2.",
+            )],
+            test_tools(),
+            Some(variant.tool_choice()),
+            Some(false),
+            case.thinking_behavior,
+        );
+        let (expected_text, tool_call_count) = variant.expected();
+        let mut content = Vec::new();
+        content.extend(expected_text.map(|text| AssistantContentBlock::Text {
+            text: text.to_string(),
+        }));
+        let calls = [("get_weather", &weather_arguments), ("add", &add_arguments)];
+        for (index, (name, arguments)) in calls.iter().take(tool_call_count).enumerate() {
+            content.push(AssistantContentBlock::ToolCall(AssistantToolCall {
+                id: format!("functions.{name}:{index}"),
+                name: (*name).to_string(),
+                arguments: serde_json::to_string(arguments)?,
+            }));
+        }
+        let result = run_roundtrip(case, backends, &request, AssistantMessage { content })
+            .await
+            .with_context(|| {
+                format!(
+                    "Poolside variant {}",
+                    serde_json::to_value(variant).unwrap()
+                )
+            })?;
+
+        assert_eq!(result.parsed_message.reasoning(), None);
+        assert_eq!(
+            result.parsed_message.text(),
+            expected_text.unwrap_or_default()
+        );
+        let parsed_calls = result.parsed_message.tool_calls().collect::<Vec<_>>();
+        assert_eq!(parsed_calls.len(), tool_call_count);
+        for (parsed, (name, arguments)) in parsed_calls.iter().zip(calls) {
+            assert_eq!(parsed.name, name);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&parsed.arguments)?,
+                *arguments
+            );
+        }
+        assert!(result.output_grammar.is_none());
+        assert_eq!(
+            result.rerendered_closed_completion,
+            result.closed_completion
+        );
+    }
+    Ok(())
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.

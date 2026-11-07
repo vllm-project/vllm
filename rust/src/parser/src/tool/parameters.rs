@@ -134,6 +134,14 @@ impl ToolSchemas {
         let tool_schema = self.tools.get(function_name).unwrap_or(ToolSchema::empty());
         tool_schema.convert(name, value.into())
     }
+
+    /// Whether a raw parameter is always a string, so its value can be emitted
+    /// before the closing tag. Nullable and mixed types need the complete value.
+    pub(super) fn is_string_param(&self, function_name: &str, name: &str) -> bool {
+        self.tools
+            .get(function_name)
+            .is_some_and(|tool| tool.parameter_type(name) == Some(JsonParamType::String))
+    }
 }
 
 impl ToolSchema {
@@ -157,13 +165,12 @@ impl ToolSchema {
     /// the value fails to convert, this falls back to returning the raw
     /// string as a JSON string value, or object-like JSON for structured input.
     fn convert(&self, name: &str, input: ParamInput) -> Value {
+        convert_with_optional_schema(self.parameter_type(name).as_ref(), &input)
+    }
+
+    fn parameter_type(&self, name: &str) -> Option<JsonParamType<'_>> {
         let root = SchemaRoot::new(&self.parameters);
-        let param_type = root
-            .resolved()
-            .get("properties")
-            .and_then(|properties| properties.get(name))
-            .and_then(|schema| JsonParamType::from_schema(&root, schema));
-        convert_with_optional_schema(param_type.as_ref(), &input)
+        ObjectType::from_schema(root, root.resolved().as_object()).field(name)
     }
 }
 
@@ -192,15 +199,7 @@ impl<'a> JsonParamType<'a> {
                 JsonType::Number => Self::Number,
                 JsonType::Boolean => Self::Boolean,
                 JsonType::Null => Self::Null,
-                JsonType::Object => Self::Object(ObjectType {
-                    root: *root,
-                    properties: schema
-                        .and_then(|schema| schema.get("properties"))
-                        .and_then(Value::as_object),
-                    additional_properties: schema
-                        .and_then(|schema| schema.get("additionalProperties"))
-                        .filter(|schema| schema.is_object()),
-                }),
+                JsonType::Object => Self::Object(ObjectType::from_schema(*root, schema)),
                 JsonType::Array => Self::Array(ArrayType {
                     root: *root,
                     items: schema.and_then(|schema| schema.get("items")),
@@ -222,6 +221,18 @@ impl<'a> JsonParamType<'a> {
 }
 
 impl<'a> ObjectType<'a> {
+    fn from_schema(root: SchemaRoot<'a>, schema: Option<&'a Map<String, Value>>) -> Self {
+        Self {
+            root,
+            properties: schema
+                .and_then(|schema| schema.get("properties"))
+                .and_then(Value::as_object),
+            additional_properties: schema
+                .and_then(|schema| schema.get("additionalProperties"))
+                .filter(|schema| schema.is_object()),
+        }
+    }
+
     /// The type of the field named `name`, from its declared schema or the
     /// additional properties' schema.
     fn field(&self, name: &str) -> Option<JsonParamType<'a>> {
@@ -473,6 +484,40 @@ mod tests {
         assert_eq!(params.convert("unknown_schema", text("42")), json!("42"));
         assert_eq!(params.convert("unknown_type", text("42")), json!("42"));
         assert_eq!(params.convert("known", text("42")), json!(42));
+    }
+
+    #[test]
+    fn root_additional_properties_supply_parameter_types() {
+        let strings = ToolSchema::from_schema(json!({
+            "type": "object",
+            "additionalProperties": {"type": "string"}
+        }));
+        assert_eq!(strings.convert("note", text(" null ")), json!(" null "));
+        assert_eq!(strings.convert("count", text("1.10")), json!("1.10"));
+
+        let numbers = ToolSchema::from_schema(json!({
+            "type": "object",
+            "additionalProperties": {"type": "number"}
+        }));
+        assert_eq!(numbers.convert("count", text(" 1.25 ")), json!(1.25));
+    }
+
+    #[test]
+    fn root_declared_properties_override_additional_properties() {
+        let params = ToolSchema::from_schema(json!({
+            "type": "object",
+            "properties": {
+                "label": {"type": "string"},
+                "count": {"type": "integer"},
+                "untyped": true
+            },
+            "additionalProperties": {"type": "number"}
+        }));
+
+        assert_eq!(params.convert("label", text(" 1.25 ")), json!(" 1.25 "));
+        assert_eq!(params.convert("count", text("42")), json!(42));
+        assert_eq!(params.convert("untyped", text("42")), json!("42"));
+        assert_eq!(params.convert("extra", text("1.25")), json!(1.25));
     }
 
     #[test]
