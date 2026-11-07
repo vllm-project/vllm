@@ -143,8 +143,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             logger.info_once(
                 "%s cannot count video tokens yet, so the Transformers modeling "
                 "backend serves this model without video inputs. Please report "
-                "this to transformers so it can be fixed, see "
-                "https://github.com/huggingface/transformers/issues/43329",
+                "this to transformers so it can be fixed.",
                 type(self.get_hf_processor()).__name__,
             )
             return False

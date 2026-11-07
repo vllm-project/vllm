@@ -83,7 +83,7 @@ def _variance_eps(rsqrt: fx.Node, x: fx.Node) -> float | None:
     if not is_op(mean, "mean"):
         return None
     # timm's RmsNorm2d means over the channel dim of NCHW, so fusing it would
-    # normalise Gemma 3n's MobileNetV5 vision tower over width instead
+    # normalize Gemma 3n's MobileNetV5 vision tower over width instead
     dim = _operand(mean, 1, "dim")
     dims = dim if isinstance(dim, (list, tuple)) else (dim,)
     if tuple(dims) != (-1,):

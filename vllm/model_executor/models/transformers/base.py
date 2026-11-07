@@ -18,7 +18,7 @@
 
 import inspect
 import os
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from functools import cached_property
 from itertools import chain
@@ -830,40 +830,25 @@ class Base(
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def _drop_ignored_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterator[tuple[str, torch.Tensor]]:
-        """Drop a weight only if the model has nowhere to put it.
-
-        Transformers aggregates `_keys_to_ignore_on_load_unexpected` onto ancestors
-        without the submodule prefix, and uses it only to decide whether an
-        *unexpected* key deserves a warning, so a pattern says nothing about a
-        weight the model does have.
-        """
-        keys = self.model._keys_to_ignore_on_load_unexpected
-        if not keys:
-            yield from weights
-            return
-        pattern = re.compile("|".join(keys))
-        expected = {name for name, _ in self.named_parameters()}
-        expected |= {name for name, _ in self.named_buffers()}
-        for name, weight in weights:
-            if (
-                pattern.search(name)
-                and self.hf_to_vllm_mapper.map_name(name) not in expected
-            ):
-                continue
-            yield name, weight
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             ignore_unexpected_prefixes=self.ignore_unexpected_prefixes,
             ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
         )
-        return loader.load_weights(
-            self._drop_ignored_weights(weights), mapper=self.hf_to_vllm_mapper
-        )
+        # Transformers merges `_keys_to_ignore_on_load_unexpected` up without prefixes,
+        # so drop a match only if it has nowhere to go
+        if keys := self.model._keys_to_ignore_on_load_unexpected:
+            pattern = re.compile("|".join(keys))
+            expected = {name for name, _ in self.named_parameters()}
+            expected |= {name for name, _ in self.named_buffers()}
+            weights = (
+                (name, weight)
+                for name, weight in weights
+                if not pattern.search(name)
+                or self.hf_to_vllm_mapper.map_name(name) in expected
+            )
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @staticmethod
     def check_version(min_version: str, feature: str):

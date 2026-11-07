@@ -266,7 +266,9 @@ def test_repeated_omni_request_hits_the_processor_cache(model_id):
     assert first["prompt_token_ids"] == second["prompt_token_ids"]
     assert first["mm_hashes"] == second["mm_hashes"]
     (audio_item,) = second["mm_kwargs"]["audio"]
-    assert ("audio_feature_lengths" in audio_item) == model_config.uses_mrope
+    assert ("audio_feature_lengths" in audio_item) == (
+        "feature_attention_mask" in audio_item
+    )
 
 
 def test_repeated_audio_in_video_request_skips_the_processor_cache():
