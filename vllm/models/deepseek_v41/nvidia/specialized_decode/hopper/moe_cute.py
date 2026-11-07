@@ -520,7 +520,7 @@ class LowBatchMoEKernel:
         self,
         ns1: int = 3,
         ns2: int = 5,
-        chunk_target: int = 3,
+        chunk_target: int = 1,
         ids_mode: bool = False,
         dense: bool = True,
         shared: bool = False,
@@ -1340,6 +1340,7 @@ class LowBatchMoEKernel:
         s_fdone: Int32,
         clist: Int32,
         flist: Int32,
+        tab: Int32,
     ):
         processed = Int32(0)
         fin_n = Int32(0)
@@ -1356,8 +1357,19 @@ class LowBatchMoEKernel:
                         tile, hh = _ch_tile(ch, NCH, tsh)
                         nch = _tile_nch(tile, NCH, tsh)
                         if hh == nch - 1:
-                            sts32(flist + (fin_n % CL) * 4, Uint32(tile))
-                            fin_n = fin_n + 1
+                            done = Int32(0)
+                            if cutlass.const_expr(not self.dense):  # noqa: SIM102
+                                if nch == 1:  # noqa: SIM102
+                                    if Int32(lds32(tab + (tile // NPAIR) * 4)) != E_SH:
+                                        done = Int32(1)
+                            if done == 1:
+                                # a whole routed tile its consumers finalized
+                                rc = tile // NPAIR
+                                red_add_gpu(sync + _i64(S_READY + rc) * 4, 1)
+                                red_add_gpu(sync + _i64(S_ALL) * 4, 1)
+                            else:
+                                sts32(flist + (fin_n % CL) * 4, Uint32(tile))
+                                fin_n = fin_n + 1
                         else:
                             red_add_gpu(sync + _i64(S_TILE + tile) * 4, 1)
                 processed = avail
@@ -2285,7 +2297,7 @@ class LowBatchMoEKernel:
             if lane == 0:
                 stamp = ldg_cg_i32(cnt + C_GEN * 4) + 1
                 self._signal(
-                    sync, stamp, NCH, tsh, s_done, s_fin, s_fdone, clist, flist
+                    sync, stamp, NCH, tsh, s_done, s_fin, s_fdone, clist, flist, tab
                 )
         if warp < NCW:
             blk = warp // 4
@@ -2483,6 +2495,43 @@ class LowBatchMoEKernel:
                     Gs = G
                     if dsm == 1:
                         Gs = Int32(0)
+                    whole = Int32(0)
+                    if cutlass.const_expr(not self.dense):  # noqa: SIM102
+                        if e != E_SH:  # noqa: SIM102
+                            if _tile_nch(tl, NCH, tsh) == 1:
+                                whole = Int32(1)
+                                Gs = Int32(0)
+                    if whole == 1:
+                        # A whole tile: its SwiGLU + FP8 intermediate right away,
+                        # from this CTA's accumulators through the (by now free)
+                        # front scratch, so its row chunk's GEMM2 need not wait
+                        # for the end of this CTA's GEMM1.
+                        for j in cutlass.range_constexpr(4):
+                            if j < G:
+                                for i2 in cutlass.range_constexpr(2):
+                                    cc = 8 * j + 2 * t + i2
+                                    v0 = acc[4 * j + i2] * f13
+                                    v1 = acc[4 * j + 2 + i2] * f13
+                                    sts_f32(s_ids + (cc * 128 + r0) * 4, v0)
+                                    sts_f32(s_ids + (cc * 128 + r0 + 8) * 4, v1)
+                        named_barrier(1, NCT)
+                        for q2 in cutlass.range_constexpr(4):
+                            self._cluster_swiglu(
+                                warp + 8 * q2,
+                                tl,
+                                rc,
+                                e,
+                                ncol,
+                                mask,
+                                lane,
+                                s_ids,
+                                tab,
+                                g2,
+                                iq,
+                                isc,
+                            )
+                        fence_proxy_async_global()
+                        named_barrier(1, NCT)
                     for j in cutlass.range_constexpr(4):
                         if j < Gs:
                             for i2 in cutlass.range_constexpr(2):

@@ -8,6 +8,7 @@ graph. Needs one SM90 GPU; under a minute.
 Run: pytest -v tests/models/deepseek_v41/nvidia/specialized_decode/test_hopper.py
 """
 
+import itertools
 from types import SimpleNamespace
 
 import pytest
@@ -820,6 +821,133 @@ def test_low_batch_moe_matches_the_stock_moe(
                 )
             else:
                 assert shared is None
+
+
+def test_low_batch_moe_every_row_count_skewed_and_spread(dist_init, workspace_init):
+    """The low-batch MoE (dense, cluster and entry paths, routed
+    in-kernel and by given ids) at every row count it serves, on the two
+    extremes of routing: skewed (one expert takes every row, so its row chunks
+    fill up, the others get a row or two) and spread (every route its own
+    expert while there are experts left: the most tiles, so the most split-K
+    partial slots). Each call against the FP32 reference, synchronized so an
+    illegal access surfaces at its call."""
+    from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.hopper import moe
+
+    num_experts, top_k = MOE_SHAPES[0]
+    config = VllmConfig(kernel_config=KernelConfig(moe_backend="humming"))
+    with set_current_vllm_config(config):
+        bias = torch.zeros(num_experts, device=DEVICE)
+        ffn, (w13, w2), _ = _moe_ffn(num_experts, top_k, bias)
+        mod = moe.HopperLowBatchMoE.of(ffn)
+        assert mod is not None
+        g = torch.Generator(device=DEVICE).manual_seed(11)
+        for m, spread in itertools.product(range(1, moe.MAX_ROWS + 1), (False, True)):
+            x = torch.randn(m, MOE_HIDDEN, generator=g, device=DEVICE).bfloat16()
+            logits = torch.randn(m, num_experts, generator=g, device=DEVICE) - 4.0
+            if spread:
+                route = torch.arange(m * top_k, device=DEVICE).view(m, top_k)
+                logits.scatter_(1, route % num_experts, 8.0)
+            else:
+                # expert 7 first for every row, then 5 of a small pool
+                logits[:, 7] = 8.0
+                pool = torch.randint(0, 24, (m, top_k - 1), generator=g, device=DEVICE)
+                logits.scatter_(1, pool, 4.0)
+            ids, weights = _routing(logits, bias, top_k)
+            want = _moe_reference(x, ids, weights, w13, w2)
+            for kw in (
+                dict(router_logits=logits),
+                dict(topk_ids=ids, topk_weights=weights),
+            ):
+                routed, _ = mod(x, **kw)
+                got = _finalize(routed)
+                torch.accelerator.synchronize()
+                assert _rel(got, want) < 6e-2, (m, spread, list(kw), _rel(got, want))
+
+
+def test_low_batch_moe_is_repeatable_on_a_dirty_workspace(dist_init, workspace_init):
+    """Serving calls run on a workspace a different call left behind (another
+    layer, row count, routing or kernel): layers of both shapes share
+    it, and each target call at a serving shape (ids and logits routing, so
+    the dense / cluster / entry paths) gives
+    bitwise the same per-route rows, routing weights and shared-expert output
+    after random sequences of other calls, eagerly and replayed from a CUDA
+    graph, as on its first run."""
+    from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.hopper import moe
+
+    g = torch.Generator(device=DEVICE).manual_seed(13)
+    layers = {}
+    for num_experts, top_k in MOE_SHAPES:
+        config = VllmConfig(kernel_config=KernelConfig(moe_backend="humming"))
+        with set_current_vllm_config(config):
+            bias = torch.randn(num_experts, generator=g, device=DEVICE) * 0.05
+            mod = moe.HopperLowBatchMoE.of(_moe_ffn(num_experts, top_k, bias)[0])
+        assert mod is not None
+        layers[top_k] = (mod, num_experts, bias)
+    assert layers[6][0].workspace is layers[3][0].workspace
+
+    def make(top_k, m, spread, ids_mode):
+        _, num_experts, bias = layers[top_k]
+        x = torch.randn(m, MOE_HIDDEN, generator=g, device=DEVICE).bfloat16()
+        logits = torch.randn(m, num_experts, generator=g, device=DEVICE)
+        if spread:
+            route = torch.arange(m * top_k, device=DEVICE).view(m, top_k)
+            logits.scatter_(1, route % num_experts, 8.0)
+        else:  # requests of 6 rows routed alike
+            req = torch.randn((m + 5) // 6, num_experts, generator=g, device=DEVICE)
+            logits = req.repeat_interleave(6, 0)[:m] + 0.5 * logits
+        ids, weights = _routing(logits, bias, top_k)
+        kw = (
+            dict(topk_ids=ids, topk_weights=weights)
+            if ids_mode
+            else dict(router_logits=logits)
+        )
+        return top_k, x, kw
+
+    def run(top_k, x, kw):
+        routed, shared = layers[top_k][0](x, **kw)
+        assert shared is not None
+        rows = routed.gemm2_permuted[routed.expanded_idx_to_permuted_idx.long()]
+        return rows.clone(), routed.expert_weights.clone(), shared.clone()
+
+    shapes = [(6, m) for m in (6, 12, 24, 48, 144)] + [(3, m) for m in (5, 10, 40)]
+    targets = [
+        make(top_k, m, spread, ids_mode)
+        for (top_k, m), spread, ids_mode in itertools.product(
+            shapes, (False, True), (False, True)
+        )
+    ]
+    others = [
+        make(top_k, m, spread, ids_mode)
+        for top_k, m, spread, ids_mode in itertools.product(
+            (6, 3), (1, 4, 9, 16, 17, 30, 96, 140), (False, True), (False, True)
+        )
+    ]
+    want = [run(*t) for t in targets]
+
+    def same(got, ref):
+        return all(torch.equal(a, b) for a, b in zip(got, ref))
+
+    step = 0
+    for i, target in enumerate(targets * 2):
+        for _ in range(1 + step % 3):
+            run(*others[(7 * step) % len(others)])
+            step += 1
+        assert same(run(*target), want[i % len(targets)]), i % len(targets)
+
+    order = [(7 * j) % len(targets) for j in range(len(targets))]
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        got = []
+        for j, i in enumerate(order):
+            run(*others[(5 * j) % len(others)])
+            got.append(run(*targets[i]))
+    for _ in range(3):
+        graph.replay()
+        torch.accelerator.synchronize()
+        for i, out in zip(order, got):
+            assert same(out, want[i]), i
 
 
 # ------------------------------------------------------------------ mHC pre

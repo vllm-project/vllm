@@ -364,10 +364,10 @@ class HopperLowBatchMoE:
         input_ids: torch.Tensor | None = None,
     ) -> tuple[UnfinalizedMoEOutput, torch.Tensor | None]:
         """The unfinalized routed output of the BF16 MoE input ``x`` [rows,
-        5120], routed from FP32 ``router_logits`` [rows, experts] or, on a
-        hash-routed layer, by the stock router's ``topk_ids`` (int32 [rows,
-        top_k]) and ``topk_weights`` (FP32 [rows, top_k], renormalized and
-        times the routed scaling factor); and the fused shared expert's
+        5120], routed from FP32 ``router_logits`` [rows, experts] or by given
+        ``topk_ids`` (int32 [rows, top_k]) and ``topk_weights`` (FP32 [rows,
+        top_k], renormalized and times the routed scaling factor), as on a
+        hash-routed layer; and the fused shared expert's
         output, or None above ``SHARED_MAX_ROWS`` rows. Both are views of the
         workspace."""
         from cutlass import Int32, Int64
@@ -382,7 +382,8 @@ class HopperLowBatchMoE:
         def address(t: torch.Tensor) -> Int64:
             return Int64(t.data_ptr())
 
-        ids_mode = self.hash_routed
+        ids_mode = topk_ids is not None
+        assert ids_mode or not self.hash_routed
         image = self.image and not ids_mode and input_ids is not None
         if ids_mode:
             assert topk_ids is not None and topk_weights is not None

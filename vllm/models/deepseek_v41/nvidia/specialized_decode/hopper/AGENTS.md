@@ -49,6 +49,7 @@ is the MLA chain's `wo_a` (below).
 | The next coefficients from the executor's mHC pre (`mhc.SeamPre`) on its side stream, in chunks of 64 rows | all executor steps |
 | Dense FP8 linears (`fused_wqa_wkv`, `wq_b`, the indexer's `wq_b`, `wo_b`, the shared expert's) on the CuTe DSL GEMV or tuned Humming, chained with PDL | up to 192, per `dense.DISPATCH` |
 | Low-batch MoE: both expert GEMMs and the shared expert in one launch, the top-k reduction left to the next boundary | up to 144 |
+| MoE entry mode: consumers finalize whole tiles right after GEMM1 | 17 to 144 |
 | FlashMLA with one plan per layer type and one global top-k table per index source | steps off the MLA chain |
 | Small-batch MLA chain (`ChainDecode`): q/kv norm writing the step's keys into fp16 SWA tile images, one cluster per row group, query RoPE and inverse RoPE fused; `wo_a` on an exact FP8 copy of the stock BF16 weight (about 8.7 MB a layer, 350 MB a GPU at TP4) | uniform steps up to 48 |
 
