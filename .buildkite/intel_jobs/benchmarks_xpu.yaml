@@ -3,7 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: ':nvidia: (H200 MIG 18GB) Benchmarks CLI'
-  key: benchmarks-cli-test-2
+  key: benchmarks-cli-test-xpu
   device: intel_gpu
   timeout_in_minutes: 55
   optional: true
