@@ -909,6 +909,7 @@ steps:
   commands:
   - pytest -v -s reasoning
   - pytest -v -s renderers
+  - pytest -v -s parser/test_harmony.py
 
 - label: ":computer: (CPU) Tool Parsers"
   key: cpu-tool-parsers
