@@ -13,6 +13,13 @@ class CompressedTensorsScheme(ABC):
     of different quantization schemes supported by CompressedTensors.
     """
 
+    def dequantize_weight(self, layer: torch.nn.Module) -> torch.Tensor:
+        """Materialize checkpoint weights before kernel-specific processing."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement dequantize_weight, "
+            "so re-quantization from this checkpoint is not supported."
+        )
+
     @classmethod
     @abstractmethod
     def get_min_capability(cls) -> int:

@@ -2,6 +2,23 @@ group: Quantization
 depends_on:
   - image-build
 steps:
+- label: ":nvidia: (H200 MIG 35GB) CT FP8 Requantization"
+  device: h200_35gb
+  key: ct-fp8-requantization
+  timeout_in_minutes: 20
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/compressed_tensors
+  - vllm/model_executor/layers/quantization/online
+  - vllm/model_executor/layers/quantization/base_config.py
+  - vllm/model_executor/layers/linear.py
+  - vllm/model_executor/utils.py
+  - tests/quantization/test_online.py
+  commands:
+    - >-
+      pytest -v -s
+      quantization/test_online.py::test_compressed_tensors_fp8_source_dequantization
+      quantization/test_online.py::test_compressed_tensors_channel_fp8_requantization
+
 # Disabled until torchao transitive dependencies are locked.
 # - label: ":nvidia: (H200 MIG 35GB) Quantization"
 #   device: h200_35gb

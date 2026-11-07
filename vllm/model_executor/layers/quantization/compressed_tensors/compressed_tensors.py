@@ -1048,6 +1048,9 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.scheme.process_weights_after_loading(layer)
 
+    def dequantize_weight(self, layer: torch.nn.Module) -> torch.Tensor:
+        return layer.scheme.dequantize_weight(layer)
+
     def create_weights(
         self,
         layer: torch.nn.Module,
