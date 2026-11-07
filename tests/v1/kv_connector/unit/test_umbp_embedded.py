@@ -678,6 +678,40 @@ def test_timeout_does_not_count_time_waiting_for_a_worker(blocked_transfer):
     assert handle.poll(queued).status is TransferJobStatus.COMPLETED
 
 
+@pytest.mark.parametrize("has_close", [False, True])
+def test_worker_close_releases_mori(monkeypatch, socket_dir, has_close):
+    """MORI builds without close() only get a final flush."""
+    monkeypatch.setitem(
+        sys.modules,
+        "mori.cpp",
+        SimpleNamespace(MemoryLocationType=SimpleNamespace(CPU=0, GPU=1)),
+    )
+    calls: list[str] = []
+
+    def flush() -> bool:
+        calls.append("flush")
+        return True
+
+    client = SimpleNamespace(
+        register_memory=lambda *a: True,
+        deregister_memory=lambda ptr: calls.append("deregister_memory"),
+        batch_exists=lambda keys: [True] * len(keys),
+        flush=flush,
+    )
+    if has_close:
+        client.close = lambda: calls.append("close")
+    handle = _MoriWorkerHandle(client, "release", RankTopology(), socket_dir, 1, 5)
+    handle.register_buffers({"layer0": torch.zeros(16, dtype=torch.uint8)})
+    scheduler = _MoriSchedulerHandle("release", RankTopology(), socket_dir)
+    try:
+        assert scheduler.lookup(["k"]) == [True]
+        handle.close()
+        assert scheduler.lookup(["k"]) == [False]
+    finally:
+        scheduler.close()
+    assert calls == ["deregister_memory", "close" if has_close else "flush"]
+
+
 def test_lookup_server_close_does_not_unlink_a_replacement(socket_dir):
     client = SimpleNamespace(batch_exists=lambda keys: [True] * len(keys))
     path = _lookup_socket_path("replaced", (0, 0, 0, 0), socket_dir)
