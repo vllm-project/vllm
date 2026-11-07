@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import pytest
 import torch
 
+from vllm.config.quantization import PhaseSpec, QuantSpec
 from vllm.model_executor.kernels.linear import (
     _LINEAR_BACKEND_KERNEL_MAP,
     _POSSIBLE_FP8_BLOCK_KERNELS,
@@ -38,8 +39,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
     kMxfp4Dynamic,
+    kNvfp4Dynamic,
+    kNvfp4DynamicTensor,
 )
 from vllm.platforms import PlatformEnum
+from vllm.utils.torch_utils import _encode_layer_name
 
 
 @pytest.mark.parametrize(
@@ -806,6 +810,197 @@ def test_b12x_backend_selects_w4a16(monkeypatch) -> None:
     assert isinstance(kernel, B12xNvFp4W4A16LinearKernel)
 
 
+def _b12x_phase(max_decode_tokens: int | None, **formats: str) -> PhaseSpec:
+    formats.setdefault("prefill", "nvfp4")
+    return PhaseSpec(max_decode_tokens=max_decode_tokens, **formats)
+
+
+def _with_phase(kernel, phase: PhaseSpec):
+    """``kernel`` with ``phase`` set as the oracle sets it, without the config
+    checks."""
+    kernel.phase = phase
+    return kernel
+
+
+def _use_phase(monkeypatch, phase: PhaseSpec) -> None:
+    import vllm.model_executor.kernels.linear as linear_mod
+
+    monkeypatch.setattr(linear_mod, "_user_linear_spec", lambda: QuantSpec(phase=phase))
+
+
+@pytest.fixture
+def _select_b12x_w4a16(monkeypatch, default_vllm_config):
+    import vllm.model_executor.kernels.linear as linear_mod
+
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
+    monkeypatch.setattr(linear_mod.current_platform, "_enum", PlatformEnum.CUDA)
+    monkeypatch.setattr(
+        linear_mod, "_get_linear_backend", lambda *, quantization: "b12x"
+    )
+    monkeypatch.setitem(
+        linear_mod._POSSIBLE_NVFP4_KERNELS,
+        PlatformEnum.CUDA,
+        [B12xNvFp4LinearKernel, B12xNvFp4W4A16LinearKernel, MarlinNvFp4LinearKernel],
+    )
+    monkeypatch.setattr(
+        B12xNvFp4W4A16LinearKernel,
+        "is_supported",
+        classmethod(lambda cls, compute_capability=None: (True, None)),
+    )
+    return default_vllm_config
+
+
+def test_b12x_w4a16_serves_phase_split(monkeypatch, _select_b12x_w4a16):
+    """The oracle returns the b12x W4A16 kernel itself with
+    quantization_config.linear.phase set; an lm_head copy keeps no phase."""
+    phase = _b12x_phase(8)
+    _use_phase(monkeypatch, phase)
+
+    kernel = init_nvfp4_linear_kernel(use_a16=True)
+
+    assert type(kernel) is B12xNvFp4W4A16LinearKernel
+    assert kernel.phase == phase
+    assert (kernel.phase_mode(8), kernel.phase_mode(9)) == (None, kNvfp4DynamicTensor)
+    assert kernel.input_quant_key() is None
+    bare = init_nvfp4_linear_kernel(use_a16=True, allow_phase_split=False)
+    assert type(bare) is B12xNvFp4W4A16LinearKernel
+    assert bare.phase is None
+
+
+def test_b12x_w4a4_rejects_phase(monkeypatch, _select_b12x_w4a16):
+    _use_phase(monkeypatch, _b12x_phase(8))
+    monkeypatch.setattr(
+        B12xNvFp4LinearKernel,
+        "is_supported",
+        classmethod(lambda cls, compute_capability=None: (True, None)),
+    )
+    with pytest.raises(NotImplementedError, match="weight=nvfp4_w4a4"):
+        init_nvfp4_linear_kernel(use_a16=False)
+
+
+_NVFP4_CELLS = [
+    ("unquantized", "nvfp4"),
+    ("nvfp4", "nvfp4"),
+    ("nvfp4", "unquantized"),
+    ("unquantized", "unquantized"),
+]
+_MXFP8_CELLS = [
+    ("unquantized", "mxfp8"),
+    ("mxfp8", "mxfp8"),
+    ("mxfp8", "unquantized"),
+    ("unquantized", "unquantized"),
+]
+
+
+@pytest.mark.parametrize("decode,prefill", _NVFP4_CELLS)
+def test_b12x_w4a16_serves_every_nvfp4_cell(
+    monkeypatch, _select_b12x_w4a16, decode, prefill
+):
+    phase = _b12x_phase(8, decode=decode, prefill=prefill)
+    _use_phase(monkeypatch, phase)
+    kernel = init_nvfp4_linear_kernel(use_a16=True)
+    assert type(kernel) is B12xNvFp4W4A16LinearKernel
+    assert (kernel.phase_mode(8), kernel.phase_mode(9)) == phase.activation_modes()
+
+
+def test_b12x_w4a16_keeps_activations_for_mxfp8_phase(monkeypatch, _select_b12x_w4a16):
+    """A phase in another quantized format leaves NVFP4 linears alone."""
+    _use_phase(monkeypatch, _b12x_phase(8, prefill="mxfp8"))
+    kernel = init_nvfp4_linear_kernel(use_a16=True)
+    assert type(kernel) is B12xNvFp4W4A16LinearKernel
+    assert kernel.phase is None
+
+
+@pytest.fixture
+def _select_b12x_mxfp8(monkeypatch, default_vllm_config):
+    import vllm.model_executor.kernels.linear as linear_mod
+
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
+    monkeypatch.setattr(linear_mod.current_platform, "_enum", PlatformEnum.CUDA)
+    monkeypatch.setattr(
+        linear_mod, "_get_linear_backend", lambda *, quantization: "b12x"
+    )
+    monkeypatch.setattr(
+        B12xMxfp8LinearKernel,
+        "is_supported",
+        classmethod(lambda cls, compute_capability=None: (True, None)),
+    )
+    return default_vllm_config
+
+
+@pytest.mark.parametrize("decode,prefill", _MXFP8_CELLS)
+def test_b12x_mxfp8_serves_phase_split(
+    monkeypatch, _select_b12x_mxfp8, decode, prefill
+):
+    phase = _b12x_phase(8, decode=decode, prefill=prefill)
+    _use_phase(monkeypatch, phase)
+    kernel = init_mxfp8_linear_kernel(weight_shape=(2048, 2048))
+    assert type(kernel) is B12xMxfp8LinearKernel
+    assert kernel.phase == phase
+    assert (kernel.phase_mode(8), kernel.phase_mode(9)) == phase.activation_modes()
+    assert not kernel.supports_pre_processed_weights
+
+
+def test_mxfp8_phase_rejects_other_kernels_and_formats(monkeypatch, _select_b12x_mxfp8):
+    """An NVFP4 phase leaves MXFP8 linears alone; an MXFP8 phase on a kernel
+    that cannot serve it raises and names the b12x kernel."""
+    import vllm.model_executor.kernels.linear as linear_mod
+    from vllm.model_executor.kernels.linear.mxfp8.emulation import (
+        EmulationMxfp8LinearKernel,
+    )
+
+    _use_phase(monkeypatch, _b12x_phase(8))
+    kernel = init_mxfp8_linear_kernel(weight_shape=(2048, 2048))
+    assert type(kernel) is B12xMxfp8LinearKernel
+    assert kernel.phase is None
+
+    _use_phase(monkeypatch, _b12x_phase(8, prefill="mxfp8"))
+    monkeypatch.setattr(
+        linear_mod, "_get_linear_backend", lambda *, quantization: "emulation"
+    )
+    monkeypatch.setattr(
+        EmulationMxfp8LinearKernel,
+        "is_supported",
+        classmethod(lambda cls, compute_capability=None: (True, None)),
+    )
+    with pytest.raises(NotImplementedError) as error:
+        init_mxfp8_linear_kernel(weight_shape=(2048, 2048))
+    message = str(error.value)
+    assert "weight=mxfp8" in message
+    assert "EmulationMxfp8LinearKernel cannot serve it" in message
+    assert "B12xMxfp8LinearKernel" in message.rsplit("b12x):", 1)[1]
+    # Batched (BMM) layers keep their own activations.
+    kernel = init_mxfp8_linear_kernel(weight_shape=(2048, 2048), bmm_batch_size=4)
+    assert type(kernel) is EmulationMxfp8LinearKernel
+
+
+@pytest.mark.parametrize(
+    "setting,match",
+    [
+        ("capture_sizes", "largest CUDA graph capture size 8"),
+        ("decoder_replay_sizes", "largest CUDA graph capture size 16"),
+        ("data_parallel", "does not support data parallelism"),
+        ("elastic_ep", "does not support data parallelism"),
+        ("encoder_cudagraphs", "encoder CUDA graphs"),
+    ],
+)
+def test_b12x_w4a16_phase_rejects_unsafe_rows(
+    monkeypatch, _select_b12x_w4a16, setting, match
+) -> None:
+    """Padded rows are uninitialized and must not reach the shared scale."""
+    config = _select_b12x_w4a16
+    _use_phase(monkeypatch, _b12x_phase(4 if setting == "capture_sizes" else 8))
+    config.parallel_config.data_parallel_size = 2 if setting == "data_parallel" else 1
+    config.parallel_config.enable_elastic_ep = setting == "elastic_ep"
+    config.compilation_config.cudagraph_mm_encoder = setting == "encoder_cudagraphs"
+    config.compilation_config.decoder_replay_cudagraph_capture_sizes = (
+        [16] if setting == "decoder_replay_sizes" else []
+    )
+    with pytest.raises(ValueError, match=match) as error:
+        init_nvfp4_linear_kernel(use_a16=True)
+    assert "quantization_config.linear.phase" in str(error.value)
+
+
 def test_b12x_nvfp4_apply_calls_native_blockscaled_gemm(monkeypatch) -> None:
     import vllm.model_executor.kernels.linear.nvfp4.b12x as b12x_mod
 
@@ -862,11 +1057,20 @@ def test_b12x_nvfp4_apply_calls_native_blockscaled_gemm(monkeypatch) -> None:
     assert kwargs == {"out_dtype": torch.bfloat16}
 
 
-def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(monkeypatch):
+def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(
+    monkeypatch, default_vllm_config
+):
     import vllm.model_executor.kernels.linear.nvfp4.b12x as b12x_mod
 
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = []
     calls = []
-    packed_weight = object()
+    plans: list[types.SimpleNamespace] = []
+    packed_weight = types.SimpleNamespace(
+        in_features=128,
+        padded_in_features=128,
+        out_features=48,
+        global_scale_kind="multiplier",
+    )
 
     def pack_weight(weight, scale, *, recipe, global_scale):
         assert weight is layer.weight
@@ -875,8 +1079,14 @@ def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(monkeypatch):
         assert global_scale is layer.weight_global_scale
         return packed_weight
 
-    def mm(source, weight, *, required_mode):
+    def plan_regimes(query, *, exact_m, a16_max_tokens):
+        assert a16_max_tokens == 0
+        plans.append(types.SimpleNamespace(handle=len(plans), token_counts=exact_m))
+        return plans[-1]
+
+    def mm(source, weight, *, plan, required_mode):
         assert weight is packed_weight
+        assert plan is plans[-1]
         assert required_mode == "a16"
         assert source.dtype == torch.bfloat16
         assert source.is_contiguous()
@@ -890,7 +1100,12 @@ def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(monkeypatch):
     monkeypatch.setattr(
         b12x_mod,
         "_import_b12x_blockscaled",
-        lambda: types.SimpleNamespace(pack_weight=pack_weight, mm=mm),
+        lambda: types.SimpleNamespace(
+            pack_weight=pack_weight,
+            mm=mm,
+            plan_regimes=plan_regimes,
+            BlockscaledQuery=types.SimpleNamespace,
+        ),
     )
     monkeypatch.setattr(
         b12x_mod,
@@ -908,6 +1123,9 @@ def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(monkeypatch):
     kernel = object.__new__(B12xNvFp4W4A16LinearKernel)
     kernel.process_weights_after_loading(layer)
     assert layer.b12x_warmup_provider is kernel
+    # A reload with unchanged shapes keeps the prepared plan.
+    kernel.process_weights_after_loading(layer)
+    assert len(plans) == 1
     kernel.get_b12x_warmup_unit(layer, (1, 8), torch.bfloat16).compile()
     assert [source.shape[0] for source in calls] == [1, 8]
 
@@ -919,21 +1137,366 @@ def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(monkeypatch):
         kernel.apply_weights(layer, x.float())
 
 
-@pytest.mark.parametrize("m,n,k", [(2, 136, 96), (17, 256, 256)])
-@torch.inference_mode()
-def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
-    monkeypatch, default_vllm_config, m, n, k
-) -> None:
+def _fake_blockscaled(packed_weight, plans, calls):
+    """A b12x blockscaled module that records plans and GEMM calls."""
+
+    def plan_regimes(query, *, exact_m, a16_max_tokens=0):
+        counts = {
+            *exact_m,
+            query.num_tokens,
+            *([a16_max_tokens] * bool(a16_max_tokens)),
+        }
+        plans.append(
+            types.SimpleNamespace(
+                handle=len(plans),
+                token_counts=tuple(sorted(counts)),
+                exact_m=exact_m,
+                query=query,
+                a16_max_tokens=a16_max_tokens,
+            )
+        )
+        return plans[-1]
+
+    def mm(source, weight, *, plan, required_mode, activation_global_scale=None):
+        assert weight is packed_weight
+        # b12x resolves a call's regime from its row count and rejects a call
+        # whose required mode differs, or that exceeds the plan.
+        rows = source.shape[0]
+        a16 = plan.query.activation_mode == "a16" or rows <= plan.a16_max_tokens
+        assert required_mode == ("a16" if a16 else "quantized"), (rows, plan)
+        assert rows <= plan.query.num_tokens, (rows, plan)
+        calls.append(
+            (source.shape[0], plan.handle, required_mode, activation_global_scale)
+        )
+        return torch.zeros((source.shape[0], 48), dtype=source.dtype)
+
+    return types.SimpleNamespace(
+        pack_weight=lambda *args, **kwargs: packed_weight,
+        mm=mm,
+        plan_regimes=plan_regimes,
+        BlockscaledQuery=types.SimpleNamespace,
+    )
+
+
+# (decode, prefill) -> per plan (activation mode, rows, a16_max_tokens, exact
+# M), then per call of 8 and 9 rows (plan, required mode, activation scale).
+_NVFP4_PLANS: dict[tuple[str, str], tuple[list, list]] = {
+    ("unquantized", "nvfp4"): (
+        [("quantized", 64, 8, (1, 2, 4, 8))],
+        [(0, "a16", "weight"), (0, "quantized", "amax")],
+    ),
+    ("nvfp4", "nvfp4"): (
+        [("quantized", 64, 0, (1, 2, 4, 8))],
+        [(0, "quantized", "amax"), (0, "quantized", "amax")],
+    ),
+    ("nvfp4", "unquantized"): (
+        [("a16", 64, 0, ()), ("quantized", 8, 0, (1, 2, 4))],
+        [(1, "quantized", "amax"), (0, "a16", "weight")],
+    ),
+    ("unquantized", "unquantized"): (
+        [("a16", 64, 0, (1, 2, 4, 8))],
+        [(0, "a16", None), (0, "a16", None)],
+    ),
+}
+
+
+@pytest.mark.parametrize("decode,prefill", _NVFP4_CELLS)
+def test_b12x_nvfp4_w4a16_plans_and_dispatches_every_cell(
+    monkeypatch, default_vllm_config, decode, prefill
+):
+    """Each phase's calls reach a plan regime with its activations. Quantized
+    calls take a per-call scale from their absolute maximum; quantized decode
+    with A16 prefill gets its own plan, since b12x forces A16 only below a row
+    count. Layers b12x cannot quantize keep BF16 activations."""
     import vllm.model_executor.kernels.linear.nvfp4.b12x as b12x_mod
 
-    supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
-    if not supported:
-        pytest.skip(reason)
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
+    default_vllm_config.scheduler_config.max_num_batched_tokens = 64
+    packed_weight = types.SimpleNamespace(
+        in_features=128,
+        padded_in_features=128,
+        out_features=48,
+        global_scale_kind="multiplier",
+        global_scale=torch.tensor([0.125]),
+    )
+    plans: list[types.SimpleNamespace] = []
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        b12x_mod,
+        "_import_b12x_blockscaled",
+        lambda: _fake_blockscaled(packed_weight, plans, calls),
+    )
+    monkeypatch.setattr(
+        b12x_mod,
+        "_import_b12x_intrinsics",
+        lambda: types.SimpleNamespace(swizzle_block_scale=lambda scale: scale),
+    )
+    layer = torch.nn.Module()
+    layer.prefix = f"proj.{decode}.{prefill}"
+    layer.output_size_per_partition = 48
+    layer.weight = torch.nn.Parameter(
+        torch.empty((48, 64), dtype=torch.uint8), requires_grad=False
+    )
+    layer.weight_scale = torch.nn.Parameter(
+        torch.empty((48, 8), dtype=torch.float8_e4m3fn), requires_grad=False
+    )
+    layer.weight_global_scale = torch.tensor([0.125])
+    phase = _b12x_phase(8, decode=decode, prefill=prefill)
+    kernel = _with_phase(object.__new__(B12xNvFp4W4A16LinearKernel), phase)
+    kernel.process_weights_after_loading(layer)
+    expected_plans, expected_calls = _NVFP4_PLANS[(decode, prefill)]
+    quantized = phase.quantized_format is not None
+    assert [
+        (
+            plan.query.activation_mode,
+            plan.query.num_tokens,
+            plan.a16_max_tokens,
+            plan.exact_m,
+        )
+        for plan in plans
+    ] == expected_plans
+    assert all(plan.query.activation_scale_available == quantized for plan in plans)
+    # A reload with unchanged shapes keeps the prepared plans.
+    kernel.process_weights_after_loading(layer)
+    assert len(plans) == len(expected_plans)
 
-    def reject_activation_quantization(*args, **kwargs):
-        pytest.fail("W4A16 must not quantize activations")
+    x = torch.randn((9, 128), dtype=torch.bfloat16)
+    kernel.apply_weights(layer, x[:8])
+    kernel.apply_weights(layer, x)
+    scales = {
+        "weight": packed_weight.global_scale,
+        "amax": None,
+        None: None,
+    }
+    for (rows, handle, mode, scale), (plan, expected_mode, kind) in zip(
+        calls, expected_calls
+    ):
+        assert (handle, mode) == (plan, expected_mode)
+        if kind == "amax":
+            torch.testing.assert_close(
+                scale, 6.0 * 448.0 / x[:rows].abs().max().float()
+            )
+        else:
+            assert scale is scales[kind]
+    with pytest.raises(ValueError, match="does not support activations"):
+        kernel.apply_mode(layer, x, mode=kNvfp4Dynamic)
 
-    monkeypatch.setattr(b12x_mod, "scaled_fp4_quant", reject_activation_quantization)
+    # The warmup prepares every planned shape in its phase's activations.
+    calls.clear()
+    layer.b12x_warmup_provider.get_b12x_warmup_unit(
+        layer, (1, 64), torch.bfloat16
+    ).compile()
+    assert sorted({rows for rows, *_ in calls}) == [1, 2, 4, 8, 64]
+    assert all(
+        mode == expected_calls[0 if rows <= 8 else 1][1] for rows, _, mode, _ in calls
+    )
+
+    packed_weight.padded_in_features = 136
+    plans.clear()
+    calls.clear()
+    kernel.process_weights_after_loading(layer)
+    assert [plan.query.activation_mode for plan in plans] == ["a16"]
+    kernel.apply_weights(layer, x)
+    assert calls == [(9, 0, "a16", None)]
+
+
+@pytest.mark.parametrize("max_decode_tokens", [64, 100])
+def test_b12x_nvfp4_quantized_decode_cutoff_at_capacity(
+    monkeypatch, default_vllm_config, max_decode_tokens
+):
+    """Quantized decode with BF16 prefill and a cutoff at or above the planned
+    capacity keeps an A16 plan for prefill calls, which run in capacity-sized
+    chunks."""
+    import vllm.model_executor.kernels.linear.nvfp4.b12x as b12x_mod
+
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
+    default_vllm_config.scheduler_config.max_num_batched_tokens = 64
+    packed_weight = types.SimpleNamespace(
+        in_features=128,
+        padded_in_features=128,
+        out_features=48,
+        global_scale_kind="multiplier",
+        global_scale=torch.tensor([0.125]),
+    )
+    plans: list[types.SimpleNamespace] = []
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        b12x_mod,
+        "_import_b12x_blockscaled",
+        lambda: _fake_blockscaled(packed_weight, plans, calls),
+    )
+    monkeypatch.setattr(
+        b12x_mod,
+        "_import_b12x_intrinsics",
+        lambda: types.SimpleNamespace(swizzle_block_scale=lambda scale: scale),
+    )
+    layer = torch.nn.Module()
+    layer.prefix = f"proj.cutoff{max_decode_tokens}"
+    layer.output_size_per_partition = 48
+    layer.weight = torch.nn.Parameter(
+        torch.empty((48, 64), dtype=torch.uint8), requires_grad=False
+    )
+    layer.weight_scale = torch.nn.Parameter(
+        torch.empty((48, 8), dtype=torch.float8_e4m3fn), requires_grad=False
+    )
+    layer.weight_global_scale = torch.tensor([0.125])
+    phase = _b12x_phase(max_decode_tokens, decode="nvfp4", prefill="unquantized")
+    kernel = _with_phase(object.__new__(B12xNvFp4W4A16LinearKernel), phase)
+    kernel.process_weights_after_loading(layer)
+    assert [(p.query.activation_mode, p.query.num_tokens) for p in plans] == [
+        ("a16", 64),
+        ("quantized", 64),
+    ]
+    kernel.apply_weights(layer, torch.randn((8, 128), dtype=torch.bfloat16))
+    kernel.apply_weights(
+        layer, torch.randn((max_decode_tokens + 6, 128), dtype=torch.bfloat16)
+    )
+    assert [(rows, handle, mode) for rows, handle, mode, _ in calls] == [
+        (8, 1, "quantized"),
+        (64, 0, "a16"),
+        (max_decode_tokens - 58, 0, "a16"),
+    ]
+
+    # The warmup prepares the A16 prefill plan as well, though every planned
+    # row count is a decode call.
+    calls.clear()
+    layer.b12x_warmup_provider.get_b12x_warmup_unit(
+        layer, (1, 64), torch.bfloat16
+    ).compile()
+    assert {(handle, mode) for _, handle, mode, _ in calls} == {
+        (0, "a16"),
+        (1, "quantized"),
+    }
+
+
+@torch.inference_mode()
+def test_b12x_nvfp4_scale_skips_padding_rows(monkeypatch, default_vllm_config):
+    """CUDA graph padding rows may hold uninitialized memory, so the shared
+    NVFP4 scale comes from the rows the runner marks as real. Without a mask
+    every row counts, except in a CUDA graph, where that raises."""
+    import vllm.model_executor.kernels.linear.nvfp4.b12x as b12x_mod
+    from vllm.forward_context import set_forward_context
+
+    x = torch.randn((4, 128), dtype=torch.bfloat16)
+    x[2] = float("nan")
+    x[3] = 1e4
+    real = 6.0 * 448.0 / x[:2].abs().max().float()
+    is_padding = torch.tensor([False, False, True, True])
+    with set_forward_context(None, default_vllm_config, is_padding=is_padding):
+        torch.testing.assert_close(b12x_mod._activation_global_scale(x), real)
+        # All-padding dummy runs keep a finite scale.
+        is_padding.fill_(True)
+        assert torch.isfinite(b12x_mod._activation_global_scale(x))
+    x[2] = 0
+    torch.testing.assert_close(
+        b12x_mod._activation_global_scale(x), 6.0 * 448.0 / x.abs().max().float()
+    )
+    assert b12x_mod._activation_global_scale(x[:0]) == 1
+    monkeypatch.setattr(type(x), "is_cuda", property(lambda self: True))
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    with pytest.raises(RuntimeError, match="padding mask"):
+        b12x_mod._activation_global_scale(x)
+
+
+# (decode, prefill) -> per plan (activation mode, rows, a16_max_tokens, exact
+# M), then per call of 8 and 9 rows (plan, required mode).
+_MXFP8_PLANS: dict[tuple[str, str], tuple[list, list]] = {
+    ("unquantized", "mxfp8"): (
+        [("quantized", 64, 8, (1, 2, 4, 8))],
+        [(0, "a16"), (0, "quantized")],
+    ),
+    ("mxfp8", "mxfp8"): (
+        [("quantized", 64, 0, (1, 2, 4, 8))],
+        [(0, "quantized"), (0, "quantized")],
+    ),
+    ("mxfp8", "unquantized"): (
+        [("a16", 64, 0, ()), ("quantized", 8, 0, (1, 2, 4))],
+        [(1, "quantized"), (0, "a16")],
+    ),
+    ("unquantized", "unquantized"): (
+        [("a16", 64, 0, (1, 2, 4, 8))],
+        [(0, "a16"), (0, "a16")],
+    ),
+}
+
+
+@pytest.mark.parametrize("decode,prefill", _MXFP8_CELLS)
+def test_b12x_mxfp8_plans_and_dispatches_every_cell(
+    monkeypatch, default_vllm_config, decode, prefill
+):
+    """With a phase split, b12x MXFP8 plans every serving shape with each
+    phase's activations instead of choosing them by row count. MXFP8 scales
+    are per row block, so no activation scale is passed."""
+    import vllm.model_executor.kernels.linear.mxfp8.b12x as b12x_mod
+
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
+    default_vllm_config.scheduler_config.max_num_batched_tokens = 64
+    packed = types.SimpleNamespace(
+        in_features=128,
+        padded_in_features=128,
+        out_features=48,
+        weight=types.SimpleNamespace(values=torch.empty(0)),
+    )
+    plans: list[types.SimpleNamespace] = []
+    calls: list[tuple] = []
+    blockscaled = _fake_blockscaled(packed, plans, calls)
+    monkeypatch.setattr(b12x_mod, "_import_b12x_blockscaled", lambda: blockscaled)
+    monkeypatch.setattr(
+        b12x_mod,
+        "_import_b12x_mxfp8",
+        lambda: types.SimpleNamespace(
+            pack_weight=lambda *args: packed, mm=blockscaled.mm
+        ),
+    )
+    layer = torch.nn.Module()
+    layer.prefix = f"mxfp8.{decode}.{prefill}"
+    layer.output_size_per_partition = 48
+    layer.weight = torch.nn.Parameter(
+        torch.empty((48, 128), dtype=torch.float8_e4m3fn), requires_grad=False
+    )
+    layer.weight_scale = torch.nn.Parameter(
+        torch.empty((48, 4), dtype=torch.uint8), requires_grad=False
+    )
+    phase = _b12x_phase(8, decode=decode, prefill=prefill)
+    kernel = _with_phase(object.__new__(B12xMxfp8LinearKernel), phase)
+    kernel.process_weights_after_loading(layer)
+    expected_plans, expected_calls = _MXFP8_PLANS[(decode, prefill)]
+    assert [
+        (
+            plan.query.activation_mode,
+            plan.query.num_tokens,
+            plan.a16_max_tokens,
+            plan.exact_m,
+        )
+        for plan in plans
+    ] == expected_plans
+    assert not any(plan.query.activation_scale_available for plan in plans)
+
+    x = torch.randn((9, 128), dtype=torch.bfloat16)
+    bias = torch.ones(48, dtype=torch.bfloat16)
+    out = kernel.apply_weights(layer, x[:8], bias)
+    torch.testing.assert_close(out, torch.ones((8, 48), dtype=torch.bfloat16))
+    kernel.apply_weights(layer, x)
+    assert [(handle, mode) for _, handle, mode, _ in calls] == expected_calls
+    assert all(scale is None for *_, scale in calls)
+    with pytest.raises(ValueError, match="does not support activations"):
+        kernel.apply_mode(layer, x, mode=kNvfp4DynamicTensor)
+    # b12x picks the activation mode per call for BF16 sources only.
+    with pytest.raises(ValueError, match="requires BF16 activations"):
+        kernel.apply_weights(layer, x.half())
+
+    calls.clear()
+    layer.b12x_warmup_provider.get_b12x_warmup_unit(
+        layer, (1, 64), torch.bfloat16
+    ).compile()
+    assert sorted({rows for rows, *_ in calls}) == [1, 2, 4, 8, 64]
+    assert all(
+        mode == expected_calls[0 if rows <= 8 else 1][1] for rows, _, mode, _ in calls
+    )
+
+
+def _nvfp4_w4a16_layer(n, k):
+    """A random NVFP4 W4A16 layer and its decoded fp32 weight."""
     torch.manual_seed(17)
     codes = torch.randint(0, 16, (n, k), device="cuda")
     scales = (2.0 ** torch.randint(-2, 2, (n, k // 16), device="cuda")).to(
@@ -952,12 +1515,173 @@ def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
         device="cuda",
     )
     decoded = lut[codes] * scales.float().repeat_interleave(16, dim=1) * 0.125
+    layer.prefix = f"proj_{n}x{k}"
+    layer.output_size_per_partition = n
+    return layer, decoded
+
+
+@pytest.mark.parametrize("cell", [None, *_NVFP4_CELLS])
+@torch.inference_mode()
+def test_b12x_nvfp4_w4a16_does_not_prepare_after_warmup(
+    monkeypatch, default_vllm_config, cell
+) -> None:
+    """Every serving token count is planned at load time and prepared by the
+    warmup, before CUDA graph capture.
+
+    A b12x preparation evicts programs no prepared plan retains, including
+    routed-MoE kernels compiled earlier in the same forward, which then fails
+    CUDA graph capture.
+    """
+    supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    import b12x.preparation.session as session
+
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
+    k = 256
+    layer, decoded = _nvfp4_w4a16_layer(256, k)
+    kernel = B12xNvFp4W4A16LinearKernel(None)
+    mode = None
+    if cell is not None:
+        kernel.phase = _b12x_phase(8, decode=cell[0], prefill=cell[1])
+        mode = kNvfp4DynamicTensor
+    kernel.process_weights_after_loading(layer)
+    capacity = layer.b12x_nvfp4_plans.capacity
+    kernel.get_b12x_warmup_unit(layer, (1, capacity), torch.bfloat16).compile()
+
+    prepared = []
+    prepare_default = session.prepare_default
+
+    def record_prepare(request):
+        prepared.append(request)
+        return prepare_default(request)
+
+    def quantized(rows: int) -> bool:
+        return cell is not None and cell[0 if rows <= 8 else 1] == "nvfp4"
+
+    monkeypatch.setattr(session, "prepare_default", record_prepare)
+    for m in (8, 4, 2, 1, 3, 40, capacity + 5):
+        x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+        expected = torch.cat(
+            [
+                _nvfp4_activation_reference(chunk, decoded)
+                if quantized(chunk.shape[0])
+                else (chunk.double() @ decoded.double().T).bfloat16()
+                for chunk in x.split(capacity)
+            ]
+        )
+        actual = kernel.apply_mode(layer, x, mode=mode)
+        torch.testing.assert_close(actual, expected, atol=0.005, rtol=0.01)
+    assert not prepared
+
+
+def _nvfp4_activation_reference(x, decoded):
+    """Reference output for NVFP4 activations scaled by amax(x), times ``decoded``."""
+    from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+        ref_nvfp4_quant,
+    )
+
+    global_scale = 6.0 * 448.0 / x.abs().max().float()
+    codes, block_scale = ref_nvfp4_quant(x, global_scale, 16)
+    dequant = (
+        codes.view(*block_scale.shape, 16) * (block_scale / global_scale)[..., None]
+    )
+    return (dequant.view_as(x).double() @ decoded.double().T).bfloat16()
+
+
+@pytest.mark.parametrize("magnitude", [1.0, 64.0])
+@torch.inference_mode()
+def test_b12x_nvfp4_w4a16_quantizes_activations_above_cutoff(
+    default_vllm_config, magnitude
+) -> None:
+    """Passes above ``max_decode_tokens`` rows use NVFP4 activations and smaller
+    passes keep BF16 ones, decided at execution time under torch.compile: a
+    branch in traced code would be fixed for every size."""
+    supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    from torch._dynamo.testing import CompileCounterWithBackend
+
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
+    k = 256
+    layer, decoded = _nvfp4_w4a16_layer(256, k)
+    reference, _ = _nvfp4_w4a16_layer(256, k)
+    kernel = _with_phase(B12xNvFp4W4A16LinearKernel(None), _b12x_phase(8))
+    kernel.process_weights_after_loading(layer)
+    a16_kernel = B12xNvFp4W4A16LinearKernel(None)
+    a16_kernel.process_weights_after_loading(reference)
+    capacity = layer.b12x_nvfp4_plans.capacity
+    source = torch.zeros(capacity, k, device="cuda", dtype=torch.bfloat16)
+    kernel.apply_mode(layer, source, mode=kNvfp4DynamicTensor)
+    a16_kernel.apply_weights(reference, source)
+
+    counter = CompileCounterWithBackend("inductor")
+    run = torch.compile(
+        lambda x: kernel.apply_weights(layer, x),
+        backend=counter,
+        fullgraph=True,
+        dynamic=True,
+    )
+    for m in (4, 40, 8, 9):
+        x = magnitude * torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+        actual = run(x)
+        a16 = a16_kernel.apply_weights(reference, x)
+        if m <= 8:
+            torch.testing.assert_close(actual, a16, atol=0, rtol=0)
+        else:
+            expected = _nvfp4_activation_reference(x, decoded)
+            torch.testing.assert_close(
+                actual, expected, atol=0.005 * magnitude, rtol=0.01
+            )
+            assert not torch.allclose(actual, a16, atol=0.005 * magnitude, rtol=0.01)
+    assert counter.frame_count == 1
+    zeros = torch.zeros(40, k, device="cuda", dtype=torch.bfloat16)
+    assert torch.equal(run(zeros), torch.zeros(40, 256, device="cuda").bfloat16())
+
+    # SchemaCheckMode compares inputs with allclose, which CUDA does not
+    # implement for float8. The numerical tests above guard input mutation.
+    torch.library.opcheck(
+        torch.ops.vllm.phase_split_linear.default,
+        (
+            torch.randn(40, k, device="cuda", dtype=torch.bfloat16),
+            None,
+            _encode_layer_name(layer.phase_split_layer_name),
+            256,
+        ),
+        test_utils="test_faketensor",
+    )
+
+
+@pytest.mark.parametrize("max_decode_tokens", [None, 32])
+@pytest.mark.parametrize("m,n,k", [(2, 136, 96), (17, 256, 256)])
+@torch.inference_mode()
+def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
+    monkeypatch, default_vllm_config, m, n, k, max_decode_tokens
+) -> None:
+    import vllm.model_executor.kernels.linear.nvfp4.b12x as b12x_mod
+
+    supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 32]
+
+    def reject_activation_quantization(*args, **kwargs):
+        pytest.fail("W4A16 must not quantize activations")
+
+    monkeypatch.setattr(b12x_mod, "scaled_fp4_quant", reject_activation_quantization)
+    layer, decoded = _nvfp4_w4a16_layer(n, k)
     x_storage = torch.randn(1, m, k * 2, device="cuda", dtype=torch.bfloat16)
     x = x_storage[..., ::2]
     bias = torch.randn(n, device="cuda", dtype=torch.bfloat16)
     kernel = B12xNvFp4W4A16LinearKernel(None)
+    if max_decode_tokens is not None:
+        # Capture sizes up to max_decode_tokens replay the decode phase.
+        kernel = _with_phase(kernel, _b12x_phase(max_decode_tokens))
     kernel.process_weights_after_loading(layer)
-    kernel.get_b12x_warmup_unit(layer, (1, 2, 4, 32), x.dtype).compile()
+    layer.b12x_warmup_provider.get_b12x_warmup_unit(
+        layer, (1, 2, 4, 32), x.dtype
+    ).compile()
     run = torch.compile(
         lambda inputs: kernel.apply_weights(layer, inputs, bias),
         fullgraph=True,
@@ -973,6 +1697,149 @@ def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
         graph.replay()
         expected = (x.double() @ decoded.double().T).bfloat16() + bias
         torch.testing.assert_close(actual, expected, atol=0.005, rtol=0.01)
+
+
+def _mxfp8_layer(n, k):
+    """A random MXFP8 layer and its decoded fp32 weight."""
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        _mxfp8_e4m3_quantize_torch,
+        dequant_mxfp8_to_bf16,
+    )
+
+    torch.manual_seed(17)
+    weight = torch.randn(n, k, device="cuda", dtype=torch.bfloat16) / 16
+    values, scales = _mxfp8_e4m3_quantize_torch(weight)
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(values, requires_grad=False)
+    layer.weight_scale = torch.nn.Parameter(scales, requires_grad=False)
+    layer.prefix = f"mxfp8_proj_{n}x{k}"
+    layer.output_size_per_partition = n
+    return layer, dequant_mxfp8_to_bf16(values, scales).float()
+
+
+def _mxfp8_activation_reference(x, decoded):
+    """Reference output for MXFP8 activations, times ``decoded``."""
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        _mxfp8_e4m3_quantize_torch,
+        dequant_mxfp8_to_bf16,
+    )
+
+    values, scales = _mxfp8_e4m3_quantize_torch(x)
+    return (
+        dequant_mxfp8_to_bf16(values, scales).double() @ decoded.double().T
+    ).bfloat16()
+
+
+def _phase_split_layer(weight, decode, prefill):
+    """A b12x phase-split layer, its decoded weight, and the reference for its
+    quantized activations; skips without b12x on this device."""
+    kernel_cls = (
+        B12xNvFp4W4A16LinearKernel if weight == "nvfp4" else B12xMxfp8LinearKernel
+    )
+    supported, reason = kernel_cls.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    if weight == "nvfp4":
+        layer, decoded = _nvfp4_w4a16_layer(256, 256)
+        kernel = B12xNvFp4W4A16LinearKernel(None)
+        reference = _nvfp4_activation_reference
+    else:
+        layer, decoded = _mxfp8_layer(256, 256)
+        kernel = B12xMxfp8LinearKernel(Mxfp8LinearLayerConfig(weight_shape=(256, 256)))
+        reference = _mxfp8_activation_reference
+    _with_phase(kernel, _b12x_phase(8, decode=decode, prefill=prefill))
+    kernel.process_weights_after_loading(layer)
+    layer.b12x_warmup_provider.get_b12x_warmup_unit(
+        layer, (1, 2, 4, 8), torch.bfloat16
+    ).compile()
+    return kernel, layer, decoded, reference
+
+
+def _assert_phase_output(actual, x, decoded, reference, quantized):
+    """A16 calls match the BF16 product; quantized ones are much closer to the
+    quantized-activation reference than to it."""
+    a16 = (x.double() @ decoded.double().T).bfloat16()
+    if not quantized:
+        torch.testing.assert_close(actual, a16, atol=0.005, rtol=0.01)
+        return
+    assert torch.isfinite(actual).all()
+    error = (actual.float() - reference(x, decoded).float()).abs().max()
+    a16_error = (actual.float() - a16.float()).abs().max()
+    assert error < 0.25 * a16_error, (error, a16_error)
+
+
+_GPU_CELLS = [("nvfp4", *cell) for cell in _NVFP4_CELLS] + [
+    ("mxfp8", *cell) for cell in _MXFP8_CELLS
+]
+
+
+@pytest.mark.parametrize("weight,decode,prefill", _GPU_CELLS)
+@torch.inference_mode()
+def test_b12x_phase_split_matches_reference(
+    monkeypatch, default_vllm_config, weight, decode, prefill
+) -> None:
+    """Each served (decode, prefill) cell computes calls of up to
+    max_decode_tokens rows with the decode activations and larger ones with
+    the prefill activations, without preparing anything after the warmup."""
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
+    kernel, layer, decoded, reference = _phase_split_layer(weight, decode, prefill)
+    import b12x.preparation.session as session
+
+    prepared = []
+    prepare_default = session.prepare_default
+
+    def record_prepare(request):
+        prepared.append(request)
+        return prepare_default(request)
+
+    monkeypatch.setattr(session, "prepare_default", record_prepare)
+    for m in (1, 8, 9, 40):
+        x = torch.randn(m, 256, device="cuda", dtype=torch.bfloat16)
+        phase_format = decode if m <= 8 else prefill
+        _assert_phase_output(
+            kernel.apply_weights(layer, x),
+            x,
+            decoded,
+            reference,
+            quantized=phase_format != "unquantized",
+        )
+    assert not prepared
+
+
+@pytest.mark.parametrize("weight", ["nvfp4", "mxfp8"])
+@pytest.mark.parametrize("prefill", ["quantized", "unquantized"])
+@torch.inference_mode()
+def test_b12x_quantized_decode_ignores_graph_padding_rows(
+    default_vllm_config, weight, prefill
+) -> None:
+    """Quantized decode calls replay in CUDA graphs whose padding rows may hold
+    NaN. NVFP4 takes its shared scale from the rows the runner's padding mask
+    marks as real; MXFP8 scales are per row block."""
+    from vllm.forward_context import set_forward_context
+
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
+    kernel, layer, decoded, reference = _phase_split_layer(
+        weight, weight, weight if prefill == "quantized" else "unquantized"
+    )
+    x = torch.zeros(8, 256, device="cuda", dtype=torch.bfloat16)
+    is_padding = torch.ones(8, dtype=torch.bool, device="cuda")
+    run = torch.compile(
+        lambda inputs: kernel.apply_weights(layer, inputs), fullgraph=True, dynamic=True
+    )
+    with set_forward_context(None, default_vllm_config, is_padding=is_padding):
+        run(x)
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = run(x)
+    for real in (3, 8):
+        x.normal_()
+        x[real:] = float("nan")
+        is_padding.copy_(torch.arange(8, device="cuda") >= real)
+        graph.replay()
+        _assert_phase_output(
+            actual[:real], x[:real], decoded, reference, quantized=True
+        )
 
 
 def _block_weights(n, k, codec):

@@ -216,6 +216,9 @@ kNvfp4Dynamic = QuantKey(
 kNvfp4DynamicToken = QuantKey(
     FP4_DTYPE, scale=kNvfp4DynamicGroupScale, scale2=kDynamicTokenScale
 )
+kNvfp4DynamicTensor = QuantKey(
+    FP4_DTYPE, scale=kNvfp4DynamicGroupScale, scale2=kDynamicTensorScale
+)
 
 
 def is_dynamic_per_token_outer_scale(key: QuantKey | None) -> bool:

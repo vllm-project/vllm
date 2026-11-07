@@ -71,7 +71,9 @@ class _LMHeadNvfp4Method(OnlineLinearBase):
         replace_parameter(layer, "weight", packed)
         replace_parameter(layer, "weight_scale", scales)
         replace_parameter(layer, "weight_global_scale", global_scale)
-        self.kernel = init_nvfp4_linear_kernel(use_a16=True)
+        # Activations stay in the model dtype, so quantization_config.linear.phase
+        # does not apply.
+        self.kernel = init_nvfp4_linear_kernel(use_a16=True, allow_phase_split=False)
         self.kernel.process_weights_after_loading(layer)
 
     def apply(

@@ -1572,6 +1572,38 @@ def test_online_requantized_moe_reload(
         torch.testing.assert_close(parameter, expected_parameters[name], rtol=0, atol=0)
 
 
+def test_phase_only_override_composes_no_online_config(tmp_path) -> None:
+    """A linear phase changes how checkpoint linears run, not what they hold, so
+    it attaches no online quantization config (which, e.g., direct reload
+    rejects)."""
+    _write_minimal_llama_config(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        quantization="compressed-tensors",
+        quantization_config=quant_config_args(
+            linear={
+                "phase": {
+                    "decode": "unquantized",
+                    "prefill": "nvfp4",
+                    "max_decode_tokens": 1024,
+                }
+            }
+        ),
+        hf_overrides={
+            "quantization_config": {
+                "quant_method": "compressed-tensors",
+                "format": "pack-quantized",
+                "config_groups": {},
+            }
+        },
+    )
+
+    result = weight_utils.get_quant_config(model_config, LoadConfig())
+
+    assert isinstance(result, CompressedTensorsConfig)
+    assert result.online_quantization_config is None
+
+
 @pytest.mark.parametrize("targets", [False, True])
 def test_activation_only_override_applies_to_checkpoint_method(
     default_vllm_config, tmp_path, monkeypatch, targets

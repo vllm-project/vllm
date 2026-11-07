@@ -17,6 +17,7 @@ from typing import TypeVar
 import torch
 
 import vllm.envs as envs
+from vllm.config.quantization import PhaseSpec, QuantSpec
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.base import (
     MMLinearKernel,
@@ -172,6 +173,11 @@ from vllm.model_executor.kernels.linear.nvfp4.marlin import (
 )
 from vllm.model_executor.kernels.linear.nvfp4.pytorch import (
     TorchNvFp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.phase_split import (
+    DualActivationKernel,
+    has_phase_split_layers,
+    maybe_phase_split,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
     Fp8BlockScaledMMLinearKernel,
@@ -963,7 +969,8 @@ def init_mxfp8_linear_kernel(
     *, weight_shape: tuple[int, int], bmm_batch_size: int | None = None
 ) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
-    current platform and `(N, K)` weight shape."""
+    current platform and `(N, K)` weight shape, set up for
+    ``quantization_config.linear.phase``."""
     config = Mxfp8LinearLayerConfig(
         weight_shape=weight_shape,
         bmm_batch_size=bmm_batch_size,
@@ -1006,12 +1013,32 @@ def init_mxfp8_linear_kernel(
             continue
 
         logger.info_once("Using %s for MXFP8 GEMM", kernel_cls.__name__)
-        return kernel_cls(config)
+        return maybe_phase_split(
+            kernel_cls(config),
+            # Batched (BMM) layers keep their own activations.
+            None if bmm_batch_size is not None else _user_linear_phase("mxfp8"),
+            weight="mxfp8",
+            candidates=_POSSIBLE_MXFP8_KERNELS.get(platform, ()),
+        )
 
     raise ValueError(
         "Failed to find a kernel that can implement the "
         "MXFP8 linear layer. Reasons: \n" + "\n".join(failure_reasons)
     )
+
+
+def _user_linear_spec() -> QuantSpec | None:
+    """User's quantization_config.linear, or None."""
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.config.quantization import QuantizationConfigArgs
+
+    config = get_current_vllm_config_or_none()
+    if config is None or config.model_config is None:
+        return None
+    args = config.model_config.quantization_config
+    if not isinstance(args, QuantizationConfigArgs):
+        return None
+    return args.linear
 
 
 def _user_linear_activation_override() -> QuantKey | None:
@@ -1028,6 +1055,17 @@ def _user_linear_activation_override_is_set() -> bool:
     from vllm.config.quantization import user_activation_override
 
     return user_activation_override("linear", get_current_vllm_config_or_none())[1]
+
+
+def _user_linear_phase(weight_format: str | None = None) -> PhaseSpec | None:
+    """User's quantization_config.linear.phase, or None. With
+    ``weight_format``, only a phase that applies to such linears: one that
+    uses that activation format or only unquantized activations."""
+    spec = _user_linear_spec()
+    phase = None if spec is None else spec.phase
+    if phase is None or weight_format is None:
+        return phase
+    return phase if phase.quantized_format in (None, weight_format) else None
 
 
 def _resolve_linear_activation_key(
@@ -1197,9 +1235,26 @@ def init_wfp8_a16_linear_kernel(
     )
 
 
-def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
+def init_nvfp4_linear_kernel(
+    use_a16: bool = False, *, allow_phase_split: bool = True
+) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
-    current platform."""
+    current platform, set up for ``quantization_config.linear.phase`` when
+    ``allow_phase_split``."""
+    kernel = _select_nvfp4_linear_kernel(use_a16)
+    if not allow_phase_split:
+        return kernel
+    return maybe_phase_split(
+        kernel,
+        _user_linear_phase("nvfp4"),
+        weight="nvfp4_w4a16" if use_a16 else "nvfp4_w4a4",
+        candidates=_POSSIBLE_NVFP4_KERNELS.get(current_platform._enum, ())
+        if use_a16
+        else (),
+    )
+
+
+def _select_nvfp4_linear_kernel(use_a16: bool) -> NvFp4LinearKernel:
     config = NvFp4LinearLayerConfig()
     a16_kernels = (
         B12xNvFp4W4A16LinearKernel,
@@ -1311,6 +1366,44 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     )
 
 
+def check_linear_phase_served(model: torch.nn.Module) -> None:
+    """Warn if ``quantization_config.linear.phase`` is set but no loaded layer
+    serves it (e.g. in an unquantized model). It is not an error: a pipeline
+    stage, an encoder-only instance, or a target whose NVFP4 layers are all in
+    its MTP head can legitimately have none. NVFP4 and MXFP8 linears it applies
+    to that cannot serve it already raised at kernel selection; linears in other
+    formats keep their own activations."""
+    phase = _user_linear_phase()
+    if phase is None:
+        return
+    from vllm.model_executor.layers.linear import LinearBase
+
+    # The model may be a drafter whose layers are all unquantized, so any
+    # served layer in the process counts.
+    if not has_phase_split_layers():
+        logger.warning_once(
+            "quantization_config.linear.phase (%s) is set, but no linear layer "
+            "serves it. Only NVFP4 W4A16 and MXFP8 linears on the b12x linear "
+            "backend serve it.",
+            # warning_once caches its arguments, which must be hashable.
+            str(phase),
+        )
+        return
+    # Checkpoint lm_heads in a served format follow the phase too.
+    linears = [
+        m
+        for m in model.modules()
+        if isinstance(m, LinearBase) or hasattr(m, "phase_split_kernel")
+    ]
+    served = sum(hasattr(m, "phase_split_kernel") for m in linears)
+    logger.info_once(
+        "quantization_config.linear.phase serves %d of %d linear layers; the "
+        "others keep their own activations.",
+        served,
+        len(linears),
+    )
+
+
 def register_linear_kernel(
     kernel_class: type,
     platform: PlatformEnum,
@@ -1370,6 +1463,8 @@ __all__ = [
     "init_fp8_linear_kernel",
     "init_int8_linear_kernel",
     "init_nvfp4_linear_kernel",
+    "DualActivationKernel",
+    "check_linear_phase_served",
     "choose_mp_linear_kernel",
     "register_linear_kernel",
     "init_wfp8_a16_linear_kernel",

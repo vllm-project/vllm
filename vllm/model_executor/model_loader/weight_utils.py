@@ -238,6 +238,19 @@ def get_quant_config(
         if online_args is None:
             return checkpoint_config
         assert isinstance(online_args, QuantizationConfigArgs)
+        linear = online_args.linear
+        if (
+            online_args.moe is None
+            and online_args.targets is None
+            and linear is not None
+            and linear.weight is None
+            and linear.activation is None
+            and linear.hadamard_size is None
+            and linear.phase is not None
+        ):
+            # A phase alone changes how the checkpoint's linears run, not
+            # what they hold; kernel selection reads it from model_config.
+            return checkpoint_config
 
         checkpoint_config.online_quantization_config = OnlineQuantizationConfig(
             online_args

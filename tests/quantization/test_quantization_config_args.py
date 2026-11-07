@@ -5,19 +5,25 @@
 import pytest
 
 from tests.quantization.utils import quant_config_args, quant_spec
+from vllm.config import ModelConfig
 from vllm.config.quantization import (
     _ONLINE_SHORTHANDS,
     _WEIGHT_QUANT_KEY_NAMES,
     QUANT_KEY_NAMES,
     QuantizationConfigArgs,
     QuantSpec,
+    merge_quantization_config,
     resolve_quantization_config,
 )
+from vllm.config.utils import hash_config
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.online.base import (
     OnlineQuantizationConfig,
     _find_matching_targets,
+)
+from vllm.model_executor.layers.quantization.online.mxfp8 import (
+    Mxfp8OnlineLinearMethod,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
@@ -31,6 +37,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
     kMxfp8Dynamic,
     kMxfp8Static,
+    kNvfp4DynamicTensor,
     kNvfp4DynamicToken,
     kNvfp4Static,
 )
@@ -213,6 +220,165 @@ def test_resolve_preserves_explicit_null_activation():
 def test_resolve_quantization_config_with_checkpoint_quantization():
     args = resolve_quantization_config("gptq", {"linear": "fp8_per_block"})
     assert args == quant_config_args(linear="fp8_per_block")
+
+
+# ---- QuantSpec.phase -----------------------------------------------------
+
+_PHASE = {"decode": "unquantized", "prefill": "nvfp4", "max_decode_tokens": 1024}
+
+_U, _NVFP4, _MXFP8 = None, kNvfp4DynamicTensor, kMxfp8Dynamic
+
+
+@pytest.mark.parametrize(
+    "decode,prefill,modes,scale",
+    [
+        ("unquantized", "nvfp4", (_U, _NVFP4), "dynamic_tensor"),
+        ("nvfp4", "nvfp4", (_NVFP4, _NVFP4), "dynamic_tensor"),
+        ("nvfp4", "unquantized", (_NVFP4, _U), "dynamic_tensor"),
+        ("unquantized", "unquantized", (_U, _U), None),
+        ("unquantized", "mxfp8", (_U, _MXFP8), None),
+        ("mxfp8", "mxfp8", (_MXFP8, _MXFP8), None),
+        ("mxfp8", "unquantized", (_MXFP8, _U), None),
+    ],
+)
+def test_phase_resolves_activation_modes(decode, prefill, modes, scale):
+    phase = quant_spec(phase={**_PHASE, "decode": decode, "prefill": prefill}).phase
+    assert phase is not None
+    assert phase.activation_modes() == modes
+    assert phase.scale == scale
+    assert phase.quantized_format == next(
+        (f for f in (decode, prefill) if f != "unquantized"), None
+    )
+
+
+def test_phase_defaults_and_optional_cutoff():
+    phase = quant_spec(phase={**_PHASE, "scale": "dynamic_tensor"}).phase
+    assert (
+        phase == quant_spec(phase={"prefill": "nvfp4", "max_decode_tokens": 1024}).phase
+    )
+    # One format for both phases needs no cutoff.
+    for fmt in ("nvfp4", "mxfp8", "unquantized"):
+        phase = quant_spec(phase={"decode": fmt, "prefill": fmt}).phase
+        assert phase is not None and phase.max_decode_tokens is None
+
+
+@pytest.mark.parametrize(
+    "overrides,match",
+    [
+        ({"max_decode_tokens": 0}, "greater than or equal to 1"),
+        ({"max_decode_tokens": None}, "max_decode_tokens is required"),
+        (
+            {"decode": "mxfp8", "max_decode_tokens": None},
+            "max_decode_tokens is required",
+        ),
+        ({"chunk": 1}, "Unexpected keyword argument"),
+        ({"decode": "nvfp4", "prefill": "mxfp8"}, "need two weight copies"),
+        ({"decode": "mxfp8", "prefill": "nvfp4"}, "need two weight copies"),
+        (
+            {"decode": "fp8_per_token"},
+            "phase.decode\n.*'unquantized', 'nvfp4' or 'mxfp8'",
+        ),
+        (
+            {"prefill": "nvfp4_per_token"},
+            "phase.prefill\n.*'unquantized', 'nvfp4' or 'mxfp8'",
+        ),
+        ({"scale": "dynamic_token"}, "phase.scale\n.*'dynamic_tensor'"),
+        (
+            {"prefill": "mxfp8", "scale": "dynamic_tensor"},
+            "scale only applies to nvfp4",
+        ),
+        (
+            {"prefill": "unquantized", "scale": "dynamic_tensor"},
+            "scale only applies to nvfp4",
+        ),
+    ],
+)
+def test_phase_rejects_unserved_specs(overrides, match):
+    with pytest.raises(ValueError, match=match):
+        quant_spec(phase={**_PHASE, **overrides})
+
+
+@pytest.mark.parametrize("field", ["weight", "activation"])
+def test_nvfp4_is_only_a_phase_name(field):
+    with pytest.raises(ValueError, match="unknown quantization name 'nvfp4'"):
+        quant_spec(**{field: "nvfp4"})
+
+
+def test_phase_is_exclusive_with_activation_and_linear_only():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        quant_spec(activation="nvfp4_per_token", phase=_PHASE)
+    with pytest.raises(ValueError, match="moe.phase is not supported"):
+        quant_config_args(moe={"phase": _PHASE})
+
+
+def test_online_quantization_rejects_phase():
+    config = OnlineQuantizationConfig(
+        quant_config_args(linear={"weight": "fp8_per_channel_static", "phase": _PHASE})
+    )
+    with pytest.raises(
+        NotImplementedError, match="phase .* is not supported for online"
+    ):
+        config.resolve_quant_method_cls(LinearBase, "model.layers.0.self_attn.o_proj")
+
+
+def test_online_mxfp8_accepts_phase():
+    """Online MXFP8 linears select their kernel like checkpoint MXFP8 ones, so
+    the phase applies to them."""
+    phase = {"decode": "unquantized", "prefill": "mxfp8", "max_decode_tokens": 64}
+    config = OnlineQuantizationConfig(
+        quant_config_args(linear={"weight": "mxfp8", "phase": phase})
+    )
+    resolved = config.resolve_quant_method_cls(
+        LinearBase, "model.layers.0.self_attn.o_proj"
+    )
+    assert resolved is not None
+    assert resolved[-1] is Mxfp8OnlineLinearMethod
+
+
+def test_phase_requires_prefill():
+    with pytest.raises(ValueError, match="phase.prefill is required"):
+        quant_spec(phase={"decode": "mxfp8", "max_decode_tokens": 8})
+
+
+def test_mxfp8_shorthand_keeps_weight_with_phase():
+    """`--quantization mxfp8` with only `linear.phase` set must still quantize
+    the linears to MXFP8 (merged at load time for an unquantized model)."""
+    phase = {"decode": "unquantized", "prefill": "mxfp8", "max_decode_tokens": 64}
+    args = merge_quantization_config(
+        _ONLINE_SHORTHANDS["mxfp8"], quant_config_args(linear={"phase": phase})
+    )
+    assert args.linear is not None
+    assert args.linear.weight == kMxfp8Static
+    assert args.linear.phase == quant_spec(phase=phase).phase
+    resolved = OnlineQuantizationConfig(args).resolve_quant_method_cls(
+        LinearBase, "model.layers.0.self_attn.o_proj"
+    )
+    assert resolved is not None
+    assert resolved[-1] is Mxfp8OnlineLinearMethod
+    # Other linear fields survive the inherited weight.
+    args = merge_quantization_config(
+        _ONLINE_SHORTHANDS["mxfp8"],
+        quant_config_args(linear={"phase": phase, "hadamard_size": 32}),
+    )
+    assert args.linear is not None
+    assert (args.linear.weight, args.linear.hadamard_size) == (kMxfp8Static, 32)
+    args = resolve_quantization_config("mxfp4_hadamard32", {"linear": {"phase": phase}})
+    assert args is not None and args.linear is not None
+    assert args.linear.hadamard_size == 32
+
+
+def test_phase_enters_model_config_hash():
+    """ModelConfig's compile factors key the compile cache, so they must change
+    with the phase."""
+
+    def config_hash(linear):
+        args = None if linear is None else quant_config_args(linear=linear)
+        return hash_config(ModelConfig("facebook/opt-125m", quantization_config=args))
+
+    base = config_hash({"phase": _PHASE})
+    assert base == config_hash({"phase": dict(_PHASE)})
+    assert base != config_hash(None)
+    assert base != config_hash({"phase": {**_PHASE, "max_decode_tokens": 2048}})
 
 
 # ---- QUANT_KEY_NAMES coverage --------------------------------------------
