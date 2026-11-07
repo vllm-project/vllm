@@ -4,11 +4,17 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm.config import set_current_vllm_config
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     required_sm120_sparse_topk,
+)
+from vllm.models.deepseek_v41.common.ops import compute_global_topk_indices_and_lens
+from vllm.models.deepseek_v41.nvidia import flashinfer_sparse as dsv41_flashinfer
+from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
+    _sm120_kv_cache_format,
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils import flashinfer as fi_utils
@@ -92,3 +98,139 @@ def test_sm120_dsv4_required_topk_tracks_dspark_width() -> None:
 
     assert required_sm120_sparse_topk(causal, 128) == 128
     assert required_sm120_sparse_topk(dspark, 128) == 192
+
+
+@pytest.mark.parametrize(
+    "kv_cache_dtype,kv_mxfp8,has_compressed_cache,expected",
+    [
+        ("fp8_ds_mla", True, True, "fp8_dsv41_inline"),
+        ("fp8_ds_mla", True, False, "fp8_dsv41_inline"),
+        ("nvfp4_ds_mla", True, True, "fp8_dsv41_inline_fp4_ca"),
+        # Sliding-window-only calls read just the MXFP8 record.
+        ("nvfp4_ds_mla", True, False, "fp8_dsv41_inline"),
+        ("fp8_ds_mla", False, True, "fp8"),
+    ],
+)
+def test_sm120_dsv41_kernel_follows_kv_caches(
+    kv_cache_dtype, kv_mxfp8, has_compressed_cache, expected
+):
+    assert (
+        _sm120_kv_cache_format(kv_cache_dtype, kv_mxfp8, has_compressed_cache)
+        == expected
+    )
+
+
+def test_inline_rows_skip_other_layers_pages_in_packed_blocks():
+    # Block size 4 packed with two other layers' pages: 12 rows per block.
+    slots = torch.tensor([[0, 3, 4, 9, -1]], dtype=torch.int32)
+    rows = dsv41_flashinfer._slots_to_inline_rows(slots, 4, 12)
+    assert rows.tolist() == [[0, 3, 12, 25, -1]]
+    assert rows.dtype == slots.dtype
+
+
+def test_inline_rows_are_slots_without_packing():
+    slots = torch.tensor([0, 5, -1], dtype=torch.int32)
+    assert dsv41_flashinfer._slots_to_inline_rows(slots, 64, 64) is slots
+
+
+def test_swa_inline_rows_are_mapped_once_per_step():
+    metadata = SimpleNamespace(block_size=4, flashinfer_sparse_index_cache={})
+    slots = torch.tensor([[0, 3, 4, 9, -1]], dtype=torch.int32)
+    lens = torch.tensor([4], dtype=torch.int32)
+
+    rows = dsv41_flashinfer._swa_inline_rows(metadata, "decode", slots, lens, 12)
+    assert rows.tolist() == [[0, 3, 12, 25, -1]]
+    # Later layers of the step reuse the first layer's rows.
+    again = dsv41_flashinfer._swa_inline_rows(metadata, "decode", slots, lens, 12)
+    assert again is rows
+    # A rebuild clears the cache, so new indices are mapped again.
+    metadata.flashinfer_sparse_index_cache.clear()
+    fresh = dsv41_flashinfer._swa_inline_rows(metadata, "decode", slots, lens, 12)
+    assert fresh is not rows and torch.equal(fresh, rows)
+    # Without packing the indices are already rows.
+    unpacked = dsv41_flashinfer._swa_inline_rows(metadata, "prefill", slots, lens, 4)
+    assert unpacked is slots
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_swa_inline_rows_follow_indices_on_graph_replay():
+    # Decode captures with fresh metadata, then refills the index buffer in
+    # place before each replay. Every layer must see rows of the new indices.
+    block_size, block_span = 4, 12
+    slots = torch.zeros((2, 5), dtype=torch.int32, device="cuda")
+    lens = torch.zeros(2, dtype=torch.int32, device="cuda")
+    metadata = SimpleNamespace(block_size=block_size, flashinfer_sparse_index_cache={})
+    layer_rows = [torch.empty_like(slots) for _ in range(2)]
+
+    def forward() -> None:
+        for out in layer_rows:
+            out.copy_(
+                dsv41_flashinfer._swa_inline_rows(
+                    metadata, "decode", slots, lens, block_span
+                )
+            )
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        forward()  # warmup
+    torch.cuda.current_stream().wait_stream(stream)
+    metadata.flashinfer_sparse_index_cache.clear()  # fresh capture metadata
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        forward()
+
+    new_slots = torch.tensor(
+        [[0, 3, 4, 9, -1], [7, 13, -1, -1, -1]], dtype=torch.int32, device="cuda"
+    )
+    slots.copy_(new_slots)
+    graph.replay()
+    torch.accelerator.synchronize()
+    expected = dsv41_flashinfer._slots_to_inline_rows(new_slots, block_size, block_span)
+    for out in layer_rows:
+        assert torch.equal(out, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_global_topk_indices_address_packed_rows():
+    # Block size 4 packed with two other layers' pages: 12 rows per block.
+    block_size, block_span = 4, 12
+    topk_indices = torch.tensor(
+        [[0, 3, 4, 9, -1, -1], [7, 1, -1, -1, -1, -1]],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    token_to_req = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+    block_table = torch.tensor([[2, 5, 0], [1, 3, 0]], dtype=torch.int32, device="cuda")
+    is_valid = torch.tensor([True, True], device="cuda")
+
+    slots, slot_lens = compute_global_topk_indices_and_lens(
+        topk_indices, token_to_req, block_table, block_size, is_valid
+    )
+    rows, row_lens = compute_global_topk_indices_and_lens(
+        topk_indices,
+        token_to_req,
+        block_table,
+        block_size,
+        is_valid,
+        block_span=block_span,
+    )
+
+    expected = dsv41_flashinfer._slots_to_inline_rows(slots, block_size, block_span)
+    assert torch.equal(rows, expected)
+    assert torch.equal(row_lens, slot_lens)
+    assert rows[0].tolist() == [24, 27, 60, 1, -1, -1]
+
+
+@pytest.mark.parametrize("major,expected", [(10, False), (12, True)])
+def test_dsv41_flashinfer_accepts_nvfp4_cache_only_on_sm120(
+    monkeypatch, major, expected
+):
+    monkeypatch.setattr(
+        dsv41_flashinfer.current_platform,
+        "is_device_capability_family",
+        lambda family, device_id=0: family // 10 == major,
+    )
+    backend = dsv41_flashinfer.DeepseekV4FlashInferMLASparseBackend
+    assert backend.supports_kv_cache_dtype("nvfp4_ds_mla") is expected
+    assert backend.supports_kv_cache_dtype("fp8_ds_mla")
