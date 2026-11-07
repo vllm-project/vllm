@@ -150,6 +150,11 @@ class _RegionPairs:
     partner: list[int]
     # Whether every paired layer is in the same cache group on both sides.
     groups_match: bool = True
+    # Whether the peer reported a cache group for each paired layer and it
+    # matches ours. ``groups_match`` is also false when a shared region spans
+    # groups; this one stays true then, i.e. the per-group block lists still
+    # line up.
+    layer_groups_match: bool = True
     # Hybrid SSM models: the peer's regions holding SSM state, in the order its
     # SSM descriptors are built, and its PLE region (set by _pair_ssm_regions).
     remote_ssm_regions: list[int] | None = None
@@ -548,6 +553,7 @@ class NixlBaseConnectorWorker:
         triples: dict[tuple[int, int, int], None] = {}
         layers: set[str] = set()
         groups_match = True
+        layer_groups_match = True
         for layer_name, remote_regions in remote_regions_by_layer.items():
             local_regions = self._regions_by_layer.get(layer_name)
             if local_regions is None:
@@ -569,6 +575,7 @@ class NixlBaseConnectorWorker:
             # a region shared by several groups (-1) cannot show that.
             if remote_layer_groups and remote_layer_groups.get(layer_name) != group:
                 groups_match = False
+                layer_groups_match = False
             for remote, local in zip(remote_regions, local_regions):
                 remote_group = remote_groups[remote] if remote_groups else group
                 if remote_group not in (group, _SHARED_REGION_GROUP_ID):
@@ -602,6 +609,7 @@ class NixlBaseConnectorWorker:
             remote_regions=paired_regions,
             partner=partner,
             groups_match=groups_match,
+            layer_groups_match=layer_groups_match,
         )
         if self._has_mamba:
             self._pair_ssm_regions(pairs, engine_id)

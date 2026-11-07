@@ -121,7 +121,15 @@ class NixlBaseConnectorScheduler:
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[
-            ReqId, tuple[Request, BlockIds, tuple[int, ...], bool]
+            ReqId,
+            tuple[
+                Request,
+                BlockIds,
+                tuple[int, ...],
+                bool,
+                tuple[tuple[tuple[int, int], ...], ...],
+                tuple[tuple[int, ...], ...],
+            ],
         ] = {}
         self._reqs_need_save: dict[ReqId, Request] = {}
         # Reqs to send and their expiration time
@@ -250,6 +258,48 @@ class NixlBaseConnectorScheduler:
                     # Clean up empty engines so we don't leak a key when remote dies.
                     del self._heartbeat_by_engine[engine_id]
 
+    def get_exchange_clipped_block_positions(
+        self, block_ids: BlockIds, clip_ssm: bool = True
+    ) -> tuple[list[tuple[int, int]], ...]:
+        """Return the ``(logical position, block id)`` pairs of an exchange.
+
+        Positions are indices in the request's per-group block list. Keeping
+        them across the clipping in ``get_exchange_clipped_blocks`` lets a
+        peer pair pages by where they sit in the sequence instead of by list
+        length, and tells it which pages were clipped away.
+        """
+        if len(block_ids) == 0:
+            return ()
+        groups = self.kv_cache_config.select_transfer_block_ids(block_ids)
+        if not self._is_hma_required:
+            return tuple(list(enumerate(group)) for group in groups)
+        # NOTE (NickLucche) This logic is currently handled at the connector level
+        # because offloading connectors might want to receive the whole sequence even
+        # for SWA groups. We will abstract this logic once the interface is more stable
+        assert len(groups) == len(self.blocks_per_sw), (
+            "Number of KV cache groups must match"
+        )
+        kept: list[list[tuple[int, int]]] = []
+        for i, blocks in enumerate(groups):
+            if n_sw := self.blocks_per_sw[i]:
+                start = max(len(blocks) - n_sw, 0)
+                kept.append([(j, blocks[j]) for j in range(start, len(blocks))])
+            elif (
+                clip_ssm
+                and blocks
+                and (n_spec_blocks := self._ssm_spec_blocks[i]) is not None
+            ):
+                position = {block: j for j, block in enumerate(blocks)}
+                kept.append(
+                    [
+                        (position[block], block)
+                        for block in clip_ssm_state_blocks(blocks, n_spec_blocks)
+                    ]
+                )
+            else:
+                kept.append(list(enumerate(blocks)))
+        return tuple(kept)
+
     def get_exchange_clipped_blocks(
         self, block_ids: BlockIds, clip_ssm: bool = True
     ) -> BlockIds:
@@ -271,27 +321,10 @@ class NixlBaseConnectorScheduler:
         if len(block_ids) == 0:
             # No blocks to clip, e.g. a full prefix cache hit.
             return block_ids
-        block_ids = self.kv_cache_config.select_transfer_block_ids(block_ids)
-        if not self._is_hma_required:
-            return block_ids
-        # NOTE (NickLucche) This logic is currently handled at the connector level
-        # because offloading connectors might want to receive the whole sequence even
-        # for SWA groups. We will abstract this logic once the interface is more stable
-        assert len(block_ids) == len(self.blocks_per_sw), (
-            "Number of KV cache groups must match"
+        return tuple(
+            [block for _, block in group]
+            for group in self.get_exchange_clipped_block_positions(block_ids, clip_ssm)
         )
-        clipped = []
-        for i, blocks in enumerate(block_ids):
-            if n_sw := self.blocks_per_sw[i]:
-                blocks = blocks[-n_sw:]
-            elif (
-                clip_ssm
-                and blocks
-                and (n_spec_blocks := self._ssm_spec_blocks[i]) is not None
-            ):
-                blocks = clip_ssm_state_blocks(blocks, n_spec_blocks)
-            clipped.append(blocks)
-        return tuple(clipped)
 
     def set_xfer_handshake_metadata(
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
@@ -494,6 +527,8 @@ class NixlBaseConnectorScheduler:
             block_ids,
             cached,
             awaiting_kvs,
+            block_positions,
+            required_positions,
         ) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
             meta.add_new_req_to_recv(
@@ -502,6 +537,8 @@ class NixlBaseConnectorScheduler:
                 kv_transfer_params=req.kv_transfer_params,
                 local_num_computed_blocks=cached,
                 awaiting_kvs=awaiting_kvs,
+                local_block_positions=block_positions,
+                local_required_positions=required_positions,
             )
 
         if self.use_host_buffer:

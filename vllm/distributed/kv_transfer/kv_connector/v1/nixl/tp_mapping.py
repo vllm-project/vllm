@@ -27,6 +27,11 @@ class ReadSpec:
     local_block_ids: BlockIds
     remote_block_ids: BlockIds
     block_ids_by_region: bool = False
+    # Logical transfer-view pairs: block_ids[k] belongs to local_regions[k]
+    # and remote_regions[k]. A region may repeat.
+    block_ids_by_pair: bool = False
+    local_regions: list[int] | None = None
+    remote_regions: list[int] | None = None
 
 
 def _is_attention_spec(spec_type: type[KVCacheSpec]) -> bool:

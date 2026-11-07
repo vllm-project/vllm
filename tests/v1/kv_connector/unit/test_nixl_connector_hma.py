@@ -20,6 +20,11 @@ from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
+    RemoteMeta,
+    ReqMeta,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
+    NixlPullConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
@@ -113,6 +118,135 @@ def region_pull_worker():
     worker._read_blocks_mixed = MagicMock()  # type: ignore[method-assign]
     worker.nixl_wrapper = MagicMock()
     return worker
+
+
+@pytest.mark.cpu_test
+def test_position_mapped_alias_pull_uses_logical_pages():
+    """Aliases with different groups pair block IDs by logical page."""
+    worker = _position_pull_worker()
+    meta = ReqMeta(
+        local_block_ids=((10, 11, 14), (20, 21, 24)),
+        local_physical_block_ids=((10, 11, 14), (20, 21, 24)),
+        tp_size=1,
+        local_block_positions=(
+            ((0, 10), (1, 11), (4, 14)),
+            ((0, 20), (1, 21), (4, 24)),
+        ),
+        local_required_positions=((1, 4), (1, 4)),
+        remote=RemoteMeta(
+            block_ids=((100, 101, 104), (200, 201, 204)),
+            engine_id="P",
+            request_id="p-req",
+            host="p-host",
+            port=1234,
+            block_positions=(
+                ((0, 100), (1, 101), (4, 104)),
+                ((0, 200), (1, 201), (4, 204)),
+            ),
+        ),
+    )
+    pairs = SimpleNamespace(
+        local=[7, 7], remote=[0, 1], group=[0, 1], layer_groups_match=True
+    )
+    plan = SimpleNamespace(all_source_ranks=(0,))
+    remote_info = _position_remote_info()
+
+    (spec,) = worker._build_position_read_specs(meta, pairs, plan, remote_info)
+
+    assert spec.block_ids_by_pair
+    assert spec.local_block_ids == [[11, 14], [21, 24]]
+    assert spec.remote_block_ids == [[101, 104], [201, 204]]
+    assert spec.local_regions == [7, 7]
+    assert spec.remote_regions == [0, 1]
+
+
+@pytest.mark.cpu_test
+def test_position_mapped_alias_pull_follows_positions_not_order():
+    """Clipped tails pair by position even when the lists differ in length."""
+    worker = _position_pull_worker(1)
+    meta = ReqMeta(
+        local_block_ids=((10, 11, 12),),
+        local_physical_block_ids=((10, 11, 12),),
+        tp_size=1,
+        local_block_positions=(((3, 10), (4, 11), (5, 12)),),
+        local_required_positions=((3, 4, 5),),
+        remote=RemoteMeta(
+            block_ids=((40, 41, 42, 43),),
+            engine_id="P",
+            request_id="p-req",
+            host="p-host",
+            port=1234,
+            # The prefill side reports an extra page past the window.
+            block_positions=(((3, 40), (4, 41), (5, 42), (6, 43)),),
+        ),
+    )
+    pairs = SimpleNamespace(local=[0], remote=[0], group=[0], layer_groups_match=True)
+    plan = SimpleNamespace(all_source_ranks=(0,))
+
+    (spec,) = worker._build_position_read_specs(
+        meta, pairs, plan, _position_remote_info()
+    )
+
+    assert spec.local_block_ids == [[10, 11, 12]]
+    assert spec.remote_block_ids == [[40, 41, 42]]
+
+
+@pytest.mark.cpu_test
+def test_position_mapped_alias_pull_rejects_conflicting_sources():
+    """An aliased local page must not silently pick one remote page."""
+    worker = _position_pull_worker(1)
+    meta = ReqMeta(
+        local_block_ids=((10,),),
+        local_physical_block_ids=((10,),),
+        tp_size=1,
+        local_block_positions=(((0, 10),),),
+        local_required_positions=((0,),),
+        remote=RemoteMeta(
+            block_ids=((100,), (200,)),
+            engine_id="P",
+            request_id="p-req",
+            host="p-host",
+            port=1234,
+            block_positions=(((0, 100),), ((0, 200),)),
+        ),
+    )
+    # Two layers, both aliasing local region 7 but holding different pages on
+    # the prefill side.
+    pairs = SimpleNamespace(
+        local=[7, 7], remote=[0, 1], group=[0, 0], layer_groups_match=True
+    )
+    plan = SimpleNamespace(all_source_ranks=(0,))
+
+    with pytest.raises(NotImplementedError, match="sharing relation"):
+        worker._build_position_read_specs(meta, pairs, plan, _position_remote_info())
+
+
+def _position_pull_worker(num_groups: int = 2):
+    worker = object.__new__(NixlPullConnectorWorker)
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.block_size = 64
+    worker.use_mla = True
+    worker._has_mamba = False
+    worker.pp_size = 1
+    worker.pcp_size = 1
+    worker.dcp_size = 1
+    worker.enable_permute_local_kv = False
+    worker.enable_heterogeneous_attn_post_process = False
+    worker.kv_cache_config = SimpleNamespace(
+        transfer_groups=tuple(object() for _ in range(num_groups))
+    )
+    worker.dst_region_mem_types = {"P": ["VRAM"] * num_groups}
+    worker.transfer_topo = SimpleNamespace(tp_ratio=lambda _size: 1)
+    return worker
+
+
+def _position_remote_info():
+    return SimpleNamespace(
+        remote_block_size=64,
+        remote_physical_blocks_per_logical=1,
+        remote_tp_size=1,
+        remote_dcp_size=1,
+    )
 
 
 @pytest.mark.cpu_test
@@ -501,7 +635,7 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
 
     scheduler.update_state_after_alloc(request, blocks, num_external_tokens=2)
 
-    _, _, local_num_computed_blocks, awaiting_kvs = scheduler._reqs_need_recv[
+    _, _, local_num_computed_blocks, awaiting_kvs, _, _ = scheduler._reqs_need_recv[
         request.request_id
     ]
     assert local_num_computed_blocks == (2, 1)
@@ -541,7 +675,9 @@ def test_full_local_hit_is_not_awaited_by_the_scheduler():
 
     scheduler.update_state_after_alloc(request, blocks, num_external_tokens=0)
 
-    _, local_block_ids, _, awaiting_kvs = scheduler._reqs_need_recv[request.request_id]
+    _, local_block_ids, _, awaiting_kvs, _, _ = scheduler._reqs_need_recv[
+        request.request_id
+    ]
     assert not local_block_ids  # full local hit: nothing to pull
     assert awaiting_kvs is False
 
@@ -2176,6 +2312,27 @@ def test_exchange_clipped_blocks_ssm_single_state():
     # Non-mamba models pass through unchanged.
     fa_sched = make_nixl_scheduler(has_mamba=False)
     assert fa_sched.get_exchange_clipped_blocks(([1, 2],)) == ([1, 2],)
+
+
+@pytest.mark.cpu_test
+def test_exchange_clipped_positions_survive_clipping():
+    """Clipped lists report where each page sat in the request."""
+    sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
+    sched.blocks_per_sw = [2, 0]
+    sched._ssm_spec_blocks = [None, 2]
+    blocks = ([1, 2, 3], [0, 6, 7, 8, 9])
+
+    assert sched.get_exchange_clipped_block_positions(blocks) == (
+        [(1, 2), (2, 3)],
+        [(2, 7)],
+    )
+    assert sched.get_exchange_clipped_blocks(blocks) == ([2, 3], [7])
+    assert sched.get_exchange_clipped_block_positions(()) == ()
+
+    fa_sched = make_nixl_scheduler(has_mamba=False)
+    assert fa_sched.get_exchange_clipped_block_positions(([1, 2],)) == (
+        [(0, 1), (1, 2)],
+    )
 
 
 # ── Hybrid MLA+SSM (KimiLinear-shaped KDA+MLA) tests ─────────────────────

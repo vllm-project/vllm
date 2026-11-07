@@ -230,6 +230,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 ReadSpec(remote_rank=rank, local_block_ids=[], remote_block_ids=[])
                 for rank in plan.all_source_ranks
             ]
+        elif not pairs.groups_match and not (
+            pairs.remote == pairs.local and len(pairs.local) == self.num_regions
+        ):
+            # The two sides advertise different regions: pair every layer with
+            # its counterpart and read the pages each side still needs by
+            # their logical position.
+            read_specs = self._build_position_read_specs(meta, pairs, plan, remote_info)
+            meta.region_blocks_to_zero = None
         elif not pairs.groups_match:
             # The two sides put some layer in different cache groups: read each
             # region at its own blocks.
@@ -487,6 +495,135 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                         )
                         self.xfer_stats.record_failed_notification()
 
+    def _build_position_read_specs(
+        self,
+        meta: ReqMeta,
+        pairs,
+        plan,
+        remote_info,
+    ) -> list[ReadSpec]:
+        """Pair regions by the logical page positions the two sides hold.
+
+        Each pair reads one remote region into one local region. Pages are
+        matched by their position in the request's block list, so a sliding
+        window's tail or a request-lifetime ring block lines up even when the
+        two lists are clipped to different lengths. A local page reached
+        through several aliases must map to a single remote page: any other
+        mapping would need a sharing relation between the aliased layers.
+        """
+        if not self.use_mla or self._has_mamba:
+            raise NotImplementedError(
+                "Position-mapped NIXL pulls are only supported for pure MLA"
+            )
+        if self.block_size != remote_info.remote_block_size:
+            raise NotImplementedError(
+                "Position-mapped NIXL pulls require matching block sizes"
+            )
+        if (
+            self._physical_blocks_per_logical_kv_block != 1
+            or remote_info.remote_physical_blocks_per_logical != 1
+        ):
+            raise NotImplementedError(
+                "Position-mapped NIXL pulls require one kernel page per logical page"
+            )
+        if (
+            self.pp_size > 1
+            or self.pcp_size > 1
+            or self.dcp_size > 1
+            or remote_info.remote_dcp_size > 1
+        ):
+            raise NotImplementedError(
+                "Position-mapped NIXL pulls require PP, PCP and DCP of 1"
+            )
+        if self.enable_permute_local_kv or self.enable_heterogeneous_attn_post_process:
+            raise NotImplementedError(
+                "Position-mapped NIXL pulls cannot post-process KV layouts"
+            )
+        assert self.transfer_topo is not None
+        if self.transfer_topo.tp_ratio(remote_info.remote_tp_size) != 1:
+            raise NotImplementedError(
+                "Position-mapped NIXL pulls require matching TP sizes"
+            )
+        assert meta.remote is not None
+        if "DRAM" in self.dst_region_mem_types[meta.remote.engine_id]:
+            raise NotImplementedError(
+                "Position-mapped NIXL pulls require a device-resident producer"
+            )
+        if not pairs.layer_groups_match:
+            raise NotImplementedError(
+                "Position-mapped NIXL pulls require every layer to stay in its "
+                "cache group on both sides"
+            )
+        if len(meta.local_block_positions) != len(
+            self.kv_cache_config.transfer_groups
+        ) or len(meta.local_required_positions) != len(meta.local_block_positions):
+            raise RuntimeError("Local block position metadata is malformed")
+        if len(meta.remote.block_positions) != len(meta.remote.block_ids):
+            raise RuntimeError("Prefill did not report a position for each block list")
+
+        local_positions = [dict(group) for group in meta.local_block_positions]
+        remote_positions = [dict(group) for group in meta.remote.block_positions]
+        required = [sorted(set(group)) for group in meta.local_required_positions]
+        sources: dict[tuple[int, int, int], tuple[int, int]] = {}
+        pair_infos: list[tuple[int, int, list[int], list[int]]] = []
+        for local_region, remote_region, group in zip(
+            pairs.local, pairs.remote, pairs.group, strict=True
+        ):
+            if not 0 <= group < len(required):
+                raise NotImplementedError(
+                    "Position-mapped NIXL pulls cannot transfer a cache group "
+                    "without block positions"
+                )
+            local_blocks: list[int] = []
+            remote_blocks: list[int] = []
+            for position in required[group]:
+                local_block = local_positions[group].get(position)
+                if local_block is None:
+                    raise RuntimeError(
+                        f"Local KV has no page at logical position {position}"
+                    )
+                remote_block = remote_positions[group].get(position)
+                if remote_block is None:
+                    raise RuntimeError(
+                        "Prefill KV does not cover logical page "
+                        f"{position} of cache group {group}"
+                    )
+                key = (local_region, group, local_block)
+                source = (remote_region, remote_block)
+                known = sources.get(key)
+                if known is None:
+                    sources[key] = source
+                elif known != source:
+                    raise NotImplementedError(
+                        f"Local KV page {local_block} of cache group {group} "
+                        f"aliases remote regions {known[0]} and {remote_region}; "
+                        "the connector needs an explicit sharing relation to "
+                        "choose between them"
+                    )
+                else:
+                    # The page was already read through another alias.
+                    continue
+                local_blocks.append(local_block)
+                remote_blocks.append(remote_block)
+            if local_blocks:
+                pair_infos.append(
+                    (local_region, remote_region, local_blocks, remote_blocks)
+                )
+
+        if not pair_infos:
+            return [ReadSpec(rank, [], []) for rank in plan.all_source_ranks]
+        return [
+            ReadSpec(
+                rank,
+                [info[2] for info in pair_infos],
+                [info[3] for info in pair_infos],
+                block_ids_by_pair=True,
+                local_regions=[info[0] for info in pair_infos],
+                remote_regions=[info[1] for info in pair_infos],
+            )
+            for rank in plan.all_source_ranks
+        ]
+
     def _read_blocks(
         self,
         read_spec: ReadSpec,
@@ -554,7 +691,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 self._recving_transfers.setdefault(request_id, [])
             return True
 
-        if not read_spec.block_ids_by_region:
+        if not read_spec.block_ids_by_region and not read_spec.block_ids_by_pair:
             assert (
                 len(remote_block_ids)
                 == len(local_block_ids)
@@ -581,23 +718,61 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # blocks for region-mapped reads).
         pairs = self._dst_pairs[dst_engine_id]
         by_region = read_spec.block_ids_by_region
-        remote_block_descs_ids = self._compute_desc_ids(
-            block_ids=remote_block_ids,
-            dst_num_blocks=self.dst_num_blocks[dst_engine_id],
-            block_size_ratio=None,
-            physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
-            region_num_blocks=(self.dst_region_num_blocks.get(dst_engine_id) or None),
-            pairs=(pairs.remote, pairs.remote if by_region else pairs.group),
-            ssm_regions=pairs.remote_ssm_regions,
-        )
-        local_block_descs_ids = self._compute_desc_ids(
-            block_ids=local_block_ids,
-            dst_num_blocks=self.dst_num_blocks[self.engine_id],
-            block_size_ratio=block_size_ratio,
-            physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
-            region_num_blocks=(self.dst_region_num_blocks.get(self.engine_id) or None),
-            pairs=(pairs.local, pairs.local if by_region else pairs.group),
-        )
+        if read_spec.block_ids_by_pair:
+            assert read_spec.local_regions is not None
+            assert read_spec.remote_regions is not None
+            pair_keys = list(range(len(remote_block_ids)))
+            remote_block_descs_ids = self._compute_desc_ids(
+                block_ids=remote_block_ids,
+                dst_num_blocks=self.dst_num_blocks[dst_engine_id],
+                block_size_ratio=None,
+                physical_blocks_per_logical=(
+                    remote_info.remote_physical_blocks_per_logical
+                ),
+                region_num_blocks=(
+                    self.dst_region_num_blocks.get(dst_engine_id) or None
+                ),
+                pairs=(read_spec.remote_regions, pair_keys),
+                ssm_regions=pairs.remote_ssm_regions,
+            )
+            local_block_descs_ids = self._compute_desc_ids(
+                block_ids=local_block_ids,
+                dst_num_blocks=self.dst_num_blocks[self.engine_id],
+                block_size_ratio=block_size_ratio,
+                physical_blocks_per_logical=(
+                    self._physical_blocks_per_logical_kv_block
+                ),
+                region_num_blocks=(
+                    self.dst_region_num_blocks.get(self.engine_id) or None
+                ),
+                pairs=(read_spec.local_regions, pair_keys),
+            )
+        else:
+            remote_block_descs_ids = self._compute_desc_ids(
+                block_ids=remote_block_ids,
+                dst_num_blocks=self.dst_num_blocks[dst_engine_id],
+                block_size_ratio=None,
+                physical_blocks_per_logical=(
+                    remote_info.remote_physical_blocks_per_logical
+                ),
+                region_num_blocks=(
+                    self.dst_region_num_blocks.get(dst_engine_id) or None
+                ),
+                pairs=(pairs.remote, pairs.remote if by_region else pairs.group),
+                ssm_regions=pairs.remote_ssm_regions,
+            )
+            local_block_descs_ids = self._compute_desc_ids(
+                block_ids=local_block_ids,
+                dst_num_blocks=self.dst_num_blocks[self.engine_id],
+                block_size_ratio=block_size_ratio,
+                physical_blocks_per_logical=(
+                    self._physical_blocks_per_logical_kv_block
+                ),
+                region_num_blocks=(
+                    self.dst_region_num_blocks.get(self.engine_id) or None
+                ),
+                pairs=(pairs.local, pairs.local if by_region else pairs.group),
+            )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 

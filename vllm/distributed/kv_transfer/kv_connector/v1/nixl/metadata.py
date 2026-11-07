@@ -53,8 +53,10 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  15: Add remote_registration_generation to kv_transfer_params
 #  16: Pair regions by the layers both sides hold: every peer advertises
 #      region_members and the cache group of each layer
+#  17: Exchange logical block positions alongside block ids and add required
+#      positions for position-paired alias reads
 #
-NIXL_CONNECTOR_VERSION: int = 16
+NIXL_CONNECTOR_VERSION: int = 17
 
 
 @dataclass
@@ -242,6 +244,9 @@ class RemoteMeta:
     num_tokens: int | None = None
     # Bumped each time the remote publishes a changed KV cache registration.
     registration_generation: int = 0
+    # Per-transfer-group (logical position, block id) pairs of
+    # ``block_ids``, preserved across exchange clipping.
+    block_positions: tuple[tuple[tuple[int, int], ...], ...] = ()
 
 
 @dataclass
@@ -256,6 +261,12 @@ class ReqMeta:
     # the remote's; kept per-group since hybrid models (e.g. SWA+FA) can have
     # different cache-hit counts per group.
     local_num_computed_blocks: tuple[int, ...] = ()
+    # Per-transfer-group (logical page index, block id) pairs. Unlike
+    # local_block_ids, this keeps the page position after null/hashed blocks
+    # are filtered, so a peer can pair reads by logical position.
+    local_block_positions: tuple[tuple[tuple[int, int], ...], ...] = ()
+    # Per-transfer-group logical page indices that still need importing.
+    local_required_positions: tuple[tuple[int, ...], ...] = ()
     remote: RemoteMeta | None = None
     # Remote block size, discovered during NIXL handshake (push mode).
     remote_block_size: int | None = None
@@ -300,6 +311,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
         awaiting_kvs: bool = False,
+        local_block_positions: tuple[tuple[tuple[int, int], ...], ...] = (),
+        local_required_positions: tuple[tuple[int, ...], ...] = (),
     ) -> ReqMeta:
         return ReqMeta(
             local_block_ids=local_block_ids,
@@ -310,6 +323,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             remote_block_size=kv_transfer_params.get("remote_block_size"),
             pp_size=kv_transfer_params.get("pp_size", 1),
             local_num_computed_blocks=local_num_computed_blocks,
+            local_block_positions=local_block_positions,
+            local_required_positions=local_required_positions,
             awaiting_kvs=awaiting_kvs,
         )
 
@@ -330,12 +345,16 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
         awaiting_kvs: bool = False,
+        local_block_positions: tuple[tuple[tuple[int, int], ...], ...] = (),
+        local_required_positions: tuple[tuple[int, ...], ...] = (),
     ):
         req = self._add_new_req(
             local_block_ids,
             kv_transfer_params,
             local_num_computed_blocks,
             awaiting_kvs,
+            local_block_positions,
+            local_required_positions,
         )
         req.remote = RemoteMeta(
             block_ids=kv_transfer_params["remote_block_ids"],
@@ -347,6 +366,10 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             num_tokens=kv_transfer_params.get("remote_num_tokens"),
             registration_generation=kv_transfer_params.get(
                 "remote_registration_generation", 0
+            ),
+            block_positions=tuple(
+                tuple((int(position), int(block)) for position, block in group)
+                for group in kv_transfer_params.get("remote_block_positions") or ()
             ),
         )
         self.reqs_to_recv[request_id] = req

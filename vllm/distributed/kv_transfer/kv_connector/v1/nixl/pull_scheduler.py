@@ -167,6 +167,20 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         )
                         for group in blocks.blocks
                     )
+                    block_positions: list[tuple[tuple[int, int], ...]] = []
+                    required_positions: list[tuple[int, ...]] = []
+                    for group_id in self.kv_cache_config.transfer_group_ids:
+                        group = blocks.blocks[group_id]
+                        positions = []
+                        required = []
+                        for index, block in enumerate(group):
+                            if block.is_null:
+                                continue
+                            positions.append((index, block.block_id))
+                            if block.block_hash is None:
+                                required.append(index)
+                        block_positions.append(tuple(positions))
+                        required_positions.append(tuple(required))
 
                     # Get unhashed blocks to pull from remote. Mind that a full prefix
                     # cache hit is indicated with an empty list.
@@ -177,6 +191,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         # Parked in WAITING_FOR_REMOTE_KVS only when there is
                         # something to pull; a full local hit stays RUNNING.
                         num_external_tokens > 0,
+                        tuple(block_positions),
+                        tuple(required_positions),
                     )
 
                 else:
@@ -228,7 +244,14 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # To avoid stranding the prefill blocks in the prefill instance,
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.
-            self._reqs_need_recv[request.request_id] = (request, [], (), False)
+            self._reqs_need_recv[request.request_id] = (
+                request,
+                [],
+                (),
+                False,
+                (),
+                (),
+            )
             params["do_remote_prefill"] = False
             return False, None
 
@@ -251,6 +274,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         delay_free_blocks = any(len(group) > 0 for group in block_ids)
         remote_num_tokens = 0
         blocks_expiry_time = None
+        block_positions: tuple[list[tuple[int, int]], ...] = ()
         if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
             request_kv_blocks_ttl = self._kv_lease_duration
@@ -274,6 +298,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # trimming down after allocating for the whole sequence length. Empty
             # blocks are always at the start of the list.
             # Here we "unpad" blocks to send the actual remote blocks to be read.
+            block_positions = self.get_exchange_clipped_block_positions(block_ids)
             block_ids = self.get_exchange_clipped_blocks(block_ids)
 
             remote_num_tokens = request.num_computed_tokens
@@ -282,6 +307,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             do_remote_prefill=is_p_node,
             do_remote_decode=is_d_node,
             remote_block_ids=block_ids,
+            remote_block_positions=block_positions,
             remote_engine_id=self.engine_id,
             remote_request_id=request.request_id,
             remote_host=self.side_channel_host,
