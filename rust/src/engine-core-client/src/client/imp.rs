@@ -12,7 +12,10 @@ use futures::future::join_all;
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
 use tokio::runtime::Handle;
+#[cfg(test)]
+use tokio::sync::Barrier;
 use tokio::sync::{mpsc, watch};
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace, warn};
 use vllm_metrics::METRICS;
 use zeromq::RouterSendHalf;
@@ -70,9 +73,40 @@ pub(crate) struct ClientInner {
     utility_reg: Mutex<UtilityRegistry>,
     health_error: ArcSwapOption<Error>,
     health_tx: watch::Sender<bool>,
+    #[cfg(test)]
+    abort_send_gates: Mutex<BTreeMap<EngineId, Arc<TestAbortSendGate>>>,
     /// Whether the engines can accept and process new requests, maintained
     /// around the control calls this client sends.
     readiness: Arc<Readiness>,
+}
+
+#[cfg(test)]
+pub(crate) struct TestAbortSendGate {
+    entered: Barrier,
+    release: Barrier,
+}
+
+#[cfg(test)]
+impl TestAbortSendGate {
+    fn new() -> Self {
+        Self {
+            entered: Barrier::new(2),
+            release: Barrier::new(2),
+        }
+    }
+
+    async fn block(&self) {
+        self.entered.wait().await;
+        self.release.wait().await;
+    }
+
+    pub async fn wait_until_blocked(&self) {
+        self.entered.wait().await;
+    }
+
+    pub async fn release(&self) {
+        self.release.wait().await;
+    }
 }
 
 impl ClientInner {
@@ -114,8 +148,17 @@ impl ClientInner {
             utility_reg: Mutex::new(UtilityRegistry::default()),
             health_error: ArcSwapOption::empty(),
             health_tx: watch::Sender::new(true),
+            #[cfg(test)]
+            abort_send_gates: Mutex::new(BTreeMap::new()),
             readiness: Arc::new(Readiness::new()),
         }
+    }
+
+    #[cfg(test)]
+    pub fn install_abort_send_gate(&self, engine_id: EngineId) -> Arc<TestAbortSendGate> {
+        let gate = Arc::new(TestAbortSendGate::new());
+        self.abort_send_gates.lock().insert(engine_id, gate.clone());
+        gate
     }
 
     /// Get the model name associated with this client used for metrics
@@ -436,6 +479,12 @@ impl ClientInner {
         engine_id: &EngineId,
         request_ids: &[String],
     ) -> Result<()> {
+        #[cfg(test)]
+        let gate = { self.abort_send_gates.lock().remove(engine_id) };
+        #[cfg(test)]
+        if let Some(gate) = gate {
+            gate.block().await;
+        }
         self.send_to_engine(engine_id, EngineCoreRequestType::Abort, &request_ids).await
     }
 
@@ -485,6 +534,38 @@ impl ClientInner {
     }
 }
 
+/// Serializes automatic abort sends for one engine.
+struct AbortWorker {
+    tx: mpsc::UnboundedSender<Vec<String>>,
+    _task: AbortOnDropHandle<()>,
+}
+
+impl AbortWorker {
+    fn spawn(inner: Arc<ClientInner>, engine_id: EngineId) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = inner.handle.clone();
+        let task = AbortOnDropHandle::new(handle.spawn(run_abort_worker(inner, engine_id, rx)));
+        Self { tx, _task: task }
+    }
+}
+
+async fn run_abort_worker(
+    inner: Arc<ClientInner>,
+    engine_id: EngineId,
+    mut rx: mpsc::UnboundedReceiver<Vec<String>>,
+) {
+    while let Some(request_ids) = rx.recv().await {
+        if let Err(error) = inner.do_abort_requests(&engine_id, &request_ids).await {
+            warn!(
+                ?engine_id,
+                ?request_ids,
+                error = %error.as_report(),
+                "failed to auto-abort request streams"
+            );
+        }
+    }
+}
+
 /// Background loop that listens for request IDs to abort and sends abort
 /// messages to the engine. This is used to implement the auto-abort behavior
 /// when a request stream is dropped without being properly terminated.
@@ -499,6 +580,7 @@ pub(crate) async fn run_abort_loop(
     // lone abort is still forwarded promptly.
     const MAX_DRAIN: usize = 1024;
     let mut batch: Vec<AbortRequest> = Vec::new();
+    let mut workers: BTreeMap<EngineId, AbortWorker> = BTreeMap::new();
 
     while abort_rx.recv_many(&mut batch, MAX_DRAIN).await > 0 {
         let mut by_engine: BTreeMap<EngineId, Vec<String>> = BTreeMap::new();
@@ -525,12 +607,14 @@ pub(crate) async fn run_abort_loop(
         }
 
         for (engine_id, request_ids) in by_engine {
-            if let Err(error) = inner.do_abort_requests(&engine_id, &request_ids).await {
+            let worker = workers
+                .entry(engine_id.clone())
+                .or_insert_with(|| AbortWorker::spawn(inner.clone(), engine_id.clone()));
+            if let Err(error) = worker.tx.send(request_ids) {
                 warn!(
                     ?engine_id,
-                    ?request_ids,
-                    error = %error.as_report(),
-                    "failed to auto-abort request streams"
+                    request_ids = ?error.0,
+                    "auto-abort worker already shut down; skipping requests"
                 );
             }
         }
