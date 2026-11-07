@@ -55,7 +55,10 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
-from vllm.model_executor.models.interfaces import requires_raw_input_tokens
+from vllm.model_executor.models.interfaces import (
+    requires_raw_input_tokens,
+    supports_fp32_logits_gather,
+)
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -345,6 +348,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # model_state exists (num_new_sampled_tokens_per_step from ModelState).
         self.sampler: Sampler | None = None
         self.rejection_sampler: RejectionSampler | None = None
+        # Whether the model opts in with SupportsFP32LogitsGather and the
+        # stock samplers are used (see _compute_logits).
+        self.fused_logits_gather = False
         self.batch_sharder: BatchSharder | None = None
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
@@ -534,6 +540,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.vllm_config.watermark_config
                     ),
                 )
+            self.fused_logits_gather = not custom and supports_fp32_logits_gather(
+                self.model
+            )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 self.device,
@@ -1699,6 +1708,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         shard_metadata = None
+        logits_writable = False
         global_input_batch = input_batch
         if self.batch_sharder is not None:
             # Shard the inputs along the batch dimension to sample in parallel
@@ -1719,7 +1729,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = logits[:, : self.vocab_size]
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]
-            logits = self.model_state.compute_sample_logits(sample_hidden_states)
+            logits, logits_writable = self._compute_logits(
+                sample_hidden_states, input_batch
+            )
 
         # A diffusion prefill has no logit rows even when a bitmask row
         # arrived for it.
@@ -1733,6 +1745,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 grammar_output.grammar_bitmask,
             )
 
+        # Only the stock samplers take the keyword (see _compute_logits).
+        sampler_kwargs = {"logits_writable": True} if logits_writable else {}
         sampler_output: SamplerOutput | None
         if input_batch.num_reqs == 0:
             # This rank owns no requests this step. It contributes an
@@ -1740,7 +1754,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampler_output = None
         elif input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             assert self.sampler is not None
-            sampler_output = self.sampler(logits, input_batch)
+            sampler_output = self.sampler(logits, input_batch, **sampler_kwargs)
         else:
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
@@ -1750,6 +1764,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
+                **sampler_kwargs,
             )
 
         if shard_metadata is not None:
@@ -1770,6 +1785,37 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         assert sampler_output is not None
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
+
+    def _compute_logits(
+        self, sample_hidden_states: torch.Tensor, input_batch: InputBatch
+    ) -> tuple[torch.Tensor, bool]:
+        """The target logits of ``sample_hidden_states``, and whether their
+        consumer (the rejection sampler on a step with drafts, the sampler
+        otherwise) may process them in place.
+
+        For a model that opts in (``fused_logits_gather``), they are computed
+        under a forward context whose ``logits_gather_dtype`` has
+        `LogitsProcessor` gather them in one fused pass: in FP32 (exact) when
+        the consumer wants FP32 (see `Sampler.wants_fp32_logits`), which then
+        skips its copy, else in the head's dtype. Other models compute them
+        as on main.
+        """
+        if not self.fused_logits_gather:
+            return self.model_state.compute_sample_logits(sample_hidden_states), False
+        consumer: Sampler | RejectionSampler | None = self.sampler
+        if input_batch.num_draft_tokens > 0 and self.rejection_sampler is not None:
+            consumer = self.rejection_sampler
+        assert consumer is not None
+        fp32 = sample_hidden_states.shape[0] <= get_max_chunk_logits(
+            self.vocab_size
+        ) and consumer.wants_fp32_logits(input_batch.idx_mapping_np)
+        with set_forward_context(
+            None,
+            self.vllm_config,
+            logits_gather_dtype=torch.float32 if fp32 else sample_hidden_states.dtype,
+        ):
+            logits = self.model_state.compute_sample_logits(sample_hidden_states)
+        return logits, fp32
 
     def postprocess_sampled(
         self,
