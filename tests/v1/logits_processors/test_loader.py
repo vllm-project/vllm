@@ -16,8 +16,10 @@ from vllm.v1.sample.logits_processor import _load_logitsprocs_by_fqcns
     [
         "invalid_fqcn_without_colon",
         "invalid:fqcn:with:multiple:colons",
+        ":MyClass",
+        "mod:",
     ],
-    ids=["missing-colon", "too-many-colons"],
+    ids=["missing-colon", "too-many-colons", "empty-module", "empty-class"],
 )
 def test_invalid_fqcn_rejected(fqcn: str):
     with pytest.raises(ValueError, match="Invalid logits processor FQCN"):
