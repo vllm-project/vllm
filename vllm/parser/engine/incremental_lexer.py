@@ -97,6 +97,9 @@ class IncrementalLexer:
         self,
         terminals: list[TerminalDef] | LexerShape,
         content_terminal: str = CONTENT_TERMINAL,
+        *,
+        fence_chars: frozenset[str] = frozenset(),
+        fence_terminal: str = "",
     ) -> None:
         if isinstance(terminals, LexerShape):
             shape = terminals
@@ -115,6 +118,12 @@ class IncrementalLexer:
         self._prefix_set = shape.prefix_set
         self._literals_by_first = shape.literals_by_first
 
+        # Code-fence runs (opt-in). A run of fence characters at least three
+        # long is emitted as one token so the engine can compare the closing
+        # run against the opening length.
+        self._fence_chars = fence_chars
+        self._fence_terminal = fence_terminal
+
     def reset(self) -> None:
         self.buffer = ""
         self._token_counts.clear()
@@ -126,9 +135,14 @@ class IncrementalLexer:
         token_count: int = 0,
     ) -> list[LexToken]:
         char_token_counts = self._char_token_counts(text, token_texts, token_count)
-        if not self.buffer and self._has_only_literals and self._literal_first_chars:
+        fence_chars = self._fence_chars
+        if (
+            not self.buffer
+            and self._has_only_literals
+            and (self._literal_first_chars or fence_chars)
+        ):
             for ch in text:
-                if ch in self._literal_first_chars:
+                if ch in self._literal_first_chars or ch in fence_chars:
                     break
             else:
                 return [LexToken(self.content_terminal, text, sum(char_token_counts))]
@@ -189,11 +203,41 @@ class IncrementalLexer:
         literals_by_first = self._literals_by_first
         prefix_set = self._prefix_set
 
+        fence_chars = self._fence_chars
+        fence_terminal = self._fence_terminal
         while self.buffer:
-            if has_only_literals and first_chars:
+            if fence_chars and self.buffer[0] in fence_chars:
+                fence_char = self.buffer[0]
+                run_len = 1
+                while run_len < len(self.buffer) and self.buffer[run_len] == fence_char:
+                    run_len += 1
+                if run_len == len(self.buffer) and not final:
+                    # The run may still grow into a longer fence; wait.
+                    break
+                if run_len >= 3:
+                    tokens.append(
+                        LexToken(
+                            fence_terminal,
+                            self.buffer[:run_len],
+                            self._pop_token_count(run_len),
+                        )
+                    )
+                else:
+                    # Fewer than three fence characters: inline code.
+                    tokens.append(
+                        LexToken(
+                            content_terminal,
+                            self.buffer[:run_len],
+                            self._pop_token_count(run_len),
+                        )
+                    )
+                self.buffer = self.buffer[run_len:]
+                continue
+
+            if has_only_literals and (first_chars or fence_chars):
                 has_potential = False
                 for ch in self.buffer:
-                    if ch in first_chars:
+                    if ch in first_chars or ch in fence_chars:
                         has_potential = True
                         break
                 if not has_potential:
@@ -274,7 +318,10 @@ class IncrementalLexer:
         buf = self.buffer
         n = len(buf)
         first_chars = self._literal_first_chars
+        fence_chars = self._fence_chars
         for i in range(1, n):
+            if buf[i] in fence_chars:
+                return i
             if buf[i] not in first_chars:
                 continue
             remaining = n - i
