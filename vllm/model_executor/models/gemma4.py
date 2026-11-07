@@ -21,6 +21,7 @@
 from collections.abc import Iterable
 from dataclasses import replace
 from itertools import islice
+from typing import ClassVar
 
 import torch
 from torch import nn
@@ -1424,6 +1425,8 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
 class Gemma4ForCausalLM(
     nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts, SupportsEagle3
 ):
+    is_3d_moe_weight: ClassVar[bool] = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             # Multimodal weights are handled by the multimodal wrapper.
@@ -1456,6 +1459,10 @@ class Gemma4ForCausalLM(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = _get_text_config(vllm_config.model_config.hf_config)
+        # Nested Gemma4 checkpoints only declare architectures at the top level;
+        # the 3D MoE LoRA wrapper reads them from this config.
+        if not config.architectures:
+            config.architectures = ["Gemma4ForCausalLM"]
         quant_config = vllm_config.quant_config
 
         super().__init__()
