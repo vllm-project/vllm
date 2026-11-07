@@ -21,6 +21,16 @@ from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
 
+_YARN_ROPE_PARAMETERS = {
+    "mrope_interleaved": True,
+    "mrope_section": [11, 11, 10],
+    "rope_type": "yarn",
+    "rope_theta": 10_000_000,
+    "partial_rotary_factor": 0.25,
+    "factor": 4.0,
+    "original_max_position_embeddings": 262_144,
+}
+
 
 def _make_hf_config(**kwargs) -> PreTrainedConfig:
     defaults = dict(
@@ -33,9 +43,17 @@ def _make_hf_config(**kwargs) -> PreTrainedConfig:
 
 
 @pytest.mark.cpu_test
-def test_dict_overrides_are_not_forwarded_to_draft():
-    """Dict overrides are target-specific key patches; the draft must get
-    only the architecture-mapping override."""
+def test_non_rope_dict_overrides_are_not_forwarded_to_draft():
+    """Non-rope dict patches stay target-only; the draft keeps arch mapping."""
+    composed = SpeculativeConfig.compose_draft_hf_overrides({"num_hidden_layers": 1})
+    hf_config = composed(_make_hf_config(model_type="deepseek_v3"))
+    assert hf_config.architectures == ["DeepSeekMTPModel"]
+    assert getattr(hf_config, "num_hidden_layers", None) != 1
+
+
+@pytest.mark.cpu_test
+def test_max_position_embeddings_dict_override_stays_target_only():
+    """Independent drafts must keep the max-model-len clamp (#63909 regression)."""
     composed = SpeculativeConfig.compose_draft_hf_overrides(
         {"max_position_embeddings": 1234}
     )
@@ -222,6 +240,61 @@ def test_mtp_stages_are_independent_of_dspark_width():
         _make_speculative_config(
             hf_kwargs, "DeepSeekV4MTPModel", method="mtp", num_speculative_tokens=5
         )
+
+
+@pytest.mark.cpu_test
+def test_dict_yarn_overrides_reach_the_draft_config():
+    """CLI nested YaRN overrides must apply when the draft has text_config."""
+    composed = SpeculativeConfig.compose_draft_hf_overrides(
+        {"text_config": {"rope_parameters": _YARN_ROPE_PARAMETERS}}
+    )
+    nested = PreTrainedConfig(
+        architectures=["LlamaForCausalLM"],
+        model_type="llama",
+        num_hidden_layers=4,
+    )
+    base = PreTrainedConfig(
+        architectures=["LlamaForCausalLM"],
+        model_type="llama",
+        num_hidden_layers=4,
+        text_config=nested,
+    )
+    hf_config = composed(base)
+    text_cfg = getattr(hf_config, "text_config", None)
+    assert text_cfg is not None
+    rope = getattr(text_cfg, "rope_parameters", None)
+    assert rope is not None
+    assert rope["rope_type"] == "yarn"
+    assert rope["factor"] == 4.0
+
+
+@pytest.mark.cpu_test
+def test_nested_overrides_skip_flat_draft_config():
+    """External flat drafters must not get a bare text_config dict."""
+    composed = SpeculativeConfig.compose_draft_hf_overrides(
+        {"text_config": {"rope_parameters": _YARN_ROPE_PARAMETERS}}
+    )
+    hf_config = composed(_make_hf_config(model_type="llama"))
+    # flat llama config has no text_config; nested key must be skipped
+    assert getattr(hf_config, "text_config", None) is None
+
+
+@pytest.mark.cpu_test
+def test_top_level_rope_parameters_replace_on_draft():
+    """Top-level rope keys reach the draft; unrelated keys stay target-only."""
+    composed = SpeculativeConfig.compose_draft_hf_overrides(
+        {
+            "num_hidden_layers": 1,
+            "rope_parameters": _YARN_ROPE_PARAMETERS,
+        }
+    )
+    hf_config = composed(_make_hf_config(model_type="deepseek_v3"))
+    assert hf_config.architectures == ["DeepSeekMTPModel"]
+    assert getattr(hf_config, "num_hidden_layers", None) != 1
+    rope = getattr(hf_config, "rope_parameters", None)
+    assert rope is not None
+    assert rope["rope_type"] == "yarn"
+    assert rope["factor"] == 4.0
 
 
 @pytest.mark.cpu_test
