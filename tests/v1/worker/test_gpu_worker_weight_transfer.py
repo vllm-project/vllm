@@ -62,15 +62,19 @@ class _RecordingEngine:
 
 
 class _RecordingModelRunner:
-    def __init__(self) -> None:
+    def __init__(self, raise_on_reload: bool = False) -> None:
         self.seen_config: VllmConfig | None = None
         self.reset_lora_calls = 0
+        self.raise_on_reload = raise_on_reload
+        self.model = nn.Module()
 
     def reload_weights(self, *args) -> None:
         self.seen_config = get_current_vllm_config()
+        if self.raise_on_reload:
+            raise ValueError("boom")
 
     def get_model(self) -> nn.Module:
-        return nn.Module()
+        return self.model
 
     def reset_lora_state(self) -> None:
         self.reset_lora_calls += 1
@@ -359,15 +363,10 @@ def test_failed_reload_weights_unstages_in_direct_mode(mode, monkeypatch):
     events: list = []
     monkeypatch.setattr(gpu_worker, "abort_direct_reload", _failing_abort(events))
     worker = _make_worker(None)
-    model = nn.Module()
-    monkeypatch.setattr(worker.model_runner, "get_model", lambda: model)
-
-    def fail(*args) -> None:
-        raise ValueError("boom")
-
-    monkeypatch.setattr(worker.model_runner, "reload_weights", fail)
+    worker.model_runner = _RecordingModelRunner(raise_on_reload=True)
     with pytest.raises(ValueError, match="boom"):
         Worker.reload_weights(worker)
+    model = worker.model_runner.model
     assert events == ([("abort", model)] if mode == "direct" else [])
 
 

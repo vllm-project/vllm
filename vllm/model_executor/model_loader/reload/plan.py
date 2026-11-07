@@ -31,6 +31,8 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.utils import storage_view
 
+from .utils import stages_online_quant
+
 from .bake import Copy, Targets, Traced, trace_loads
 from .direct import direct_reload_active, direct_reload_enabled
 from .geometry import (
@@ -184,7 +186,7 @@ def check_plannable(model: torch.nn.Module) -> None:
         parallel = getattr(moe_config, "moe_parallel_config", None)
         if getattr(parallel, "enable_eplb", False):
             raise RuntimeError(f"load plan: EPLB is not supported ({name})")
-        if getattr(getattr(module, "quant_method", None), "uses_meta_device", False):
+        if stages_online_quant(module):
             # staged by `begin`: its loaders buffer the traced tensors
             raise RuntimeError(
                 f"load plan: online quantization is not supported ({name})"

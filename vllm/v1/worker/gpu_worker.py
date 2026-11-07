@@ -1977,9 +1977,8 @@ def init_worker_distributed_environment(
 
 
 def _unstage_aborted_update(model: nn.Module) -> None:
-    """Free what an aborted direct update staged before the lent KV cache is
-    recommitted. Best effort: the next begin unstages again, and the error
-    that aborted the update must not be replaced."""
+    """Free what an aborted direct update staged; best effort, as the next
+    begin unstages again and the aborting error must propagate."""
     if not direct_reload_enabled():
         return
     try:

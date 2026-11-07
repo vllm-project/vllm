@@ -35,6 +35,7 @@ from .layerwise import (
     stage_layer_for_reload,
     unstage_layer,
 )
+from .utils import stages_online_quant
 
 logger = init_logger(__name__)
 
@@ -110,13 +111,11 @@ def _check_supported_modules(model: torch.nn.Module) -> None:
         method = getattr(module, "quant_method", None)
         moe_config = getattr(module, "moe_config", None)
         if (
-            getattr(method, "uses_meta_device", False)
+            stages_online_quant(module)
             and moe_config is not None
             and moe_config.moe_parallel_config.enable_eplb
         ):
-            # not validated: elastic EP replaces the quant method by one that
-            # is not staged (uses_meta_device unset), so BF16 bytes would be
-            # written into the quantized kernel tensors
+            # not validated: elastic EP swaps in a quant method that is not staged
             raise RuntimeError(
                 f"direct reload: online quantization with EPLB is not supported "
                 f"({name})"
@@ -232,8 +231,8 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     """Make every tensor writable by its checkpoint weight loader.
 
     Everything that can refuse the reload is checked first and raises with
-    the model untouched beyond unstaging an aborted update. Once this returns,
-    the model holds checkpoint-layout bytes until a finish succeeds."""
+    the model untouched. Once this returns, the model holds checkpoint-layout
+    bytes until a finish succeeds."""
     if not hasattr(model, "_ckpt_param_names"):
         raise RuntimeError("direct reload: no checkpoint layout was recorded")
     # Unstage what an aborted update left staged: this only restores the
@@ -269,11 +268,7 @@ def abort_direct_reload(model: torch.nn.Module) -> list[torch.nn.Module]:
     their kernel tensors back and drop the checkpoint tensors they buffered.
     The model stays pending; only a new full update repairs it. Returns the
     online-quantized modules."""
-    online = [
-        m
-        for m in model.modules()
-        if getattr(getattr(m, "quant_method", None), "uses_meta_device", False)
-    ]
+    online = [m for m in model.modules() if stages_online_quant(m)]
     for module in online:
         unstage_layer(module)
         # its kernel tensors are processed: restore the guard the abort may

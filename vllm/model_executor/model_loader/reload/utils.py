@@ -14,6 +14,7 @@ __all__ = [
     "get_tensor_load_numel",
     "has_device_tensors",
     "get_info_size",
+    "stages_online_quant",
 ]
 
 
@@ -83,3 +84,9 @@ def get_info_size(info: LayerReloadingInfo) -> int:
         for value in args.arguments.values()
         if isinstance(value, torch.Tensor) and value.device.type not in ("meta", "cpu")
     )
+
+
+def stages_online_quant(module: torch.nn.Module) -> bool:
+    """Whether the module is online-quantized from a checkpoint created on
+    meta, so a reload stages it layerwise."""
+    return getattr(getattr(module, "quant_method", None), "uses_meta_device", False)

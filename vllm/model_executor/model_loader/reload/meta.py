@@ -23,7 +23,8 @@ __all__ = [
 # Modules whose tensors are never moved to, or materialized from, the meta device.
 SKIP_MODULES: set[str] = {"HadamardTransform"}
 
-# Tensors never loaded by a weight loader, so the layerwise trigger ignores them.
+# Tensors never loaded by a weight loader, so the layerwise trigger ignores them,
+# and never moved to, or materialized from, the meta device.
 SKIP_LOAD_TENSORS: set[str] = {
     "_expert_map",
     "expert_mask",
@@ -32,11 +33,6 @@ SKIP_LOAD_TENSORS: set[str] = {
     "expert_local_to_global",
     "e_score_correction_bias",
 }
-
-# Tensors which are never moved to, or materialized from, the meta device.
-# A `bias` is staged like the weight: post-load processing may re-lay it out
-# (Marlin pads and permutes it), so it must be reloaded in checkpoint layout.
-SKIP_TENSORS: set[str] = SKIP_LOAD_TENSORS
 
 
 def to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -106,12 +102,12 @@ def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
         {
             name: sanitize_layer_refs(to_meta_tensor(param), layer)
             for name, param in params.items()
-            if name not in SKIP_TENSORS
+            if name not in SKIP_LOAD_TENSORS
         },
         {
             name: sanitize_layer_refs(to_meta_tensor(buffer), layer)
             for name, buffer in buffers.items()
-            if name not in SKIP_TENSORS
+            if name not in SKIP_LOAD_TENSORS
             and not _is_non_persistent_parameter_alias_buffer(
                 layer, name, buffer, parameter_storage_ptrs
             )
@@ -129,20 +125,21 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     tensor_names = (
         get_layer_tensors(layer).keys() | restore_params.keys() | restore_buffers.keys()
     )
-    # a bias registered after the metadata was recorded (by the model's
-    # load_weights) has no meta copy: it stays live and is loaded in place
-    kept = SKIP_TENSORS | ({"bias"} - restore_params.keys())
+    # a bias is staged like the weight (Marlin re-lays it out), unless the
+    # model's load_weights registered it after the metadata was recorded: with
+    # no meta copy, it stays live and is loaded in place
+    kept = SKIP_LOAD_TENSORS | ({"bias"} - restore_params.keys())
     for name in tensor_names:
         if name not in kept and hasattr(layer, name):
             delattr(layer, name)
 
     for name, param in restore_params.items():
-        if name not in SKIP_TENSORS:
+        if name not in SKIP_LOAD_TENSORS:
             param = restore_layer_refs(param, layer)
             layer.register_parameter(name, param)
 
     for name, buffer in restore_buffers.items():
-        if name not in SKIP_TENSORS:
+        if name not in SKIP_LOAD_TENSORS:
             buffer = restore_layer_refs(buffer, layer)
             layer.register_buffer(name, buffer, persistent=name not in non_persistent)
 
@@ -154,7 +151,7 @@ def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
 
     with info.restore_device:
         for name, tensor in get_layer_tensors(layer).items():
-            if name not in SKIP_TENSORS and tensor.is_meta:
+            if name not in SKIP_LOAD_TENSORS and tensor.is_meta:
                 setattr(layer, name, materialize_meta_tensor(tensor))
 
 

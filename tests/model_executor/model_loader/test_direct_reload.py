@@ -29,7 +29,6 @@ import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import store_params_in_triton
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
 )
@@ -56,7 +55,11 @@ from vllm.model_executor.model_loader.reload.layerwise import (
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.utils import replace_parameter, retire_parameter
+from vllm.model_executor.utils import (
+    refill_derived,
+    replace_parameter,
+    retire_parameter,
+)
 
 _MODEL_CONFIG = SimpleNamespace(
     word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.bfloat16
@@ -122,11 +125,7 @@ def _quantize_int8(layer):  # (g): BF16 checkpoint tensor, int8 kernel tensor
 
 
 def _dequantize_child(layer):  # (g): parent reads the quantized child
-    w = layer.online.weight.float() * layer.online.weight_scale
-    if hasattr(layer, "W"):
-        layer.W.copy_(w)
-    else:
-        layer.W = w
+    refill_derived(layer, "W", layer.online.weight.float() * layer.online.weight_scale)
 
 
 _SHAPES = {
@@ -750,15 +749,11 @@ def _config(**overrides) -> SimpleNamespace:
     fields = dict(
         offload_config=offload,
         model_config=SimpleNamespace(quantization=None),
-        quant_config=None,
         lora_config=None,
         speculative_config=None,
         weight_transfer_config=None,
     )
     return SimpleNamespace(**(fields | overrides))
-
-
-_ONLINE = object.__new__(OnlineQuantizationConfig)
 
 
 @pytest.mark.parametrize(
@@ -804,12 +799,6 @@ _ONLINE = object.__new__(OnlineQuantizationConfig)
             {"model_config": SimpleNamespace(quantization="torchao")},
             "torchao",
         ),
-        ("direct", {"quant_config": _ONLINE}, None),
-        (
-            "direct",
-            {"quant_config": SimpleNamespace(online_quantization_config=_ONLINE)},
-            None,
-        ),
         ("direct", {"lora_config": object()}, "LoRA"),
         (
             "direct",
@@ -829,8 +818,6 @@ _ONLINE = object.__new__(OnlineQuantizationConfig)
         "offload-prefetch",
         "offload-uva",
         "torchao",
-        "online-config",
-        "online-composed",
         "lora",
         "draft-lm-head-quant",
         "sharded-rdt",

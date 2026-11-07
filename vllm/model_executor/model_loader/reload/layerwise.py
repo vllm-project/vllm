@@ -481,14 +481,14 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
 
 
 def _copy_into_kernel_tensor(processed: torch.Tensor, kernel: torch.Tensor) -> None:
-    """Copy a processed tensor into its kernel tensor, then point it at the
-    kernel tensor: what post-load processing built around it (a quant config's
-    scales, a triton_kernels tensor) then reads the tensor that captured CUDA
-    graphs and later kernel-format updates use, and its storage is freed."""
+    """Copy into the kernel tensor, then rebind the processed tensor to it:
+    objects post-load processing built around that tensor object (a quant
+    config's scales) then read the kernel tensor."""
     kernel.data.copy_(processed)
-    if processed is not kernel and (processed.shape, processed.dtype) == (
-        kernel.shape,
-        kernel.dtype,
+    if (
+        processed is not kernel
+        and processed.shape == kernel.shape
+        and processed.dtype == kernel.dtype
     ):
         processed.data = kernel.data
 
