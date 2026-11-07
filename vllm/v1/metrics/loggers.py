@@ -27,6 +27,7 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
+    DEFERRED_REASONS,
     KV_FETCH_STAGES,
     CachingMetrics,
     IterationStats,
@@ -297,8 +298,16 @@ class LoggingStatLogger(StatLoggerBase):
         ]
 
         if self.last_scheduler_stats.num_skipped_waiting_reqs > 0:
-            log_parts.append("Deferred: %d reqs")
+            deferred_by_reason = self.last_scheduler_stats.num_deferred_reqs_by_reason
+            log_parts.append("Deferred: %d reqs (%s)")
             log_args.append(self.last_scheduler_stats.num_skipped_waiting_reqs)
+            log_args.append(
+                ", ".join(
+                    f"{reason} {num_reqs}"
+                    for reason, num_reqs in deferred_by_reason.items()
+                    if num_reqs
+                )
+            )
 
         kv_fetch = self.last_scheduler_stats.num_kv_fetch_reqs_by_stage
         if any(kv_fetch.values()):
@@ -412,6 +421,10 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             total_kv_fetch = self.last_scheduler_stats.num_kv_fetch_reqs_by_stage
             for stage, num_reqs in engine_kv_fetch.items():
                 total_kv_fetch[stage] = total_kv_fetch.get(stage, 0) + num_reqs
+            engine_deferred = last_scheduler_stats.num_deferred_reqs_by_reason
+            total_deferred = self.last_scheduler_stats.num_deferred_reqs_by_reason
+            for reason, num_reqs in engine_deferred.items():
+                total_deferred[reason] = total_deferred.get(reason, 0) + num_reqs
             self.last_scheduler_stats.kv_cache_usage += (
                 last_scheduler_stats.kv_cache_usage
             )
@@ -564,6 +577,26 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             }
             self.gauge_waiting_by_reason[waiting_reason] = create_metric_per_engine(
                 gauge_waiting_by_reason, per_engine_labelvalues_with_reason
+            )
+
+        gauge_deferred_by_reason = self._gauge_cls(
+            name="vllm:num_requests_deferred_by_reason",
+            documentation=(
+                "Number of deferred waiting requests by the constraint deferring "
+                "them. Sum of all reasons equals "
+                "vllm:num_requests_waiting_by_reason{reason='deferred'}."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames + ["reason"],
+        )
+        self.gauge_deferred_by_reason: dict[str, dict[int, Gauge]] = {}
+        for deferred_reason in DEFERRED_REASONS:
+            per_engine_labelvalues_with_reason = {
+                idx: labelvalues + [deferred_reason]
+                for idx, labelvalues in per_engine_labelvalues.items()
+            }
+            self.gauge_deferred_by_reason[deferred_reason] = create_metric_per_engine(
+                gauge_deferred_by_reason, per_engine_labelvalues_with_reason
             )
 
         self.gauge_kv_fetch_by_stage: dict[str, dict[int, Gauge]] = {}
@@ -1158,6 +1191,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_waiting_by_reason[WAITING_REASON_DEFERRED][engine_idx].set(
                 scheduler_stats.num_skipped_waiting_reqs
             )
+            for reason, gauges in self.gauge_deferred_by_reason.items():
+                gauges[engine_idx].set(
+                    scheduler_stats.num_deferred_reqs_by_reason.get(reason, 0)
+                )
             for stage, gauges in self.gauge_kv_fetch_by_stage.items():
                 gauges[engine_idx].set(
                     scheduler_stats.num_kv_fetch_reqs_by_stage.get(stage, 0)

@@ -19,6 +19,7 @@ from vllm.v1.metrics.buckets import (
 )
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
+from vllm.v1.metrics.stats import DEFERRED_REASONS, SchedulerStats
 
 pytestmark = pytest.mark.cpu_test
 
@@ -329,5 +330,31 @@ def test_watermark_requests_counter_registration(with_config: bool):
         PrometheusStatLogger(config)
         names = {m.name for m in prometheus_client.REGISTRY.collect()}
         assert ("vllm:watermark_requests" in names) == with_config
+    finally:
+        unregister_vllm_metrics()
+
+
+def test_deferred_by_reason_gauge_records_breakdown():
+    """Each reason gets its own series, and unreported reasons read zero."""
+    config = build_logger_config(ObservabilityConfig())
+    try:
+        logger = PrometheusStatLogger(config)
+        logger.record(
+            SchedulerStats(
+                num_skipped_waiting_reqs=3,
+                num_deferred_reqs_by_reason={"lora": 2, "blocked": 1},
+            ),
+            None,
+        )
+        values = {
+            sample.labels["reason"]: sample.value
+            for metric in prometheus_client.REGISTRY.collect()
+            if metric.name == "vllm:num_requests_deferred_by_reason"
+            for sample in metric.samples
+        }
+        assert values == {reason: 0.0 for reason in DEFERRED_REASONS} | {
+            "lora": 2.0,
+            "blocked": 1.0,
+        }
     finally:
         unregister_vllm_metrics()
