@@ -19,6 +19,8 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import num_compute_units
 
+from .recurrent_common import l2norm_qk, recurrent_step, sigmoid_gating
+
 
 @triton.jit
 def _gdn_mtp_update_kernel(
@@ -70,25 +72,27 @@ def _gdn_mtp_update_kernel(
 
     p_state = i_hv * V * K + o_v[:, None] * K + o_k[None, :]
     b_h = tl.load(state + src * stride_state_slot + p_state).to(tl.float32)
-    neg_A = -tl.exp(tl.load(A_log + i_hv).to(tl.float32))
-    bias = tl.load(dt_bias + i_hv).to(tl.float32)
+    A_log_val = tl.load(A_log + i_hv).to(tl.float32)
+    dt_bias_val = tl.load(dt_bias + i_hv).to(tl.float32)
     for t in range(num_tokens):
         row = bos + t
         p_qkv = mixed_qkv + row * stride_qkv_row
         b_q = tl.load(p_qkv + i_h * K + o_k).to(tl.float32)
         b_k = tl.load(p_qkv + (H + i_h) * K + o_k).to(tl.float32)
         b_v = tl.load(p_qkv + 2 * H * K + i_hv * V + o_v).to(tl.float32)
-        x = tl.load(a + row * stride_a_row + i_hv).to(tl.float32) + bias
-        decay = tl.exp(neg_A * tl.where(x <= 20.0, tl.log(1 + tl.exp(x)), x))
-        beta = tl.sigmoid(tl.load(b + row * stride_b_row + i_hv).to(tl.float32))
-
-        b_q = b_q * tl.rsqrt(tl.sum(b_q * b_q) + 1e-6) * scale
-        b_k = b_k * tl.rsqrt(tl.sum(b_k * b_k) + 1e-6)
-        b_h *= decay
-        b_v = (b_v - tl.sum(b_h * b_k[None, :], 1)) * beta
-        b_h += b_v[:, None] * b_k[None, :]
+        b_g, b_beta = sigmoid_gating(
+            tl.load(a + row * stride_a_row + i_hv).to(tl.float32),
+            tl.load(b + row * stride_b_row + i_hv).to(tl.float32),
+            A_log_val,
+            dt_bias_val,
+            1.0,
+            20.0,
+        )
+        b_q, b_k = l2norm_qk(b_q, b_k, 0)
+        b_q *= scale
+        b_h, b_o = recurrent_step(b_h, b_q, b_k, b_v, b_g, b_beta, False)
         # Rounded like the unfused path, whose recurrent kernel stores it first.
-        b_o = tl.sum(b_h * b_q[None, :], 1).to(out.dtype.element_ty)
+        b_o = b_o.to(out.dtype.element_ty)
         tl.store(p_out + t * HV * V, b_o)
         b_o = b_o.to(tl.float32)
         tl.store(p_sum_sq + t * HV * NV, tl.sum(b_o * b_o))

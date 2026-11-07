@@ -1288,9 +1288,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE", "1"))
     ),
-    # Select the GDN MTP decode implementation. "cuda" uses the fused decode
-    # kernel where supported and falls back to "triton" otherwise; setting it
-    # explicitly to "cuda" raises when unsupported.
+    # Select the GDN MTP decode implementation. CUDA spec decode defaults to
+    # the shared Triton kernel, which is bitwise identical to the packed decode
+    # path; "cuda" opts into the fused post-conv MTP op, falls back to "triton"
+    # when unsupported, and raises when "cuda" is set explicitly and unsupported.
     "VLLM_GDN_DECODE_KERNEL": env_with_choices(
         "VLLM_GDN_DECODE_KERNEL",
         "cuda",

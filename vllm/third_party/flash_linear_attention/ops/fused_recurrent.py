@@ -10,10 +10,10 @@
 
 import torch
 
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
-from .op import exp, log
+from .recurrent_common import l2norm_qk, recurrent_step
+from .recurrent_decode import gated_delta_rule_decode
 
 
 @triton.heuristics(
@@ -126,27 +126,17 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
 
         if USE_QK_L2NORM_IN_KERNEL:
-            b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
-            b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
+            b_q, b_k = l2norm_qk(b_q, b_k, 0)
         b_q = b_q * scale
-        # [BV, BK]
-        if not IS_KDA:
-            b_g = tl.load(p_g).to(tl.float32)
-            b_h *= exp(b_g)
+        if IS_KDA:
+            b_g = tl.load(p_gk).to(tl.float32)
         else:
-            b_gk = tl.load(p_gk).to(tl.float32)
-            b_h *= exp(b_gk[None, :])
-        # [BV]
-        b_v -= tl.sum(b_h * b_k[None, :], 1)
+            b_g = tl.load(p_g).to(tl.float32)
         if IS_BETA_HEADWISE:
             b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
         else:
             b_beta = tl.load(p_beta).to(tl.float32)
-        b_v *= b_beta
-        # [BV, BK]
-        b_h += b_v[:, None] * b_k[None, :]
-        # [BV]
-        b_o = tl.sum(b_h * b_q[None, :], 1)
+        b_h, b_o = recurrent_step(b_h, b_q, b_k, b_v, b_g, b_beta, IS_KDA)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
         # keep the states for multi-query tokens
@@ -253,94 +243,6 @@ def fused_recurrent_gated_delta_rule_fwd(
     return o, final_state
 
 
-@triton.jit
-def fused_recurrent_gated_delta_rule_packed_decode_kernel(
-    mixed_qkv,
-    a,
-    b,
-    A_log,
-    dt_bias,
-    o,
-    h0,
-    ht,
-    ssm_state_indices,
-    scale,
-    stride_mixed_qkv_tok: tl.constexpr,
-    stride_a_tok: tl.constexpr,
-    stride_b_tok: tl.constexpr,
-    stride_init_state_token: tl.constexpr,
-    stride_final_state_token: tl.constexpr,
-    stride_indices_seq: tl.constexpr,
-    H: tl.constexpr,
-    HV: tl.constexpr,
-    K: tl.constexpr,
-    V: tl.constexpr,
-    BK: tl.constexpr,
-    BV: tl.constexpr,
-    SOFTPLUS_THRESHOLD: tl.constexpr,
-    USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
-    SPLIT_BATCH_HEAD_GRID: tl.constexpr,
-):
-    if SPLIT_BATCH_HEAD_GRID:
-        i_v, i_hv, i_n = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    else:
-        i_v, i_nh = tl.program_id(0), tl.program_id(1)
-        i_n, i_hv = i_nh // HV, i_nh % HV
-    i_h = i_hv // (HV // H)
-
-    o_k = tl.arange(0, BK)
-    o_v = i_v * BV + tl.arange(0, BV)
-    mask_k = o_k < K
-    mask_v = o_v < V
-    mask_h = mask_v[:, None] & mask_k[None, :]
-
-    state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq).to(tl.int64)
-    p_o = o + (i_n * HV + i_hv) * V + o_v
-
-    # Skip if state index is invalid (NULL_BLOCK_ID=0)
-    if state_idx <= 0:
-        zero = tl.zeros([BV], dtype=tl.float32).to(p_o.dtype.element_ty)
-        tl.store(p_o, zero, mask=mask_v)
-        return
-
-    p_h0 = h0 + state_idx * stride_init_state_token
-    p_h0 = p_h0 + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
-    b_h = tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
-
-    p_mixed = mixed_qkv + i_n * stride_mixed_qkv_tok
-    q_off = i_h * K + o_k
-    k_off = (H * K) + i_h * K + o_k
-    v_off = (2 * H * K) + i_hv * V + o_v
-    b_q = tl.load(p_mixed + q_off, mask=mask_k, other=0).to(tl.float32)
-    b_k = tl.load(p_mixed + k_off, mask=mask_k, other=0).to(tl.float32)
-    b_v = tl.load(p_mixed + v_off, mask=mask_v, other=0).to(tl.float32)
-
-    if USE_QK_L2NORM_IN_KERNEL:
-        b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
-        b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
-    b_q = b_q * scale
-
-    a_val = tl.load(a + i_n * stride_a_tok + i_hv).to(tl.float32)
-    b_val = tl.load(b + i_n * stride_b_tok + i_hv).to(tl.float32)
-    A_log_val = tl.load(A_log + i_hv).to(tl.float32)
-    dt_bias_val = tl.load(dt_bias + i_hv).to(tl.float32)
-    x = a_val + dt_bias_val
-    softplus_x = tl.where(x <= SOFTPLUS_THRESHOLD, tl.log(1.0 + tl.exp(x)), x)
-    g_val = -tl.exp(A_log_val) * softplus_x
-    beta_val = tl.sigmoid(b_val)
-
-    b_h *= exp(g_val)
-    b_v -= tl.sum(b_h * b_k[None, :], 1)
-    b_v *= beta_val
-    b_h += b_v[:, None] * b_k[None, :]
-    b_o = tl.sum(b_h * b_q[None, :], 1)
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
-
-    p_ht = ht + state_idx * stride_final_state_token
-    p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
-    tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
-
-
 def fused_recurrent_gated_delta_rule_packed_decode(
     mixed_qkv: torch.Tensor,
     a: torch.Tensor,
@@ -439,69 +341,43 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         raise ValueError(
             f"Packed decode kernel only supports NK=1 (got K={K}, BK={BK})."
         )
-    BV = min(triton.next_power_of_2(V), 32)
-    if (
-        K == V == 128
-        and current_platform.is_cuda()
-        and current_platform.is_device_capability_family(100, device_id=dev.index)
-    ):
-        # Tuned on GB300; validated on GB200 and with 148 SMs.
-        # MRv2 decode warmup/graph capture compiles the reachable BV variants.
-        if B * HV <= 64:
-            BV = 4
-        elif initial_state.dtype == torch.float32:
-            BV = 8
-    elif (
-        K == V == 128
-        and initial_state.dtype == torch.float32
-        and current_platform.is_cuda()
-        and current_platform.is_device_capability(90, device_id=dev.index)
-    ):
-        # Tuned on H200: with an FP32 state BV=4 is fastest at every measured shape.
-        # No BF16-state tile wins everywhere on SM90, so BF16 keeps 32.
-        BV = 4
-    num_stages = 3
-    num_warps = 1
 
+    # q, k and v are consecutive slices of the same packed row, so the fast path
+    # hands the shared kernel three base pointers instead of gathering them into
+    # separate tensors. Nothing else about the launch differs from speculative
+    # verification.
+    q = mixed_qkv
+    k = mixed_qkv[:, H * K :]
+    v = mixed_qkv[:, 2 * H * K :]
     stride_mixed_qkv_tok = mixed_qkv.stride(0)
-    stride_a_tok = a.stride(0)
-    stride_b_tok = b.stride(0)
-    stride_init_state_token = initial_state.stride(0)
-    stride_final_state_token = initial_state.stride(0)
-    stride_indices_seq = ssm_state_indices.stride(0)
-
-    NV = triton.cdiv(V, BV)
-    # CUDA limits grid Y/Z dimensions to 65535.
-    split_batch_head_grid = B * HV > 65535
-    grid = (NV, HV, B) if split_batch_head_grid else (NV, B * HV)
-    fused_recurrent_gated_delta_rule_packed_decode_kernel[grid](
-        mixed_qkv=mixed_qkv,
+    stride_o_tok = out.stride(0)
+    gated_delta_rule_decode(
+        A_log=A_log,
         a=a,
         b=b,
-        A_log=A_log,
         dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
         o=out,
-        h0=initial_state,
-        ht=initial_state,
-        ssm_state_indices=ssm_state_indices,
+        initial_state=initial_state,
+        final_state=initial_state,
         scale=scale,
-        stride_mixed_qkv_tok=stride_mixed_qkv_tok,
-        stride_a_tok=stride_a_tok,
-        stride_b_tok=stride_b_tok,
-        stride_init_state_token=stride_init_state_token,
-        stride_final_state_token=stride_final_state_token,
-        stride_indices_seq=stride_indices_seq,
+        num_seqs=B,
+        num_tokens=1,
         H=H,
         HV=HV,
         K=K,
         V=V,
-        BK=BK,
-        BV=BV,
-        SOFTPLUS_THRESHOLD=20.0,
-        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-        SPLIT_BATCH_HEAD_GRID=split_batch_head_grid,
-        num_warps=num_warps,
-        num_stages=num_stages,
+        cu_seqlens=None,
+        ssm_state_indices=ssm_state_indices,
+        num_accepted_tokens=None,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        inplace_final_state=True,
+        stride_q_tok=stride_mixed_qkv_tok,
+        stride_k_tok=stride_mixed_qkv_tok,
+        stride_v_tok=stride_mixed_qkv_tok,
+        stride_o_tok=stride_o_tok,
     )
     return out, initial_state
 

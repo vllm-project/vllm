@@ -137,6 +137,23 @@ def supports_fused_mtp_decode() -> bool:
     )
 
 
+def uses_shared_gdn_spec_decode_kernel(
+    requested: str,
+    *,
+    spec_decode: bool,
+    explicit_request: bool,
+    is_cuda: bool,
+) -> bool:
+    """Whether speculative decode must use the shared Triton recurrence.
+
+    The CUDA post-conv MTP op uses fast-math intrinsics and warp reductions
+    that the Triton kernel cannot reproduce, so a request advanced alone and
+    the same request inside a verification batch could disagree when logits
+    tie. Only an explicit ``VLLM_GDN_DECODE_KERNEL=cuda`` opts into that op.
+    """
+    return requested == "cuda" and spec_decode and is_cuda and not explicit_request
+
+
 def fused_mtp_decode_impl() -> Callable[..., torch.Tensor]:
     if current_platform.is_rocm():
         return fused_gdn_decode_post_conv_mtp_triton
@@ -866,6 +883,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # returns the out_proj input: `out`, or a pre-quantized activation.
         self._fused_gdn_gated_rms_norm = fused_gdn_gated_rms_norm
         self.gdn_decode_kernel = envs.VLLM_GDN_DECODE_KERNEL.strip().lower()
+        if uses_shared_gdn_spec_decode_kernel(
+            self.gdn_decode_kernel,
+            spec_decode=self.speculative_config is not None,
+            explicit_request="VLLM_GDN_DECODE_KERNEL" in os.environ,
+            is_cuda=current_platform.is_cuda(),
+        ):
+            logger.info_once(
+                "Using the shared Triton GDN decode kernel for spec decode. "
+                "Set VLLM_GDN_DECODE_KERNEL=cuda to use the fused CUDA MTP op."
+            )
+            self.gdn_decode_kernel = "triton"
         if self.gdn_decode_kernel == "cuda" and current_platform.is_cuda_alike():
             reason = self._fused_gdn_decode_unsupported_reason(vllm_config)
             if reason is not None:
