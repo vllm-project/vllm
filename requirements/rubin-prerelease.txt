@@ -1,4 +1,5 @@
-# Public CUDA 13.4 prerelease PyTorch nightly pins for Rubin bring-up.
+# Public CUDA 13.4 (cu134) prerelease PyTorch nightly pins for Rubin bring-up;
+# there are no cu135 wheels yet. The image runs them on its CUDA 13.5 runtime.
 # Installed when INSTALL_RUBIN_PRERELEASE=true (see docker/Dockerfile).
 # TODO(rubin-bringup): delete once Rubin APIs ship in regular PyTorch wheels
 # (vllm-project/vllm#49735).
@@ -9,6 +10,6 @@ torch==2.16.0.dev20261009+cu134
 torchvision==0.30.0.dev20261009+cu134
 torchaudio==2.11.0.dev20261009+cu134
 
-cuda-python==13.4.1
-cuda-bindings==13.4.1
+cuda-python==13.5.0
+cuda-bindings==13.5.0
 nixl==1.5.2
