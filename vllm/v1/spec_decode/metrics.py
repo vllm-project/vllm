@@ -247,6 +247,9 @@ class SpecDecodingProm:
         self.counter_spec_decode_num_accepted_tokens_per_pos: dict[
             int, list[prometheus_client.Counter]
         ] = {}
+        self.counter_spec_decode_scheduled_steps: dict[
+            int, list[prometheus_client.Counter]
+        ] = {}
         if not is_diffusion:
             assert speculative_config is not None
             num_spec_tokens = speculative_config.num_speculative_tokens
@@ -262,6 +265,45 @@ class SpecDecodingProm:
                 ]
                 for idx, lv in per_engine_labelvalues.items()
             }
+
+            k_labelnames = labelnames + ["num_spec_tokens"]
+            scheduled_counter = self._counter_cls(
+                name="vllm:spec_decode_scheduled_steps",
+                documentation=(
+                    "Dynamic-SD scheduler steps that scheduled request work, by "
+                    "the number of draft tokens the schedule requested from the "
+                    "drafter in that step, including 0."
+                ),
+                labelnames=k_labelnames,
+            )
+            self.counter_spec_decode_scheduled_steps = {
+                idx: [
+                    scheduled_counter.labels(*lv, str(k))
+                    for k in range(num_spec_tokens + 1)
+                ]
+                for idx, lv in per_engine_labelvalues.items()
+            }
+
+    def observe_scheduled_k(self, scheduled_k: int, engine_idx: int = 0):
+        """Record the K the dynamic-SD schedule selected for one step.
+
+        K is the draft length requested from the drafter in that step; the
+        drafts are verified in the next step. Only steps that scheduled request
+        work are observations: the schedule is consulted per scheduled batch, so
+        a step that scheduled nothing carries the default K rather than a
+        selected one.
+
+        The per-request spec-decode counters record the drafts a step verifies,
+        which a step that selects K=0 can still do for earlier drafts, so they
+        do not show the K=0 selection; without this counter a schedule that has
+        stopped speculating is indistinguishable from one that is not
+        configured."""
+        if not self.spec_decoding_enabled:
+            return
+        counters = self.counter_spec_decode_scheduled_steps.get(engine_idx)
+        if counters is None or not 0 <= scheduled_k < len(counters):
+            return
+        counters[scheduled_k].inc()
 
     def observe(self, spec_decoding_stats: SpecDecodingStats, engine_idx: int = 0):
         if not self.spec_decoding_enabled:
