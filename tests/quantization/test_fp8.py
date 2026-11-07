@@ -1015,3 +1015,38 @@ def test_kv_cache_dtype_skip_layers(monkeypatch, dist_init, workspace_init):
     for i, layer in enumerate(model.model.decoder.layers):
         expected = "auto" if str(i) in ["0", "2"] else "fp8"
         assert layer.self_attn.attn.kv_cache_dtype == expected
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("out_dtype", [torch.float32, torch.float16])
+def test_dequant_identity_fallback_uses_layer_activation_dtype(out_dtype):
+    """The identity fallback of `get_and_maybe_dequant_weights` feeds the
+    identity to the layer's kernel as an activation, so it must be built in the
+    layer's own dtype; `out_dtype` only describes the returned weights."""
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        get_and_maybe_dequant_weights,
+    )
+
+    seen_dtypes: list[torch.dtype] = []
+
+    class RecordingLinearMethod:
+        def apply(self, layer, x, bias=None):
+            seen_dtypes.append(x.dtype)
+            w = layer.weight.to(x.dtype) * layer.weight_scale.to(x.dtype)
+            return x @ w.t()
+
+    layer = torch.nn.Module()
+    layer.quant_method = RecordingLinearMethod()
+    layer.params_dtype = torch.bfloat16
+    layer.input_size_per_partition = 16
+    layer.weight = torch.nn.Parameter(
+        torch.randn(8, 16).to(torch.float8_e4m3fn), requires_grad=False
+    )
+    layer.weight_scale = torch.nn.Parameter(torch.tensor(0.5), requires_grad=False)
+
+    dequant_weights = get_and_maybe_dequant_weights(layer, out_dtype=out_dtype)
+
+    assert seen_dtypes == [torch.bfloat16]
+    assert dequant_weights.dtype == out_dtype
+    expected = (layer.weight.float() * layer.weight_scale).to(out_dtype)
+    torch.testing.assert_close(dequant_weights, expected, atol=0, rtol=0)
