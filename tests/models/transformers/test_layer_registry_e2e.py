@@ -40,28 +40,36 @@ def tiny_llama_path(tmp_path_factory):
 # Registered names of the layers the backend can
 # currently route to hw-agnostic implementations.
 _COVERED_LAYERS = ("rms_norm", "silu_and_mul")
+# Key under which `_layer_providers` reports the attention backend.
+_ATTN_BACKEND = "attn_backend"
 
 
 def _layer_providers(model) -> dict[str, str]:
     """Map each covered layer type present in the model to the provider its
     implementation came from (``hw_agnostic`` or ``vllm``).
     """
+    from vllm.model_executor.layers.attention import Attention
 
-    def provider_of(module) -> str | None:
-        for cls in type(module).__mro__:
-            if "hw_agnostic.layers" in cls.__module__:
+    def provider_of(cls: type) -> str | None:
+        for base in cls.__mro__:
+            if ".hw_agnostic." in base.__module__:
                 return "hw_agnostic"
-            if ".model_executor.layers." in cls.__module__:
+            if base.__module__.startswith(
+                ("vllm.model_executor.layers.", "vllm.v1.attention.backends.")
+            ):
                 return "vllm"
         return None
 
     providers: dict[str, str] = {}
     for module in model.modules():
-        name = getattr(module, "name", None)
+        if isinstance(module, Attention):
+            name, cls = _ATTN_BACKEND, module.attn_backend
+        else:
+            name, cls = getattr(module, "name", None), type(module)
         if (
-            name in _COVERED_LAYERS
+            name in (*_COVERED_LAYERS, _ATTN_BACKEND)
             and name not in providers
-            and (prov := provider_of(module)) is not None
+            and (prov := provider_of(cls)) is not None
         ):
             providers[name] = prov
     return providers
@@ -98,12 +106,12 @@ def test_hw_agnostic_matches_vllm_end_to_end(monkeypatch, vllm_runner, tiny_llam
 
     monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "0")
     vllm_providers, vllm_outputs = _serve(vllm_runner, tiny_llama_path, prompts)
-    # Both replaceable layers present in a Llama block must be vLLM's here.
-    assert vllm_providers == {"rms_norm": "vllm", "silu_and_mul": "vllm"}
+    # Every replaceable layer present in a Llama block must be vLLM's here.
+    assert vllm_providers == dict.fromkeys((*_COVERED_LAYERS, _ATTN_BACKEND), "vllm")
 
     monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
     hw_providers, hw_outputs = _serve(vllm_runner, tiny_llama_path, prompts)
-    assert hw_providers == {"rms_norm": "hw_agnostic", "silu_and_mul": "hw_agnostic"}
+    assert hw_providers == dict.fromkeys(vllm_providers, "hw_agnostic")
 
     check_logprobs_close(
         outputs_0_lst=vllm_outputs,

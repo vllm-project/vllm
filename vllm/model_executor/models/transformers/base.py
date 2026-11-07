@@ -37,6 +37,7 @@ from transformers.conversion_mapping import (
     get_model_conversion_mapping,
 )
 
+import vllm.envs as envs
 from vllm.compilation.decorators import DynamicArgDims, support_torch_compile
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
@@ -91,6 +92,7 @@ if TYPE_CHECKING:
     from transformers import PreTrainedModel
 
     from vllm.config import VllmConfig
+    from vllm.v1.attention.backend import AttentionBackend
 
 logger = init_logger(__name__)
 
@@ -104,6 +106,23 @@ class PreTrainedModelClasses(NamedTuple):
     decoder: type["PreTrainedModel"]
     encoders: dict[str, type["PreTrainedModel"]]
     """Modality -> encoder class, for each modality that has one."""
+
+
+def _hw_agnostic_attention_backend() -> "type[AttentionBackend]":
+    """The hw-agnostic Triton attention backend, which needs a usable Triton."""
+    from vllm.triton_utils import HAS_TRITON
+
+    if not HAS_TRITON:
+        raise NotImplementedError(
+            "The hw-agnostic attention backend needs Triton, which is not usable "
+            "on this platform. Unset VLLM_USE_HW_AGNOSTIC."
+        )
+    from vllm.model_executor.hw_agnostic.v1.attention.backends.triton_attn import (
+        TritonAttentionBackend,
+    )
+
+    logger.info_once("Using hardware agnostic attention backend TRITON_ATTN")
+    return TritonAttentionBackend
 
 
 class Base(
@@ -694,6 +713,9 @@ class Base(
                 # Handle attention sinks
                 if (sinks := attn_fuser.sinks(attn_module)) is not None:
                     kwargs["sinks"] = sinks
+
+            if attn_cls is Attention and envs.VLLM_USE_HW_AGNOSTIC:
+                kwargs["attn_backend"] = _hw_agnostic_attention_backend()
 
             attn_instance = attn_cls(**kwargs)
 
