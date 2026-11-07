@@ -22,8 +22,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     SlidingWindowSpec,
 )
-from vllm.v1.spec_decode.utils import check_draft_context_window
 from vllm.v1.worker.gpu.attn_utils import init_attn_backend
+from vllm.v1.worker.gpu.spec_decode.utils import check_draft_context_window
 
 TARGET = "NousResearch/Meta-Llama-3.1-8B-Instruct"
 DRAFTER = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"

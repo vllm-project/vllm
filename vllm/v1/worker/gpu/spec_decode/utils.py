@@ -5,15 +5,23 @@ from collections.abc import Iterable
 import numpy as np
 import torch
 
-from vllm.config import LoadConfig, replace
+from vllm.config import LoadConfig, SpeculativeConfig, replace
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 logger = init_logger(__name__)
+
+
+def max_num_tokens_after_draft_slots(
+    max_num_tokens: int, num_reqs: int, max_num_new_slots_per_req: int
+) -> int:
+    """Return the input-token budget after reserving each request's draft slots."""
+    return max_num_tokens - num_reqs * max_num_new_slots_per_req
 
 
 def get_drafter_hidden_states(
@@ -154,3 +162,21 @@ def get_parallel_drafting_token_id(hf_config) -> int:
         " `mask_token_id`, `dspark_noise_token_id`, `pard_token`, or"
         " `ptd_token_id` for parallel drafting."
     )
+
+
+def check_draft_context_window(
+    speculative_config: SpeculativeConfig,
+    attn_layers: dict[str, AttentionLayerBase],
+    draft_layer_names: set[str],
+) -> None:
+    """Raise if `draft_context_window` is set but a draft layer ignores it."""
+    window = speculative_config.draft_context_window
+    if window is None:
+        return
+    for name in sorted(draft_layer_names):
+        if getattr(attn_layers[name], "sliding_window", None) != window:
+            raise ValueError(
+                f"draft_context_window is set but draft layer {name} does "
+                "not apply it. Only drafters built on the Llama EAGLE-3 model "
+                "code support it."
+            )
