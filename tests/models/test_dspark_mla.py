@@ -490,3 +490,84 @@ def test_k3_dspark_mla_kv_cache_spec_groups_with_target_mla():
     groups = _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
     assert len(groups) == 1
     assert len(groups[0].layer_names) == 29
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("mtp_module_name", "target_module_name"),
+    [
+        ("vllm.models.deepseek_v4.amd.mtp", "vllm.models.deepseek_v4.amd.model"),
+        ("vllm.models.deepseek_v4.nvidia.mtp", "vllm.models.deepseek_v4.nvidia.model"),
+        ("vllm.models.deepseek_v4.xpu.mtp", "vllm.models.deepseek_v4.xpu.model"),
+    ],
+    ids=["v4_amd_mtp", "v4_nvidia_mtp", "v4_xpu_mtp"],
+)
+def test_deepseek_v4_mtp_packed_modules_mapping_and_quant_alignment(
+    monkeypatch: pytest.MonkeyPatch,
+    mtp_module_name: str,
+    target_module_name: str,
+):
+    """All DeepSeekV4MTP entry points must reuse DeepseekV4ForCausalLM's
+    packed_modules_mapping and align MTP per-layer quant config entries.
+    """
+    import importlib
+
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        is_layer_skipped,
+    )
+    from vllm.model_executor.model_loader.utils import configure_quant_config
+
+    if not torch.cuda.is_available():
+        monkeypatch.setattr(
+            torch.cuda,
+            "get_device_properties",
+            lambda *args, **kwargs: SimpleNamespace(gcnArchName="gfx942"),
+        )
+
+    mtp_mod = importlib.import_module(mtp_module_name)
+    target_mod = importlib.import_module(target_module_name)
+    mtp_cls = mtp_mod.DeepSeekV4MTP
+    target_cls = target_mod.DeepseekV4ForCausalLM
+
+    assert mtp_cls.packed_modules_mapping == target_cls.packed_modules_mapping
+
+    quant_config = Fp8Config(
+        is_checkpoint_fp8_serialized=True,
+        weight_block_size=[128, 128],
+        ignored_layers=[
+            "model.mtp.0.attn.wq_a",
+            "model.mtp.0.attn.wkv",
+            "model.mtp.0.ffn.shared_experts.w1",
+            "model.mtp.0.ffn.shared_experts.w3",
+        ],
+    )
+    configure_quant_config(quant_config, mtp_cls)
+
+    class DummyPredictor(nn.Module):
+        def __init__(self, *, vllm_config, prefix=""):
+            super().__init__()
+            self.layers = {}
+
+    monkeypatch.setattr(mtp_mod, "DeepSeekV4MultiTokenPredictor", DummyPredictor)
+    if hasattr(mtp_mod, "_use_sequence_parallel"):
+        monkeypatch.setattr(mtp_mod, "_use_sequence_parallel", lambda _: False)
+
+    hf_config = SimpleNamespace(num_hidden_layers=32, num_nextn_predict_layers=1)
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=hf_config),
+        quant_config=quant_config,
+    )
+    mtp = mtp_cls(vllm_config=vllm_config, prefix="model")
+    assert mtp.quant_config is quant_config
+
+    assert is_layer_skipped(
+        prefix="model.layers.32.attn.fused_wqa_wkv",
+        ignored_layers=quant_config.ignored_layers,
+        fused_mapping=quant_config.packed_modules_mapping,
+    )
+    assert is_layer_skipped(
+        prefix="model.layers.32.ffn.shared_experts.gate_up_proj",
+        ignored_layers=quant_config.ignored_layers,
+        fused_mapping=quant_config.packed_modules_mapping,
+    )
