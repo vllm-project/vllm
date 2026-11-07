@@ -285,6 +285,16 @@ def recompute_mrope_positions(
                 <= last_vision_start_token + num_timestamp_tokens + 1
             ):
                 in_the_middle_of_media = True
+            # The previous prefill chunk may also end right after the vision
+            # start token, before any embedding of its media:
+            # | --- prefill 1 ------| ---- prefill 2 ----- |
+            # | TTTTTTTTTTTTTTTTTTTS|VVVVVVVVVVTTTTTTTTTTTT|
+            if (
+                not in_the_middle_of_media
+                and num_computed_tokens == last_vision_start_token + 1
+                and media_mask[num_computed_tokens]
+            ):
+                in_the_middle_of_media = True
 
             if in_the_middle_of_media:
                 mm_embeddings_seen = (

@@ -14,6 +14,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.multimodal.video_prune.evs import compute_mrope_for_media
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -235,3 +236,80 @@ def test_match_qwen3vl_mrope_evs_on(
     )
 
     assert torch.equal(actual_mrope, expected_mrope_masked)
+
+
+def make_image_feature(grid_thw: list[int], offset: int) -> MultiModalFeatureSpec:
+    return MultiModalFeatureSpec(
+        data=MultiModalKwargsItem(
+            {
+                "image_grid_thw": MultiModalFieldElem(
+                    data=torch.tensor(grid_thw),
+                    field=None,  # HACK.
+                ),
+            }
+        ),
+        modality="image",
+        identifier="DUMMY",
+        mm_position=PlaceholderRange(offset=offset, length=grid_thw[1] * grid_thw[2]),
+    )
+
+
+def make_image_embedding(grid_thw: list[int], hidden_size: int = 16) -> torch.Tensor:
+    # Mirrors Qwen3VLForConditionalGeneration._postprocess_image_embeds_evs.
+    positions = compute_mrope_for_media(grid_thw, 1)
+    positions = torch.cat([positions, torch.zeros_like(positions[:, 0:1])], dim=1)
+    embeds = torch.empty((positions.shape[0], hidden_size))
+    return torch.cat([embeds, positions.float()], dim=1)
+
+
+@pytest.mark.parametrize("num_images", [2, 3])
+@pytest.mark.parametrize("split_after_vision_start", [False, True])
+def test_qwen3vl_mrope_evs_images_chunked_prefill(
+    num_images: int, split_after_vision_start: bool
+):
+    """With pruning enabled, image positions are recomputed too. The prefill
+    chunk boundary can land right after an image's vision start token, before
+    any of its embeddings; the next chunk must still find that media."""
+    hf_config = DummyConfig()
+    grid_thw = [1, 4, 3]
+    image_tokens = [IMAGE_TOKEN_ID] * (grid_thw[1] * grid_thw[2])
+
+    input_tokens = [11, 12, 13, 14, 15]
+    for _ in range(num_images):
+        input_tokens += [VISION_START_TOKEN_ID, *image_tokens, VISION_END_TOKEN_ID]
+        input_tokens += [21, 22, 23]
+    vision_starts = [
+        i for i, tok in enumerate(input_tokens) if tok == VISION_START_TOKEN_ID
+    ]
+    mm_features = [make_image_feature(grid_thw, vs + 1) for vs in vision_starts]
+    expected_mrope, _ = Qwen3VLForConditionalGeneration._get_mrope_input_positions(
+        input_tokens=input_tokens,
+        mm_features=mm_features,
+        config=hf_config,
+    )
+
+    def recompute(images: int, mrope_positions, num_computed_tokens: int):
+        _, positions, _ = Qwen3VLForConditionalGeneration._recompute_mrope_positions(
+            input_ids=input_tokens,
+            multimodal_embeddings=[make_image_embedding(grid_thw)] * images,
+            mrope_positions=mrope_positions,
+            num_computed_tokens=num_computed_tokens,
+            vision_start_token_id=hf_config.vision_start_token_id,
+            image_token_id=hf_config.image_token_id,
+            video_token_id=hf_config.video_token_id,
+        )
+        return positions
+
+    # Only the positions up to the first vision start are known up front.
+    known = vision_starts[0] + 1
+    initial_mrope = torch.full_like(expected_mrope, -1)
+    initial_mrope[:, :known] = expected_mrope[:, :known]
+
+    if split_after_vision_start:
+        # First chunk ends right after the second image's vision start token.
+        first_chunk = recompute(1, initial_mrope, 0)
+        actual_mrope = recompute(num_images - 1, first_chunk, vision_starts[1] + 1)
+    else:
+        actual_mrope = recompute(num_images, initial_mrope, 0)
+
+    assert torch.equal(actual_mrope, expected_mrope)
