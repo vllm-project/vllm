@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 import numpy as np
@@ -9,13 +10,17 @@ import pytest
 import torch
 import torch.nn as nn
 from PIL import Image
+from transformers import BatchEncoding
 
 from vllm import envs
 from vllm.config import MultiModalConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 from vllm.model_executor.models.nano_nemotron_vl import (
+    NanoNemotronVLDummyInputsBuilder,
+    NanoNemotronVLImagePixelInputsDynamic,
     NanoNemotronVLMultiModalProcessor,
+    NanoNemotronVLVideoPixelInputs,
     NemotronH_Nano_VL_V2,
 )
 from vllm.multimodal.parse import (
@@ -24,10 +29,12 @@ from vllm.multimodal.parse import (
     VideoProcessorItems,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.processors import nano_nemotron_vl as nemotron_processors
 from vllm.transformers_utils.processors.nano_nemotron_vl import (
     DynamicResolutionImageTiler,
     NanoNemotronVLProcessor,
     _bicubic_resize_and_normalize,
+    cvcuda_bicubic_resize,
 )
 
 # FusedMMInputNorm runs a Triton kernel on GPU platforms, so its inputs must
@@ -202,8 +209,336 @@ def test_nemotron_processor_rejects_partial_normalization():
         )
 
 
+def test_nemotron_processor_device_resize_requires_device_normalization():
+    with pytest.raises(
+        ValueError, match="device_resize requires mm_device_do_normalize"
+    ):
+        NanoNemotronVLProcessor(
+            config=None, tokenizer=None, max_model_len=1024, device_resize=True
+        )
+
+
+class _CharTokenizer:
+    """One token per character: enough for the prompt-length bookkeeping."""
+
+    def encode(self, text: str, **kwargs) -> list[int]:
+        return [ord(c) for c in text]
+
+    def decode(self, ids: list[int], **kwargs) -> str:
+        return "".join(map(chr, ids))
+
+    def __call__(self, text: str | list[str], **kwargs) -> BatchEncoding:
+        if isinstance(text, list):
+            return BatchEncoding({"input_ids": [self.encode(t) for t in text]})
+        return BatchEncoding({"input_ids": self.encode(text)})
+
+
+_NORM_MEAN = [0.485, 0.456, 0.406]
+_NORM_STD = [0.229, 0.224, 0.225]
+
+
+def _make_processor(**kwargs) -> NanoNemotronVLProcessor:
+    config = SimpleNamespace(
+        force_image_size=16,
+        patch_size=4,
+        downsample_ratio=0.5,
+        use_thumbnail=False,
+        norm_mean=_NORM_MEAN,
+        norm_std=_NORM_STD,
+        dtype=torch.bfloat16,
+        vision_config=SimpleNamespace(
+            args={"min_num_patches": 4, "max_num_patches": 64},
+            # As in the Nemotron 3 Nano Omni checkpoints.
+            video_target_num_patches=16,
+            video_maintain_aspect_ratio=True,
+        ),
+        sound_config=None,
+    )
+    return NanoNemotronVLProcessor(
+        config=config, tokenizer=_CharTokenizer(), max_model_len=1024, **kwargs
+    )
+
+
+@pytest.mark.parametrize(
+    ("device_normalize", "cvcuda_available", "device_resize", "expected"),
+    [
+        (True, True, None, True),  # on by default
+        (True, True, False, False),  # opted out
+        (True, False, None, False),  # not CUDA, or no CV-CUDA
+        (False, True, None, False),  # normalizing on the CPU
+    ],
+)
+def test_nemotron_device_resize_is_on_by_default_where_it_can_run(
+    device_normalize: bool,
+    cvcuda_available: bool,
+    device_resize: bool | None,
+    expected: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        nemotron_processors, "_cvcuda_available", lambda: cvcuda_available
+    )
+    kwargs = MultiModalConfig(
+        mm_device_do_normalize=device_normalize
+    ).merge_mm_processor_kwargs({})
+    if device_resize is not None:
+        kwargs["device_resize"] = device_resize
+    assert _make_processor(**kwargs).device_resize is expected
+
+
+def _preprocess(processor: NanoNemotronVLProcessor, modality: str, sources: list):
+    if modality == "image":
+        images = [Image.fromarray(source) for source in sources]
+        text = ["<image>" * len(images) + " Describe."]
+        return processor._preprocess_image(text, images, max_num_tiles=1)
+    videos = [
+        (source, {"fps": 2.0, "frames_indices": list(range(len(source)))})
+        for source in sources
+    ]
+    return processor._preprocess_video(["<video> Describe."], videos)
+
+
+def _sources(modality: str) -> list[np.ndarray]:
+    rng = np.random.default_rng(0)
+    shapes = [(37, 53, 3), (90, 20, 3)] if modality == "image" else [(5, 37, 53, 3)]
+    return [rng.integers(0, 256, shape, dtype=np.uint8) for shape in shapes]
+
+
+@pytest.mark.parametrize("modality", ["image", "video"])
+def test_nemotron_processor_device_resize_sends_source_pixels(
+    modality: str, default_vllm_config
+):
+    device_kwargs = MultiModalConfig(
+        mm_device_do_normalize=True
+    ).merge_mm_processor_kwargs({})
+    sources = _sources(modality)
+    text, inputs = _preprocess(
+        _make_processor(**device_kwargs, device_resize=False), modality, sources
+    )
+    raw_text, raw_inputs = _preprocess(
+        _make_processor(**device_kwargs, device_resize=True), modality, sources
+    )
+
+    # The prompt (and so every token count) and the target sizes are unchanged;
+    # the decoded pixels are sent as they are.
+    assert raw_text == text
+    if modality == "image":
+        resized = inputs.pop("pixel_values_flat")
+        raw = raw_inputs.pop("pixel_values_raw")
+        sizes = raw_inputs["imgs_sizes"]
+        assert raw_inputs == inputs
+    else:
+        resized = [inputs["pixel_values_flat_video"]]
+        raw = raw_inputs["pixel_values_raw_video"]
+        sizes = raw_inputs["video_frame_sizes"].tolist()
+        torch.testing.assert_close(
+            raw_inputs["video_num_patches"], inputs["video_num_patches"]
+        )
+    assert [tuple(size) for size in sizes] == [tuple(r.shape[-2:]) for r in resized]
+    for raw_pixels, source in zip(raw, sources, strict=True):
+        assert raw_pixels.dtype == torch.uint8
+        assert torch.equal(raw_pixels, torch.from_numpy(source))
+
+
+def test_nemotron_device_resize_profiles_a_real_video_resize(default_vllm_config):
+    device_kwargs = MultiModalConfig(
+        mm_device_do_normalize=True
+    ).merge_mm_processor_kwargs({})
+    results = {}
+    for device_resize in (False, True):
+        processor = _make_processor(**device_kwargs, device_resize=device_resize)
+        info = SimpleNamespace(
+            get_dummy_image_size_and_max_tokens=lambda mm_counts: ((16, 16), 4),
+            get_hf_processor=lambda processor=processor: processor,
+            supports_video=True,
+            get_hf_config=lambda: SimpleNamespace(
+                force_image_size=16, patch_size=4, downsample_ratio=0.5
+            ),
+            get_num_frames_with_most_features=lambda seq_len, mm_counts: 4,
+            ctx=SimpleNamespace(
+                get_mm_config=lambda: SimpleNamespace(media_io_kwargs={})
+            ),
+            sound_config=None,
+        )
+        builder = NanoNemotronVLDummyInputsBuilder(info)  # type: ignore[arg-type]
+        videos = cast(list, builder.get_dummy_mm_data(64, {"video": 1}, {})["video"])
+        results[device_resize] = (
+            videos[0][0].shape,
+            processor._preprocess_video(["<video>"], videos),
+        )
+
+    shape, (text, inputs) = results[False]
+    raw_shape, (raw_text, raw_inputs) = results[True]
+    # Without device_resize, profiling frames are already at the target size.
+    assert tuple(inputs["pixel_values_flat_video"].shape[-2:]) == shape[1:3]
+    # With it, they are twice the target, so the profile run includes the
+    # resize on the device; the prompt and token counts are unchanged.
+    assert raw_text == text
+    (frame_size,) = raw_inputs["video_frame_sizes"].tolist()
+    assert raw_shape[1:3] == (2 * frame_size[0], 2 * frame_size[1])
+    assert tuple(frame_size) == shape[1:3]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CV-CUDA needs CUDA")
+@pytest.mark.parametrize("modality", ["image", "video"])
+def test_nemotron_device_resize_rounds_fp32_resize_once(
+    modality: str, default_vllm_config
+):
+    pytest.importorskip("cvcuda")
+    device_kwargs = MultiModalConfig(
+        mm_device_do_normalize=True
+    ).merge_mm_processor_kwargs({})
+    sources = _sources(modality)
+    _, raw_inputs = _preprocess(
+        _make_processor(**device_kwargs, device_resize=True), modality, sources
+    )
+
+    def fp32_resize_rounded(source: np.ndarray, size) -> torch.Tensor:
+        pixels = torch.from_numpy(source).reshape(-1, *source.shape[-3:])
+        resized = torch.nn.functional.interpolate(
+            pixels.permute(0, 3, 1, 2).float(),
+            size=tuple(size),
+            mode="bicubic",
+            align_corners=False,
+            antialias=True,
+        )
+        return resized.round().clamp(0, 255).to(torch.uint8)
+
+    model = _uninitialized_model()
+    nn.Module.__init__(model)
+    model.input_norm = FusedMMInputNorm(_NORM_MEAN, _NORM_STD, 1.0 / 255.0).to(_DEVICE)
+    model.patch_size = 4
+    model.dynamic_resolution = True
+    if modality == "video":
+        raw_inputs["frames_indices"] = torch.tensor(raw_inputs["frames_indices"])
+    parsed = model._parse_and_validate_multimodal_inputs(**raw_inputs)
+    if modality == "image":
+        images = parsed["images"]
+        assert isinstance(images, NanoNemotronVLImagePixelInputsDynamic)
+        pixels = images.pixel_values_flat
+        expected = DynamicResolutionImageTiler.stack(
+            [
+                fp32_resize_rounded(source, size)[0]
+                for source, size in zip(sources, raw_inputs["imgs_sizes"])
+            ],
+            4,
+        )
+    else:
+        videos = parsed["videos"]
+        assert isinstance(videos, NanoNemotronVLVideoPixelInputs)
+        pixels = videos["pixel_values_flat"]
+        expected = fp32_resize_rounded(
+            sources[0], raw_inputs["video_frame_sizes"][0].tolist()
+        )
+        # Chunked uploads give the same pixels as one upload, also without a
+        # resize (reformat only).
+        frames = raw_inputs["pixel_values_raw_video"][0]
+        for size in ((32, 40), tuple(frames.shape[1:3])):
+            torch.testing.assert_close(
+                cvcuda_bicubic_resize(frames, size, _DEVICE, max_chunk_bytes=1),
+                cvcuda_bicubic_resize(frames, size, _DEVICE),
+                rtol=0,
+                atol=0,
+            )
+        torch.testing.assert_close(
+            cvcuda_bicubic_resize(frames, frames.shape[1:3], _DEVICE).cpu(),
+            frames.permute(0, 3, 1, 2),
+            rtol=0,
+            atol=0,
+        )
+
+    # uint8 NCHW, like the CPU path, for FusedMMInputNorm to cast and normalize.
+    # CV-CUDA rounds and clips the FP32 resize once: at most one level off it.
+    # (torch's uint8 CPU resize can be tens of levels off it on upscales.)
+    actual = pixels.cpu()
+    assert actual.dtype == torch.uint8
+    assert actual.shape == expected.shape
+    diff = (actual.int() - expected.int()).abs()
+    assert diff.max() <= 1
+    assert (diff > 0).float().mean() < 1e-3
+
+
+def _non_torch_device_bytes() -> int:
+    torch.accelerator.synchronize()
+    free, total = torch.accelerator.get_memory_info()
+    return total - free - torch.accelerator.memory_reserved()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CV-CUDA needs CUDA")
+def test_nemotron_device_resize_scratch_memory_stays_flat():
+    # CV-CUDA keeps every scratch buffer it allocates and reuses one only for
+    # requests no larger than it. Each video in this sweep (128 frames, two
+    # pixels taller and wider than the last) needs more scratch than the one
+    # before: without the cap and the reserved buffer, each one keeps another
+    # ~0.5 GiB of device memory.
+    pytest.importorskip("cvcuda")
+    frames = torch.randint(0, 256, (128, 716, 716, 3), dtype=torch.uint8)
+    cvcuda_bicubic_resize(frames[:, :686, :686].contiguous(), (512, 512), _DEVICE)
+    before = _non_torch_device_bytes()
+    for side in range(688, 718, 2):
+        video = frames[:, :side, :side].contiguous()
+        cvcuda_bicubic_resize(video, (512, 512), _DEVICE)
+    assert _non_torch_device_bytes() - before < 64 * 1024 * 1024
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CV-CUDA needs CUDA")
+def test_nemotron_device_resize_does_not_wait_for_the_gpu():
+    # CV-CUDA calls cudaDeviceSynchronize for a tensor whose stream it does not
+    # know, which waits for every stream, and cvcuda.clear_cache() waits for
+    # the current one. Only the upload from pageable memory may wait, and only
+    # for the current stream: frames already on the device must not wait at all.
+    pytest.importorskip("cvcuda")
+    frames = torch.randint(0, 256, (8, 360, 640, 3), dtype=torch.uint8)
+    stream, other = torch.cuda.Stream(_DEVICE), torch.cuda.Stream(_DEVICE)
+    with torch.cuda.stream(stream):
+        expected = cvcuda_bicubic_resize(frames, (224, 384), _DEVICE)
+        on_device = frames.to(_DEVICE)
+        for busy, video in ((other, frames), (stream, on_device)):
+            torch.accelerator.synchronize()
+            with torch.cuda.stream(busy):
+                torch.cuda._sleep(1_000_000_000)
+            actual = cvcuda_bicubic_resize(video, (224, 384), _DEVICE)
+            assert not busy.query()
+            torch.accelerator.synchronize()
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def _uninitialized_model() -> NemotronH_Nano_VL_V2:
     return object.__new__(NemotronH_Nano_VL_V2)  # type: ignore[type-abstract]
+
+
+def test_nemotron_device_resize_embeds_videos_of_different_sizes_separately():
+    # Videos that keep their aspect ratio can get different frame sizes, and
+    # one encoder batch can hold several of them.
+    model = _uninitialized_model()
+    nn.Module.__init__(model)
+    seen: list[dict] = []
+
+    def record(**kwargs):
+        seen.append(kwargs)
+        return {}
+
+    model._parse_and_validate_multimodal_inputs = record  # type: ignore[method-assign]
+    frames = [
+        torch.zeros(2, 4, 8, 3, dtype=torch.uint8),
+        torch.zeros(2, 6, 6, 3, dtype=torch.uint8),
+    ]
+    kwargs = dict(
+        pixel_values_raw_video=frames,
+        video_frame_sizes=torch.tensor([[32, 64], [48, 48]]),
+        video_num_patches=torch.tensor([2, 2]),
+        frames_indices=torch.tensor([[0, 1], [0, 1]]),
+        frame_duration_ms=torch.tensor([500, 500]),
+    )
+    model.embed_multimodal(**kwargs)
+    assert [k["video_frame_sizes"].tolist() for k in seen] == [[[32, 64]], [[48, 48]]]
+    assert all(k["pixel_values_raw_video"][0] is f for k, f in zip(seen, frames))
+    assert [k["video_num_patches"].tolist() for k in seen] == [[2], [2]]
+
+    seen.clear()
+    same_size = torch.tensor([[32, 64], [32, 64]])
+    model.embed_multimodal(**{**kwargs, "video_frame_sizes": same_size})
+    assert len(seen) == 1
 
 
 @pytest.mark.parametrize("input_key", ["image_embeds", "video_embeds"])
