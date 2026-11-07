@@ -3,7 +3,7 @@
 """CPU tests for the kpool tail slot mapping (no GPU required).
 
 The kpool tail cache is a 1-block-per-request circular ring addressed by
-``pos % kpool`` (``CircularBufferSpec`` / ``CircularBufferManager``: exactly one block
+``pos % kpool`` (``CircularBufferManager``: exactly one block
 allocated per request, never grown, so only column 0 of its block table is
 ever written; the rest stays zero-initialized).
 
@@ -32,7 +32,8 @@ from vllm.v1.attention.backends.mla.indexer import (
     KpoolTailMetadataBuilder,
     compute_kpool_tail_slot_mapping,
 )
-from vllm.v1.kv_cache_interface import CircularBufferSpec, compute_layout_strides
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
+from vllm.v1.kv_cache_interface import AttentionSpec, compute_layout_strides
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 KPOOL = 4
@@ -40,7 +41,7 @@ KPOOL = 4
 
 def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
     (layout,) = KpoolTailBackend.supported_kv_cache_layouts()
-    spec = CircularBufferSpec(
+    spec = AttentionSpec(
         block_size=KPOOL,
         num_kv_heads=2,
         head_size=128,
@@ -71,11 +72,12 @@ def test_tail_ring_divides_the_attention_block(num_speculative_tokens, ring):
             cache_config=SimpleNamespace(block_size=640),
             index_kpool=KPOOL,
         )
-    spec = cache.get_kv_cache_spec(
+    layer_config = cache.get_kv_cache_config(
         SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
     )
 
-    assert isinstance(spec, CircularBufferSpec) and spec.block_size == ring
+    assert layer_config.manager_cls is CircularBufferManager
+    assert layer_config.spec.block_size == ring
     assert ring >= KPOOL + num_speculative_tokens
     assert 640 % ring == 0
 

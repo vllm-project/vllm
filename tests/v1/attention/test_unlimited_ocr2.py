@@ -300,9 +300,10 @@ def _check_paged_decode_graph(dtype, backend, block_size, rswa, high_cache):
 @pytest.mark.parametrize("block_size", [16, 32])
 def test_rswa_keeps_input_and_bounds_1000_output_tokens(block_size):
     """The existing R-SWA manager recycles output blocks in a bounded pool."""
+    from tests.v1.core.utils import new_kv_cache_group
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.single_type_kv_cache_manager import RSWAManager
-    from vllm.v1.kv_cache_interface import RSWASpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     prefix, window = 1000, 128
     prefix_blocks = (prefix + block_size - 1) // block_size
@@ -310,14 +311,14 @@ def test_rswa_keeps_input_and_bounds_1000_output_tokens(block_size):
     pool = BlockPool(
         num_gpu_blocks=bound + 2, enable_caching=False, hash_block_size=block_size
     )
-    manager = RSWAManager(
-        RSWASpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=128,
-            dtype=torch.bfloat16,
-            rswa_window=window,
+    layer = RSWAManager.layer_config(
+        AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
         ),
+        rswa_window=window,
+    )
+    manager = RSWAManager(
+        new_kv_cache_group(["layer"], layer),
         block_pool=pool,
         enable_caching=False,
         kv_cache_group_id=0,

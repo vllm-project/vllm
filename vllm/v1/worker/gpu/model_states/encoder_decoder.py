@@ -10,7 +10,8 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.utils.torch_utils import PIN_MEMORY
-from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheConfig
+from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroup
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
@@ -125,7 +126,10 @@ class EncoderDecoderModelState(ModelState):
             num_tokens = input_batch.num_tokens
         enc_dec_attn_metadata = EncoderDecoderAttnMetadata(
             self._get_encoder_seq_lens(
-                input_batch.req_ids, attn_groups, for_capture, num_reqs
+                input_batch.req_ids,
+                kv_cache_config.kv_cache_groups,
+                for_capture,
+                num_reqs,
             )
         )
 
@@ -159,7 +163,7 @@ class EncoderDecoderModelState(ModelState):
     def _get_encoder_seq_lens(
         self,
         req_ids: list[str],
-        attn_groups: list[list[AttentionGroup]],
+        kv_cache_groups: list[KVCacheGroup],
         for_capture: bool,
         num_reqs: int,
     ) -> dict[int, tuple[torch.Tensor, np.ndarray]]:
@@ -184,12 +188,8 @@ class EncoderDecoderModelState(ModelState):
         encoder_seq_lens_gpu = self.encoder_seq_lens_gpu[:num_reqs]
 
         seq_lens_by_group: dict[int, tuple[torch.Tensor, np.ndarray]] = {}
-        for kv_cache_group_idx, groups in enumerate(attn_groups):
-            has_cross_attn = any(
-                isinstance(attn_group.kv_cache_spec, CrossAttentionSpec)
-                for attn_group in groups
-            )
-            if has_cross_attn:
+        for kv_cache_group_idx, kv_cache_group in enumerate(kv_cache_groups):
+            if issubclass(kv_cache_group.manager_cls, CrossAttentionManager):
                 seq_lens_by_group[kv_cache_group_idx] = (
                     encoder_seq_lens_gpu,
                     encoder_seq_lens_np,

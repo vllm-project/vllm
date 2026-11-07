@@ -141,14 +141,14 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
         return
 
     from vllm.model_executor.layers.mamba.abstract import MambaBase
+    from vllm.v1.core.kv_cache_utils import is_mamba_align_group, is_mamba_group
     from vllm.v1.kv_cache_interface import MambaSpec
     from vllm.v1.worker.replayssm_utils import ReplaySSMModelContext
 
     use_v2 = config.use_v2_model_runner
     grouped = []
     for group_id, group in enumerate(runner.kv_cache_config.kv_cache_groups):
-        spec = group.kv_cache_spec
-        if not isinstance(spec, MambaSpec):
+        if not is_mamba_group(group):
             continue
         mixers = [
             layer
@@ -161,6 +161,9 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
         ]
         if not mixers:
             continue
+        spec = group.kv_cache_specs[group.layer_names[0]]
+        assert isinstance(spec, MambaSpec)
+        align = is_mamba_align_group(group)
         table = (
             v2_runner.block_tables.input_block_tables[group_id]
             if use_v2
@@ -190,9 +193,10 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
                 mixer._replayssm_ring_start.zero_()
                 mixer._replayssm_prev_num_accepted.zero_()
 
-        context = ReplaySSMModelContext.create(grouped, runner.max_num_reqs)
+        context = ReplaySSMModelContext.create(
+            grouped, runner.max_num_reqs, materialize_prefixes=align
+        )
         device = grouped[0][2].device
-        align = grouped[0][1].mamba_cache_mode == "align"
         block_size = grouped[0][1].block_size
         query_len = (
             v2_runner.decode_query_len if use_v2 else runner.uniform_decode_query_len
