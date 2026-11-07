@@ -241,3 +241,27 @@ default on NVIDIA is `FLASHINFER_MLA_SPARSE_DSV4` on SM12x and
 `FLASHMLA_SPARSE_DSV4` on other supported CUDA architectures.
 
 --8<-- "gen:table-mla-v4-decode"
+
+## Exporting transfer regions from custom storage
+
+A backend can override `KVCacheSpec.get_kv_cache_transfer_regions(kv_cache)` to
+expose named views of its actual per-layer cache. Each region has logical order
+`[blocks, heads, states, content]`; physical strides and storage offsets may
+differ. Region construction must share the registered cache's storage, so
+writes through a returned view update the cache used by attention.
+
+Dense attention exports `{"key": key_view, "value": value_view}`. Content remains
+spec-owned: names do not define a quantization codec or permit consumers to
+reinterpret compressed state as dense K/V. Specs without an override return
+`None`, preserving existing registration behavior.
+
+For `[B, 2, H, 1, N, D]` storage, a producer can export
+`cache[:, 0, :, 0]` and `cache[:, 1, :, 0]`; for `[2, B, H, 1, N, D]`, it can
+export `cache[0, :, :, 0]` and `cache[1, :, :, 0]`. Both produce `[B, H, N, D]`
+regions without copying or merging K/V into one dimension. A connector obtains
+the spec from its existing `KVCacheConfig` and calls this method at registration,
+before normalization. `register_kv_caches` keeps its existing signature.
+
+This export maps native storage to standard regions. TP slicing of those regions
+is a separate operation; it does not replace `slice_for_tp_transfer` in the
+[multi-view connector work](https://github.com/vllm-project/vllm/pull/46387).
