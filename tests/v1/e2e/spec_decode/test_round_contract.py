@@ -67,7 +67,7 @@ def _metric(llm: LLM, name: str) -> float:
     return 0.0
 
 
-def _tuples(outputs) -> list[tuple[list[int], str, object]]:
+def _tuples(outputs) -> list[tuple[list[int], str, Any]]:
     return [
         (list(o.outputs[0].token_ids), o.outputs[0].text, o.outputs[0].logprobs)
         for o in outputs
@@ -77,7 +77,7 @@ def _tuples(outputs) -> list[tuple[list[int], str, object]]:
 def _run(
     model: str,
     speculative_config: dict | None = None,
-    params: SamplingParams = SP,
+    params: SamplingParams | list[SamplingParams] = SP,
     **kwargs,
 ):
     llm = LLM(
@@ -166,8 +166,6 @@ def test_tree_speculator_runs_chains(model, tp, capfd):
     _check(model, got, "tree_runs_chains", **kwargs)
 
 
-# The test backend reads the batch layout on the host, so attention runs
-# eagerly: piecewise CUDA graphs at most.
 _TREE_MODES: dict[str, dict[str, Any]] = {
     "eager": {"enforce_eager": True},
     "piecewise": {"compilation_config": {"cudagraph_mode": "PIECEWISE"}},
@@ -203,6 +201,63 @@ def test_tree_speculator_samples_trees(capfd):
     assert LOWERED not in out + err
     assert drafted > 0 and acceptance > 1
     assert all(tokens for tokens, _, _ in got)
+
+
+# FULL CUDA graphs of one shape: 4 requests of K + 1 rows. Requests end at
+# different lengths, so the later verify batches are padded to it.
+_ONE_FULL_SHAPE = {
+    "cudagraph_mode": "FULL_DECODE_ONLY",
+    "cudagraph_capture_sizes": [4 * (NGRAM["num_speculative_tokens"] + 1)],
+}
+_STAGGERED = [
+    SamplingParams(max_tokens=n, temperature=0, logprobs=NUM_LOGPROBS)
+    for n in (48, 40, 32, 24)
+]
+# float32, but TRITON_ATTN's dots round to TF32 and with decode CUDA graphs
+# it picks its split-softmax kernel by capture size, so the graph and no-graph
+# runs differ in logprob by up to 8e-3 here. A stale tree changes tokens.
+LOGPROB_ATOL = 3e-2
+
+
+def test_tree_replays_one_full_cudagraph(capfd):
+    """One captured FULL CUDA graph replays different trees: the speculator
+    cycles two trees and a chain with the same rows through the graph of the
+    4-request verify batch, then padded batches as requests end. Tokens and
+    logprobs match the run without CUDA graphs, so nothing of the tree
+    (parents, ancestor mask, KV commit) is frozen at capture. Steps with a
+    prefill run without the graph."""
+    from vllm_add_test_speculators import EAGER_UNIFORM_VERIFY, PLANNED, UNIFORM_VERIFY
+
+    config = {"method": "test_ngram_tree_cycle", **NGRAM}
+    kwargs: dict[str, Any] = {
+        "attention_config": {"backend": "CUSTOM"},
+        "dtype": "float32",
+        "max_num_seqs": len(PROMPTS),
+    }
+    no_graphs = {"cudagraph_mode": "NONE"}
+    ref, _, _ = _run(DENSE, config, _STAGGERED, compilation_config=no_graphs, **kwargs)
+    capfd.readouterr()
+    kwargs["compilation_config"] = _ONE_FULL_SHAPE
+    got, drafted, acceptance = _run(DENSE, config, _STAGGERED, **kwargs)
+    out, err = capfd.readouterr()
+    assert LOWERED not in out + err
+    assert drafted > 0 and acceptance > 1
+    # Each topology replayed the graph: a step built but not run in Python.
+    for topology in ("sibling_of_first", "sibling_of_second", "chain"):
+        assert f"{PLANNED} {topology}" in out + err
+        built = (out + err).count(f"{UNIFORM_VERIFY} {topology}\n")
+        ran = (out + err).count(f"{EAGER_UNIFORM_VERIFY} {topology}\n")
+        print(f"{topology}: {built - ran} of {built} uniform steps replayed")
+        assert built > ran, topology
+    assert [tokens for tokens, _, _ in got] == [tokens for tokens, _, _ in ref]
+    diffs = [
+        abs(step[token_id].logprob - want[token_id].logprob)
+        for (_, _, ref_logprobs), (_, _, logprobs) in zip(ref, got)
+        for want, step in zip(ref_logprobs, logprobs)
+        for token_id in want.keys() & step.keys()
+    ]
+    print(f"max |logprob diff| to no graphs over {len(diffs)}: {max(diffs):.2e}")
+    assert max(diffs) <= LOGPROB_ATOL
 
 
 async def _generate(engine: AsyncLLM, index: int, prompt: str):

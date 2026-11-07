@@ -56,28 +56,32 @@ def walk_tree(plan: VerifyPlan, target: TargetTokens, width: int) -> AcceptResul
     return AcceptResult(path=path, path_len=path_len, sampled=sampled)
 
 
-def tree_ancestors(
-    parents: torch.Tensor, query_start_loc: torch.Tensor
-) -> list[torch.Tensor | None]:
-    """Per request, ``[n, n]`` bool over its ``n`` query rows: row ``i`` sees
-    row ``j`` when ``j`` is ``i`` or an ancestor along ``parents`` (rows of the
-    query, -1 for the first). None for a request whose rows form a chain, which
-    attends causally."""
-    # A readable reference, not a fast path: it walks the tree on the host.
-    with gpu_sync_allowed():
-        bounds, host_parents = query_start_loc.tolist(), parents.tolist()
-    masks: list[torch.Tensor | None] = []
-    for start, end in zip(bounds[:-1], bounds[1:]):
-        local = host_parents[start:end]
-        if local == list(range(-1, end - start - 1)):
-            masks.append(None)
-            continue
-        sees = torch.eye(end - start, dtype=torch.bool, device=parents.device)
-        for row, parent in enumerate(local):
-            if parent >= 0:
-                sees[row] |= sees[parent]
-        masks.append(sees)
-    return masks
+def tree_window(
+    parents: torch.Tensor, query_start_loc: torch.Tensor, width: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The last ``width`` query rows of each request: ``[R, W]`` token indices,
+    ``[R, W]`` bool whether the column is a row of the request's query, and
+    ``[R, W, W]`` bool: column ``i`` sees column ``j`` when ``j`` is ``i``, an
+    ancestor along ``parents`` (rows of the query, -1 for the first) or before
+    the query. Static shapes and no host reads, so a CUDA graph can capture it
+    and still read each batch's parents."""
+    num_reqs = query_start_loc.shape[0] - 1
+    cols = torch.arange(width, device=parents.device)
+    end = query_start_loc[1:].long()
+    # Column of the query's first row: columns before it are context.
+    first = (width - (end - query_start_loc[:-1].long()))[:, None]
+    tokens = end[:, None] - width + cols
+    valid = cols >= first
+    # The parent's column; negative when it is before the window, so visible.
+    parent = parents[tokens.clamp(min=0)].long() + first
+    parent = torch.where(valid, parent, -1)
+    sees = torch.eye(width, dtype=torch.bool, device=parents.device)
+    sees = sees.repeat(num_reqs, 1, 1) | (cols < first)[:, None, :]
+    node = parent
+    for _ in range(width - 1):
+        sees |= cols == node[..., None]
+        node = torch.where(node >= 0, parent.gather(1, node.clamp(min=0)), -1)
+    return tokens, valid, sees
 
 
 # Caches copy as integers of their element size (fp8 has no index_put on CPU).

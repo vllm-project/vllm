@@ -15,7 +15,7 @@ from vllm.v1.worker.gpu.spec_decode.round import (
     VerifyPlan,
 )
 
-from . import OFF_CHAIN
+from . import OFF_CHAIN, PLANNED, VerifySteps
 from .reference import walk_tree
 
 
@@ -53,13 +53,7 @@ class NgramTreeSpeculator(NgramGPUSpeculator):
         # Row i holds draft i - 1 (row 0, the root, is ignored).
         src = np.tile(np.arange(-1, num_cols - 1), (num_reqs, 1)).clip(min=0)
         alt = np.zeros((num_reqs, num_cols), dtype=np.int64)
-        tree = rows >= 4
-        # Rows: root, d1, sibling of d1, d2 (child of d1), d3, ...
-        parent[tree, 2] = 0
-        parent[tree, 3] = 1
-        src[tree, 2] = 0
-        src[tree, 3:] -= 1
-        alt[tree, 2] = 1
+        tree = self._branch(rows >= 4, parent, src, alt)
         drafts = self.req_states.draft_tokens[inputs.idx_mapping]
         src_gpu = async_tensor_h2d(src, self.device)
         src_gpu = src_gpu.clamp(max=drafts.shape[1] - 1)
@@ -81,6 +75,19 @@ class NgramTreeSpeculator(NgramGPUSpeculator):
             parent=self._parent[:num_reqs], tokens=self._tokens[:num_reqs]
         )
 
+    def _branch(
+        self, tree: np.ndarray, parent: np.ndarray, src: np.ndarray, alt: np.ndarray
+    ) -> np.ndarray:
+        """Turn the chains of the ``tree`` requests into trees, in place; return
+        the requests whose second draft's row follows a sibling of the first."""
+        # Rows: root, d1, sibling of d1, d2 (child of d1), d3, ...
+        parent[tree, 2] = 0
+        parent[tree, 3] = 1
+        src[tree, 2] = 0
+        src[tree, 3:] -= 1
+        alt[tree, 2] = 1
+        return tree
+
     def _check_skip(self, slots: torch.Tensor) -> None:
         if self._printed:
             return
@@ -96,3 +103,42 @@ class NgramTreeSpeculator(NgramGPUSpeculator):
         if hit_any:
             print(OFF_CHAIN, flush=True)
             self._printed = True
+
+
+class NgramTreeCycleSpeculator(NgramTreeSpeculator):
+    """Cycles the verify plan of each step through two trees and a chain with
+    the same rows, so different topologies replay one captured batch shape:
+    ``NgramTreeSpeculator``'s tree, a tree whose second draft gets a sibling
+    holding another token, and no plan (the runner's chain). Prints ``PLANNED``
+    and the topology the first time it plans each, and records the step's
+    topology in ``VerifySteps``."""
+
+    _TOPOLOGIES = ("sibling_of_first", "sibling_of_second", "chain")
+    _steps = 0
+    _planned: frozenset[str] = frozenset()
+
+    def plan(self, inputs: PlanInputs) -> VerifyPlan | None:
+        if inputs.chain_only:
+            VerifySteps.topology = "chain_only"
+            return None
+        self._topology = self._TOPOLOGIES[self._steps % len(self._TOPOLOGIES)]
+        VerifySteps.topology = self._topology
+        self._steps += 1
+        if self._topology not in self._planned:
+            print(f"{PLANNED} {self._topology}", flush=True)
+            self._planned |= {self._topology}
+        if self._topology == "chain":
+            return None
+        return super().plan(inputs)
+
+    def _branch(
+        self, tree: np.ndarray, parent: np.ndarray, src: np.ndarray, alt: np.ndarray
+    ) -> np.ndarray:
+        if self._topology == "sibling_of_first":
+            return super()._branch(tree, parent, src, alt)
+        # Rows: root, d1, d2, sibling of d2, d3, ...
+        parent[tree, 3] = 1
+        src[tree, 3] = 1
+        src[tree, 4:] -= 1
+        alt[tree, 3] = 1
+        return np.zeros_like(tree)
