@@ -1732,7 +1732,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/torch_bindings.cpp"
     ${VLLM_SKINNY_SRC}
     "csrc/rocm/attention_dispatch.cu"
-    ${VLLM_ATTENTION_PAGED_ATTN_SRC})
+    ${VLLM_ATTENTION_PAGED_ATTN_SRC}
+    "csrc/flashmla/fused_norm_rope_attn_rope_cast_fwd_rocm.cu")
 
   # Compress the offloaded device binaries. The 9-arch release build packs
   # ~2 GiB of .hip_fatbin into _rocm_C.abi3.so, which pushes the module past

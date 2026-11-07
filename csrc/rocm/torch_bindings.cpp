@@ -82,6 +82,35 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
 #endif
 
+  rocm_ops.def(
+      "fused_norm_rope_attn_rope_cast_fwd(Tensor q, Tensor kv, Tensor indices, "
+      "Tensor? topk_length, Tensor? attn_sink, float sm_scale, Tensor "
+      "positions, "
+      "Tensor cos_sin_cache, bool enable_q_norm, float rms_norm_eps, "
+      "bool apply_q_rope, Tensor(a!) out, Tensor(b!) out_scale) -> ()");
+  rocm_ops.impl("fused_norm_rope_attn_rope_cast_fwd", torch::kCUDA,
+                &fused_norm_rope_attn_rope_cast_fwd_rocm);
+
+  rocm_ops.def(
+      "fused_norm_rope_attn_rope_cast_prefill(Tensor q, Tensor main_cache, "
+      "Tensor main_table, Tensor? extra_cache, Tensor? extra_table, Tensor "
+      "topk, "
+      "Tensor query_start_loc, Tensor seq_lens, Tensor gather_lens, "
+      "int window_size, int compress_ratio, Tensor? attn_sink, float sm_scale, "
+      "Tensor positions, Tensor cos_sin_cache, bool main_use_fnuz, "
+      "Tensor(a!) out, Tensor(b!) out_scale) -> ()");
+  rocm_ops.impl("fused_norm_rope_attn_rope_cast_prefill", torch::kCUDA,
+                &fused_norm_rope_attn_rope_cast_prefill_rocm);
+
+  rocm_ops.def(
+      "fused_norm_rope_attn_rope_cast_decode(Tensor q, Tensor main_cache, "
+      "Tensor main_indices, Tensor main_indptr, Tensor? extra_cache, "
+      "Tensor? extra_indices, Tensor? extra_indptr, Tensor? attn_sink, "
+      "float sm_scale, Tensor positions, Tensor cos_sin_cache, "
+      "bool main_use_fnuz, Tensor(a!) out, Tensor(b!) out_scale) -> ()");
+  rocm_ops.impl("fused_norm_rope_attn_rope_cast_decode", torch::kCUDA,
+                &fused_norm_rope_attn_rope_cast_decode_rocm);
+
   // Custom attention op
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.

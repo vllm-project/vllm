@@ -1481,6 +1481,366 @@ def _random_cos_sin_cache(max_pos: int, device: torch.device) -> torch.Tensor:
 
 
 @requires_gfx950
+@pytest.mark.parametrize("enable_q_norm", [False, True])
+@pytest.mark.parametrize("apply_q_rope", [False, True])
+@pytest.mark.parametrize("optional_metadata", [False, True])
+@pytest.mark.parametrize("index_repeats", [1, 33])
+@pytest.mark.parametrize("heads", [8, 32])
+@torch.inference_mode()
+def test_hip_mega_prefill_mxfp8_output(
+    enable_q_norm: bool,
+    apply_q_rope: bool,
+    optional_metadata: bool,
+    index_repeats: int,
+    heads: int,
+) -> None:
+    """Fused sparse prefill honors masks and writes only its MXFP8 row views."""
+    device = torch.device("cuda")
+    torch.manual_seed(21)
+    tokens, width = 3, heads * HEAD_DIM
+    q = torch.randn(tokens, heads, HEAD_DIM + 16, device=device).bfloat16()
+    q = q[..., :HEAD_DIM]
+    kv = torch.randn(6, 1, HEAD_DIM + 16, device=device).bfloat16() * 0.25
+    kv = kv[..., :HEAD_DIM]
+    indices = torch.tensor(
+        [[-1, -1, -1, -1, -1], [0, -1, 3, 99, 5], [1, 4, 2, 3, 1]],
+        dtype=torch.int32,
+        device=device,
+    )
+    indices = indices.repeat(1, index_repeats)
+    lengths = (
+        None
+        if optional_metadata
+        else torch.tensor([0, indices.shape[1], 2], dtype=torch.int32, device=device)
+    )
+    sink = None if optional_metadata else torch.linspace(-1, 1, heads, device=device)
+    positions = torch.tensor(
+        [3, 8, 9], dtype=torch.int32 if apply_q_rope else torch.int64, device=device
+    )
+    cos_sin = _random_cos_sin_cache(16, device)
+    q_ref = q.float()
+    if enable_q_norm:
+        q_ref *= torch.rsqrt(q_ref.square().mean(dim=-1, keepdim=True) + 1e-6)
+    cos, sin = cos_sin[positions.long(), None].chunk(2, dim=-1)
+    if apply_q_rope:
+        even = q_ref[..., NOPE_HEAD_DIM::2].clone()
+        odd = q_ref[..., NOPE_HEAD_DIM + 1 :: 2].clone()
+        q_ref[..., NOPE_HEAD_DIM::2] = even * cos - odd * sin
+        q_ref[..., NOPE_HEAD_DIM + 1 :: 2] = odd * cos + even * sin
+    limits = [indices.shape[1]] * tokens if lengths is None else lengths.cpu().tolist()
+    rows = [
+        [slot for slot in row[:limit] if 0 <= slot < kv.shape[0]]
+        for row, limit in zip(indices.cpu().tolist(), limits)
+    ]
+    ref = _ref_sparse_prefill_ragged(
+        q_ref.bfloat16(), kv[:, 0], rows, HEAD_DIM**-0.5, sink
+    ).float()
+    even = ref[..., NOPE_HEAD_DIM::2].clone()
+    odd = ref[..., NOPE_HEAD_DIM + 1 :: 2].clone()
+    ref[..., NOPE_HEAD_DIM::2] = even * cos + odd * sin
+    ref[..., NOPE_HEAD_DIM + 1 :: 2] = odd * cos - even * sin
+
+    data = torch.full(
+        (tokens + 2, width + 16), 1.0, dtype=torch.float8_e4m3fn, device=device
+    )
+    scale = torch.full(
+        (tokens + 2, width // 32 + 4), 17, dtype=torch.uint8, device=device
+    )
+    out_data, out_scale = data[1:-1, :width], scale[1:-1, : width // 32]
+    torch.ops._rocm_C.fused_norm_rope_attn_rope_cast_fwd(
+        q,
+        kv,
+        indices,
+        lengths,
+        sink,
+        HEAD_DIM**-0.5,
+        positions,
+        cos_sin,
+        enable_q_norm,
+        1e-6,
+        apply_q_rope,
+        out_data,
+        out_scale,
+    )
+    torch.testing.assert_close(
+        _mxfp8_dequant(out_data, out_scale), ref.flatten(1), atol=3e-3, rtol=0.08
+    )
+    assert torch.count_nonzero(out_data[0].float()) == 0
+    assert torch.all(data[[0, -1]].float() == 1)
+    assert torch.all(data[:, width:].float() == 1)
+    assert torch.all(scale[[0, -1]] == 17)
+    assert torch.all(scale[:, width // 32 :] == 17)
+
+
+@requires_gfx950
+@pytest.mark.parametrize("heads", [8, 32])
+@pytest.mark.parametrize("request_repeats", [1, 103])
+@pytest.mark.parametrize("cache_padding", [0, 2])
+@pytest.mark.parametrize("with_extra", [False, True])
+@pytest.mark.parametrize("main_use_fnuz", [False, True])
+@pytest.mark.parametrize("with_sink", [False, True])
+@torch.inference_mode()
+def test_hip_mega_paged_prefill_mxfp8_output(
+    heads: int,
+    request_repeats: int,
+    cache_padding: int,
+    with_extra: bool,
+    main_use_fnuz: bool,
+    with_sink: bool,
+) -> None:
+    """Fused prefill respects request boundaries, causal top-k and SWA replay."""
+    device = torch.device("cuda")
+    torch.manual_seed(23)
+    tokens, width = 5, heads * HEAD_DIM
+    q = torch.randn(tokens, heads, HEAD_DIM + 16, device=device).bfloat16()
+    q = q[..., :HEAD_DIM]
+    main = _pack_fp8_ds_mla_cache(
+        torch.randn(24, HEAD_DIM, device=device).bfloat16() * 0.25, 4, False
+    )
+    if main_use_fnuz:
+        cpu = main.cpu().flatten(1)
+        payload = cpu[:, : 4 * 576].reshape(6, 4, 576)[..., :448]
+        values = payload.contiguous().view(torch.float8_e4m3fn).float() * 0.5
+        payload.copy_(values.to(torch.float8_e4m3fnuz).view(torch.uint8))
+        cpu[:, 4 * 576 :].reshape(6, 4, 8)[..., :7] += 1
+        main.copy_(cpu.reshape_as(main))
+    extra = (
+        _pack_fp8_ds_mla_cache(
+            torch.randn(12, HEAD_DIM, device=device).bfloat16() * 0.25, 2, False
+        )
+        if with_extra
+        else None
+    )
+    main_pages = [[4, 1, 5], [5, 0, 1], [2, 0, 3]]
+    extra_pages = [[3, 4, 1], [2, 0, 1], [5, 1, 4]]
+    candidates = [
+        [0, -1, 1, 0, 1],
+        [1, 0, 99, -1, 0],
+        [0, 2, -1, 99, 1],
+        [1, 0, 4, 2, -1],
+        [-1, -1, -1, -1, -1],
+    ]
+    topk = torch.tensor(candidates, dtype=torch.int32, device=device)
+    lengths, gathers, request_ids = [5, 0, 10], [2, 0, 3], [0, 0, 2, 2, 2]
+    logical_positions = [3, 4, 7, 8, 9]
+    main_rows, extra_rows = [], []
+    for t, (req, pos) in enumerate(zip(request_ids, logical_positions)):
+        start = max(pos - 3, 0, lengths[req] - gathers[req])
+        main_rows.append(
+            [main_pages[req][i // 4] * 4 + i % 4 for i in range(start, pos + 1)]
+        )
+        selected = candidates[t][: min((pos + 1) // 2, len(candidates[t]))]
+        extra_rows.append(
+            [
+                extra_pages[req][i // 2] * 2 + i % 2
+                for i in selected
+                if 0 <= i < lengths[req] // 2
+            ]
+        )
+    sink = torch.linspace(-1, 1, heads, device=device) if with_sink else None
+    positions = torch.tensor(
+        [3, 4, 7, 8, 9], device=device, dtype=torch.int32 if with_sink else torch.int64
+    )
+    cos_sin = _random_cos_sin_cache(16, device)
+    ref = (
+        _ref_sparse_decode_ragged(
+            q,
+            main,
+            main_rows,
+            HEAD_DIM**-0.5,
+            sink,
+            4,
+            extra,
+            extra_rows if with_extra else None,
+            main_use_fnuz,
+            extra_block_size=2,
+        )
+        .bfloat16()
+        .float()
+    )
+    cos, sin = cos_sin[positions.long(), None].chunk(2, dim=-1)
+    even, odd = ref[..., 448::2].clone(), ref[..., 449::2].clone()
+    ref[..., 448::2] = even * cos + odd * sin
+    ref[..., 449::2] = odd * cos - even * sin
+
+    # Cross the CTA threshold to exercise both KV tile sizes.
+    if request_repeats > 1:
+        q = q.repeat(request_repeats, 1, 1)
+        positions = positions.repeat(request_repeats)
+        topk = topk.repeat(request_repeats, 1)
+        ref = ref.repeat(request_repeats, 1, 1)
+    tokens *= request_repeats
+    main_pages *= request_repeats
+    extra_pages *= request_repeats
+    lengths *= request_repeats
+    gathers *= request_repeats
+
+    # Keep gaps between pages, metadata rows and output rows.
+    page_stride = 4 * 584 + cache_padding
+    storage = torch.zeros(
+        12 * page_stride + cache_padding, dtype=torch.uint8, device=device
+    )
+    padded_cache = storage.as_strided(
+        (12, 4, 584), (page_stride, 584, 1), storage_offset=cache_padding
+    )
+    padded_cache[::2].copy_(main)
+    tables = torch.tensor(
+        [row + [-1] for row in main_pages], device=device, dtype=torch.int32
+    )[:, :3]
+    extra_table = (
+        torch.tensor(extra_pages, device=device, dtype=torch.int32)
+        if with_extra
+        else None
+    )
+    starts = torch.tensor(
+        [19 + 5 * i + offset for i in range(request_repeats) for offset in (0, 2, 2)]
+        + [19 + tokens],
+        device=device,
+        dtype=torch.int32,
+    )
+    seq_lens = torch.tensor(lengths, device=device, dtype=torch.int32)
+    gather_lens = torch.tensor(gathers, device=device, dtype=torch.int32)
+    data = torch.full(
+        (tokens + 2, width + 16), 1.0, dtype=torch.float8_e4m3fn, device=device
+    )
+    scales = torch.full(
+        (tokens + 2, width // 32 + 4), 17, dtype=torch.uint8, device=device
+    )
+    out, out_scale = data[1:-1, :width], scales[1:-1, : width // 32]
+
+    def run():
+        torch.ops._rocm_C.fused_norm_rope_attn_rope_cast_prefill(
+            q,
+            padded_cache[::2],
+            tables,
+            extra,
+            extra_table,
+            topk,
+            starts,
+            seq_lens,
+            gather_lens,
+            4,
+            2 if with_extra else 0,
+            sink,
+            HEAD_DIM**-0.5,
+            positions,
+            cos_sin,
+            main_use_fnuz,
+            out,
+            out_scale,
+        )
+
+    run()
+    torch.testing.assert_close(
+        _mxfp8_dequant(out, out_scale), ref.flatten(1), atol=3e-3, rtol=0.08
+    )
+    # A shorter SWA span must not retain a previous invocation's KV.
+    gather_lens.zero_()
+    topk.fill_(-1)
+    run()
+    assert torch.count_nonzero(out.float()) == 0
+    assert torch.all(data[[0, -1]].float() == 1)
+    assert torch.all(data[:, width:].float() == 1)
+    assert torch.all(scales[[0, -1]] == 17)
+    assert torch.all(scales[:, width // 32 :] == 17)
+
+
+@requires_gfx950
+@pytest.mark.parametrize("with_extra", [False, True])
+@pytest.mark.parametrize("main_use_fnuz", [False, True])
+@pytest.mark.parametrize("with_sink", [False, True])
+@torch.inference_mode()
+def test_hip_mega_decode_mxfp8_output(
+    with_extra: bool, main_use_fnuz: bool, with_sink: bool
+) -> None:
+    """Paged decode handles holes, empty rows and independently sized KV pages."""
+    device = torch.device("cuda")
+    torch.manual_seed(22)
+    tokens, heads, width = 4, 8, 8 * HEAD_DIM
+    q = torch.randn(tokens, heads, HEAD_DIM + 16, device=device).bfloat16()
+    q = q[..., :HEAD_DIM]
+    main_cache = _pack_fp8_ds_mla_cache(
+        torch.randn(12, HEAD_DIM, device=device).bfloat16() * 0.25,
+        4,
+        False,
+    )
+    if main_use_fnuz:
+        # The gfx950 writer only emits OCP; re-encode its values on the CPU.
+        cache_cpu = main_cache.cpu().flatten(1)
+        payload = cache_cpu[:, : 4 * 576].reshape(3, 4, 576)[..., :448]
+        values = payload.contiguous().view(torch.float8_e4m3fn).float() * 0.5
+        payload.copy_(values.to(torch.float8_e4m3fnuz).view(torch.uint8))
+        cache_cpu[:, 4 * 576 :].reshape(3, 4, 8)[..., :7] += 1
+        main_cache.copy_(cache_cpu.reshape_as(main_cache))
+    main_rows = [[], [9, -1, 2, 99, 4, 2], [], [0, 11, 3]]
+    main_indices, main_indptr = _ragged_from_rows(main_rows, device)
+    extra_cache = extra_indices = extra_indptr = extra_rows = None
+    if with_extra:
+        extra_cache = _pack_fp8_ds_mla_cache(
+            torch.randn(6, HEAD_DIM, device=device).bfloat16() * 0.25, 2, False
+        )
+        extra_rows = [[], [4, 0], [5, 1, 2], []]
+        extra_indices, extra_indptr = _ragged_from_rows(extra_rows, device)
+    sink = torch.linspace(-1, 1, heads, device=device) if with_sink else None
+    positions = torch.tensor(
+        [3, 8, 9, 13], dtype=torch.int32 if with_sink else torch.int64, device=device
+    )
+    cos_sin = _random_cos_sin_cache(16, device)
+    ref = _ref_sparse_decode_ragged(
+        q,
+        main_cache,
+        [[slot for slot in row if 0 <= slot < 12] for row in main_rows],
+        HEAD_DIM**-0.5,
+        sink,
+        4,
+        extra_cache,
+        extra_rows,
+        main_use_fnuz,
+        extra_block_size=2,
+    ).float()
+    cos, sin = cos_sin[positions.long(), None].chunk(2, dim=-1)
+    even = ref[..., NOPE_HEAD_DIM::2].clone()
+    odd = ref[..., NOPE_HEAD_DIM + 1 :: 2].clone()
+    ref[..., NOPE_HEAD_DIM::2] = even * cos + odd * sin
+    ref[..., NOPE_HEAD_DIM + 1 :: 2] = odd * cos - even * sin
+
+    # Leave gaps between pages and guards around the output views.
+    padded_cache = torch.zeros(6, 4, 584, dtype=torch.uint8, device=device)
+    padded_cache[::2].copy_(main_cache)
+    data = torch.full(
+        (tokens + 2, width + 16), 1.0, dtype=torch.float8_e4m3fn, device=device
+    )
+    scales = torch.full(
+        (tokens + 2, width // 32 + 4), 17, dtype=torch.uint8, device=device
+    )
+    out_data, out_scale = data[1:-1, :width], scales[1:-1, : width // 32]
+    torch.ops._rocm_C.fused_norm_rope_attn_rope_cast_decode(
+        q,
+        padded_cache[::2],
+        main_indices,
+        main_indptr,
+        extra_cache,
+        extra_indices,
+        extra_indptr,
+        sink,
+        HEAD_DIM**-0.5,
+        positions,
+        cos_sin,
+        main_use_fnuz,
+        out_data,
+        out_scale,
+    )
+    torch.testing.assert_close(
+        _mxfp8_dequant(out_data, out_scale), ref.flatten(1), atol=3e-3, rtol=0.08
+    )
+    assert torch.count_nonzero(out_data[0].float()) == 0
+    assert torch.all(data[[0, -1]].float() == 1)
+    assert torch.all(data[:, width:].float() == 1)
+    assert torch.all(scales[[0, -1]] == 17)
+    assert torch.all(scales[:, width // 32 :] == 17)
+
+
+@requires_gfx950
 @torch.inference_mode()
 def test_sparse_attn_decode_reduce_mxfp8_epilogue() -> None:
     """QUANT_OUT must equal MXFP8-quantizing the reduce's fp32 output."""

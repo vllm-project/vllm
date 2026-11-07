@@ -3,6 +3,15 @@
 
 vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available for ROCm 10.0; ROCm 7.2 wheels remain available for earlier releases.
 
+DeepSeek V4.1 automatically uses mega attention for prefill on MI355X and
+MI355X VF (gfx950) when the prefill op is compiled in, the model uses BF16
+with head dimension 512 and RoPE dimension 64, and the KV cache dtype is
+`auto`, `fp8`, or `fp8_ds_mla`. Selection also requires a positive sliding
+window, TP-divisible head and output-group counts with whole heads per local
+group, no KV connector, and context parallel sizes of one. Other configurations
+use the ordinary ROCm sparse attention path. Decode continues to use ordinary
+ROCm sparse attention in all cases.
+
 #### Prebuilt Wheels
 
 | ROCm Variant | Python Version | ROCm Version | glibc Requirement | Supported Versions |
