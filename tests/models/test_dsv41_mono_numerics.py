@@ -541,7 +541,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
         # the SWA records K1 writes: every runner's cache, byte for byte,
         # equals the one the reference's insert leaves (a K1 that skipped or
         # misplaced an insert fails here, whatever its attention then reads)
-        for r, got in swa_of.items():
+        for got in swa_of.values():
             assert torch.equal(got.view(torch.uint8), swa_ref.view(torch.uint8)), tag
         normed = normed.view(bf).view(M, HIDDEN)
         assert _cos(runner.res_mid[:M], res) > 0.99999, tag

@@ -324,7 +324,7 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
     return f"{scheme}://{host}:{port}"
 
 
-# Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
+# Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783
 # Apply the existing make_zmq_socket memory policy to every socket owner.
 _ZMQ_LARGE_BUFFER_SIZE = 512 * 1024**2
 _ZMQ_LARGE_BUFFER_MIN_TOTAL_MEMORY = 32 * 1024**3
