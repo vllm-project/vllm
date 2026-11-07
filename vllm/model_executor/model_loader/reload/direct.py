@@ -229,6 +229,8 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
         t = module._parameters.get(name)
         if t is not None and _owned(model, t):
             t.data.zero_()
+    if model._ckpt_padding_fill and torch.accelerator.is_available():
+        torch.accelerator.synchronize()  # engines may write on other streams
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )
