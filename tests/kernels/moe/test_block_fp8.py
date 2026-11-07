@@ -316,8 +316,11 @@ def test_w8a8_block_fp8_fused_moe(
 @torch.inference_mode()
 def test_block_fp8_up_and_down_tma_matches_pointer(M, modular, workspace_init):
     if not (
-        current_platform.is_device_capability_family(90)
-        or current_platform.is_device_capability_family(100)
+        current_platform.is_cuda()
+        and (
+            current_platform.is_device_capability_family(90)
+            or current_platform.is_device_capability_family(100)
+        )
     ):
         pytest.skip("This block FP8 TMA test requires SM90 or SM100")
 
