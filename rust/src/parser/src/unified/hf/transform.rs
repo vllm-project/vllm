@@ -8,7 +8,7 @@
 
 use std::sync::LazyLock;
 
-use regex_automata::meta::Regex;
+use regex::Regex;
 use serde_json::{Map, Value};
 
 use super::template::Captures;
