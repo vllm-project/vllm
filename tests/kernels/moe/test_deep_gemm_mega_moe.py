@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_BF16,
     MEGA_MOE_MXFP4,
+    MEGA_MOE_MXFP8,
     MEGA_MOE_NVFP4,
     MEGA_MOE_WEIGHT_FORMATS,
     DeepGemmMegaMoEExperts,
@@ -312,6 +313,53 @@ def test_deep_gemm_mega_moe_loads_shards_into_kernel_layout(weight_format):
         for name in ("w13_weight_scale_2", "w2_weight_scale_2", "w2_input_scale"):
             assert torch.equal(getattr(experts, name), ckpt[name][physical])
         assert experts.l2_activation_scale == ckpt["w2_input_scale"].max().item()
+
+
+def test_deep_gemm_mega_moe_online_quant_matches_pre_quantized_loading():
+    """Online MXFP8 loading writes what loading pre-quantized shards writes."""
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+
+    def make_experts(online_quant: bool) -> DeepGemmMegaMoEExperts:
+        return _make_experts(
+            num_experts=1,
+            num_local_experts=1,
+            experts_start_idx=0,
+            top_k=1,
+            hidden_size=128,
+            intermediate_size=128,
+            weight_format=MEGA_MOE_MXFP8,
+            online_quant=online_quant,
+        ).cuda()
+
+    online, pre_quantized = make_experts(True), make_experts(False)
+    shard = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
+
+    assert online.weight_loader(
+        online.w13_weight, shard, "experts.w13_weight", "w1", 0, return_success=True
+    )
+    values, scales = mxfp8_e4m3_quantize(shard, is_sf_swizzled_layout=False)
+    assert pre_quantized.weight_loader(
+        pre_quantized.w13_weight,
+        values,
+        "experts.w13_weight",
+        "w1",
+        0,
+        return_success=True,
+    )
+    assert pre_quantized.weight_loader(
+        pre_quantized.w13_weight_scale,
+        scales,
+        "experts.w13_weight_scale",
+        "w1",
+        0,
+        return_success=True,
+    )
+
+    assert torch.equal(online.w13_weight, pre_quantized.w13_weight)
+    assert torch.equal(online.w13_weight_scale, pre_quantized.w13_weight_scale)
+    assert online.w13_weight_scale.abs().sum() > 0
 
 
 @pytest.mark.parametrize("weight_format", [MEGA_MOE_MXFP4, MEGA_MOE_NVFP4])

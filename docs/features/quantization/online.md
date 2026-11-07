@@ -57,6 +57,26 @@ vllm serve Qwen/Qwen3.6-35B-A3B --quantization lut_b_moe
 | `lut_b_moe` | MoE only: 3-bit indices into an E4M3 codebook with an e8m0 scale per 8x64 tile | MoE only: fp8_e4m3 data, e8m0 per-1x32-block scale | Native on Rubin (SM 10.7) via the tensor core LUT decode. Other GPUs emulate the same numerics for accuracy checks with dequantized weights. Dense layers stay unquantized. |
 | `mxfp4_hadamard32` | `mxfp4`, with the weight rotated along its input dimension by a 32-wide block Hadamard matrix before quantization | `mxfp4`, with activations rotated by the same matrix before quantization | Linear only. The rotation is orthogonal, so the GEMM is unchanged up to quantization error, which it shrinks by spreading outliers across each 32-element block. The activation rotation runs in PyTorch before the selected MXFP4 linear backend. |
 
+## MXFP8 Experts with DeepGEMM MegaMoE
+
+On Blackwell (SM100), DeepSeek-V4 can run its routed experts in MXFP8 while the
+checkpoint stays BF16. With `--moe-backend deep_gemm_mega_moe`, dynamic MXFP8
+experts are quantized during loading: each BF16 expert shard is converted to
+`fp8_e4m3` with canonical per-1x32 UE8M0 block scales, so the checkpoint needs
+neither pre-quantized expert weights nor expert scales.
+
+```bash
+vllm serve <deepseek-v4-checkpoint> \
+  --quantization mxfp8 \
+  --moe-backend deep_gemm_mega_moe \
+  --enable-expert-parallel
+```
+
+This path is chosen automatically when `quantization_config.moe.weight`
+resolves to dynamic MXFP8; every other expert precision keeps the offline
+path and loads the weights the checkpoint provides. Grouped expert loading
+requires expert parallelism.
+
 ## Advanced Configuration
 
 For fine-grained control, use a `quantization_config` dictionary.
