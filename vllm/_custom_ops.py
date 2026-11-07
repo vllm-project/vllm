@@ -511,6 +511,29 @@ def rms_norm_per_block_quant(
 
 
 # fused silu_and_mul + block quant
+def silu_mul_fp8_sm90(
+    input: torch.Tensor, *, round_silu: bool = False
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fuse BF16 SiLU/mul with FlashInfer SM90's 1x128 FP8 quantization.
+
+    Scales have logical shape (M, K/128), stride (1, round_up(M, 4)),
+    and FlashInfer's reciprocal/zero-group semantics. They are not UE8M0
+    scales. round_silu retains the intermediate BF16 rounding of the
+    explicit CUDA activation; False matches the tested Inductor path.
+    """
+    m, twice_k = input.shape
+    k = twice_k // 2
+    output = torch.empty((m, k), dtype=torch.float8_e4m3fn, device=input.device)
+    scales = torch.empty_strided(
+        (m, k // 128),
+        (1, ((m + 3) // 4) * 4),
+        dtype=torch.float32,
+        device=input.device,
+    )
+    torch.ops._C.silu_mul_fp8_sm90(output, input, scales, round_silu)
+    return output, scales
+
+
 def silu_and_mul_per_block_quant(
     input: torch.Tensor,
     group_size: int,  # Changed from list[int]
