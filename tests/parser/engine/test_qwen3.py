@@ -950,6 +950,47 @@ class TestArgValueExtender:
             c.function.arguments for c in result.tool_calls
         )
 
+    @pytest.mark.parametrize("size", [1, 3, 7])
+    @pytest.mark.parametrize(
+        "repeat_end", ["</parameter>\n", ""], ids=["closed", "next"]
+    )
+    def test_repeated_key_keeps_first_value(
+        self, mock_tokenizer, mock_request, write_tool, size, repeat_end
+    ):
+        """A key written again with another value keeps the first one, streamed
+        and non-streaming, so the streamed arguments stay valid JSON."""
+        from vllm.parser.qwen3 import Qwen3Parser
+
+        mock_request.tools = [write_tool]
+        text = (
+            LOOP_HEAD
+            + "<parameter=content>\nprint(1)\n</parameter>\n"
+            + "<parameter=content>\nExamine the file\n"
+            + repeat_end
+            + "<parameter=mode>\n644\n</parameter>\n"
+            + LOOP_TAIL
+        )
+
+        def make_parser():
+            return Qwen3Parser(
+                mock_tokenizer, chat_template_kwargs={"enable_thinking": False}
+            )
+
+        results = simulate_tool_streaming(
+            make_parser(),
+            mock_request,
+            [text[i : i + size] for i in range(0, len(text), size)],
+        )
+        result = make_parser().extract_tool_calls(text, mock_request)
+
+        streamed = collect_tool_arguments(results)
+        assert json.loads(streamed) == {
+            "path": "/repo/app.py",
+            "content": "print(1)",
+            "mode": 644,
+        }
+        assert [c.function.arguments for c in result.tool_calls] == [streamed]
+
     def test_closed_params_are_parsed_once(
         self, mock_tokenizer, mock_request, write_tool, monkeypatch
     ):
