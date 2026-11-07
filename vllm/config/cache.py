@@ -393,8 +393,10 @@ class CacheConfig:
     free after CUDA graph capture rather than from a profiling estimate. If
     unspecified, enabled on CUDA and ROCm with the V2 model runner unless
     kv_cache_memory_bytes is set; falls back to estimate-based sizing where the
-    driver lacks VMM support. Explicitly requesting it where unsupported is an
-    error."""
+    driver lacks VMM support. With LMCacheMPConnector, it requires
+    `"lmcache.mp.use_vmm_api": true` in that connector's
+    kv_connector_extra_config (CUDA only). Explicitly requesting it where
+    unsupported is an error."""
 
     kv_offloading_size: float | None = None
     """Size of the KV cache offloading buffer in GiB. When TP > 1, this is

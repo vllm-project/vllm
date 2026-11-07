@@ -85,6 +85,7 @@ class ExtensibleKVCache:
         kv_cache_config: KVCacheConfig,
         device: torch.device,
         layout: KVCacheLayout,
+        exportable: bool = False,
     ):
         tensors = [
             tensor
@@ -118,6 +119,7 @@ class ExtensibleKVCache:
                 end - start
                 for start, end in pairwise([*self.segment_offsets, self.size])
             ],
+            exportable=exportable,
         )
 
     def _segments(
@@ -369,12 +371,22 @@ class ExtensibleKVCache:
 
 
 def registers_kv_cache_memory(vllm_config: "VllmConfig") -> bool:
-    """Whether a KV connector registers the committed KV cache for RDMA, which
-    needs each segment backed by one physical chunk."""
+    """Whether a KV connector registers the committed KV cache for RDMA or with
+    another process, which needs each segment backed by one physical chunk."""
     kv_transfer_config = vllm_config.kv_transfer_config
     return (
         kv_transfer_config is not None
         and kv_transfer_config.registers_kv_cache_memory()
+    )
+
+
+def exports_kv_cache_memory(vllm_config: "VllmConfig") -> bool:
+    """Whether a KV connector shares the KV cache with another process through
+    exported VMM handles, as LMCache MP does with lmcache.mp.use_vmm_api."""
+    kv_transfer_config = vllm_config.kv_transfer_config
+    return kv_transfer_config is not None and any(
+        config.get("lmcache.mp.use_vmm_api", False)
+        for config in kv_transfer_config.connector_extra_configs("LMCacheMPConnector")
     )
 
 

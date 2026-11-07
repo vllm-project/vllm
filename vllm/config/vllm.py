@@ -3415,13 +3415,17 @@ class VllmConfig:
                 "elastic EP scale-up skips warmup and reuses the profiled KV "
                 "cache size, so no measurement would size the cache"
             )
-        elif (
-            self.kv_transfer_config is not None
-            and self.kv_transfer_config.has_connector("LMCacheMPConnector")
+        elif self.kv_transfer_config is not None and not all(
+            config.get("lmcache.mp.use_vmm_api", False)
+            for config in self.kv_transfer_config.connector_extra_configs(
+                "LMCacheMPConnector"
+            )
         ):
             unsupported = (
                 "LMCacheMPConnector shares the KV cache through legacy CUDA IPC, "
-                "which cannot export driver-mapped memory"
+                "which cannot export driver-mapped memory; set "
+                '"lmcache.mp.use_vmm_api": true in its kv_connector_extra_config '
+                "to share it through VMM handles"
             )
         elif (
             self.kv_transfer_config is not None
@@ -3440,7 +3444,8 @@ class VllmConfig:
             # hsa_amd_portable_export_dmabuf accepts VMM ranges.
             unsupported = (
                 "on ROCm, UCX and RDMA cannot yet register driver-mapped memory, "
-                "which the NIXL, Mooncake, MoRIIO and UMBP connectors require"
+                "which the NIXL, Mooncake, MoRIIO and UMBP connectors require, "
+                "and LMCache MP cannot yet share it"
             )
         if requested is None:
             cache_config.enable_extensible_kv_cache = unsupported is None
