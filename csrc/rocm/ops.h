@@ -24,6 +24,15 @@ void wvSplitKQ(const at::Tensor& in_a, const at::Tensor& in_b,
                const at::Tensor& scale_a, const at::Tensor& scale_b,
                const int64_t CuCount);
 
+// gfx1151-only FP8 blockscale skinny GEMM. Native AITER uses unshuffled
+// weights with per-128x128 weight scales and per-1x128 activation scales:
+// weight [N,K] may have padded row strides (e.g. [4352,1] for K=4096),
+// activation_scale [M,K/128], weight_scale [N/128,K/128].
+void wvSplitKQBlockScale(const at::Tensor& weight, const at::Tensor& activation,
+                         const at::Tensor& activation_scale,
+                         const at::Tensor& weight_scale, at::Tensor& out,
+                         const int64_t CuCount);
+
 torch::Tensor mxfp4_w4a8_gemv_rdna3(const at::Tensor& a, const at::Tensor& b_q,
                                     const at::Tensor& b_scale);
 

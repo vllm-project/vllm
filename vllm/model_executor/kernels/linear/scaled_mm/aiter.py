@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import torch
 
 from vllm import _custom_ops as ops
@@ -401,6 +400,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             and k % 128 == 0
             and bool(rocm_aiter_ops.is_triton_blockscale_bpreshuffle_gemm_tuned(n, k))
         )
+        self.use_gfx1151_skinny_blockscale = False
         if self.use_bpreshuffle:
             # The tuned preshuffle configs expect a column-major group scale.
             act_scale_descriptor = config.activation_quant_key.scale
@@ -437,6 +437,23 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
             )
             layer.aiter_bpreshuffled = True
+
+    def enable_gfx1151_skinny_blockscale(self, output_size: int) -> None:
+        """Opt in to gfx1151 skinny blockscale dispatch for native RDNA layout."""
+        if not self.use_triton or self.use_bpreshuffle:
+            return
+        if output_size <= 0 or output_size % 128 != 0:
+            raise ValueError(
+                "gfx1151 skinny blockscale output size must be a positive "
+                f"multiple of 128, got {output_size}"
+            )
+        n, _ = self.config.weight_shape
+        if output_size != n:
+            raise ValueError(
+                "gfx1151 skinny blockscale output size must match the "
+                f"kernel weight shape N={n}, got {output_size}"
+            )
+        self.use_gfx1151_skinny_blockscale = True
 
     @classmethod
     def is_supported(cls, compute_capability=None):
@@ -492,6 +509,46 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
+
+        # Opted-in native RDNA Triton blockscale projections only. A/B/As/Bs
+        # are exactly the already-prepared tensors received by the passing
+        # backend; no extra quantization, weight shuffle, or layout change.
+        skinny_n, _ = self.config.weight_shape
+        skinny_k = A.shape[1] if A.ndim == 2 else None
+        if (
+            self.use_gfx1151_skinny_blockscale
+            and self.use_triton
+            and not self.use_bpreshuffle
+            and tuple(self.weight_group_shape) == (128, 128)
+            and out_dtype == torch.bfloat16
+            and skinny_n > 0
+            and skinny_n % 128 == 0
+            and A.ndim == 2
+            and 1 <= A.shape[0] <= 6
+            and skinny_k is not None
+            and skinny_k % 128 == 0
+            and skinny_k == 4096
+            and B.shape == (skinny_n, skinny_k)
+            and As.shape == (A.shape[0], skinny_k // 128)
+            and Bs.shape == (skinny_n // 128, skinny_k // 128)
+            and A.dtype == torch.float8_e4m3fn
+            and B.dtype == A.dtype
+            and As.dtype == Bs.dtype == torch.float32
+            and A.is_contiguous()
+            # Native ROCm FP8 padding creates a row-major logical weight
+            # view with physical padding. Share it with
+            # AITER directly: no .contiguous() copy or second representation.
+            and B.stride(1) == 1
+            and B.stride(0) >= skinny_k
+            and B.stride(0) % 16 == 0
+            and As.is_contiguous()
+            and Bs.is_contiguous()
+        ):
+            import vllm._custom_ops as ops
+
+            cu_count = torch.cuda.get_device_properties(A.device).multi_processor_count
+            return ops.wvSplitKQBlockScale(B, A, As, Bs, cu_count)
+
         if self.use_bpreshuffle:
             gemm_a8w8_blockscale_op = (
                 rocm_aiter_ops.triton_gemm_a8w8_blockscale_preshuffle
