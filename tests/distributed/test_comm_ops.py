@@ -792,7 +792,8 @@ def fp16_partial_sums_row_parallel_test_worker(
     """VLLM_TP_FP16_PARTIAL_SUMS on a TP=2 RowParallelLinear with bias:
 
     - unquantized: bit-exact BF16 rounding of the FP16 sum of FP16 partials;
-    - block FP8 ("kernel" mode): matches BF16 partial sums up to rounding;
+    - block FP8 ("kernel" mode, Fp8 and compressed-tensors): matches BF16
+      partial sums up to rounding;
     - LoRA: falls back to BF16 partial sums.
     """
     from types import SimpleNamespace
@@ -803,6 +804,9 @@ def fp16_partial_sums_row_parallel_test_worker(
     from vllm.model_executor.layers.linear import (
         RowParallelLinear,
         _fp16_partial_linear,
+    )
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+        CompressedTensorsConfig,
     )
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
     from vllm.utils.torch_utils import set_default_torch_dtype
@@ -851,10 +855,21 @@ def fp16_partial_sums_row_parallel_test_worker(
     w_fp8 = (w_blocks / w_scale[:, None, :, None]).view(n, k)
     w_fp8 = w_fp8.to(torch.float8_e4m3fn)
     k_shard = slice(shard.start // block, shard.stop // block)
+    fp8 = dict(num_bits=8, type="float", symmetric=True)
+    group_0 = dict(
+        targets=["Linear"],
+        weights=fp8
+        | dict(strategy="block", block_structure=[block, block], dynamic=False),
+        input_activations=fp8 | dict(strategy="group", group_size=block, dynamic=True),
+    )
+    ct_config = CompressedTensorsConfig.from_config(
+        dict(format="float-quantized", config_groups=dict(group_0=group_0), ignore=[])
+    )
     vllm_config = VllmConfig(kernel_config=KernelConfig(linear_backend="triton"))
     # The FP8 linear methods read model_config.dtype.
     vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
     for quant_config, scale_name in (
+        (ct_config, "weight_scale"),
         (Fp8Config(weight_block_size=[block, block]), "weight_scale_inv"),
     ):
         outs = {}

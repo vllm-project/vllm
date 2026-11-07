@@ -1948,6 +1948,7 @@ class RowParallelLinear(LinearBase):
             )
             kernel = (
                 getattr(scheme, "kernel", None)
+                or getattr(scheme, "fp8_linear", None)
                 or getattr(self.quant_method, "kernel", None)
                 or getattr(self.quant_method, "fp8_linear", None)
             )
