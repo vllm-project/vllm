@@ -574,28 +574,29 @@ class InklingMoE(nn.Module):
 
         param = getattr(experts, key)
         slots = self._local_expert_slots()
-        gids = sorted(slots)
-        lids = [slots[g] for g in gids]
         tp_rank = experts.moe_config.moe_parallel_config.tp_rank
 
         if key.endswith(("_scale_2", "_global_scale")):
-            # Per-expert scalars, vectorized over the local experts. The
-            # fused w13 params carry one slot per gate/up half. A single
-            # checkpoint value is shared by both halves.
-            vals = weight[gids].float().reshape(len(gids), -1)
-            target_width = math.prod(param.shape[1:])
-            if vals.shape[1] == 1:
-                vals = vals.expand(-1, target_width)
-            elif vals.shape[1] != target_width:
-                raise ValueError(
-                    f"cannot load {tuple(weight.shape)} into {tuple(param.shape)}"
-                )
-            param.data[lids] = vals.reshape(len(gids), *param.shape[1:]).to(
-                param.device
-            )
+            # Per-expert scalars, one narrow + copy_ per local expert. The
+            # fused w13 params carry one slot per gate/up half; a single
+            # checkpoint value is copied into each half.
+            width = math.prod(param.shape[1:])
+            for gid, lid in slots.items():
+                val = weight[gid].reshape(-1)
+                dst = param.data[lid].view(-1)
+                if val.numel() == width:
+                    dst.copy_(val)
+                elif val.numel() == 1:
+                    for half in range(width):
+                        dst.narrow(0, half, 1).copy_(val)
+                else:
+                    raise ValueError(
+                        f"cannot load {tuple(weight.shape)} into {tuple(param.shape)}"
+                    )
         elif key == "w2_weight_scale" and weight.shape[-1] == 1:
             # Per-output-channel scales are replicated across TP ranks.
-            param.data[lids] = weight[gids].to(device=param.device, dtype=param.dtype)
+            for gid, lid in slots.items():
+                param.data[lid].copy_(weight[gid])
         elif key.startswith("w13"):
             # Checkpoint w13 rows are interleaved [g0, u0, g1, u1, ...]; the
             # fused param layout is [w1(gate); w3(up)]. The TP-local rows form

@@ -243,13 +243,13 @@ def mamba_v2_sharded_weight_loader(
             #   seem to handle slices well.
             # https://github.com/python/mypy/issues/2410
             target_slice = param.data[boundary : (boundary + take), ...]
-            param.data[
-                boundary : (boundary + take), ...  # type: ignore[misc]
-            ] = loaded_weight[
-                loaded_start_idx : (
-                    loaded_start_idx + take
-                )  # type: ignore[misc]
-            ].view_as(target_slice)
+            target_slice.copy_(
+                loaded_weight[
+                    loaded_start_idx : (
+                        loaded_start_idx + take
+                    )  # type: ignore[misc]
+                ].view(target_slice.shape)
+            )
 
             # move indexing boundaries
             boundary += shard_size
