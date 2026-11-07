@@ -310,6 +310,60 @@ class TestTurboQuantKVCacheSpec:
         assert spec.state_content_bytes == expected_slot
 
 
+class TestTurboQuantAttentionBackendValidation:
+    """Tests for TurboQuantAttentionBackend capability & configuration validation."""
+
+    @pytest.mark.parametrize("head_size", [16, 32, 64, 128, 256])
+    def test_supports_power_of_two_head_sizes(self, head_size):
+        from vllm.v1.attention.backends.turboquant_attn import (
+            TurboQuantAttentionBackend,
+        )
+
+        assert TurboQuantAttentionBackend.supports_head_size(head_size)
+
+    @pytest.mark.parametrize("head_size", [-1, 0, 15, 80, 96, 112, 144])
+    def test_rejects_non_power_of_two_head_sizes(self, head_size):
+        from vllm.v1.attention.backend import AttentionType
+        from vllm.v1.attention.backends.turboquant_attn import (
+            TurboQuantAttentionBackend,
+        )
+
+        assert not TurboQuantAttentionBackend.supports_head_size(head_size)
+
+        # Confirm validate_configuration reports head_size not supported
+        invalid_reasons = TurboQuantAttentionBackend.validate_configuration(
+            head_size=head_size,
+            dtype=torch.float16,
+            kv_cache_dtype="turboquant_3bit_nc",
+            block_size=16,
+            use_mla=False,
+            has_sink=False,
+            use_sparse=False,
+            use_mm_prefix=False,
+            use_per_head_quant_scales=False,
+            device_capability=(8, 0),
+            attn_type=AttentionType.DECODER,
+        )
+        assert "head_size not supported" in invalid_reasons
+
+    @pytest.mark.parametrize("dim", [15, 80, 96, 112, 144])
+    def test_build_hadamard_non_power_of_two_raises(self, dim):
+        from vllm.v1.attention.backends.turboquant_attn import _build_hadamard
+
+        with pytest.raises(ValueError, match="power-of-two"):
+            _build_hadamard(dim, "cpu")
+
+    @pytest.mark.parametrize("dim", [32, 64, 128, 256])
+    def test_build_hadamard_power_of_two_orthonormal(self, dim):
+        from vllm.v1.attention.backends.turboquant_attn import _build_hadamard
+
+        H = _build_hadamard(dim, "cpu")
+        assert H.shape == (dim, dim)
+        eye = H @ H.T
+        assert torch.allclose(eye, torch.eye(dim), atol=1e-5)
+        assert torch.allclose(H, H.T, atol=1e-6)
+
+
 class TestTurboQuantWorkspaceReservation:
     @staticmethod
     def _fake_vllm_config(
