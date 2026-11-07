@@ -25,6 +25,31 @@ We currently support the following OpenAI APIs:
 - [Translation API](./speech_to_text.md#translations-api) (`/v1/audio/translations`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../../models/supported_models.md#transcription).
 
+## Rust frontend gRPC inference
+
+The experimental Rust frontend exposes the `vllm.Inference` gRPC service alongside
+HTTP when `--grpc-port` is set:
+
+```bash
+VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B --grpc-port 50051
+```
+
+`GenerateStream` supports parallel sampling. Set `sampling.num_sequences` to the
+number of candidates and `temperature` to a positive value. An omitted or zero
+`num_sequences` generates one candidate. The default temperature is `0.0` (greedy),
+which only supports one candidate. `VLLM_MAX_N_SEQUENCES` limits the number of
+candidates per request (default: `16384`).
+
+The stream sends `prompt_info` once. Each subsequent `outputs` message identifies
+its candidate with a zero-based `index`; candidates can return deltas and finish
+in any order. A candidate's `finish_info` marks only that candidate as complete.
+Read until the stream ends to receive all candidates. Disconnecting cancels the
+remaining candidates. The unary `Generate` RPC supports one candidate only.
+
+For the wire schema, see
+[`inference.proto`](https://github.com/vllm-project/vllm/blob/main/rust/proto/inference.proto).
+The separate Python `--grpc` server uses a different gRPC API.
+
 ## Anthropic APIs
 
 - Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)

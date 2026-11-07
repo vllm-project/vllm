@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
 use asynk_strim_attr::{TryYielder, try_stream};
-use futures::{Stream, StreamExt as _, pin_mut};
+use futures::{Stream, StreamExt as _, stream};
 use thiserror_ext::AsReport as _;
 use tonic::{Request, Response, Status};
 use tracing::{Span, info, info_span, warn};
@@ -32,6 +33,7 @@ pub struct InferenceServiceImpl {
 
 struct PreparedGrpcRequest {
     text_request: TextRequest,
+    n: NonZeroU32,
     request_span: Span,
     started_at: Instant,
 }
@@ -132,6 +134,22 @@ impl InferenceServiceImpl {
         info!(parent: &request_span, "gRPC inference request received");
 
         let result = async {
+            let n = NonZeroU32::new(
+                proto_request.sampling.as_ref().map_or(0, |sampling| sampling.num_sequences),
+            )
+            .unwrap_or(NonZeroU32::MIN);
+            if !stream && n > NonZeroU32::MIN {
+                return Err(Status::invalid_argument(
+                    "num_sequences > 1 is only supported by GenerateStream",
+                ));
+            }
+            let max_n_sequences = self.state.api_server_options.max_n_sequences;
+            if i64::from(n.get()) > max_n_sequences {
+                return Err(Status::invalid_argument(format!(
+                    "num_sequences must be at most {max_n_sequences}, got {n}. To increase \
+                     this limit, set the VLLM_MAX_N_SEQUENCES environment variable."
+                )));
+            }
             let media = std::mem::take(&mut proto_request.media);
             let mut text_request =
                 convert::to_text_request(proto_request, stream, &self.state.base_model_names())?;
@@ -172,13 +190,13 @@ impl InferenceServiceImpl {
             }
             apply_encoder_cache_placeholders(&mut text_request);
 
-            Ok(text_request)
+            Ok((text_request, n))
         }
         .instrument(request_span.clone())
         .await;
 
-        let text_request = match result {
-            Ok(text_request) => text_request,
+        let (text_request, n) = match result {
+            Ok(prepared) => prepared,
             Err(status) => {
                 warn!(
                     parent: &request_span,
@@ -193,6 +211,7 @@ impl InferenceServiceImpl {
 
         Ok(PreparedGrpcRequest {
             text_request,
+            n,
             request_span,
             started_at,
         })
@@ -228,6 +247,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
         let PreparedGrpcRequest {
             text_request,
+            n: _,
             request_span,
             started_at,
         } = self.prepare_request(proto_req, data_parallel_rank, false, "Generate").await?;
@@ -293,49 +313,60 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
         let PreparedGrpcRequest {
             text_request,
+            n,
             request_span,
             started_at,
         } = self
             .prepare_request(proto_req, data_parallel_rank, true, "GenerateStream")
             .await?;
 
-        let stream = self
+        let streams = self
             .state
             .chat
             .text()
-            .generate(text_request)
+            .generate_n(text_request, n)
             .instrument(request_span.clone())
             .await
             .map_err(|error| log_text_error(&request_span, started_at, "submission", error))?;
 
         let response_stream =
-            generate_stream_responses(stream, response_opts, request_span.clone(), started_at)
+            generate_stream_responses(streams, response_opts, request_span.clone(), started_at)
                 .instrument(request_span);
         Ok(Response::new(Box::pin(response_stream)))
     }
 }
 
-/// Convert one decoded text stream into gRPC streaming responses.
+/// Merge decoded text streams into indexed gRPC streaming responses.
 ///
-/// The response body owns the generation stream, so a client disconnect drops
-/// it and aborts the request in the engine, even before any output arrives.
+/// The response body owns the generation streams, so a client disconnect drops
+/// them and aborts pending requests in the engine, even before any output arrives.
 #[try_stream]
 async fn generate_stream_responses(
-    stream: impl TextOutputStream,
+    streams: Vec<impl TextOutputStream>,
     response_opts: ResponseOpts,
     request_span: Span,
     started_at: Instant,
     mut y: TryYielder<pb::GenerateResponse, Status>,
 ) -> Result<(), Status> {
-    pin_mut!(stream);
+    let mut stream = stream::select_all(
+        streams
+            .into_iter()
+            .zip(0u32..)
+            .map(|(stream, index)| stream.map(move |event| (index, event)).boxed()),
+    );
+    let mut prompt_info_sent = false;
 
-    while let Some(event) = stream.next().await {
+    while let Some((index, event)) = stream.next().await {
         let response = match event {
             Err(error) => Err(log_text_error(&request_span, started_at, "stream", error)),
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids,
                 prompt_logprobs,
             }) => {
+                if prompt_info_sent {
+                    continue;
+                }
+                prompt_info_sent = true;
                 let prompt_info = convert::to_prompt_info(
                     &prompt_token_ids,
                     prompt_logprobs.as_ref(),
@@ -361,9 +392,12 @@ async fn generate_stream_responses(
                 finished.as_deref(),
                 &response_opts,
             )
-            .map(|outputs| pb::GenerateResponse {
-                prompt_info: None,
-                outputs: Some(outputs),
+            .map(|mut outputs| {
+                outputs.index = index;
+                pb::GenerateResponse {
+                    prompt_info: None,
+                    outputs: Some(outputs),
+                }
             }),
         };
         y.yield_ok(response?).await;

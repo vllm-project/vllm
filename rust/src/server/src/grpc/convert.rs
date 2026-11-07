@@ -173,14 +173,6 @@ fn build_sampling_params(
 
     // Preserve explicit values; omitted fields inherit model defaults during lowering.
     if let Some(s) = sampling {
-        // num_sequences (n > 1) is not supported yet by the TextLlm layer; the response
-        // path also hardcodes SequenceOutput.index = 0, so accepting >1 would silently
-        // truncate output cardinality. Reject explicitly.
-        if s.num_sequences > 1 {
-            return Err(Status::invalid_argument(
-                "num_sequences > 1 is not supported",
-            ));
-        }
         params.top_k = s.top_k;
         params.top_p = s.top_p;
         params.min_p = s.min_p;
@@ -355,7 +347,7 @@ pub fn to_sequence_output(
         .unwrap_or_default();
 
     Ok(pb::SequenceOutput {
-        index: 0, // TODO: multi-sequence (n > 1) not supported
+        index: 0,
         text: if opts.output_text {
             delta.to_string()
         } else {
