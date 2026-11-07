@@ -5,7 +5,7 @@ meta:
   provider: "Moonshot AI"
   description: "2.8T-parameter native multimodal MoE with Kimi Delta Attention, sparse MLA, and a 1M-token context window"
   date_added: 2026-11-02
-  date_updated: 2026-11-05
+  date_updated: 2026-11-07
   tasks:
     - multimodal
     - text
@@ -92,7 +92,10 @@ features:
       - multi_node_tp
     hardware:
       ppu: unsupported
-      # The fused CuTe DSL decode path is CUDA-only.
+      # The fused CuTe DSL decode path is CUDA-only. The MI355X decode
+      # (kimi_k3/amd/specialized_decode) is a separate path that needs DSpark
+      # and max_num_seqs x (K + 1) <= 16, and is written for Kimi-K3's shapes.
+      amd: unsupported
       ironwood: unsupported
     args:
       - "--additional-config"
