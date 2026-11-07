@@ -106,6 +106,11 @@ def _planned_reload(model, plan: LoadPlan, weights) -> None:
     finish_reload(model, _MODEL_CONFIG, _CPU)
 
 
+def _bytes(t: torch.Tensor) -> torch.Tensor:
+    # reshape first: `view(torch.uint8)` rejects 0-d tensors (scalar scales)
+    return t.reshape(-1).view(torch.uint8)
+
+
 def _state(model):
     return {
         name: (t.dtype, tuple(t.shape), t.stride(), t.detach().clone(), t.data_ptr())
@@ -143,7 +148,7 @@ def _plan(model, shapes, mirrors=()) -> LoadPlan:
             ptr,
         ), name
         if not hasattr(t, "_ckpt") and name not in mirrors:
-            assert torch.equal(t.view(torch.uint8), data.view(torch.uint8)), name
+            assert torch.equal(_bytes(t), _bytes(data)), name
     return plan
 
 
