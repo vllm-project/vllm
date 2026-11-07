@@ -144,6 +144,7 @@ def test_dspark_draft_loads_weights(tmp_path, dist_init):
     )
     with set_current_vllm_config(vllm_config):
         model = MuseSparkDSparkForCausalLM(vllm_config=vllm_config)
+    assert model.lm_head is not None
     checkpoint = {
         "fc.weight": torch.zeros_like(model.model.fc.weight),
         "lm_head.weight": torch.zeros_like(model.lm_head.weight),
