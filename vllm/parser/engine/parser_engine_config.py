@@ -100,7 +100,8 @@ class ParserEngineConfig:
 
     # Framing for a tool region containing multiple top-level JSON objects.
     # The engine emits one tool call per object. JSON_ARRAY is used by Granite;
-    # SEMICOLON_SEQUENCE handles Llama's ``{...}; {...}`` format.
+    # SEMICOLON_SEQUENCE handles Llama 3's ``{...}; {...}`` format and Llama 4's
+    # unseparated ``{...}{...}`` format.
     # ...
     tool_call_body_collection: ToolCallBodyCollection | None = None
 

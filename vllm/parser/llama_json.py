@@ -69,9 +69,10 @@ def _validate_complete_tool_output(text: str) -> bool | None:
             return True
         if _has_only_output_end_token(text, position):
             return True
-        if text[position] != ";":
+        if text[position] == ";":
+            position += 1
+        elif text[position] != "{":
             return False
-        position += 1
     return found
 
 
