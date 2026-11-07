@@ -115,18 +115,21 @@ Every overhead is measured against R3 off, with a fixed workload, CUDA graph `FU
 | partial capture, blocks only (§6.11 without cone patches) | `FULL` | −0.6% | −3.8% |
 | partial capture, blocks only | `FULL_AND_PIECEWISE` | −40.5% | −41.0% |
 
-At this scale nearly all prompt rows are new, so trimming rows already in the pool saves almost nothing. Both conditions are needed: partial capture, and CUDA graph `FULL` (with piecewise graphs the eager stages cost as much as the full rows). Generated tokens per arm differ by a few percent at this scale. The cost of the cone patches at this scale is being measured.
+At this scale nearly all prompt rows are new, so trimming rows already in the pool saves almost nothing. Both conditions are needed: partial capture, and CUDA graph `FULL` (with piecewise graphs the eager stages cost as much as the full rows). Generated tokens per arm differ by a few percent at this scale.
 
-**One node.** 512 closed-loop agents, 16 turns growing to 14.6K tokens, 256 output tokens per turn, same prompts and prefix hits in every arm. In three builds with partial capture and cone patches, run with one arm per node:
+With cone patches, the same scenario on 5 GB200 replicas (4 GPUs each) plus a pool node: R3 off 2,056.7 s, R3 in the response 2,052.6 s (no measurable cost), R3 + indexer + hidden through Mooncake 2,168.5 s (−5.2%; −4.0% as the median of per-node pairs, one node is a −17.5% outlier). Each replica writes 106.6 GB in 427,573 puts with no retry; the indexer is 91.1 GB of it (3,419 bytes per token), R3 13.2 GB, hidden 2.1 GB, cone patches 0.33 GB. On this cluster the checker's readback of one replica ran at about 25 MB/s and 6,831 keys still failed after three retries; they are reported missing, with 0 wrong rows, while the pool holds every object (no eviction). The same readback on GB300 takes 130–210 s with nothing missing. Reads of large objects that outlive the 1 s read lease are the suspect; this is the trainer-side path and is still open.
 
-| Arm | Range over three runs |
-|---|---|
-| R3 in the response | −1.5% to −6.1% |
-| R3 through Mooncake, cone patches | −2.4% to −4.7% |
-| R3 + indexer + hidden through Mooncake | −8.8% to −16.7% |
-| No trim (every row through layers 20–39) | −24.5% to −25.7% |
+**One node.** 512 closed-loop agents, 16 turns growing to 14.6K tokens, 256 output tokens per turn, same prompts and prefix hits in every arm. All arms on the same node, one run each:
 
-These ranges are mostly node and run noise. The all-outputs arm of two builds on the same node differs by 0.2% (1,144.6 s and 1,147.2 s), the same builds on another node run 4.3% slower, and one build repeated on one node differs by 4%. A same-node measurement of all arms is in progress. Cone patches for R3 are about 1.7 GB for 512 sessions (2.1M generated tokens).
+| Arm | Time | vs R3 off |
+|---|---|---|
+| R3 off | 1,031.4 s | — |
+| R3 in the response | 1,044.5 s | −1.3% |
+| R3 through Mooncake, cone patches | 1,066.6 s | −3.3% |
+| R3 + indexer + hidden through Mooncake | 1,146.3 s | −10.0% |
+| No trim (every row through layers 20–39) | 1,370.6 s | −24.7% |
+
+Arms must share a node: another node of the same type runs 4.3% slower, and one build repeated on one node differs by up to 4%, so differences under 4 points are not conclusions. The all-outputs arm costs about 7 points more than R3 alone; most of it is the indexer, which is 7× the bytes of R3. Cone patches for R3 are about 1.7 GB for 512 sessions (2.1M generated tokens).
 
 **Exactness.** Against a run without trimming, same prompts, no weight updates: every cell a sampled token depends on, plus all columns below layer 20, is bitwise identical for R3 and the indexer, in 512/512 plain sessions, 16/16 forks and 16/16 forks inside a parent's rows. 0 of 137.6M R3 cells and 0 of 36.0M indexer cells missing. With speculative decoding and a weight update every step, groups, forks, delayed forks, forced preemption and injected write failures stay at the same counts as without partial capture.
 
