@@ -184,7 +184,7 @@ bad:
 }
 
 static void endpoint_dealloc(Endpoint *e) {
-    PyTypeObject *type = Py_TYPE(e);
+    PyTypeObject *type = Py_TYPE((PyObject *)e);
     freefunc free_object = (freefunc)PyType_GetSlot(type, Py_tp_free);
     if (e->view.obj) PyBuffer_Release(&e->view);
     free_object(e);
