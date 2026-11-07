@@ -21,6 +21,22 @@ For non-cuda platform, please install nixl with ucx build from source, instructe
 python tools/install_nixl_from_source_ubuntu.py
 ```
 
+### Hybrid SSM/Mamba models
+
+For hybrid SSM/Mamba models (including GDN), set the convolution-state layout
+to `DS` in the environment of **both the prefiller and decoder** before
+starting either instance:
+
+```bash
+export VLLM_SSM_CONV_STATE_LAYOUT=DS
+```
+
+NixlConnector requires this layout for convolution-state transfer. Using `SD`
+instead triggers a startup assertion. These models also require the hybrid
+KV cache manager (HMA); do not disable it. See the
+[hybrid-model connector requirements](disagg_prefill.md#hybrid-models) and
+the [compatibility matrix](nixl_connector_compatibility.md) for other constraints.
+
 ### Transport Configuration
 
 NixlConnector uses NIXL library for underlying communication, which supports multiple transport backends. UCX (Unified Communication X) is the primary default transport library used by NIXL. Configure transport environment variables:
