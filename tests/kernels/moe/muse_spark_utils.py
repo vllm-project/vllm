@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared helpers for the MuseSpark1x MoE runner tests."""
+"""Shared helpers for the Muse Spark MoE runner tests."""
 
 from collections.abc import Callable
 
@@ -19,8 +19,8 @@ from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.models.muse_spark.nvidia.muse_moe_runner import (
     MuseMoERunner,
     MusePostExpertFinalize,
-    MuseSpark1xRouter,
     MuseSparkRoutedExperts,
+    MuseSparkRouter,
 )
 
 # route_scale must be 1.0 and scoring sigmoid for the routing to classify as
@@ -56,7 +56,7 @@ def make_runner(
         kernel_config=KernelConfig(moe_backend="auto"),
     )
     with set_current_vllm_config(vllm_config):
-        router = MuseSpark1xRouter(
+        router = MuseSparkRouter(
             top_k=top_k,
             num_experts=num_experts,
             expert_bias=expert_bias,

@@ -506,7 +506,7 @@ def bf16_arguments(experts, routed: nn.Module) -> dict[str, Any]:
 
 
 def stock_experts(moe: nn.Module) -> tuple[Any, nn.Module]:
-    """The stock experts kernel and RoutedExperts of a MuseSpark1xMoE."""
+    """The stock experts kernel and RoutedExperts of a MuseSparkMoE."""
     routed = moe.experts.routed_experts
     kernel = getattr(routed.quant_method, "moe_kernel", None)
     if kernel is None:
