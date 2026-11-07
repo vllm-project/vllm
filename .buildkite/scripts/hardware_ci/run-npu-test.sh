@@ -4,55 +4,18 @@
 # It serves a sanity check for compilation and basic model usage.
 set -ex
 
-# Base ubuntu image with basic ascend development libraries and python installed
+# Base ubuntu image with basic ascend development libraries and python installed,
+# pinned by digest (was quay.io/ascend/cann:9.1.0-910b-ubuntu22.04-py3.12).
+# Update via PR only when the check's runtime dependencies require it.
+BASE_IMAGE="quay.io/ascend/cann@sha256:cfa76a9bcd84dd81c487d6d26edb8b95e2140525891009ccb6009e5cd2544d8e"
+
 VLLM_ASCEND_REPO="https://github.com/vllm-project/vllm-ascend.git"
-CONFIG_FILE_REMOTE_PATH="tests/e2e/vllm_interface/vllm_test.cfg"
-TEST_RUN_CONFIG_FILE="vllm_test.cfg"
-VLLM_ASCEND_TMP_DIR=
-# Get the test run configuration file from the vllm-ascend repository
-fetch_vllm_test_cfg() {
-    VLLM_ASCEND_TMP_DIR=$(mktemp -d)
-    # Ensure that the temporary directory is cleaned up when an exception occurs during configuration file retrieval
-    cleanup() {
-        rm -rf "${VLLM_ASCEND_TMP_DIR}"
-    }
-    trap cleanup EXIT
+GH_PROXY_REWRITE="url.https://gh-proxy.test.osinfra.cn/https://github.com/.insteadOf=https://github.com/"
 
-    GIT_TRACE=1 git clone -v --depth 1 "${VLLM_ASCEND_REPO}" "${VLLM_ASCEND_TMP_DIR}"
-    if [ ! -f "${VLLM_ASCEND_TMP_DIR}/${CONFIG_FILE_REMOTE_PATH}" ]; then
-        echo "Error: file '${CONFIG_FILE_REMOTE_PATH}' does not exist in the warehouse" >&2
-        exit 1
-    fi
-
-    # If the file already exists locally, just overwrite it
-    cp "${VLLM_ASCEND_TMP_DIR}/${CONFIG_FILE_REMOTE_PATH}" "${TEST_RUN_CONFIG_FILE}"
-    echo "Copied ${CONFIG_FILE_REMOTE_PATH} to ${TEST_RUN_CONFIG_FILE}"
-
-    # Since the trap will be overwritten later, and when it is executed here, the task of cleaning up resources
-    # when the trap is abnormal has been completed, so the temporary resources are manually deleted here.
-    rm -rf "${VLLM_ASCEND_TMP_DIR}"
-    trap - EXIT
-}
-
-# Downloads test run configuration file from a remote URL.
-# Loads the configuration into the current script environment.
-get_config() {
-    if [ ! -f "${TEST_RUN_CONFIG_FILE}" ]; then
-        echo "Error: file '${TEST_RUN_CONFIG_FILE}' does not exist in the warehouse" >&2
-        exit 1
-    fi
-    # shellcheck source=/dev/null
-    source "${TEST_RUN_CONFIG_FILE}"
-    echo "Base docker image name that get from configuration: ${BASE_IMAGE_NAME}"
-    return 0
-}
-
-# get test running configuration.
-fetch_vllm_test_cfg
-# Check if the function call was successful. If not, exit the script.
-if ! get_config; then
-  exit 1
-fi
+# Resolve vllm-ascend main to an exact commit so each run checks out one fixed
+# revision and the docker layer cache cannot reuse a checkout of another one.
+VLLM_ASCEND_SHA=$(git -c "${GH_PROXY_REWRITE}" ls-remote "${VLLM_ASCEND_REPO}" refs/heads/main | cut -f1)
+echo "vllm-ascend main @ ${VLLM_ASCEND_SHA}"
 
 image_name="npu/vllm-ci:${BUILDKITE_COMMIT}_${EPOCHSECONDS}"
 container_name="npu_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
@@ -70,7 +33,7 @@ cat <<EOF | DOCKER_BUILDKIT=1 docker build \
     --builder "${builder_name}" --cache-from type=local,src="${builder_cache_dir}" \
                            --cache-to type=local,dest="${builder_cache_dir}",mode=max \
     --progress=plain --load -t "${image_name}" -f - .
-FROM ${BASE_IMAGE_NAME}
+FROM ${BASE_IMAGE}
 
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
@@ -79,20 +42,29 @@ ENV SOC_VERSION="ascend910b1"
 RUN pip config set global.index-url http://cache-service-vllm.nginx-pypi-cache.svc.cluster.local:${PYPI_CACHE_PORT}/pypi/simple && \
     pip config set global.trusted-host cache-service-vllm.nginx-pypi-cache.svc.cluster.local
 
-# Install for pytest to make the docker build cache layer always valid
+# Install pytest from an inline hash-locked set; kept before COPY . . so the
+# layer stays cacheable. Regenerate the hashes with:
+#   uv pip compile --generate-hashes --no-annotate --python-version 3.12 \
+#     --python-platform x86_64-manylinux_2_28 <<< 'pytest==<version>'
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install pytest>=6.0
+    printf '%s\n' \
+    'iniconfig==2.3.1 --hash=sha256:67f4b9c50da0dedf52af349e7749a80a9057a5031199791b906c3bb3ae878960 --hash=sha256:9121e2c1fdb355232495be3194c8dfe87ccc2d5dee45947b78e68f499790d7a7' \
+    'packaging==26.3 --hash=sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c' \
+    'pluggy==1.7.0 --hash=sha256:7dd7b0d8832ba3cb632c306926ded123429211b83641b35dc5c41ad2d34f9bec --hash=sha256:d1eaa46ebb595891b860ab086b4d09c8588af65ebd4361b8e8f4bb8920b90ba8' \
+    'pygments==2.21.0 --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9 --hash=sha256:610ca751c9bc2492b38eb9a38a7fbc93edbbb2d7182edaf34e66ae493dee5c8c' \
+    'pytest==8.4.2 --hash=sha256:86c0d0b93306b961d58d62a4db4879f27fe25513d4b969df351abdddb3c30e01 --hash=sha256:872f880de3fc3a5bdc88a11b39c9710c3497a547cfa9320bc3c5e62fbf272e79' \
+    > /tmp/pytest-lock.txt \
+    && pip install --require-hashes -r /tmp/pytest-lock.txt
 
 WORKDIR /workspace/vllm
 
 COPY . .
 
-# Install vllm-ascend
+# Install vllm-ascend, detached at the exact commit resolved above
 WORKDIR /workspace
-ARG VLLM_ASCEND_REPO=https://github.com/vllm-project/vllm-ascend.git
-ARG VLLM_ASCEND_TAG=main
 RUN git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf "https://github.com/" && \
-    git clone --depth 1 \$VLLM_ASCEND_REPO --branch \$VLLM_ASCEND_TAG /workspace/vllm-ascend
+    git clone --depth 1 "${VLLM_ASCEND_REPO}" /workspace/vllm-ascend && \
+    git -C /workspace/vllm-ascend checkout --detach "${VLLM_ASCEND_SHA}"
 
 ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 ENV VLLM_USE_MODELSCOPE=True
