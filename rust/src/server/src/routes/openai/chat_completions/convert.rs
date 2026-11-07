@@ -487,7 +487,7 @@ mod tests {
     use vllm_chat::{
         AssistantContentBlock, AssistantToolCall, ChatContentPart, ChatMessage as VllmChatMessage,
         ChatRenderer, ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
-        KimiK3ChatRenderer, SamplingParams as VllmSamplingParams,
+        KimiK3ChatRenderer, KimiK3Variant, SamplingParams as VllmSamplingParams,
     };
     use vllm_text::{
         Prompt, PromptTruncation, PromptTruncationLimit, TruncationSide, output::TextDecodeOptions,
@@ -915,10 +915,11 @@ mod tests {
         );
 
         let tokenizer = Arc::new(TestTokenizer::new());
-        let prompt = KimiK3ChatRenderer::new(tokenizer.clone(), Default::default())
-            .render(&prepared.chat_request)
-            .expect("Kimi K3 rendering succeeds")
-            .prompt;
+        let prompt =
+            KimiK3ChatRenderer::new(tokenizer.clone(), Default::default(), KimiK3Variant::K3)
+                .render(&prepared.chat_request)
+                .expect("Kimi K3 rendering succeeds")
+                .prompt;
         let Prompt::TokenIds(prompt_token_ids) = prompt else {
             panic!("Kimi K3 renders token IDs");
         };

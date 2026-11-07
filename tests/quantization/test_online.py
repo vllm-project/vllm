@@ -308,6 +308,10 @@ def test_online_mxfp4_activation_key_is_honoured_or_rejected(
         assert computed_key == activation_quant_key
 
 
+@pytest.mark.skipif(
+    current_platform.is_xpu(),
+    reason="MXFP4 linear kernels on XPU only support dynamic activation.",
+)
 def test_online_hadamard_target_wraps_resolved_method(default_vllm_config) -> None:
     """`hadamard_size` on a `targets` spec wraps the method built with the
     resolved activation key in `InputHadamardLinearMethod`."""
