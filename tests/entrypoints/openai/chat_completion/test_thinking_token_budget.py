@@ -214,6 +214,35 @@ async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("client", ["default", "auto_config"], indirect=True)
+async def test_thinking_token_budget_ignores_start_marker_in_system_prompt(
+    client: openai.AsyncOpenAI,
+):
+    """A system prompt that mentions the start marker leaves the full budget
+    for the model's own reasoning."""
+    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+    start_ids = list(tokenizer.encode(REASONING_START_STR, add_special_tokens=False))
+    end_ids = list(tokenizer.encode(REASONING_END_STR, add_special_tokens=False))
+    system = f"Reason inside {REASONING_START_STR} tags. " + "Be brief. " * 20
+
+    response = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "system", "content": system}, *MESSAGES],
+        max_tokens=100,
+        temperature=0.0,
+        extra_body={"thinking_token_budget": THINK_BUDGET, "return_token_ids": True},
+    )
+
+    reasoning_token_count = _count_reasoning_decode_token_ids_between_markers(
+        list(response.choices[0].token_ids), start_ids, end_ids
+    )
+    assert reasoning_token_count == THINK_BUDGET, (
+        f"reasoning tokens ({reasoning_token_count}) != "
+        f"thinking_token_budget ({THINK_BUDGET})"
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND,
     reason="the Rust frontend does not serve /v1/responses",

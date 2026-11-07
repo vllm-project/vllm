@@ -89,3 +89,56 @@ def test_swap_exchanges_two_budgeted_states():
     )
     assert h._state[0]["thinking_token_budget"] == b1
     assert h._state[1]["thinking_token_budget"] == b0
+
+
+THINK_START = 151667
+THINK_END = 151668
+TURN_END = 151645
+
+
+def _forced_tokens(prompt_tok_ids: list[int], budget: int) -> list[int]:
+    """Add one request and return the token ids forced at its first step."""
+    h = ThinkingBudgetStateHolder(
+        create_mock_reasoning_config(
+            [THINK_START], [THINK_END], turn_end_token_ids=[TURN_END]
+        ),
+        8,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    output_tok_ids: list[int] = []
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=budget),
+                    prompt_tok_ids,
+                    output_tok_ids,
+                )
+            ],
+            moved=(),
+        )
+    )
+    h.update_state([output_tok_ids], None)
+    logits = h.apply_to_logits(
+        torch.zeros((1, THINK_END + 1)), predict_bonus_token=False, spec_token_ids=None
+    )
+    return (logits[0] == 1e9).nonzero().flatten().tolist()
+
+
+def test_start_marker_in_earlier_prompt_turn_is_not_counted():
+    """A start marker quoted in an earlier message, closed by an end-of-turn
+    token, must not count the rest of the prompt against the budget."""
+    prompt = [1, THINK_START, 10, 11, 12, TURN_END, 13, 14]
+    assert _forced_tokens(prompt, budget=3) == []
+
+
+def test_start_marker_after_prompt_turn_end_is_counted():
+    """Reasoning left open in the final turn of the prompt, such as a
+    resumed partial assistant message, still counts against the budget."""
+    prompt = [1, TURN_END, 2, THINK_START, 10, 11, 12]
+    assert _forced_tokens(prompt, budget=3) == [THINK_END]

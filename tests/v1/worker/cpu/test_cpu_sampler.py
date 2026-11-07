@@ -48,18 +48,21 @@ class ReasoningConfig:
     reasoning_start_token_ids = [START]
     reasoning_end_token_ids = [END]
     natural_reasoning_end_token_ids = [END]
+    turn_end_token_ids: list[int] = []
 
 
 class MultiTokenEndReasoningConfig:
     reasoning_start_token_ids = [START]
     reasoning_end_token_ids = [END_A, END_B]
     natural_reasoning_end_token_ids = [END_A, END_B]
+    turn_end_token_ids: list[int] = []
 
 
 class DistinctEndReasoningConfig:
     reasoning_start_token_ids = [START]
     reasoning_end_token_ids = [END_A, END_B]
     natural_reasoning_end_token_ids = [END]
+    turn_end_token_ids: list[int] = []
 
 
 class _ReasoningTokenizer:
@@ -745,3 +748,46 @@ def test_cpu_watermark_deduplication_scope_and_partial_context() -> None:
     assert partial_sampler._get_repeated_contexts(
         partial_indices, partial_context
     ).tolist() == [True]
+
+
+EOT = 94
+
+
+class TurnEndReasoningConfig(ReasoningConfig):
+    turn_end_token_ids: list[int] = [EOT]
+
+
+def test_cpu_thinking_budget_ignores_start_marker_in_earlier_prompt_turn() -> None:
+    tokens = [1, START, 10, 11, 12, EOT, 13, 14]
+    req_states = _make_req_states(tokens, prompt_len=len(tokens))
+    req_idx = req_states.req_id_to_index["req"]
+    state = CPUThinkingBudgetState(req_states, TurnEndReasoningConfig())
+    state.add_request(req_idx, SamplingParams(thinking_token_budget=3))
+
+    logits = torch.zeros((1, VOCAB_SIZE))
+    state.apply(logits, _thinking_context(req_idx, [14]))
+    assert torch.count_nonzero(logits) == 0
+
+
+def test_cpu_thinking_budget_counts_start_marker_after_prompt_turn_end() -> None:
+    tokens = [1, EOT, 2, START, 10, 11, 12]
+    req_states = _make_req_states(tokens, prompt_len=len(tokens))
+    req_idx = req_states.req_id_to_index["req"]
+    state = CPUThinkingBudgetState(req_states, TurnEndReasoningConfig())
+    state.add_request(req_idx, SamplingParams(thinking_token_budget=3))
+
+    logits = torch.zeros((1, VOCAB_SIZE))
+    state.apply(logits, _thinking_context(req_idx, [12]))
+    assert logits[0, END] == pytest.approx(1.0e9)
+
+
+def test_cpu_thinking_budget_ignores_turn_end_token_in_output() -> None:
+    tokens = [1, START, 10, EOT, 11, 12]
+    req_states = _make_req_states(tokens, prompt_len=1)
+    req_idx = req_states.req_id_to_index["req"]
+    state = CPUThinkingBudgetState(req_states, TurnEndReasoningConfig())
+    state.add_request(req_idx, SamplingParams(thinking_token_budget=3))
+
+    logits = torch.zeros((1, VOCAB_SIZE))
+    state.apply(logits, _thinking_context(req_idx, [12]))
+    assert logits[0, END] == pytest.approx(1.0e9)

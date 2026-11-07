@@ -53,6 +53,7 @@ class ThinkingBudgetStateHolder:
         # No separate enable flag: a non-``None`` ``reasoning_config`` is the switch.
         self.is_enabled = reasoning_config is not None
 
+        self.turn_end_token_ids: frozenset[int] = frozenset()
         if reasoning_config is None:
             self.think_start_token_ids = []
             self.think_end_token_ids = []
@@ -61,6 +62,7 @@ class ThinkingBudgetStateHolder:
             re = reasoning_config.reasoning_end_token_ids
             self.think_start_token_ids = rs if rs else []
             self.think_end_token_ids = re if re else []
+            self.turn_end_token_ids = frozenset(reasoning_config.turn_end_token_ids)
 
         self.device = device
         self._state: dict[int, dict[str, Any]] = {}
@@ -168,6 +170,17 @@ class ThinkingBudgetStateHolder:
                 return i
         return -1
 
+    def _closed_by_turn_end(self, prompt_tok_ids: list[int], start: int) -> bool:
+        """Whether a turn ends after the reasoning start at `start`.
+
+        Then an earlier message quoted the start marker, so the request is not
+        reasoning yet.
+        """
+        if not self.turn_end_token_ids:
+            return False
+        tail = prompt_tok_ids[start + len(self.think_start_token_ids) :]
+        return not self.turn_end_token_ids.isdisjoint(tail)
+
     def _init_state_entry(
         self, prompt_tok_ids: list[int] | None, thinking_token_budget: int
     ) -> dict[str, Any]:
@@ -191,7 +204,9 @@ class ThinkingBudgetStateHolder:
             last_end = self._find_last_sequence_index(
                 prompt_tok_ids, self.think_end_token_ids
             )
-            in_think = last_start > last_end
+            in_think = last_start > last_end and not self._closed_by_turn_end(
+                prompt_tok_ids, last_start
+            )
             # load metrics such as think count, start thinking
             # if request is in thinking mode, already
             if in_think:
