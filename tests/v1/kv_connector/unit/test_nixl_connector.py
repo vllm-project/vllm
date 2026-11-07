@@ -5,6 +5,7 @@ import contextlib
 import inspect
 import os
 import queue
+import socket
 import tempfile
 import textwrap
 import threading
@@ -3226,6 +3227,55 @@ def test_registration_generation_bumps_on_changed_payload(
         assert params is not None
         generations.append(params["remote_registration_generation"])
     assert generations[0] == generations[1] < generations[2]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.timeout(60)
+def test_handshake_listener_bind_failure_raises():
+    """A side-channel port that is already in use fails startup instead of
+    blocking it forever."""
+    vllm_config = create_vllm_config()
+    scheduler = NixlConnectorScheduler(
+        vllm_config,
+        vllm_config.kv_transfer_config.engine_id,
+        make_kv_cache_config(block_size=16),
+    )
+    payload = NixlHandshakePayload(compatibility_hash="", agent_metadata_bytes=b"")
+    with socket.socket() as occupier:
+        occupier.bind(("127.0.0.1", 0))
+        occupier.listen()
+        scheduler.side_channel_host = "127.0.0.1"
+        scheduler.side_channel_port = occupier.getsockname()[1]
+        with pytest.raises(
+            RuntimeError, match=f"127.0.0.1:{scheduler.side_channel_port}"
+        ):
+            scheduler.set_xfer_handshake_metadata({(0, 0): payload})
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+@pytest.mark.timeout(1200, method="thread")
+def test_llm_startup_fails_when_side_channel_port_is_taken(monkeypatch):
+    """`LLM` reports a taken side-channel port instead of hanging in startup."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    with socket.socket() as occupier:
+        occupier.bind(("127.0.0.1", 0))
+        occupier.listen()
+        port = occupier.getsockname()[1]
+        monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "127.0.0.1")
+        monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_PORT", str(port))
+        with pytest.raises(RuntimeError, match=f"127.0.0.1:{port}"):
+            LLM(
+                model="Qwen/Qwen3-0.6B",
+                enforce_eager=True,
+                gpu_memory_utilization=0.5,
+                kv_transfer_config=KVTransferConfig(
+                    kv_connector="NixlConnector",
+                    kv_role="kv_both",
+                ),
+            )
 
 
 # ── TTL-based remote engine eviction tests ──────────────────────────
