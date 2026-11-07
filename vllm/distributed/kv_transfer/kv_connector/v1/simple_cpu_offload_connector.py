@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """SimpleCPUOffloadConnector: minimal CPU KV cache offloading."""
 
+import os
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
@@ -54,7 +55,7 @@ logger = init_logger(__name__)
 # Default CPU capacity: 8 GB
 DEFAULT_CPU_CAPACITY_BYTES = 8 * (1024**3)
 
-VALID_KV_OFFLOAD_BACKENDS = ("cpu", "disk")
+VALID_KV_OFFLOAD_BACKENDS = ("cpu", "disk", "hybrid")
 # Keys that only apply to the disk backend, warned about under "cpu".
 _DISK_ONLY_KEYS = (
     "disk_path",
@@ -140,7 +141,8 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 f"Unknown kv_offload_backend {kv_offload_backend!r}; "
                 f"expected one of {VALID_KV_OFFLOAD_BACKENDS}"
             )
-        disk_mode = kv_offload_backend == "disk"
+        hybrid_mode = kv_offload_backend == "hybrid"
+        disk_mode = kv_offload_backend in ("disk", "hybrid")
         self._cache_hit_source = (
             CacheHitSource.DISK if disk_mode else CacheHitSource.HOST
         )
@@ -151,6 +153,32 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         )
         disk_buffer_slots = max(1, int(extra_config.get("disk_buffer_slots", 2)))
         use_page_cache = bool(extra_config.get("use_page_cache", False))
+        hot_cache_tokens = 0
+        max_load_slots = disk_buffer_slots
+        if hybrid_mode:
+            from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+            hot_cache_tokens = int(
+                extra_config.get("hot_cache_tokens_per_request", 2048)
+            )
+            max_load_slots = int(extra_config.get("max_load_slots", 8))
+            if hot_cache_tokens < 0 or max_load_slots < disk_buffer_slots:
+                raise ValueError("Invalid Hybrid hot-cache or load-slot limit")
+            if (
+                lazy_offload
+                or use_page_cache
+                or not getattr(os, "O_DIRECT", 0)
+                or world_size != 1
+                or vllm_config.parallel_config.data_parallel_size != 1
+                or len(kv_cache_config.kv_cache_groups) != 1
+                or not isinstance(
+                    kv_cache_config.kv_cache_groups[0].kv_cache_spec, FullAttentionSpec
+                )
+            ):
+                raise ValueError(
+                    "Hybrid requires eager offload, O_DIRECT, one GPU and "
+                    "one full-attention group"
+                )
 
         if disk_mode:
             if disk_path is None:
@@ -219,6 +247,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 use_page_cache=use_page_cache if disk_mode else False,
                 num_cpu_blocks=num_cpu_blocks,
                 aligned_num_cpu_blocks=aligned_num_cpu_blocks,
+                hot_cache_tokens_per_request=hot_cache_tokens,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = SimpleCPUOffloadWorker(
@@ -231,9 +260,14 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 disk_buffer_slots=disk_buffer_slots,
                 use_page_cache=use_page_cache,
                 num_cpu_blocks=num_cpu_blocks,
+                max_load_slots=max_load_slots,
             )
 
     # --- Worker-side methods ---
+
+    def shutdown(self) -> None:
+        if self.worker_handler is not None:
+            self.worker_handler.shutdown()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         if self.worker_handler is not None:
