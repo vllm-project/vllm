@@ -931,6 +931,18 @@ class TestApplyCohereTemplateKwargs:
         result = _convert(_make_request(safety_mode="CONTEXTUAL"))
         assert result.chat_template_kwargs["safety_mode"] == "contextual"
 
+    def test_response_format_forwarded_as_dict(self):
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+        result = _convert(
+            _make_request(
+                response_format={"type": "json_object", "json_schema": schema}
+            )
+        )
+        assert result.chat_template_kwargs["response_format"] == {
+            "type": "json_object",
+            "json_schema": schema,
+        }
+
     def test_citation_options_forwarded_as_dict(self):
         result = _convert(_make_request(citation_options={"mode": "accurate"}))
         assert result.chat_template_kwargs["citation_options"] == {"mode": "accurate"}
