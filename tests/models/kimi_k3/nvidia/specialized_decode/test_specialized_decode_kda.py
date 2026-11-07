@@ -379,10 +379,8 @@ def test_div_full_is_reciprocal_product():
     n = 1 << 24
     g = torch.Generator(device=DEVICE).manual_seed(0)
     randn = lambda scale: torch.randn(n, device=DEVICE, generator=g) * scale
-    bits = (
-        lambda low, high: torch.randint(
-            low, high, (n,), device=DEVICE, generator=g, dtype=torch.int64
-        )
+    bits = lambda low, high: (
+        torch.randint(low, high, (n,), device=DEVICE, generator=g, dtype=torch.int64)
         .int()
         .view(torch.float32)
     )
