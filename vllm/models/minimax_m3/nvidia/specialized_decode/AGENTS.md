@@ -78,10 +78,12 @@ kernel against them, so a change there that breaks these fails it.
 `MiniMaxM3MoE.process_weights_after_loading` builds one `LowBatchFfn` per MoE
 layer once the weights are processed; it compiles the kernels then, outside any
 CUDA graph capture, and binds the routed and shared expert weights in place (no
-copies). `MiniMaxM3SparseAttention.process_weights_after_loading` builds its
-`LowBatchAttention` the same way when its impl takes the CUTLASS decode (whose
-query is E4M3): the kernels compile once per process, the scratch buffers are
-allocated then, and o_proj's weights are read in place. The captured graphs
+copies). `MiniMaxM3DecoderLayer.process_weights_after_loading` builds its sparse
+attention layer's `LowBatchAttention` the same way when the impl takes the
+CUTLASS decode (whose query is E4M3); the hook is on the decoder layer, so the
+loader's attention-layer pass is unchanged with the setting off. The kernels
+compile once per process, the scratch buffers are allocated then, and o_proj's
+weights are read in place. The captured graphs
 keep those weight addresses, so a weight reload needs new captures (as for the
 FFN; sleep mode is excluded above). `attention/o_proj.py` builds FlashInfer's
 `LowLatencyBlockscaledGemmKernel` from its module path with fixed tactics, so
