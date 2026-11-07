@@ -11,31 +11,28 @@
 
 import torch
 
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
+from .utils import is_gfx942
 
+_WU_STOCK = [
+    triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+    for num_warps in [2, 4, 8]
+    for num_stages in [2, 3, 4]
+]
 
-if current_platform.is_rocm():
+if is_gfx942:
     _WU_CONFIGS = [
         triton.Config(
-            {
-                "matrix_instr_nonkdim": 16,
-                "waves_per_eu": 2,
-                "kpack": 2,
-            },
+            {"matrix_instr_nonkdim": 16, "waves_per_eu": 2},
             num_warps=2,
             num_stages=1,
-        ),
+        )
     ]
-    _WU_KEY: list[str] = []  # static config; no key
+    _WU_KEY: list[str] = []
 else:
-    _WU_CONFIGS = [
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
-    ]
+    _WU_CONFIGS = _WU_STOCK
     _WU_KEY = ["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"]
 
 
@@ -132,9 +129,8 @@ def recompute_w_u_fwd(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    # AMD: larger BK/BV reduces inner iterations; for K=V=128 both cover full dim in 1 iter.
-    BK = 128 if K <= 128 else 64
-    BV = 128 if V <= 128 else 64
+    BK = 64
+    BV = 64
     u = torch.empty_like(v)
     w = k.new_empty(B, T, H, K)
     recompute_w_u_fwd_kernel[(NT, B * H)](

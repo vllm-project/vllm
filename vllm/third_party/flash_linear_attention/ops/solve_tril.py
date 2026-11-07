@@ -12,12 +12,11 @@ import os
 
 import torch
 
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 from .op import make_tensor_descriptor
-from .utils import input_guard, is_amd, is_tma_supported
+from .utils import input_guard, is_amd, is_gfx942, is_tma_supported
 
 FLA_TRIL_PRECISION = os.environ.get("FLA_TRIL_PRECISION", "ieee")
 ALLOWED_TRIL_PRECISIONS = ["ieee", "tf32"] if is_amd else ["ieee", "tf32", "tf32x3"]
@@ -25,15 +24,13 @@ assert FLA_TRIL_PRECISION in ALLOWED_TRIL_PRECISIONS, (
     f"FLA_TRIL_PRECISION must be one of {ALLOWED_TRIL_PRECISIONS}, but got {FLA_TRIL_PRECISION}"
 )
 
-_STACK_NUM_STAGES = [1, 2, 3, 4, 5] if current_platform.is_rocm() else [2, 3, 4, 5]
-
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
-        for num_stages in _STACK_NUM_STAGES
+        for num_stages in [2, 3, 4, 5]
     ],
     key=["BT"],
 )
@@ -106,7 +103,7 @@ def solve_tril_16x16_kernel(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
-        for num_stages in _STACK_NUM_STAGES
+        for num_stages in [2, 3, 4, 5]
     ],
     key=["H", "BT", "IS_VARLEN"],
 )
@@ -217,15 +214,17 @@ def merge_16x16_to_32x32_inverse_kernel(
         )
 
 
-if current_platform.is_rocm():
+_MERGE_64_STOCK = [
+    triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+    for num_warps in [2, 4, 8]
+    for num_stages in [2, 3, 4, 5]
+]
+
+if is_gfx942:
     _MERGE_64_CONFIGS = [triton.Config({}, num_warps=2, num_stages=5)]
-    _MERGE_64_KEY: list[str] = []  # static config; no key
+    _MERGE_64_KEY: list[str] = []
 else:
-    _MERGE_64_CONFIGS = [
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4, 5]
-    ]
+    _MERGE_64_CONFIGS = _MERGE_64_STOCK
     _MERGE_64_KEY = ["H", "BT", "IS_VARLEN"]
 
 

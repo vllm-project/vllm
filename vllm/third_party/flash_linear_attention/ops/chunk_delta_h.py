@@ -10,38 +10,34 @@
 
 import torch
 
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
 from .op import exp, exp2
-from .utils import FLA_CHUNK_SIZE, use_cuda_graph
+from .utils import FLA_CHUNK_SIZE, is_gfx942, use_cuda_graph
 
 NUM_WARPS = [2, 4, 8, 16]
 # Triton's AMD backend fails to lower this kernel with num_stages=4.
 _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
 
-if current_platform.is_rocm():
+_FWD_H_STOCK = [
+    triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
+    for num_warps in [2, 4]
+    for num_stages in _CHUNK_DELTA_H_NUM_STAGES
+    for BV in [32, 64]
+]
+
+if is_gfx942:
     _FWD_H_CONFIGS = [
         triton.Config(
-            {
-                "BV": 32,
-                "matrix_instr_nonkdim": 16,
-                "waves_per_eu": 2,
-                "kpack": 2,
-            },
-            num_warps=2,
+            {"BV": 32, "matrix_instr_nonkdim": 16, "waves_per_eu": 2},
+            num_warps=8,
             num_stages=2,
-        ),
+        )
     ]
-    _FWD_H_KEY: list[str] = []  # static config; no key
+    _FWD_H_KEY: list[str] = []
 else:
-    _FWD_H_CONFIGS = [
-        triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
-        for num_stages in _CHUNK_DELTA_H_NUM_STAGES
-        for BV in [32, 64]
-    ]
+    _FWD_H_CONFIGS = _FWD_H_STOCK
     _FWD_H_KEY = ["H", "K", "V", "BT"]
 
 
