@@ -62,22 +62,6 @@ def test_deepseek_v4_rocm_dspark_skips_disabled_confidence_head():
 
 
 @pytest.mark.cpu_test
-def test_deepseek_v4_rocm_dspark_disables_unloaded_confidence_head(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    model = _make_uninitialized_model(object())
-    _prepare_loader_model(model, [])
-    _disable_distributed_loader_paths(monkeypatch)
-
-    model._direct_reload_begun = True
-    assert model.load_weights([]) == set()
-    assert model.model.confidence_head is not None  # may be one bucket of an update
-    model._direct_reload_begun = False
-    assert model.load_weights([]) == set()
-    assert model.model.confidence_head is None
-
-
-@pytest.mark.cpu_test
 def test_deepseek_v4_rocm_dspark_loads_complete_confidence_head(
     monkeypatch: pytest.MonkeyPatch,
 ):

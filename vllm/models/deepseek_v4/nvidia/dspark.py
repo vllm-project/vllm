@@ -37,7 +37,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.reload import weight_update_active
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen3_dspark import (
     DSparkConfidenceHead,
@@ -485,7 +484,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        loaded_confidence_head = False
 
         weights = _duplicate_context_wkv_weights(weights, len(self.model.layers))
         for name, loaded_weight in weights:
@@ -493,9 +491,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
             if mapped is None:
                 continue
             name = mapped
-            if "confidence_head." in name:
-                loaded_confidence_head = True
-
             # ``.scale`` -> per-method scale suffix.
             if name.endswith(".scale"):
                 suffix = (
@@ -571,12 +566,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
-        if (
-            self.model.confidence_head is not None
-            and not loaded_confidence_head
-            and not weight_update_active(self)
-        ):
-            self.model.confidence_head = None
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 

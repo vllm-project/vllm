@@ -32,7 +32,6 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
-from vllm.model_executor.model_loader.reload import weight_update_active
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 
@@ -324,7 +323,6 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         includes_embed_tokens = False
         includes_lm_head = False
         includes_draft_id_mapping = False
-        includes_confidence_head = False
         for name, loaded_weight in weights:
             # t2d is training-only; the draft remaps via d2t at sampling time.
             if "t2d" in name:
@@ -338,8 +336,6 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
                 includes_embed_tokens = True
             if "lm_head" in name:
                 includes_lm_head = True
-            if "confidence_head" in name:
-                includes_confidence_head = True
             model_weights[name] = loaded_weight
             # Sets has_own_embed_tokens / has_own_lm_head so load_dspark_model
             # knows whether to keep these or alias the target's.
@@ -356,8 +352,6 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             orig_to_new_substr["lm_head"] = None
         if not includes_draft_id_mapping:
             orig_to_new_substr["draft_id_to_target_id"] = None
-        if not includes_confidence_head and not weight_update_active(self):
-            self.model.confidence_head = None
         if self.model.confidence_head is None:
             orig_to_new_substr["confidence_head"] = None
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
