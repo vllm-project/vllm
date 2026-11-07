@@ -380,19 +380,20 @@ def test_glm5next_attn_loader_renames_weight_scale():
 
     from vllm.models.glm5next.common.model import _mla_proj_checkpoint_tensor
 
-    config = Glm5NextTextConfig(kv_lora_rank=512, mla_use_nope=False)
+    config = Glm5NextTextConfig(kv_lora_rank=512)
     scale = torch.rand(4, 2)
     name, tensor = _mla_proj_checkpoint_tensor(
         "layers.3.self_attn.kv_a_proj_with_mqa.weight_scale",
         scale,
         _glm5_mla_params(),
         config,
+        0,
     )
     assert name == "layers.3.self_attn.kv_a_proj_with_mqa.weight_scale_inv"
     assert tensor is scale
     # a projection the model does not load from block-FP8 keeps its name
     name, _ = _mla_proj_checkpoint_tensor(
-        "layers.0.self_attn.o_proj.weight_scale", scale, {}, config
+        "layers.0.self_attn.o_proj.weight_scale", scale, {}, config, 0
     )
     assert name == "layers.0.self_attn.o_proj.weight_scale"
 
@@ -404,20 +405,18 @@ def test_glm5next_nope_kv_a_padding_block_scale():
 
     from vllm.models.glm5next.common.model import _mla_proj_checkpoint_tensor
 
-    config = Glm5NextTextConfig(
-        kv_lora_rank=512, mla_use_nope=True, qk_rope_head_dim=64
-    )
+    config = Glm5NextTextConfig(kv_lora_rank=512)
     prefix = "layers.3.self_attn.kv_a_proj_with_mqa"
     weight = torch.randn(512, 256).to(torch.float8_e4m3fn)
     _, padded = _mla_proj_checkpoint_tensor(
-        f"{prefix}.weight", weight, _glm5_mla_params(), config
+        f"{prefix}.weight", weight, _glm5_mla_params(), config, 64
     )
     assert padded.shape == (576, 256) and padded.dtype == torch.float8_e4m3fn
     assert torch.equal(padded[:512].view(torch.uint8), weight.view(torch.uint8))
     assert not padded[512:].float().any()
     scale = torch.rand(4, 2)
     _, padded = _mla_proj_checkpoint_tensor(
-        f"{prefix}.weight_scale_inv", scale, _glm5_mla_params(), config
+        f"{prefix}.weight_scale_inv", scale, _glm5_mla_params(), config, 64
     )
     assert padded.shape == (5, 2)  # ceil(576 / 128) blocks
     assert torch.equal(padded[:4], scale)
@@ -454,5 +453,5 @@ def test_indexer_fuse_allocates_weight_left_on_meta(model_config):
     indexer.wk_weights_proj.weight = indexer.wk_weights_proj.weight.to("meta")
     indexer.process_weights_after_loading()
     fused = indexer.wk_weights_proj.weight
-    assert fused.device == _DEVICE
+    assert fused.is_cuda
     torch.testing.assert_close(fused, expected, rtol=0, atol=0)

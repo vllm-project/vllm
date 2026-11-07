@@ -1004,6 +1004,12 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
+        # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from
+        # ``kv_a_proj_with_mqa``; pad them with zeros for the model shape.
+        kv_a_pad_size = 0
+        if self.config.mla_use_nope and self.config.qk_rope_head_dim > 0:
+            kv_a_pad_size = self.config.qk_rope_head_dim
+
         for args in weights:
             name, loaded_weight = args[:2]
             kwargs: dict = args[2] if len(args) > 2 else {}
@@ -1032,7 +1038,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
             name, loaded_weight = _mla_proj_checkpoint_tensor(
-                name, loaded_weight, params_dict, self.config
+                name, loaded_weight, params_dict, self.config, kv_a_pad_size
             )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -1449,6 +1455,7 @@ def _mla_proj_checkpoint_tensor(
     tensor: torch.Tensor,
     params_dict: dict[str, nn.Parameter],
     config: Glm5NextTextConfig,
+    kv_a_pad_size: int,
 ) -> tuple[str, torch.Tensor]:
     """A checkpoint tensor of an MLA projection, in the form its parameter
     loads: Quark's ``weight_scale`` under the ``weight_scale_inv`` name, and a
@@ -1458,7 +1465,6 @@ def _mla_proj_checkpoint_tensor(
     suffix = next((s for s in _FP8_ATTN_PROJS if s in name), None)
     if suffix is None:
         return name, tensor
-    kv_a_pad_size = config.qk_rope_head_dim if config.mla_use_nope else 0
     prefix = name.rsplit(suffix, 1)[0]
     scale_name = f"{prefix}.{_FP8_ATTN_PROJS[suffix]}.weight_scale_inv"
     if scale_name not in params_dict:  # no q_lora_rank: kv_a is not fused
