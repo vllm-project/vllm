@@ -8,11 +8,15 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.config import ModelConfig, VllmConfig
+
 pytest.importorskip("triton")
 if not torch.cuda.is_available():
     pytest.skip("CUDA required for sampler flag tests", allow_module_level=True)
 
 from vllm.sampling_params import SamplingParams
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+from vllm.v1.worker.gpu.sample.gumbel import _gumbel_sample_kernel, gumbel_sample
 from vllm.v1.worker.gpu.sample.logits_processor import (
     LogitsContext,
     LogitsProcessor,
@@ -147,3 +151,114 @@ def test_logits_processing_cache_only_checks_active_requests():
 
     assert not np.any(sampler.needs_logits_processing[sampling_only])
     assert np.any(sampler.needs_logits_processing[with_processing])
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("consumer", ["tokens", "logprobs", "mask"])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {},
+        {"top_k": 17},
+        {"top_p": 0.8},
+        {"min_p": 0.1},
+        {"logit_bias": {7: 2.0}},
+        {"frequency_penalty": 0.5},
+    ],
+)
+def test_temperature_only_sampling_preserves_tokens_and_consumed_logits(
+    dtype, consumer, extra
+):
+    """Compare fused temperature with the original materialized sampling path.
+
+    Filtering, processors, and consumers of scaled logits must retain their
+    original behavior. Reordered slots and padded row strides exercise indexing.
+    """
+    vocab_size = 8193
+    req_states = RequestState(4, 64, 16, 0, vocab_size, DEVICE)
+    sampler = Sampler(
+        VllmConfig(),
+        4,
+        vocab_size,
+        DEVICE,
+        req_states,
+        return_sampling_mask=consumer == "mask",
+    )
+    for i, temperature in enumerate([0.7, 1.0, 1.4, 0.8]):
+        req_states.add_request(str(i), 1, [7], 0, 16)
+        req_idx = req_states.req_id_to_index[str(i)]
+        sampler.add_request(
+            req_idx, SamplingParams(temperature=temperature, seed=100 + i, **extra)
+        )
+    req_states.apply_staged_writes()
+    sampler.apply_staged_writes()
+    idx_np = np.array([1, 3, 0, 2], dtype=np.int32)
+    idx = torch.from_numpy(idx_np).to(DEVICE)
+    pos = torch.tensor([1, 3, 2, 4], device=DEVICE, dtype=torch.int64)
+    input_ids = torch.full((4,), 7, device=DEVICE, dtype=torch.int32)
+    local_pos = torch.zeros_like(input_ids)
+    lengths = np.ones(4, dtype=np.int32)
+    torch.manual_seed(42)
+    logits = torch.randn(4, vocab_size + 15, dtype=dtype, device=DEVICE)[:, :vocab_size]
+    original = logits.clone()
+    args = (idx, idx, idx_np, pos, input_ids, local_pos, lengths)
+
+    expected_logits = sampler.apply_sampling_params(
+        logits, *args, skip_top_k_top_p=True
+    )
+    top_k, top_p, has_topp_only_rows = sampler.sampling_states.get_top_k_top_p(
+        idx, idx_np, vocab_size
+    )
+    expected_logits = apply_top_k_top_p(
+        expected_logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
+    )
+    expected_tokens = gumbel_sample(
+        expected_logits,
+        idx,
+        sampler.sampling_states.temperature.gpu,
+        sampler.sampling_states.seeds.gpu,
+        pos,
+        apply_temperature=False,
+        is_drafting=False,
+    )
+    actual_tokens, actual_logits = sampler.sample(
+        logits, *args, return_logprobs=consumer == "logprobs"
+    )
+    assert torch.equal(actual_tokens, expected_tokens)
+    assert torch.equal(logits, original)
+    if consumer != "tokens":
+        assert torch.equal(actual_logits, expected_logits)
+
+
+@pytest.mark.parametrize("use_fp64", [False, True])
+def test_temperature_sampling_warmup_covers_logits_dtypes(tmp_path, use_fp64):
+    """Expand real compile keys without loading weights or allocating GPU tensors."""
+    from transformers import Qwen3Config
+
+    Qwen3Config(
+        architectures=["Qwen3ForCausalLM"],
+        vocab_size=8193,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            dtype="bfloat16",
+            skip_tokenizer_init=True,
+            max_model_len=64,
+            use_fp64_gumbel=use_fp64,
+        )
+    )
+    keys = _gumbel_sample_kernel.get_warmup_keys(vllm_config=config)
+    inputs = [dict(key.inputs) for key in keys]
+    assert {item["logits_ptr"].dtype for item in inputs} == {
+        torch.bfloat16,
+        torch.float32,
+    }
+    assert {item["local_max_ptr"].dtype for item in inputs} == {
+        torch.float64 if use_fp64 else torch.float32
+    }
