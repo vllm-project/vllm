@@ -54,6 +54,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
 )
+from vllm.model_executor.layers.fusion.residual_stream import ResidualStream
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
@@ -537,6 +538,7 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
         layer_idx: int,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        residual_stream: "ResidualStream | None" = None,
     ) -> list[torch.Tensor]:
         if residual is None and layer_idx in self.aux_hidden_state_layers:
             # The layer-0 capture aliases the embeddings, which become the
@@ -552,7 +554,7 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
             # the complete hidden state.
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         return super()._maybe_add_hidden_state(
-            aux_hidden_states, layer_idx, hidden_states, residual
+            aux_hidden_states, layer_idx, hidden_states, residual, residual_stream
         )
 
     def forward(
