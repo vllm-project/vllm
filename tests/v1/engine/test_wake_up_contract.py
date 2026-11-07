@@ -23,7 +23,7 @@ pytestmark = pytest.mark.cpu_test
 async def test_dp_wake_up_requires_all_engines_awake(results, expected):
     client = object.__new__(DPLBAsyncMPClient)
     client.core_engines = [b"engine-0", b"engine-1"]
-    client._call_utility_async = AsyncMock(side_effect=results)
+    client._call_utility_async = AsyncMock(side_effect=results)  # type: ignore[method-assign]
 
     assert await client.wake_up_async(["weights"]) is expected
     assert client._call_utility_async.await_args_list == [

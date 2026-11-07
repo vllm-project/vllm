@@ -125,6 +125,7 @@ def create_scheduler(
         runner=runner,
     )
     if mm_encoder_only:
+        assert model_config.multimodal_config is not None
         model_config.multimodal_config.mm_encoder_only = True
     if use_ec_connector and ec_role == "ec_producer":
         model_config.multimodal_config = MultiModalConfig()

@@ -510,7 +510,7 @@ def test_kv_cache_block_uses_slots():
 
     # Verify that slots actually prevent dynamic attribute assignment.
     with pytest.raises(AttributeError):
-        block.unexpected_field = True
+        block.unexpected_field = True  # type: ignore[attr-defined]
 
 
 def test_free_kv_cache_block_queue_initialization():
@@ -1236,7 +1236,9 @@ def test_num_hash_lookahead_tokens(
         ),
     )
 
-    assert vllm_config.num_hash_lookahead_tokens == expected
+    assert VllmConfig.num_hash_lookahead_tokens.fget(vllm_config) == (  # type: ignore[attr-defined]
+        expected
+    )
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -1799,6 +1801,7 @@ def test_allocate_with_lookahead():
         num_new_tokens=3,
         num_lookahead_tokens=2,  # Total required: 3+2=5 tokens
     )
+    assert blocks is not None
     assert len(blocks.get_block_ids()[0]) == 2  # ceil(5/4)=2 blocks
 
     # Test case 2: With precomputed blocks
@@ -1814,6 +1817,7 @@ def test_allocate_with_lookahead():
         num_new_tokens=3,
         num_lookahead_tokens=2,
     )
+    assert blocks is not None
     assert len(blocks.get_block_ids()[0]) == 2
 
     # Test case 3: With precomputed blocks
@@ -1829,6 +1833,7 @@ def test_allocate_with_lookahead():
         num_new_tokens=3,
         num_lookahead_tokens=4,
     )
+    assert blocks is not None
     assert len(blocks.get_block_ids()[0]) == 2
 
 

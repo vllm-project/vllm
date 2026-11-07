@@ -83,11 +83,13 @@ SILENT_GROUPS = [
     "tests/transformers_utils",
     "tests/utils_",
     "tests/v1/attention",
+    "tests/v1/core",
     "tests/v1/cudagraph",
     "tests/v1/determinism",
     "tests/v1/distributed",
     "tests/v1/e2e",
     "tests/v1/ec_connector",
+    "tests/v1/engine",
     "tests/v1/executor",
     "tests/v1/kv_offload",
     "tests/v1/logits_processors",
@@ -109,8 +111,6 @@ SEPARATE_GROUPS = [
     "tests/distributed",
     "tests/models",
     "tests/v1",
-    "tests/v1/core",
-    "tests/v1/engine",
     "tests/v1/kv_connector",
 ]
 
