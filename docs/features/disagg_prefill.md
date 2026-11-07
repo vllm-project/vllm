@@ -77,7 +77,55 @@ decode = client.chat.completions.create(
 )
 ```
 
-If `messages` has non-text content or `echo` is set, the ids are ignored and `messages` is rendered instead, so it must match the prefill request. Otherwise `kv_transfer_params["prompt_token_ids"]` must be a non-empty list of non-negative integers, or the request fails with HTTP 400, as it always does on `/v1/chat/completions/batch`.
+If `messages` has non-text content, the ids are ignored and `messages` is rendered instead — unless `kv_transfer_params["prompt_features"]` is also present (see below) — so the content must match the prefill request. If `echo` is set, the ids are always ignored. Otherwise `kv_transfer_params["prompt_token_ids"]` must be a non-empty list of non-negative integers, or the request fails with HTTP 400, as it always does on `/v1/chat/completions/batch`.
+
+### Forwarding multimodal features (`prompt_features`)
+
+A router that already rendered the prompt — including multimodal preprocessing — can forward the render result alongside the ids, so media requests skip templating, tokenization and multimodal preprocessing on the decode side too (one render per request). Render first (the render endpoints return a `GenerateRequest` with `token_ids` and `features`), then forward both on the decode request:
+
+```python
+rendered = client.post(
+    "/v1/chat/completions/render",
+    json={
+        "model": model,
+        "messages": messages,
+        "return_token_ids": True,
+        # true by default; false strips kwargs_data/mm_metadata from
+        # `features` for cache-aware routers that only need the layout
+        "return_mm_kwargs": True,
+    },
+).json()
+
+decode = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    stream=True,
+    extra_body={
+        "kv_transfer_params": {
+            "do_remote_prefill": True,
+            "prompt_token_ids": rendered["token_ids"],
+            "prompt_features": rendered["features"],
+        }
+    },
+)
+```
+
+`prompt_features` uses the same `MultiModalFeatures` schema as the [Generate API](../serving/online_serving/token_in_token_out.md):
+
+| Field | Type | Description |
+|---|---|---|
+| `mm_hashes` | `dict[str, list[str]]` | Per-modality item hashes, used for processor-cache lookup. |
+| `mm_placeholders` | `dict[str, list[PlaceholderRangeInfo]]` | Per-modality placeholder ranges (`offset`, `length`) in the token sequence. Must stay within `prompt_token_ids`. |
+| `kwargs_data` | `dict[str, list[str \| None]]` | Per-modality serialized tensor data (base64 `MultiModalKwargsItem`). `None` entries are resolved from cache. |
+| `mm_metadata` | `dict[str, list[str \| None]]` | Per-modality metadata-only items for encoder-cache disaggregated prefill; requires `ec_transfer_params` on the same request. |
+
+The payload is validated exactly like the Generate API's `features` field: placeholder bounds, metadata-only/EC consistency, and shared-memory cache-handle authentication (`--mm-processor-cache-type shm`). Violations fail with HTTP 400 before the engine sees the request. When shared-memory processor caching is enabled, `kwargs_data` items carrying SHM handles must originate from this deployment's render responses — forged handles are rejected.
+
+Notes:
+
+- `prompt_features` without `prompt_token_ids` is ignored (with a server-side warning) — forward both or neither.
+- The Harmony (GPT-OSS) chat path does not support forwarded features; the ids are ignored there and `messages` are re-rendered.
+- When absent, behavior is unchanged: media requests fall back to rendering from `messages` on the decode side.
 
 ## Generate API output modes
 
