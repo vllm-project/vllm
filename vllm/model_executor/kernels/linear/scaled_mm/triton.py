@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import Sequence
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -9,6 +11,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm
     triton_scaled_mm,
 )
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8DynamicTokenSym,
+)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
@@ -24,6 +30,122 @@ from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearLayerConfig,
 )
+
+
+class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
+    """Triton FP8 GEMM with per-token activations and per-channel weights."""
+
+    MISSING_TUNING_REASON = "requires a tuned config for this layer outside RDNA4."
+
+    def __init__(
+        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+    ) -> None:
+        super().__init__(c, layer_param_names)
+        self.config_selector = self._has_rdna4_config_selector()
+        # Outside RDNA4, can_implement already requires tuning.
+        self.has_tuned_configs = not self.config_selector or self._has_tuned_configs(c)
+        self.num_processors = 0
+        self.cache_size_bytes = 0
+        if self.config_selector:
+            from vllm.model_executor.layers.quantization.utils import (
+                fp8_per_token_config_selector as selector,
+            )
+            from vllm.utils.platform_utils import num_compute_units
+
+            device = torch.accelerator.current_device_index()
+            self.num_processors = num_compute_units(device)
+            self.cache_size_bytes = selector.get_device_cache_size(device)
+
+    @staticmethod
+    def _has_rdna4_config_selector() -> bool:
+        if not current_platform.is_rocm():
+            return False
+        from vllm.platforms.rocm import on_rdna4
+
+        return on_rdna4()
+
+    @staticmethod
+    def _has_tuned_configs(c: FP8ScaledMMLinearLayerConfig) -> bool:
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            get_w8a8_per_token_fp8_configs,
+        )
+        from vllm.utils.platform_utils import get_device_name_as_file_name
+
+        n, k = c.weight_shape
+        configs = get_w8a8_per_token_fp8_configs(
+            n,
+            k,
+            get_device_name_as_file_name(),
+            current_platform.fp8_dtype(),
+            c.out_dtype,
+        )
+        return any(
+            not config.get("USE_CONFIG_SELECTOR", False)
+            for config in (configs or {}).values()
+        )
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_rocm():
+            return False, "requires ROCm."
+        if not current_platform.supports_fp8():
+            return False, "requires FP8 support."
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        if not (
+            c.activation_quant_key == kFp8DynamicTokenSym
+            and c.weight_quant_key.scale.group_shape.is_per_channel()
+        ):
+            return False, "requires per-token activations and per-channel weights."
+        if c.out_dtype not in (torch.bfloat16, torch.float16):
+            return False, "requires BF16 or FP16 output."
+        if not cls._has_rdna4_config_selector() and not cls._has_tuned_configs(c):
+            return False, cls.MISSING_TUNING_REASON
+        return True, None
+
+    def input_quant_key(self) -> QuantKey | None:
+        return kFp8DynamicTokenSym
+
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_shape: list,
+    ) -> torch.Tensor:
+        if self.config_selector and not torch.compiler.is_compiling():
+            return _triton_fp8_per_token_scaled_mm(
+                A,
+                B,
+                As,
+                Bs,
+                out_dtype,
+                bias,
+                self.has_tuned_configs,
+                True,
+                self.num_processors,
+                self.cache_size_bytes,
+            ).view(*output_shape)
+        return torch.ops.vllm.triton_fp8_per_token_scaled_mm(
+            A,
+            B,
+            As,
+            Bs,
+            out_dtype,
+            bias,
+            self.has_tuned_configs,
+            self.config_selector,
+            self.num_processors,
+            self.cache_size_bytes,
+        ).view(*output_shape)
 
 
 class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
@@ -213,6 +335,124 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             list(self.weight_group_shape),
             self.config.out_dtype,
         )
+
+
+def _triton_fp8_per_token_scaled_mm(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    output_dtype: torch.dtype,
+    bias: torch.Tensor | None,
+    has_tuned_configs: bool,
+    config_selector: bool = False,
+    num_processors: int = 0,
+    cache_size_bytes: int = -1,
+) -> torch.Tensor:
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        get_w8a8_per_token_fp8_config,
+    )
+
+    config = None
+    if has_tuned_configs and qx.stride(1) == 1 and weight.stride(0) == 1:
+        config = get_w8a8_per_token_fp8_config(
+            qx.size(0), weight.size(1), qx.size(1), qx.dtype, output_dtype
+        )
+    if config_selector and current_platform.is_rocm():
+        from vllm.model_executor.layers.quantization.utils import (
+            fp8_per_token_config_selector as selector,
+        )
+
+        if selector.can_use_config_selector(
+            qx, weight, x_scale, weight_scale, output_dtype, bias
+        ):
+            if config is None:
+                if num_processors == 0:
+                    from vllm.utils.platform_utils import num_compute_units
+
+                    num_processors = num_compute_units(qx.get_device())
+                if cache_size_bytes < 0:
+                    cache_size_bytes = selector.get_device_cache_size(qx.get_device())
+                choice = selector.select_config(
+                    qx.size(0),
+                    weight.size(1),
+                    qx.size(1),
+                    num_processors,
+                    cache_size_bytes,
+                )
+            else:
+                choice = {
+                    "engine": "shared",
+                    "block_size_m": config["BLOCK_SIZE_M"],
+                    "block_size_n": config["BLOCK_SIZE_N"],
+                    "block_size_k": config["BLOCK_SIZE_K"],
+                    "num_warps": config["num_warps"],
+                    "num_stages": config["num_stages"],
+                    "group_m": config.get("GROUP_M", 1),
+                    "n_stripe": config.get("N_STRIPE", 0),
+                    "unmasked_loads": bool(config.get("UNMASKED_LOADS", False)),
+                }
+            return selector.launch_fp8_per_token(
+                qx, weight, x_scale, weight_scale, output_dtype, bias, choice
+            )
+    if config is None:
+        return triton_scaled_mm(qx, weight, x_scale, weight_scale, output_dtype, bias)
+
+    # Configs select the device/dtypes; retain the measured scale/bias contract.
+    group_m, n_stripe, unmasked_loads = 1, 0, False
+    if x_scale.dtype == weight_scale.dtype == torch.float32:
+        n_stripe = config.get("N_STRIPE", 0)
+        unmasked_loads = bool(config.get("UNMASKED_LOADS", False))
+        if (
+            bias is None
+            and x_scale.numel() != 1
+            and weight_scale.numel() != 1
+            and x_scale.is_contiguous()
+            and weight_scale.is_contiguous()
+        ):
+            group_m = config.get("GROUP_M", 1)
+    return triton_scaled_mm(
+        qx,
+        weight,
+        x_scale,
+        weight_scale,
+        output_dtype,
+        bias,
+        use_default_config=False,
+        block_size_m=config["BLOCK_SIZE_M"],
+        block_size_n=config["BLOCK_SIZE_N"],
+        block_size_k=config["BLOCK_SIZE_K"],
+        num_warps=config["num_warps"],
+        num_stages=config["num_stages"],
+        group_m=group_m,
+        n_stripe=n_stripe,
+        unmasked_loads=unmasked_loads,
+    )
+
+
+def _triton_fp8_per_token_scaled_mm_fake(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    output_dtype: torch.dtype,
+    bias: torch.Tensor | None,
+    has_tuned_configs: bool,
+    config_selector: bool = False,
+    num_processors: int = 0,
+    cache_size_bytes: int = -1,
+) -> torch.Tensor:
+    return torch.empty(
+        (qx.size(0), weight.size(1)), dtype=output_dtype, device=qx.device
+    )
+
+
+# The new op name gives compiled graphs a distinct cache key for this schema.
+direct_register_custom_op(
+    "triton_fp8_per_token_scaled_mm",
+    _triton_fp8_per_token_scaled_mm,
+    fake_impl=_triton_fp8_per_token_scaled_mm_fake,
+)
 
 
 def _int8_scaled_mm_func(

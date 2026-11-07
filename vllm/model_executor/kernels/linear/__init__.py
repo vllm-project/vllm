@@ -230,6 +230,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
     TritonFp8BlockScaledMMKernel,
+    TritonFp8PerTokenScaledMMKernel,
     TritonFP8ScaledMMLinearKernel,
     TritonInt8ScaledMMLinearKernel,
 )
@@ -272,7 +273,7 @@ def _get_linear_backend(*, quantization: str) -> str:
 def _batch_invariant_fp8_kernel(kernel, config, quantization: str):
     can_implement, reason = is_supported_and_can_implement_kernel(kernel, config, None)
     if not can_implement:
-        raise ValueError(f"Batch invariance on ROCm: {reason}")
+        raise ValueError(f"Batch invariance on ROCm: {kernel.__name__} {reason}")
     linear_backend = _get_linear_backend(quantization=quantization)
     if linear_backend not in ("auto", "triton"):
         logger.warning_once(
@@ -341,6 +342,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "triton": {
         TritonInt8ScaledMMLinearKernel,
         TritonFp8BlockScaledMMKernel,
+        TritonFp8PerTokenScaledMMKernel,
         TritonW4A16LinearKernel,
     },
     "deep_gemm": {
@@ -472,6 +474,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         AiterPerTokenFp8ScaledMMLinearKernel,
         ROCmFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
+        TritonFp8PerTokenScaledMMKernel,
         RowWiseTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
@@ -650,9 +653,9 @@ _KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
 
 def is_supported_and_can_implement_kernel(
     kernel: type[_KernelT], config: _KernelConfigT, compute_capability: int | None
-) -> tuple[bool, str]:
+) -> tuple[bool, str | None]:
     if kernel.__name__ in envs.VLLM_DISABLED_KERNELS:
-        return False, f" {kernel.__name__} is disabled by environment variable"
+        return False, "is disabled by environment variable."
 
     if compute_capability is None:
         _cc = current_platform.get_device_capability()
@@ -661,16 +664,9 @@ def is_supported_and_can_implement_kernel(
 
     is_supported, failure_reason = kernel.is_supported(compute_capability)
     if not is_supported:
-        return False, f"{kernel.__name__} {failure_reason}."
+        return False, failure_reason
 
-    can_implement, failure_reason = kernel.can_implement(config)
-    if not can_implement:
-        return (
-            False,
-            f"{kernel.__name__} {failure_reason}.",
-        )
-
-    return True, ""
+    return kernel.can_implement(config)
 
 
 def choose_scaled_mm_linear_kernel(
@@ -720,15 +716,33 @@ def choose_scaled_mm_linear_kernel(
             scope="global",
         )
 
-    platform_kernels = possible_kernels.get(current_platform._enum, [])
+    candidates = possible_kernels.get(current_platform._enum, [])
 
     # Apply --linear-backend filtering when set.
     platform_kernels = _resolve_backend_kernels(
-        platform_kernels,
+        candidates,
         "scaled-mm",
         quantization=quantization,
         compute_capability=compute_capability,
     )
+    triton_per_token = TritonFp8PerTokenScaledMMKernel
+    if platform_kernels == [triton_per_token]:
+        kernel = platform_kernels[0]
+        can_implement, reason = is_supported_and_can_implement_kernel(
+            kernel, config, compute_capability
+        )
+        if can_implement:
+            return kernel
+        failure_reason_list.append(f"{kernel.__name__} {reason}")
+        platform_kernels = []
+        if reason == triton_per_token.MISSING_TUNING_REASON:
+            torch_fallbacks = (
+                RowWiseTorchFP8ScaledMMLinearKernel,
+                ChannelWiseTorchFP8ScaledMMLinearKernel,
+            )
+            platform_kernels = [
+                candidate for candidate in candidates if candidate in torch_fallbacks
+            ]
 
     for kernel in platform_kernels:
         is_supported_and_can_implement, failure_reason = (
@@ -736,7 +750,7 @@ def choose_scaled_mm_linear_kernel(
         )
         if is_supported_and_can_implement:
             return kernel
-        failure_reason_list.append(failure_reason)
+        failure_reason_list.append(f"{kernel.__name__} {failure_reason}")
 
     raise ValueError(
         "Failed to find a kernel that can implement the "
