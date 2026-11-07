@@ -579,9 +579,13 @@ def get_and_maybe_dequant_weights(
     #   quantizing 1.0 may lead to over/underflows
     # - Should only be used offline, since it's O(N^3)
     assert hasattr(layer, "input_size_per_partition")
+    # The identity is the layer's input, so build it in the activation dtype the
+    # layer's kernel was set up for; `out_dtype` only describes the result. Some
+    # kernels cannot take e.g. the fp32 default: ROCm AITER's block-FP8 GEMM
+    # aborts the process in its per-group activation quant.
     eye = torch.eye(
         layer.input_size_per_partition,
-        dtype=out_dtype,
+        dtype=getattr(layer, "params_dtype", out_dtype),
         device=weight.device,
     )
     dequant_weights = layer.quant_method.apply(layer, eye, bias=None).to(out_dtype)
