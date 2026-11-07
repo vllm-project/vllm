@@ -15,6 +15,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.metrics.reader import Counter
 
 from ...utils import check_logprobs_close, check_outputs_equal
 
@@ -152,6 +153,51 @@ def test_batching(
         outputs_1_lst=batched_outputs,
         name_0="for_loop_vllm",
         name_1="batched_vllm",
+    )
+
+
+@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
+@pytest.mark.parametrize("max_tokens", [64])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_mamba1_spec_decode(
+    vllm_runner,
+    example_prompts,
+    model: str,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
+    """Speculative decoding must not change greedy outputs of Mamba-1 layers."""
+    with vllm_runner(
+        model, max_num_seqs=MAX_NUM_SEQS, enable_chunked_prefill=True
+    ) as vllm_model:
+        ref_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs
+        )
+
+    with vllm_runner(
+        model,
+        max_num_seqs=MAX_NUM_SEQS,
+        enable_chunked_prefill=True,
+        disable_log_stats=False,
+        speculative_config={
+            "method": "ngram",
+            "num_speculative_tokens": 3,
+            "prompt_lookup_max": 3,
+            "prompt_lookup_min": 2,
+        },
+    ) as vllm_model:
+        spec_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs
+        )
+        metrics = {m.name: m for m in vllm_model.llm.get_metrics()}
+
+    accepted = metrics.get("vllm:spec_decode_num_accepted_tokens")
+    assert isinstance(accepted, Counter) and accepted.value > 0
+    check_logprobs_close(
+        outputs_0_lst=ref_outputs,
+        outputs_1_lst=spec_outputs,
+        name_0="vllm",
+        name_1="vllm_spec_decode",
     )
 
 
