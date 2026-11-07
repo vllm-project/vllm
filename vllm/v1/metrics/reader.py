@@ -23,9 +23,9 @@ class Metric:
 
 @dataclass
 class Counter(Metric):
-    """A monotonically increasing integer counter."""
+    """A monotonically increasing counter, including fractional quantities."""
 
-    value: int
+    value: float
 
 
 @dataclass
@@ -112,7 +112,7 @@ def get_metrics_snapshot() -> list[Metric]:
             else:
                 for s in samples:
                     collected.append(
-                        Counter(name=metric.name, labels=s.labels, value=int(s.value))
+                        Counter(name=metric.name, labels=s.labels, value=s.value)
                     )
 
         elif metric.type == "histogram":
