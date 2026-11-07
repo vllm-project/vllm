@@ -131,6 +131,13 @@ def _format_module_tree(
     return lines
 
 
-def format_model_inspection(model: nn.Module) -> str:
-    """Format a model into a transformers-style hierarchical string."""
+def format_model_inspection(model: object) -> str:
+    """Format a model into a transformers-style hierarchical string.
+
+    Falls back to ``repr(model)`` when ``model`` is not a
+    :class:`torch.nn.Module`, so ``LLM.__repr__`` works for non-torch
+    workers (e.g. ones backed by a different runtime).
+    """
+    if not isinstance(model, nn.Module):
+        return repr(model)
     return "\n".join(_format_module_tree(model))
