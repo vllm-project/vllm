@@ -1082,7 +1082,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[self.layer_name] = self
         self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
         # Under decode_backend=latency_specialized the decode executor sets the
-        # flag, and process_weights_after_loading builds the low-batch path.
+        # flag, and the decoder layer's process_weights_after_loading builds
+        # the low-batch path.
         self.use_low_batch_attention = False
         self.low_batch_attention: LowBatchAttention | None = None
 
@@ -1108,20 +1109,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
     def get_attn_backend(self) -> type[MiniMaxM3SparseBackend]:
         return self.attn_backend
-
-    def process_weights_after_loading(self) -> None:
-        # The low-batch kernels read the E4M3 query of the CUTLASS decode and
-        # an NVFP4 index cache.
-        if (
-            self.use_low_batch_attention
-            and getattr(self.impl, "use_cutlass_decode", False)
-            and self.indexer_kv_dtype == "nvfp4"
-        ):
-            from vllm.models.minimax_m3.nvidia.specialized_decode.attention import (
-                build_low_batch_attention,
-            )
-
-            self.low_batch_attention = build_low_batch_attention(self)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         # Main GQA K/V cache. Block size may change after load, refresh it.
@@ -1415,6 +1402,23 @@ class MiniMaxM3DecoderLayer(nn.Module):
         self.post_attention_layernorm = MiniMAXGemmaRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+
+    def process_weights_after_loading(self) -> None:
+        # Here rather than on the attention layer, so that the loader's
+        # attention pass does not change when the setting is off. The
+        # low-batch kernels read the E4M3 query of the CUTLASS decode and an
+        # NVFP4 index cache.
+        attn = self.self_attn
+        if (
+            getattr(attn, "use_low_batch_attention", False)
+            and getattr(attn.impl, "use_cutlass_decode", False)
+            and attn.indexer_kv_dtype == "nvfp4"
+        ):
+            from vllm.models.minimax_m3.nvidia.specialized_decode.attention import (
+                build_low_batch_attention,
+            )
+
+            attn.low_batch_attention = build_low_batch_attention(attn)
 
     def forward(
         self,
