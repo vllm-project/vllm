@@ -253,6 +253,10 @@ class SchedulerInterface(ABC):
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return 0.0
 
+    def set_lora_pinned(self, lora_id: int, pinned: bool) -> None:
+        """Track a LoRA adapter that holds a GPU slot outside of any request."""
+        return None
+
     @abstractmethod
     def make_stats(self) -> "SchedulerStats | None":
         """Make a SchedulerStats object for logging.
