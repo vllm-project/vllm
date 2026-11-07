@@ -280,3 +280,23 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+@pytest.mark.parametrize(
+    "logit_bias",
+    [
+        {7: 1.0, 5: float("nan")},
+        # Also covers the slow path taken for a non-integer key.
+        {"bad": 1.0, 5: float("nan")},
+    ],
+)
+def test_logit_bias_rejects_nan(logit_bias):
+    # NaN used to clamp to -100, silently banning the token.
+    with pytest.raises(VLLMValidationError, match="NaN") as exc_info:
+        SamplingParams.from_optional(logit_bias=logit_bias)
+    assert exc_info.value.parameter == "logit_bias"
+
+
+def test_logit_bias_clamps_infinite_values():
+    params = SamplingParams.from_optional(logit_bias={1: float("inf"), "2": -1e9})
+    assert params.logit_bias == {1: 100.0, 2: -100.0}
