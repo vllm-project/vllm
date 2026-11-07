@@ -22,11 +22,18 @@ async def reset_prefix_cache(
     raw_request: Request,
     reset_running_requests: bool = Query(default=False),
     reset_external: bool = Query(default=False),
+    preserve_running_requests: bool = Query(default=False),
 ):
     """Reset the local prefix cache.
 
     Optionally, if the query parameter `reset_external=true`
     also resets the external (connector-managed) prefix cache.
+
+    If `preserve_running_requests=true`, the prefix cache is cleared
+    without preempting running requests. Blocks held by running requests
+    remain allocated, but all cached hashes are cleared so new requests
+    cannot hit them. Useful under sustained load where the default mode
+    keeps failing.
 
     Returns `{"success": bool}`. The reset fails (`success=false`) while
     blocks are still held, e.g. by running requests or in-flight async KV
@@ -34,12 +41,13 @@ async def reset_prefix_cache(
 
     Example:
        POST /reset_prefix_cache?reset_external=true
+       POST /reset_prefix_cache?preserve_running_requests=true
 
     """
     logger.info("Resetting prefix cache...")
 
     success = await engine_client(raw_request).reset_prefix_cache(
-        reset_running_requests, reset_external
+        reset_running_requests, reset_external, preserve_running_requests
     )
     return JSONResponse(content={"success": bool(success)})
 
