@@ -247,7 +247,9 @@ steps:
   - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP2-PCP2-EP.yaml
   - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-EP.yaml
   - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-DCP4-EP.yaml
+  - tests/evals/gsm8k/configs/DeepSeek-V4.1-Flash-NVFP4-DSpark-PCP4-CUDAGraph.yaml
   - tests/evals/gsm8k/configs/models-pcp.txt
+  - vllm/models/deepseek_v41/
   - vllm/model_executor/layers/quantization
   - vllm/config/parallel.py
   - vllm/distributed/parallel_state.py
