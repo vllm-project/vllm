@@ -454,9 +454,9 @@ def test_opt_in_outside_the_kernels_cdna_raises(monkeypatch, cdna):
     "cdna, tp, target", [(3, 4, "gfx950"), (4, 2, "gfx942")], ids=["gfx942", "gfx950"]
 )
 def test_opt_in_with_another_arch_for_flydsl_raises(monkeypatch, cdna, tp, target):
-    """An ARCH environment variable that names another architecture than the
-    GPU's would make FlyDSL build kernels that do not match the weight copies,
-    so the opt-in stops the server."""
+    """A FLYDSL_GPU_ARCH environment variable that names another architecture
+    than the GPU's would make FlyDSL build kernels that do not match the weight
+    copies, so the opt-in stops the server."""
     _deployment(monkeypatch, cdna=cdna, tp=tp, target=target)
     with pytest.raises(ValueError, match=f"makes it compile for {target}"):
         md.MonoDecodeLayer.create(_decoder_layer(), _config())

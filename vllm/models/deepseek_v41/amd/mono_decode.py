@@ -372,13 +372,15 @@ class MonoDecodeLayer:
                 if cus < BLOCKS:
                     why = f"needs {BLOCKS} compute units, the GPU has {cus}"
                 elif target != gpu:
-                    # FlyDSL compiles the kernels for the ARCH environment
-                    # variable when it is set, while the choice of the gfx942
-                    # weight copies follows the GPU. A stray ARCH would make
-                    # the two disagree, so it stops the server here.
+                    # FlyDSL compiles the kernels for the FLYDSL_GPU_ARCH
+                    # environment variable when it is set, while the choice of
+                    # the gfx942 weight copies follows the GPU. A stray
+                    # FLYDSL_GPU_ARCH would make the two disagree, so it stops
+                    # the server here.
                     why = (
                         f"needs FlyDSL to compile for the GPU's {gpu}, but the "
-                        f"ARCH environment variable makes it compile for {target}"
+                        "FLYDSL_GPU_ARCH environment variable makes it compile "
+                        f"for {target}"
                     )
         if why is not None:
             raise ValueError(f"--monokernel {why}.")
