@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import itertools
+
 import pytest
 from transformers import AutoTokenizer
 
@@ -254,6 +256,25 @@ STREAMING_13 = {
     "reasoning": "Here was",
     "content": None,
 }
+# The delta ends with the complete response special seq
+STREAMING_14 = {
+    "previous_text": "Here is my thought process: foo",
+    "current_text": "Here is my thought process: foo bar Here is my response:",
+    "delta_text": " bar Here is my response:",
+    "reasoning": " bar ",
+    "content": None,
+}
+# A potential response seq held back by the previous delta is broken, and the
+# real response seq completes within the same delta
+STREAMING_15 = {
+    "previous_text": "Here is my thought process: foo Here is",
+    "current_text": (
+        "Here is my thought process: foo Here is bar Here is my response: baz"
+    ),
+    "delta_text": " bar Here is my response: baz",
+    "reasoning": "Here is bar ",
+    "content": " baz",
+}
 
 STREAMING_SUBCASES = [
     pytest.param(
@@ -308,6 +329,14 @@ STREAMING_SUBCASES = [
         STREAMING_13,
         id="Delta breaks potential responise sequence",
     ),
+    pytest.param(
+        STREAMING_14,
+        id="Delta ends with the response sequence",
+    ),
+    pytest.param(
+        STREAMING_15,
+        id="Delta breaks held response sequence and completes a new one",
+    ),
 ]
 
 
@@ -342,3 +371,49 @@ def test_streaming_subcases(param_dict):
         assert isinstance(response, DeltaMessage)
         assert param_dict["reasoning"] == response.reasoning
         assert param_dict["content"] == response.content
+
+
+MULTI_TOKEN_DELTA_OUTPUTS = [
+    f"{START_REASONING} foo bar {START_RESPONSE} baz qux",
+    f"{START_REASONING} Here we go. {START_RESPONSE} ok",
+    f"{START_REASONING} a Here is b {START_RESPONSE} c",
+]
+
+
+def _stream_deltas(parser: ReasoningParser, deltas: list[str]):
+    # A delta spanning the response sequence carries both reasoning and content,
+    # which the shared reconstructor in tests/reasoning/utils.py rejects.
+    reasoning = content = None
+    previous_text = ""
+    for delta_text in deltas:
+        current_text = previous_text + delta_text
+        delta = parser.extract_reasoning_streaming(
+            previous_text, current_text, delta_text, [], [], []
+        )
+        if delta is not None and delta.reasoning is not None:
+            reasoning = (reasoning or "") + delta.reasoning
+        if delta is not None and delta.content is not None:
+            content = (content or "") + delta.content
+        previous_text = current_text
+    return reasoning, content
+
+
+@pytest.mark.parametrize("output", MULTI_TOKEN_DELTA_OUTPUTS)
+def test_streaming_matches_non_streaming_with_multi_token_deltas(output: str):
+    """Deltas carrying several tokens (e.g. stream_interval > 1) must not change
+    the parsed result; try every split of the text after the start sequence into
+    up to three deltas."""
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    expected = run_reasoning_extraction(parser_cls(tokenizer), [output])
+
+    tokens = [
+        tokenizer.convert_tokens_to_string([token])
+        for token in tokenizer.tokenize(output.removeprefix(START_REASONING))
+    ]
+    for num_cuts in (1, 2):
+        for cuts in itertools.combinations(range(1, len(tokens)), num_cuts):
+            bounds = (0, *cuts, len(tokens))
+            deltas = [START_REASONING] + [
+                "".join(tokens[start:end]) for start, end in itertools.pairwise(bounds)
+            ]
+            assert _stream_deltas(parser_cls(tokenizer), deltas) == expected, deltas
