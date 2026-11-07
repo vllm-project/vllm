@@ -126,6 +126,8 @@ def _make_builder(
     vllm_config.compilation_config.cudagraph_mode = (
         CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
     )
+    # These builders test the eager staging; the capture tests opt in.
+    vllm_config.compilation_config.use_breakable_cudagraph = False
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     vllm_config.cache_config.use_replayssm = use_recoverssm
     vllm_config.cache_config.use_kda_recoverssm = use_recoverssm
@@ -228,7 +230,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
             max_cudagraph_capture_size=None,
             static_forward_context={},
         ),
-        scheduler_config=SimpleNamespace(max_num_seqs=4),
+        scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=64),
         additional_config={},
         num_speculative_tokens=2,
         num_hash_lookahead_tokens=0,
