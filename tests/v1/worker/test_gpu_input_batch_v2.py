@@ -76,7 +76,9 @@ def test_make_dummy_dp_padding_respects_max_model_len(num_tokens: int):
     assert int(batch.seq_lens.max()) <= max_model_len
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA top-k.")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA/ROCm top-k."
+)
 @pytest.mark.parametrize("is_padding", [True, False])
 def test_make_dummy_padding_controls_moe_routing(monkeypatch, is_padding: bool):
     """Dummy tokens marked as padding are dropped by the MoE router (top-k id
