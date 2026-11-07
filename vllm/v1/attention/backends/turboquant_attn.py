@@ -217,7 +217,17 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
     """Builds TurboQuantMetadata from scheduler output."""
 
     kv_cache_spec: AttentionSpec
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    # UNIFORM_SINGLE_TOKEN_DECODE, not UNIFORM_BATCH: spec-decode verify
+    # batches (uniform query_len of 1 + num_speculative_tokens) route through
+    # the per-request Python prefill loop (supports_spec_as_decode=False),
+    # which reads CPU-resident metadata and is not graph-capturable. Under
+    # UNIFORM_BATCH the runner FULL-captures those batches with dummy
+    # metadata (seq_lens filled with 1), baking empty/garbage attention into
+    # the graph: silent repetition collapse for num_speculative_tokens > 1
+    # and illegal memory access for num_speculative_tokens == 1 (#52475).
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
