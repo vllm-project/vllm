@@ -12,6 +12,7 @@ from functools import cache
 import psutil
 import regex as re
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 DEVICE_CONTROL_ENV_VAR = "CPU_VISIBLE_MEMORY_NODES"
@@ -66,53 +67,176 @@ def _read_int_file(path: str) -> int | None:
         return None
 
 
+_CGROUP_ROOT = "/sys/fs/cgroup"
+_PROC_SELF_CGROUP = "/proc/self/cgroup"
+_PROC_SELF_MOUNTINFO = "/proc/self/mountinfo"
+# Release default for resolving the process cgroup instead of reading the
+# cgroup root only. Flip this one line to change the default behavior;
+# VLLM_RESOLVE_PROCESS_CGROUP=1/0 overrides it either way.
+RESOLVE_PROCESS_CGROUP_BY_DEFAULT = False
+# cgroup v1 reports "no limit" as a huge sentinel (close to PAGE_COUNTER_MAX).
+_CGROUP_UNLIMITED = 1 << 62
+
+
+def _resolve_process_cgroup() -> bool:
+    override = envs.VLLM_RESOLVE_PROCESS_CGROUP
+    return RESOLVE_PROCESS_CGROUP_BY_DEFAULT if override is None else override
+
+
+def _path_parts(path: str) -> list[str]:
+    return [part for part in path.split("/") if part]
+
+
+def _cgroup_membership(controller: str | None) -> str:
+    """This process's cgroup path from /proc/self/cgroup: the ``0::`` entry
+    for cgroup v2, the entry naming ``controller`` for v1."""
+    try:
+        with open(_PROC_SELF_CGROUP) as f:
+            for line in f:
+                parts = line.strip().split(":", 2)
+                if len(parts) != 3:
+                    continue
+                _, controllers, path = parts
+                is_v2 = controller is None and controllers == ""
+                is_v1 = controller is not None and controller in controllers.split(",")
+                if is_v2 or is_v1:
+                    return path
+    except OSError:
+        pass
+    return ""
+
+
+def _cgroup_mount(controller: str | None, membership: str) -> tuple[str, str]:
+    """(mount point, mount root) of the hierarchy from /proc/self/mountinfo.
+
+    A mount can expose a subtree (mount root other than "/"), cgroup v1 can
+    co-mount controllers as e.g. "cpu,memory", and several mounts can match.
+    The mount whose root contains ``membership`` wins. Among those, the one
+    with the shortest root wins, because it exposes the most ancestors and an
+    ancestor limit still applies. Then the first match; then /sys/fs/cgroup.
+    """
+    candidates: list[tuple[str, str]] = []
+    try:
+        with open(_PROC_SELF_MOUNTINFO) as f:
+            for line in f:
+                before, separator, after = line.partition(" - ")
+                mount_fields, fs_fields = before.split(), after.split()
+                if not separator or len(mount_fields) < 5 or len(fs_fields) < 3:
+                    continue
+                fs_type, super_options = fs_fields[0], fs_fields[2].split(",")
+                is_v2 = controller is None and fs_type == "cgroup2"
+                is_v1 = (
+                    controller is not None
+                    and fs_type == "cgroup"
+                    and controller in super_options
+                )
+                if is_v2 or is_v1:
+                    # mountinfo escapes spaces as \040.
+                    candidates.append(
+                        (
+                            mount_fields[4].replace("\\040", " "),
+                            mount_fields[3].replace("\\040", " "),
+                        )
+                    )
+    except OSError:
+        pass
+    member_parts = _path_parts(membership)
+    containing = [
+        (point, root)
+        for point, root in candidates
+        if member_parts[: len(_path_parts(root))] == _path_parts(root)
+    ]
+    if containing:
+        return min(containing, key=lambda mount: len(_path_parts(mount[1])))
+    if candidates:
+        return candidates[0]
+    if controller is None:
+        return _CGROUP_ROOT, "/"
+    return os.path.join(_CGROUP_ROOT, controller), "/"
+
+
+def _cgroup_dirs(controller: str | None) -> list[str]:
+    """Directories of this process's cgroup, nearest first, mount point last.
+
+    When resolving is off (``RESOLVE_PROCESS_CGROUP_BY_DEFAULT`` unless
+    ``VLLM_RESOLVE_PROCESS_CGROUP`` overrides it) only /sys/fs/cgroup (or the
+    v1 controller directory under it) is returned, which is the previous
+    behavior. A path that is not visible inside the mount (host cgroup
+    namespace) yields the mount point alone.
+    """
+    if not _resolve_process_cgroup():
+        if controller is None:
+            return [_CGROUP_ROOT]
+        return [os.path.join(_CGROUP_ROOT, controller)]
+    membership = _cgroup_membership(controller)
+    mount_point, mount_root = _cgroup_mount(controller, membership)
+    components = _path_parts(membership)
+    root_components = _path_parts(mount_root)
+    if ".." in components:
+        # A cgroup outside this namespace cannot be resolved from here.
+        components = []
+    elif components[: len(root_components)] == root_components:
+        # /proc/self/cgroup is relative to the hierarchy root.
+        components = components[len(root_components) :]
+    dirs = [
+        os.path.join(mount_point, *components[:depth])
+        for depth in range(len(components), 0, -1)
+    ]
+    dirs.append(mount_point)
+    return dirs
+
+
+def _limited_memory_levels() -> list[tuple[int, int | None]]:
+    """(limit, usage) of every cgroup from this process's cgroup up to the
+    root that has a memory limit; usage is None when it cannot be read."""
+    for controller, limit_file, usage_file in (
+        (None, "memory.max", "memory.current"),
+        ("memory", "memory.limit_in_bytes", "memory.usage_in_bytes"),
+    ):
+        levels = []
+        for cg_dir in _cgroup_dirs(controller):
+            limit = _read_int_file(os.path.join(cg_dir, limit_file))
+            if limit is None or limit >= _CGROUP_UNLIMITED:
+                continue
+            levels.append((limit, _read_int_file(os.path.join(cg_dir, usage_file))))
+        if levels:
+            return levels
+    return []
+
+
 @cache
 def get_cgroup_memory_limit() -> int | None:
     """Return the cgroup memory limit in bytes, or None.
 
-    Supports both cgroup v2 (unified) and v1. Returns None when
-    not running under a constrained cgroup (e.g. bare metal, or limit
-    reported as `max`/an unrealistically large value).
+    Supports both cgroup v2 (unified) and v1. When resolving the process
+    cgroup is enabled, the limit is the smallest one on the process's own
+    cgroup and its parents, which is the one the kernel enforces; otherwise
+    only the cgroup root is read. Returns None when no cgroup limits the
+    process (e.g. bare metal, or every level reports `max`/an unrealistically
+    large value).
     """
     if sys.platform != "linux":
         return None
-
-    # cgroup v2 unified hierarchy
-    v2_limit = _read_int_file("/sys/fs/cgroup/memory.max")
-    if v2_limit is not None:
-        return v2_limit
-
-    # cgroup v1
-    v1_limit = _read_int_file("/sys/fs/cgroup/memory/memory.limit_in_bytes")
-    if v1_limit is not None:
-        # cgroup v1 reports a huge sentinel (close to PAGE_COUNTER_MAX)
-        # when unlimited. Treat absurdly large values as "no limit".
-        if v1_limit >= (1 << 62):
-            return None
-        return v1_limit
-
-    return None
+    levels = _limited_memory_levels()
+    return min(limit for limit, _ in levels) if levels else None
 
 
 def get_cgroup_memory_usage() -> int | None:
     """Return the current cgroup memory usage in bytes, or None.
 
-    The usage value is intentionally read on every call because cgroup
-    memory usage changes while the process is running.
+    The usage is relative to ``get_cgroup_memory_limit()``: limit minus usage
+    is the smallest free headroom over every limited cgroup, because a parent
+    limit also counts the usage of its other children. With one limited
+    cgroup this is that cgroup's usage. It is intentionally read on every
+    call because cgroup memory usage changes while the process is running.
     """
     if sys.platform != "linux":
         return None
-
-    # cgroup v2 unified hierarchy
-    if _read_int_file("/sys/fs/cgroup/memory.max") is not None:
-        return _read_int_file("/sys/fs/cgroup/memory.current")
-
-    # cgroup v1
-    v1_limit = _read_int_file("/sys/fs/cgroup/memory/memory.limit_in_bytes")
-    if v1_limit is not None and v1_limit < (1 << 62):
-        return _read_int_file("/sys/fs/cgroup/memory/memory.usage_in_bytes")
-
-    return None
+    levels = _limited_memory_levels()
+    headrooms = [limit - usage for limit, usage in levels if usage is not None]
+    if not headrooms:
+        return None
+    return min(limit for limit, _ in levels) - min(headrooms)
 
 
 def get_available_memory() -> int:
