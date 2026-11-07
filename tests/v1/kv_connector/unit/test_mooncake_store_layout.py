@@ -22,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (
 )
 from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
@@ -289,6 +290,62 @@ def test_rank_local_descriptors_match_reference(num_regions: int, num_block_lens
         )
         assert all(type(addr) is int for addr in chunk_addrs)
         assert type(block_id) is int
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("block_id", [1, 2])
+def test_rank_local_scattered_heads_transfer_dense_extent_only(block_id: int):
+    num_blocks, num_heads, num_layers, block_size, content = 3, 2, 3, 16, 4
+    full = torch.zeros(
+        num_blocks, num_heads, num_layers, block_size, content, dtype=torch.float16
+    )
+    cache = full[:, :, 0]
+    assert not is_non_overlapping_and_dense(cache[0])
+
+    metadata = KeyMetadata("test-model", 1, 0, 0, 0)
+    layout = RankLocalStoreLayout(metadata, block_size, block_size)
+    layout.register_kv_caches([cache], num_blocks)
+
+    element_size = cache.element_size()
+    segment = block_size * content * element_size
+    block_stride = num_heads * num_layers * segment
+    assert layout.block_len == [segment] * num_heads
+    assert layout.block_stride == [block_stride] * num_heads
+
+    storage_start = full.data_ptr()
+    storage_end = storage_start + full.numel() * element_size
+    for candidate in range(num_blocks):
+        addrs, sizes, _ = layout.prepare_values([(0, block_size)], [candidate], [0])
+        candidate_addrs, candidate_sizes = addrs[0], sizes[0]
+        assert candidate_sizes == [segment] * num_heads
+        assert candidate_addrs == [
+            cache.data_ptr() + head * num_layers * segment + candidate * block_stride
+            for head in range(num_heads)
+        ]
+        for addr, size in zip(candidate_addrs, candidate_sizes, strict=True):
+            assert storage_start <= addr and addr + size <= storage_end
+
+    full.copy_(torch.arange(full.numel(), dtype=torch.float16).view(full.shape))
+    chunk_addrs, chunk_sizes, _ = layout.prepare_values(
+        [(0, block_size)], [block_id], [0]
+    )
+    payload = b"".join(
+        ctypes.string_at(addr, size)
+        for addr, size in zip(chunk_addrs[0], chunk_sizes[0], strict=True)
+    )
+    assert len(payload) == segment * num_heads
+
+    saved_block = cache[block_id].clone()
+    full[:, :, 1:] += 1
+    full[(block_id + 1) % num_blocks] += 1
+    expected = full.clone()
+    cache[block_id].zero_()
+    offset = 0
+    for addr, size in zip(chunk_addrs[0], chunk_sizes[0], strict=True):
+        ctypes.memmove(addr, payload[offset : offset + size], size)
+        offset += size
+    torch.testing.assert_close(cache[block_id], saved_block)
+    torch.testing.assert_close(full, expected)
 
 
 def test_rank_local_descriptors_handle_empty_and_invalid_chunks():
