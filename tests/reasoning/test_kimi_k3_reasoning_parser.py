@@ -407,3 +407,141 @@ def test_reasoning_end_matches_reference_over_marker_dense_sequences(seed):
             assert parser.is_reasoning_end_streaming(
                 full, delta
             ) == _reference_is_reasoning_end(full), (head, delta)
+
+
+# On ~1M-token prompts K3 sometimes skips the pre-filled think channel: it writes
+# the reply directly and closes it with the response closer, never emitting
+# <|close|>think<|sep|> or <|open|>response<|sep|>.
+RESPONSE_CLOSE = f"{CLOSE}response{SEP}"
+MESSAGE_CLOSE = f"{CLOSE}message{SEP}"
+REPLY = "To find it:\n\n1. **Convert** the coordinates."
+
+
+def _ids(text: str) -> list[int]:
+    return DummyTokenizer().encode(text)
+
+
+@pytest.mark.parametrize("prefix", ["", THINK_OPEN], ids=["prefix-consumed", "open"])
+@pytest.mark.parametrize("tail", [RESPONSE_CLOSE + MESSAGE_CLOSE, RESPONSE_CLOSE])
+def test_extract_reasoning_skipped_think_channel_is_content(prefix, tail):
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+
+    reasoning, content = parser.extract_reasoning_content(
+        prefix + REPLY + tail, request
+    )
+
+    assert reasoning is None
+    assert content == REPLY
+
+
+def test_delegating_parser_returns_skipped_think_reply_as_content():
+    parser = ReasoningOnlyParser(_dummy_tokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+
+    reasoning, content, tool_calls = parser.parse(
+        REPLY + RESPONSE_CLOSE + MESSAGE_CLOSE, request
+    )
+
+    assert reasoning is None
+    assert content == REPLY
+    assert tool_calls == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"step{THINK_CLOSE}{RESPONSE_OPEN}answer{RESPONSE_CLOSE}{MESSAGE_CLOSE}",
+        f"{THINK_OPEN}step{THINK_CLOSE}{RESPONSE_OPEN}answer{RESPONSE_CLOSE}",
+    ],
+)
+def test_response_close_after_a_closed_think_channel_keeps_the_reasoning(text):
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+
+    reasoning, content = parser.extract_reasoning_content(text, request)
+
+    assert reasoning == "step"
+    assert content == "answer"
+
+
+def test_is_reasoning_end_on_a_skipped_think_channel():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    reply = [*OPEN_IDS, *_ids(REPLY)]
+
+    assert parser.is_reasoning_end(reply) is False
+    assert parser.is_reasoning_end([*reply, *_ids(RESPONSE_CLOSE)]) is True
+    # A prior turn's response closer in the prompt does not end this turn.
+    prompt = [*_ids("answer" + RESPONSE_CLOSE + MESSAGE_CLOSE), *OPEN_IDS]
+    assert parser.is_reasoning_end(prompt) is False
+    assert parser.is_reasoning_end_streaming(
+        [*reply, *_ids(RESPONSE_CLOSE)], _ids(RESPONSE_CLOSE)[-2:]
+    )
+
+
+def _stream(parser, chunks, prompt_token_ids):
+    request = ChatCompletionRequest(model="test-model", messages=[])
+    reasoning, content = "", ""
+    for i, chunk in enumerate(chunks):
+        delta = parser.parse_delta(
+            delta_text=chunk,
+            delta_token_ids=_ids(chunk)
+            if chunk not in (THINK_OPEN, THINK_CLOSE)
+            else (OPEN_IDS if chunk == THINK_OPEN else CLOSE_IDS),
+            request=request,
+            prompt_token_ids=prompt_token_ids,
+            finished=i == len(chunks) - 1,
+        )
+        if delta is not None:
+            reasoning += delta.reasoning or ""
+            content += delta.content or ""
+    return reasoning, content
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [
+            "To find it:",
+            "\n\n1. **Convert** the coordinates.",
+            RESPONSE_CLOSE,
+            MESSAGE_CLOSE,
+        ],
+        # The closer split across steps must not leak into either field.
+        [
+            "To find it:\n\n1. **Convert** the coordinates.",
+            CLOSE,
+            "response",
+            SEP,
+            MESSAGE_CLOSE,
+        ],
+        [REPLY + RESPONSE_CLOSE + MESSAGE_CLOSE],
+    ],
+    ids=["closer-whole", "closer-split", "one-chunk"],
+)
+def test_streaming_skipped_think_channel_delivers_the_reply_as_content(chunks):
+    parser = ReasoningOnlyParser(_dummy_tokenizer())
+
+    reasoning, content = _stream(parser, chunks, prompt_token_ids=OPEN_IDS)
+
+    assert content == REPLY
+    # What had already streamed as reasoning cannot be recalled; it is the reply
+    # (or a prefix of it) and never carries a marker fragment.
+    assert REPLY.startswith(reasoning)
+    assert "<|" not in reasoning
+
+
+def test_streaming_closed_think_channel_is_unchanged():
+    parser = ReasoningOnlyParser(_dummy_tokenizer())
+    chunks = [
+        "step",
+        THINK_CLOSE,
+        RESPONSE_OPEN + "answer",
+        RESPONSE_CLOSE,
+        MESSAGE_CLOSE,
+    ]
+
+    reasoning, content = _stream(parser, chunks, prompt_token_ids=OPEN_IDS)
+
+    assert reasoning == "step"
+    assert content == "answer"
