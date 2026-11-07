@@ -156,6 +156,9 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
             # Rebind, never copy: the params must alias the megakernel buffers (EPLB).
             getattr(layer, name).data = tensor
         self._adapter = adapter
+        # a rerun builds a new megakernel; captured graphs launch the old one
+        layer.supports_direct_reload = False
+        layer.direct_reload_unsupported_reason = "the FlashInfer MoE-EP megakernel"
 
     def apply(
         self,

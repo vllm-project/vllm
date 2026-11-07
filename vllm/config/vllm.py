@@ -1278,41 +1278,6 @@ class VllmConfig:
         # loaders into every process that builds a config
         if envs.VLLM_RELOAD_MODE != "direct":
             return
-        from vllm.model_executor.layers.quantization.online.base import (
-            OnlineQuantizationConfig,
-        )
-
-        offload = self.offload_config
-        if (
-            offload.offload_backend != "auto"
-            or offload.prefetch.offload_group_size > 0
-            or offload.uva.cpu_offload_gb > 0
-        ):
-            # CPU/UVA offload gives parameters new storage on every post-load
-            # processing; prefetch offload shares one buffer between layers
-            raise ValueError("Direct reload does not support weight offloading.")
-        model_config = self.model_config
-        if model_config is not None and model_config.quantization == "torchao":
-            # its load_weights runs a layerwise reload, and its post-load
-            # processing replaces the weight parameter
-            raise ValueError("Direct reload does not support torchao quantization.")
-        if isinstance(self.quant_config, OnlineQuantizationConfig) or (
-            getattr(self.quant_config, "online_quantization_config", None) is not None
-        ):
-            # `finish` clears the guard that keeps online quantization from
-            # quantizing its already-quantized bytes again
-            raise ValueError("Direct reload does not support online quantization.")
-        if self.lora_config is not None:
-            # LoRA wraps layers after cold start; their wrappers forward
-            # `quant_method`, so a rerun would process each base layer twice
-            raise ValueError("Direct reload does not support LoRA.")
-        spec = self.speculative_config
-        if spec is not None and spec.draft_lm_head_quantization is not None:
-            # after `begin` the draft's quantized lm_head is a view of the target
-            # lm_head's storage: post-load processing would write it there
-            raise ValueError(
-                "Direct reload does not support draft_lm_head_quantization."
-            )
         transfer = self.weight_transfer_config
         if transfer is not None and transfer.backend == "sharded_rdt":
             # its replay plan is baked by a layerwise (meta) dry run

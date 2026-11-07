@@ -10,6 +10,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
 from vllm.model_executor.utils import weights_already_processed
 
@@ -71,14 +72,22 @@ def reload_weights(
     }
     counter_before_reloading = time.perf_counter()
 
-    # load weights from disk if none are provided
     if weights_iterator is None:
         model_loader = get_model_loader(load_config)
-        if not hasattr(model_loader, "get_all_weights"):
+        # before start_reload changes the model: the base method only raises
+        get_all_weights = getattr(type(model_loader), "get_all_weights", None)
+        if get_all_weights is BaseModelLoader.get_all_weights:
             raise NotImplementedError(
                 f"Model reloading with `{load_config.load_format}` format"
             )
 
+    logger.info_once("Reloading weights inplace...")
+    if is_checkpoint_format:
+        # may refuse the reload: before model_config points at the new weights
+        start_reload(model)
+
+    # load weights from disk if none are provided
+    if weights_iterator is None:
         if weights_path is not None:
             # The revision and any object-storage `model_weights` source
             # belong to the model we are reloading away from, so they must
@@ -89,12 +98,9 @@ def reload_weights(
         weights_iterator = model_loader.get_all_weights(model_config, model)
         weights_iterator = cast(Iterable[tuple[str, torch.Tensor]], weights_iterator)
 
-    # begin loading weights
-    logger.info_once("Reloading weights inplace...")
     if is_checkpoint_format:
         # load weights from checkpoint/ original model format
         device = torch.device(load_config.device or vllm_config.device_config.device)
-        start_reload(model)
         loaded_weights = model.load_weights(weights_iterator)
         finish_reload(model, model_config, device)
 

@@ -60,6 +60,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.supports_pre_processed_weights = (
             self.unquantized_backend != UnquantizedMoeBackend.MOONEP
         )
+        if self.unquantized_backend == UnquantizedMoeBackend.CPU:
+            self.supports_direct_reload = False
+            self.direct_reload_unsupported_reason = (
+                "CPU unquantized MoE skips the expert prepack when post-load "
+                "processing reruns"
+            )
 
     @property
     def supports_eplb(self) -> bool:

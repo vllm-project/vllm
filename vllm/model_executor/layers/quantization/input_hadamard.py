@@ -55,6 +55,12 @@ class InputHadamardLinearMethod(LinearMethodBase):
     (+-1) Sylvester matrix, which is checked and then dropped.
     """
 
+    # post-load processing deletes `input_rotation`, which a reload loads into
+    supports_direct_reload = False
+    direct_reload_unsupported_reason = (
+        "online input rotation drops input_rotation after loading"
+    )
+
     # TODO: the rotation runs in PyTorch before the wrapped method; let kernels
     # that can rotate inside their activation quantization (AITER's MXFP4 HIP
     # quant, CUDA hadacore) take it over.

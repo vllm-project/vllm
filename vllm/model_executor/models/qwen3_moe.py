@@ -66,6 +66,7 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import (
     EagleModelMixin,
     MixtureOfExperts,
+    SupportsDirectReload,
     SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
@@ -547,6 +548,7 @@ class Qwen3MoeForCausalLM(
     SupportsEagle,
     SupportsEagle3,
     MixtureOfExperts,
+    SupportsDirectReload,
     SupportsQuant,
 ):
     hf_to_vllm_mapper = Qwen3MoeModel.hf_to_vllm_mapper

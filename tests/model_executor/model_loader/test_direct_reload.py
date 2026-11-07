@@ -22,8 +22,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import LoadConfig, VllmConfig, WeightTransferConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.layers.quantization.input_hadamard import (
+    InputHadamardLinearMethod,
+)
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
@@ -31,10 +34,13 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 from vllm.model_executor.model_loader.reload import finish_reload, start_reload
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
+    check_direct_reload_support,
     finish_direct_reload,
 )
+from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import SupportsDirectReload
 from vllm.model_executor.utils import replace_parameter, retire_parameter
 
 _MODEL_CONFIG = SimpleNamespace(
@@ -119,7 +125,7 @@ class _Layer(torch.nn.Module):
         self.quant_method = _Method(fn) if fn is not None else None
 
 
-class _ToyModel(torch.nn.Module):
+class _ToyModel(torch.nn.Module, SupportsDirectReload):
     def __init__(self):
         super().__init__()
         self.attn = _Layer(_derive_w_uk)
@@ -155,10 +161,10 @@ def _checkpoint(scale: float = 1.0) -> dict[str, torch.Tensor]:
     }
 
 
-def _cold_start(weights: dict[str, torch.Tensor]) -> _ToyModel:
+def _cold_start(weights: dict[str, torch.Tensor], cls=_ToyModel) -> _ToyModel:
     """As ``BaseModelLoader.load_model`` does."""
     with _DEVICE:
-        model = _ToyModel()
+        model = cls()
     model.load_weights(weights.items())
     process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
     return model
@@ -292,63 +298,226 @@ class TestRefusals:
         owner, (_, _, dtype, offset), attrs, storage = model.mimo.weight._ckpt
         layout = ((64, 64), (64, 1), dtype, offset)
         model.mimo.weight._ckpt = (owner, layout, attrs, storage)
+        self._assert_begin_refused(model, "checkpoint layout needs")
+
+    def _assert_begin_refused(self, model, match) -> None:
         before = _state(model)
-        with pytest.raises(RuntimeError, match="checkpoint layout needs"):
+        with pytest.raises(RuntimeError, match=match):
             begin_direct_reload(model)
         _assert_same(_state(model), before, addresses=True)
+        assert "_direct_reload_begun" not in model.__dict__
 
-    def test_online_quantization_refused(self, monkeypatch):
-        # finish clears the guard that keeps online quantization from
-        # quantizing its converted bytes again
-        online = object.__new__(Fp8PerTensorOnlineLinearMethod)
-        init = _ToyModel.__init__
-
-        def with_online_layer(self):
-            init(self)
-            self.proj.quant_method = online
-
-        monkeypatch.setattr(_ToyModel, "__init__", with_online_layer)
-        with pytest.raises(RuntimeError, match="online quantization"):
-            _cold_start(_checkpoint())
-
-    def test_online_shared_experts_refused(self, monkeypatch):
-        # post-load processing deletes the staging parameters a reload loads
-        init = _ToyModel.__init__
-
-        def with_online_shared_experts(self):
-            init(self)
-            self.proj.shared_expert_online_loader = object()
-
-        monkeypatch.setattr(_ToyModel, "__init__", with_online_shared_experts)
-        with pytest.raises(RuntimeError, match="online quantization"):
-            _cold_start(_checkpoint())
-
-    @pytest.mark.parametrize("method_cls", ["HummingLinearMethod", "HummingMoEMethod"])
-    def test_humming_refused(self, monkeypatch, method_cls):
-        # its post-load processing runs only once per quant method
+    @pytest.mark.parametrize(
+        "kind,match",
+        [
+            # finish clears the guard that keeps online quantization from
+            # quantizing its converted bytes again
+            ("online", "online quantization"),
+            # elastic EP wraps the method after load
+            ("online-elastic-ep", "online quantization"),
+            # its post-load processing runs only once per quant method
+            ("HummingLinearMethod", "humming"),
+            ("HummingMoEMethod", "humming"),
+            # Quark online rotation deletes input_rotation after loading
+            ("InputHadamardLinearMethod", "input_rotation"),
+        ],
+    )
+    def test_quant_method_refused(self, kind, match):
+        from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
+            FusedMoEModularMethod,
+        )
         from vllm.model_executor.layers.quantization import humming as humming_mod
 
-        humming = object.__new__(getattr(humming_mod, method_cls))
-        init = _ToyModel.__init__
+        model = _cold_start(_checkpoint())
+        if kind.startswith("online"):
+            method = object.__new__(Fp8PerTensorOnlineLinearMethod)
+            if kind == "online-elastic-ep":
+                wrapper = object.__new__(FusedMoEModularMethod)
+                wrapper.__dict__["old_quant_method"] = method
+                method = wrapper
+        elif kind == "InputHadamardLinearMethod":
+            method = object.__new__(InputHadamardLinearMethod)
+        else:
+            method = object.__new__(getattr(humming_mod, kind))
+        model.proj.__dict__["quant_method"] = method
+        self._assert_begin_refused(model, match)
 
-        def with_humming_layer(self):
-            init(self)
-            self.proj.quant_method = humming
+    @pytest.mark.parametrize(
+        "module_path,cls_name",
+        [
+            ("vllm.models.muse_spark.nvidia.mega_moe", "MuseSparkMegaMoEExperts"),
+            ("vllm.models.deepseek_v4.amd.mega_moe", "DeepseekV4AiterMegaMoEExperts"),
+            ("vllm.models.step5.nvidia.mega_moe", "Step5MegaMoEExperts"),
+            # its rows are views of the cold-start checkpoint files
+            (
+                "vllm.models.qwen4_exp.nvidia.ngram_embedding",
+                "Qwen4ExpPLEDiskOffloadEmbedding",
+            ),
+        ],
+    )
+    def test_unsupported_component_refused(self, module_path, cls_name):
+        import importlib
 
-        monkeypatch.setattr(_ToyModel, "__init__", with_humming_layer)
-        with pytest.raises(RuntimeError, match="humming"):
-            _cold_start(_checkpoint())
+        cls = getattr(importlib.import_module(module_path), cls_name)
+        model = _cold_start(_checkpoint())
+        experts = object.__new__(cls)
+        torch.nn.Module.__init__(experts)
+        model.proj.add_module("experts", experts)
+        reason = cls.direct_reload_unsupported_reason
+        self._assert_begin_refused(
+            model, rf"{cls_name} is not supported \(proj\.experts\): {reason}"
+        )
+
+    def test_instance_declared_unsupported_refused(self):
+        # set on a model instance at runtime (MiniMax-M3 AMD mono decode);
+        # False refuses even a validated class
+        model = _cold_start(_checkpoint())
+        model.supports_direct_reload = False
+        self._assert_begin_refused(
+            model, r"_ToyModel is not supported \(model\): no reason given"
+        )
 
     def test_replaced_param_refused(self):
         # a new Parameter under a checkpoint name has no checkpoint layout:
         # the loader would write checkpoint bytes into its runtime layout
         model = _cold_start(_checkpoint())
         model.proj.weight = torch.nn.Parameter(model.proj.weight.data, False)
+        self._assert_begin_refused(model, r"replaced .*proj\.weight")
+
+
+def _worker(model, draft=None, **config):
+    from vllm.v1.worker.gpu_worker import Worker
+
+    worker = object.__new__(Worker)
+    worker.vllm_config = _config(parallel_config=None, **config)
+    worker.device = _DEVICE
+    worker.model_runner = SimpleNamespace(
+        get_model=lambda: model, get_draft_model=lambda: draft
+    )
+    return worker
+
+
+def _reload_config(**model_config) -> SimpleNamespace:
+    return SimpleNamespace(
+        model_config=SimpleNamespace(**vars(_MODEL_CONFIG), **model_config),
+        load_config=LoadConfig(),
+        device_config=SimpleNamespace(device=_DEVICE),
+        lora_config=None,
+    )
+
+
+def _refused(model):
+    model.supports_direct_reload = False
+    model.direct_reload_unsupported_reason = "weight copies are built once"
+    return model
+
+
+class TestCallSites:
+    """The check runs when the weight-transfer engine is created and in
+    `begin`, which caches only a pass."""
+
+    @pytest.mark.parametrize("refused", ["target", "draft", "lora"])
+    def test_refused_model_fails_engine_creation(self, refused):
+        # at startup, before a trainer connects and waits in a collective
+        target, draft = _cold_start(_checkpoint()), _cold_start(_checkpoint())
+        if refused != "lora":
+            _refused(target if refused == "target" else draft)
+        lora = {"lora_config": object()} if refused == "lora" else {}
+        worker = _worker(target, draft, **lora)
+        with pytest.raises(RuntimeError, match="built once|LoRA"):
+            worker._create_weight_transfer_engine(WeightTransferConfig(backend="ipc"))
+        assert not hasattr(worker, "weight_transfer_engine")
+
+    def test_layerwise_engine_creation_not_checked(self, monkeypatch):
+        monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+        worker = _worker(_refused(_cold_start(_checkpoint())))
+        worker._create_weight_transfer_engine(WeightTransferConfig(backend="ipc"))
+        assert worker.weight_transfer_engine is not None
+
+    def test_sparse_nccl_warns_and_is_not_checked(self, caplog_vllm):
+        # its patches skip begin/finish: nothing to check, a warning instead
+        worker = _worker(_refused(_cold_start(_checkpoint())))
+        worker._create_weight_transfer_engine(
+            WeightTransferConfig(backend="sparse_nccl")
+        )
+        assert worker.weight_transfer_engine is not None
+        assert any(
+            "skip the direct-reload lifecycle" in r.getMessage()
+            for r in caplog_vllm.records
+        )
+
+    @pytest.mark.parametrize("with_config", [True, False])
+    def test_begin_caches_only_a_pass(self, monkeypatch, with_config):
+        # and only one that checked the config (a begin outside a config skips it)
+        from vllm.model_executor.model_loader.reload import direct
+
+        config = _config() if with_config else None
+        monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
+        calls = []
+        check = direct.check_direct_reload_support
+
+        def counted(model):
+            calls.append(model)
+            check(model)
+
+        monkeypatch.setattr(direct, "check_direct_reload_support", counted)
+        model = _refused(_cold_start(_checkpoint()))
+        for _ in range(2):  # a refusal is not cached
+            with pytest.raises(RuntimeError, match="built once"):
+                begin_direct_reload(model)
+        del model.supports_direct_reload  # e.g. mono decode turned off
+        _reload(model, _checkpoint(1.01))
+        _reload(model, _checkpoint(1.02))  # a cached pass skips the walk
+        assert len(calls) == (3 if with_config else 4)
+
+    @pytest.mark.parametrize("refused", ["model", "loader"])
+    def test_reload_weights_refused_before_config_changes(self, refused):
+        model = _cold_start(_checkpoint())
+        config = _reload_config(model="old", model_weights="w", revision="r")
+        if refused == "model":
+            _refused(model)
+        else:  # a loader that cannot iterate weights by name
+            config.load_config = LoadConfig(load_format="dummy")
         before = _state(model)
-        with pytest.raises(RuntimeError, match=r"replaced .*proj\.weight"):
-            begin_direct_reload(model)
-        _assert_same(_state(model), before, addresses=True)
+        with pytest.raises(
+            RuntimeError if refused == "model" else NotImplementedError,
+            match="built once|dummy",
+        ):
+            reload_weights(config, model, None, "new", True)
         assert "_direct_reload_begun" not in model.__dict__
+        cfg = config.model_config
+        assert (cfg.model, cfg.model_weights, cfg.revision) == ("old", "w", "r")
+        _assert_same(_state(model), before, addresses=True)
+
+    @pytest.mark.parametrize("marked", [True, False])
+    def test_unmarked_model_warns_once(self, caplog_vllm, marked):
+        class _UnmarkedOnce(_ToyModel):  # the mark is not inherited
+            pass
+
+        model = _cold_start(_checkpoint(), _ToyModel if marked else _UnmarkedOnce)
+        _worker(model)._create_weight_transfer_engine(
+            WeightTransferConfig(backend="ipc")
+        )
+        for scale in (1.01, 1.02):
+            reload_weights(
+                _reload_config(), model, iter(_checkpoint(scale).items()), None, True
+            )
+        warnings = [r for r in caplog_vllm.records if "not validated" in r.getMessage()]
+        if marked:
+            assert warnings == []
+        else:
+            assert len(warnings) == 1 and "_UnmarkedOnce" in warnings[0].getMessage()
+
+
+def test_torchao_records_no_layout():
+    # its wrapper tensors have no storage to record; a direct update refuses
+    with _DEVICE:
+        model = _ToyModel()
+    model.load_weights(_checkpoint().items())
+    config = SimpleNamespace(**vars(_MODEL_CONFIG) | {"quantization": "torchao"})
+    process_weights_after_loading(model, config, _DEVICE)
+    with pytest.raises(RuntimeError, match="no checkpoint layout"):
+        begin_direct_reload(model)
 
 
 def test_retry_after_aborted_update_matches_cold_start():
@@ -494,14 +663,17 @@ def test_replace_parameter_keeps_the_target_checkpoint_layout():
     assert model.proj.weight._ckpt == ckpt
 
 
-def _config(**overrides) -> SimpleNamespace:
-    offload = SimpleNamespace(
-        offload_backend="auto",
-        prefetch=SimpleNamespace(offload_group_size=0),
-        uva=SimpleNamespace(cpu_offload_gb=0),
+def _offload(backend="auto", group_size=0, cpu_offload_gb=0) -> SimpleNamespace:
+    return SimpleNamespace(
+        offload_backend=backend,
+        prefetch=SimpleNamespace(offload_group_size=group_size),
+        uva=SimpleNamespace(cpu_offload_gb=cpu_offload_gb),
     )
+
+
+def _config(**overrides) -> SimpleNamespace:
     fields = dict(
-        offload_config=offload,
+        offload_config=_offload(),
         model_config=SimpleNamespace(quantization=None),
         quant_config=None,
         lora_config=None,
@@ -515,69 +687,26 @@ _ONLINE = object.__new__(OnlineQuantizationConfig)
 
 
 @pytest.mark.parametrize(
-    "mode,overrides,match",
+    "overrides,match",
     [
-        ("direct", {}, None),
-        ("layerwise", {"lora_config": object()}, None),
+        ({}, None),
+        ({"offload_config": _offload(backend="uva")}, "weight offloading"),
+        ({"offload_config": _offload(group_size=2)}, "weight offloading"),
+        ({"offload_config": _offload(cpu_offload_gb=1)}, "weight offloading"),
+        ({"model_config": SimpleNamespace(quantization="torchao")}, "torchao"),
+        ({"quant_config": _ONLINE}, "online quantization"),
         (
-            "direct",
-            {
-                "offload_config": SimpleNamespace(
-                    offload_backend="uva",
-                    prefetch=SimpleNamespace(offload_group_size=0),
-                    uva=SimpleNamespace(cpu_offload_gb=0),
-                )
-            },
-            "weight offloading",
-        ),
-        (
-            "direct",
-            {
-                "offload_config": SimpleNamespace(
-                    offload_backend="auto",
-                    prefetch=SimpleNamespace(offload_group_size=2),
-                    uva=SimpleNamespace(cpu_offload_gb=0),
-                )
-            },
-            "weight offloading",
-        ),
-        (
-            "direct",
-            {
-                "offload_config": SimpleNamespace(
-                    offload_backend="auto",
-                    prefetch=SimpleNamespace(offload_group_size=0),
-                    uva=SimpleNamespace(cpu_offload_gb=1),
-                )
-            },
-            "weight offloading",
-        ),
-        (
-            "direct",
-            {"model_config": SimpleNamespace(quantization="torchao")},
-            "torchao",
-        ),
-        ("direct", {"quant_config": _ONLINE}, "online quantization"),
-        (
-            "direct",
             {"quant_config": SimpleNamespace(online_quantization_config=_ONLINE)},
             "online quantization",
         ),
-        ("direct", {"lora_config": object()}, "LoRA"),
+        ({"lora_config": object()}, "LoRA"),
         (
-            "direct",
             {"speculative_config": SimpleNamespace(draft_lm_head_quantization="fp8")},
             "draft_lm_head_quantization",
-        ),
-        (
-            "direct",
-            {"weight_transfer_config": SimpleNamespace(backend="sharded_rdt")},
-            "sharded_rdt",
         ),
     ],
     ids=[
         "defaults",
-        "layerwise-lora",
         "offload-backend",
         "offload-prefetch",
         "offload-uva",
@@ -586,12 +715,31 @@ _ONLINE = object.__new__(OnlineQuantizationConfig)
         "online-composed",
         "lora",
         "draft-lm-head-quant",
-        "sharded-rdt",
     ],
 )
-def test_verify_direct_reload_compat(monkeypatch, mode, overrides, match):
-    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+def test_config_refused_by_the_check_not_at_startup(overrides, match):
+    # refused where the check runs (weight transfer, begin); a server that
+    # never updates starts in direct mode
     config = _config(**overrides)
+    VllmConfig._verify_direct_reload_compat(config)
+    model = _cold_start(_checkpoint())
+    if match is None:
+        check_direct_reload_support(model, config)
+    else:
+        with pytest.raises(RuntimeError, match=match):
+            check_direct_reload_support(model, config)
+
+
+@pytest.mark.parametrize(
+    "mode,backend,match",
+    [
+        ("direct", "sharded_rdt", "sharded_rdt"),
+        ("layerwise", "sharded_rdt", None),
+    ],
+)
+def test_verify_direct_reload_compat(monkeypatch, mode, backend, match):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    config = _config(weight_transfer_config=SimpleNamespace(backend=backend))
     if match is None:
         VllmConfig._verify_direct_reload_compat(config)
     else:

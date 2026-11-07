@@ -138,10 +138,21 @@ class MonoDecode:
         self._layer_name = attn0.layer_name
         self._index_prefix = attn0.indexer.index_cache.prefix
         self._enabled = True
+        # the runner's converted weight copies are built once
+        model.supports_direct_reload = False
+        model.direct_reload_unsupported_reason = (
+            "mono decode keeps weight copies a reload does not refresh "
+            "(VLLM_ROCM_MINIMAX_M3_MONO)"
+        )
 
     def _disable(self, why: str) -> None:
         logger.warning("MiniMax-M3 mono decode off: %s", why)
+        self._turn_off()
+
+    def _turn_off(self) -> None:
         self._enabled = False
+        # without mono decode no stale copy is read: direct reload is allowed
+        self._model.__dict__.pop("supports_direct_reload", None)
 
     def _ensure_runner(self) -> bool:
         """Build (or rebuild after a KV cache re-bind) the runner outside capture."""
@@ -164,7 +175,7 @@ class MonoDecode:
         except Exception:
             # TP-uniform: every rank fails the same way, so all fall back
             logger.exception("MiniMax-M3 mono decode: runner build failed")
-            self._enabled = False
+            self._turn_off()
             return False
         if self._runner.shared_fp8:
             copy = sum(lw.shared_bytes() for lw in self._runner.sparse)

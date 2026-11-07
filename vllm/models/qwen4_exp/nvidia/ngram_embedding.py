@@ -69,6 +69,10 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
     Every ETP rank stages full rows, so no ETP reduction is needed.
     """
 
+    # its rows are views of the cold-start checkpoint files
+    supports_direct_reload = False
+    direct_reload_unsupported_reason = "PLE disk offload does not support weight reload"
+
     def __init__(
         self,
         num_embeddings: int,

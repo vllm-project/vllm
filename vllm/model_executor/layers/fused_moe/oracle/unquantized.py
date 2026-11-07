@@ -421,6 +421,8 @@ def convert_to_unquantized_kernel_format(
             num_prefetch_slots=MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
         )
         layer._moonep_weight_layout = layout
+        layer.supports_direct_reload = False  # the conversion above raises
+        layer.direct_reload_unsupported_reason = "MoonEP weight conversion runs once"
         return layout.full_gate_weight, layout.full_down_weight
 
     if unquantized_backend == UnquantizedMoeBackend.AITER:

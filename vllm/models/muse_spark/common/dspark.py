@@ -593,6 +593,12 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
             self.model.specialized_draft = build_draft_decode(
                 self.model, self.model._compilation_mode
             )
+            # refuse at begin, before this method raises at finish
+            self.supports_direct_reload = False
+            self.direct_reload_unsupported_reason = (
+                "the specialized decode does not support reloading the DSpark "
+                "draft's weights"
+            )
 
 
 EntryClass = MuseSparkDSparkForCausalLM

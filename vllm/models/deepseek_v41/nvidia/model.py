@@ -1714,6 +1714,9 @@ class DeepseekV41LLMForCausalLM(
         self.logits_processor = SpecializedDecodeLogitsProcessor(
             self.config.vocab_size, self.specialized_decode.all_gather
         )
+        # its replicated embed_tokens copy is built once
+        self.supports_direct_reload = False
+        self.direct_reload_unsupported_reason = "the latency_specialized decode"
         return self.specialized_decode
 
     def get_model_state_cls(self):

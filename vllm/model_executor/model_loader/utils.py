@@ -158,7 +158,8 @@ def process_weights_after_loading(
 
     maybe_retie_word_embeddings(model, model_config)
 
-    if direct_reload_enabled():
+    # torchao is refused (its wrapper tensors have no storage to record)
+    if direct_reload_enabled() and model_config.quantization != "torchao":
         record_checkpoint_layout(model)  # cold start only; reloads reuse it
 
     for name, module in model.named_modules():
