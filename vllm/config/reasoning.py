@@ -9,6 +9,27 @@ from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
 
 
+def _resolve_token_ids(tokenizer, marker: str) -> list[int]:
+    """Resolve a marker string to token IDs.
+
+    Control tokens (e.g. Mistral's ``[THINK]``) are registered in the
+    vocabulary as single special-token entries but ``tokenizer.encode``
+    treats them as literal text and splits them into multiple sub-word
+    tokens.  ``convert_tokens_to_ids`` returns the correct single ID
+    for these tokens, so we try it first -- but only accept the result
+    when the token is a registered special token, since ordinary
+    vocabulary pieces also have single IDs that differ from their BPE
+    encoding.  Falls back to ``encode`` for multi-token markers like
+    ``<think>`` and for ordinary text.
+    """
+    token_id = tokenizer.convert_tokens_to_ids(marker)
+    unk_id = getattr(tokenizer, "unk_token_id", None)
+    special_ids = getattr(tokenizer, "all_special_ids", [])
+    if token_id is not None and token_id != unk_id and token_id in special_ids:
+        return [token_id]
+    return tokenizer.encode(marker, add_special_tokens=False)
+
+
 @config
 class ReasoningConfig:
     """Configuration for reasoning models.
@@ -101,14 +122,12 @@ class ReasoningConfig:
             # If we don't have valid strings to tokenize,
             # we can't initialize the token IDs.
             return
-        self._reasoning_start_token_ids = tokenizer.encode(
-            reasoning_start_str, add_special_tokens=False
+        self._reasoning_start_token_ids = _resolve_token_ids(
+            tokenizer, reasoning_start_str
         )
-        self._reasoning_end_token_ids = tokenizer.encode(
-            reasoning_end_str, add_special_tokens=False
-        )
-        self._natural_reasoning_end_token_ids = tokenizer.encode(
-            natural_reasoning_end_str, add_special_tokens=False
+        self._reasoning_end_token_ids = _resolve_token_ids(tokenizer, reasoning_end_str)
+        self._natural_reasoning_end_token_ids = _resolve_token_ids(
+            tokenizer, natural_reasoning_end_str
         )
 
         if (
