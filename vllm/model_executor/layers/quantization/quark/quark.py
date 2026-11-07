@@ -4,6 +4,7 @@
 import fnmatch
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
+import regex as re
 import torch
 from transformers import PreTrainedConfig
 
@@ -1025,13 +1026,12 @@ class QuarkConfig(QuantizationConfig):
     @staticmethod
     def get_cache_scale_mapper() -> "WeightsMapper":
         """Map Quark KV-cache scale names to vLLM names."""
-        orig_to_new_suffix = {
-            ".k_proj.output_scale": ".attn.k_scale",
-            ".v_proj.output_scale": ".attn.v_scale",
-            ".q_proj.output_scale": ".attn.q_scale",
-            ".self_attn.prob_output_scale": ".self_attn.attn.prob_scale",
+        # Regex so these run before the model's `orig_to_new_stacked` rules.
+        orig_to_new_regex = {
+            re.compile(r"\.([qkv])_proj\.output_scale$"): r".attn.\1_scale",
+            re.compile(r"\.prob_output_scale$"): ".attn.prob_scale",
         }
-        cache_scale_mapper = WeightsMapper(orig_to_new_suffix=orig_to_new_suffix)
+        cache_scale_mapper = WeightsMapper(orig_to_new_regex=orig_to_new_regex)
         return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
 
 
