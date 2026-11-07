@@ -36,7 +36,7 @@ def get_blip_num_patches(*, image_size: int, patch_size: int) -> int:
     return grid_length * grid_length
 
 
-# Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/blip/modeling_blip.py#L164 # noqa
+# Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/blip/modeling_blip.py#L164
 class BlipVisionEmbeddings(nn.Module):
     def __init__(self, config: BlipVisionConfig | Blip2VisionConfig):
         super().__init__()
