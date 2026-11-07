@@ -357,9 +357,9 @@ class SimpleCPUOffloadScheduler:
                     target += cdiv(max_num_batched_tokens, block_size)
             elif isinstance(spec, MambaSpec):
                 target += 2
-            elif isinstance(spec, SlidingWindowSpec):
-                target += cdiv(spec.sliding_window, block_size) + 1
             else:
+                # A step allocates a block in every attention group, sliding-window
+                # ones included, for each block of tokens it schedules.
                 target += cdiv(max_num_batched_tokens, block_size)
         return int(target * (1 + WATERMARK_RATIO))
 

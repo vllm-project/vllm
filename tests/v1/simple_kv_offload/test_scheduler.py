@@ -30,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector i
     SimpleCPUOffloadConnector,
 )
 from vllm.utils.hashing import sha256
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
@@ -3659,6 +3660,18 @@ def test_qsa_ring_group_is_never_stored_or_loaded() -> None:
     assert set(meta2.load_gpu_blocks) == {block.block_id for block in fa_blocks2}
     assert ring_block2.block_id not in meta2.load_gpu_blocks
     assert len(meta2.load_cpu_blocks) == num_blocks
+
+
+def test_lazy_target_covers_a_steps_sliding_window_allocations() -> None:
+    """A step that schedules max_num_batched_tokens allocates a block for each block of
+    them in every attention group, sliding-window ones included, so the lazy walk's
+    target covers that much in each group, whatever the window."""
+    kv_cache_config = _make_kv_cache_config(num_blocks=16, num_groups=6)
+    max_batched = 64 * BLOCK_SIZE
+    target = SimpleCPUOffloadScheduler._estimate_lazy_target_blocks(
+        kv_cache_config, max_batched
+    )
+    assert target >= 6 * cdiv(max_batched, BLOCK_SIZE)
 
 
 def test_lazy_target_blocks_ignore_non_prefix_cacheable_groups() -> None:
