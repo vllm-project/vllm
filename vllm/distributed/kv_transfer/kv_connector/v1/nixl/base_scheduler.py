@@ -105,6 +105,10 @@ class NixlBaseConnectorScheduler:
             g.kv_cache_spec.prefix_replay_tokens > 0
             for g in kv_cache_config.kv_cache_groups
         )
+        self._has_sliding_window = any(
+            isinstance(g.kv_cache_spec, SlidingWindowSpec)
+            for g in kv_cache_config.kv_cache_groups
+        )
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
@@ -386,16 +390,20 @@ class NixlBaseConnectorScheduler:
         """Trailing prompt tokens the prefiller must not compute; the decoder
         recomputes them locally.
 
-        Mamba needs h(N-1) so the decoder can derive h(N) itself. DSV41's sliding
-        window under bounded replay is not replayed after a P/D load, so it must
-        be laid out for the token the decoder recomputes. Multi-module
+        Mamba needs h(N-1) so the decoder can derive h(N) itself. Sliding
+        window layers must be laid out for the token the decoder recomputes (N-1),
+        otherwise the sliding window query at N-1 attends to the null block
+        whenever N - W + 1 is a multiple of block_size (#65550). DSV41's sliding
+        window under bounded replay also relies on this layout. Multi-module
         MTP needs to keep its whole lookahead window off of the prefiller, which
         would otherwise embed the unverified drafts in the MTP layer's KV cache. The
         decoder would never rebuild them, because the update is sized by the rejection
         count, which is zero for the first decode.
         """
         return max(
-            1 if self._has_mamba or self._bounded_replay else 0,
+            1
+            if self._has_mamba or self._bounded_replay or self._has_sliding_window
+            else 0,
             self.vllm_config.num_prefill_lookahead_tokens - 1,
         )
 
