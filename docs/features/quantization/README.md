@@ -46,7 +46,7 @@ Compressed-tensors NVFP4 checkpoints with a QuIP-style Hadamard input transform 
 
 Other transforms, older GPUs, and an explicit `--linear-backend` other than `auto` or `humming` use the generic transform path, which applies the transform separately before the selected kernel.
 
-Block-diagonal compressed-tensors transforms support tensor parallelism (`--tensor-parallel-size N`) when `head_dim` is set and divides each rank's input size for input transforms or each transformed output partition size for output transforms. Full-width transforms without `head_dim` still require `--tensor-parallel-size 1`.
+Compressed-tensors transforms support tensor parallelism (`--tensor-parallel-size N`). Block-diagonal transforms (`head_dim` set) require `head_dim` to divide each rank's input size for input transforms, or each transformed output partition size for output transforms. Full-width transforms (no `head_dim`) are supported only on dimensions that are not split across ranks, such as the input of column-parallel layers and the output of row-parallel layers.
 
 !!! note
     The `fp_quant` quantization method and the QuTLASS backend have been removed. Use a compressed-tensors checkpoint instead.
