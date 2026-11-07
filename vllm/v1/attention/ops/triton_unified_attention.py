@@ -1246,7 +1246,7 @@ def unified_attention(
         use_3d
         and num_seqs == 1
         and max_seqlen_q == 1
-        and num_query_heads == 16
+        and num_query_heads in (16, 32)
         and num_kv_heads == 8
         and head_size == 128
         and num_par_softmax_segments == 16
@@ -1257,7 +1257,10 @@ def unified_attention(
         and current_platform.is_cuda()
         and current_platform.is_device_capability(80)
     ):
-        TILE_SIZE_DECODE, launch_num_warps, launch_num_stages = 64, 8, 1
+        TILE_SIZE_DECODE = 64
+        launch_num_warps, launch_num_stages = (
+            (8, 1) if num_query_heads == 16 else (4, 2)
+        )
 
     # RDNA launch tuning, after vLLM's 2D/3D choice (it keeps vLLM's split-KV
     # threshold). Only launch parameters change; sliding window, sinks, softcap and

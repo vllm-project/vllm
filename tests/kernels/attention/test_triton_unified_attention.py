@@ -443,15 +443,18 @@ def ref_paged_attn(
 
 
 @pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("num_query_heads", [16, 32])
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Requires CUDA graphs")
 @torch.inference_mode()
-def test_single_query_decode_graph_tracks_context_length(block_size: int) -> None:
+def test_single_query_decode_graph_tracks_context_length(
+    block_size: int, num_query_heads: int
+) -> None:
     """A captured decode must mask stale split-K states as the context changes."""
     torch.set_default_device(DEVICE_TYPE)
     set_random_seed(173)
     max_context = 32768
     num_blocks = max_context // block_size
-    query = torch.randn(1, 16, 128, dtype=torch.float16)
+    query = torch.randn(1, num_query_heads, 128, dtype=torch.float16)
     key_cache = torch.randn(num_blocks, block_size, 8, 128, dtype=query.dtype)
     value_cache = torch.randn_like(key_cache)
     block_table = torch.randperm(num_blocks, dtype=torch.int32).unsqueeze(0)
@@ -460,7 +463,11 @@ def test_single_query_decode_graph_tracks_context_length(block_size: int) -> Non
     output = torch.empty_like(query)
     scratch = [
         torch.empty(shape, dtype=torch.float32)
-        for shape in [(1, 16, 16, 128), (1, 16, 16), (1, 16, 16)]
+        for shape in [
+            (1, num_query_heads, 16, 128),
+            (1, num_query_heads, 16),
+            (1, num_query_heads, 16),
+        ]
     ]
 
     def decode():
