@@ -30,6 +30,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadata
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 
 # --8<-- [start:short_conv]
@@ -178,7 +179,36 @@ class ShortConv(MambaBase, PluggableLayer):
             assert attn_metadata.state_indices_tensor_d is not None
             state_indices_d = attn_metadata.state_indices_tensor_d.flatten()
             Bx_d = B_d * x_d  # (num_decodes, dim)
-            if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+            if attn_metadata.num_accepted_tokens is not None:
+                assert attn_metadata.query_start_loc_d is not None
+                out_d = torch.zeros_like(Bx_d)
+                # Speculative checkpoints share one enlarged convolution state.
+                # Acceptance selects a temporal offset, not a cache block.
+                slots = attn_metadata.state_indices_tensor_d[:, 0]
+                starts = attn_metadata.query_start_loc_d.tolist()
+                accepted = attn_metadata.num_accepted_tokens.tolist()
+                width = conv_weights.shape[-1]
+                for request_idx, slot in enumerate(slots.tolist()):
+                    start, end = starts[request_idx : request_idx + 2]
+                    if start == end or slot == NULL_BLOCK_ID:
+                        continue
+                    offset = accepted[request_idx] - 1
+                    history = conv_state[slot, :, offset : offset + width - 1]
+                    inputs = torch.cat((history, Bx_d[start:end].T), dim=-1)
+                    out_d[start:end] = (
+                        torch.nn.functional.conv1d(
+                            inputs.unsqueeze(0),
+                            conv_weights.unsqueeze(1),
+                            self.conv.bias,
+                            groups=conv_weights.shape[0],
+                        )
+                        .squeeze(0)
+                        .T
+                    )
+                    # Keep every candidate checkpoint for the next verify step.
+                    updated = inputs[:, 1:]
+                    conv_state[slot, :, : updated.shape[-1]].copy_(updated)
+            elif current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
                 conv_state_view = conv_state[state_indices_d].contiguous()
                 out_d = causal_conv1d_update_torch(
                     Bx_d.unsqueeze(-1),
