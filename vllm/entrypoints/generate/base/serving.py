@@ -38,6 +38,7 @@ PRIORITY_HEADER = "X-Vllm-Priority"
 def build_per_request_timing_metrics(
     metrics: RequestStateStats | None,
     num_generation_tokens: int,
+    first_content_token_ts: float | None = None,
 ) -> PerRequestMetrics:
     """Build per-request timing metrics from ``RequestStateStats``.
 
@@ -58,6 +59,7 @@ def build_per_request_timing_metrics(
     last_token_ts = metrics.last_token_ts
 
     time_to_first_token_ms: float | None = None
+    time_to_first_content_token_ms: float | None = None
     generation_time_ms: float | None = None
     queue_time_ms: float | None = None
     mean_itl_ms: float | None = None
@@ -65,6 +67,13 @@ def build_per_request_timing_metrics(
 
     if scheduled_ts > 0 and first_token_ts > 0:
         time_to_first_token_ms = (first_token_ts - scheduled_ts) * 1000
+
+    if (
+        scheduled_ts > 0
+        and first_content_token_ts is not None
+        and first_content_token_ts > 0
+    ):
+        time_to_first_content_token_ms = (first_content_token_ts - scheduled_ts) * 1000
 
     if first_token_ts > 0 and last_token_ts > 0:
         generation_time_ms = (last_token_ts - first_token_ts) * 1000
@@ -83,6 +92,7 @@ def build_per_request_timing_metrics(
 
     return PerRequestMetrics(
         time_to_first_token_ms=time_to_first_token_ms,
+        time_to_first_content_token_ms=time_to_first_content_token_ms,
         generation_time_ms=generation_time_ms,
         queue_time_ms=queue_time_ms,
         mean_itl_ms=mean_itl_ms,

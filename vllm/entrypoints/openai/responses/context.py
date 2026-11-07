@@ -113,6 +113,15 @@ class ConversationContext(ABC):
     # the stored engine timestamps cover only one turn, while token usage is
     # accumulated across all turns.
     request_metrics_cover_all_generation_turns: bool = True
+    first_content_token_ts: float | None = None
+
+    def record_first_content_token(self, metrics: "RequestStateStats | None") -> None:
+        if (
+            self.first_content_token_ts is None
+            and metrics is not None
+            and metrics.last_token_ts > 0
+        ):
+            self.first_content_token_ts = metrics.last_token_ts
 
     @abstractmethod
     def append_output(self, output: RequestOutput) -> None:
@@ -180,8 +189,10 @@ class SimpleContext(ConversationContext):
         tokenizer: TokenizerLike | None = None,
         request: ResponsesRequest | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
+        content_timing_parser: Parser | None = None,
     ):
         self.last_output = None
+        self.request = request
         self.response_parser = response_parser or (
             parser_cls(
                 tokenizer,
@@ -191,6 +202,8 @@ class SimpleContext(ConversationContext):
             if parser_cls is not None and tokenizer is not None and request is not None
             else None
         )
+        self.content_timing_parser = content_timing_parser
+        self.first_content_token_ts = None
 
         # Accumulated final output for streaming mode
         self._accumulated_text: str = ""
@@ -319,6 +332,7 @@ class ParsableContext(ConversationContext):
         self.num_cached_tokens = 0
         self.num_cache_creation_tokens = 0
         self.num_reasoning_tokens = 0
+        self.first_content_token_ts = None
         # not implemented yet for ParsableContext
         self.all_turn_metrics: list[TurnMetrics] = []
 
@@ -658,6 +672,7 @@ class HarmonyContext(ConversationContext):
         self.num_cached_tokens = 0
         self.num_cache_creation_tokens = 0
         self.num_reasoning_tokens = 0
+        self.first_content_token_ts = None
         self.num_tool_output_tokens = 0
 
         self.last_append_segments: list[Segment] = []
@@ -702,6 +717,9 @@ class HarmonyContext(ConversationContext):
             self.last_append_flush_status = len(flushed_segments) > 0
             self.all_turn_metrics.append(self.current_turn_metrics.copy())
             self.current_turn_metrics.reset()
+
+        if any(segment.delta and segment.is_content for segment in segments):
+            self.record_first_content_token(output.metrics)
 
         self.last_append_segments = segments
         self._messages.extend(
