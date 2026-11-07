@@ -52,6 +52,7 @@ from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
     LayerName,
     direct_register_custom_op,
+    eager_bypass_custom_op,
 )
 
 logger = init_logger(__name__)
@@ -321,11 +322,11 @@ class MoERunner(MoERunnerInterface):
             # trace, so CPU can always call the fused-MoE op directly.
             return _moe_forward if self._shared_experts is None else _moe_forward_shared
 
-        return (
-            torch.ops.vllm.moe_forward
-            if self._shared_experts is None
-            else torch.ops.vllm.moe_forward_shared
-        )
+        # The custom op is the Dynamo boundary; eager calls (models run
+        # without torch.compile) skip the dispatcher and call the body.
+        if self._shared_experts is None:
+            return eager_bypass_custom_op("moe_forward", _moe_forward)
+        return eager_bypass_custom_op("moe_forward_shared", _moe_forward_shared)
 
     @property
     def shared_experts(self) -> SharedExperts | None:
