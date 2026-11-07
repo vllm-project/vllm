@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 from transformers import TokenizersBackend
 
@@ -203,6 +204,8 @@ class GuidanceBackend(StructuredOutputBackend):
             ll_matcher=ll_matcher,
             ll_tokenizer=self.ll_tokenizer,
             vocab_size=self.vocab_size,
+            extra_stop_token_ids=frozenset(stop_token_ids or ())
+            - {self.ll_tokenizer.eos_token},
         )
 
     def allocate_token_bitmask(self, max_num_seqs: int):
@@ -222,6 +225,16 @@ class GuidanceGrammar(StructuredOutputGrammar):
     printed_error: bool = False
     terminated: bool = False
     rollback_lag: int = 0
+    extra_stop_token_ids: frozenset[int] = frozenset()
+
+    def _map_stop_tokens_to_eos(self, tokens: list[int]) -> list[int]:
+        if not self.extra_stop_token_ids:
+            return tokens
+        eos_token = self.ll_tokenizer.eos_token
+        return [
+            eos_token if token in self.extra_stop_token_ids else token
+            for token in tokens
+        ]
 
     def check_error(self):
         if not self.printed_error:
@@ -236,6 +249,7 @@ class GuidanceGrammar(StructuredOutputGrammar):
         Returns True if the parser was advanced successfully.
         Returns False if the parser failed to advance.
         """
+        tokens = self._map_stop_tokens_to_eos(tokens)
         eos_token = self.ll_tokenizer.eos_token
         eos_index = next(
             (index for index, token in enumerate(tokens) if token == eos_token),
@@ -295,7 +309,9 @@ class GuidanceGrammar(StructuredOutputGrammar):
         if len(tokens) == 0:
             return []
 
-        num_tokens = self.ll_matcher.validate_tokens(tokens)
+        num_tokens = self.ll_matcher.validate_tokens(
+            self._map_stop_tokens_to_eos(tokens)
+        )
 
         self.check_error()
 
@@ -312,6 +328,17 @@ class GuidanceGrammar(StructuredOutputGrammar):
         # this will automatically return [EOS] mask if the matcher is stopped
         # or otherwise in an error state
         llguidance_torch.fill_next_token_bitmask(self.ll_matcher, bitmask, idx)
+        if self.extra_stop_token_ids:
+            row = bitmask[idx].numpy().view(np.uint32)
+            can_stop = self.ll_matcher.is_accepting()
+            # A grammar can accept EOS before the matcher has stopped.
+            # Request-specific stops require an accepting grammar state.
+            for token in self.extra_stop_token_ids:
+                token_mask = np.uint32(1 << (token % 32))
+                if can_stop:
+                    row[token // 32] |= token_mask
+                else:
+                    row[token // 32] &= ~token_mask
         self.check_error()
 
     def is_terminated(self) -> bool:
@@ -320,6 +347,8 @@ class GuidanceGrammar(StructuredOutputGrammar):
     def reset(self):
         # This method may be not needed anymore? TODO
         self.ll_matcher.reset()
+        self.terminated = False
+        self.rollback_lag = 0
 
 
 def serialize_guidance_grammar(

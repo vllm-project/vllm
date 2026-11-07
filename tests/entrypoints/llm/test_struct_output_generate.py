@@ -205,6 +205,47 @@ class CarDescription(BaseModel):
     car_type: CarType
 
 
+def test_guidance_stop_token_waits_for_complete_json(vllm_runner):
+    """A preferred stop token must wait until the JSON string is complete."""
+    with vllm_runner(
+        "facebook/opt-125m",
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=2,
+        gpu_memory_utilization=0.3,
+        kv_cache_memory_bytes=32 * 1024 * 1024,
+        structured_outputs_config={"backend": "guidance"},
+        **platform_args,
+    ) as runner:
+        tokenizer = runner.llm.get_tokenizer()
+        encoded = [
+            tokenizer.encode(text, add_special_tokens=False) for text in ('"', "X", "Y")
+        ]
+        assert all(len(tokens) == 1 for tokens in encoded)
+        quote, stop_token, content_token = [tokens[0] for tokens in encoded]
+        sampling_params = SamplingParams(
+            temperature=0,
+            max_tokens=8,
+            allowed_token_ids=[quote, stop_token, content_token],
+            stop_token_ids=[stop_token],
+            logit_bias={stop_token: 100},
+            structured_outputs=StructuredOutputsParams(
+                json={"type": "string", "minLength": 1, "maxLength": 1}
+            ),
+        )
+        outputs = runner.llm.generate(
+            "Return a JSON string.", sampling_params, use_tqdm=False
+        )
+
+        assert len(outputs) == 1
+        output = outputs[0].outputs[0]
+        assert output.token_ids == [quote, content_token, quote, stop_token]
+        assert output.text == '"Y"'
+        assert json.loads(output.text) == "Y"
+        assert output.finish_reason == "stop"
+        assert output.stop_reason == stop_token
+
+
 @pytest.mark.parametrize(
     "model_name, backend, tokenizer_mode, speculative_config",
     PARAMS_MODELS_BACKENDS_TOKENIZER_MODE,
