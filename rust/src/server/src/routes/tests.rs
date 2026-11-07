@@ -11638,7 +11638,7 @@ async fn chat_completions_n_returns_one_choice_per_seeded_sample() {
             &metrics_before,
             &metrics_after,
             metric,
-            Some("model_name=\"test-model\""),
+            Some("model_name=\"test-model\",engine=\"0\""),
         )
     };
     assert_eq!(delta("vllm:request_params_n_count"), 1.0);
