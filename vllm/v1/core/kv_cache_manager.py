@@ -582,9 +582,21 @@ class KVCacheManager:
         # Free on the processed-token basis: in-flight steps' attention windows
         # still read blocks below the optimistic boundary, and rejected spec
         # tokens can roll it back.
+        processed_tokens = max(
+            0, total_computed_tokens - request.num_in_flight_tokens
+        )
+        if (
+            num_external_computed_tokens > 0
+            and total_computed_tokens == request.num_tokens
+        ):
+            # Full-prompt remote KV load: scheduler recomputes the last prompt token
+            # to sample the first output token. Retain one extra token of history so
+            # position N - W remains in an allocated block.
+            processed_tokens = max(0, processed_tokens - 1)
+
         self.coordinator.remove_skipped_blocks(
             request.request_id,
-            max(0, total_computed_tokens - request.num_in_flight_tokens),
+            processed_tokens,
             num_prompt_tokens=request.num_prompt_tokens,
         )
 
