@@ -9,7 +9,6 @@ from vllm.parser.deepseek_v4 import (
     DeepSeekV4Parser,
     _dsml_arg_converter,
     _dsml_arg_value_extender,
-    _param_patterns,
     deepseek_v4_config,
 )
 from vllm.parser.engine.parser_engine_config import ParserEngineConfig
@@ -25,8 +24,6 @@ DSML_PARAM_CLOSE = "</｜DSML｜ parameter>"
 # Turn markers, so a prompt-closed reasoning block is only honored in the
 # current turn (continue_final_message, or a template that skips thinking).
 DEEPSEEK_TURN_BOUNDARY_TOKENS = frozenset({"<｜User｜>", "<｜Assistant｜>"})
-
-_PARAM_RE, _PARTIAL_PARAM_RE = _param_patterns(DSML_PARAM_START, DSML_PARAM_CLOSE)
 
 
 @functools.cache
@@ -57,14 +54,11 @@ def deepseek_v41_config(thinking: bool = False) -> ParserEngineConfig:
         },
         arg_converter=functools.partial(
             _dsml_arg_converter,
-            param_re=_PARAM_RE,
-            partial_param_re=_PARTIAL_PARAM_RE,
             param_start=DSML_PARAM_START,
+            param_close=DSML_PARAM_CLOSE,
         ),
         arg_value_extender=functools.partial(
             _dsml_arg_value_extender,
-            param_re=_PARAM_RE,
-            partial_param_re=_PARTIAL_PARAM_RE,
             param_start=DSML_PARAM_START,
             param_close=DSML_PARAM_CLOSE,
         ),

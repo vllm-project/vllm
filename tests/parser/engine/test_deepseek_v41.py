@@ -298,3 +298,128 @@ def test_long_string_argument_streams_before_close():
     ]
     assert len(arg_chunks) > len(body) // 64
     assert json.loads("".join(arg_chunks)) == {"text": body}
+
+
+# ── A DSML closer inside a value belongs to the value ────────────────
+
+_WRITE_FILE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+            },
+        },
+    }
+]
+
+
+def _write_file(path, content, param_close="</｜DSML｜ parameter>"):
+    return (
+        '<｜DSML｜ invoke name="write_file">\n'
+        f'<｜DSML｜ parameter name="path" string="true">{path}</｜DSML｜ parameter>\n'
+        f'<｜DSML｜ parameter name="content" string="true">{content}{param_close}\n'
+        "</｜DSML｜ invoke>\n"
+    )
+
+
+def _streamed_and_parsed_args(text, chunk_size, special_calls=False):
+    tokenizer, tokens = tokenizer_for(text, special_calls)
+    streamed = collect_output(
+        replay_streaming(
+            parser_for(tokenizer, {"thinking": False}),
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            tools=_WRITE_FILE_TOOLS,
+        )
+    )
+    _, _, calls = parser_for(tokenizer, {"thinking": False}).parse(
+        text,
+        _test_request(tools=_WRITE_FILE_TOOLS),
+        enable_auto_tools=True,
+        model_output_token_ids=[tid for tid, _ in tokens],
+    )
+    return (
+        [json.loads(call["arguments"]) for call in streamed.tool_calls],
+        [json.loads(call.arguments) for call in calls],
+    )
+
+
+_CLOSERS = ["</｜DSML｜ parameter>", "</｜DSML｜ invoke>", "</｜DSML｜ calls>"]
+
+
+@pytest.mark.parametrize(
+    ("chunk_size", "special_calls"), [(1, False), (7, False), (10000, False), (1, True)]
+)
+@pytest.mark.parametrize("closer", _CLOSERS)
+def test_closer_inside_value_is_kept(closer, chunk_size, special_calls):
+    content = f"A block ends with {closer} on its own line."
+    text = "<｜DSML｜ calls>\n" + _write_file("dsml.md", content) + "</｜DSML｜ calls>"
+    expected = [{"path": "dsml.md", "content": content}]
+    assert _streamed_and_parsed_args(text, chunk_size, special_calls) == (
+        expected,
+        expected,
+    )
+
+
+@pytest.mark.parametrize("chunk_size", [1, 10000])
+@pytest.mark.parametrize("closer", _CLOSERS)
+def test_value_ending_with_closer_is_kept(closer, chunk_size):
+    content = f"The closer is {closer}"
+    text = "<｜DSML｜ calls>\n" + _write_file("dsml.md", content) + "</｜DSML｜ calls>"
+    expected = [{"path": "dsml.md", "content": content}]
+    assert _streamed_and_parsed_args(text, chunk_size) == (expected, expected)
+
+
+@pytest.mark.parametrize("chunk_size", [1, 10000])
+def test_closer_inside_value_before_next_call(chunk_size):
+    first = "see </｜DSML｜ invoke> and </｜DSML｜ calls> here"
+    text = (
+        "<｜DSML｜ calls>\n"
+        + _write_file("one.md", first)
+        + _write_file("two.txt", "second")
+        + "</｜DSML｜ calls>"
+    )
+    expected = [
+        {"path": "one.md", "content": first},
+        {"path": "two.txt", "content": "second"},
+    ]
+    assert _streamed_and_parsed_args(text, chunk_size) == (expected, expected)
+
+
+@pytest.mark.parametrize("chunk_size", [1, 10000])
+@pytest.mark.parametrize("block_end", ["</｜DSML｜ calls>", ""])
+def test_unclosed_value_ends_at_invoke_end(chunk_size, block_end):
+    # The model omitted the value's closer: the call still ends at
+    # </invoke> and keeps the value, newline included.
+    text = "<｜DSML｜ calls>\n" + _write_file("a.txt", "hello", "") + block_end
+    expected = [{"path": "a.txt", "content": "hello\n"}]
+    assert _streamed_and_parsed_args(text, chunk_size) == (expected, expected)
+
+
+def test_long_value_with_closer_still_streams():
+    content = "A" * 2048 + " </｜DSML｜ invoke> " + "B" * 2048
+    text = "<｜DSML｜ calls>\n" + _write_file("big.md", content) + "</｜DSML｜ calls>"
+    tokenizer, tokens = tokenizer_for(text, False)
+    results = replay_streaming(
+        parser_for(tokenizer, {"thinking": False}),
+        tokens,
+        chunk_size=32,
+        finished_on_last=True,
+        tools=_WRITE_FILE_TOOLS,
+    )
+    arg_chunks = [
+        tool_call.function.arguments
+        for result in results
+        if result
+        for tool_call in result.tool_calls or []
+        if tool_call.function and tool_call.function.arguments
+    ]
+    assert len(arg_chunks) > len(content) // 64
+    assert json.loads("".join(arg_chunks)) == {"path": "big.md", "content": content}

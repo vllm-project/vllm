@@ -120,6 +120,13 @@ class TestArgConverter:
         result = json.loads(_dsml_arg_converter("", partial=False))
         assert result == {}
 
+    @pytest.mark.parametrize("partial", [False, True])
+    def test_param_close_inside_value_is_text(self, partial):
+        text = f"ends with {_PARAM_CLOSE} then more"
+        raw = self._raw(("doc", "true", text), ("n", "false", "1"))
+        result = json.loads(_dsml_arg_converter(raw, partial=partial))
+        assert result == {"doc": text, "n": 1}
+
     def _bare(self, name: str, value: str) -> str:
         return f'<｜DSML｜parameter name="{name}">{value}{_PARAM_CLOSE}'
 
