@@ -171,6 +171,7 @@ def test_moe_loads_compressed_tensors_global_scale(
     )
     layer = SimpleNamespace(
         experts=SimpleNamespace(routed_experts=experts),
+        n_routed_experts=3,
         _local_expert_slots=lambda: {0: 0, 1: 1, 2: 2},
     )
     checkpoint_scale = torch.tensor([[1.0], [2.0], [3.0]])
@@ -199,6 +200,7 @@ def test_moe_loads_channelwise_scale_for_tp(
     )
     layer = SimpleNamespace(
         experts=SimpleNamespace(routed_experts=experts),
+        n_routed_experts=3,
         _local_expert_slots=lambda: {0: 0, 2: 1},
     )
     checkpoint_scale = torch.arange(3 * checkpoint_rows).reshape(3, checkpoint_rows, 1)
@@ -212,6 +214,35 @@ def test_moe_loads_channelwise_scale_for_tp(
         expected = expected[:, 4:].reshape(2, 2, 2, 1).transpose(1, 2).flatten(1, 2)
     torch.testing.assert_close(param, expected.float())
     assert loaded == [f"experts.routed_experts.{projection}_weight_scale"]
+
+
+@pytest.mark.parametrize(
+    ("key", "param_shape", "checkpoint_shape"),
+    [("w2_weight", (2, 4, 3), (3, 4, 3)), ("w13_weight_scale_2", (2, 2), (3, 1))],
+)
+def test_moe_skips_ep_padding_experts_during_load(
+    key: str, param_shape: tuple[int, ...], checkpoint_shape: tuple[int, ...]
+) -> None:
+    """A rank whose EP slab ends in alignment padding (e.g. 256 experts on EP6)
+    owns slots past the checkpoint's last expert; only real experts load."""
+    param = torch.nn.Parameter(torch.zeros(param_shape))
+    experts = SimpleNamespace(
+        **{key: param},
+        moe_config=SimpleNamespace(moe_parallel_config=SimpleNamespace(tp_rank=0)),
+    )
+    layer = SimpleNamespace(
+        experts=SimpleNamespace(routed_experts=experts),
+        n_routed_experts=3,
+        _local_expert_slots=lambda: {2: 0, 3: 1},
+    )
+    checkpoint = torch.arange(1.0, 1.0 + torch.Size(checkpoint_shape).numel())
+    checkpoint = checkpoint.reshape(checkpoint_shape)
+
+    loaded = moe.InklingMoE.load_expert_weight(layer, f"experts.{key}", checkpoint)
+
+    torch.testing.assert_close(param[0], checkpoint[2].expand_as(param[0]))
+    torch.testing.assert_close(param[1], torch.zeros_like(param[1]))
+    assert loaded == [f"experts.routed_experts.{key}"]
 
 
 def test_sink_down_projection_is_packed_during_load(monkeypatch) -> None:
