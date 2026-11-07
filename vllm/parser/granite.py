@@ -22,12 +22,16 @@ from typing import TYPE_CHECKING
 
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
+    ArgValueExtender,
     ParserEngineConfig,
     ParserState,
     ToolCallBodyCollection,
     Transition,
 )
-from vllm.parser.utils import extract_json_member_object
+from vllm.parser.utils import (
+    extract_json_member_object,
+    json_member_value_extender,
+)
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -44,6 +48,12 @@ def _granite_arg_converter(raw_args: str, partial: bool) -> str:
     if span is None:
         return "" if partial else "{}"
     return span
+
+
+def _granite_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
+    """Extend an open string value inside the ``arguments`` object in
+    ``O(|delta|)`` time (see :func:`json_member_value_extender`)."""
+    return json_member_value_extender(raw_args, "arguments")
 
 
 @functools.cache
@@ -73,6 +83,7 @@ def granite_config() -> ParserEngineConfig:
         arg_converter=_granite_arg_converter,
         tool_call_body_collection=ToolCallBodyCollection.JSON_ARRAY,
         stream_arg_deltas=True,
+        arg_value_extender=_granite_arg_value_extender,
     )
 
 
