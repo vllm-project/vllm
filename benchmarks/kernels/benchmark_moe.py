@@ -702,7 +702,7 @@ class BenchmarkWorker:
 
         need_device_guard = False
         if current_platform.is_rocm():
-            visible_device = os.environ.get("ROCR_VISIBLE_DEVICES", None)
+            visible_device = os.environ.get("HIP_VISIBLE_DEVICES", None)
             if visible_device != f"{self.device_id}":
                 need_device_guard = True
 
@@ -1066,16 +1066,6 @@ def main(args: argparse.Namespace):
         batch_sizes = args.batch_size
 
     use_deep_gemm = bool(args.use_deep_gemm)
-
-    if current_platform.is_rocm() and "HIP_VISIBLE_DEVICES" in os.environ:
-        # Ray will set ROCR_VISIBLE_DEVICES for device visibility
-        logger.warning(
-            "Ray uses ROCR_VISIBLE_DEVICES to control device accessibility."
-            "Replacing HIP_VISIBLE_DEVICES with ROCR_VISIBLE_DEVICES."
-        )
-        val = os.environ["HIP_VISIBLE_DEVICES"]
-        os.environ["ROCR_VISIBLE_DEVICES"] = val
-        del os.environ["HIP_VISIBLE_DEVICES"]
 
     ray.init()
     num_gpus = int(ray.available_resources()["GPU"])
