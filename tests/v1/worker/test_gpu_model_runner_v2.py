@@ -508,6 +508,46 @@ def test_capture_model_excludes_adaptive_verification_profiling_cache(
     assert curves == ([] if profile_only else [[]])
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_capture_model_bounds_adaptive_verification_profiling_memory(monkeypatch):
+    """Adaptive verification profiles every shape after the KV cache is
+    allocated, so the memory it reserves must stay within what the largest
+    shape needs instead of growing with the number of shapes."""
+    runner = _make_capture_runner(monkeypatch, captured=True)
+    # Each shape's activations in MiB. Multiples of 20 MiB are reserved
+    # exactly, with or without expandable segments.
+    sizes = [20, 40, 80]
+    monkeypatch.setattr(
+        runner.cudagraph_manager, "captured_token_counts", lambda: sizes, raising=False
+    )
+    runner.step_timing = SimpleNamespace(collect=lambda: contextlib.nullcontext([]))
+    runner.adaptive_verification = SimpleNamespace(
+        batches_to_profile=lambda sizes: [
+            {"num_tokens": n} for n in sizes for _ in range(2)
+        ],
+        set_initial_cost_curves=lambda timings: None,
+    )
+    profiled: list[int] = []
+
+    def _dummy_run(num_tokens):
+        torch.empty(num_tokens << 20, dtype=torch.uint8, device="cuda")
+        profiled.append(num_tokens)
+
+    monkeypatch.setattr(runner, "_dummy_run", _dummy_run)
+    monkeypatch.setattr(
+        model_runner_module, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext
+    )
+    monkeypatch.setattr(model_runner_module, "lock_workspace", lambda: None)
+    torch.accelerator.empty_cache()
+    base = torch.accelerator.memory_reserved()
+    torch.accelerator.reset_peak_memory_stats()
+
+    runner.capture_model()
+
+    assert sorted(profiled) == [20, 20, 40, 40, 80, 80]
+    assert torch.accelerator.max_memory_reserved() - base <= max(sizes) << 20
+
+
 @pytest.mark.parametrize("target_buffer", ["absent", "none", "tensor"])
 def test_get_drafter_hidden_states_tolerates_missing_target_buffer(target_buffer):
     """Targets allocate the MTP hidden buffer only for hidden-state drafters."""
