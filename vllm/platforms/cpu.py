@@ -467,6 +467,7 @@ class CpuPlatform(Platform):
                 CpuArchEnum.POWERPC,
                 CpuArchEnum.X86,
                 CpuArchEnum.S390X,
+                CpuArchEnum.RISCV,
             )
             and not (
                 "libomp" in ld_preload_str
