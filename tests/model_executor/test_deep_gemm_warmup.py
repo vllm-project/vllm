@@ -377,6 +377,34 @@ def test_fp8_einsum_warmup_matches_quantized_o_proj_layout(
     assert z_scale.dtype == torch.int32 and z_scale.is_contiguous()
 
 
+def test_fp8_einsum_warmup_covers_both_output_variants(
+    monkeypatch, clear_fp8_einsum_warmup_cache
+) -> None:
+    """A target and a draft layer can disagree on the quantized o_proj."""
+    monkeypatch.setattr(
+        deep_gemm_warmup, "_get_fp8_einsum_m_values", lambda weight, max_tokens: [1]
+    )
+    seen = []
+    monkeypatch.setattr(
+        deep_gemm_warmup,
+        "fp8_einsum",
+        lambda eq, a, b, out, *, recipe, use_128x4_sfd_layout: seen.append(
+            use_128x4_sfd_layout
+        ),
+    )
+    layers = [
+        _dsv4_attention(recipe=(1, 1, 32), tma_aligned_scales=True),
+        _dsv4_attention(
+            recipe=(1, 1, 32), tma_aligned_scales=True, quantize_o_proj=True
+        ),
+    ]
+    model = SimpleNamespace(modules=lambda: iter(layers))
+
+    deep_gemm_warmup.deepgemm_fp8_einsum_warmup(model, 1)
+
+    assert seen == [False, True]
+
+
 def test_count_warmup_iterations_counts_each_fp8_einsum_shape_once(
     monkeypatch, clear_fp8_einsum_warmup_cache
 ) -> None:

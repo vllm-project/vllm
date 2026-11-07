@@ -330,9 +330,12 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         is_deep_gemm_supported() and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
     )
     if do_deep_gemm_warmup:
-        model = worker.get_model()
         max_tokens = worker.scheduler_config.max_num_batched_tokens
-        deep_gemm_warmup(model, max_tokens)
+        # The drafter is outside the target's module tree and its o_proj can
+        # land on a different einsum kernel than the target's.
+        for model in (worker.get_model(), worker.get_draft_model()):
+            if model is not None:
+                deep_gemm_warmup(model, max_tokens)
 
     b12x_warmup(worker, cudagraph_capture_sizes)
 
