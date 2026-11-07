@@ -516,6 +516,7 @@ def test_rocm_mxfp8_quantizer_matches_torch_on_degenerate_blocks(num_rows):
 FUSED_QUANT_SERVING_SHAPES = [
     ("shared_gate_up_tp4", 1152, 5120),
     ("fused_wqa_wkv", 1792, 5120),
+    ("stacked_context_wkv", 1536, 5120),
     ("wq_b_tp4", 8192, 1280),
     ("shared_down_tp4", 5120, 576),
     ("default_config", 1024, 2048),
