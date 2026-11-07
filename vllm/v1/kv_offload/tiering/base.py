@@ -103,6 +103,11 @@ class JobResult:
     # I/O can no longer touch those chunks; the manager applies the release on
     # its own polling path.
     deferred_release: threading.Event | None = None
+    # Only applicable to failed jobs. The errno of the first failing operation,
+    # if the tier knows it; ``None`` means unknown. The manager classifies it
+    # with ``io_errors.classify_errno`` (e.g. to tell a full tier from a
+    # transient error).
+    error_errno: int | None = None
 
 
 class ParentManager(ABC):
