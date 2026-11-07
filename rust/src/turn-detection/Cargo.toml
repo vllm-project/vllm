@@ -1,0 +1,19 @@
+[package]
+name = "vllm-turn-detection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+matrixmultiply.workspace = true
+realfft.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+libm.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

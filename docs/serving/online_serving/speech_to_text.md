@@ -204,7 +204,7 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 | ----- | ----------- |
 | `input_audio_buffer.append` | Send base64-encoded audio chunk: `{"type": "input_audio_buffer.append", "audio": "<base64>"}` |
 | `input_audio_buffer.commit` | Trigger transcription processing or end: `{"type": "input_audio_buffer.commit", "final": bool}` |
-| `session.update` | Configure session: `{"type": "session.update", "model": "model-name"}` |
+| `session.update` | Configure session: `{"type": "session.update", "model": "model-name"}`, optionally with `turn_detection` (see [Turn Detection](#turn-detection)) |
 
 ### Server → Client Events
 
@@ -213,9 +213,49 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 | `session.created` | Connection established with session ID and timestamp |
 | `transcription.delta` | Incremental transcription text: `{"type": "transcription.delta", "delta": "text"}` |
 | `transcription.done` | Final transcription with usage stats |
+| `input_audio_buffer.speech_started` | Turn detection heard a turn start: `{"type": "input_audio_buffer.speech_started", "audio_start_ms": 1020}` |
+| `input_audio_buffer.speech_stopped` | Turn detection heard a turn end: `{"type": "input_audio_buffer.speech_stopped", "audio_end_ms": 2472}` |
 | `error` | Error notification with message and optional code |
 
 #### Example Clients
 
 - [openai_realtime_client.py](https://github.com/vllm-project/vllm/tree/main/examples/speech_to_text/realtime/openai_realtime_client.py) - Upload and transcribe an audio file
 - [openai_realtime_microphone_client.py](https://github.com/vllm-project/vllm/tree/main/examples/speech_to_text/realtime/openai_realtime_microphone_client.py) - Gradio demo for live microphone transcription
+
+### Turn Detection
+
+With `turn_detection` set in `session.update`, the server tells the client where each
+spoken turn starts and ends, which is what a voice agent needs to know when to reply.
+The events report positions in milliseconds of audio received since the start of the
+session. Detection is off by default; `"turn_detection": null` turns it off again, and
+sending the same setting again keeps the running detector.
+
+| Type | Settings | Turn ends |
+| ---- | -------- | --------- |
+| `server_vad` | `threshold` (0.5), `prefix_padding_ms` (300), `silence_duration_ms` (500) | after `silence_duration_ms` of silence, judged by [Silero VAD](https://github.com/snakers4/silero-vad) |
+| `semantic_vad` | `eagerness`: `low`, `medium`, `high` or `auto` (= `medium`) | when [Smart Turn v3.2](https://github.com/pipecat-ai/smart-turn) judges the speech before a pause complete; otherwise after a longer silence |
+
+```json
+{"type": "session.update", "model": "model-name", "turn_detection": {"type": "semantic_vad", "eagerness": "auto"}}
+```
+
+For `semantic_vad`, a pause of 300 ms (`high`), 1200 ms (`medium`/`auto`) or 1500 ms (`low`)
+is checked with Smart Turn; if the turn is judged incomplete, it ends once the pause
+reaches 2 s, 4 s or 8 s.
+
+Unlike OpenAI's Realtime API, the events only report turn boundaries: the audio buffer
+is not committed per turn and the transcription keeps streaming as one text, which
+usually lags the audio. Detection is also off unless requested, and settings this
+server does not use (such as `create_response`) are ignored.
+
+Both models run on CPU in the API server, built into vLLM (no ONNX Runtime), in a pool
+of `VLLM_MAX_AUDIO_PREPROCESS_WORKERS` threads. On one Zen 4 core, Silero costs about
+30 µs per 32 ms of audio and Smart Turn about 60 ms per pause it checks. The model files
+are downloaded from the Hugging Face Hub at pinned revisions the first time a session asks
+for them, and are checked against pinned checksums. For offline deployments, download
+them in advance:
+
+```bash
+hf download istupakov/silero-vad-onnx silero_vad.onnx --revision 8b14476858ef240c50b3884bb38cc67290c1cc70
+hf download pipecat-ai/smart-turn-v3 smart-turn-v3.2-gpu.onnx --revision f766f81d3cfdf7737ac64aad813d91bbfd56bf93
+```

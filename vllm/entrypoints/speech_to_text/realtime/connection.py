@@ -4,13 +4,16 @@
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
+from functools import partial
 from http import HTTPStatus
+from typing import TypeVar
 from uuid import uuid4
 
 import numpy as np
 import pybase64 as base64
 from fastapi import WebSocket
+from pydantic import ValidationError
 from starlette.websockets import WebSocketDisconnect
 
 from vllm import envs
@@ -23,13 +26,21 @@ from .protocol import (
     ErrorEvent,
     InputAudioBufferAppend,
     InputAudioBufferCommit,
+    InputAudioBufferSpeechStarted,
+    InputAudioBufferSpeechStopped,
+    SemanticVad,
+    ServerVad,
     SessionCreated,
+    SessionUpdate,
     TranscriptionDelta,
     TranscriptionDone,
 )
 from .serving import OpenAIServingRealtime
+from .turn_detection import SAMPLE_RATE_HZ, TurnDetector, TurnEvent
 
 logger = init_logger(__name__)
+
+T = TypeVar("T")
 
 
 class RealtimeConnection:
@@ -53,6 +64,10 @@ class RealtimeConnection:
 
         self._is_connected = False
         self._is_model_validated = False
+
+        self.turn_detector: TurnDetector | None = None
+        #: Samples appended so far: turn detection's clock.
+        self._audio_samples = 0
 
         self._max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
 
@@ -99,7 +114,7 @@ class RealtimeConnection:
         """Route events to handlers.
 
         Supported event types:
-        - session.update: Configure model
+        - session.update: Configure model and turn detection
         - input_audio_buffer.append: Add audio chunk to queue
         - input_audio_buffer.commit: Start transcription generation
         """
@@ -115,6 +130,15 @@ class RealtimeConnection:
                 await self.send_error(err.error.message, "model_not_found")
                 return
             self._is_model_validated = True
+            if "turn_detection" in event:
+                try:
+                    session = SessionUpdate(**event)
+                except ValidationError as e:
+                    await self.send_error(
+                        sanitize_message(str(e)), "invalid_turn_detection"
+                    )
+                    return
+                await self.configure_turn_detection(session.turn_detection)
         elif event_type == "input_audio_buffer.append":
             append_event = InputAudioBufferAppend(**event)
             try:
@@ -140,6 +164,11 @@ class RealtimeConnection:
             except Exception as e:
                 logger.error("Failed to decode audio: %s", e)
                 await self.send_error("Invalid audio data", "invalid_audio")
+                return
+
+            self._audio_samples += len(audio_array)
+            if self.turn_detector is not None:
+                await self.detect_turns(audio_array)
 
         elif event_type == "input_audio_buffer.commit":
             if not self._is_model_validated:
@@ -161,6 +190,72 @@ class RealtimeConnection:
                 await self.start_generation()
         else:
             await self.send_error(f"Unknown event type: {event_type}", "unknown_event")
+
+    async def configure_turn_detection(
+        self, config: ServerVad | SemanticVad | None
+    ) -> None:
+        """Replace the session's turn detector (``None`` turns detection off).
+
+        The same setting again keeps the running detector. Otherwise a turn in
+        progress is closed with ``speech_stopped`` at the current position, and
+        the new detector starts listening there.
+        """
+        current = self.turn_detector
+        if current is not None and current.config == config:
+            return
+        detector = None
+        if config is not None:
+            try:
+                # Not on the detection pool: the first session to ask downloads
+                # and loads the models, which must not hold up other sessions.
+                detector = await asyncio.to_thread(
+                    TurnDetector, config, start_sample=self._audio_samples
+                )
+            except Exception as e:
+                logger.warning("Turn detection is unavailable: %s", e)
+                await self.send_error(
+                    f"turn_detection is unavailable: {sanitize_message(str(e))}",
+                    "turn_detection_unavailable",
+                )
+                return
+        await self._close_turn()
+        self.turn_detector = detector
+
+    async def detect_turns(self, audio: np.ndarray) -> None:
+        """Run turn detection on appended audio and send its events."""
+        assert self.turn_detector is not None
+        try:
+            events: list[TurnEvent] = await self._run_off_loop(
+                partial(self.turn_detector.process, audio)
+            )
+        except Exception as e:
+            # A detector that failed mid-append is out of step with the audio.
+            logger.exception("Turn detection failed: %s", e)
+            await self._close_turn()
+            self.turn_detector = None
+            await self.send_error(
+                f"turn detection failed and is now off: {sanitize_message(str(e))}",
+                "turn_detection_failed",
+            )
+            return
+        for event in events:
+            if event.kind == "speech_started":
+                await self.send(
+                    InputAudioBufferSpeechStarted(audio_start_ms=event.audio_ms)
+                )
+            else:
+                await self.send(
+                    InputAudioBufferSpeechStopped(audio_end_ms=event.audio_ms)
+                )
+
+    async def _close_turn(self) -> None:
+        if self.turn_detector is not None and self.turn_detector.in_turn:
+            end_ms = round(self._audio_samples * 1000 / SAMPLE_RATE_HZ)
+            await self.send(InputAudioBufferSpeechStopped(audio_end_ms=end_ms))
+
+    async def _run_off_loop(self, fn: Callable[[], T]) -> T:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self.serving.turn_detection_executor, fn)
 
     async def audio_stream_generator(self) -> AsyncGenerator[np.ndarray, None]:
         """Generator that yields audio chunks from the queue."""
@@ -271,7 +366,12 @@ class RealtimeConnection:
                 await self.send_error(sanitize_message(str(e)), "processing_error")
 
     async def send(
-        self, event: SessionCreated | TranscriptionDelta | TranscriptionDone
+        self,
+        event: SessionCreated
+        | TranscriptionDelta
+        | TranscriptionDone
+        | InputAudioBufferSpeechStarted
+        | InputAudioBufferSpeechStopped,
     ):
         """Send event to client."""
         data = event.model_dump_json()

@@ -1079,7 +1079,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_EMBED_DECODE_BYTES": lambda: int(
         os.getenv("VLLM_MAX_EMBED_DECODE_BYTES", "2147483648")
     ),
-    # Maximum number of worker threads used for STT preprocessing. The default
+    # Maximum number of worker threads used for STT preprocessing, and for
+    # turn detection on /v1/realtime (a separate pool of this size). The default
     # intentionally caps at 2 because that performed best in profiling.
     # https://github.com/vllm-project/vllm/pull/44612#issuecomment-4662757781
     "VLLM_MAX_AUDIO_PREPROCESS_WORKERS": lambda: int(
