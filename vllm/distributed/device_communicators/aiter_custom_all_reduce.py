@@ -44,6 +44,60 @@ class AiterCustomAllreduce:
         if not register_graph_buffers:
             kwargs["enable_register_for_capturing"] = False
         self._impl = _AiterCustomAllreduce(group, device, max_size=max_size, **kwargs)
+        self._group = group
+        # Inboxes and call counters of AITER's Gluon all-reduce, which does the
+        # plain all-reduce on gfx1250 with 4 ranks.
+        self._gluon: tuple[tuple[int, ...], torch.Tensor] | None = None
+        if not self._impl.disabled:
+            self._gluon = self._init_gluon()
+
+    def _init_gluon(self) -> tuple[tuple[int, ...], torch.Tensor] | None:
+        """Allocate the Gluon all-reduce state, or return None where it cannot
+        run. All ranks of the group call it."""
+        from vllm.distributed.parallel_state import in_the_same_node_as
+        from vllm.platforms.rocm import on_gfx1250
+
+        if not on_gfx1250() or self._impl.world_size != 4:
+            return None
+        try:
+            from aiter.dist.device_communicators.custom_all_reduce import (
+                _should_use_vmm,
+            )
+            from aiter.ops.triton.comms.all_reduce import all_reduce_init
+        except ImportError:
+            logger.info_once(
+                "AITER Gluon all-reduce is disabled: it needs AITER v0.1.28 or later.",
+                scope="global",
+            )
+            return None
+        # The inboxes are shared with hipIpc, which AITER uses on gfx1250 from
+        # ROCm 7.14.
+        if _should_use_vmm(True) or not all(
+            in_the_same_node_as(self._group, source_rank=0)
+        ):
+            logger.info_once(
+                "AITER Gluon all-reduce is disabled: it needs hipIpc "
+                "(ROCm 7.14 or later) and all ranks on one node.",
+                scope="global",
+            )
+            return None
+        # The inbox of each rank is 16 times the largest input.
+        gluon = all_reduce_init(self._group, self.effective_max_size())
+        logger.info_once(
+            "AITER custom all-reduce uses the Gluon kernel for bf16 inputs.",
+            scope="global",
+        )
+        return gluon
+
+    def _should_gluon(self, inp: torch.Tensor) -> bool:
+        return (
+            self._gluon is not None
+            and inp.dtype == torch.bfloat16
+            and inp.is_contiguous()
+            and inp.numel() % 4 == 0
+            and inp.data_ptr() % 16 == 0
+            and inp.nbytes <= self.effective_max_size()
+        )
 
     @property
     def aiter_ca(self):
@@ -57,6 +111,11 @@ class AiterCustomAllreduce:
         return self._impl.should_custom_ar(inp)
 
     def custom_all_reduce(self, inp: torch.Tensor) -> torch.Tensor | None:
+        if self._should_gluon(inp):
+            from aiter.ops.triton.comms.all_reduce import all_reduce
+
+            assert self._gluon is not None
+            return all_reduce(inp, self._group, *self._gluon)
         return self._impl.custom_all_reduce(inp)
 
     def should_custom_ag(self, inp: torch.Tensor) -> bool:
@@ -111,6 +170,11 @@ class AiterCustomAllreduce:
         return self._impl.capture()
 
     def close(self) -> None:
+        if self._gluon is not None:
+            from aiter.ops.triton.comms.all_reduce import all_reduce_free
+
+            all_reduce_free(self._group, self._gluon[0])
+            self._gluon = None
         self._impl.close()
 
     @property
