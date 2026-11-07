@@ -1144,6 +1144,85 @@ def rms_norm_batch_invariant(
     return output.reshape(original_shape)
 
 
+@triton.jit
+def _layer_norm_kernel(
+    input_ptr,
+    weight_ptr,
+    bias_ptr,
+    output_ptr,
+    mean_ptr,
+    rstd_ptr,
+    n_cols,
+    eps,
+    BLOCK_SIZE: tl.constexpr,
+    HAS_WEIGHT: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+):
+    """LayerNorm over the last dim of a contiguous 2D tensor, one program per
+    row, fixed reduction order, so a row's result does not depend on how many
+    rows are in the batch."""
+    row_idx = tl.program_id(0).to(tl.int64)
+    row_ptr = input_ptr + row_idx * n_cols
+    out_ptr = output_ptr + row_idx * n_cols
+
+    acc = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+    for col_offset in range(0, n_cols, BLOCK_SIZE):
+        col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
+        mask = col_idx < n_cols
+        acc += tl.load(row_ptr + col_idx, mask=mask, other=0.0).to(tl.float32)
+    mean = tl.sum(acc, axis=0) / n_cols
+
+    acc = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+    for col_offset in range(0, n_cols, BLOCK_SIZE):
+        col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
+        mask = col_idx < n_cols
+        x = tl.load(row_ptr + col_idx, mask=mask, other=0.0).to(tl.float32)
+        d = tl.where(mask, x - mean, 0.0)
+        acc += d * d
+    rstd = 1.0 / tl.sqrt(tl.sum(acc, axis=0) / n_cols + eps)
+    tl.store(mean_ptr + row_idx, mean)
+    tl.store(rstd_ptr + row_idx, rstd)
+
+    for col_offset in range(0, n_cols, BLOCK_SIZE):
+        col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
+        mask = col_idx < n_cols
+        x = tl.load(row_ptr + col_idx, mask=mask, other=0.0)
+        y = (x.to(tl.float32) - mean) * rstd
+        if HAS_WEIGHT:
+            y = y * tl.load(weight_ptr + col_idx, mask=mask, other=1.0).to(tl.float32)
+        if HAS_BIAS:
+            y = y + tl.load(bias_ptr + col_idx, mask=mask, other=0.0).to(tl.float32)
+        tl.store(out_ptr + col_idx, y.to(x.dtype), mask=mask)
+
+
+def native_layer_norm_batch_invariant(input, normalized_shape, weight, bias, eps):
+    """Batch-invariant replacement for ``aten::native_layer_norm``.
+    Returns ``(output, mean, rstd)`` like the native op; mean/rstd are fp32."""
+    n_norm = len(normalized_shape)
+    n_cols = math.prod(normalized_shape)
+    x = input.contiguous().reshape(-1, n_cols)
+    n_rows = x.shape[0]
+    out = torch.empty_like(x)
+    mean = torch.empty(n_rows, dtype=torch.float32, device=x.device)
+    rstd = torch.empty(n_rows, dtype=torch.float32, device=x.device)
+    if n_rows > 0:
+        _layer_norm_kernel[(n_rows,)](
+            x,
+            weight.contiguous() if weight is not None else x,
+            bias.contiguous() if bias is not None else x,
+            out,
+            mean,
+            rstd,
+            n_cols,
+            eps,
+            BLOCK_SIZE=1024,
+            HAS_WEIGHT=weight is not None,
+            HAS_BIAS=bias is not None,
+        )
+    stat_shape = tuple(input.shape[: input.dim() - n_norm]) + (1,) * n_norm
+    return out.reshape(input.shape), mean.reshape(stat_shape), rstd.reshape(stat_shape)
+
+
 def linear_batch_invariant(input, weight, bias=None):
     if bias is not None:
         bias = bias.expand(weight.shape[0])
@@ -1436,6 +1515,11 @@ def enable_batch_invariant_mode():
         _batch_invariant_LIB.impl("aten::addmm.out", addmm_out_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, key)
+        # Native XPU layer_norm changes its reduction once a call has >= 256
+        # rows (seen on torch 2.14), so a row's result depends on batch size.
+        _batch_invariant_LIB.impl(
+            "aten::native_layer_norm", native_layer_norm_batch_invariant, key
+        )
 
         _fp16_block_size_n = 128
 
