@@ -397,9 +397,9 @@ def _select_cfg(M, N, K):
     and occupancy- and shape-aware: keyed on the LOCAL (M, N, K), so it adapts to the
     TP-sharded shapes (e.g. MiniMax-M3 TP=4 vs TP=8, where local N and K differ) —
     on gfx950, large prefill (M > 1024, N > 1024, K % 128 == 0) uses 128x128x128;
-    otherwise large-K prefill uses BLOCK_K=256; short-K (K=768) widens N. BLOCK_K must divide K
-    (the K-loop is unmasked), so every BLOCK_K below is guarded to be K-divisible
-    (served K: 384/768/1024/2048/6144).
+    otherwise large-K prefill uses BLOCK_K=256; short-K (K=768) widens N. BLOCK_K
+    must divide K (the K-loop is unmasked), so every BLOCK_K below is guarded to be
+    K-divisible (served K: 384/768/1024/2048/6144).
     """
     if _ON_CDNA4:
         cfg = _select_m31_cfg(M, N, K)

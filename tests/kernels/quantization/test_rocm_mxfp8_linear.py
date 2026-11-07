@@ -218,7 +218,8 @@ PARTIAL_TILE_SHAPES = [("partial_n_k128", 1153, 2176)]
 # 1025/3940/4097 leave partial M tiles and a partial final M group on the gfx950
 # large-prefill path; 4096 is whole tiles with 16-wide M groups.
 @pytest.mark.parametrize(
-    "num_tokens", [1, 2, 7, 8, 16, 31, 32, 48, 96, 128, 256, 1024, 1025, 3940, 4096, 4097]
+    "num_tokens",
+    [1, 2, 7, 8, 16, 31, 32, 48, 96, 128, 256, 1024, 1025, 3940, 4096, 4097],
 )
 @torch.inference_mode()
 def test_rocm_mxfp8_linear_matches_dequant_reference(name, n, k, num_tokens):

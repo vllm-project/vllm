@@ -48,7 +48,23 @@ MXFP4_TOKEN_COUNTS = [
 ]
 
 # 4095/4096/4097 cross the gfx950 large-prefill M-group width change (8 -> 16 at 4096).
-MXFP8_TOKEN_COUNTS = [1, 32, 64, 65, 128, 129, 256, 257, 512, 1024, 1025, 2048, 4095, 4096, 4097]
+MXFP8_TOKEN_COUNTS = [
+    1,
+    32,
+    64,
+    65,
+    128,
+    129,
+    256,
+    257,
+    512,
+    1024,
+    1025,
+    2048,
+    4095,
+    4096,
+    4097,
+]
 
 # Row 0 lands in the first tile of every decomposition, so it can stay
 # invariant when the rest of the output does not.
