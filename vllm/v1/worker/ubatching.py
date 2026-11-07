@@ -4,7 +4,9 @@ import threading
 
 import torch
 
+import vllm.envs as envs
 from vllm import forward_context
+from vllm.distributed import parallel_state
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import current_stream
@@ -252,3 +254,137 @@ def make_ubatch_contexts(
         ctxs.append(ctx)
 
     return ctxs
+
+
+# DBO under pure TP: each TP all-reduce is a hand-off point and runs on the comm
+# stream, on a per-microbatch communicator, while the other microbatch computes.
+_TP_UBATCH_COMMS: list | None = None
+# VLLM_DBO_TP_DMA_AR=1 (TP2 only): a microbatch's all-reduce runs as a one-shot
+# INT4 all-reduce over the SDMA copy engines, which needs no CUs while the other
+# microbatch computes; QuickReduce and RCCL are CU kernels that contend with the
+# GEMMs under DBO.
+_DMA_AR = None
+
+
+def init_dbo_tp_comms(parallel_config) -> None:
+    """Build the per-microbatch TP communicators and install the all-reduce hook
+    (DBO under pure TP only). Collective: every rank calls it in the same order."""
+    global _TP_UBATCH_COMMS, _DMA_AR
+    if not parallel_config.dbo_tp_only or _TP_UBATCH_COMMS is not None:
+        return
+    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+
+    tp = parallel_state.get_tp_group()
+    comms = [
+        PyNcclCommunicator(group=tp.cpu_group, device=tp.device)
+        for _ in range(parallel_config.num_ubatches)
+    ]
+    if any(c.disabled for c in comms):
+        logger.warning(
+            "DBO: the NCCL library is unavailable, the TP all-reduces of a "
+            "microbatch stay on the compute stream (no overlap)"
+        )
+        return
+    _TP_UBATCH_COMMS = comms
+    parallel_state.set_dbo_tp_all_reduce_hook(_dbo_tp_all_reduce)
+    if envs.VLLM_DBO_TP_DMA_AR:
+        if tp.world_size == 2:
+            from vllm.distributed.device_communicators.dma_all_reduce import (
+                DmaAllReduce,
+            )
+
+            max_mb = envs.VLLM_DBO_TP_DMA_AR_MAX_MB
+            layout = envs.VLLM_DBO_TP_DMA_AR_LAYOUT
+            _DMA_AR = DmaAllReduce(
+                tp.cpu_group, tp.device, max_bytes=max_mb << 20, layout=layout
+            )
+            logger.info(
+                "DBO: microbatch all-reduces up to %d MiB run as one-shot INT4 "
+                "over SDMA (layout %s)",
+                max_mb,
+                layout,
+            )
+        else:
+            logger.warning(
+                "DBO: VLLM_DBO_TP_DMA_AR=1 needs TP 2, got %d; ignored", tp.world_size
+            )
+    logger.info(
+        "DBO: %d per-microbatch TP communicators for the comm-stream all-reduce",
+        len(comms),
+    )
+
+
+def dbo_comm_stream_priority() -> int:
+    """High on ROCm: at the default priority comm and compute can share one
+    hardware queue and serialize."""
+    from vllm.platforms import current_platform
+
+    return -1 if current_platform.is_rocm() else 0
+
+
+def dbo_tp_collective(issue) -> bool:
+    """Run ``issue(comm, stream)`` as a microbatch hand-off on its comm stream;
+    False outside a microbatch."""
+    if len(_THREAD_ID_TO_CONTEXT) == 0 or _TP_UBATCH_COMMS is None:
+        return False
+    ctx_idx = _THREAD_ID_TO_CONTEXT.get(threading.get_ident())
+    if ctx_idx is None:
+        return False
+    ctx = _CURRENT_CONTEXTS[ctx_idx]
+    ctx.yield_and_switch_from_compute_to_comm()
+    issue(_TP_UBATCH_COMMS[ctx_idx], ctx.comm_stream)
+    ctx.switch_to_compute_sync()
+    return True
+
+
+def _dbo_tp_all_reduce(group, input_: torch.Tensor) -> torch.Tensor | None:
+    """The TP all-reduce of a microbatch, on the comm stream."""
+    if len(_THREAD_ID_TO_CONTEXT) == 0:
+        return None
+    ctx_idx = _THREAD_ID_TO_CONTEXT.get(threading.get_ident())
+    if ctx_idx is None or group is not parallel_state._TP:
+        return None
+    assert _TP_UBATCH_COMMS is not None
+    ctx = _CURRENT_CONTEXTS[ctx_idx]
+    logger.info_once("DBO: TP all-reduces of a microbatch go to the comm stream")
+    qr = _dbo_tp_quick_reduce(group, input_)
+    # No record_stream: the stream waits already order the buffers, and it would
+    # pin every block until the GPU catches up (out of memory at a 32k step).
+    out = torch.empty_like(input_)
+    ctx.yield_and_switch_from_compute_to_comm()
+    # Stream write/wait operations cannot be captured into a graph: QuickReduce
+    # or NCCL/RCCL there.
+    if (
+        _DMA_AR is not None
+        and _DMA_AR.should_reduce(input_)
+        and not torch.cuda.is_current_stream_capturing()
+    ):
+        logger.info_once("DBO: microbatch all-reduces run over SDMA (one-shot INT4)")
+        _DMA_AR.all_reduce(input_, out=out)
+    elif qr is not None:
+        qr.quick_all_reduce(input_, out=out)
+    else:
+        _TP_UBATCH_COMMS[ctx_idx].all_reduce(
+            input_, out_tensor=out, stream=ctx.comm_stream
+        )
+    ctx.switch_to_compute_sync()
+    return out
+
+
+def _dbo_tp_quick_reduce(group, input_: torch.Tensor):
+    """The TP group's QuickReduce communicator if VLLM_DBO_TP_QUICK_REDUCE is
+    set and ``input_`` is in its window, else None.
+
+    Both microbatches share one comm stream and only one microbatch thread runs
+    at a time, so the calls are issued in the same order on every rank and never
+    overlap: QuickReduce's single buffer is enough.
+    """
+    if not envs.VLLM_DBO_TP_QUICK_REDUCE:
+        return None
+    qr = getattr(group.device_communicator, "qr_comm", None)
+    if qr is None or qr.disabled or not qr.should_quick_allreduce(input_):
+        return None
+    logger.info_once(
+        "DBO: microbatch all-reduces in the QuickReduce window run QuickReduce"
+    )
+    return qr
