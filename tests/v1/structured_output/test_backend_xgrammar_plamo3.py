@@ -52,7 +52,8 @@ def make_vllm_config() -> VllmConfig:
         structured_outputs_config=StructuredOutputsConfig(backend="xgrammar"),
     )
     config.model_config = SimpleNamespace(
-        hf_config=SimpleNamespace(model_type="plamo3")
+        hf_config=SimpleNamespace(model_type="plamo3"),
+        try_get_generation_config=lambda: {},
     )
     return config
 
