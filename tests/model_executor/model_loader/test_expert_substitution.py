@@ -155,6 +155,40 @@ def test_loads_explicitly_named_values(local_layers):
         )
 
 
+def _packed_values(layer: int) -> torch.Tensor:
+    return torch.tensor([[1.0, 1.0], [2.0, 2.0]]) + 10.0 * layer
+
+
+@pytest.mark.parametrize("local_layers", [(0, 1), (0,), ()])
+def test_loads_packed_values(local_layers):
+    """A single packed ``values`` tensor supplies all of a layer's novices."""
+    model = _cpu_model(local_layers)
+    loaded = model.load_weights(
+        [
+            ("weight", torch.tensor([1.0, 2.0])),
+            *(
+                (f"model.layers.{layer}.mlp.experts.values", _packed_values(layer))
+                for layer in range(2)
+            ),
+        ]
+    )
+    model.process_weights_after_loading()
+
+    assert loaded == {"weight"} | {
+        f"model.layers.{layer}.mlp.experts.values" for layer in local_layers
+    }
+    for layer in local_layers:
+        torch.testing.assert_close(
+            model.model.layers[layer].mlp.experts.values, _packed_values(layer)
+        )
+
+
+def test_packed_values_shape_mismatch_raises():
+    model = _cpu_model(local_layers=(0,), tracked=False)
+    with pytest.raises(ValueError, match="values for layer 0 have shape"):
+        model.load_weights([("model.layers.0.mlp.experts.values", torch.zeros(3, 2))])
+
+
 def test_direct_reload_updates_values_incrementally():
     model = _cpu_model(local_layers=(0,), tracked=False)
     values = model.model.layers[0].mlp.experts.values
