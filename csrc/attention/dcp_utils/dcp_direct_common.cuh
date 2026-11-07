@@ -48,6 +48,8 @@ __device__ __forceinline__ void multimem_store_release_system(uint32_t* mc_ptr,
                :
                : "l"(mc_ptr), "r"(value)
                : "memory");
+  // The multicast signal is polled through its local unicast alias.
+  asm volatile("fence.proxy.alias;" ::: "memory");
 #else
   asm volatile("trap;");
 #endif
