@@ -84,7 +84,13 @@ class Step3p5MTPProposer(EagleProposer):
         input_batch_size: int,
         block_size: int,
     ) -> torch.Tensor:
-        old_positions_1d = positions[0] if self.uses_mrope else positions
+        # The parent advances seq_lens in place, so capture the out-of-bounds
+        # condition first. For M-RoPE the absolute position of the token being
+        # appended is seq_lens itself, which is what the KV slot is addressed by.
+        if self.uses_mrope:
+            exceeds = common_attn_metadata.seq_lens[:batch_size] >= self.max_model_len
+        else:
+            exceeds = positions + 1 >= self.max_model_len
         positions = super()._update_positions_dependent_metadata(
             positions,
             common_attn_metadata,
@@ -97,8 +103,11 @@ class Step3p5MTPProposer(EagleProposer):
             common_attn_metadata.slot_mapping
         )
         # Recompute slot_mapping for the remaining gids using their own block tables.
-        new_positions_1d = positions[0] if self.uses_mrope else positions
-        exceeds = old_positions_1d + 1 >= self.max_model_len
+        # Every group addresses the same absolute position the parent used; the
+        # M-RoPE coordinate in positions[0] would land in a different block.
+        new_positions_1d = (
+            self._slot_positions[:batch_size] if self.uses_mrope else positions
+        )
         for attn_group in self.draft_attn_groups:
             gid = attn_group.kv_cache_group_id
             if gid == self.kv_cache_gid:
