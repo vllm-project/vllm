@@ -13,8 +13,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from transformers import Qwen2Config
 
+from vllm import SamplingParams
 from vllm.config import LoadConfig, SpeculativeConfig
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 
 
@@ -95,3 +98,44 @@ def test_override_does_not_mutate_the_target_config():
     cfg = _config("flashinfer_b12x", "flashinfer_cutlass")
     _capture_draft_config(cfg)
     assert cfg.kernel_config.moe_backend == "flashinfer_b12x"
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA backend override")
+def test_mtp_with_self_dispatching_target_backend(vllm_runner, tmp_path):
+    """An explicit regular draft backend can load and generate with MTP."""
+    Qwen2Config(
+        architectures=["MiMoForCausalLM"],
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        num_nextn_predict_layers=1,
+        vocab_size=1024,
+    ).save_pretrained(tmp_path)
+    with vllm_runner(
+        str(tmp_path),
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        max_model_len=256,
+        max_num_batched_tokens=256,
+        max_num_seqs=2,
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        kernel_config={
+            "moe_backend": "flashinfer_moe_ep_cutedsl",
+            "enable_jit_warmup": False,
+        },
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 2,
+            "moe_backend": "flashinfer_trtllm",
+        },
+    ) as runner:
+        (output,) = runner.llm.generate(
+            [{"prompt_token_ids": [1, 2, 3]}],
+            SamplingParams(temperature=0, max_tokens=4, ignore_eos=True),
+        )
+        tokens = output.outputs[0].token_ids
+        assert len(tokens) == 4
+        assert all(0 <= token < 1024 for token in tokens)
