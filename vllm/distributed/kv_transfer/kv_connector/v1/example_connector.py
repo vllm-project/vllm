@@ -327,6 +327,7 @@ class ExampleConnector(KVConnectorBase_V1):
         meta = ExampleConnectorMetadata()
 
         total_need_load = 0
+        scheduled_tokens = scheduler_output.num_scheduled_tokens
         for new_req in scheduler_output.scheduled_new_reqs:
             token_ids = new_req.prompt_token_ids or []
             mm_hashes = [f.identifier for f in new_req.mm_features]
@@ -344,6 +345,12 @@ class ExampleConnector(KVConnectorBase_V1):
                 # but a single request can have both store and load.
                 # NOTE(rob): for this debug implementation, we only cache
                 # the original prompt tokens.
+                # During chunked prefill, only the currently scheduled chunk
+                # has valid KV. Do not publish a full-prompt snapshot early.
+                if new_req.num_computed_tokens + scheduled_tokens.get(
+                    new_req.req_id, 0
+                ) < len(token_ids):
+                    continue
                 if not self._found_match_for_prompt(token_ids, mm_hashes):
                     meta.add_request(
                         token_ids=token_ids,
