@@ -813,6 +813,7 @@ class VllmConfig:
                 "DFlash2BeamDraftModel",
                 "DFlash2RicursiveDraftModel",
                 "LiLiCorrDraftModel",
+                "DSpineDraftModel",
             }.intersection(draft_config.architectures or [])
         )
 
