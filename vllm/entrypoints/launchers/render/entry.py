@@ -11,7 +11,12 @@ from vllm.config import VllmConfig
 from vllm.logger import configure_logging_from_args, init_logger
 
 from ..app import build_app
-from ..launcher import serve_http, setup_server
+from ..launcher import (
+    remove_unix_socket_file,
+    serve_http,
+    setup_server,
+    unix_socket_file_identity,
+)
 from ..utils.server_utils import get_uvicorn_log_config
 from .app_state import init_render_app_state
 
@@ -74,6 +79,7 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
 
     # 1. Socket binding
     listen_address, sock = setup_server(args, reuse_port=False)
+    uds_identity = unix_socket_file_identity(args.uds) if args.uds else None
 
     # 2. Build and serve the API server
     engine_args = AsyncEngineArgs.from_cli_args(args)
@@ -103,6 +109,8 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
         await shutdown_task
     finally:
         sock.close()
+        if args.uds:
+            remove_unix_socket_file(args.uds, uds_identity)
 
 
 if __name__ == "__main__":
