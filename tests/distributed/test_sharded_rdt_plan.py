@@ -23,6 +23,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import layerwise_groups
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     ALLOWED_OPS,
@@ -34,6 +35,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     ShardedRDTWeightTransferEngine,
     ShardedRDTWeightTransferInitInfo,
+    _check_streams,
     _dtype_from_name,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_fake import (
@@ -49,6 +51,33 @@ META = torch.device("meta")
 # ---------------------------------------------------------------------------
 # Harness
 # ---------------------------------------------------------------------------
+
+
+def consumer_engine(
+    *,
+    device: torch.device | None = None,
+    model: torch.nn.Module | None = None,
+    parallel_config: SimpleNamespace | None = None,
+) -> ShardedRDTWeightTransferEngine:
+    """A consumer engine built through ``__init__`` with the least it accepts:
+    a Ray executor backend, no model config, a bare module and ``device``
+    (CPU by default).
+
+    Tests then override only the state the path under test reads, so an
+    attribute the engine starts reading later fails as behaviour rather than
+    as a missing attribute on a hand-assembled instance.
+    """
+    if device is None:
+        device = torch.device("cpu")
+    if parallel_config is None:
+        parallel_config = SimpleNamespace(distributed_executor_backend="ray")
+    vllm_config = SimpleNamespace(parallel_config=parallel_config, model_config=None)
+    return ShardedRDTWeightTransferEngine(
+        WeightTransferConfig(backend="sharded_rdt"),
+        vllm_config,
+        device,
+        torch.nn.Module() if model is None else model,
+    )
 
 
 class _FakeLayer:
@@ -103,9 +132,9 @@ def _copy(
 def _planner(baked, *, name_meta, live=None, held_by=None, group_lens=None):
     """A planning-only engine.
 
-    `__init__` needs a config/model/device the planner never reads, so build the
-    instance without it and set exactly the state `_build_call_plan` consumes:
-    the baked plan, the name metadata, the live-name set, and a bound router.
+    The planner never reads the model or the device, so the engine is built
+    bare and given exactly the state `_build_call_plan` consumes: the baked
+    plan, the name metadata, the live-name set, and a bound router.
 
     ``held_by``: name -> the ranks holding it. Names left out are held by every
     producer (the replicated class 0). Default: one producer holding everything,
@@ -126,7 +155,7 @@ def _planner(baked, *, name_meta, live=None, held_by=None, group_lens=None):
             classes.append(seen[key])
     else:
         n_prod, owner_sets, classes = 1, [[0]], [0] * len(names)
-    eng = object.__new__(ShardedRDTWeightTransferEngine)
+    eng = consumer_engine()
     eng._name_to_plan = dict(baked)
     eng._name_meta = dict(name_meta)
     eng._live_names = set(live or name_meta)
@@ -393,11 +422,14 @@ class TestConsumerIdentity:
     a collision silently serves two workers out of one ring."""
 
     def _engine(self, *, dp_index, rank, world_size):
-        eng = object.__new__(ShardedRDTWeightTransferEngine)
-        eng.parallel_config = SimpleNamespace(
-            data_parallel_index=dp_index, rank=rank, world_size=world_size
+        return consumer_engine(
+            parallel_config=SimpleNamespace(
+                distributed_executor_backend="ray",
+                data_parallel_index=dp_index,
+                rank=rank,
+                world_size=world_size,
+            )
         )
-        return eng
 
     def _ids(self, *, num_consumers, workers, replica_rank=0, num_replicas=1):
         """Consumer ids for a DP-only engine whose workers are ``dp_index``es."""
@@ -548,6 +580,20 @@ class TestRdtRouter:
         r = RdtRouter(4, 2, [[0, 1], [2, 3]], [0, 1, 0], ["a", "b", "c"], [2, 1])
         assert r.group_owners(0) == [0, 1, 2, 3]
         assert r.group_owners(1) == [0, 1]
+
+    def test_untagged_free_uses_the_legacy_one_argument_call(self):
+        class _LegacyFree:
+            def __init__(self, owner):
+                self.owner = owner
+
+            def remote(self, group_idx):
+                return self.owner, group_idx
+
+        r = _router(2, 1)
+        actors = [SimpleNamespace(free_group=_LegacyFree(owner)) for owner in range(2)]
+        r.bind(actors, [object(), object()], consumer_id=0)
+
+        assert r.free_group(0) == [(0, 0), (1, 0)]
 
     def test_an_unowned_name_raises(self):
         r = RdtRouter(2, 2, [[]], [0], ["w"], [1])
@@ -1102,6 +1148,54 @@ class TestCallPlanRouting:
         with pytest.raises(ValueError, match="empty"):
             RdtRouter(2, 1, [[]], [0], ["w"], [1]).validate()
 
+    def test_pure_pipeline_assigns_one_stream_per_owner_component(self):
+        eng, names, group_lens = self._routed_planner(
+            [[0, 1], [0, 1], [2, 3], [2, 3], [4, 5], [4, 5]],
+            1,
+            0,
+        )
+        plan = eng._build_call_plan(names, group_lens)
+        assert [chunk.stream for chunk in plan.chunks] == [0, 0, 1, 1, 2, 2]
+        assert plan.num_streams == 3
+
+
+class TestStreamInvariants:
+    """Parallel streams cannot split ordering owned by one plan entity."""
+
+    @staticmethod
+    def _chunk(owner, stream, layer):
+        return SimpleNamespace(
+            owner=owner,
+            stream=stream,
+            scatters=[
+                SimpleNamespace(
+                    layer=layer,
+                    src=(layer.tag, ()),
+                )
+            ],
+        )
+
+    def test_a_plan_that_keeps_every_entity_in_one_stream_passes(self):
+        a, b = _FakeLayer("a"), _FakeLayer("b")
+        _check_streams([self._chunk(0, 0, a), self._chunk(1, 1, b)])
+
+    def test_owner_and_group_splits_are_left_to_the_plan_builder(self):
+        """``_stage_components`` merges every co-owner of a gather group into
+        one component and ``_build_call_plan`` gives each component one
+        stream, so an owner or a group in two streams cannot come out of the
+        builder; the check guards only the module-loading order."""
+        a, b = _FakeLayer("a"), _FakeLayer("b")
+        _check_streams([self._chunk(0, 0, a), self._chunk(0, 1, b)])
+        _check_streams([self._chunk(0, 0, a), self._chunk(1, 1, b)])
+
+    def test_a_module_in_two_streams_is_refused(self):
+        layer = _FakeLayer("a")
+        with pytest.raises(
+            RuntimeError,
+            match="module loading 'a' spans stage streams 0 and 1",
+        ):
+            _check_streams([self._chunk(0, 0, layer), self._chunk(1, 1, layer)])
+
 
 class TestSignalCompleteness:
     """Every gather group is signaled exactly once — after its last chunk when
@@ -1474,18 +1568,12 @@ class TestRequiresTheRayExecutor:
 
     def _construct(self, backend):
         cfg = SimpleNamespace(
-            parallel_config=SimpleNamespace(distributed_executor_backend=backend)
+            parallel_config=SimpleNamespace(distributed_executor_backend=backend),
+            model_config=None,
         )
-        eng = object.__new__(ShardedRDTWeightTransferEngine)
-        # Only the guard is under test, so stand in for the base __init__.
-        with pytest.MonkeyPatch.context() as m:
-            m.setattr(
-                ShardedRDTWeightTransferEngine.__bases__[0],
-                "__init__",
-                lambda self, *a, **k: None,
-            )
-            ShardedRDTWeightTransferEngine.__init__(eng, None, cfg, META, None)
-        return eng
+        return ShardedRDTWeightTransferEngine(
+            WeightTransferConfig(backend="sharded_rdt"), cfg, META, torch.nn.Module()
+        )
 
     @pytest.mark.parametrize("backend", ["uni", "mp", "external_launcher"])
     def test_a_non_ray_executor_is_refused(self, backend):
@@ -1513,9 +1601,12 @@ def _bake_probe(self, model_name):  # noqa: PLR0915  (runs in the vLLM worker)
     Self-contained on purpose: this is pickled to the worker, so it imports what
     it needs rather than closing over this module's globals.
     """
+    from types import SimpleNamespace
+
     import torch
     from huggingface_hub import get_safetensors_metadata
 
+    from vllm.config.weight_transfer import WeightTransferConfig
     from vllm.distributed.weight_transfer.sharded_rdt_common import ALLOWED_OPS
     from vllm.distributed.weight_transfer.sharded_rdt_engine import (
         ShardedRDTWeightTransferEngine,
@@ -1605,12 +1696,15 @@ def _bake_probe(self, model_name):  # noqa: PLR0915  (runs in the vLLM worker)
             loaders_before[(id(mod), pname)] = getattr(tensor, "weight_loader", None)
 
     # ---- bake ---------------------------------------------------------------
-    eng = object.__new__(ShardedRDTWeightTransferEngine)
-    eng.model = model
-    eng.device = device
-    eng._name_to_plan = {}
-    eng._name_meta = {}
-    eng._live_names = set()
+    eng = ShardedRDTWeightTransferEngine(
+        WeightTransferConfig(backend="sharded_rdt"),
+        SimpleNamespace(
+            parallel_config=SimpleNamespace(distributed_executor_backend="ray"),
+            model_config=None,
+        ),
+        device,
+        model,
+    )
     eng._bake(
         ShardedRDTWeightTransferInitInfo(
             names=names, dtype_names=dtype_names, shapes=shapes
