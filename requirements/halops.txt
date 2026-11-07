@@ -1,0 +1,11 @@
+# HALOps MXFP8 W8A8 GEMM backend (Blackwell SM100, CUDA 13.2 / cu132 wheels).
+#
+# Standalone opt-in file: do not pull it in via `-r` from another requirements
+# file, so the PaddlePaddle find-links location below never leaks into vLLM's
+# default resolution and `pip install vllm` stays resolvable from PyPI alone.
+#
+#   pip install -r requirements/halops.txt
+#
+--find-links https://www.paddlepaddle.org.cn/packages/stable/cu132/halops/
+
+halops==0.1.0
