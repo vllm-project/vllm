@@ -44,8 +44,6 @@ PAGE = 128
 MAX_PAGES = 8192
 INDEX_CTAS_PER_SM = 4
 ATTENTION_CTAS = 8  # CTAs a row, two pages each
-# Partial maxima and sums, then partial outputs, of up to 8 CTAs a row.
-PARTIAL_BYTES = MAX_ROWS * 8 * (2 * HEADS + HEADS * HEAD_DIM) * 4
 
 
 class AttentionStep(NamedTuple):
@@ -149,14 +147,15 @@ class _Scratch(NamedTuple):
 
 @cache
 def _scratch(device: torch.device) -> _Scratch:
-    from .indexer_cute import RECORD_BYTES, work_entries
+    from .indexer_cute import RECORD_BYTES, SCORE_STRIDE, work_entries
+    from .sparse_cute import PARTIAL_BYTES
 
     ctas = (
         INDEX_CTAS_PER_SM
         * torch.cuda.get_device_properties(device).multi_processor_count
     )
     return _Scratch(
-        scores=torch.empty(MAX_ROWS, MAX_PAGES, 2, dtype=torch.int32, device=device),
+        scores=torch.empty(MAX_ROWS, SCORE_STRIDE, 2, dtype=torch.int32, device=device),
         act=torch.zeros(MAX_ROWS, HEADS * HEAD_DIM, dtype=torch.uint8, device=device),
         act_scale=torch.zeros(
             128 * HEADS * HEAD_DIM // 32, dtype=torch.uint8, device=device

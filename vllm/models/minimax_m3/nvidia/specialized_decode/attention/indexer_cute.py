@@ -29,6 +29,7 @@ import cutlass
 import cutlass.cute as cute
 from cutlass import Float32, Int32, Int64, Uint32
 
+from . import HEAD_DIM, MAX_PAGES, MAX_REQS, PAGE
 from .ptx import (
     bulk_copy,
     e4m3x4_f16,
@@ -44,13 +45,10 @@ from .ptx import (
     st_s32x2,
 )
 
-PAGE = 128
-HEAD_DIM = 128
 CODE_BYTES = PAGE * HEAD_DIM // 2  # a page's E2M1 codes; its scales follow
 TOPK = 16  # 15 ranked history pages and the local page
-SCORE_STRIDE = 8192  # pages a score row holds (the block table's width at 1M)
+SCORE_STRIDE = MAX_PAGES  # pages a score row holds
 WARPS = 8
-MAX_REQS = 32
 STAGES = 4
 PAGE_BYTES = PAGE * 72  # codes, then scales
 STAGE_BYTES = PAGE_BYTES + 8 * HEAD_DIM  # a page and its request's query rows

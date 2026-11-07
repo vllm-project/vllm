@@ -46,7 +46,8 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_front_
     inverse_scale,
 )
 
-from .indexer_cute import RECORD_BYTES
+from . import HEAD_DIM, HEADS, MAX_ROWS, PAGE
+from .indexer_cute import RECORD_BYTES, SCORE_STRIDE
 from .ptx import (
     arrive_count,
     atom_add_shared,
@@ -78,24 +79,20 @@ from .ptx import (
     st_u32,
 )
 
-HEADS = 16
-HEAD_DIM = 128
 Q_SIZE = HEADS * HEAD_DIM
-PAGE = 128
 CODE_BYTES = PAGE * HEAD_DIM // 2
 SLOT_BYTES = CODE_BYTES + PAGE * HEAD_DIM // 16  # K slot, then the V slot
 HISTORY = 15  # ranked history pages; the local page is the 16th
-SCORE_STRIDE = 8192
 WARPS = 8
 RANKERS = WARPS * 32
 CAPACITY = 256  # survivors the ranking places
 PAIRS = SCORE_STRIDE // RANKERS  # pairs a thread holds while ranking a long row
 BIG = 1 << 24
 LOG2E = 1.4426950408889634
-MAX_ROWS = 32
 MAX_CTAS = 8
 STAGE_ROW = HEAD_DIM + 4  # floats a head of the staged output (padded)
 ML_BYTES = MAX_ROWS * MAX_CTAS * 2 * HEADS * 4  # the partials' maxima and sums
+PARTIAL_BYTES = ML_BYTES + MAX_ROWS * MAX_CTAS * Q_SIZE * 4  # then their outputs
 
 
 def swizzled_scale_offset(row, block):
@@ -483,9 +480,10 @@ class SparseAttention:
                 )
                 for i in cutlass.range_constexpr(4):
                     q_words[hh, half, i] = words[i]
-        # o_proj streams its weights once launched: up to eight rows launch it
-        # once their pages are known when they rank at most 256 (its stream
-        # does not delay their loads then), others before their wait.
+        # o_proj streams its weights once launched: past eight rows it was
+        # launched before the wait; up to eight, a CTA whose row ranks at most
+        # 256 pages launches it once its pages are known (its stream does not
+        # delay their loads then), any other CTA here, its record loaded.
         after_pages = Int32(0)
         if (rows <= 8) & (count <= RANKERS):
             after_pages = Int32(1)
