@@ -115,6 +115,7 @@ class _AsyncServing(BeamSearchOnlineMixin):
 class _OfflineServing(BeamSearchOfflineMixin):
     renderer = _Renderer()
     llm_engine = _EngineClient()
+    model_config = MagicMock(max_model_len=128)
 
     def _preprocess_cmpl(
         self,
