@@ -52,6 +52,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionTransformer,
+    Qwen2_5_VLEncoderCudaGraphMixin,
     Qwen2_5_VLImageEmbeddingInputs,
     Qwen2_5_VLImageInputs,
     Qwen2_5_VLImagePixelInputs,
@@ -1098,6 +1099,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
 class Qwen2_5OmniThinkerForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    Qwen2_5_VLEncoderCudaGraphMixin,
     SupportsPP,
     SupportsLoRA,
     SupportsMRoPE,
@@ -1147,8 +1149,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             vllm_config.model_config.hf_config.thinker_config
         )
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
         self.config = thinker_config
+        self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
 
