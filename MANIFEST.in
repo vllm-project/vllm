@@ -8,3 +8,12 @@ include tools/build_rust.py
 
 recursive-include cmake *
 recursive-include csrc *
+
+# setuptools-scm adds every git-tracked file; drop what building or testing
+# from the sdist doesn't need.
+prune docs
+prune docker
+prune recipes
+prune .buildkite
+prune .github
+prune .agents
