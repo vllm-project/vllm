@@ -4,7 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
@@ -541,7 +541,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     """Parser-derived constraints that preserve the public request's text metadata."""
 
-    _DEFAULT_SAMPLING_PARAMS = {
+    _DEFAULT_SAMPLING_PARAMS: ClassVar[dict] = {
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": 0,

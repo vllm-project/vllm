@@ -56,6 +56,7 @@ logger = init_logger(__name__)
 
 _PROBE_TEXT = "zZ_vllm_sse_probe_Zz"
 _PROBE_INDEX = 987654321
+_encode_delta_text = json.JSONEncoder(ensure_ascii=False).encode
 
 
 def _delta_frame_template(
@@ -391,11 +392,6 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     num_cached_tokens = res.num_cached_tokens
                     first_iteration = False
 
-                prompt_text = res.prompt
-                if prompt_text is None:
-                    engine_input = engine_inputs[prompt_idx]
-                    prompt_text = self._extract_prompt_text(engine_input)
-
                 # Prompt details are excluded from later streamed outputs
                 if prompt_token_ids is not None:
                     num_prompt_tokens[prompt_idx] = len(prompt_token_ids)
@@ -418,6 +414,12 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         assert prompt_token_ids is not None
                         if request.return_token_ids:
                             prompt_text = ""
+                        else:
+                            prompt_text = res.prompt
+                            if prompt_text is None:
+                                prompt_text = self._extract_prompt_text(
+                                    engine_inputs[prompt_idx]
+                                )
                         assert prompt_text is not None
                         if request.max_tokens == 0:
                             # only return the prompt
@@ -498,7 +500,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         prefix, infix, suffix = delta_template
                         yield (
                             f"{prefix}{i}{infix}"
-                            f"{json.dumps(delta_text, ensure_ascii=False)}"
+                            f"{_encode_delta_text(delta_text)}"
                             f"{suffix}"
                         )
                         continue
