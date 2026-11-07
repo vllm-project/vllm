@@ -67,6 +67,8 @@ pub struct SamplingHints {
     pub default_presence_penalty: Option<f32>,
     pub default_frequency_penalty: Option<f32>,
     pub default_max_tokens: Option<u32>,
+    /// Server-wide cap that also bounds client-provided `max_tokens`.
+    pub max_tokens_cap: Option<u32>,
 }
 
 /// Effective bounds used to validate and lower sampling requests.

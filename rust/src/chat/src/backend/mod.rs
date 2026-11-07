@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 use vllm_text::backend::hf::{HfOverrides, ModelSource};
 use vllm_text::{DynTextBackend, GenerationConfigMode, TextBackend};
 
@@ -79,6 +79,8 @@ pub struct LoadModelBackendsOptions {
     pub hf_overrides: HfOverrides,
     /// Which generation-config sampling defaults to inherit.
     pub generation_config: GenerationConfigMode,
+    /// Keys applied over the generation-config sampling defaults.
+    pub override_generation_config: Map<String, Value>,
     /// Which chat renderer implementation to use.
     pub renderer: RendererSelection,
     /// Disable frontend-side multimodal preprocessing and render the model as

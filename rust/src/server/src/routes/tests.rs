@@ -4124,6 +4124,55 @@ async fn openai_return_weight_versions_reports_spans_on_final_choice() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn chat_generation_config_overrides_reach_engine() {
+    let backend = FakeChatBackend {
+        sampling_hints: vllm_text::SamplingHints {
+            default_temperature: Some(0.25),
+            max_tokens_cap: Some(5),
+            ..Default::default()
+        },
+        ..FakeChatBackend::new()
+    };
+    let engine_values = Arc::new(std::sync::Mutex::new(None));
+    let (app, engine_task) = test_app_with_backend_and_engine_request_check(Arc::new(backend), {
+        let engine_values = Arc::clone(&engine_values);
+        move |request| {
+            let params = request.sampling_params.as_ref().expect("sampling params");
+            *engine_values.lock().unwrap() = Some((params.temperature, params.max_tokens));
+        }
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 50
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    // The default fills the omitted temperature; the cap lowers the client's
+    // `max_tokens: 50`.
+    assert_eq!(*engine_values.lock().unwrap(), Some((0.25, 5)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_chat_image_url_reaches_engine_mm_features() {
     let (app, engine_task) = test_app_with_backend_and_engine_request_check(
         Arc::new(FakeChatBackend::with_multimodal_model_info(

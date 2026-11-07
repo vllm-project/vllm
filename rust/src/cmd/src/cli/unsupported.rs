@@ -208,13 +208,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     pub hf_token: Option<Unsupported>,
 
-    /// Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
-    /// used with `--generation-config auto`, the override parameters will be
-    /// merged with the default config from the model. If used with
-    /// `--generation-config vllm`, only the override parameters are used.
-    #[arg(long)]
-    pub override_generation_config: Option<Unsupported>,
-
     /// IOProcessor plugin name to load at model startup
     #[arg(long)]
     pub io_processor_plugin: Option<Unsupported>,
