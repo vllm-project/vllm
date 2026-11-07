@@ -141,6 +141,9 @@ Parameters shared with the target are excluded from the draft selection, so
 target updates remain authoritative. An empty `draft.*` selection is valid.
 The Engram and draft patterns can be supplied together.
 
+Without a draft pattern, level-2 sleep discards draft weights, and speculative
+decoding accepts no tokens after `reload_weights`; vLLM logs a warning.
+
 #### Release only KV cache memory
 
 `LLM.release_kv_cache_memory()` discards KV cache physical memory while keeping model weights resident. It requires a completed pause and all executor memory to be resident: full sleep, partial wake-up, and repeated release without restoring memory are rejected. Requests retained with `mode="keep"` are recomputed after wake-up.
