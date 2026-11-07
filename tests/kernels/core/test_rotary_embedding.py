@@ -6,7 +6,63 @@ import pytest
 import torch
 
 from tests.kernels.utils import opcheck
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding import (
+    LinearScalingRotaryEmbedding,
+    RotaryEmbedding,
+)
+from vllm.model_executor.layers.rotary_embedding.fope import FourierRotaryEmbedding
+
+
+@pytest.mark.parametrize("scaled", [False, True])
+@pytest.mark.parametrize("is_neox", [False, True])
+def test_rotation_description_matches_partial_rotary_forward(
+    default_vllm_config, scaled: bool, is_neox: bool
+):
+    args = (64, 32, 128, 10000, is_neox)
+    rot = (
+        LinearScalingRotaryEmbedding(*args, scaling_factors=2.0, dtype=torch.float32)
+        if scaled
+        else RotaryEmbedding(*args, dtype=torch.float32)
+    )
+    positions = torch.tensor([5, 0, 9, 2])
+    query = torch.randn(4, 4 * 64, dtype=torch.bfloat16)
+    key = torch.randn(4, 2 * 64, dtype=torch.bfloat16)
+    expected = rot.forward_native(positions, query, key)
+
+    rotation = rot.get_rotation(positions, query.dtype)
+
+    assert rotation is not None
+    assert rotation.positions is positions
+    assert rotation.cos_sin is rot.cos_sin_cache
+    assert rotation.cos_sin.dtype == query.dtype
+    actual = RotaryEmbedding.forward_static(
+        rotation.positions,
+        query,
+        key,
+        rot.head_size,
+        rotation.cos_sin.shape[-1],
+        rotation.cos_sin,
+        rotation.is_neox,
+    )
+    torch.testing.assert_close(actual, expected)
+
+
+def test_fourier_rotary_embedding_has_no_rotation(default_vllm_config):
+    """Fourier RoPE rotates by per-KV-head angles, not a cos/sin table."""
+    rot = FourierRotaryEmbedding(
+        head_size=64,
+        rotary_dim=64,
+        max_position_embeddings=128,
+        base=10000,
+        is_neox_style=True,
+        dtype=torch.float16,
+        init_cache=False,
+        num_key_value_heads=2,
+        num_inv_freq=32,
+        fope_sep_head=True,
+        fope_init_factor=1.0,
+    )
+    assert rot.get_rotation(torch.arange(4), torch.float16) is None
 
 
 def rotary_embedding_opcheck(
