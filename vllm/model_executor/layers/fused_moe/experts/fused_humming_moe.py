@@ -29,6 +29,10 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
 from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import moe_fused_mul_sum
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    UnfinalizedMoEOutput,
+    route_major_moe_output,
+)
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     MoEPermuteScratch,
     get_moe_permute_scratch,
@@ -876,8 +880,21 @@ class HummingIndexedExperts(HummingExpertsBase):
         if expert_tokens_meta and expert_tokens_meta.psum_recv_per_rank is not None:
             valid_tokens = expert_tokens_meta.psum_recv_per_rank[-1:]
 
+        gemm2_rows = buffers["down_output"].view(*topk_ids.shape, -1)
+        if self._uses_post_gemm2_hook(topk_ids.size(0)):
+            # The indexed GEMM2 writes row t * top_k + k for route (t, k).
+            if valid_tokens is not None:
+                raise NotImplementedError(
+                    "post_gemm2_hook does not support padded all2all batches."
+                )
+            self._run_post_gemm2_hook(
+                route_major_moe_output(gemm2_rows, topk_weights, topk_ids, expert_map),
+                output,
+            )
+            return
+
         moe_fused_mul_sum(
-            inputs=buffers["down_output"].view(*topk_ids.shape, -1),
+            inputs=gemm2_rows,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             expert_map=expert_map,
@@ -1012,6 +1029,15 @@ class HummingGroupedExperts(HummingExpertsBase):
             tuning_config=self.w2_tuning_config_str,
         )
 
+        if self._uses_post_gemm2_hook(topk_ids.size(0)):
+            self._run_post_gemm2_hook(
+                _permuted_moe_output(
+                    buffers["down_output"], topk_weights, topk_ids, inv_perm, expert_map
+                ),
+                output,
+            )
+            return
+
         moe_unpermute(
             out=output,
             permuted_hidden_states=buffers["down_output"].view(*topk_ids.shape, -1),
@@ -1019,6 +1045,24 @@ class HummingGroupedExperts(HummingExpertsBase):
             inv_permuted_idx=inv_perm,
             expert_first_token_offset=expert_offsets,
         )
+
+
+def _permuted_moe_output(
+    gemm2_rows: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    inv_perm: torch.Tensor,
+    expert_map: torch.Tensor | None,
+) -> UnfinalizedMoEOutput:
+    """Wrap expert-sorted GEMM2 rows; routes to remote experts map to ``-1``."""
+    permuted_idx = inv_perm.view(topk_ids.shape)
+    if expert_map is not None:
+        permuted_idx = permuted_idx.masked_fill(expert_map[topk_ids] < 0, -1)
+    return UnfinalizedMoEOutput(
+        gemm2_permuted=gemm2_rows.view(-1, gemm2_rows.shape[-1]),
+        expert_weights=topk_weights,
+        expanded_idx_to_permuted_idx=permuted_idx,
+    )
 
 
 class BatchedHummingGroupedExperts(HummingExpertsBase):
@@ -1063,6 +1107,10 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         output is written into workspace13 via the buffer management.
         """
         assert not apply_router_weight_on_input
+        if self._uses_post_gemm2_hook(topk_ids.size(0)):
+            raise NotImplementedError(
+                "post_gemm2_hook is not supported by the batched Humming experts."
+            )
         assert expert_tokens_meta is not None
 
         hidden_states = hidden_states.view(-1, hidden_states.size(-1))
