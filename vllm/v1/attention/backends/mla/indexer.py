@@ -1001,6 +1001,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.use_shardq = any(
             getattr(layers.get(name), "use_shardq", False) for name in self.layer_names
         )
+        self.use_sp_shardq = all(
+            getattr(layers.get(name), "use_sp_shardq", False)
+            for name in self.layer_names
+        )
         if self.use_shardq:
             self.shardq_gather_indices = CpuGpuBuffer(
                 scheduler_config.max_num_batched_tokens,
@@ -1534,6 +1538,18 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
 
+        split = (
+            build_shardq_split(
+                common_attn_metadata, self.vllm_config, self.use_sp_shardq
+            )
+            if self.use_shardq
+            else None
+        )
+        if split is not None and split.sequence_parallel:
+            # Score local decode rows through the same causal prefill chunks.
+            num_decodes = num_decode_tokens = 0
+            num_prefills, num_prefill_tokens = num_reqs, num_tokens
+
         prefill_metadata = None
         if num_prefills > 0:
             compressed_seq_lens = (
@@ -1550,9 +1566,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 else seq_lens_cpu
             )
             positions = shardq_gather_indices = None
-            if self.use_shardq and (
-                split := build_shardq_split(common_attn_metadata, self.vllm_config)
-            ):
+            if split is not None:
                 # Tokens this builder counts as decodes stay in place there.
                 assert num_decode_tokens <= split.num_decode_tokens
                 # Every rank scores every decode token in place, then its own
@@ -1588,6 +1602,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     out=self.shardq_query_start_loc.cpu[: num_reqs + 1],
                 )
                 query_start_loc = self.shardq_query_start_loc.copy_to_gpu(num_reqs + 1)
+                if split.sequence_parallel:
+                    # Q and head weights already arrive in the local row order.
+                    shardq_gather_indices = None
             prefill_query_lens_cpu = torch.diff(
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )

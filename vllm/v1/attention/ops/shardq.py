@@ -53,6 +53,7 @@ class ShardQMetadata:
     # Every rank's tokens, grouped by rank, and where each group starts.
     token_ids: torch.Tensor
     rank_offsets: torch.Tensor
+    sequence_parallel: bool = False
     # forward_mqa metadata of this rank's tokens, which run with all heads.
     attn_metadata: "SparseMLACommonMetadata" = field(init=False)
 
@@ -96,6 +97,7 @@ class ShardQSplit(NamedTuple):
     # Token ids grouped by rank.
     token_ids: np.ndarray
     num_tokens_per_rank: np.ndarray
+    sequence_parallel: bool = False
 
     @property
     def local_token_ids(self) -> np.ndarray:
@@ -105,8 +107,17 @@ class ShardQSplit(NamedTuple):
         return self.token_ids[start : start + self.num_tokens_per_rank[rank]]
 
 
+def sequence_parallel_split(num_tokens: int, world: int) -> ShardQSplit:
+    """Match the contiguous, equally padded shards produced by ``sp_shard``."""
+    chunk = -(-num_tokens // world)
+    counts = np.clip(num_tokens - np.arange(world) * chunk, 0, chunk)
+    return ShardQSplit(0, np.arange(num_tokens), counts, True)
+
+
 def build_shardq_split(
-    common_attn_metadata: "CommonAttentionMetadata", vllm_config: "VllmConfig"
+    common_attn_metadata: "CommonAttentionMetadata",
+    vllm_config: "VllmConfig",
+    sequence_parallel: bool = False,
 ) -> ShardQSplit | None:
     """This step's ``zigzag_split`` over the TP group of the tokens after the
     decodes (requests of at most 1 + num_speculative_tokens tokens). None when
@@ -131,6 +142,31 @@ def build_shardq_split(
     prefill_lens = query_lens[num_decodes:num_reqs].numpy()
     if prefill_lens.sum() != num_prefill_tokens:
         return None
+    if sequence_parallel:
+        compilation = vllm_config.compilation_config
+        capture_limit = (
+            compilation.max_prefill_cudagraph_capture_tokens
+            or compilation.max_cudagraph_capture_size
+            or 0
+        )
+        if (
+            compilation.cudagraph_mode
+            and compilation.cudagraph_mode.mixed_mode()
+            and common_attn_metadata.num_actual_tokens <= capture_limit
+        ):
+            # Captured projections use the full-token layout selected during
+            # warmup. Retain the original query exchange for those batch sizes.
+            sequence_parallel = False
+    if sequence_parallel:
+        # Match sp_shard's contiguous, equally padded input shards. Include
+        # decode rows so the local projections never need remote hidden states.
+        num_tokens = int(query_lens.sum())
+        if num_tokens != common_attn_metadata.num_actual_tokens:
+            return None
+        split = sequence_parallel_split(num_tokens, get_tp_group().world_size)
+        if split.num_tokens_per_rank.min() == 0:
+            return None
+        return split
     token_ids, num_tokens_per_rank = zigzag_split(
         prefill_lens, get_tp_group().world_size
     )
