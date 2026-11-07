@@ -146,7 +146,10 @@ class EncoderCudaGraphManager:
                 # budgets so min(budgets) >= max_batch_size.
                 self.max_batch_size = user_max_vision_items
                 effective_min = max(min_budget, user_max_vision_items)
-                self.token_budgets = self._generate_budgets(effective_min, max_budget)
+                self.token_budgets = self._generate_budgets(
+                    effective_min,
+                    max_budget,
+                )
             elif user_budgets:
                 # User provided budgets only; cap auto-inferred
                 # max_batch_size to min(user_budgets).
@@ -157,7 +160,10 @@ class EncoderCudaGraphManager:
                 )
             else:
                 # Fully auto-inferred.
-                self.token_budgets = self._generate_budgets(min_budget, max_budget)
+                self.token_budgets = self._generate_budgets(
+                    min_budget,
+                    max_budget,
+                )
                 self.max_batch_size = min(
                     max_budget // min_budget,
                     min(self.token_budgets),
@@ -182,6 +188,16 @@ class EncoderCudaGraphManager:
 
         self.budget_graphs: dict[str, dict[BudgetGraphMapKey, BudgetGraphMetadata]] = {}
         self.graph_pool: Any | None = None
+        # One set of max-size input buffers and one max-size output buffer
+        # per (path, axis_keys) combination, shared by all budgets of that
+        # combination as prefix views. Populated at the first
+        # (largest-budget) capture of each combination.
+        self._shared_input_buffers: dict[
+            tuple[str, CaptureAxisKeys], dict[str, torch.Tensor]
+        ] = {}
+        self._shared_output_buffers: dict[
+            tuple[str, CaptureAxisKeys], torch.Tensor
+        ] = {}
         self.graph_hits = 0
         self.graph_misses = 0
         self.log_stats_interval = 100
@@ -200,7 +216,10 @@ class EncoderCudaGraphManager:
                         f"Invalid minimum budget {min_path_budget} for encoder "
                         f"CUDA graph path {path!r}; max budget is {max_budget}"
                     )
-                budgets = self._generate_budgets(min_path_budget, max_budget)
+                # Paths with a declared min budget have fixed-size items
+                # (e.g. DeepSeek-OCR's global path), so budget by exact
+                # item multiples instead of the subdivided grid.
+                budgets = self._item_multiple_budgets(min_path_budget, max_budget)
             if path_config.allow_zero_tokens:
                 budgets.insert(0, 0)
             self.path_token_budgets[path] = budgets
@@ -217,17 +236,44 @@ class EncoderCudaGraphManager:
         )
 
     @staticmethod
-    def _generate_budgets(min_budget: int, max_budget: int) -> list[int]:
-        """Generate power-of-2 token budgets from min_budget to max_budget."""
-        budgets: list[int] = []
-        b = min_budget
-        while b <= max_budget:
-            budgets.append(b)
-            b *= 2
-        # Always include max_budget if it's not already a power-of-2 boundary
-        if not budgets or budgets[-1] < max_budget:
-            budgets.append(max_budget)
-        return budgets
+    def _generate_budgets(
+        min_budget: int,
+        max_budget: int,
+    ) -> list[int]:
+        """Generate token budgets from min_budget to max_budget.
+
+        Subdivided grid: quarter-octave steps up to 1024, half-octave steps
+        above. Capture buffers are shared across budgets (see
+        ``_capture_budget_graph``), so extra graphs cost no buffer memory
+        and the finer table only cuts padding waste.
+        """
+        points = {min_budget, max_budget}
+        base = 1
+        while base < max_budget:
+            # Quarter-octave grid below 1024, half-octave above.
+            steps = 4 if base < 1024 else 2
+            step = base // steps
+            for k in range(steps):
+                point = base + k * step
+                if min_budget <= point <= max_budget:
+                    points.add(point)
+            base *= 2
+        return sorted(points)
+
+    @staticmethod
+    def _item_multiple_budgets(item_tokens: int, max_budget: int) -> list[int]:
+        """Budgets for a path whose items all have item_tokens tokens.
+
+        Every item count up to 16, then 1/8-octave steps, so batches of up to
+        16 items fit their budget exactly.
+        """
+        max_items = max_budget // item_tokens
+        counts = {c for c in range(1, 17) if c <= max_items} | {max_items}
+        count = 16
+        while count < max_items:
+            count = math.ceil(count * 2 ** (1 / 8))
+            counts.add(min(count, max_items))
+        return [c * item_tokens for c in sorted(counts)]
 
     def supports_modality(self, modality: str) -> bool:
         """Check if a modality is supported by this manager."""
@@ -242,6 +288,8 @@ class EncoderCudaGraphManager:
         for graph_set in self.budget_graphs.values():
             graph_set.clear()
         self.graph_pool = None
+        self._shared_input_buffers.clear()
+        self._shared_output_buffers.clear()
 
     def capture(self, graph_pool: Any):
         """Capture CUDA graphs for every configured path and token budget."""
@@ -254,8 +302,10 @@ class EncoderCudaGraphManager:
         num_graphs = self.get_num_graphs_to_capture()
         if num_graphs > _CAPTURE_GRAPH_COUNT_WARNING_THRESHOLD:
             logger.warning(
-                "Capturing %d encoder CUDA graphs; capture axes multiply the "
-                "per-budget graph count, consider pruning axis keys.",
+                "Capturing %d encoder CUDA graphs; the subdivided default "
+                "budget table and capture axes multiply the graph count. "
+                "Consider explicit encoder_cudagraph_token_budgets or "
+                "fewer capture axis keys.",
                 num_graphs,
             )
 
@@ -296,6 +346,40 @@ class EncoderCudaGraphManager:
             self.budget_graphs[path] = {}
         return self.budget_graphs[path]
 
+    @staticmethod
+    def _share_prefix_compatible(
+        probe: dict[str, torch.Tensor],
+        shared: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        """View prefix-compatible probe buffers into the shared buffers.
+
+        For each probe buffer that is a row-prefix of its shared counterpart
+        (same trailing dims and dtype, no more rows), copy the probe contents
+        into the shared buffer and return the prefix view instead. 0-dim
+        buffers with matching dtype are shared wholesale. Anything else
+        keeps its own per-budget allocation.
+        """
+        values = dict(probe)
+        for key, buf in probe.items():
+            full = shared.get(key)
+            if full is None:
+                continue
+            if buf.ndim == 0:
+                if full.ndim == 0 and full.dtype == buf.dtype:
+                    full.copy_(buf)
+                    values[key] = full
+                continue
+            if (
+                full.ndim == buf.ndim
+                and full.shape[1:] == buf.shape[1:]
+                and full.dtype == buf.dtype
+                and buf.shape[0] <= full.shape[0]
+            ):
+                view = full[: buf.shape[0]]
+                view.copy_(buf)
+                values[key] = view
+        return values
+
     def _capture_budget_graph(
         self,
         token_budget: int,
@@ -327,11 +411,25 @@ class EncoderCudaGraphManager:
             axis_keys,
         )
 
-        values = capture_inputs.values
+        # Budgets are captured largest-first, so the first capture of each
+        # (path, axis_keys) group provides the shared buffers that later
+        # captures of the group view into. Buffers whose shape or dtype is
+        # not prefix-compatible keep their own per-budget allocation.
+        share_key = (path, axis_keys)
+        shared = self._shared_input_buffers.get(share_key)
+        if shared is None:
+            values = capture_inputs.values
+            self._shared_input_buffers[share_key] = values
+        else:
+            values = self._share_prefix_compatible(capture_inputs.values, shared)
 
         with torch.inference_mode():
             output = self.model.encoder_cudagraph_forward({**values}, path=path)
-            output_buffer = torch.empty_like(output)
+            shared_out = self._shared_output_buffers.get(share_key)
+            if shared_out is None or output.shape[0] > shared_out.shape[0]:
+                shared_out = torch.empty_like(output)
+                self._shared_output_buffers[share_key] = shared_out
+            output_buffer = shared_out[: output.shape[0]]
 
         graph = torch.cuda.CUDAGraph()
         with (
