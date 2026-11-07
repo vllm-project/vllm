@@ -13,6 +13,9 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.attention.attention import get_attention_context
+from vllm.model_executor.layers.attention.kv_transfer_utils import (
+    maybe_transfer_kv_layer,
+)
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -441,6 +444,7 @@ class DeepseekV32Attention(MLAAttention):
         )
 
         self._sparse_indexer_and_attn(
+            self.layer_name,
             positions,
             q_c,
             q_nope,
@@ -457,8 +461,10 @@ class DeepseekV32Attention(MLAAttention):
         return self.o_proj(output)[0]
 
     @eager_break_during_capture
+    @maybe_transfer_kv_layer
     def _sparse_indexer_and_attn(
         self,
+        layer_name: str,
         positions: torch.Tensor,
         q_c: torch.Tensor,
         q_nope: torch.Tensor,
@@ -513,7 +519,7 @@ class DeepseekV32Attention(MLAAttention):
         self.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 
         attn_metadata, _, kv_cache, layer_slot_mapping = get_attention_context(
-            self.layer_name
+            layer_name
         )
         if attn_metadata is None:
             output.zero_()
