@@ -5,7 +5,7 @@ import pytest
 
 from tests.models.utils import GenerateModelInfo
 
-from .ppl_utils import ppl_tol, vqa_ppl_test
+from .ppl_utils import vqa_ppl_test
 
 MODELS = [
     (
@@ -47,6 +47,15 @@ def test_ppl(
     mm_device_do_normalize: bool,
     aiter_config: str,
 ):
+    if aiter_config == "aiter_on":
+        # AITER RMSNorm rounds once, unlike HF; keep Inductor's bf16 casts so
+        # the surrounding ops round like HF (see ROCm/aiter#2236).
+        extra_kwargs = {
+            **extra_kwargs,
+            "compilation_config": {
+                "inductor_compile_config": {"emulate_precision_casts": True}
+            },
+        }
     vqa_ppl_test(
         hf_runner,
         vllm_runner,
@@ -56,5 +65,4 @@ def test_ppl(
             **extra_kwargs,
         },
         mm_processor_kwargs=_pixel_factor(factor),
-        tol=ppl_tol(aiter_config),
     )
