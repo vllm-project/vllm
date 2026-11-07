@@ -1,6 +1,9 @@
 # Common dependencies
 -r common.txt
 
+# NVFP4 GGUF checkpoints, including RecursiveSI/flint-nvfp4-gguf.
+gguf>=0.19.0
+
 # The version of gRPC libraries should be consistent with each other
 grpcio==1.78.0
 grpcio-reflection==1.78.0

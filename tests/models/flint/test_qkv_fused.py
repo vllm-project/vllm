@@ -18,9 +18,9 @@ if not current_platform.is_cuda() or not current_platform.is_device_capability_f
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (  # noqa: E402
     swizzle_blockscale,
 )
-from vllm.models.flint.ops import norm, nvfp4_gemv  # noqa: E402
-from vllm.models.flint.ops.qk_norm_rope import qk_norm_rope_cache  # noqa: E402
-from vllm.models.flint.ops.qkv_fused import flint_qkv_fused  # noqa: E402
+from vllm.models.flint.nvidia.ops import norm, nvfp4_gemv  # noqa: E402
+from vllm.models.flint.nvidia.ops.qk_norm_rope import qk_norm_rope_cache  # noqa: E402
+from vllm.models.flint.nvidia.ops.qkv_fused import flint_qkv_fused  # noqa: E402
 
 HQ, HKV, D, K = 32, 4, 128, 2048
 N = (HQ + 2 * HKV) * D

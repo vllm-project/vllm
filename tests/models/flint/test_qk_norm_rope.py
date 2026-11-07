@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.models.flint.ops.qk_norm_rope import qk_norm_rope_cache
+from vllm.models.flint.nvidia.ops.qk_norm_rope import qk_norm_rope_cache
 from vllm.platforms import current_platform
 
 HQ, HKV, D = 32, 4, 128

@@ -11,8 +11,8 @@ import torch
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
 )
-from vllm.models.flint.gguf_nvfp4 import dequantize_nvfp4
-from vllm.models.flint.ops import nvfp4_gemv
+from vllm.models.flint.common.gguf_nvfp4 import dequantize_nvfp4
+from vllm.models.flint.nvidia.ops import nvfp4_gemv
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -114,7 +114,7 @@ def test_gemv_silu_mul_matches_unfused(n, k, m):
 
 
 def test_merged_global_scale_mismatch_raises():
-    from vllm.models.flint.ops.linear import check_merged_global_scales
+    from vllm.models.flint.nvidia.ops.linear import check_merged_global_scales
 
     p = "model.layers.0.self_attn."
     ok = [(f"{p}{n}_proj.weight_scale_2", torch.tensor(0.5)) for n in "qkv"]
@@ -146,7 +146,7 @@ def test_bf16_gemv_silu_mul():
 def test_large_m_dequant_gemm_matches_reference():
     from types import SimpleNamespace
 
-    from vllm.models.flint.ops.linear import _dequant_gemm
+    from vllm.models.flint.nvidia.ops.linear import _dequant_gemm
 
     n, k = 2048, 4096
     w, s, gs = _nvfp4(n, k)
@@ -171,7 +171,7 @@ def test_rms_norm_matches_reference(m, has_residual):
     """Flint's (fused residual-add) RMSNorm: fp32 math on the unrounded
     x + residual, one bf16 rounding of each output. rsqrt.approx and the
     reduction order allow rare 1-ulp differences from the fp32 reference."""
-    from vllm.models.flint.ops import norm
+    from vllm.models.flint.nvidia.ops import norm
 
     gen = torch.Generator(device="cuda").manual_seed(m)
     h = 2048
@@ -194,7 +194,7 @@ def test_rms_norm_matches_reference(m, has_residual):
 @torch.inference_mode()
 def test_silu_and_mul_matches_reference(m):
     """bf16(silu(g) * u) in fp32 with one rounding."""
-    from vllm.models.flint.ops import norm
+    from vllm.models.flint.nvidia.ops import norm
 
     gen = torch.Generator(device="cuda").manual_seed(m)
     x = (torch.randn(m, 2 * 6144, device="cuda", generator=gen) * 3).bfloat16()

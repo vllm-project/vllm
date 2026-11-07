@@ -16,7 +16,9 @@ if not current_platform.is_cuda() or not current_platform.is_device_capability_f
 
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache  # noqa: E402
 
-from vllm.models.flint.ops.decode_attention import flint_decode_attention  # noqa: E402
+from vllm.models.flint.nvidia.ops.decode_attention import (
+    flint_decode_attention,  # noqa: E402
+)
 
 HQ, HKV, D, PAGE = 32, 4, 128, 16
 SCALE = D**-0.5
