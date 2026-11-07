@@ -956,17 +956,25 @@ def test_tp_fp16_partial_sums_scale_is_exact_and_overflows():
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="needs CUDA")
 def test_tp_fp16_partial_sums_nvfp4_kernel():
-    """NVFP4 CUTLASS ("kernel" mode): the FP16 partial sum carries the 2^-k
-    prescale on alpha and on the rank-0 bias, with the bias in the GEMM
-    epilogue (SM120) or added after it."""
+    """NVFP4 ("kernel" mode, CUTLASS and FlashInfer CUTLASS): the FP16 partial
+    sum carries the 2^-k prescale on alpha and on the rank-0 bias, with the
+    CUTLASS bias in the GEMM epilogue (SM120) or added after it."""
     from vllm._custom_ops import scaled_fp4_quant
     from vllm.model_executor.kernels.linear.nvfp4.base import NvFp4LinearLayerConfig
     from vllm.model_executor.kernels.linear.nvfp4.cutlass import (
         CutlassNvFp4LinearKernel,
     )
+    from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+        FlashInferCutlassNvFp4LinearKernel,
+    )
 
-    if not CutlassNvFp4LinearKernel.is_supported()[0]:
-        pytest.skip("needs the CUTLASS NVFP4 GEMM (SM100/SM120)")
+    kernel_classes = [
+        cls
+        for cls in (CutlassNvFp4LinearKernel, FlashInferCutlassNvFp4LinearKernel)
+        if cls.is_supported()[0]
+    ]
+    if not kernel_classes:
+        pytest.skip("needs an NVFP4 CUTLASS GEMM (SM100/SM120)")
     torch.manual_seed(0)
     m, k, n = 64, 2048, 1024
     x = torch.randn(m, k, device="cuda").bfloat16()
@@ -981,18 +989,21 @@ def test_tp_fp16_partial_sums_nvfp4_kernel():
     layer.alpha = 1.0 / (x_global * w_global)
     layer.input_global_scale_inv = x_global
     layer.input_size_per_partition, layer.output_size_per_partition = k, n
-    kernel = CutlassNvFp4LinearKernel(NvFp4LinearLayerConfig())
 
-    for bias_epilogue in {kernel.bias_epilogue, False}:
-        kernel.bias_epilogue = bias_epilogue
-        layer.partial_sum_dtype, layer.partial_sum_scale = None, 1.0
-        ref = kernel.apply_weights(layer, x, b)
-        layer.partial_sum_dtype, layer.partial_sum_scale = torch.float16, 0.25
-        part = kernel.apply_weights(layer, x, b)
-        assert ref.dtype == torch.bfloat16 and part.dtype == torch.float16
-        rms = float(ref.float().pow(2).mean().sqrt())
-        diff = float((part.float() * 4 - ref.float()).abs().mean()) / rms
-        assert diff < 1e-2, (bias_epilogue, diff)
+    for cls in kernel_classes:
+        kernel = cls(NvFp4LinearLayerConfig())
+        epilogues = {getattr(kernel, "bias_epilogue", False), False}
+        for bias_epilogue in epilogues:
+            if hasattr(kernel, "bias_epilogue"):
+                kernel.bias_epilogue = bias_epilogue
+            layer.partial_sum_dtype, layer.partial_sum_scale = None, 1.0
+            ref = kernel.apply_weights(layer, x, b)
+            layer.partial_sum_dtype, layer.partial_sum_scale = torch.float16, 0.25
+            part = kernel.apply_weights(layer, x, b)
+            assert ref.dtype == torch.bfloat16 and part.dtype == torch.float16
+            rms = float(ref.float().pow(2).mean().sqrt())
+            diff = float((part.float() * 4 - ref.float()).abs().mean()) / rms
+            assert diff < 1e-2, (cls.__name__, bias_epilogue, diff)
 
 
 @multi_gpu_test(num_gpus=2)

@@ -188,6 +188,8 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
 class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's CUTLASS wrapper."""
 
+    supports_partial_sum_dtype = True
+
     def input_quant_key(self) -> QuantKey | None:
         """This kernel supports dynamic quantization of the input. By
         convention, pre-quantized blockscales must use the swizzled layout."""
@@ -250,12 +252,24 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
                 padded_n=x.shape[-1] + weights_padding_bytes * 2,
             )
 
+        # RowParallelLinear may ask for FP16 partial sums
+        # (VLLM_TP_FP16_PARTIAL_SUMS), prescaled by partial_sum_scale.
+        alpha = layer.alpha
+        partial_sum_dtype = getattr(layer, "partial_sum_dtype", None)
+        if partial_sum_dtype is not None and partial_sum_dtype != output_dtype:
+            output_dtype = partial_sum_dtype
+            partial_sum_scale = layer.partial_sum_scale
+            if partial_sum_scale != 1.0:
+                alpha = alpha * partial_sum_scale
+                if bias is not None:
+                    bias = bias * partial_sum_scale
+
         out = flashinfer_scaled_fp4_mm(
             x_fp4,
             layer.weight,
             x_blockscale,
             layer.weight_scale,
-            layer.alpha,
+            alpha,
             output_dtype,
             backend="cutlass",
         )
@@ -263,7 +277,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         out = slice_nvfp4_output(out, output_size)
 
         if bias is not None:
-            out = out + bias
+            out = out + bias.to(out.dtype)
         return out.view(*output_shape)
 
 
