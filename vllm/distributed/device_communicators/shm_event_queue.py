@@ -130,13 +130,15 @@ class EventQueue:
         finally:
             self.endpoint.release(commit if writer else True)
 
-    def __del__(self):
+    def __del__(self, _suppress=suppress):
+        # Bound at definition time: module globals may already be None when
+        # this runs during interpreter shutdown.
         if hasattr(self, "endpoint"):
             del self.endpoint
         if hasattr(self, "shm"):
             self.shm.close()
             if self.creator:
-                with suppress(FileNotFoundError):
+                with _suppress(FileNotFoundError):
                     self.shm.unlink()
 
 
