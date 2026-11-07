@@ -173,7 +173,7 @@ For further details on derenderer APIs, please refer to [this page](derenderer.m
 
 ## Process Checkpoint APIs
 
-For external checkpoint/restore orchestrators, available with `--enable-sleep-mode`. Preparing drains the engine and releases its KV cache and other external state, any number of times. Until `/checkpoint/restore`, new requests get a retryable error and `/health` still returns 200, as while asleep. `--checkpoint-prepare-on-startup` prepares each engine once it starts.
+For external checkpoint/restore orchestrators, available with `--enable-sleep-mode`. Preparing drains the engine and releases its KV cache and other external state, any number of times. Until `/checkpoint/restore`, new requests get a retryable error and `/health` still returns 200, as while asleep. `--checkpoint-prepare-on-startup` prepares each engine once it starts. With a KV connector, the engine prepares only if the connector supports process checkpoints with its configuration; `NixlConnector` does when the engine starts with `--checkpoint-prepare-on-startup`.
 
 - `/checkpoint/prepare` - Start preparing, draining with `?mode=wait` (default), `abort` or `keep`; 200 once started or already preparing, 400 if the engine cannot prepare now
 - `/checkpoint/status` - Return the state: 200 once prepared, 503 until then, 500 after a failure
