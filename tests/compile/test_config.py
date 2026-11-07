@@ -596,17 +596,15 @@ def _mock_config_for_cudagraph_sizes(
     )
     config.num_speculative_tokens = VllmConfig.num_speculative_tokens.fget(config)
     config.uniform_decode_query_len = VllmConfig.uniform_decode_query_len.fget(config)
-    config.get_decode_cudagraph_query_lens = (
-        lambda decode_query_len: VllmConfig.get_decode_cudagraph_query_lens(
-            config, decode_query_len
-        )
+    config.get_decode_cudagraph_query_lens = lambda decode_query_len: (
+        VllmConfig.get_decode_cudagraph_query_lens(config, decode_query_len)
     )
-    config.get_draft_decode_cudagraph_request_sizes = (
-        lambda: VllmConfig.get_draft_decode_cudagraph_request_sizes(config)
+    config.get_draft_decode_cudagraph_request_sizes = lambda: (
+        VllmConfig.get_draft_decode_cudagraph_request_sizes(config)
     )
     config.use_v2_model_runner = True
-    config._split_cudagraph_capture_sizes = (
-        lambda *args: VllmConfig._split_cudagraph_capture_sizes(config, *args)
+    config._split_cudagraph_capture_sizes = lambda *args: (
+        VllmConfig._split_cudagraph_capture_sizes(config, *args)
     )
     return config
 
@@ -1122,7 +1120,7 @@ def test_default_cudagraph_capture_sizes_keep_all_sizes_bounded():
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Only test CUDA/ROCm")
 def test_real_vllm_config_caps_widest_ngram_decode_batch():
     """Real config post-init preserves the default capture ceiling."""
     model_config = ModelConfig(model="facebook/opt-125m")
