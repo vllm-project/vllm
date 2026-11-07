@@ -79,6 +79,96 @@ SLIDING_WINDOW_LEFT = 129
 STAGING_CAPACITY = 64
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend metadata")
+def test_segmented_mm_metadata_keeps_only_live_image_queries():
+    """Finished image prefixes must not keep decode or text rows on MM kernels."""
+    from dataclasses import replace
+
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_standard_kv_cache_spec,
+        create_vllm_config,
+    )
+    from vllm.v1.attention.backends.rocm_segmented_attn import (
+        RocmSegmentedAttentionMetadataBuilder,
+    )
+
+    device = torch.device("cpu")
+    config = create_vllm_config(
+        max_model_len=16384,
+        max_num_seqs=3,
+        max_num_batched_tokens=128,
+        dtype="bfloat16",
+    )
+    builder = RocmSegmentedAttentionMetadataBuilder(
+        create_standard_kv_cache_spec(config), [], config, device
+    )
+    common = replace(
+        create_common_attn_metadata(
+            BatchSpec([192, 8194, 4096], [64, 2, 32]), 16, device
+        ),
+        is_prefilling=torch.tensor([True, False, True]),
+        mm_req_doc_ranges={0: [(0, 31), (128, 255)], 1: [(16, 1104)], 2: [(16, 1104)]},
+    )
+    metadata = builder.build(0, common)
+    torch.testing.assert_close(
+        metadata.mm_prefix_range_tensor,
+        torch.tensor([[[128, 255]], [[0, 0]], [[0, 0]]], dtype=torch.int32),
+    )
+    assert metadata.mm_prefix_max_span == 128
+    text = builder.build(0, replace(common, mm_req_doc_ranges={}))
+    assert text.mm_prefix_range_tensor is None and text.mm_prefix_max_span == 0
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        dict(mm_prefix_mode="none"),
+        dict(mm_prefix_mode="unclamped"),
+        dict(mm_prefix_max_span=576),
+        dict(mm_prefix_max_ranges=2),
+    ],
+)
+def test_segmented_mm_tuning_cache_isolates_image_masks(tmp_path, changed):
+    """Persistent image winners must not leak into text or another image layout."""
+    import json
+
+    from vllm.model_executor.warmup import rocm_segmented_attn_autotune_warmup as tuning
+    from vllm.v1.attention.ops import segmented_attention_config as selection
+
+    options = dict(
+        mm_prefix_mode="clamped", mm_prefix_max_span=1152, mm_prefix_max_ranges=1
+    )
+    default = selection.select_segmented_config(
+        1, 1117, 1117, 16, 8, 256, True, sliding_window=1023, **options
+    )
+    winner = tuning._candidate_configs(
+        default,
+        1,
+        1117,
+        16,
+        256,
+        1117,
+        native_fp8=True,
+        sliding_window=1023,
+        mm_prefix_mode="clamped",
+    )[0]
+    record = dict(workload=[1, 1117, 1117], best=winner)
+    identity = dict(
+        kv_upcast_modes=list(selection.KV_UPCAST_MODES), sliding_window=1023, **options
+    )
+    path = tmp_path / "mm.json"
+    path.write_text(json.dumps(dict(identity=identity, records=[record])))
+    loaded, _ = tuning._load_records(path, identity, 16, 8, 256, True)
+    assert loaded["records"] == [record]
+    args = ("cpu", torch.bfloat16, torch.float8_e4m3fn, 16, 8, 256, 16, 1.0)
+    key = tuning._key(*args, **options)
+    assert tuning._key(*args, **{**options, **changed}) != key
+    rejected, _ = tuning._load_records(path, {**identity, **changed}, 16, 8, 256, True)
+    assert rejected["records"] == []
+
+
 def _query_ranges(mm_ranges, query_lens, seq_lens):
     """Fill a staging buffer and return the written rows, or None if empty."""
     query_start_loc = torch.tensor(

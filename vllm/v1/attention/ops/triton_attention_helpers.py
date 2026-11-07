@@ -396,6 +396,11 @@ def compute_kv_seq_mask(
     # kv > q - sw; future kv passes trivially). Inert for full-attention layers
     # (SLIDING_WINDOW <= 0).
     if USE_MM_PREFIX:
+        # A non-causal base mask can have one row. Keep the loop-carried
+        # shape fixed when image masks introduce the query dimension.
+        seq_mask = tl.broadcast_to(
+            seq_mask, (query_abs_pos.shape[0], seq_offset.shape[0])
+        )
         for i in range(MAX_MM_RANGES):
             range_start = tl.load(
                 mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
