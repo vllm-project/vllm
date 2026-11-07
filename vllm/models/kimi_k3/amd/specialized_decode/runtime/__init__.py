@@ -30,6 +30,8 @@ MAX_ROWS = 16
 MAX_SEQS = (1, 2, 4, 8)
 # M1c's qlens: DCP1 runs only them (AITER's asm decode at DCP1 is not served)
 M1C_QLENS = (4, 8)
+# the KV cache dtypes M1 serves: M1a writes E4M3, M1c / AITER's decode read it
+FP8_KV = ("fp8", "fp8_e4m3")
 WHOLE, FFN = "whole", "ffn"
 # Kimi-K3's text shapes the kernels are written for (hidden size, routed experts,
 # KDA heads, KDA head dim, KDA short-conv width)
@@ -44,14 +46,17 @@ class DecodeConfig:
     m1: bool = True
     # the DCP KV cache interleave (AITER's decode path, M1a's query pad)
     interleave: int = 1
+    # the most requests a step has (``step_reasons``: max_num_seqs x q <= MAX_ROWS)
+    max_num_seqs: int = 1
 
     @property
     def widths(self) -> tuple[int, ...]:
-        """The rows a launch serves: whole requests, at most MAX_ROWS rows. Every
-        uniform verify step up to MAX_ROWS rows is one of them, so an eager step
-        never pads; a FULL replay pads whole requests the way vLLM's stock decode
-        does."""
-        return tuple(range(self.q, MAX_ROWS + 1, self.q))
+        """The rows a launch serves: whole requests, 1 .. max_num_seqs of them.
+        Every uniform verify step is one of them (vLLM captures no uniform decode
+        graph wider than max_num_seqs x q), so an eager step never pads; a FULL
+        replay pads whole requests the way vLLM's stock decode does."""
+        rows = min(MAX_ROWS, self.max_num_seqs * self.q)
+        return tuple(range(self.q, rows + 1, self.q))
 
 
 def decode_backend(vllm_config) -> str:
@@ -95,6 +100,7 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
         q=spec.num_speculative_tokens + 1,
         m1=not m1,
         interleave=vllm_config.parallel_config.cp_kv_cache_interleave_size,
+        max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
     )
 
 
@@ -102,14 +108,24 @@ def m1_reasons(vllm_config) -> list[str]:
     """Why the MLA layers cannot run M1 (empty: they can). At DCP8 not a refusal:
     those layers run vLLM's attention ops instead, then K2 (``step_reasons``)."""
     import vllm.envs as envs
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     cc = vllm_config.cache_config
+    backend = vllm_config.attention_config.backend
     checks = (
-        # M1a writes the MLA layers' fp8 KV and hands AITER an fp8 query
-        (not cc.cache_dtype.startswith("fp8"), "an fp8 KV cache"),
+        # M1 reads AITER MLA's decode metadata (max_qo_len, paged_kv_*,
+        # asm_decode_num_heads); the loaded layers' backend is checked too
+        # (``guards.mla_weight_reasons``)
+        (
+            not (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MLA)
+            or backend not in (None, AttentionBackendEnum.ROCM_AITER_MLA),
+            "the ROCM_AITER_MLA attention backend",
+        ),
+        # M1a writes the MLA layers' fp8 (E4M3) KV and hands AITER an fp8 query
+        (cc.cache_dtype not in FP8_KV, "an fp8 (E4M3) KV cache"),
         # M1 runs W_UK / W_UV as AITER's MXFP4 bmms
         (
-            not envs.VLLM_ROCM_USE_AITER_FP4BMM,
+            not (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_FP4BMM),
             "AITER's MXFP4 bmms (VLLM_ROCM_USE_AITER_FP4BMM=1)",
         ),
     )
@@ -121,6 +137,7 @@ def unsupported(vllm_config) -> list[str]:
     can). Config only: the loaded weights are checked when the executor is built.
     Default-deny: every feature below is refused, the kernels serve none of them.
     What only M1 needs is not refused at DCP8 (``m1_reasons``)."""
+    import vllm.envs as envs
     from vllm.config import CompilationMode
     from vllm.model_executor.layers.mamba.mamba_utils import (
         MambaStateDtypeCalculator,
@@ -147,15 +164,22 @@ def unsupported(vllm_config) -> list[str]:
         # the kernels read one batch's attention metadata per step
         (pc.use_ubatching, "DBO (dual-batch overlap)"),
         (vllm_config.lora_config is not None, "LoRA"),
-        # MoRIIO consumers finish loads before execution, without per-layer hooks.
+        # K2 runs the MoE vLLM loads for AITER's SiTU MXFP4 MoE
+        # (``guards.weight_reasons``), M1 AITER's MLA metadata and bmms
+        (
+            not (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MOE),
+            "AITER off (set VLLM_ROCM_USE_AITER=1, VLLM_ROCM_USE_AITER_MOE=1)",
+        ),
+        # MoRIIO and Mooncake consumers finish loads before execution, without
+        # per-layer hooks.
         (
             kv is not None
             and (
-                kv.kv_connector != "MoRIIOConnector"
+                kv.kv_connector not in ("MoRIIOConnector", "MooncakeConnector")
                 or kv.kv_connector_module_path is not None
                 or kv.kv_role != "kv_consumer"
             ),
-            "KV transfer connectors other than a MoRIIO consumer",
+            "KV transfer connectors other than a MoRIIO or Mooncake consumer",
         ),
         (
             vllm_config.aux_output_config.enable_return_routed_experts,
@@ -187,8 +211,10 @@ def unsupported(vllm_config) -> list[str]:
         (
             MambaStateDtypeCalculator.kda_state_dtype(mc.dtype, cc.mamba_cache_dtype)
             != (torch.bfloat16, torch.float32),
-            "KDA cache dtypes other than a BF16 conv state and an FP32 recurrent "
-            "state (mamba cache dtype)",
+            (
+                "KDA cache dtypes other than a BF16 conv state and an FP32 recurrent "
+                "state (mamba cache dtype)"
+            ),
         ),
         (cc.use_replayssm or cc.use_kda_recoverssm, "ReplaySSM / RecoverSSM"),
         # the model state hooks build the executor and bind it to each KV cache
@@ -238,8 +264,10 @@ def step_reasons(vllm_config, check_m1c: bool = True) -> list[str]:
     seqs = vllm_config.scheduler_config.max_num_seqs
     if seqs not in MAX_SEQS or seqs * (k + 1) > MAX_ROWS:
         return [
-            f"max_num_seqs {seqs} at {k} speculative tokens (max_num_seqs 1, 2, 4 "
-            f"or 8 with max_num_seqs x (k + 1) <= {MAX_ROWS})"
+            (
+                f"max_num_seqs {seqs} at {k} speculative tokens (max_num_seqs 1, 2, 4 "
+                f"or 8 with max_num_seqs x (k + 1) <= {MAX_ROWS})"
+            )
         ]
     if vllm_config.parallel_config.decode_context_parallel_size != 1:
         return []
@@ -248,8 +276,10 @@ def step_reasons(vllm_config, check_m1c: bool = True) -> list[str]:
         return ["DCP1 without M1 (" + "; ".join(m1) + ")"]
     if check_m1c and not m1c_serves(k + 1, seqs):
         return [
-            f"DCP1 at {k} speculative tokens, max_num_seqs {seqs} (DCP1 runs M1c "
-            "only: 3 or 7 speculative tokens, max_num_seqs 1 or 2; use DCP8)"
+            (
+                f"DCP1 at {k} speculative tokens, max_num_seqs {seqs} (DCP1 runs M1c "
+                "only: 3 or 7 speculative tokens, max_num_seqs 1 or 2; use DCP8)"
+            )
         ]
     return []
 

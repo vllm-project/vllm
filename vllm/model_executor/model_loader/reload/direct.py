@@ -10,7 +10,8 @@ Between ``begin`` and a successful ``finish`` the model must not run; there is
 no rollback, the next full update repairs it.
 
 Delivery contract (not checked here): an update delivers every checkpoint
-tensor of each module whose PWAL changes its layout or is not idempotent.
+tensor of each module whose PWAL changes its layout or is not idempotent, and
+of every ``padding_fill_params()`` parameter, which ``begin`` zero-fills whole.
 """
 
 from collections.abc import Iterator
@@ -30,8 +31,10 @@ logger = init_logger(__name__)
 
 __all__ = [
     "begin_direct_reload",
+    "direct_reload_active",
     "direct_reload_enabled",
     "finish_direct_reload",
+    "loadable_tensors",
     "record_checkpoint_layout",
 ]
 
@@ -57,11 +60,16 @@ def direct_reload_enabled() -> bool:
     return envs.VLLM_RELOAD_MODE == "direct"
 
 
+def direct_reload_active(model: torch.nn.Module) -> bool:
+    """Whether ``model`` is between ``begin_direct_reload`` and its finish."""
+    return getattr(model, "_direct_reload_begun", False)
+
+
 def _layout(t: torch.Tensor) -> tuple:
     return tuple(t.shape), t.stride(), t.dtype, t.storage_offset()
 
 
-def _loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
+def loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
     """Parameters and persistent buffers, each object once."""
     seen: set[int] = set()
     for module_name, module in model.named_modules():
@@ -117,10 +125,18 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     # a model owns the tensors it records first; `begin` refuses a shared one
     # (a target lm_head in a draft) whose post-load processing re-laid it out
     model._ckpt_owner = object()  # tags owned tensors (ids of freed ones recur)
-    for _, t in _loadable_tensors(model):
+    for _, t in loadable_tensors(model):
         if not t.is_meta and not hasattr(t, "_ckpt"):
             attrs = {k: t.__dict__[k] for k in _LOADER_ATTRS if k in t.__dict__}
-            t._ckpt = (model._ckpt_owner, _layout(t), attrs)
+            storage = t.untyped_storage().data_ptr()
+            t._ckpt = (model._ckpt_owner, _layout(t), attrs, storage)
+    # Before PWAL, which may pad moe_config; by name, so a dropped param isn't kept.
+    model._ckpt_padding_fill = [
+        (module, name)
+        for module in model.modules()
+        if hasattr(module, "padding_fill_params")
+        for name in module.padding_fill_params()
+    ]
     # every name, aliases included: post-load processing may replace either
     model._ckpt_param_names = frozenset(
         name
@@ -158,7 +174,7 @@ def _checkpoint_views(
     tensor post-load processing re-laid out; raises if a storage cannot
     hold its checkpoint layout."""
     views: list[tuple[torch.Tensor, torch.Tensor]] = []
-    for name, t in _loadable_tensors(model):
+    for name, t in loadable_tensors(model):
         ckpt = getattr(t, "_ckpt", None)
         if ckpt is None:
             continue  # no layout: created by post-load processing, derived
@@ -173,6 +189,8 @@ def _checkpoint_views(
             )
         shape, stride, dtype, offset = ckpt[1]
         storage = t.untyped_storage()
+        if storage.data_ptr() != ckpt[3]:  # moved, e.g. `set_` into a fused buffer
+            offset = t.storage_offset()
         span = 0 if 0 in shape else 1 + sum((n - 1) * s for n, s in zip(shape, stride))
         need = (offset + span) * dtype.itemsize
         if need > storage.nbytes():
@@ -200,12 +218,17 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     model._direct_reload_begun = True  # one finish per begin
     for t, view in views:
         t.data = view  # no zeroing: the full sync rewrites the checkpoint region
-    for _, t in _loadable_tensors(model):
+    for _, t in loadable_tensors(model):
         if not _owned(model, t):
             continue
         for k in _LOADER_ATTRS:
             t.__dict__.pop(k, None)
         t.__dict__.update(t._ckpt[2])
+    # Reset padding the loaders skip; erases the checkpoint region, so all is resent.
+    for module, name in model._ckpt_padding_fill:
+        t = module._parameters.get(name)
+        if t is not None and _owned(model, t):
+            t.data.zero_()
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )
