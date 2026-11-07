@@ -35,11 +35,17 @@ from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     LINEAR_ALGOS,
+    WEIGHT,
+    KNvfp4Static,
     ModelOptFp8Config,
     ModelOptLinearMethod,
     ModelOptMixedPrecisionConfig,
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    apply_fused_global_scale_ratio,
+    fused_global_scale_ratio,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
@@ -1679,3 +1685,166 @@ def test_modelopt_block_quant_loads_expert_blocks_with_aligned_tp_slices(
             "w2",
             0,
         )
+
+
+# Fused NVFP4 linear layers (q/k/v, gate/up) whose shards store different global
+# weight scales: the GEMM runs with the largest, and each shard's output columns
+# get its own back.
+
+
+def test_ratio_modelopt_multipliers():
+    kept, ratio = fused_global_scale_ratio(
+        torch.tensor([0.25, 1.0, 1.0]), [2, 1, 1], divisor=False
+    )
+    assert kept.item() == 1.0
+    torch.testing.assert_close(ratio, torch.tensor([0.25, 0.25, 1.0, 1.0]))
+
+
+def test_ratio_compressed_tensors_divisors():
+    # divisors 4 and 1 are the scales 1/4 and 1: the GEMM runs with 1
+    kept, ratio = fused_global_scale_ratio(
+        torch.tensor([4.0, 1.0]), [1, 2], divisor=True
+    )
+    assert kept.item() == 1.0
+    torch.testing.assert_close(ratio, torch.tensor([0.25, 1.0, 1.0]))
+
+
+def test_shared_scale_needs_no_ratio():
+    kept, ratio = fused_global_scale_ratio(
+        torch.tensor([2.0, 2.0]), [4, 4], divisor=False
+    )
+    assert kept.item() == 2.0
+    assert ratio is None
+    out = torch.randn(3, 8)
+    assert apply_fused_global_scale_ratio(out, None) is out
+
+
+def test_rescaled_output_equals_per_shard_dequantization():
+    """Running with the kept scale and rescaling equals dequantizing each
+    shard with its own scale."""
+    torch.manual_seed(0)
+    x = torch.randn(3, 8)
+    w = torch.randn(5, 8)
+    scales = torch.tensor([0.125, 0.5])
+    own = torch.cat([scales[0].expand(2), scales[1].expand(3)]).unsqueeze(1)
+    kept, ratio = fused_global_scale_ratio(scales, [2, 3], divisor=False)
+    out = apply_fused_global_scale_ratio(x @ (w * kept).T, ratio)
+    torch.testing.assert_close(out, x @ (w * own).T)
+
+
+def _nvfp4_layer(weight_scale_2, widths):
+    layer = torch.nn.Module()
+    layer.logical_widths = widths
+    out = sum(widths)
+    layer.weight_scale = torch.nn.Parameter(
+        torch.ones(out, 1, dtype=torch.float8_e4m3fn), requires_grad=False
+    )
+    layer.weight_scale_2 = torch.nn.Parameter(
+        torch.tensor(weight_scale_2, dtype=torch.float32), requires_grad=False
+    )
+    return layer
+
+
+def test_knvfp4_static_keeps_largest_and_ratio():
+    layer = _nvfp4_layer([0.25, 1.0], [16, 16])
+    KNvfp4Static().process(layer, WEIGHT)
+    assert layer.weight_global_scale.item() == 1.0
+    torch.testing.assert_close(
+        layer.fused_global_scale_ratio,
+        torch.cat([torch.full((16,), 0.25), torch.ones(16)]),
+    )
+
+
+def test_knvfp4_static_shared_scale_has_no_ratio():
+    layer = _nvfp4_layer([0.5, 0.5, 0.5], [8, 4, 4])
+    KNvfp4Static().process(layer, WEIGHT)
+    assert layer.weight_global_scale.item() == 0.5
+    assert layer.fused_global_scale_ratio is None
+
+
+class _DequantKernel:
+    """Stands in for an NVFP4 GEMM: x @ (dense * weight_global_scale).T + bias,
+    with one global scale for the whole fused layer, as the real kernels do.
+    ``dense`` holds the block-dequantized weight (e2m1 * e4m3 block scale)."""
+
+    def __init__(self, dense: torch.Tensor, divisor: bool = False):
+        self.dense = dense
+        self.divisor = divisor
+        self.biases: list[torch.Tensor | None] = []
+
+    def apply_weights(self, layer, x, bias=None):
+        self.biases.append(bias)
+        gs = layer.weight_global_scale
+        gs = 1.0 / gs if self.divisor else gs
+        out = x @ (self.dense * gs).T
+        return out if bias is None else out + bias
+
+
+def _per_shard_reference(x, dense, multipliers, widths, bias):
+    own = torch.repeat_interleave(torch.tensor(multipliers), torch.tensor(widths))
+    return x @ (dense * own.unsqueeze(1)).T + bias
+
+
+@pytest.mark.parametrize("widths", [[16, 16], [32, 8, 8]])
+def test_modelopt_apply_uses_each_fused_shard_global_scale(widths):
+    """Load (KNvfp4Static) plus forward (ModelOptLinearMethod.apply) give every
+    shard its own global scale, and the bias is added after the rescale."""
+    from vllm.model_executor.layers.quantization.modelopt import FormatScheme
+
+    torch.manual_seed(0)
+    scales = [0.002 * (i + 1) for i in range(len(widths))]
+    layer = _nvfp4_layer(scales, widths)
+    KNvfp4Static().process(layer, WEIGHT)
+
+    n = sum(widths)
+    dense = torch.randn(n, 32)
+    x = torch.randn(4, 32)
+    bias = torch.randn(n)
+    kernel = _DequantKernel(dense)
+    method = SimpleNamespace(fmt=FormatScheme(), kernel=kernel)
+
+    out = ModelOptLinearMethod.apply(method, layer, x, bias)
+
+    assert kernel.biases == [None]
+    torch.testing.assert_close(
+        out, _per_shard_reference(x, dense, scales, widths, bias)
+    )
+
+
+def test_compressed_tensors_apply_uses_each_fused_shard_global_scale():
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
+        compressed_tensors_w4a4_nvfp4 as ct,
+    )
+
+    torch.manual_seed(0)
+    widths = [16, 16]
+    divisors = [4.0, 1.0]  # compressed-tensors stores 1 / scale
+    layer = torch.nn.Module()
+    kept, ratio = fused_global_scale_ratio(torch.tensor(divisors), widths, divisor=True)
+    layer.weight_global_scale = 1.0 / kept  # what the kernel reads
+    layer.fused_global_scale_ratio = ratio
+
+    dense = torch.randn(32, 32)
+    x = torch.randn(4, 32)
+    bias = torch.randn(32)
+    kernel = _DequantKernel(dense, divisor=True)
+    scheme = SimpleNamespace(kernel=kernel)
+
+    out = ct.CompressedTensorsW4A4Fp4.apply_weights(scheme, layer, x, bias)
+
+    assert kernel.biases == [None]
+    torch.testing.assert_close(
+        out, _per_shard_reference(x, dense, [1 / d for d in divisors], widths, bias)
+    )
+
+
+def test_fused_global_scale_ratio_warns_when_widths_do_not_match():
+    with patch(
+        "vllm.model_executor.layers.quantization.utils.nvfp4_utils.logger"
+    ) as log:
+        kept, ratio = fused_global_scale_ratio(
+            torch.tensor([0.25, 1.0]), [32], divisor=False
+        )
+    assert kept.item() == 1.0
+    assert ratio is None
+    log.warning_once.assert_called_once()

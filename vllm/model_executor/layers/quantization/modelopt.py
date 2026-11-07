@@ -88,7 +88,9 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     CSF_SCALE_ENCODINGS,
+    apply_fused_global_scale_ratio,
     csf_weights_transform,
+    fused_global_scale_ratio,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP4_DTYPE,
@@ -2195,16 +2197,15 @@ class KNvfp4Static(QuantKeyScheme):
                 "constructing this layer, or add it to the quantization "
                 "ignore list."
             )
-        if torch.unique(layer.weight_scale_2).numel() != 1:
-            logger.warning_once(
-                "In NVFP4 linear, the global weight scale differs across "
-                "parallel layers (e.g. q_proj, k_proj, v_proj). This will "
-                "likely reduce accuracy. Consider a checkpoint with the same "
-                "global NVFP4 scale for fused weights."
-            )
-        # Raw max, no reciprocation — Marlin/cutlass want ModelOpt's amax/2688.
-        weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
+        # The kernels take one global weight scale per layer (ModelOpt's
+        # amax/2688, no reciprocation): the largest of the fused shards'
+        # (q/k/v, gate/up). Shards whose scale differs get theirs back on the
+        # output (see ModelOptLinearMethod.apply).
+        weight_global_scale, ratio = fused_global_scale_ratio(
+            layer.weight_scale_2, layer.logical_widths, divisor=False
+        )
         replace_parameter(layer, "weight_global_scale", weight_global_scale)
+        replace_parameter(layer, "fused_global_scale_ratio", ratio)
         # Kernels read weight_global_scale; the loaded param keeps its data.
         retire_parameter(layer, "weight_scale_2")
 
@@ -2817,12 +2818,23 @@ class ModelOptLinearMethod(LinearMethodBase):
             )
 
     def apply(self, layer, x, bias=None):
-        return self.fmt.apply(
-            layer,
-            x,
-            bias,
-            lambda lyr, inp, b: self.kernel.apply_weights(layer=lyr, x=inp, bias=b),
-        )
+        ratio = getattr(layer, "fused_global_scale_ratio", None)
+        if ratio is None:
+            return self.fmt.apply(
+                layer,
+                x,
+                bias,
+                lambda lyr, inp, b: self.kernel.apply_weights(layer=lyr, x=inp, bias=b),
+            )
+
+        # Fused NVFP4 shards with different global scales: rescale each
+        # shard's columns before the bias.
+        def kernel_apply(lyr, inp, b):
+            out = self.kernel.apply_weights(layer=lyr, x=inp, bias=None)
+            out = apply_fused_global_scale_ratio(out, ratio)
+            return out if b is None else out + b
+
+        return self.fmt.apply(layer, x, bias, kernel_apply)
 
 
 def resolve(algo: str, subcfg, prefix: str):

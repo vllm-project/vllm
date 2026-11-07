@@ -12,6 +12,10 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    apply_fused_global_scale_ratio,
+    fused_global_scale_ratio,
+)
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
@@ -96,19 +100,14 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         # Rename CT checkpoint names to standardized names
         move_parameter(layer, "weight_packed", "weight")
 
-        # Check for mismatched weight global scales
-        if torch.unique(layer.weight_global_scale).numel() != 1:
-            logger.warning_once(
-                "In NVFP4 linear, the weight global scale is different"
-                " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
-                " will likely result in reduced accuracy. Please verify the model"
-                " accuracy. Consider using a checkpoint with a shared global NVFP4"
-                " scale for fused layers."
-            )
-
-        # Process weight global scale (CT stores as divisors, i.e. 1/scale)
-        weight_global_scale = layer.weight_global_scale.max().to(torch.float32)
-        replace_parameter(layer, "weight_global_scale", 1.0 / weight_global_scale)
+        # The kernels take one weight global scale per layer: the largest of the
+        # fused shards' (q/k/v, gate/up; CT stores divisors, i.e. 1/scale).
+        # Shards whose scale differs get theirs back on the output.
+        weight_global_scale, ratio = fused_global_scale_ratio(
+            layer.weight_global_scale, layer.logical_widths, divisor=True
+        )
+        replace_parameter(layer, "weight_global_scale", weight_global_scale)
+        replace_parameter(layer, "fused_global_scale_ratio", ratio)
 
         if not self.use_a16:
             if torch.unique(layer.input_global_scale).numel() != 1:
@@ -142,4 +141,9 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
+        ratio = getattr(layer, "fused_global_scale_ratio", None)
+        if ratio is None:
+            return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
+        out = self.kernel.apply_weights(layer=layer, x=x, bias=None)
+        out = apply_fused_global_scale_ratio(out, ratio)
+        return out if bias is None else out + bias

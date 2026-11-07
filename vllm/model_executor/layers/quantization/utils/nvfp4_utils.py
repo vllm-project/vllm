@@ -318,3 +318,53 @@ def csf_weights_transform(
             logger.info("Decoded %d CSF scale tensors at load", decoded)
 
     return transform
+
+
+def fused_global_scale_ratio(
+    global_scales: torch.Tensor, logical_widths: list[int], *, divisor: bool
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """The weight global scale an NVFP4 linear GEMM runs with, and the
+    per-column factor that gives each fused shard back its own.
+
+    The NVFP4 GEMMs take one weight global scale per layer, but a fused layer
+    (q/k/v, gate/up) stores one per shard. A global scale is a factor on its
+    shard's output columns, so running the GEMM with the largest one and
+    multiplying each shard's columns by its own scale over that one is exact.
+    ``divisor`` marks compressed-tensors' convention (1 / scale).
+
+    Returns the kept scale as a multiplier (fp32 scalar) and the ratio over
+    this rank's output columns (fp32), or None when every shard stores the
+    same scale.
+
+    The ratio is applied by the quant method's forward. Code that reads
+    ``weight_global_scale`` directly instead (fused decode paths, gathered
+    weights) must apply it too, or serve only layers whose shards share a
+    scale.
+    """
+    stored = global_scales.to(torch.float32).reshape(-1)
+    multiplier = 1.0 / stored if divisor else stored
+    kept = multiplier.max()
+    if bool((multiplier == kept).all()):
+        return kept, None
+    if len(logical_widths) != stored.numel():
+        logger.warning_once(
+            "In NVFP4 linear, the global weight scale differs across fused "
+            "shards (e.g. q_proj, k_proj, v_proj), but %d scales do not match "
+            "%d shard widths, so the largest is used for every shard. This "
+            "will likely reduce accuracy.",
+            stored.numel(),
+            len(logical_widths),
+        )
+        return kept, None
+    widths = torch.tensor(logical_widths, device=stored.device)
+    return kept, torch.repeat_interleave(multiplier / kept, widths).contiguous()
+
+
+def apply_fused_global_scale_ratio(
+    out: torch.Tensor, ratio: torch.Tensor | None
+) -> torch.Tensor:
+    """Multiply each output column by its shard's global-scale ratio (see
+    fused_global_scale_ratio); a no-op when the shards share one."""
+    if ratio is None:
+        return out
+    return (out.float() * ratio).to(out.dtype)
