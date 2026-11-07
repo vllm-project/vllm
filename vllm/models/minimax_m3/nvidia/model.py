@@ -518,11 +518,11 @@ class MiniMaxM3MoE(nn.Module):
         reduce_results: bool = True,
         prefix: str = "",
         use_mega_moe: bool = False,
-        input_is_sequence_sharded: bool = False,
+        use_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.input_is_sequence_sharded = input_is_sequence_sharded
+        self.use_sequence_parallel = use_sequence_parallel
         if self.tp_size > config.num_local_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
@@ -613,7 +613,7 @@ class MiniMaxM3MoE(nn.Module):
         # Replicated hidden states are sharded here, so each rank routes only
         # its own tokens through the EP-wide kernel.
         self.shard_replicated_input = (
-            self.tp_size > 1 and not self.input_is_sequence_sharded
+            self.tp_size > 1 and not self.use_sequence_parallel
         )
 
         def replicated_shared_experts() -> MiniMaxM3MLP:
@@ -1342,7 +1342,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 reduce_results=reduce_results,
                 prefix=f"{prefix}.block_sparse_moe",
                 use_mega_moe=use_mega_moe,
-                input_is_sequence_sharded=self.use_sequence_parallel,
+                use_sequence_parallel=self.use_sequence_parallel,
             )
         else:
             self.mlp = MiniMaxM3MLP(
