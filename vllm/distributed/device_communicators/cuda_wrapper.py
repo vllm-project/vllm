@@ -42,13 +42,6 @@ class CudaRTLibrary:
     exported_functions = [
         # ​cudaError_t cudaSetDevice ( int  device )
         Function("cudaSetDevice", cudaError_t, [ctypes.c_int]),
-        # cudaError_t cudaStreamCreateWithFlags ( cudaStream_t* pStream,
-        #                                         unsigned int flags )
-        Function(
-            "cudaStreamCreateWithFlags",
-            cudaError_t,
-            [ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint],
-        ),
         # cudaError_t 	cudaDeviceSynchronize ( void )
         Function("cudaDeviceSynchronize", cudaError_t, []),
         # ​cudaError_t cudaDeviceReset ( void )
@@ -169,10 +162,17 @@ class CudaRTLibrary:
         self.CUDART_CHECK(self.funcs["cudaSetDevice"](device))
 
     def cudaStreamCreateWithFlags(self, flags: int) -> int:
+        """Create a stream on the current device; returns its raw handle.
+
+        Only used under NVIDIA Confidential Computing, so unlike
+        ``exported_functions`` it is resolved on use: ROCm and non-CC processes
+        never look it up.
+        """
+        create = self.lib.cudaStreamCreateWithFlags
+        create.restype = cudaError_t
+        create.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint]
         stream = ctypes.c_void_p()
-        self.CUDART_CHECK(
-            self.funcs["cudaStreamCreateWithFlags"](ctypes.byref(stream), flags)
-        )
+        self.CUDART_CHECK(create(ctypes.byref(stream), flags))
         assert stream.value is not None
         return stream.value
 

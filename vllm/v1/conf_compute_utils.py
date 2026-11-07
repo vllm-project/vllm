@@ -12,7 +12,7 @@ so that:
   into an existing tensor lands in a staging tensor and is moved by a D2D on
   the current stream, so it is ordered exactly like the original copy. This
   applies to every caller.
-- D2H issued on a stream created with ``new_d2h_stream()`` is issued
+- D2H issued on a stream created with ``new_external_d2h_stream()`` is issued
   by a worker thread once the source is ready. Event / stream / device
   synchronize additionally wait for the D2H copies submitted before the event
   was recorded (or before the call). Using such a stream asserts that its D2H
@@ -63,7 +63,7 @@ _orig_accel_synchronize = torch.accelerator.synchronize
 _d2h_executor: ThreadPoolExecutor | None = None
 _pending_lock = threading.Lock()
 _pending: list[Future] = []
-# Raw handles of the streams created via new_d2h_stream().
+# Raw handles of the streams created via new_external_d2h_stream().
 _d2h_streams: set[int] = set()
 # For each registered stream, the producer stream it last waited on.
 _producer_of: dict[int, torch.cuda.Stream] = {}
@@ -87,25 +87,23 @@ def _new_external_stream(device: torch.device) -> torch.cuda.Stream:
     return torch.cuda.ExternalStream(handle, device=device)
 
 
-def new_d2h_stream(device: torch.device | int | None = None) -> torch.cuda.Stream:
+def new_external_d2h_stream(
+    device: torch.device | int | None = None,
+) -> torch.cuda.Stream:
     """Create a stream whose non_blocking D2H copies go through the worker
-    thread once ``install()`` has run (see the module docstring).
+    thread once ``install()`` has run (see the module docstring). Callers use
+    this through ``async_utils.new_d2h_stream()``.
 
-    Under CC the stream is created outside torch's stream pool: the patches key
-    on the raw handle, and a pool stream handed out later (e.g. by
-    ``graph_capture()`` or ``aux_stream()``) must never share it, or its events
-    would be redirected to the producer stream. Without CC this is a plain
-    ``torch.cuda.Stream``. The stream lives for the life of the process.
+    The stream is created outside torch's stream pool: the patches key on the
+    raw handle, and a pool stream handed out later (e.g. by ``graph_capture()``
+    or ``aux_stream()``) must never share it, or its events would be redirected
+    to the producer stream. The stream lives for the life of the process.
 
     Such a stream must only carry copies: readiness is tracked on the stream
     it last waited on via ``wait_stream()``, so a kernel launched on the copy
     stream itself is not ordered before the copies of its output. Compute such
     values on the producer stream first.
     """
-    from vllm.platforms import current_platform
-
-    if not current_platform.is_confidential_compute():
-        return torch.cuda.Stream(device)
     dev = torch.device("cuda") if device is None else torch.device(device)
     if dev.index is None:
         dev = torch.device("cuda", torch.cuda.current_device())
@@ -125,7 +123,9 @@ def register_inplace_h2d_target(tensor: torch.Tensor) -> None:
     allocation) completes before the first in-place upload. The registration
     lapses with ``tensor``, so a later tensor reusing its memory is not matched.
     """
-    if not tensor.is_cuda:
+    from vllm.platforms import current_platform
+
+    if not tensor.is_cuda or not current_platform.is_confidential_compute():
         return
     ptr = tensor.untyped_storage().data_ptr()
     cur = torch.cuda.current_stream(tensor.device)

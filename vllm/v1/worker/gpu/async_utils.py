@@ -10,6 +10,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.platforms import current_platform
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     KVConnectorOutput,
@@ -135,7 +136,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
         # Computed on the main stream: the copy stream only carries copies
-        # (see conf_compute_utils.new_d2h_stream).
+        # (see new_d2h_stream).
         has_fault = get_ep_all2all_manager().query_fault() if check_ep_fault else None
 
         with stream(copy_stream, main_stream):
@@ -274,6 +275,19 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
 
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
     return x.to("cpu", non_blocking=True, copy=True).numpy()
+
+
+def new_d2h_stream(device: torch.device | int | None = None) -> torch.cuda.Stream:
+    """Create a stream for non_blocking D2H copies.
+
+    It must only carry copies: compute anything it copies on the producer stream
+    first (see ``conf_compute_utils.new_external_d2h_stream()``).
+    """
+    if not current_platform.is_confidential_compute():
+        return torch.cuda.Stream(device)
+    from vllm.v1.conf_compute_utils import new_external_d2h_stream
+
+    return new_external_d2h_stream(device)
 
 
 @contextlib.contextmanager

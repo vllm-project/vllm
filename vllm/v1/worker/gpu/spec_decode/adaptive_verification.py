@@ -17,9 +17,8 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionCGSupport
-from vllm.v1.conf_compute_utils import new_d2h_stream
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
+from vllm.v1.worker.gpu.async_utils import StepTimingSample, new_d2h_stream, stream
 from vllm.v1.worker.gpu.attn_utils import (
     get_query_lens_mismatch_unsupported_backend,
     get_varlen_cudagraph_unsupported_backend,

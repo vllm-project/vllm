@@ -8,10 +8,9 @@ import torch
 from vllm.config import LoadConfig, replace
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
-from vllm.v1.conf_compute_utils import new_d2h_stream
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
-from vllm.v1.worker.gpu.async_utils import async_copy_to_np
+from vllm.v1.worker.gpu.async_utils import async_copy_to_np, new_d2h_stream
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 logger = init_logger(__name__)

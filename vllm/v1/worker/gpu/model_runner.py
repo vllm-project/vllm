@@ -74,7 +74,6 @@ from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.conf_compute_utils import install as install_conf_compute_copy_patches
-from vllm.v1.conf_compute_utils import new_d2h_stream
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -101,6 +100,7 @@ from vllm.v1.worker.gpu.async_utils import (
     AsyncOutput,
     AsyncPoolingOutput,
     StepTimingCollector,
+    new_d2h_stream,
 )
 from vllm.v1.worker.gpu.attn_utils import (
     FastPrefillHelper,
