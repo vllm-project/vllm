@@ -1020,6 +1020,26 @@ async def benchmark(
     probe_stop = asyncio.Event()
 
     async def probe_loop():
+        # Probes are strictly single-token requests used to measure interference
+        # and queueing delay. Do not inherit generation length overrides from
+        # the main workload's extra_body.
+        probe_extra_body = (
+            {
+                k: v
+                for k, v in test_input.extra_body.items()
+                if k
+                not in (
+                    "max_tokens",
+                    "max_completion_tokens",
+                    "max_output_tokens",
+                    "max_new_tokens",
+                    "min_tokens",
+                    "min_completion_tokens",
+                )
+            }
+            if test_input.extra_body
+            else None
+        )
         probe_input = replace(
             test_input,
             prompt="Hi",
@@ -1027,6 +1047,7 @@ async def benchmark(
             output_len=1,
             multi_modal_content=None,
             chat_messages=None,
+            extra_body=probe_extra_body,
         )
         interval = 1 / probe_request_rate
         # The main session's pool is capped at max_concurrency, so probes use
