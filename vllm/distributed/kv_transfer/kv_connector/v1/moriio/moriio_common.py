@@ -256,6 +256,20 @@ def pod_index(global_dp_rank: int, dp_size_local: int) -> int:
     return global_dp_rank // dp_size_local if dp_size_local else 0
 
 
+def fill_remote_pod_from_config(
+    params: dict[str, Any], extra_config: dict, is_producer: bool
+) -> None:
+    """Use serve-config peer hosts when the router did not send them."""
+    hosts = extra_config.get("remote_hosts")
+    dp_local = int(extra_config.get("remote_dp_size_local") or 0)
+    if not hosts or not dp_local or params.get("remote_hosts"):
+        return
+    params["remote_hosts"] = hosts
+    params["remote_dp_size_local"] = dp_local
+    if not is_producer:
+        params.setdefault("is_request_leader", True)
+
+
 def resolve_host_ip(extra_config: dict) -> str:
     """The IP this MoRIIO process advertises for KV transfer.
 

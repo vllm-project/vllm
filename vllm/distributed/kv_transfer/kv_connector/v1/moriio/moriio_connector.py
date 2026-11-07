@@ -47,6 +47,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     TransferError,
     TransferId,
     WriteTask,
+    fill_remote_pod_from_config,
     fold_local_rank,
     get_moriio_mode,
     get_peer_zmq_from_request_id,
@@ -1055,6 +1056,9 @@ class MoRIIOConnectorScheduler:
         # without a sidecar wire-protocol change.
         transfer_id = params.get("transfer_id") or f"sidecar-{request.request_id}"
         params.setdefault("transfer_id", transfer_id)
+        fill_remote_pod_from_config(
+            params, self.kv_transfer_config.kv_connector_extra_config, self.is_producer
+        )
         request_id = request.request_id
         self.map_request_id(request_id, transfer_id)
         if params.get("do_remote_decode") and self.mode == MoRIIOMode.WRITE:
