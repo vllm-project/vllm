@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import random
+from dataclasses import replace
+from datetime import timedelta
 
 import pytest
 import torch
@@ -9,6 +11,7 @@ import torch
 from tests.utils import ensure_current_vllm_config, multi_gpu_test
 from vllm import _custom_ops as ops
 from vllm.distributed import (
+    cleanup_dist_env_and_memory,
     init_distributed_environment,
     initialize_model_parallel,
     tensor_model_parallel_all_gather,
@@ -28,9 +31,511 @@ from vllm.utils.torch_utils import set_random_seed
 pytestmark = pytest.mark.skip_global_cleanup
 
 
+@pytest.mark.parametrize("num_tokens", [1, 5])
+@pytest.mark.parametrize("experts", [4, 32])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "capture", [False, True] if current_platform.is_cuda() else [False]
+)
+@ensure_current_vllm_config()
+@pytest.mark.skipif(
+    current_platform.is_xpu(), reason="Routed expert XPU support is not enabled"
+)
+def test_routed_expert_projections_match_composed_weights(
+    num_tokens, experts, dtype, capture
+):
+    _check_routed_expert_projections(num_tokens, experts, dtype, capture)
+
+
+def _check_routed_expert_projections(
+    num_tokens, experts, dtype, capture, tp_rank=0, tp_size=1, fully_sharded=False
+):
+    """Compose expert weights before activation, including an initially idle route."""
+    from vllm.config import LoRAConfig
+    from vllm.lora.layers import LoRAMapping
+    from vllm.lora.punica_wrapper import get_punica_wrapper
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        FusedMoEQuantConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+
+    set_random_seed(42)
+    device = current_platform.device_type
+    hidden, intermediate, rank, topk = 32, 32, 8, 2
+
+    def weight(*shape):
+        return torch.randn(*shape, device=device, dtype=dtype) * 0.05
+
+    wrapper = get_punica_wrapper(
+        num_tokens,
+        num_tokens,
+        device,
+        lora_config=LoRAConfig(max_loras=2, max_lora_rank=8, max_loras_per_request=2),
+    )
+    wrapper.update_metadata(
+        LoRAMapping((0,) * num_tokens, (0,) * num_tokens, is_prefill=False),
+        [1, 2],
+        3,
+        0,
+    )
+    config = FusedMoEConfig(
+        num_experts=experts,
+        experts_per_token=topk,
+        hidden_dim=hidden,
+        intermediate_size=intermediate,
+        num_local_experts=experts,
+        num_logical_experts=experts,
+        activation=MoEActivation.SILU,
+        device=device,
+        routing_method=RoutingMethodType.Unspecified,
+        moe_parallel_config=replace(
+            FusedMoEParallelConfig.make_no_parallel(), tp_size=tp_size, tp_rank=tp_rank
+        ),
+        in_dtype=dtype,
+    )
+    layer = TritonExperts(config, FusedMoEQuantConfig.make())
+    slots = torch.zeros(num_tokens, 2, dtype=torch.int32, device=device)
+    slots[:, 1] = -1
+    coefficients = torch.full((num_tokens, 2), 0.5, device=device)
+    ctx = MoELoRAContext(
+        w13_lora_a_stacked=tuple(weight(2, experts, rank, hidden) for _ in range(2)),
+        w13_lora_b_stacked=tuple(
+            weight(2, experts, intermediate, rank) for _ in range(2)
+        ),
+        w2_lora_a_stacked=(weight(2, experts, rank, intermediate),),
+        w2_lora_b_stacked=(weight(2, experts, hidden, rank),),
+        adapter_enabled=torch.ones(3, dtype=torch.int32, device=device),
+        max_loras=2,
+        top_k=topk,
+        w13_num_slices=2,
+        fully_sharded=False,
+        tp_rank=0,
+        tp_size=1,
+        local_num_experts=experts,
+        punica_wrapper=wrapper,
+        use_tuned_config=False,
+        local_lora_routes=(slots, coefficients),
+    )
+    x = weight(num_tokens, hidden)
+    ids = (
+        torch.arange(num_tokens * topk, device=device).view(num_tokens, topk) % experts
+    )
+    expert_weights = torch.full((num_tokens, topk), 0.5, device=device)
+    w1, w2 = (
+        weight(experts, 2 * intermediate, hidden),
+        weight(experts, hidden, intermediate),
+    )
+    reference_ctx, reference_w1, reference_w2 = ctx, w1, w2
+    local_intermediate = intermediate // tp_size
+    partition = slice(tp_rank * local_intermediate, (tp_rank + 1) * local_intermediate)
+    rank_part = slice(tp_rank * rank // tp_size, (tp_rank + 1) * rank // tp_size)
+    hidden_part = slice(tp_rank * hidden // tp_size, (tp_rank + 1) * hidden // tp_size)
+    if tp_size > 1:
+        ctx = replace(
+            ctx,
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+            fully_sharded=fully_sharded,
+            w13_lora_a_stacked=tuple(
+                a[:, :, rank_part, :].contiguous() if fully_sharded else a
+                for a in ctx.w13_lora_a_stacked
+            ),
+            w13_lora_b_stacked=tuple(
+                b[:, :, partition, :].contiguous() for b in ctx.w13_lora_b_stacked
+            ),
+            w2_lora_a_stacked=tuple(
+                a[:, :, :, partition].contiguous() for a in ctx.w2_lora_a_stacked
+            ),
+            w2_lora_b_stacked=tuple(
+                b[:, :, hidden_part, :].contiguous() if fully_sharded else b
+                for b in ctx.w2_lora_b_stacked
+            ),
+        )
+        w1 = torch.cat([w[:, partition, :] for w in w1.chunk(2, dim=1)], dim=1)
+        w2 = w2[:, :, partition].contiguous()
+    base_up = torch.einsum("th,tkoh->tko", x, w1[ids])
+    up = torch.empty_like(base_up)
+    down = torch.empty(num_tokens, topk, hidden, device=device, dtype=dtype)
+
+    def run():
+        up.copy_(base_up)
+        state = layer.apply_w13_lora(
+            ctx,
+            y=up,
+            x=x,
+            topk_ids=ids,
+            topk_weights=expert_weights,
+            expert_map=None,
+            w1=w1,
+            w2=w2,
+            num_tokens=num_tokens,
+            top_k_num=topk,
+        )
+        gate, value = up.chunk(2, dim=-1)
+        activated = torch.nn.functional.silu(gate) * value
+        down.copy_(torch.einsum("tki,tkhi->tkh", activated, w2[ids]))
+        down.mul_(expert_weights[..., None])
+        layer.apply_w2_lora(
+            ctx,
+            y=down,
+            x=activated.reshape(-1, local_intermediate),
+            topk_weights=expert_weights,
+            lora_metadata=state,
+            num_tokens=num_tokens,
+            w1=w1,
+            w2=w2,
+            top_k_num=topk,
+        )
+        if tp_size > 1:
+            down.copy_(tensor_model_parallel_all_reduce(down))
+
+    run()
+    graph = None
+    if capture:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run()
+    slots[:, 1] = 1
+    coefficients[:, 0] = 0.7
+    coefficients[:, 1] = 0.3
+    slots[1::3] = -1
+    slots[2::3, 1] = -1
+    coefficients[2::3, 0] = 1.0
+    if graph is not None:
+        graph.replay()
+    else:
+        run()
+
+    # Keep the oracle independent of device-specific GEMM implementations.
+    ref_ids = ids.cpu()
+    merged_up = reference_w1.float().cpu()[ref_ids]
+    merged_down = reference_w2.float().cpu()[ref_ids]
+    for route in range(2):
+        adapter = slots[:, route].cpu()
+        coefficient = coefficients[:, route].cpu() * (adapter >= 0)
+        adapter = adapter.clamp(min=0)
+        for part in range(2):
+            merged_up[:, :, part * intermediate : (part + 1) * intermediate].add_(
+                coefficient[:, None, None, None]
+                * (
+                    reference_ctx.w13_lora_b_stacked[part]
+                    .float()
+                    .cpu()[adapter[:, None], ref_ids]
+                    @ reference_ctx.w13_lora_a_stacked[part]
+                    .float()
+                    .cpu()[adapter[:, None], ref_ids]
+                )
+            )
+        merged_down.add_(
+            coefficient[:, None, None, None]
+            * (
+                reference_ctx.w2_lora_b_stacked[0]
+                .float()
+                .cpu()[adapter[:, None], ref_ids]
+                @ reference_ctx.w2_lora_a_stacked[0]
+                .float()
+                .cpu()[adapter[:, None], ref_ids]
+            )
+        )
+    expected_up = torch.einsum("th,tkoh->tko", x.float().cpu(), merged_up)
+    gate, value = expected_up.chunk(2, dim=-1)
+    expected = (
+        torch.einsum(
+            "tki,tkhi->tkh", torch.nn.functional.silu(gate) * value, merged_down
+        )
+        * expert_weights.cpu()[..., None]
+    )
+    actual_up = up
+    if tp_size > 1:
+        actual_up = torch.cat(
+            [tensor_model_parallel_all_gather(p.contiguous()) for p in up.chunk(2, -1)],
+            dim=-1,
+        )
+    torch.testing.assert_close(
+        actual_up.float().cpu(), expected_up, atol=1e-4, rtol=1e-2
+    )
+    torch.testing.assert_close(down.float().cpu(), expected, atol=1e-5, rtol=1e-2)
+
+
+def _run_routed_expert_tp_rank(local_rank, port, dtype, fully_sharded):
+    torch.accelerator.set_device_index(local_rank)
+    try:
+        with ensure_current_vllm_config():
+            init_distributed_environment(
+                world_size=2,
+                rank=local_rank,
+                local_rank=local_rank,
+                distributed_init_method=f"tcp://127.0.0.1:{port}",
+                backend=current_platform.dist_backend,
+                timeout=timedelta(seconds=180),
+            )
+            initialize_model_parallel(2, 1)
+            _check_routed_expert_projections(
+                5, 4, dtype, False, local_rank, 2, fully_sharded
+            )
+    finally:
+        cleanup_dist_env_and_memory()
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("fully_sharded", [False, True])
+@pytest.mark.skipif(
+    current_platform.is_xpu(), reason="Routed expert XPU support is not enabled"
+)
+def test_routed_expert_projections_tp2(dtype, fully_sharded):
+    """Real projection collectives preserve the composed unsharded result."""
+    torch.multiprocessing.spawn(
+        _run_routed_expert_tp_rank,
+        args=(get_open_port(), dtype, fully_sharded),
+        nprocs=2,
+    )
+
+
+def _run_routed_expert_ep_rejection(pgi, vllm_config, cpu_group):
+    from tests.lora.utils import make_moe_lora_context
+    from vllm.lora.layers import LoRAMapping, LoRARouteMapping
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep import (
+        MoEPrepareAndFinalizeNaiveDPEPModular,
+    )
+
+    tokens = 3 if pgi.rank == 0 else 5
+    ctx, _ = make_moe_lora_context(tokens, 32, 32, 4, 2, routed=True)
+    prepare = MoEPrepareAndFinalizeNaiveDPEPModular()
+    prepare.set_lora_context(ctx)
+    x = torch.ones(tokens, 32, device=pgi.device, dtype=torch.bfloat16)
+    ids = torch.tensor([[0, 2]] * tokens, device=pgi.device, dtype=torch.int32)
+    weights = torch.full((tokens, 2), 0.5, device=pgi.device)
+    for routed_rank in (0, 1, -1):
+        mapping = (
+            LoRARouteMapping(((1, 2),) * tokens, ((0.7, 0.3),) * tokens, (), False)
+            if pgi.rank == routed_rank
+            else LoRAMapping((0,) * tokens, (), False)
+        )
+        ctx.punica_wrapper.update_metadata(mapping, [1, 2], 3, 0)
+        # Both ranks must reject, including the one with no routed requests.
+        with pytest.raises(NotImplementedError, match="residency and slot identities"):
+            prepare.prepare(x, weights, ids, 4, None, False, FusedMoEQuantConfig.make())
+        torch.distributed.barrier(group=cpu_group)
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("enable_ep", [False, True])
+def test_routed_expert_dispatch_rejected_across_ranks(enable_ep):
+    """Unsupported routing fails on every rank before dispatch can deadlock."""
+    from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
+        parallel_launch_with_config,
+    )
+    from vllm.config import VllmConfig
+
+    config = VllmConfig()
+    config.parallel_config.data_parallel_size = 2
+    config.parallel_config.enable_expert_parallel = enable_ep
+    config.parallel_config.is_moe_model = True
+    config.parallel_config.all2all_backend = "allgather_reducescatter"
+    parallel_launch_with_config(2, _run_routed_expert_ep_rejection, config, None)
+
+
 @pytest.fixture(autouse=True)
 def reset_device(reset_default_device):
     pass
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Marlin requires CUDA")
+@pytest.mark.parametrize("routed", [False, True])
+@ensure_current_vllm_config()
+@torch.inference_mode()
+def test_marlin_expert_composition(routed, workspace_init):
+    """Quantized bases retain both adapter updates without requantizing them."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from tests.lora.utils import make_moe_lora_context, moe_lora_reference_weights
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import gptq_marlin_moe_quant_config
+    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
+    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+        MoEPrepareAndFinalizeNoDPEPModular,
+    )
+    from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
+        marlin_quantize,
+    )
+    from vllm.scalar_type import scalar_types
+
+    set_random_seed(0)
+    tokens, hidden, intermediate, experts, topk = 5, 512, 256, 4, 2
+    dtype = torch.bfloat16
+
+    def quantize(rows, columns):
+        results = [
+            marlin_quantize(
+                torch.randn(columns, rows, dtype=dtype, device="cuda") * 0.05,
+                scalar_types.uint4b8,
+                128,
+            )
+            for _ in range(experts)
+        ]
+        ref, packed, scales = zip(*results)
+        return (
+            torch.stack(ref).transpose(1, 2),
+            torch.stack(packed),
+            torch.stack(scales),
+        )
+
+    w13, packed13, scale13 = quantize(2 * intermediate, hidden)
+    w2, packed2, scale2 = quantize(hidden, intermediate)
+    config = make_dummy_moe_config(
+        num_experts=experts,
+        experts_per_token=topk,
+        hidden_dim=hidden,
+        intermediate_size=intermediate,
+    )
+    layer = MarlinExperts(config, gptq_marlin_moe_quant_config(scale13, scale2, 4, 128))
+    ctx, coefficients = make_moe_lora_context(
+        tokens, hidden, intermediate, experts, topk, routed=routed
+    )
+    layer.set_lora_context(ctx)
+    kernel = FusedMoEKernel(MoEPrepareAndFinalizeNoDPEPModular(), layer)
+    x = torch.randn(tokens, hidden, dtype=dtype, device="cuda") * 0.05
+    ids = (
+        torch.arange(tokens * topk, device="cuda", dtype=torch.int32).view(tokens, topk)
+        % experts
+    )
+    weights = torch.tensor([[0.3, 0.7]] * tokens, device="cuda")
+    output = kernel.apply(
+        x, packed13, packed2, weights, ids, MoEActivation.SILU, experts, None, False
+    )
+    merged13, merged2 = moe_lora_reference_weights(w13, w2, ctx, coefficients)
+
+    def reference(a, b):
+        gate, up = torch.einsum("th,tkih->tki", x.float(), a.float()[ids.long()]).chunk(
+            2, -1
+        )
+        act = torch.nn.functional.silu(gate) * up
+        return (
+            torch.einsum("tki,tkhi->tkh", act, b.float()[ids.long()])
+            * weights[..., None]
+        ).sum(1)
+
+    expected, base = reference(merged13, merged2), reference(w13, w2)
+    assert (expected - base).norm() / expected.norm() > 0.02
+    assert isinstance(output, torch.Tensor)
+    torch.testing.assert_close(output.float(), expected, atol=1e-4, rtol=1e-2)
+
+
+@pytest.mark.parametrize("no_adapter", [False, True])
+@pytest.mark.parametrize("add_inputs", [False, True])
+@ensure_current_vllm_config()
+@pytest.mark.skipif(
+    current_platform.is_xpu(), reason="Routed expert XPU support is not enabled"
+)
+def test_single_route_matches_scalar_expert_projections(no_adapter, add_inputs):
+    """One route is ordinary LoRA; base-only must also preserve output semantics."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from tests.lora.utils import make_moe_lora_context
+    from vllm.lora.layers import LoRAMapping, LoRARouteMapping
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+
+    set_random_seed(0)
+    tokens, hidden, intermediate, experts, topk = 5, 32, 32, 4, 2
+    device = current_platform.device_type
+    ctx, _ = make_moe_lora_context(
+        tokens, hidden, intermediate, experts, topk, routed=False
+    )
+    layer = TritonExperts(
+        make_dummy_moe_config(
+            num_experts=experts,
+            experts_per_token=topk,
+            hidden_dim=hidden,
+            intermediate_size=intermediate,
+        ),
+        FusedMoEQuantConfig.make(),
+    )
+    x = torch.randn(tokens, hidden, device=device, dtype=torch.bfloat16)
+    activated = torch.randn(tokens * topk, intermediate, device=device, dtype=x.dtype)
+    ids = (
+        torch.arange(tokens * topk, device=device, dtype=torch.int32).view(tokens, topk)
+        % experts
+    )
+    weights = torch.full((tokens, topk), 0.5, device=device)
+    w1 = torch.empty(experts, 2 * intermediate, hidden, device="meta", dtype=x.dtype)
+    w2 = torch.empty(experts, hidden, intermediate, device="meta", dtype=x.dtype)
+    initial_up = torch.randn(
+        tokens, topk, 2 * intermediate, device=device, dtype=x.dtype
+    )
+    initial_down = torch.randn(tokens, topk, hidden, device=device, dtype=x.dtype)
+    results = []
+    for routed in (False, True):
+        adapter_id = 0 if no_adapter else 1
+        mapping = (
+            LoRARouteMapping(((adapter_id,),) * tokens, ((1.0,),) * tokens, (), False)
+            if routed
+            else LoRAMapping((adapter_id,) * tokens, (), False)
+        )
+        ctx.punica_wrapper.update_metadata(mapping, [1, 2], 3, 0)
+        # Delta-only callers initialize their output to zero even on no-LoRA.
+        up = initial_up.clone() if add_inputs else torch.zeros_like(initial_up)
+        down = initial_down.clone() if add_inputs else torch.zeros_like(initial_down)
+        state = layer.apply_w13_lora(
+            ctx,
+            y=up,
+            x=x,
+            topk_ids=ids,
+            topk_weights=weights,
+            expert_map=None,
+            w1=w1,
+            w2=w2,
+            num_tokens=tokens,
+            top_k_num=topk,
+            add_inputs=add_inputs,
+        )
+        layer.apply_w2_lora(
+            ctx,
+            y=down,
+            x=activated,
+            topk_weights=weights,
+            lora_metadata=state,
+            num_tokens=tokens,
+            w1=w1,
+            w2=w2,
+            top_k_num=topk,
+            add_inputs=add_inputs,
+        )
+        results.append((up, down))
+    for scalar, routed in zip(*results):
+        # Routed accumulation rounds the BF16 delta before adding the base.
+        torch.testing.assert_close(scalar, routed, atol=1e-3, rtol=1.6e-2)
+    if no_adapter:
+        for actual, initial in zip(results[1], (initial_up, initial_down)):
+            torch.testing.assert_close(
+                actual,
+                initial if add_inputs else torch.zeros_like(initial),
+                atol=0,
+                rtol=0,
+            )
+
+
+@pytest.mark.parametrize("dispatched", [False, True])
+@ensure_current_vllm_config()
+def test_trtllm_no_lora_fast_path_respects_routes(dispatched):
+    """Scalar base-only metadata cannot suppress routed expert contributions."""
+    from tests.lora.utils import make_moe_lora_context
+    from vllm.lora.layers import LoRAMapping
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
+        TrtLlmMxfp4LoRAExperts,
+    )
+
+    ctx, _ = make_moe_lora_context(2, 32, 32, 4, 2, routed=True)
+    if dispatched:
+        ctx.local_lora_routes = ctx.punica_wrapper.lora_route_mapping
+        ctx.punica_wrapper.update_metadata(LoRAMapping((0, 0), (), False), [1, 2], 3, 0)
+    assert not TrtLlmMxfp4LoRAExperts._batch_has_no_lora(ctx)
 
 
 def round_up(x, base):

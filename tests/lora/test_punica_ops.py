@@ -532,9 +532,8 @@ def test_add_lora_fused_moe_early_exit(device):
     """Ensures add_lora_fused_moe does not invoke the LoRA kernel or
     modify the output tensor when no_lora_flag_cpu is True
     """
-    from types import SimpleNamespace
-
-    from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
+    from vllm.config import LoRAConfig
+    from vllm.lora.punica_wrapper import get_punica_wrapper
 
     torch.set_default_device(device)
     torch.accelerator.set_device_index(device)
@@ -543,17 +542,18 @@ def test_add_lora_fused_moe_early_exit(device):
     num_experts, top_k, max_lora_rank = 8, 2, 16
     K, N = 256, 128
 
-    # build PunicaWrapperGPU with minimal lora_config mock
-    lora_config = SimpleNamespace(
+    lora_config = LoRAConfig(
         max_loras=max_loras,
         specialize_active_lora=False,
     )
-    wrapper = PunicaWrapperGPU(
+    wrapper = get_punica_wrapper(
         max_num_batched_tokens=num_tokens,
         max_batches=num_tokens,
         device=device,
         lora_config=lora_config,
     )
+    assert hasattr(wrapper, "token_mapping_meta")
+    metadata = wrapper.token_mapping_meta
 
     # simulate a prior LoRA batch so the internal mapping is
     # populated with stale LoRA IDs
@@ -564,7 +564,7 @@ def test_add_lora_fused_moe_early_exit(device):
     )
     lora_mapping[:8] = 1
     lora_mapping[8:] = 2
-    wrapper.token_mapping_meta.prepare_tensors(lora_mapping)
+    metadata.prepare_tensors(lora_mapping)
 
     # simulate a base-model batch (all -1)
     base_mapping = torch.full(
@@ -573,9 +573,9 @@ def test_add_lora_fused_moe_early_exit(device):
         dtype=torch.int32,
         device=device,
     )
-    wrapper.token_mapping_meta.prepare_tensors(base_mapping)
+    metadata.prepare_tensors(base_mapping)
 
-    assert wrapper.token_mapping_meta.no_lora_flag_cpu[0].item() is True
+    assert metadata.no_lora_flag_cpu[0].item() is True
 
     # dummy tensors for add_lora_fused_moe
     y = torch.rand(num_tokens, top_k, N, dtype=torch.bfloat16, device=device)

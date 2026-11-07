@@ -44,6 +44,46 @@ from vllm.v1.worker.gpu.lora_utils import LoraState
 pytestmark = pytest.mark.skip_global_cleanup
 
 
+@pytest.mark.parametrize("routed", [False, True])
+def test_expert_route_metadata_does_not_inherit_scalar_no_lora(routed):
+    """A base-only scalar batch must not suppress an explicit expert route."""
+    from vllm.lora.ops.triton_ops.lora_kernel_metadata import LoRAKernelMeta
+
+    wrapper = PunicaWrapperCPU(3, 3, torch.device("cpu"))
+    wrapper._init_moe_route_metadata(2)
+    scalar = LoRAKernelMeta.make(2, 3, "cpu")
+    scalar.prepare_tensors(torch.full((3,), -1, dtype=torch.int32))
+    route = torch.tensor([1, -1, 0], dtype=torch.int32)
+    mapping, ids, no_lora, count = wrapper._get_moe_lora_metadata(
+        scalar, 3, False, route, routed
+    )
+    assert mapping is route
+    assert no_lora.item() == (not routed)
+    if routed:
+        assert ids.tolist() == [-1, 0, 1]
+        assert count.item() == 3
+        again = wrapper._get_moe_lora_metadata(scalar, 3, False, route, True)
+        assert again[1].data_ptr() == ids.data_ptr()
+        assert again[3].data_ptr() == count.data_ptr()
+    else:
+        assert ids is scalar.active_lora_ids
+    assert scalar.no_lora_flag_cpu.item()
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [None, torch.zeros(2, dtype=torch.int64), torch.zeros(4, dtype=torch.int32)[::2]],
+)
+def test_expert_route_metadata_rejects_invalid_mapping(mapping):
+    from vllm.lora.ops.triton_ops.lora_kernel_metadata import LoRAKernelMeta
+
+    wrapper = PunicaWrapperCPU(2, 2, torch.device("cpu"))
+    wrapper._init_moe_route_metadata(2)
+    scalar = LoRAKernelMeta.make(2, 2, "cpu")
+    with pytest.raises(ValueError, match="token mapping"):
+        wrapper._get_moe_lora_metadata(scalar, 2, False, mapping, True)
+
+
 @pytest.fixture
 def routed_kernel_limit(request, monkeypatch):
     """Simulate hardware limits at the external CUDA driver boundary."""
@@ -473,6 +513,84 @@ def test_input_processor_rejects_unsupported_composition(
             SamplingParams(max_tokens=1),
             ("generate",),
             lora_request=make_routing_request(adapters, (0.7, 0.3)),
+        )
+
+
+@pytest.fixture
+def tiny_moe_config(tmp_path):
+    from transformers import OlmoeConfig
+
+    OlmoeConfig(
+        architectures=["OlmoeForCausalLM"],
+        hidden_size=32,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=128,
+    ).save_pretrained(tmp_path)
+    return str(tmp_path)
+
+
+@pytest.mark.parametrize("enable_ep", [False, True])
+def test_public_llm_rejects_composition_with_cross_rank_moe(
+    tiny_moe_config, enable_ep, monkeypatch
+):
+    """Reject unsupported residency before starting workers or loading adapters."""
+    from vllm import LLM
+
+    if not enable_ep:
+        # Offline DP configures each process through these environment variables.
+        monkeypatch.setenv("VLLM_DP_SIZE", "2")
+        monkeypatch.setenv("VLLM_DP_RANK", "0")
+        monkeypatch.setenv("VLLM_DP_RANK_LOCAL", "0")
+    with pytest.raises(ValueError, match="Distributed routed LoRA requires"):
+        LLM(
+            model=tiny_moe_config,
+            skip_tokenizer_init=True,
+            enforce_eager=True,
+            enable_lora=True,
+            max_loras=2,
+            max_loras_per_request=2,
+            enable_expert_parallel=enable_ep,
+            all2all_backend="deepep_low_latency",
+        )
+
+
+def test_scalar_ep_config_still_allows_ordinary_requests(tiny_moe_config):
+    from vllm import SamplingParams
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.exceptions import VLLMValidationError
+    from vllm.v1.engine.input_processor import InputProcessor
+
+    adapter = make_lora_request(1)
+    config = EngineArgs(
+        model=tiny_moe_config,
+        skip_tokenizer_init=True,
+        enforce_eager=True,
+        enable_lora=True,
+        max_loras=2,
+        max_loras_per_request=1,
+        enable_expert_parallel=True,
+    ).create_engine_config()
+    processor = InputProcessor(config)
+    request = processor.process_inputs(
+        "scalar",
+        {"prompt_token_ids": [3, 4]},
+        SamplingParams(max_tokens=1),
+        ("generate",),
+        lora_request=adapter,
+    )
+    assert request.lora_request == adapter
+    with pytest.raises(VLLMValidationError, match="expert parallelism"):
+        processor.process_inputs(
+            "routed",
+            {"prompt_token_ids": [3, 4]},
+            SamplingParams(max_tokens=1),
+            ("generate",),
+            lora_request=make_routing_request((adapter,), (1.0,)),
         )
 
 

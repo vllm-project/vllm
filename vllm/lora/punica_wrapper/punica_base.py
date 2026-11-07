@@ -21,6 +21,7 @@ from .utils import (
 if TYPE_CHECKING:
     # avoid circuit import
     from vllm.lora.layers import LoRAMapping, LoRARouteMapping
+    from vllm.lora.ops.triton_ops.lora_kernel_metadata import LoRAKernelMeta
 
 
 class PunicaWrapperABC(ABC):
@@ -167,6 +168,54 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self._lora_route_tensors: RoutedLoRATensors | None = None
         self._lora_route_buffers: RoutedLoRATensors | None = None
         self.routed_lora_graph_mode = False
+        self.max_loras_per_request = 1
+
+    def _init_moe_route_metadata(self, max_loras: int) -> None:
+        # Alignment includes the no-adapter sentinel in its launch bounds.
+        self._moe_route_lora_ids = torch.arange(
+            -1, max_loras, dtype=torch.int32, device=self.device
+        )
+        self._moe_route_num_loras = torch.tensor(
+            [max_loras + 1], dtype=torch.int32, device="cpu"
+        )
+        self._moe_route_no_lora = torch.tensor([False], device="cpu")
+
+    def _get_moe_lora_metadata(
+        self,
+        metadata: "LoRAKernelMeta",
+        num_tokens: int,
+        specialize_active_lora: bool,
+        token_lora_mapping: torch.Tensor | None,
+        routed: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if routed:
+            if token_lora_mapping is None:
+                raise ValueError(
+                    "Routed expert LoRA requires an explicit token mapping"
+                )
+            if (
+                token_lora_mapping.ndim != 1
+                or token_lora_mapping.dtype != torch.int32
+                or not token_lora_mapping.is_contiguous()
+            ):
+                raise ValueError(
+                    "Routed expert LoRA requires a contiguous int32 token mapping"
+                )
+            return (
+                token_lora_mapping,
+                self._moe_route_lora_ids,
+                self._moe_route_no_lora,
+                self._moe_route_num_loras,
+            )
+        mapping, _, _, _, ids, no_lora, count = metadata.meta_args(
+            num_tokens, specialize_active_lora
+        )
+        return (
+            mapping if token_lora_mapping is None else token_lora_mapping,
+            ids,
+            no_lora,
+            count,
+        )
 
     def _update_base_metadata(
         self,
@@ -498,6 +547,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
         expert_map: torch.Tensor | None = None,
         pad_sorted_ids: bool = False,
         naive_block_assignment: bool = False,
+        token_lora_mapping: torch.Tensor | None = None,
+        routed: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Aligns tokens and experts into block-sized chunks for LoRA-based
         mixture-of-experts (MoE) execution.
@@ -524,6 +575,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
         fully_sharded: bool = False,
         offset: int = 0,
         token_lora_mapping: torch.Tensor | None = None,
+        add_inputs: bool = True,
+        routed: bool = False,
     ):
         """Performs a fused forward computation for LoRA of
         Mixture-of-Experts (MoE) layer.
@@ -553,6 +606,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         use_tuned_config: bool,
         add_inputs: bool = True,
         token_lora_mapping: torch.Tensor | None = None,
+        routed: bool = False,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -593,6 +647,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         tp_rank: int,
         use_tuned_config: bool,
         add_inputs: bool = True,
+        routed: bool = False,
     ) -> None:
         """Apply w2 LoRA to y (intermediate_cache3) in-place before moe_sum.
 

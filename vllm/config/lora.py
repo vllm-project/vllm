@@ -14,10 +14,11 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.config import ModelConfig, ParallelConfig
     from vllm.config.cache import CacheConfig
 else:
     ModelConfig = Any
+    ParallelConfig = Any
     CacheConfig = Any
 
 logger = init_logger(__name__)
@@ -141,6 +142,23 @@ class LoRAConfig:
             raise ValueError(
                 f"LoRA is not supported with moe_backend={moe_backend!r}. "
                 "Disable LoRA or select a MoE backend that supports LoRA."
+            )
+
+    def requires_distributed_routing(self, parallel_config: ParallelConfig) -> bool:
+        """Whether adapter residency must be shared across MoE dispatch ranks."""
+        return self.max_loras_per_request > 1 and (
+            parallel_config.enable_expert_parallel
+            or (
+                bool(parallel_config.is_moe_model)
+                and parallel_config.data_parallel_size > 1
+            )
+        )
+
+    def verify_with_parallel_config(self, parallel_config: ParallelConfig) -> None:
+        if self.requires_distributed_routing(parallel_config):
+            raise ValueError(
+                "Distributed routed LoRA requires coordinated adapter residency "
+                "and is not supported yet."
             )
 
     def verify_with_model_config(self, model_config: ModelConfig):

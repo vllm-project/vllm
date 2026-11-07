@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import json
 import shutil
 from collections.abc import Sequence
 
@@ -10,8 +11,10 @@ import torch
 from safetensors.torch import load_file, save_file
 
 import vllm
-from vllm.lora.request import LoRARequest
+from vllm.lora.request import LoRARequest, LoRARoutingRequest
+from vllm.platforms import current_platform
 
+from ..models.utils import check_logprobs_close
 from ..utils import multi_gpu_test
 
 MODEL_PATH = "allenai/OLMoE-1B-7B-0125-Instruct"
@@ -171,3 +174,126 @@ def test_olmoe_lora_tp2(olmoe_lora_files, fully_sharded_loras):
 
     generate_and_test(llm, olmoe_lora_files, lora_id=1)
     generate_and_test(llm, olmoe_lora_files, lora_id=2)
+
+
+COMPOSITION_WEIGHTS = (0.7, 0.3)
+
+
+def write_composition_adapters(source: str, root) -> tuple[str, str, str]:
+    """Writes adapter B, a perturbed copy of the source adapter A, and adapter C,
+    the rank-concatenated merge of COMPOSITION_WEIGHTS * (A, B). Composing A and
+    B with those weights must therefore match C served as one adapter."""
+    generator = torch.Generator().manual_seed(0)
+    adapter_a = load_file(f"{source}/adapter_model.safetensors")
+    adapter_b, adapter_c = {}, {}
+    for name, a_weight in adapter_a.items():
+        if ".lora_B." in name:
+            continue
+        b_name = name.replace(".lora_A.", ".lora_B.")
+        b_weight = adapter_a[b_name]
+        noise = torch.randn(a_weight.shape, generator=generator).to(a_weight.dtype)
+        adapter_b[name] = a_weight.roll(1, dims=0) + noise * a_weight.std()
+        adapter_b[b_name] = -b_weight
+        adapter_c[name] = torch.cat((a_weight, adapter_b[name]))
+        adapter_c[b_name] = torch.cat(
+            (
+                COMPOSITION_WEIGHTS[0] * b_weight,
+                COMPOSITION_WEIGHTS[1] * adapter_b[b_name],
+            ),
+            dim=1,
+        )
+    paths = []
+    for name, weights, rank_factor in (("b", adapter_b, 1), ("c", adapter_c, 2)):
+        path = root / name
+        shutil.copytree(source, path)
+        save_file(weights, str(path / "adapter_model.safetensors"))
+        config = json.loads((path / "adapter_config.json").read_text())
+        # Doubling r and alpha keeps the LoRA scaling alpha / r unchanged.
+        config["r"] *= rank_factor
+        config["lora_alpha"] *= rank_factor
+        (path / "adapter_config.json").write_text(json.dumps(config))
+        paths.append(str(path))
+    return source, paths[0], paths[1]
+
+
+def generate_composition_and_merged(
+    llm: vllm.LLM, prompts: list[str], adapters: tuple[str, str, str]
+):
+    path_a, path_b, path_c = adapters
+    composition = LoRARoutingRequest(
+        routing_name="composition",
+        routing_int_id=100,
+        lora_requests=(
+            LoRARequest("a", 1, path_a),
+            LoRARequest("b", 2, path_b),
+        ),
+        lora_weights=COMPOSITION_WEIGHTS,
+    )
+    merged = LoRARequest("merged", 3, path_c)
+    params = vllm.SamplingParams(temperature=0, max_tokens=32, logprobs=5)
+    results = []
+    for lora_request in (composition, merged):
+        outputs = llm.generate(prompts, params, lora_request=lora_request)
+        results.append(
+            [
+                (
+                    list(output.outputs[0].token_ids),
+                    output.outputs[0].text,
+                    output.outputs[0].logprobs,
+                )
+                for output in outputs
+            ]
+        )
+    return results
+
+
+COMPOSITION_ENGINE_ARGS = dict(
+    enforce_eager=current_platform.is_xpu(),
+    max_model_len=1024,
+    enable_lora=True,
+    max_loras=4,
+    max_loras_per_request=2,
+    max_lora_rank=16,
+    lora_target_modules=[
+        "experts",
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ],
+    trust_remote_code=True,
+)
+
+
+@pytest.mark.skipif(
+    current_platform.is_xpu(), reason="Routed expert XPU support is not enabled"
+)
+def test_olmoe_lora_composition_matches_merged_adapter(olmoe_lora_files, tmp_path):
+    """Composed expert and attention adapters match the merged adapter."""
+    adapters = write_composition_adapters(olmoe_lora_files, tmp_path)
+    llm = vllm.LLM(MODEL_PATH, **COMPOSITION_ENGINE_ARGS)
+    prompts = [
+        PROMPT_TEMPLATE.format(context="How many candidates are there?"),
+        PROMPT_TEMPLATE.format(context="Count the number of candidates."),
+    ]
+    composition, merged = generate_composition_and_merged(llm, prompts, adapters)
+    check_logprobs_close(
+        outputs_0_lst=merged,
+        outputs_1_lst=composition,
+        name_0="merged",
+        name_1="composition",
+    )
+
+
+def test_olmoe_lora_composition_rejects_unsupported_dispatch():
+    """Reject unsupported composition before launching distributed workers."""
+    with pytest.raises(ValueError, match="Distributed routed LoRA requires"):
+        vllm.LLM(
+            MODEL_PATH,
+            enable_expert_parallel=True,
+            all2all_backend="deepep_low_latency",
+            **COMPOSITION_ENGINE_ARGS,
+        )

@@ -318,6 +318,17 @@ class InputProcessor:
                     "Routed LoRA does not support microbatching or prefill "
                     "context parallelism. Disable these options."
                 )
+            if (
+                self.vllm_config.parallel_config.enable_expert_parallel
+                or (
+                    self.model_config.is_moe
+                    and self.vllm_config.parallel_config.data_parallel_size > 1
+                )
+            ) and self.lora_config.max_loras_per_request < 2:
+                raise VLLMValidationError(
+                    "Routed LoRA with expert parallelism or MoE data parallelism "
+                    "requires max_loras_per_request >= 2 for coordinated residency."
+                )
             if not self.model_config.enforce_eager and (
                 not current_platform.is_cuda()
                 or self.lora_config.max_loras_per_request < 2

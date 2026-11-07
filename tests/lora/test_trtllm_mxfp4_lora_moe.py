@@ -9,6 +9,8 @@ import pytest
 import torch
 
 from tests.kernels.moe.utils import make_dummy_moe_config
+from tests.lora.utils import make_moe_lora_context, moe_lora_reference_weights
+from tests.utils import ensure_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import mxfp4_w4a16_moe_quant_config
 from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
@@ -128,6 +130,43 @@ def _run_lora_path(experts, kernel_weights, x, ids, weights, delta):
 def _rel_err(actual: torch.Tensor, expected: torch.Tensor) -> float:
     actual, expected = actual.double(), expected.double()
     return float((actual - expected).norm() / expected.norm())
+
+
+@pytest.mark.parametrize("routed", [False, True])
+@ensure_current_vllm_config()
+@torch.inference_mode()
+def test_composed_lora_matches_dequantized_reference(routed, workspace_init):
+    """Both projections use adapters even when the scalar fallback is base-only."""
+    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+        MoEPrepareAndFinalizeNoDPEPModular,
+    )
+
+    set_random_seed(0)
+    experts, kernel_weights, reference = _make_experts(has_bias=True)
+    x, ids, weights = _make_inputs()
+    ctx, coefficients = make_moe_lora_context(T, K, N, E, TOPK, routed=routed)
+    assert not experts._batch_has_no_lora(ctx)
+    experts.set_lora_context(ctx)
+    kernel = FusedMoEKernel(MoEPrepareAndFinalizeNoDPEPModular(), experts)
+    output = kernel.apply(
+        x,
+        kernel_weights[0],
+        kernel_weights[1],
+        weights,
+        ids,
+        MoEActivation.SILU,
+        E,
+        None,
+        False,
+    )
+    w13, w2 = moe_lora_reference_weights(reference[0], reference[1], ctx, coefficients)
+    _, expected = _reference(
+        (w13.double(), w2.double(), *reference[2:]), x, ids, weights
+    )
+    _, base = _reference(reference, x, ids, weights)
+    assert _rel_err(expected, base) > 0.02
+    assert _rel_err(output, expected) < 0.02
 
 
 @pytest.mark.parametrize("has_bias", [False, True])

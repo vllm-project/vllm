@@ -735,6 +735,12 @@ steps:
   device: b200-k8s
   # optional: true
   source_file_dependencies:
+  - vllm/lora/
+  - vllm/model_executor/layers/fused_moe/experts/lora_experts_mixin.py
+  - vllm/model_executor/layers/fused_moe/experts/lora_context.py
+  - vllm/model_executor/layers/fused_moe/experts/trtllm_lora_moe.py
+  - tests/lora/test_trtllm_mxfp4_lora_moe.py
+  - tests/lora/utils.py
   - csrc/quantization/fp4/
   - csrc/nvfp4_kv_cache_kernels.cu
   - csrc/quantization/w8a8/cutlass/
@@ -793,6 +799,7 @@ steps:
     - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
+    - pytest -v -s tests/lora/test_trtllm_mxfp4_lora_moe.py
     - pytest -v -s tests/kernels/test_bf16x3_router_gemm_cutedsl.py
     - pytest -v -s tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
     - pytest -v -s tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py

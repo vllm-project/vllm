@@ -495,10 +495,6 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # that, so use it directly. Otherwise fall back to the context stash
         # (e.g. weight-only quant), guarding on a row-count match so a
         # DP-gathered layout never indexes a local stash out of bounds.
-        sorted_token_ids_lora = None
-        expert_ids_lora = None
-        num_tokens_post_padded_lora = None
-        token_lora_mapping = None
         lora_context = self._lora_context
         if lora_unquantized_hidden_states is not None:
             lora_x = lora_unquantized_hidden_states
@@ -577,22 +573,12 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 lora_context.events[1],
                 lora_context.aux_stream,
             )
-            (
-                sorted_token_ids_lora,
-                expert_ids_lora,
-                num_tokens_post_padded_lora,
-                token_lora_mapping,
-            ) = lora_meta
+            lora_metadata = lora_meta
             intermediate_cache1.add_(lora_delta_w13)
         else:
             _base_w13_fn()
             if lora_context is not None:
-                (
-                    sorted_token_ids_lora,
-                    expert_ids_lora,
-                    num_tokens_post_padded_lora,
-                    token_lora_mapping,
-                ) = self.apply_w13_lora(
+                lora_metadata = self.apply_w13_lora(
                     lora_context,
                     y=intermediate_cache1,
                     x=lora_x,
@@ -717,10 +703,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                     y=lora_delta_w2,
                     x=intermediate_cache2,
                     topk_weights=topk_weights,
-                    sorted_token_ids_lora=sorted_token_ids_lora,
-                    expert_ids_lora=expert_ids_lora,
-                    num_tokens_post_padded_lora=num_tokens_post_padded_lora,
-                    token_lora_mapping=token_lora_mapping,
+                    lora_metadata=lora_metadata,
                     num_tokens=num_tokens,
                     w1=w1,
                     w2=w2,
@@ -745,10 +728,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                     y=intermediate_cache3,
                     x=intermediate_cache2,
                     topk_weights=topk_weights,
-                    sorted_token_ids_lora=sorted_token_ids_lora,
-                    expert_ids_lora=expert_ids_lora,
-                    num_tokens_post_padded_lora=num_tokens_post_padded_lora,
-                    token_lora_mapping=token_lora_mapping,
+                    lora_metadata=lora_metadata,
                     num_tokens=num_tokens,
                     w1=w1,
                     w2=w2,

@@ -9,6 +9,14 @@ from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 
 @dataclass
+class MoELoRAExecutionState:
+    """Projection alignment carried from gate/up to down for one forward."""
+
+    alignment: tuple[torch.Tensor | None, ...] | None = None
+    routes: list[tuple[torch.Tensor, "MoELoRAExecutionState"]] | None = None
+
+
+@dataclass
 class MoELoRAContext:
     """Carries all LoRA state for one MoE forward pass.
 
@@ -63,6 +71,8 @@ class MoELoRAContext:
     # None means no dispatch happened (non-EP path), in which case callers
     # fall back to punica_wrapper.token_mapping_meta.
     local_token_lora_mapping: torch.Tensor | None = None
+    local_lora_routes: tuple[torch.Tensor, torch.Tensor] | None = None
+    is_routed_projection: bool = False
 
     # Original unquantized hidden states, stashed by the modular kernel
     # before the prepare step potentially quantizes them. Used by

@@ -46,6 +46,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         torch._dynamo.mark_dynamic(self._sampler_indices_padded, 0)
 
         self.lora_config = kwargs["lora_config"]
+        self.max_loras_per_request = self.lora_config.max_loras_per_request
         self.max_loras = self.lora_config.max_loras
 
         # Compute captured LoRA counts for cudagraph specialization.
@@ -366,6 +367,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         pad_sorted_ids: bool = False,
         naive_block_assignment: bool = False,
         token_lora_mapping: torch.Tensor | None = None,
+        routed: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Aligns tokens and experts into block-sized chunks for LoRA-based
         mixture-of-experts (MoE) execution.
@@ -374,6 +376,8 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         read from `self.token_mapping_meta`. This is how EP+LoRA injects the
         per-rank-local token→LoRA map after all-to-all dispatch.
         """
+        if routed:
+            raise NotImplementedError("Routed expert LoRA is not supported on XPU")
         (
             token_lora_mapping_meta,
             _,
@@ -465,8 +469,11 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         offset: int = 0,
         token_lora_mapping: torch.Tensor | None = None,
         add_inputs: bool = True,
+        routed: bool = False,
     ):
         """Perform a fused forward computation for a LoRA MoE layer."""
+        if routed:
+            raise NotImplementedError("Routed expert LoRA is not supported on XPU")
         (
             token_lora_mapping_meta,
             _,
@@ -543,12 +550,15 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         use_tuned_config: bool,
         add_inputs: bool = True,
         token_lora_mapping: torch.Tensor | None = None,
+        routed: bool = False,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
+        if routed:
+            raise NotImplementedError("Routed expert LoRA is not supported on XPU")
         import functools
 
         from vllm.lora.layers.utils import try_get_optimal_moe_lora_config
@@ -679,7 +689,10 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         tp_rank: int,
         use_tuned_config: bool,
         add_inputs: bool = True,
+        routed: bool = False,
     ) -> None:
+        if routed:
+            raise NotImplementedError("Routed expert LoRA is not supported on XPU")
         import functools
 
         from vllm.lora.layers.utils import try_get_optimal_moe_lora_config

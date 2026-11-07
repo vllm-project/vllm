@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
+
 import torch
 
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
-from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
+from vllm.model_executor.layers.fused_moe.experts.lora_context import (
+    MoELoRAContext,
+    MoELoRAExecutionState,
+)
 
 
 class LoRAExpertsMixin:
@@ -49,12 +54,46 @@ class LoRAExpertsMixin:
         top_k_num: int,
         add_inputs: bool = True,
         swap_w13_slices: bool = False,
-    ) -> tuple[
-        torch.Tensor | None,
-        torch.Tensor | None,
-        torch.Tensor | None,
-        torch.Tensor | None,
-    ]:
+    ) -> MoELoRAExecutionState:
+        routes = lora_context.local_lora_routes
+        if routes is None:
+            routes = lora_context.punica_wrapper.lora_route_mapping
+        if routes is not None and not lora_context.is_routed_projection:
+            slots, coefficients = routes
+            state = MoELoRAExecutionState(routes=[])
+            if not add_inputs:
+                y.zero_()
+            if num_tokens == 0:
+                return state
+            for route in range(slots.shape[1]):
+                delta = torch.zeros_like(y)
+                route_context = replace(
+                    lora_context,
+                    local_token_lora_mapping=slots[:num_tokens, route]
+                    .to(dtype=torch.int32)
+                    .contiguous(),
+                    is_routed_projection=True,
+                )
+                alignment = self.apply_w13_lora(
+                    route_context,
+                    y=delta,
+                    x=x,
+                    topk_ids=topk_ids,
+                    topk_weights=topk_weights,
+                    expert_map=expert_map,
+                    w1=w1,
+                    w2=w2,
+                    num_tokens=num_tokens,
+                    top_k_num=top_k_num,
+                    add_inputs=True,
+                    swap_w13_slices=swap_w13_slices,
+                )
+                weights = coefficients[:num_tokens, route]
+                delta.view(num_tokens, top_k_num, -1).mul_(weights[:, None, None])
+                y.add_(delta)
+                assert state.routes is not None
+                state.routes.append((weights, alignment))
+            return state
         w13_lora_a_stacked = lora_context.w13_lora_a_stacked
         w13_lora_b_stacked = lora_context.w13_lora_b_stacked
         if lora_context.enable_moe_shared_loras:
@@ -99,6 +138,7 @@ class LoRAExpertsMixin:
             lora_context.use_tuned_config,
             add_inputs=add_inputs or interleave_w13,
             token_lora_mapping=lora_context.local_token_lora_mapping,
+            routed=lora_context.is_routed_projection,
         )
         if interleave_w13:
             # Map gate/up slices onto even/odd output channels without a copy.
@@ -108,7 +148,7 @@ class LoRAExpertsMixin:
                 gate_up_output.add_(gate_up_delta)
             else:
                 gate_up_output.copy_(gate_up_delta)
-        return result
+        return MoELoRAExecutionState(alignment=result)
 
     def apply_w2_lora(
         self,
@@ -117,16 +157,40 @@ class LoRAExpertsMixin:
         y: torch.Tensor,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
-        sorted_token_ids_lora: torch.Tensor | None,
-        expert_ids_lora: torch.Tensor | None,
-        num_tokens_post_padded_lora: torch.Tensor | None,
-        token_lora_mapping: torch.Tensor | None,
+        lora_metadata: MoELoRAExecutionState,
         num_tokens: int,
         w1: torch.Tensor,
         w2: torch.Tensor,
         top_k_num: int,
         add_inputs: bool = True,
     ) -> None:
+        if lora_metadata.routes is not None:
+            if not add_inputs:
+                y.zero_()
+            for weights, alignment in lora_metadata.routes:
+                delta = torch.zeros_like(y)
+                self.apply_w2_lora(
+                    replace(lora_context, is_routed_projection=True),
+                    y=delta,
+                    x=x,
+                    topk_weights=topk_weights,
+                    lora_metadata=alignment,
+                    num_tokens=num_tokens,
+                    w1=w1,
+                    w2=w2,
+                    top_k_num=top_k_num,
+                    add_inputs=True,
+                )
+                delta.view(num_tokens, top_k_num, -1).mul_(weights[:, None, None])
+                y.add_(delta)
+            return
+        assert lora_metadata.alignment is not None
+        (
+            sorted_token_ids_lora,
+            expert_ids_lora,
+            num_tokens_post_padded_lora,
+            token_lora_mapping,
+        ) = lora_metadata.alignment
         w2_lora_b_stacked = lora_context.w2_lora_b_stacked
         if lora_context.enable_moe_shared_loras:
             # w2 lora_B is shared across experts (collapsed expert-dim 1);
@@ -156,4 +220,5 @@ class LoRAExpertsMixin:
             lora_context.tp_rank,
             lora_context.use_tuned_config,
             add_inputs=add_inputs,
+            routed=lora_context.is_routed_projection,
         )

@@ -201,6 +201,18 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         lora_ctx = self._lora_context
         local_token_lora_mapping = None
         if lora_ctx is not None:
+            lora_ctx.local_token_lora_mapping = None
+            lora_ctx.local_lora_routes = None
+            wrapper = lora_ctx.punica_wrapper
+            if (
+                wrapper.max_loras_per_request > 1
+                or wrapper.lora_route_mapping is not None
+            ):
+                raise NotImplementedError(
+                    "Routed LoRA with cross-rank MoE dispatch is not supported: "
+                    "adapter residency and slot identities are not synchronized "
+                    "across ranks. Use max_loras_per_request=1 and ordinary LoRA."
+                )
             local_token_lora_mapping = (
                 lora_ctx.punica_wrapper.token_mapping_meta.token_lora_mapping[
                     : a1.shape[0]

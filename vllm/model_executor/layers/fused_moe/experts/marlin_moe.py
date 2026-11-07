@@ -761,12 +761,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
             # act_input  = intermediate_cache1 (M*topk, 2N for gated)
             # act_output = intermediate_cache2 (M*topk, N)
 
-            (
-                sorted_token_ids_lora,
-                expert_ids_lora,
-                num_tokens_post_padded_lora,
-                token_lora_mapping,
-            ) = self.apply_w13_lora(
+            lora_metadata = self.apply_w13_lora(
                 ctx,
                 y=act_input,
                 x=hidden_states,
@@ -778,14 +773,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 num_tokens=M,
                 top_k_num=top_k_num,
             )
-            lora_state.update(
-                {
-                    "sorted": sorted_token_ids_lora,
-                    "eids": expert_ids_lora,
-                    "npad": num_tokens_post_padded_lora,
-                    "tlm": token_lora_mapping,
-                }
-            )
+            lora_state["metadata"] = lora_metadata
             self.activation(
                 act_enum,
                 act_output,
@@ -807,10 +795,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 y=moe_out,
                 x=lora_state["cache2"],
                 topk_weights=topk_weights,
-                sorted_token_ids_lora=lora_state["sorted"],
-                expert_ids_lora=lora_state["eids"],
-                num_tokens_post_padded_lora=lora_state["npad"],
-                token_lora_mapping=lora_state["tlm"],
+                lora_metadata=lora_state["metadata"],
                 num_tokens=M,
                 w1=w1,
                 w2=w2,
