@@ -143,7 +143,7 @@ pub fn generate_multi_turn_random(
                 );
 
                 let (prompt, adjusted) =
-                    gen_prompt_to_target_len(tokenizer, &inner_seq, target_len)?;
+                    gen_prompt_to_target_len(tokenizer, &inner_seq, target_len, &allowed_tokens)?;
                 let (prompt, token_len) = if turn_idx == 0 && !shared_prefix_text.is_empty() {
                     let combined = format!("{}{}", &*shared_prefix_text, prompt);
                     let token_len = tokenizer.encode(&combined, false)?.len();
@@ -216,7 +216,7 @@ fn generate_prefix_sharing_conversations(
     let global_text: Arc<str> = if global_len > 0 {
         let offset: usize = rng.random_range(0..at_len);
         let seq = make_token_seq(allowed_tokens, offset, global_len);
-        let (text, _) = gen_prompt_to_target_len(tokenizer, &seq, global_len)?;
+        let (text, _) = gen_prompt_to_target_len(tokenizer, &seq, global_len, allowed_tokens)?;
         Arc::from(text)
     } else {
         Arc::from("")
@@ -228,7 +228,7 @@ fn generate_prefix_sharing_conversations(
         for conv_idx in 0..num_conversations {
             let offset: usize = rng.random_range(0..at_len);
             let seq = make_token_seq(allowed_tokens, offset + conv_idx, conv_len);
-            let (text, _) = gen_prompt_to_target_len(tokenizer, &seq, conv_len)?;
+            let (text, _) = gen_prompt_to_target_len(tokenizer, &seq, conv_len, allowed_tokens)?;
             texts.push(Arc::from(text));
         }
         texts
@@ -275,7 +275,8 @@ fn generate_prefix_sharing_conversations(
                         offset + conv_idx * max_turns + turn_idx,
                         turn_unique_len,
                     );
-                    let (text, _) = gen_prompt_to_target_len(tokenizer, &seq, turn_unique_len)?;
+                    let (text, _) =
+                        gen_prompt_to_target_len(tokenizer, &seq, turn_unique_len, allowed_tokens)?;
                     text
                 } else {
                     String::new()
@@ -320,7 +321,7 @@ fn generate_shared_prefix_text(
     let tokens: Vec<u32> = (0..prefix_len)
         .map(|_| allowed_tokens[rng.random_range(0..allowed_tokens.len())])
         .collect();
-    let (text, _) = gen_prompt_to_target_len(tokenizer, &tokens, prefix_len)?;
+    let (text, _) = gen_prompt_to_target_len(tokenizer, &tokens, prefix_len, allowed_tokens)?;
     Ok(Arc::from(text))
 }
 
@@ -481,6 +482,7 @@ fn gen_prompt_to_target_len(
     tokenizer: &TokenizerKind,
     token_sequence: &[u32],
     target_len: usize,
+    allowed_tokens: &[u32],
 ) -> Result<(String, Vec<u32>)> {
     let max_retry = 20;
     let mut tokens = token_sequence.to_vec();
@@ -504,16 +506,15 @@ fn gen_prompt_to_target_len(
         if tokens.len() == target_len {
             return Ok((prompt, tokens));
         } else if tokens.len() < target_len {
-            let allowed = tokenizer.get_allowed_tokens();
             let needed = target_len - tokens.len();
-            if allowed.is_empty() {
+            if allowed_tokens.is_empty() {
                 let vocab_size = tokenizer.vocab_size() as usize;
                 for j in 0..needed {
                     tokens.push(((tokens.len() + j) % vocab_size) as u32);
                 }
             } else {
                 for j in 0..needed {
-                    tokens.push(allowed[(tokens.len() + j) % allowed.len()]);
+                    tokens.push(allowed_tokens[(tokens.len() + j) % allowed_tokens.len()]);
                 }
             }
         } else {
