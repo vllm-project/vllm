@@ -12,10 +12,15 @@ exists to catch. So the parser cases below pin both directions, and
 it.
 """
 
+import shutil
+import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
 import pytest
+import regex as re
+import yaml
 
 import tools.pre_commit.check_test_tethering as checker
 from tools.pre_commit.check_test_tethering import (
@@ -897,6 +902,41 @@ def test_main_flags_an_untethered_file(monkeypatch):
         assert main() == 1
     finally:
         orphan.unlink()
+
+
+@pytest.mark.parametrize(
+    "script_path", ["tests/run.sh", ".buildkite/scripts/run.sh", "tools/run.sh"]
+)
+def test_shell_script_change_checks_unchanged_tests(tmp_path, script_path):
+    """Removing a script's pytest command must flag tests outside the diff."""
+    config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text())
+    hook = next(
+        hook
+        for repo in config["repos"]
+        for hook in repo["hooks"]
+        if hook["id"] == "check-test-tethering"
+    )
+    assert re.search(hook["files"], script_path)
+    script = tmp_path / script_path
+    script.parent.mkdir(parents=True)
+    script.write_text("pytest tests/test_example.py\n")
+    test = tmp_path / "tests/test_example.py"
+    test.parent.mkdir(exist_ok=True)
+    test.write_text("def test_example(): pass\n")
+    area = tmp_path / ".buildkite/test_areas/example.yaml"
+    area.parent.mkdir(parents=True, exist_ok=True)
+    area.write_text(f"steps:\n- commands:\n  - bash {script_path}\n")
+    tool = tmp_path / "tools/pre_commit/check_test_tethering.py"
+    tool.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(checker.__file__, tool)
+    command = [sys.executable, str(tool), script_path]
+    before = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
+    assert before.returncode == 0, before.stdout + before.stderr
+
+    script.write_text("echo 'no tests'\n")
+    after = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
+    assert after.returncode == 1, after.stdout + after.stderr
+    assert "tests/test_example.py is not run by any Buildkite job" in after.stdout
 
 
 def test_to_repo_relative_accepts_absolute_paths():

@@ -27,8 +27,8 @@ Modes
 * **changed-files** (default): pre-commit passes the changed test files as
   arguments; each one must be tethered or allowlisted.
 * **full scan**: ``--all``, or automatically whenever the change set touches a
-  pipeline yaml or the allowlist itself - because editing a job command can
-  orphan a test that is not otherwise in the diff. The full scan also reports
+  pipeline yaml, a shell script, or the allowlist itself - because editing a
+  job command can orphan a test that is not otherwise in the diff. The scan reports
   allowlist entries that have since become tethered, or whose file is gone, so
   the list stays honest.
 
@@ -886,9 +886,8 @@ def _to_repo_relative(path: str) -> str:
 
 
 def _change_set_touches_ci_config(paths: list[str]) -> bool:
-    """A change to a pipeline yaml, a ci_config, or the allowlist can orphan a
-    test that is not itself in the change set, so those changes force a full
-    scan."""
+    """Changes to CI config, shell scripts, or the allowlist can orphan tests
+    outside the change set, so they force a full scan."""
     return any(
         ".buildkite/test_areas/" in path
         or ".buildkite/hardware_tests/" in path
@@ -896,6 +895,7 @@ def _change_set_touches_ci_config(paths: list[str]) -> bool:
         or ".buildkite/ci_config" in path
         or path.endswith("test-amd.yaml")
         or path.endswith("test_tethering_allowlist.txt")
+        or path.endswith(".sh")
         for path in paths
     )
 
