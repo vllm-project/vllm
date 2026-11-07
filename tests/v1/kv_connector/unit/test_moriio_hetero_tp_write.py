@@ -228,6 +228,7 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
     worker._hybrid_payload_index_by_layer = {
         layer.name: groups.index("mamba") for layer in layers if layer.kind == "mamba"
     }
+    worker._single_kv_cache_group = len(groups) == 1
     worker._conv_decomp = next(
         (
             derive_mamba_conv_split(spec, tp_size)

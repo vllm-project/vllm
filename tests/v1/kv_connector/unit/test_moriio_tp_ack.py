@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+import time
 from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -455,21 +456,59 @@ def test_read_completion_waits_for_every_posted_read():
 
 
 @pytest.mark.parametrize(
-    ("has_mamba", "expected_invalid"),
-    [(False, {1, 2}), (True, set())],
+    ("has_mamba", "single_group", "expected_invalid", "expected_failed"),
+    [
+        (False, True, {1, 2}, set()),
+        (True, True, set(), {"req"}),
+        (False, False, set(), {"req"}),
+    ],
 )
-def test_failed_read_reports_blocks_only_without_hma(has_mamba, expected_invalid):
+def test_failed_read_reports_blocks_only_for_one_group(
+    has_mamba, single_group, expected_invalid, expected_failed
+):
+    """Block-level recovery needs one KV cache group and no recurrent state;
+    otherwise the request is reported for request-level recovery."""
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = has_mamba
+    worker._single_kv_cache_group = single_group
     worker._recving_local_blocks = {"req": [1, 2]}
     worker._invalid_block_ids = set()
+    worker._failed_sync_recving = set()
 
     worker._record_failed_recv("req")
 
     assert worker.get_block_ids_with_load_errors() == expected_invalid
+    assert worker._failed_sync_recving == expected_failed
 
 
-def test_hybrid_step_barrier_fails_closed():
+_COMPLETION_ERROR = "transport retry counter exceeded"
+_POST_ERROR = "ibv_post_send failed with 12: Cannot allocate memory (posted 3/8 WRs)"
+
+
+@pytest.mark.parametrize(
+    ("has_mamba", "single_group", "backend", "qps", "message", "fails_step"),
+    [
+        (True, False, "rdma", 1, _COMPLETION_ERROR, False),
+        (True, True, "rdma", 1, _COMPLETION_ERROR, False),
+        (False, False, "rdma", 1, _COMPLETION_ERROR, False),
+        (True, False, "xgmi", 4, _COMPLETION_ERROR, False),
+        (True, False, "rdma", 4, _COMPLETION_ERROR, True),
+        (False, False, "rdma", 4, _COMPLETION_ERROR, True),
+        (False, True, "rdma", 4, _COMPLETION_ERROR, False),
+        (True, False, "rdma", 1, _POST_ERROR, True),
+        (True, False, "rdma", 1, "SQ full (read): ep=0", True),
+        (False, True, "rdma", 1, _POST_ERROR, False),
+    ],
+)
+def test_terminal_read_failure_fails_the_step_only_while_dma_may_continue(
+    has_mamba, single_group, backend, qps, message, fails_step
+):
+    """Once every READ is terminal the failure is reported instead of killing
+    the engine, unless request-level recovery would free blocks that the
+    failed transfer may still write into: through another QP, or through work
+    requests posted before a post failure. Block-level recovery for a single
+    KV cache group is unchanged."""
+
     class FailingWrapper:
         def waiting_for_transfer_complete(self, _statuses, fail_fast=True):
             raise TransferError("failed")
@@ -478,12 +517,18 @@ def test_hybrid_step_barrier_fails_closed():
             pass
 
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
-    worker._has_mamba = True
-    worker._reads_issued_this_step = [_ReadStatus("failed")]
+    worker._has_mamba = has_mamba
+    worker._single_kv_cache_group = single_group
+    worker.moriio_config = SimpleNamespace(backend=backend, qp_per_transfer=qps)
+    worker._reads_issued_this_step = [_ReadStatus("failed", message)]
     worker.moriio_wrapper = FailingWrapper()
 
-    with pytest.raises(TransferError, match="failed"):
+    if fails_step:
+        with pytest.raises(TransferError, match="failed"):
+            worker._await_reads_issued_this_step()
+    else:
         worker._await_reads_issued_this_step()
+    assert worker._reads_issued_this_step == []
 
 
 def test_step_barrier_awaits_every_read_before_forward():
@@ -500,6 +545,7 @@ def test_step_barrier_awaits_every_read_before_forward():
     attn, indexer, mtp_attn = object(), object(), object()
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = False
+    worker._single_kv_cache_group = True
     worker._reads_issued_this_step = [attn, indexer, mtp_attn]
     worker.moriio_wrapper = RecordingWrapper()
 
@@ -532,7 +578,8 @@ def test_step_barrier_without_mamba_does_not_raise_on_failure():
 
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = False
-    worker._reads_issued_this_step = [_ReadStatus("failed")]
+    worker._single_kv_cache_group = True
+    worker._reads_issued_this_step = [_ReadStatus("failed", _COMPLETION_ERROR)]
     worker.moriio_wrapper = FailingWrapper()
 
     worker._await_reads_issued_this_step()
@@ -540,8 +587,9 @@ def test_step_barrier_without_mamba_does_not_raise_on_failure():
 
 
 class _ReadStatus:
-    def __init__(self, state: str):
+    def __init__(self, state: str, message: str = "SQ full"):
         self.state = state
+        self.message = message
 
     def Succeeded(self):
         return self.state == "success"
@@ -550,7 +598,7 @@ class _ReadStatus:
         return self.state == "failed"
 
     def Message(self):
-        return "SQ full"
+        return self.message
 
     def Code(self):
         return -1
@@ -592,11 +640,14 @@ def fake_clock(monkeypatch):
 
 
 def _worker_with_failed_and_pending_read(has_mamba, pending_b, monkeypatch):
-    failed_a = _ReadStatus("failed")
+    failed_a = _ReadStatus("failed", _COMPLETION_ERROR)
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = has_mamba
+    worker._single_kv_cache_group = True
     worker.world_size = 1
-    worker.moriio_config = SimpleNamespace(recv_abort_timeout=600.0)
+    worker.moriio_config = SimpleNamespace(
+        recv_abort_timeout=600.0, backend="rdma", qp_per_transfer=1
+    )
     worker.moriio_wrapper = MoRIIOWrapper(moriio_engine=object(), transfer_timeout=5.0)
     monkeypatch.setattr(worker.moriio_wrapper, "send_notify", lambda *a, **kw: None)
     worker._reads_issued_this_step = [failed_a, pending_b]
@@ -611,6 +662,7 @@ def _worker_with_failed_and_pending_read(has_mamba, pending_b, monkeypatch):
     worker._recving_transfers_start = {}
     worker._recving_local_blocks = {"a": [1, 2], "b": [3, 4]}
     worker._invalid_block_ids = set()
+    worker._failed_sync_recving = set()
     return worker
 
 
@@ -627,21 +679,23 @@ def test_step_barrier_failure_still_awaits_other_requests(monkeypatch, fake_cloc
     assert worker.get_block_ids_with_load_errors() == {1, 2}
 
 
-def test_hybrid_step_barrier_failure_does_not_wait(monkeypatch, fake_clock):
-    pending_b = _PolledStatus()
-    worker = _worker_with_failed_and_pending_read(True, pending_b, monkeypatch)
+def test_hybrid_step_barrier_failure_awaits_other_requests(monkeypatch, fake_clock):
+    late_b = _PolledStatus(succeed_after=5)
+    worker = _worker_with_failed_and_pending_read(True, late_b, monkeypatch)
 
-    with pytest.raises(TransferError, match="SQ full"):
-        worker._await_reads_issued_this_step()
+    worker._await_reads_issued_this_step()
 
-    assert pending_b.state == "in_progress"
-    assert fake_clock.sleeps == 0
+    assert late_b.state == "success"
+    assert worker._pop_done_transfers() == {"tx-b"}
+    assert worker.get_block_ids_with_load_errors() == set()
+    assert worker._failed_sync_recving == {"a"}
 
 
 @pytest.mark.parametrize("has_mamba", [False, True])
 def test_step_barrier_timeout_fails_closed_while_reads_in_flight(has_mamba, fake_clock):
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = has_mamba
+    worker._single_kv_cache_group = True
     worker.moriio_wrapper = MoRIIOWrapper(moriio_engine=object(), transfer_timeout=0.05)
     worker._reads_issued_this_step = [_PolledStatus(), _PolledStatus()]
 
@@ -665,6 +719,7 @@ def test_step_barrier_native_timeout_fails_closed_while_reads_in_flight(
     engine = SimpleNamespace(wait_all=Mock(side_effect=wait_all))
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = has_mamba
+    worker._single_kv_cache_group = True
     worker.moriio_wrapper = MoRIIOWrapper(moriio_engine=engine, transfer_timeout=0.05)
     worker._reads_issued_this_step = [_PolledStatus(), _PolledStatus()]
 
@@ -688,6 +743,7 @@ def test_step_barrier_noop_when_no_reads_posted():
 
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = False
+    worker._single_kv_cache_group = True
     worker._reads_issued_this_step = []
     worker.moriio_wrapper = RecordingWrapper()
 
@@ -766,3 +822,34 @@ def test_requested_cudagraph_mode_is_never_overridden():
     assert (
         MoRIIOConnector.requires_piecewise_for_cudagraph({"read_mode": False}) is False
     )
+
+
+def test_unmatched_release_is_dropped_after_defer_timeout(monkeypatch):
+    """A release whose transfer prefill no longer knows (e.g. a second release
+    for a failed request) is retried for a while, then dropped."""
+    acks = [["tx-gone"]]
+
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.is_producer = True
+    worker.mode = MoRIIOMode.READ
+    worker.world_size = 1
+    worker.moriio_config = SimpleNamespace(defer_timeout=60.0)
+    worker.moriio_wrapper = SimpleNamespace(
+        pop_finished_req_ids=lambda: acks.pop() if acks else [],
+        shutdown=lambda: None,
+    )
+    worker.transfer_id_to_request_id = {}
+    worker._consumer_notification_counts = {}
+    worker._completed_consumer_notifications = set()
+    worker._pending_unmapped_acks = []
+    now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+
+    assert worker.get_finished() == (set(), set())
+    assert len(worker._pending_unmapped_acks) == 1
+    now[0] += 30
+    worker.get_finished()
+    assert len(worker._pending_unmapped_acks) == 1
+    now[0] += 31
+    worker.get_finished()
+    assert worker._pending_unmapped_acks == []

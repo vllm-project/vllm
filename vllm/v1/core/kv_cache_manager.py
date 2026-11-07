@@ -773,6 +773,29 @@ class KVCacheManager:
             clipped_block_ids.append(ids[:num_valid_blocks])
         return tuple(clipped_block_ids)
 
+    def get_block_ids_from_token(
+        self, request_id: str, start_token: int
+    ) -> tuple[list[int], ...]:
+        """Get the non-null block ids holding the request's KV from
+        ``start_token`` on, in every KV cache group. Recurrent-state blocks
+        before ``start_token`` are prefix-cache checkpoints, not later state."""
+        block_ids: list[list[int]] = []
+        for group, blocks in zip(
+            self.kv_cache_config.kv_cache_groups,
+            self.get_blocks(request_id).blocks,
+        ):
+            spec = group.kv_cache_spec
+            if not isinstance(spec, (CrossAttentionSpec, EncoderOnlyAttentionSpec)):
+                blocks = blocks[start_token // spec.block_size :]
+            block_ids.append([b.block_id for b in blocks if not b.is_null])
+        return tuple(block_ids)
+
+    def evict_blocks_by_group(self, block_ids: Sequence[Sequence[int]]) -> None:
+        """Evict blocks from the prefix cache, given one list of block IDs per
+        KV cache group. Each group is evicted from its own block pool."""
+        for manager, ids in zip(self.coordinator.single_type_managers, block_ids):
+            manager.block_pool.evict_blocks(set(ids))
+
     def estimate_cached_tokens(self, request: Request) -> int:
         """Estimate the number of tokens cached by the request."""
         cached_tokens: int | None = None

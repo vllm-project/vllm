@@ -639,6 +639,7 @@ def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
         moriio_wrapper=wrapper,
         transfer_id_to_request_id={"tA": "req-1"},
         _unmatched_write_failures=OrderedDict(),
+        _failed_sync_recving=set(),
         get_finished=lambda: (set(), set()),
     )
 

@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 from collections.abc import Callable
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
+from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 
@@ -394,3 +400,163 @@ def test_block_level_load_failure_fails_closed_with_multiple_groups():
 
     with pytest.raises(RuntimeError, match="failed_recving"):
         scheduler._handle_invalid_blocks({1}, {})
+
+
+class _HMAMockConnector(Mock, SupportsHMA):
+    def request_finished_all_groups(self, request, block_ids):
+        return False, None
+
+
+def _multi_group_sync_load_scheduler(policy: str, *requests: Request) -> Scheduler:
+    """Two KV cache groups (full + sliding window); the first request loads
+    all but its last block synchronously."""
+    scheduler = create_scheduler(
+        create_vllm_config(kv_load_failure_policy=policy),
+        kv_cache_config=make_kv_cache_config(block_size=16, swa_enabled=True),
+    )
+    for request in requests:
+        scheduler.add_request(request=request)
+    scheduler.connector = _HMAMockConnector()
+    scheduler.connector.get_external_cache_hit_sources.side_effect = (
+        create_mock_connector().get_external_cache_hit_sources.side_effect
+    )
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(
+            {requests[0].request_id: requests[0].num_tokens - 16}, async_load=False
+        )
+    )
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+    return scheduler
+
+
+def _cached(scheduler: Scheduler, block_ids: tuple[list[int], ...]) -> bool:
+    managers = scheduler.kv_cache_manager.coordinator.single_type_managers
+    return any(
+        managers[group].block_pool.blocks[block_id].block_hash is not None
+        for group, ids in enumerate(block_ids)
+        for block_id in ids
+    )
+
+
+@pytest.mark.parametrize("policy", ["recompute", "fail"])
+def test_multi_group_sync_load_failure_is_request_level(policy: str):
+    """A failed synchronous load under several KV cache groups is recovered
+    per request: the loaded blocks leave the prefix cache, and the request is
+    recomputed from scratch or failed; other requests are unaffected."""
+    failed, other = create_request(num_tokens=64), create_request(num_tokens=64)
+    scheduler = _multi_group_sync_load_scheduler(policy, failed, other)
+
+    scheduler_output = scheduler.schedule()
+    loaded = scheduler.kv_cache_manager.get_block_ids(failed.request_id)
+    assert _cached(scheduler, loaded)
+
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(
+            [failed, other],
+            failed_sync_recving={failed.request_id},
+            use_eos=True,
+        ),
+    )
+
+    assert other.status == RequestStatus.FINISHED_STOPPED
+    assert not _cached(scheduler, loaded)
+    assert scheduler.running == []
+    if policy == "recompute":
+        assert failed.status == RequestStatus.PREEMPTED
+        assert failed.num_computed_tokens == 0
+        assert failed.num_output_tokens == 0
+        assert scheduler.waiting.peek_request() is failed
+    else:
+        assert failed.status == RequestStatus.FINISHED_ERROR
+
+
+def test_multi_group_sync_load_failure_recovers_sharing_requests():
+    """A request that already reuses blocks of the failed load is recomputed
+    too, since those blocks hold incomplete KV."""
+    failed = create_request(num_tokens=64, common_prefix_len=48)
+    sharing = create_request(num_tokens=64, common_prefix_len=48)
+    scheduler = _multi_group_sync_load_scheduler("recompute", failed, sharing)
+
+    scheduler_output = scheduler.schedule()
+    failed_blocks = scheduler.kv_cache_manager.get_block_ids(failed.request_id)
+    sharing_blocks = scheduler.kv_cache_manager.get_block_ids(sharing.request_id)
+    assert set(failed_blocks[0]) & set(sharing_blocks[0])
+
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(
+            [failed, sharing], failed_sync_recving={failed.request_id}
+        ),
+    )
+
+    assert failed.status == RequestStatus.PREEMPTED
+    assert sharing.status == RequestStatus.PREEMPTED
+    assert scheduler.running == []
+
+
+def test_failed_sync_recving_ignores_requests_without_a_sync_load():
+    failed, other = create_request(num_tokens=64), create_request(num_tokens=64)
+    scheduler = _multi_group_sync_load_scheduler("recompute", failed, other)
+
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(
+            [failed, other], failed_sync_recving={other.request_id}
+        ),
+    )
+
+    assert failed.status == RequestStatus.RUNNING
+    assert other.status == RequestStatus.RUNNING
+
+
+@pytest.mark.parametrize("policy", ["recompute", "fail"])
+def test_sync_load_failure_of_a_request_preempted_before_its_output(policy: str):
+    """Under async scheduling the next schedule() can preempt a request before
+    the output reporting its failed load arrives. Its blocks must still leave
+    the prefix cache, and its in-flight output must not be delivered."""
+    failed, other = create_request(num_tokens=64), create_request(num_tokens=64)
+    scheduler = _multi_group_sync_load_scheduler(policy, failed, other)
+
+    scheduler_output = scheduler.schedule()
+    loaded = scheduler.kv_cache_manager.get_block_ids(failed.request_id)
+    scheduler.running.remove(failed)
+    scheduler._preempt_request(failed, time.monotonic())
+    assert _cached(scheduler, loaded)
+
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(
+            [failed, other], failed_sync_recving={failed.request_id}
+        ),
+    )
+
+    assert not _cached(scheduler, loaded)
+    assert other.status == RequestStatus.RUNNING
+    if policy == "recompute":
+        assert failed.status == RequestStatus.PREEMPTED
+        assert failed.num_output_tokens == 0
+    else:
+        assert failed.status == RequestStatus.FINISHED_ERROR
+
+
+def test_sync_load_bad_blocks_skip_earlier_recurrent_state_checkpoints():
+    """A recurrent-state block before the load start is a prefix-cache
+    checkpoint the load did not write, so it is not reported as bad."""
+    kv_cache_config = make_kv_cache_config(
+        block_size=16, mamba_enabled=True, mamba_cache_mode="align"
+    )
+
+    def block(block_id: int) -> KVCacheBlock:
+        return KVCacheBlock(block_id)
+
+    manager = SimpleNamespace(
+        kv_cache_config=kv_cache_config,
+        get_blocks=lambda _: SimpleNamespace(
+            blocks=([block(1), block(2), block(3)], [block(7), block(8), block(9)])
+        ),
+    )
+
+    assert KVCacheManager.get_block_ids_from_token(manager, "req", 32) == ([3], [9])
