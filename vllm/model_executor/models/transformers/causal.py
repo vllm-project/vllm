@@ -17,10 +17,15 @@
 """Transformers modeling backend mixin for causal language models."""
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
+from functools import cached_property
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
+from torch import nn
+from transformers import AutoModelForCausalLM, PreTrainedModel
+from transformers.models.auto.auto_factory import _get_model_class
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -33,6 +38,21 @@ from .base import Base
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+logger = init_logger(__name__)
+
+LM_HEAD_TRANSFORM_ATTR = "lm_head_transform"
+"""Attribute in which to store the module that transforms the hidden states before the
+output embeddings, for models which have one (see `CausalMixin._output_head`)."""
+
+
+class OutputHead(NamedTuple):
+    embeddings: str = "lm_head"
+    """Name of the output embeddings in the Transformers `ForCausalLM` class."""
+    transform: str | None = None
+    """Name of the module that transforms the hidden states before the output
+    embeddings, if the model has one."""
+    transform_module: nn.Module | None = None
 
 
 class CausalMixin(VllmModelForTextGeneration, Base):
@@ -62,16 +82,81 @@ class CausalMixin(VllmModelForTextGeneration, Base):
                 scale=getattr(self.text_config, "logit_scale", 1.0),
                 soft_cap=getattr(self.text_config, "final_logit_softcapping", None),
             )
+
+            if (transform := self._output_head.transform_module) is not None:
+                self.init_parameters(transform)
+                setattr(self, LM_HEAD_TRANSFORM_ATTR, transform)
         else:
             self.lm_head = PPMissingLayer()
 
+    @cached_property
+    def _output_head(self) -> OutputHead:
+        """Find the output head of the model's Transformers `ForCausalLM` class.
+
+        Most models project the hidden states with an output embedding called
+        `lm_head`. Some (e.g. ModernBERT decoder) first pass them through a module
+        of their own (dense -> activation -> norm) and name the output embeddings
+        differently. Only classes which override `get_output_embeddings` can do
+        this, so the `ForCausalLM` class is only built (on `meta`) for those.
+        """
+        mapping = AutoModelForCausalLM._model_mapping
+        if type(self.config) not in mapping:
+            return OutputHead()
+        model_class = _get_model_class(self.config, mapping)
+        if model_class.get_output_embeddings is PreTrainedModel.get_output_embeddings:
+            return OutputHead()
+
+        with torch.device("meta"):
+            causal_lm = model_class._from_config(
+                self.config, dtype=self.model_config.dtype
+            )
+        output_embeddings = causal_lm.get_output_embeddings()
+        children = {m: n for n, m in causal_lm.named_children()}
+        if output_embeddings not in children:
+            return OutputHead()
+
+        # Modules which are neither the base model nor the output embeddings
+        base_model_class = type(self.model)
+        others = [
+            (name, module)
+            for name, module in causal_lm.named_children()
+            if module is not output_embeddings
+            and not isinstance(module, base_model_class)
+            and next(module.parameters(), None) is not None
+        ]
+        if len(others) > 1:
+            logger.warning_once(
+                "%s has more than one module besides its base model and output "
+                "embeddings (%s). The Transformers modeling backend cannot tell the "
+                "order in which they are applied, so it will ignore them.",
+                model_class.__name__,
+                ", ".join(name for name, _ in others),
+            )
+            others = []
+        transform, transform_module = others[0] if others else (None, None)
+        output_head = OutputHead(
+            children[output_embeddings], transform, transform_module
+        )
+        logger.debug("Identified output head as: %s", output_head)
+        return output_head
+
+    def _rename_output_head(self, name: str) -> str:
+        """Rename the output head weights to match this module's attributes."""
+        embeddings, transform, _ = self._output_head
+        if transform is not None and name.startswith(f"{transform}."):
+            return LM_HEAD_TRANSFORM_ATTR + name.removeprefix(transform)
+        if embeddings != "lm_head" and name.startswith(f"{embeddings}."):
+            return "lm_head" + name.removeprefix(embeddings)
+        return name
+
     def load_weights(self, weights: Iterable[tuple[str, "torch.Tensor"]]) -> set[str]:
-        """A thin wrapper around `Base.load_weights` to handle the lm_head bias."""
+        """A thin wrapper around `Base.load_weights` to handle the output head."""
         lm_head_bias = set()
         load_device = self.vllm_config.load_config.device or self.device_config.device
 
         def auto_load_lm_head_bias(weights):
             for name, weight in weights:
+                name = self._rename_output_head(name)
                 if name.endswith("lm_head.bias") and self.pp_group.is_last_rank:
                     # load_weights is called outside vLLM's device context,
                     # so we must enter it again when registering the bias.
@@ -85,5 +170,7 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         return super().load_weights(auto_load_lm_head_bias(weights)) | lm_head_bias
 
     def compute_logits(self, hidden_states: "torch.Tensor") -> "torch.Tensor | None":
+        if (transform := getattr(self, LM_HEAD_TRANSFORM_ATTR, None)) is not None:
+            hidden_states = transform(hidden_states)
         logits = self.logits_processor(self.lm_head, hidden_states, self.lm_head.bias)
         return logits
