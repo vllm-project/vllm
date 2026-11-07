@@ -310,8 +310,8 @@ def fused_moe_kernel(
     num_tokens_post_padded_ptr,
     a_desc,
     # Matrix dimensions
-    N,
-    K,
+    N: tl.constexpr,
+    K: tl.constexpr,
     EM,
     num_valid_tokens,
     # The stride variables represent how much to increase the ptr by when
