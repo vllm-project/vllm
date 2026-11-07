@@ -224,8 +224,7 @@ class MonoDecodeLayer:
         elif not (layer.use_fused_mhc and layer.fuse_mhc_rmsnorm):
             why = "needs aiter's fused mHC seam with its norm"
         elif (
-            ffn.use_mega_moe
-            or ffn.shared_experts is None
+            ffn.shared_experts is None
             or ffn.fuse_heterogeneous_shared_expert
             or ffn.is_fused_shared_expert_enabled
             or ffn.gate.bias_vl is not None
