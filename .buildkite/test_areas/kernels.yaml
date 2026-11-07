@@ -167,6 +167,22 @@ steps:
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
   commands:
     - pytest -v -s kernels/test_bf16x3_router_gemm_cutedsl.py
+  mirror:
+    amd:
+      automatic_shard: true
+      label: ":amd: (MI355) BF16x3 Router GEMM Kernels"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 20
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_rocm.py
+      - vllm/platforms/rocm.py
+      - tests/kernels/test_bf16x3_router_gemm_rocm.py
+      commands:
+      - pytest -v -s kernels/test_bf16x3_router_gemm_rocm.py
 
 - label: ":nvidia: (B200) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-b200
@@ -876,13 +892,11 @@ steps:
       - vllm/platforms/rocm.py
       - tests/kernels/test_rocm_fp32_router_gemm.py
       - tests/kernels/test_gate_linear_rocm_dispatch.py
-      - tests/kernels/test_bf16x3_router_gemm_rocm.py
       commands:
       - >-
         pytest -v -s
         tests/kernels/test_rocm_fp32_router_gemm.py
         tests/kernels/test_gate_linear_rocm_dispatch.py
-        tests/kernels/test_bf16x3_router_gemm_rocm.py
 
 # Disabled until b12x transitive dependencies are locked.
 # - label: ":nvidia: (DGX Spark) [Nightly] b12x Linear Kernels"
