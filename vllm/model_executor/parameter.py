@@ -391,8 +391,7 @@ class SharedWeightParameter(BasevLLMParameter):
     For example, when applying transforms to the "gate" and "up" partitions of
     `MergedColumnParallelLinear`, the transform weights must stay separate
     tensors in order to allow for tensor memory sharing between layers.
-    Partitions are replicated on every tensor parallel rank. Callers must
-    reject configurations whose computation is not shardable.
+    Partitions are replicated on every tensor parallel rank.
     """
 
     # global registry for sharing tensors based on passed `data_key`
@@ -449,28 +448,19 @@ class SharedWeightParameter(BasevLLMParameter):
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         assert len(self.partitions) == 1 and 0 in self.partitions
-        partition = self.partitions[0]
-
-        copy_weight_(partition.data, loaded_weight)
+        self.partitions[0]._assert_and_load(loaded_weight)
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
         assert len(self.partitions) == 1 and 0 in self.partitions
-        partition = self.partitions[0]
-
-        copy_weight_(partition.data, loaded_weight)
+        self.partitions[0]._assert_and_load(loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
-        partition_id = kwargs.pop("shard_id")
-        partition_id = self._shard_id_as_int(partition_id)
-        partition = self.partitions[partition_id]
-
-        copy_weight_(partition.data, loaded_weight)
+        partition_id = self._shard_id_as_int(kwargs.pop("shard_id"))
+        self.partitions[partition_id]._assert_and_load(loaded_weight)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         partition_id = self._shard_id_as_int(kwargs.pop("shard_id"))
-        partition = self.partitions[partition_id]
-
-        copy_weight_(partition.data, loaded_weight)
+        self.partitions[partition_id]._assert_and_load(loaded_weight)
 
     def process_weights_after_loading(self):
         for key in self.partitions:
