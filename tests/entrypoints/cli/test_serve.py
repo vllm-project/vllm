@@ -19,6 +19,7 @@ def test_headless_imports_reasoning_parser_plugin_before_engine_config():
     args = argparse.Namespace(
         api_server_count=0,
         reasoning_parser_plugin=plugin_path,
+        data_parallel_hybrid_lb=False,
     )
     engine_args = MagicMock()
 
@@ -40,3 +41,23 @@ def test_headless_imports_reasoning_parser_plugin_before_engine_config():
 
         with pytest.raises(_StopAfterEngineConfig):
             run_headless(args)
+
+
+def test_headless_rejects_hybrid_lb_before_building_engine_config():
+    args = argparse.Namespace(
+        api_server_count=0,
+        reasoning_parser_plugin=None,
+        data_parallel_hybrid_lb=True,
+    )
+    engine_args = MagicMock()
+
+    with patch(
+        "vllm.entrypoints.cli.serve.vllm.AsyncEngineArgs.from_cli_args",
+        return_value=engine_args,
+    ):
+        with pytest.raises(ValueError, match="hybrid_lb is not applicable"):
+            run_headless(args)
+
+    # The invalid combination must be rejected before any engine config work,
+    # which otherwise downloads the HF config and detects the platform first.
+    engine_args.create_engine_config.assert_not_called()
