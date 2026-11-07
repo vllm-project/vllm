@@ -6,7 +6,7 @@ Every expert backend stops after GEMM2 and hands its rows to the finalizer.
 """
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -55,6 +55,9 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
     ModelOptNvFp4FusedMoE,
 )
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
 )
@@ -77,6 +80,9 @@ from vllm.models.muse_spark.nvidia.ops.mnnvl_fusions import (
     tp_group_spans_nodes,
 )
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.models.muse_spark.nvidia.fp8_moe import MuseSparkFp8FusedMoE
 
 logger = init_logger(__name__)
 
@@ -456,7 +462,8 @@ class MusePostExpertFinalize:
 
 
 def _attach_post_expert_finalize(
-    quant_method: "MuseSparkModelOptNvFp4FusedMoE | MuseSparkUnquantizedFusedMoE",
+    quant_method: "MuseSparkModelOptNvFp4FusedMoE | MuseSparkUnquantizedFusedMoE "
+    "| MuseSparkFp8FusedMoE",
 ) -> None:
     """Hand the layer's finalizer to its experts, which exist only now."""
     assert quant_method.moe_kernel is not None
@@ -792,7 +799,7 @@ class MuseSparkUnquantizedFusedMoE(UnquantizedFusedMoEMethod):
 
 
 class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
-    """Consolidated-tensor experts with the NVFP4 / BF16 quant methods."""
+    """Consolidated-tensor experts with the NVFP4 / FP8 / BF16 quant methods."""
 
     def _get_quant_method(
         self,
@@ -800,12 +807,38 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
         quant_config: QuantizationConfig | None,
         moe_config: FusedMoEConfig,
     ) -> FusedMoEMethodBase:
+        if isinstance(quant_config, OnlineQuantizationConfig):
+            # Imported here: fp8_moe builds on this module's helpers.
+            from vllm.models.muse_spark.nvidia.fp8_moe import online_quant_method
+
+            return online_quant_method(quant_config, type(self), prefix, moe_config)
         if isinstance(quant_config, ModelOptNvFp4Config) and not (
             quant_config.is_layer_excluded(prefix)
         ):
             return MuseSparkModelOptNvFp4FusedMoE(quant_config, moe_config)
         # MuseSpark NVFP4 keeps layers 0 and 61 in BF16.
         return MuseSparkUnquantizedFusedMoE(moe_config)
+
+    def weight_loader(
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        weight_name: str,
+        shard_id: str,
+        expert_id: int,
+        return_success: Any = False,
+    ) -> Any:
+        from vllm.models.muse_spark.nvidia.fp8_moe import MuseSparkFp8FusedMoE
+
+        if isinstance(self.quant_method, MuseSparkFp8FusedMoE):
+            loaded = self.quant_method.quantize_on_load(
+                self, param, loaded_weight, weight_name, shard_id, expert_id
+            )
+            if loaded is not None:
+                return loaded if return_success else None
+        return super().weight_loader(
+            param, loaded_weight, weight_name, shard_id, expert_id, return_success
+        )
 
 
 class MuseMoERunner(MoERunner):
@@ -829,7 +862,8 @@ class MuseMoERunner(MoERunner):
             post_expert_norm, self.moe_config, fuse_all_reduce
         )
         quant_method = cast(
-            MuseSparkModelOptNvFp4FusedMoE | MuseSparkUnquantizedFusedMoE,
+            "MuseSparkModelOptNvFp4FusedMoE | MuseSparkUnquantizedFusedMoE "
+            "| MuseSparkFp8FusedMoE",
             routed_experts.quant_method,
         )
         quant_method.muse_post_expert_finalize = self.post_expert_finalize
