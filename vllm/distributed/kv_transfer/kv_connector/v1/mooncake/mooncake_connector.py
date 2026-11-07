@@ -1955,9 +1955,11 @@ class MooncakeConnectorWorker:
                         )
                     ready_reqs.append((d_req_id, send_meta))
                 else:
-                    # Otherwise (expired, very unlikely), just forget it.
+                    # Aborted before export (woken by record_send_reqs) or
+                    # expired: the reply omits it and the decoder settles it.
                     logger.warning(
-                        "Request %s expired before sending on P side.", d_req_id
+                        "Request %s was aborted or expired before sending on P side.",
+                        d_req_id,
                     )
 
             (
@@ -3114,9 +3116,18 @@ class MooncakeConnectorWorker:
                         ready=asyncio.Event(),
                     )
         for transfer_id in metadata.reqs_not_processed:
-            aborted_meta = self.reqs_need_send.pop(transfer_id, None)
-            if aborted_meta is not None:
-                assert not aborted_meta.ready.is_set()
+            # The request finished (e.g. aborted) before its KV was exported.
+            # A pull already waiting must be answered, and a later pull must
+            # fail fast; neither may create a fresh entry that waits forever.
+            # The worker may never have seen the transfer (no KeyError).
+            self._expired_transfer_ids.pop(transfer_id, None)
+            self._expired_transfer_ids[transfer_id] = time.perf_counter()
+            send_meta = self.reqs_need_send.pop(transfer_id, None)
+            if send_meta is not None:
+                assert not send_meta.ready.is_set()
+                # Wake waiters: they find the entry gone and the reply omits
+                # them, which the decoder settles as failed on FINISH.
+                send_meta.ready.set()
 
     async def _send_lease_heartbeats(
         self, lease_heartbeats: dict[EngineId, LeaseHeartbeat]

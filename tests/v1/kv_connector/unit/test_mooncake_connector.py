@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1479,6 +1480,7 @@ async def test_prefill_early_abort_cleanup_is_idempotent():
 
     unrelated = pending("unrelated")
     worker.reqs_need_send = {"recorded": pending("recorded"), "unrelated": unrelated}
+    worker._expired_transfer_ids = OrderedDict()
 
     metadata = MooncakeConnectorMetadata()
     metadata.reqs_not_processed = {"never-recorded", "recorded"}
@@ -1487,6 +1489,8 @@ async def test_prefill_early_abort_cleanup_is_idempotent():
     for _ in range(2):
         await worker.record_send_reqs(metadata)
         assert worker.reqs_need_send == {"unrelated": unrelated}
+        # Later pulls of both transfers fail at once.
+        assert set(worker._expired_transfer_ids) == {"never-recorded", "recorded"}
 
 
 def test_resolve_need_send_accounts_for_remote_tp_fanout():
@@ -3725,3 +3729,40 @@ def test_sleep_unregisters_and_restores_kv_caches():
         worker.restore_kv_caches()
         worker.restore_kv_caches()
         reg.assert_called_once_with([raw.data_ptr()], [raw.nbytes])
+
+
+@pytest.mark.asyncio
+async def test_abort_before_export_answers_waiting_pull_and_tombstones():
+    """A request aborted before its KV was exported must wake a pull that is
+    already waiting on it, leave a tombstone so a later pull fails fast, and
+    not raise for a transfer this worker never saw."""
+    vllm_config = _make_worker_vllm_config(
+        "kv_producer", kv_connector_extra_config={"kv_lease_duration": 30}
+    )
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch.object(mooncake_connector.httpx, "AsyncClient", _BootstrapClientStub),
+    ):
+        producer = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+
+        # Allocation reported; prefill never finishes.
+        meta = MooncakeConnectorMetadata()
+        meta.reqs_to_send = {"p-req-1": ("xfer-1", [])}
+        await producer.record_send_reqs(meta)
+        send_meta = producer.reqs_need_send["xfer-1"]
+        waiter = asyncio.create_task(send_meta.ready.wait())
+        await asyncio.sleep(0)
+        assert not waiter.done()
+
+        meta = MooncakeConnectorMetadata()
+        meta.reqs_not_processed = {"xfer-1", "xfer-never-seen"}
+        await producer.record_send_reqs(meta)
+
+        await asyncio.wait_for(waiter, timeout=1)
+        assert "xfer-1" not in producer.reqs_need_send
+        assert "xfer-never-seen" not in producer.reqs_need_send
+        assert {"xfer-1", "xfer-never-seen"} <= set(producer._expired_transfer_ids)
+        producer.shutdown()
