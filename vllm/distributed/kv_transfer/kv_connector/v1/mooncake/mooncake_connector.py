@@ -108,6 +108,7 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 WorkerKey = tuple[str, int, int, int]
+BlockRuns = dict[tuple[int, tuple[int, ...]], tuple[np.ndarray, ...]]
 
 ReqId = str  # Internal scheduler request ID
 TransferId = str  # KV transfer coordination ID (shared by P/D)
@@ -2539,7 +2540,11 @@ class MooncakeConnectorWorker:
     ) -> list[list[int]]:
         if self._layerwise:
             return [
-                [block * ratio + offset for block in ids for offset in range(ratio)]
+                ids
+                if ratio == 1
+                else [
+                    block * ratio + offset for block in ids for offset in range(ratio)
+                ]
                 for ratio, ids in zip(self._kernel_block_ratios, block_ids)
             ]
         # For example, if a 544-token logical block is served by 32-token
@@ -2678,15 +2683,12 @@ class MooncakeConnectorWorker:
 
         return src_ptrs, dst_ptrs, lengths, err_reqs, err_msg
 
-    def _build_block_descriptors(
+    def _build_block_runs(
         self,
         local_blocks: list[list[int]],
         remote_blocks: list[list[int]],
-        agent_meta: MooncakeXferMetadata,
         local_regions: list[TransferRegion],
-        remote_regions: list[TransferRegion],
-    ) -> tuple[list[int], list[int], list[int]]:
-        """Build descriptors from already selected and paired logical blocks."""
+    ) -> BlockRuns:
         local_block_ids_by_group = []
         remote_block_ids_by_group = []
         # Normalize before kernel expansion so _contiguous_runs can
@@ -2704,15 +2706,8 @@ class MooncakeConnectorWorker:
             remote_block_ids_by_group
         )
 
-        src_ptrs = []
-        dst_ptrs = []
-        lengths = []
-        # Regions of the same KV group share block ids; group them once.
-        block_runs: dict[tuple[int, tuple[int, ...]], tuple[np.ndarray, ...]] = {}
-        for local_region, remote_region in zip(local_regions, remote_regions):
-            assert local_region.group_index == remote_region.group_index, (
-                "Aligned Mooncake transfer regions must belong to the same KV group."
-            )
+        block_runs: BlockRuns = {}
+        for local_region in local_regions:
             group_key = (local_region.group_index, local_region.shared_group_ids)
             if group_key not in block_runs:
                 local_ids = np.asarray(
@@ -2726,7 +2721,7 @@ class MooncakeConnectorWorker:
                 remote_ids = np.asarray(
                     _block_ids_for_region(
                         remote_block_ids_by_group,
-                        remote_region.group_index,
+                        local_region.group_index,
                         local_region.shared_group_ids,
                     ),
                     dtype=np.int64,
@@ -2736,6 +2731,37 @@ class MooncakeConnectorWorker:
                     remote_ids,
                     *_contiguous_runs(local_ids, remote_ids),
                 )
+        return block_runs
+
+    def _build_block_descriptors(
+        self,
+        local_blocks: list[list[int]],
+        remote_blocks: list[list[int]],
+        agent_meta: MooncakeXferMetadata,
+        local_regions: list[TransferRegion],
+        remote_regions: list[TransferRegion],
+        block_runs: BlockRuns | None = None,
+    ) -> tuple[list[int], list[int], list[int]]:
+        """Build region addresses, reusing block runs within a send batch."""
+        if block_runs is None:
+            block_runs = {}
+        missing_regions = [
+            region
+            for region in local_regions
+            if (region.group_index, region.shared_group_ids) not in block_runs
+        ]
+        if missing_regions:
+            block_runs.update(
+                self._build_block_runs(local_blocks, remote_blocks, missing_regions)
+            )
+        src_ptrs = []
+        dst_ptrs = []
+        lengths = []
+        for local_region, remote_region in zip(local_regions, remote_regions):
+            assert local_region.group_index == remote_region.group_index, (
+                "Aligned Mooncake transfer regions must belong to the same KV group."
+            )
+            group_key = (local_region.group_index, local_region.shared_group_ids)
             local_ids, remote_ids, run_starts, run_lens = block_runs[group_key]
             if len(local_ids) == 0:
                 continue
@@ -4250,7 +4276,7 @@ class MooncakeConnectorWorker:
         return spec.block_size // self.block_size
 
     def _build_layer_transfer_params(
-        self, task: SendTask
+        self, task: SendTask, block_runs: BlockRuns | None = None
     ) -> tuple[list[int], list[int], list[int]]:
         local, remote = task.destination.layout.regions_by_layer[task.kv_cache_name]
         return self._build_block_descriptors(
@@ -4259,6 +4285,7 @@ class MooncakeConnectorWorker:
             task.destination.meta,
             local,
             remote,
+            block_runs,
         )
 
     def _send_batch(
@@ -4267,8 +4294,15 @@ class MooncakeConnectorWorker:
         """Executor: prepare and send one destination's batch."""
         result = SendResult()
         planned_transfers = []
+        block_runs_by_mapping: dict[tuple, BlockRuns] = {}
         for layer_transfer_task in tasks:
-            src, dst, sizes = self._build_layer_transfer_params(layer_transfer_task)
+            block_runs = block_runs_by_mapping.setdefault(
+                (layer_transfer_task.block_ids, layer_transfer_task.remote_block_ids),
+                {},
+            )
+            src, dst, sizes = self._build_layer_transfer_params(
+                layer_transfer_task, block_runs
+            )
             planned_transfers.append((layer_transfer_task, src, dst, sizes))
         event.synchronize()
         now = time.monotonic()
