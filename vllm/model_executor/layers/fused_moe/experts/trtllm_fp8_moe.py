@@ -449,6 +449,80 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         else:
             raise ValueError("Unsupported quantization scheme.")
 
+    def supports_precomputed_routing(self) -> bool:
+        return self.quant_config.block_shape is not None
+
+    def apply_routed(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        a1q_scale: torch.Tensor | None,
+    ) -> torch.Tensor:
+        import flashinfer
+
+        assert a1q_scale is not None
+        kwargs = self._block_scale_kwargs(hidden_states, w1, w2, activation, a1q_scale)
+        return flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(
+            topk_ids=(topk_ids, topk_weights),
+            routing_bias=None,
+            num_experts=global_num_experts,
+            top_k=topk_ids.size(1),
+            n_group=None,
+            topk_group=None,
+            routed_scaling_factor=None,
+            routing_method_type=1,  # unused: routing is precomputed
+            **kwargs,
+        )
+
+    def _block_scale_kwargs(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        activation: MoEActivation,
+        a1q_scale: torch.Tensor,
+    ) -> dict:
+        """Arguments shared by the logits- and topk-routed block-scale calls."""
+        from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
+
+        assert activation in [
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.RELU2_NO_MUL,
+        ]
+        assert self.quant_config.block_shape in [[128, 128], [1, 32]]
+        is_mxfp8 = self.quant_config.block_shape == [1, 32]
+        kwargs = dict(
+            hidden_states=hidden_states,
+            hidden_states_scale=a1q_scale if is_mxfp8 else a1q_scale.t().contiguous(),
+            gemm1_weights=w1,
+            gemm1_weights_scale=self.quant_config.w1_scale,
+            gemm1_alpha=self.gemm1_alpha,
+            gemm1_beta=self.gemm1_beta,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
+            gemm2_weights=w2,
+            gemm2_weights_scale=self.quant_config.w2_scale,
+            intermediate_size=self.intermediate_size_per_partition,
+            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_num_experts=self.local_num_experts,
+            use_shuffled_weight=True,
+            weight_layout=WeightLayout.MajorK if is_mxfp8 else WeightLayout.BlockMajorK,
+            fp8_quantization_type=(
+                Fp8QuantizationType.MxFp8
+                if is_mxfp8
+                else Fp8QuantizationType.DeepSeekFp8
+            ),
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
+        )
+        if is_mxfp8 or activation == MoEActivation.RELU2_NO_MUL:
+            kwargs["activation_type"] = activation_to_flashinfer_int(activation)
+        return kwargs
+
     def _apply_block_scale(
         self,
         hidden_states: torch.Tensor,
@@ -468,70 +542,35 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         import flashinfer
-        from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
 
         assert not apply_router_weight_on_input
-        assert activation in [
-            MoEActivation.SILU,
-            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
-            MoEActivation.RELU2_NO_MUL,
-        ]
-        activation_type = activation_to_flashinfer_int(activation)
         assert self.topk <= global_num_experts
         assert global_num_experts % 4 == 0
-        assert self.quant_config.block_shape in [[128, 128], [1, 32]]
         # Kernel expects #experts <= #threads 512
         assert global_num_experts <= 512
         # TODO: fuse into the quant kernel.
         assert a1q_scale is not None
 
-        is_mxfp8 = self.quant_config.block_shape == [1, 32]
-        if is_mxfp8:
-            fp8_quant_type = Fp8QuantizationType.MxFp8
-            use_shuffled_weight = True
-            weight_layout = WeightLayout.MajorK
-            hidden_states_scale = a1q_scale
+        kwargs = self._block_scale_kwargs(hidden_states, w1, w2, activation, a1q_scale)
+        if self.quant_config.block_shape == [1, 32]:
             # FlashInfer expects None for non-grouped MXFP8 routing configs.
             n_group = num_expert_group or None
             selected_topk_group = topk_group or None
         else:
             assert self.topk <= 32
-            fp8_quant_type = Fp8QuantizationType.DeepSeekFp8
-            use_shuffled_weight = True
-            weight_layout = WeightLayout.BlockMajorK
-            hidden_states_scale = a1q_scale.t().contiguous()
             n_group = num_expert_group or 0
             selected_topk_group = topk_group or 0
-
-        kwargs = dict(
+        kwargs.update(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
-            hidden_states=hidden_states,
-            hidden_states_scale=hidden_states_scale,
-            gemm1_weights=w1,
-            gemm1_weights_scale=self.quant_config.w1_scale,
-            gemm1_alpha=self.gemm1_alpha,
-            gemm1_beta=self.gemm1_beta,
-            gemm1_clamp_limit=self.gemm1_clamp_limit,
-            gemm2_weights=w2,
-            gemm2_weights_scale=self.quant_config.w2_scale,
             num_experts=global_num_experts,
             top_k=self.topk,
             n_group=n_group,
             topk_group=selected_topk_group,
-            intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
-            local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
-            use_shuffled_weight=use_shuffled_weight,
-            weight_layout=weight_layout,
-            fp8_quantization_type=fp8_quant_type,
             routing_replay_out=routing_replay_out,
-            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
-        if is_mxfp8 or activation == MoEActivation.RELU2_NO_MUL:
-            kwargs["activation_type"] = activation_type
         result = flashinfer.fused_moe.trtllm_fp8_block_scale_moe(**kwargs)
         return result
 

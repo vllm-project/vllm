@@ -49,6 +49,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
+from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import grouped_topk
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
     swap_w13_to_w31,
@@ -1177,6 +1178,170 @@ def test_trtllm_mxfp8_minimax2_routing_applies_routed_scale(m: int, workspace_in
         )
 
     torch.testing.assert_close(fused, reference, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize(
+    ("block_shape", "routing"),
+    [([128, 128], "softmax"), ([1, 32], "sigmoid_bias"), ([128, 128], "grouped")],
+    ids=["block", "mxfp8", "block-grouped"],
+)
+@pytest.mark.parametrize("m", [4, 64])
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Requires TRTLLM-Gen FP8 MoE (SM100)",
+)
+def test_trtllm_fp8_monolithic_routed_skips_padding(
+    m: int, block_shape: list[int], routing: str, workspace_init
+):
+    """With vLLM's top-k, padded rows (expert id -1) reach no expert and real
+    rows match the kernel's own routing. Routes like Qwen (softmax,
+    renormalized), MiniMax (sigmoid with bias, scaled) and DeepSeek-V3 / GLM
+    (grouped sigmoid with bias, scaled)."""
+    is_mxfp8 = block_shape == [1, 32]
+    is_grouped = routing == "grouped"
+    e, topk, n, k = (64, 8, 512, 1024) if is_grouped else (32, 4, 1024, 1024)
+    num_expert_group, topk_group = (8, 4) if is_grouped else (None, None)
+    scale = {"softmax": None, "sigmoid_bias": 2.0, "grouped": 2.5}[routing]
+    num_real = m // 2
+    set_random_seed(7)
+    with set_current_vllm_config(vllm_config):
+        if is_mxfp8:
+            weights = _make_mxfp8_moe_weights(e, n, k)
+        else:
+            (_, w1, w1_scale, _), (_, w2, w2_scale, _) = make_test_weights(
+                e, n, k, quant_dtype=torch.float8_e4m3fn, block_shape=block_shape
+            )
+            weights = (w1, w2, w1_scale, w2_scale)
+        w1, w2, w1_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            SimpleNamespace(
+                weight_block_size=block_shape,
+                moe_config=SimpleNamespace(
+                    is_act_and_mul=True, intermediate_size_per_partition=n
+                ),
+                activation=MoEActivation.SILU,
+            ),
+            *weights,
+            w13_input_scale=None,
+            w2_input_scale=None,
+        )
+        quant_config = make_fp8_moe_quant_config(
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            w1_scale,
+            w2_scale,
+            a1_scale=None,
+            a2_scale=None,
+            block_shape=block_shape,
+        )
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=MoEActivation.SILU,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=torch.bfloat16,
+            routing_method={
+                "softmax": RoutingMethodType.Renormalize,
+                "sigmoid_bias": RoutingMethodType.MiniMax2,
+                "grouped": RoutingMethodType.DeepSeekV3,
+            }[routing],
+            max_num_tokens=next_power_of_2(m),
+        )
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=True,
+            ),
+            TrtLlmFp8ExpertsMonolithic(
+                moe_config=moe_config, quant_config=quant_config
+            ),
+        )
+        assert isinstance(kernel.impl, mk.FusedMoEKernelMonolithicImpl)
+        experts = kernel.impl.fused_experts
+        assert experts.supports_precomputed_routing()
+
+        a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
+        logits = torch.randn((m, e), device="cuda", dtype=torch.float32)
+        bias = (
+            torch.randn(e, device="cuda", dtype=torch.float32) / 10
+            if routing != "softmax"
+            else None
+        )
+        is_padding = torch.arange(m, device="cuda") >= num_real
+        common = dict(w1=w1, w2=w2, activation=MoEActivation.SILU, global_num_experts=e)
+
+        def route() -> tuple[torch.Tensor, torch.Tensor]:
+            if is_grouped:
+                topk_weights, topk_ids = grouped_topk(
+                    a,
+                    logits,
+                    topk,
+                    renormalize=True,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    scoring_func="sigmoid",
+                    routed_scaling_factor=scale,
+                    e_score_correction_bias=bias,
+                )
+            elif is_mxfp8:
+                topk_weights, topk_ids = fused_topk_bias(
+                    a,
+                    logits,
+                    scoring_func="sigmoid",
+                    e_score_correction_bias=bias,
+                    topk=topk,
+                    renormalize=True,
+                    routed_scaling_factor=scale,
+                )
+            else:
+                topk_weights, topk_ids, _ = fused_topk(
+                    a, logits, topk, renormalize=True
+                )
+            # What vLLM's routers write for padding rows.
+            topk_ids = topk_ids.to(torch.int32).masked_fill(is_padding[:, None], -1)
+            return topk_weights, topk_ids
+
+        topk_weights, topk_ids = route()
+        # Production takes this path only under DP (NaiveDPEP dispatch); here the
+        # experts run on one GPU with the same quantized input as the reference.
+        a1q, a1q_scale, _ = kernel.impl.prepare_finalize.prepare(
+            a,
+            logits,
+            quant_config=quant_config,
+            defer_input_quant=experts.expects_unquantized_inputs,
+        )
+        routed = experts.apply_routed(
+            hidden_states=a1q,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            a1q_scale=a1q_scale,
+            **common,
+        )
+        reference = kernel.apply_monolithic(
+            hidden_states=a,
+            router_logits=logits,
+            e_score_correction_bias=bias,
+            routed_scaling_factor=scale,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+            routing_sink=None,
+            **common,
+        )
+
+    assert isinstance(routed, torch.Tensor)
+    assert isinstance(reference, torch.Tensor)
+    torch.testing.assert_close(
+        routed[:num_real], reference[:num_real], atol=2e-2, rtol=2e-2
+    )
+    assert not routed[num_real:].any()
 
 
 @pytest.mark.parametrize(

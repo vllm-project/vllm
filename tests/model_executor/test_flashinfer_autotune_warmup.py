@@ -681,3 +681,21 @@ def test_autotune_cache_key_normalizes_kv_init_fields():
     # block_size stays significant (the daemon keys on the resolved value).
     resolved = CacheConfig(block_size=32)
     assert hash_config(_normalize_cache_config_for_hash(resolved)) != hash_config(fresh)
+
+
+def test_autotune_cache_key_separates_moe_routed_tuning_under_dp(monkeypatch):
+    """DP runs with MoE padding skip also tune the precomputed-routing TRT-LLM
+    MoE ops; a cache tuned without them must not hit and skip tuning. Other
+    configs keep their key."""
+    from vllm.config import ParallelConfig, VllmConfig
+    from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+        flashinfer_autotune_cache_hash,
+    )
+
+    def key(dp: int, skip: str) -> str:
+        monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", skip)
+        config = VllmConfig(parallel_config=ParallelConfig(data_parallel_size=dp))
+        return flashinfer_autotune_cache_hash(SimpleNamespace(vllm_config=config))
+
+    assert key(1, "1") == key(1, "0")
+    assert key(2, "1") != key(2, "0")

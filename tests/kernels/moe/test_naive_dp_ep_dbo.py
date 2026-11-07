@@ -116,3 +116,34 @@ def test_default_supports_dbo_follows_supports_async():
     assert not mono.supports_dbo()
     with patch.object(type(mono), "supports_async", return_value=True):
         assert mono.supports_dbo()
+
+
+def test_monolithic_prepare_routed_dispatches_topk_not_logits():
+    """DP padding skip routes locally and gathers the -1 ids of padded rows, so
+    no rank's experts see them; logits must not be dispatched."""
+    from vllm.model_executor.layers.fused_moe.config import (
+        FUSED_MOE_UNQUANTIZED_CONFIG,
+    )
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep import (
+        MoEPrepareAndFinalizeNaiveDPEPMonolithic,
+    )
+
+    def gather_two_ranks(hidden, weights, ids, **kwargs):
+        return tuple(torch.cat([t, t]) for t in (hidden, weights, ids))
+
+    ep_group = MagicMock()
+    ep_group.dispatch.side_effect = gather_two_ranks
+    pf = MoEPrepareAndFinalizeNaiveDPEPMonolithic()
+    hidden = torch.randn(3, 8)
+    weights = torch.rand(3, 2)
+    ids = torch.tensor([[0, 1], [2, 3], [-1, -1]], dtype=torch.int32)
+    with patch.object(naive_dp_ep, "get_ep_group", return_value=ep_group):
+        a1q, a1q_scale, out_weights, out_ids = pf.prepare_routed(
+            hidden, weights, ids, quant_config=FUSED_MOE_UNQUANTIZED_CONFIG
+        )
+
+    assert pf.supports_precomputed_routing()
+    ep_group.dispatch_router_logits.assert_not_called()
+    assert a1q.shape == (6, 8) and a1q_scale is None
+    torch.testing.assert_close(out_ids, torch.cat([ids, ids]))
+    torch.testing.assert_close(out_weights, torch.cat([weights, weights]))

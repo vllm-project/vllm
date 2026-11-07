@@ -1479,6 +1479,33 @@ class RoutedExperts(PluggableLayer):
             input_ids=input_ids,
         )
 
+    @property
+    def supports_precomputed_routing(self) -> bool:
+        """Whether a monolithic kernel can take vLLM's routing instead."""
+        moe_kernel = getattr(self.quant_method, "moe_kernel", None)
+        return moe_kernel is not None and moe_kernel.supports_precomputed_routing()
+
+    def forward_monolithic_routed(
+        self,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
+        """Run a monolithic kernel on vLLM's routing, where padding rows are -1
+        and activate no expert, which the kernel's own routing cannot do."""
+        moe_kernel = self.quant_method.moe_kernel
+        assert moe_kernel is not None and moe_kernel.supports_precomputed_routing()
+        return moe_kernel.apply_monolithic_routed(
+            x,
+            self.w13_weight,
+            self.w2_weight,
+            topk_weights,
+            topk_ids,
+            activation=self.activation,
+            global_num_experts=self.global_num_experts,
+            routing_sink=self.routing_sink,
+        )
+
     def forward(
         self,
         *args,
