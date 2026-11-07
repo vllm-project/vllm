@@ -389,6 +389,41 @@ def has_flashinfer_autotune_v2() -> bool:
 
 
 @functools.cache
+def has_flashinfer_nvfp4_kv_head_dim_512() -> bool:
+    """Return whether FlashInfer can serve an NVFP4 KV cache at head_dim 512:
+    PrimTS decode at that head_dim (flashinfer-ai/flashinfer#5720) and the
+    NVFP4-to-FP8 KV materializer for prefill (flashinfer-ai/flashinfer#6445).
+    """
+    if not has_flashinfer():
+        return False
+    decode = _get_submodule("flashinfer.attention.prims_ts.decode")
+    kernels = _get_submodule("flashinfer.quantization.kernels")
+    return (
+        decode is not None
+        and hasattr(decode, "BatchDecodePagedTSWrapper")
+        and 512 in getattr(decode, "_SUPPORTED_HEAD_DIMS", ())
+        and kernels is not None
+        and hasattr(kernels, "nvfp4_kv_materialize_fp8")
+    )
+
+
+@functools.cache
+def has_flashinfer_prims_ts_shared_decode_workspace() -> bool:
+    """Return whether PrimTS decode plans can share one zeroed workspace:
+    split counters sit in a fixed region at the end of the bound buffer
+    (flashinfer-ai/flashinfer#8078) instead of at a per-plan offset.
+    """
+    if not has_flashinfer():
+        return False
+    decode = _get_submodule("flashinfer.attention.prims_ts.decode")
+    layout_fn = getattr(decode, "_make_decode_workspace_layout", None)
+    return (
+        callable(layout_fn)
+        and "scratch_reserve" in inspect.signature(layout_fn).parameters
+    )
+
+
+@functools.cache
 def has_flashinfer_comm() -> bool:
     """Return `True` if FlashInfer comm module is available."""
     return has_flashinfer() and importlib.util.find_spec("flashinfer.comm") is not None
@@ -1351,6 +1386,8 @@ __all__ = [
     "has_flashinfer_moe",
     "has_flashinfer_autotune_v2",
     "has_flashinfer_comm",
+    "has_flashinfer_nvfp4_kv_head_dim_512",
+    "has_flashinfer_prims_ts_shared_decode_workspace",
     "has_flashinfer_nvlink_two_sided",
     "has_flashinfer_nvlink_one_sided",
     "has_flashinfer_cutlass_fused_moe",
