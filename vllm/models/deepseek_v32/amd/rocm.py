@@ -8,6 +8,9 @@ import torch
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.attention.kv_transfer_utils import (
+    maybe_transfer_kv_layer,
+)
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.model_executor.layers.sparse_attn_indexer import (
     SparseAttnIndexer,
@@ -92,7 +95,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             device=hidden_states.device,
         )
         self._fused_attention(
-            positions, q_c, kv_c, k_pe, index_k, index_weights, output
+            self.layer_name, positions, q_c, kv_c, k_pe, index_k, index_weights, output
         )
         return self.o_proj(output)[0]
 
@@ -167,8 +170,10 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             torch.bmm(x, self.W_UV, out=out_view.transpose(0, 1))
 
     @eager_break_during_capture
+    @maybe_transfer_kv_layer
     def _fused_attention(
         self,
+        layer_name: str,
         positions: torch.Tensor,
         q_c: torch.Tensor,
         kv_c: torch.Tensor,
