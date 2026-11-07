@@ -39,10 +39,9 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
   // Each thread block is responsible for one token.
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
-  // NOTE: slot_idx can be -1 if the token is padded
-  if (slot_idx < 0) {
-    return;
-  }
+  // NOTE: slot_idx is -1 for padded tokens and, under DCP, for tokens whose
+  // KV is on another rank. RoPE still applies; only the store is skipped.
+  const bool store_kv = slot_idx >= 0;
   const int64_t pos = positions[token_idx];
 
   const cos_sin_t* cos_sin_ptr = rope_cos_sin_cache + pos * rot_dim;
@@ -116,6 +115,10 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
     k_pe_head_ptr[pair_idx_x] = x_dst;
     k_pe_head_ptr[pair_idx_y] = y_dst;
 
+    if (!store_kv) {
+      continue;
+    }
+
     // NOTE Why is this monster necessary?
     // When K is of type float16, the actual template replacement for
     // raw_kv_scalar_t with be u16. That's why it's used at the last moment
@@ -140,6 +143,10 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
           fp8::scaled_convert<cache_t, raw_kv_scalar_t, kv_dt>(
               raw_y_value, *kv_cache_quant_scale);
     }
+  }
+
+  if (!store_kv) {
+    return;
   }
 
   // NOPE

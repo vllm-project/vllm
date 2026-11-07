@@ -323,3 +323,54 @@ def test_concat_and_cache_mla_rope_fused(
             atol=get_default_atol(query),
             rtol=get_default_rtol(query),
         )
+
+
+@pytest.mark.parametrize("is_neox_style", [False, True])
+@torch.inference_mode()
+def test_concat_and_cache_mla_rope_fused_skips_only_store_for_slot_minus_one(
+    default_vllm_config, is_neox_style: bool
+) -> None:
+    """Tokens with slot -1 still get RoPE on q_pe and k_pe.
+
+    Under DCP, a rank's slot mapping is -1 for tokens whose KV is on another
+    rank. The rank still computes attention for those tokens' queries, so only
+    the cache store may be skipped.
+    """
+    set_random_seed(0)
+    torch.set_default_device("cuda:0")
+    num_tokens, num_heads, rope_dim, kv_lora_rank = 8, 16, 64, 512
+
+    rope = RotaryEmbedding(rope_dim, rope_dim, 8192, 10000, is_neox_style, torch.float)
+    positions = torch.randint(0, 8192, (num_tokens,))
+    q_pe = torch.randn(num_tokens, num_heads, rope_dim)
+    k_pe = torch.randn(num_tokens, rope_dim)
+    kv_c = torch.randn(num_tokens, kv_lora_rank)
+    # Even tokens own slot i of block 0; odd tokens are stored on another rank.
+    slot_mapping = torch.tensor([i if i % 2 == 0 else -1 for i in range(num_tokens)])
+
+    ref_rope = rope.forward_hip if current_platform.is_rocm() else rope.forward_native
+    ref_q_pe, ref_k_pe = ref_rope(positions, q_pe.clone(), k_pe.clone())
+    assert ref_k_pe is not None
+    ref_k_pe = ref_k_pe.flatten(start_dim=1)
+
+    kv_cache = torch.zeros(1, 16, kv_lora_rank + rope_dim)
+    ref_kv_cache = torch.zeros_like(kv_cache)
+    for i in range(0, num_tokens, 2):
+        ref_kv_cache[0, i] = torch.cat((kv_c[i], ref_k_pe[i]))
+
+    ops.concat_and_cache_mla_rope_fused(
+        positions,
+        q_pe,
+        k_pe,
+        kv_c,
+        rope.cos_sin_cache,
+        is_neox_style,
+        slot_mapping,
+        kv_cache,
+        "auto",
+        torch.tensor([1.0]),
+    )
+
+    torch.testing.assert_close(q_pe, ref_q_pe)
+    torch.testing.assert_close(k_pe, ref_k_pe)
+    torch.testing.assert_close(kv_cache, ref_kv_cache)

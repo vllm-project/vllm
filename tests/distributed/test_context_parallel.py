@@ -62,6 +62,7 @@ class ParallelSetup(NamedTuple):
 class CPTestOptions(NamedTuple):
     multi_node_only: bool
     attn_backend: str | None = None
+    compilation_config: dict | None = None
 
 
 @dataclass
@@ -81,6 +82,7 @@ class CPTestSettings:
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
         attn_backend: str | None = None,
+        compilation_config: dict | None = None,
     ):
         parallel_setups = []
         if dcp_multipliers is None:
@@ -108,6 +110,7 @@ class CPTestSettings:
             test_options=CPTestOptions(
                 multi_node_only=multi_node_only,
                 attn_backend=attn_backend,
+                compilation_config=compilation_config,
             ),
         )
 
@@ -142,6 +145,15 @@ else:
                 dcp_multipliers=[0.5],
                 cp_kv_cache_interleave_size=64,
                 attn_backend="FLASHMLA",
+            ),
+            # MLA RoPE + KV-cache fusion under DCP, where non-local tokens have slot -1.
+            CPTestSettings.detailed(
+                tp_base=2,
+                dcp_multipliers=[1],
+                compilation_config={
+                    "use_inductor_graph_partition": True,
+                    "pass_config": {"fuse_rope_kvcache_cat_mla": True},
+                },
             ),
         ],
         "Qwen/Qwen2.5-1.5B-Instruct": [
@@ -181,7 +193,7 @@ def _test_cp_gsm8k(
         chunked_prefill,
     ) = parallel_setup
 
-    multi_node_only, attn_backend = test_options
+    multi_node_only, attn_backend, compilation_config = test_options
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_transformers_version(on_fail="skip")
@@ -241,6 +253,8 @@ def _test_cp_gsm8k(
 
     if attn_backend:
         server_args.append(f"--attention-backend={attn_backend}")
+    if compilation_config:
+        server_args.extend(["--compilation-config", json.dumps(compilation_config)])
 
     with RemoteOpenAIServer(
         model_id,
