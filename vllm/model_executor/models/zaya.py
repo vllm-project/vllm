@@ -534,6 +534,10 @@ class ZayaModel(nn.Module):
 
 
 class ZayaForCausalLM(nn.Module, HasInnerState, IsHybrid):
+    # load_weights takes the stacked experts.{gate_up,down}_proj names itself;
+    # the load plan must not split them into per-expert names.
+    loads_stacked_experts = True
+
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
         return _cca_state_shapes(vllm_config.model_config.hf_config)

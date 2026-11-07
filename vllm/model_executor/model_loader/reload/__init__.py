@@ -26,6 +26,7 @@ __all__ = [
     "check_plannable",
     "load_planned",
     "plan_loads",
+    "split_stacked_experts",
     "start_reload",
     "set_torchao_reload_attrs",
     "support_quantized_model_reload_from_hp_weights",
@@ -39,6 +40,7 @@ from .layerwise import (
 )
 from .lifecycle import finish_reload, start_reload
 from .plan import LoadPlan, check_plannable, load_planned, plan_loads
+from .stacked_experts import split_stacked_experts
 from .torchao_decorator import (
     set_torchao_reload_attrs,
     support_quantized_model_reload_from_hp_weights,

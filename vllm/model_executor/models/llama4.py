@@ -140,6 +140,8 @@ class Llama4MoE(nn.Module):
             renormalize=False,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
+            # fused experts.gate_up_proj [E, H, 2I], experts.down_proj [E, I, H]
+            is_fused_checkpoint_transposed=True,
             is_sequence_parallel=self.is_sequence_parallel,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,

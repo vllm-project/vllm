@@ -16,6 +16,7 @@ import contextlib
 from types import SimpleNamespace
 
 import pytest
+import regex as re
 import torch
 
 from vllm.distributed.weight_transfer.base import ParamMeta
@@ -147,11 +148,11 @@ def _plan(model, shapes, mirrors=()) -> LoadPlan:
     return plan
 
 
-def _check_plan_equals_cold_start(make, shapes, mirrors=()):
+def _check_plan_equals_cold_start(make, shapes, mirrors=(), cold=lambda w: w):
     """Plan at the first update's start; that update and a second one reusing
-    the plan, with new random weights, must each equal a cold start on them,
-    byte for byte, and keep every address."""
-    model = _cold_start(make, _checkpoint(shapes, seed=0))
+    the plan, with new random weights, must each equal a cold start on them
+    (renamed by ``cold``), byte for byte, and keep every address."""
+    model = _cold_start(make, cold(_checkpoint(shapes, seed=0)))
     ptrs = {n: s[4] for n, s in _state(model).items()}
     start_reload(model)
     plan = _plan(model, shapes, mirrors)
@@ -160,7 +161,7 @@ def _check_plan_equals_cold_start(make, shapes, mirrors=()):
             start_reload(model)
         new = _checkpoint(shapes, seed=seed)
         _planned_reload(model, plan, new)
-        actual, expected = _state(model), _state(_cold_start(make, new))
+        actual, expected = _state(model), _state(_cold_start(make, cold(new)))
         assert actual.keys() == expected.keys()
         for name, (dtype, shape, stride, data, ptr) in actual.items():
             assert (dtype, shape, stride) == expected[name][:3], name
@@ -751,3 +752,224 @@ def test_eplb_is_refused():
     start_reload(model)
     with pytest.raises(RuntimeError, match="EPLB"):
         plan_loads(model, _metadata(shapes))
+
+
+# ------------------------------------------------- stacked routed experts (v5)
+
+_SE, _SH, _SI = 8, 16, 12  # experts, hidden, intermediate
+F32 = torch.float32
+_GATE_DOWN_UP = ("gate_proj", "down_proj", "up_proj")
+
+
+def _routed_experts(
+    tp=(1, 0), ep=(1, 0), placement="linear", block=None, names=_GATE_DOWN_UP
+):
+    """A real CPU ``RoutedExperts`` (expert TP/EP faked as (size, rank)) with
+    checkpoint names ``names`` (gate, down, up), and 2x2 block scales if
+    ``block`` (their stacked suffix, a key of ``_BLOCK_SCALES``)."""
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+        ExpertMapManager,
+    )
+    from vllm.model_executor.layers.fused_moe.routed_experts import (
+        FusedMoeWeightScaleSupported,
+        RoutedExperts,
+    )
+
+    parallel = FusedMoEParallelConfig(
+        tp_size=tp[0], tp_rank=tp[1], pcp_size=1, pcp_rank=0, dp_size=1,
+        dp_rank=0, ep_size=ep[0], ep_rank=ep[1], sp_size=1, use_ep=ep[0] > 1,
+        all2all_backend="allgather_reducescatter", enable_eplb=False,
+    )  # fmt: skip
+    expert_map = ExpertMapManager(
+        max_num_batched_tokens=16, top_k=2, global_num_experts=_SE,
+        num_redundant_experts=0, num_expert_group=2, moe_parallel_config=parallel,
+        placement_strategy=placement, enable_eplb=False,
+    )  # fmt: skip
+    moe_config = FusedMoEConfig(
+        num_experts=_SE, experts_per_token=2, hidden_dim=_SH,
+        intermediate_size=_SI, num_local_experts=expert_map.local_num_experts,
+        num_logical_experts=_SE, moe_parallel_config=parallel,
+        activation=MoEActivation.SILU, in_dtype=F32, device="cpu",
+        routing_method=RoutingMethodType.TopK, max_num_tokens=16,
+    )  # fmt: skip
+    experts = RoutedExperts(
+        "experts", F32, moe_config, None, expert_map,
+        ckpt_gate_proj_name=names[0], ckpt_down_proj_name=names[1],
+        ckpt_up_proj_name=names[2],
+    )  # fmt: skip
+    if block:
+        local, inter = experts.local_num_experts, _SI // tp[0]
+        scale = _BLOCK_SCALES[block]
+        for name, shape in (
+            (f"w13_{scale}", (local, 2 * inter // 2, _SH // 2)),
+            (f"w2_{scale}", (local, _SH // 2, inter // 2)),
+        ):
+            p = _param(*shape, dtype=F32, loader=experts.weight_loader)
+            p.quant_method = FusedMoeWeightScaleSupported.BLOCK.value
+            experts.register_parameter(name, p)
+    for p in experts.parameters():
+        p.data.fill_(-7.0)
+    return experts
+
+
+class _GenericMoE(torch.nn.Module):
+    """``AutoWeightsLoader``, which hands ``experts.*`` to
+    ``RoutedExperts.load_weights``; that takes the stacked form itself, so
+    the split must only not break it."""
+
+    names = _GATE_DOWN_UP
+
+    def load_weights(self, weights):
+        from vllm.model_executor.models.utils import AutoWeightsLoader
+
+        return AutoWeightsLoader(self).load_weights(weights)
+
+
+class _HandRolledMoE(torch.nn.Module):
+    """The per-expert mapping loop that hand-rolled model loaders use; it
+    matches ``experts.<e>.<names>.`` and knows no stacked names."""
+
+    names = _GATE_DOWN_UP
+
+    def load_weights(self, weights):
+        from vllm.model_executor.layers.fused_moe.routed_experts import (
+            RoutedExperts,
+        )
+
+        mapping = RoutedExperts.make_expert_params_mapping(
+            self, *self.names, _SE, routed_experts_prefix=""
+        )
+        params = dict(self.named_parameters())
+        for name, weight in weights:
+            matched = False
+            for param_name, weight_name, expert_id, shard_id in mapping:
+                if weight_name not in name:
+                    continue
+                matched = True
+                mapped = name.replace(weight_name, param_name)
+                param = params[mapped]
+                if param.weight_loader(
+                    param, weight, mapped, shard_id=shard_id,
+                    expert_id=expert_id, return_success=True,
+                ):  # fmt: skip
+                    break
+            if not matched:
+                raise KeyError(name)
+
+
+# stacked block-scale suffix -> per-expert checkpoint (and parameter) suffix
+_BLOCK_SCALES = {"_scale_inv": "weight_scale_inv", "_weight_scale": "weight_scale"}
+
+
+def _stacked_shapes(block: str | None = None) -> dict:
+    shapes = {
+        "experts.gate_up_proj": ((_SE, 2 * _SI, _SH), F32),
+        "experts.down_proj": ((_SE, _SH, _SI), F32),
+    }
+    if block:
+        shapes[f"experts.gate_up_proj{block}"] = ((_SE, _SI, _SH // 2), F32)
+        shapes[f"experts.down_proj{block}"] = ((_SE, _SH // 2, _SI // 2), F32)
+    return shapes
+
+
+class _W123MoE(_HandRolledMoE):
+    """A hand-rolled loader for a checkpoint that names experts ``w1/w2/w3``."""
+
+    names = ("w1", "w2", "w3")
+
+
+def _per_expert(weights: dict[str, torch.Tensor], names=_GATE_DOWN_UP) -> dict:
+    """The same values with stacked names under per-expert names (what cold
+    start loads); other names unchanged."""
+    gate_name, down_name, up_name = names
+    out = {}
+    for name, t in weights.items():
+        match = re.fullmatch(r"(.*experts)\.(gate_up|down)_proj(_\w+)?", name)
+        if match is None:
+            out[name] = t.clone()
+            continue
+        prefix, proj, rest = match.groups()
+        suffix = _BLOCK_SCALES[rest] if rest else "weight"
+        for e in range(_SE):
+            if proj == "down":
+                out[f"{prefix}.{e}.{down_name}.{suffix}"] = t[e].clone()
+            else:
+                gate, up = t[e].chunk(2, dim=0)
+                out[f"{prefix}.{e}.{gate_name}.{suffix}"] = gate.clone()
+                out[f"{prefix}.{e}.{up_name}.{suffix}"] = up.clone()
+    return out
+
+
+@pytest.mark.parametrize(
+    "loader,tp,ep,placement,block",
+    [
+        (_GenericMoE, (1, 0), (1, 0), "linear", None),
+        (_HandRolledMoE, (2, 0), (2, 1), "linear", None),
+        (_HandRolledMoE, (1, 0), (4, 1), "round_robin", "_weight_scale"),
+        (_W123MoE, (2, 1), (1, 0), "linear", "_scale_inv"),
+    ],
+)
+def test_stacked_experts_are_direct(
+    default_vllm_config, loader, tp, ep, placement, block
+):
+    """Stacked names reach every loader as per-expert views under the layer's
+    checkpoint names: the plan is direct, one write per run of local experts
+    and gate/up half, and a planned update equals a cold start on the same
+    values in per-expert form."""
+
+    def make():
+        model = loader()
+        model.experts = _routed_experts(tp, ep, placement, block, loader.names)
+        return model
+
+    shapes = _stacked_shapes(block)
+    _, plan = _check_plan_equals_cold_start(
+        make, shapes, cold=lambda w: _per_expert(w, loader.names)
+    )
+    runs = 2 if placement == "round_robin" else 1
+    halves = 2 if tp[0] > 1 else 1
+    for name in shapes:
+        writes = plan.entries[name].writes
+        assert writes is not None, name
+        assert len(writes) == runs * (halves if "gate_up" in name else 1), name
+
+
+def test_stacked_expert_fallbacks_are_split(default_vllm_config):
+    """A stacked name that falls back (here: sent as bf16 into f32 experts)
+    reaches ``load_weights`` as per-expert views too, under its layer's
+    prefix; per-expert names pass through."""
+
+    def make():
+        model = _HandRolledMoE()
+        model.mlp = torch.nn.Module()
+        model.mlp.experts = _routed_experts()
+        return model
+
+    shapes = {"mlp.experts.gate_up_proj": ((_SE, 2 * _SI, _SH), BF16)}
+    for e in range(_SE):
+        shapes[f"mlp.experts.{e}.down_proj.weight"] = ((_SH, _SI), BF16)
+    _, plan = _check_plan_equals_cold_start(make, shapes, cold=_per_expert)
+    assert all(plan.get_dest(name) is None for name in shapes)
+
+
+def test_stacked_experts_are_not_split_where_the_model_takes_them(
+    default_vllm_config,
+):
+    """A model whose loader takes the stacked names (Zaya), or a layer that
+    reads its fused checkpoint transposed (Llama4), gets them unchanged."""
+    from vllm.model_executor.model_loader.reload import split_stacked_experts
+
+    weights = [("experts.gate_up_proj", torch.zeros(_SE, _SH, 2 * _SI))]
+    model = _HandRolledMoE()
+    model.experts = _routed_experts()
+    model.loads_stacked_experts = True
+    assert split_stacked_experts(model, weights) is weights
+    del model.loads_stacked_experts
+    model.experts.is_fused_checkpoint_transposed = True
+    assert split_stacked_experts(model, weights) is weights
