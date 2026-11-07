@@ -49,6 +49,65 @@ class SpecDecodingStats:
             self.num_draft_tokens_per_pos[i] += 1
 
 
+class NearZeroAcceptanceCanary:
+    """One-shot early-run warning for sustained near-zero draft acceptance.
+
+    A mismatched or misconfigured draft/target pairing can run silently at
+    ~0% acceptance: the server looks healthy, every draft is rejected, and
+    speculative decoding is pure overhead (#61072). This canary accumulates
+    the accepted and drafted counters over the first window of speculative
+    decoding and, once the window is filled, warns at most once when
+    acceptance stayed below a near-zero threshold. The window spans log
+    intervals, so the state must not be reset with the interval buffers.
+
+    Near-zero acceptance is a symptom with several possible causes (a draft
+    trained for a different base checkpoint or tokenizer, a draft/target
+    quantization mismatch, or simply hard prompts); the warning lists them
+    without asserting that the pairing is invalid.
+    """
+
+    def __init__(
+        self,
+        window_draft_tokens: int = 4096,
+        min_acceptance_rate: float = 0.01,
+        log_fn=None,
+    ):
+        self.window_draft_tokens = window_draft_tokens
+        self.min_acceptance_rate = min_acceptance_rate
+        self._log_fn = log_fn
+        self._num_draft_tokens = 0
+        self._num_accepted_tokens = 0
+        self._fired = False
+
+    def observe(self, spec_decoding_stats: SpecDecodingStats) -> None:
+        if self._fired:
+            return
+        self._num_draft_tokens += spec_decoding_stats.num_draft_tokens
+        self._num_accepted_tokens += spec_decoding_stats.num_accepted_tokens
+        if self._num_draft_tokens < self.window_draft_tokens:
+            return
+        # Evaluate once on the filled window; later degradation is visible in
+        # the periodic metrics log.
+        self._fired = True
+        acceptance_rate = self._num_accepted_tokens / self._num_draft_tokens
+        if acceptance_rate >= self.min_acceptance_rate:
+            return
+        log_fn = self._log_fn if self._log_fn is not None else logger.warning
+        log_fn(
+            "Speculative decoding accepted %d of the first %d draft tokens "
+            "(%.2f%%). Near-zero draft acceptance makes speculative decoding "
+            "slower than running without it. Common causes are a draft model "
+            "trained for a different target checkpoint or tokenizer, or a "
+            "draft/target quantization mismatch, but low acceptance alone does "
+            "not prove the pairing is invalid -- hard prompts can also depress "
+            "it. Verify the draft matches the loaded target, or disable "
+            "speculative decoding.",
+            self._num_accepted_tokens,
+            self._num_draft_tokens,
+            100.0 * acceptance_rate,
+        )
+
+
 class SpecDecodingLogging:
     """Aggregate and log spec decoding metrics.
 
@@ -62,6 +121,10 @@ class SpecDecodingLogging:
         # overloaded semantics, so the raw spec-decode framing (drafts, bonus
         # token, per-position vector) is logged with diffusion-native terms.
         self.is_diffusion = is_diffusion
+        # The canary accumulates across log intervals, so it lives outside
+        # reset(); diffusion reuses the counters with different meaning and
+        # is exempted.
+        self.acceptance_canary = None if is_diffusion else NearZeroAcceptanceCanary()
         self.reset()
 
     def reset(self):
@@ -78,6 +141,8 @@ class SpecDecodingLogging:
         self.accepted_tokens_per_pos_lists.append(
             spec_decoding_stats.num_accepted_tokens_per_pos
         )
+        if self.acceptance_canary is not None:
+            self.acceptance_canary.observe(spec_decoding_stats)
 
     def log(self, log_fn=logger.info):
         if not self.num_drafts:
