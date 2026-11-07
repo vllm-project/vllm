@@ -441,6 +441,32 @@ def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
         core.model_executor.sample_tokens.assert_called_once()
 
 
+@pytest.mark.parametrize("step_fn", [EngineCore.step, EngineCore.step_with_batch_queue])
+def test_prefill_interval_counts_only_executed_steps(step_fn):
+    """Prefills run every Nth executed step; empty schedules don't advance it."""
+    core = MagicMock()
+    core.batch_queue = deque()
+    core.batch_queue_size = 2
+    core.is_mm_encoder_only = False
+    core.is_pooling_model = False
+    core.prefill_schedule_interval = 3
+    core.num_executed_steps = 0
+    core.scheduler.has_requests.return_value = True
+    core._should_throttle_prefills = lambda: EngineCore._should_throttle_prefills(core)
+
+    scheduled_tokens = [16, 0, 0, 16, 16, 16]
+    core.scheduler.schedule.side_effect = [
+        MagicMock(total_num_scheduled_tokens=n, pending_structured_output_tokens=False)
+        for n in scheduled_tokens
+    ]
+    for _ in scheduled_tokens:
+        core.batch_queue.clear()
+        step_fn(core)
+
+    throttled = [call.args[0] for call in core.scheduler.schedule.call_args_list]
+    assert throttled == [False, True, True, True, True, False]
+
+
 @multi_gpu_test(num_gpus=2)
 def test_engine_core_tp():
     """Test engine can initialize worker in tp properly."""
