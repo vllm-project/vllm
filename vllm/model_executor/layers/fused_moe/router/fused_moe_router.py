@@ -43,6 +43,11 @@ class FusedMoERouter(ABC):
     def supports_monolithic_kernels(self) -> bool:
         return True
 
+    @property
+    def masks_padding(self) -> bool:
+        """Whether ``select_experts`` already gives padding rows expert id -1."""
+        return False
+
     def prepare_monolithic_logits(self, router_logits: torch.Tensor) -> torch.Tensor:
         return router_logits
 

@@ -309,6 +309,7 @@ def test_runner_prepares_monolithic_logits(monkeypatch, device):
         routed_experts=experts,
         _maybe_apply_shared_experts=Mock(),
         _shared_experts=None,
+        moe_config=SimpleNamespace(dp_size=1),
     )
     logits = torch.full((16, 32), 7.0, device=device)
     hidden = torch.zeros((16, 64), device=device)
