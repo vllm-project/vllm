@@ -56,6 +56,8 @@ logger = init_logger(__name__)
 
 # constants
 MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
+# gfx1201 pure-decode batches with a 16-bit KV cache switch to 2D from this grid.
+GFX1201_DECODE_MIN_LAUNCH_GRID_SIZE_2D = 64
 NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
 
 
@@ -97,6 +99,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
     # Step-dependent fields reference persistent input buffers directly.
     supports_draft_decode_metadata_update = True
+    # Whether to half the 2d/3d threshold for pure decode batches on gfx1201 (RDNA4)
+    gfx1201_decode_threshold: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -133,20 +137,22 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # must be at least equal to the threshold below.
         # If this threshold is not reached (i.e., the batch size is not large enough),
         # the 3D kernel will be selected instead.
-        self.seq_threshold_3D = MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv
+        self.seq_threshold_3D = self._snap_to_CG_capture_size(
+            MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv
+        )
+        # Half 2d/3d threshold for pure decode batches on gfx1201 (RDNA4)
+        self.seq_threshold_3D_decode = self.seq_threshold_3D
+        if (
+            self.gfx1201_decode_threshold
+            and current_platform.is_rocm()
+            and get_dtype_size(kv_cache_spec.dtype) == 2
+        ):
+            from vllm.platforms.rocm import on_gfx1201
 
-        # Modify the threshold if needed.
-        if self.decode_cudagraph_enabled:
-            capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
-            assert capture_sizes, "CUDA Graphs enabled but no capture sizes specified."
-
-            # Select the CUDA Graph capture size closest to self.seq_threshold_3D
-            # as threshold. This ensures that each captured graph covers the
-            # correct execution path.
-            self.seq_threshold_3D = min(
-                capture_sizes,
-                key=lambda x: abs(x - self.seq_threshold_3D),
-            )
+            if on_gfx1201():
+                self.seq_threshold_3D_decode = self._snap_to_CG_capture_size(
+                    max(1, GFX1201_DECODE_MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv)
+                )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
         # On SM120, batches whose 16-segment decode grid under-fills the SMs use
@@ -220,6 +226,15 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 device=device,
             )
 
+    def _snap_to_CG_capture_size(self, threshold: int) -> int:
+        # Move 2d/3d threshold to the nearest CG capture size so each captured decode
+        # graph takes a single 2D/3D path.
+        if not self.decode_cudagraph_enabled:
+            return threshold
+        capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
+        assert capture_sizes, "CUDA Graphs enabled but no capture sizes specified."
+        return min(capture_sizes, key=lambda x: abs(x - threshold))
+
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> TritonAttentionMetadata:
@@ -255,7 +270,11 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
             causal=common_attn_metadata.causal,
-            seq_threshold_3D=self.seq_threshold_3D,
+            seq_threshold_3D=(
+                self.seq_threshold_3D_decode
+                if max_query_len == 1
+                else self.seq_threshold_3D
+            ),
             num_par_softmax_segments=self.num_par_softmax_segments,
             softmax_segm_output=self.softmax_segm_output,
             softmax_segm_max=self.softmax_segm_max,
