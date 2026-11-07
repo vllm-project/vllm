@@ -129,6 +129,44 @@ def test_silu_and_mul_per_block_quant(
     )
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("hidden_size", [1024, 4096])
+@pytest.mark.parametrize("num_tokens", [1, 2, 3, 5, 7, 32, 127, 128])
+@pytest.mark.parametrize("group_size", [64, 128])
+def test_silu_block_quant_tma_aligned_transposed_scales(
+    default_vllm_config,
+    dtype: torch.dtype,
+    hidden_size: int,
+    num_tokens: int,
+    group_size: int,
+):
+    """Test TMA-aligned column-major scales for non-multiple-of-4 token counts."""
+    torch.set_default_device("cuda")
+    x = torch.randn(num_tokens, hidden_size * 2, dtype=dtype, device="cuda")
+    quant_dtype = current_platform.fp8_dtype()
+
+    ref_out, ref_scales = ref_silu_and_mul_per_block_quant(x, quant_dtype, group_size)
+    out, scales = ops.silu_and_mul_per_block_quant(
+        x,
+        group_size=group_size,
+        quant_dtype=quant_dtype,
+        is_scale_transposed=True,
+        tma_alignment=4,
+    )
+
+    tma_aligned_m = (num_tokens + 3) // 4 * 4
+    assert out.shape == (num_tokens, hidden_size)
+    assert scales.shape == (num_tokens, hidden_size // group_size)
+    assert scales.stride() == (1, tma_aligned_m)
+    torch.testing.assert_close(ref_scales, scales, rtol=1e-2, atol=1e-4)
+
+    ref_deq = ref_out.to(torch.float32) * ref_scales.repeat_interleave(
+        group_size, dim=1
+    )
+    ops_deq = out.to(torch.float32) * scales.repeat_interleave(group_size, dim=1)
+    torch.testing.assert_close(ref_deq, ops_deq, atol=5e-2, rtol=5e-2)
+
+
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("hidden_size", [4096])
 @pytest.mark.parametrize("num_tokens", [128])
