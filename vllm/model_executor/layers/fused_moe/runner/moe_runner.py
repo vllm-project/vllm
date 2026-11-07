@@ -902,7 +902,7 @@ class MoERunner(MoERunnerInterface):
         shared_experts_overlapping = False
         if self._shared_experts is not None:
             shared_experts_overlapping = self._shared_experts.maybe_forward_async(
-                shared_experts_input
+                shared_experts_input, defer_launch=True
             )
 
         # If the Runner holds the gate, apply it after the stream sync,

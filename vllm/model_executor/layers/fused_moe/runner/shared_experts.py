@@ -23,6 +23,20 @@ from vllm.v1.worker.ubatching import (
 logger = init_logger(__name__)
 
 
+# Largest MoE input (tokens) whose graph captures the routed chain before the
+# shared-expert branch (see `_defer_capture_launch`). 64 = 8 requests x 8 rows,
+# i.e. decode with 7 speculative tokens: A/B on MiniMax-M3.1 MXFP4 (TP4,
+# MI355X) gained at <= 8 requests and lost at 16 (+2.9% step time; +0.4% at 12),
+# where the routed GEMMs are long enough that the shared branch captured second
+# starts late enough to delay the join. The token count is static per captured
+# graph, so this is a capture-time decision.
+_LATE_FORK_MAX_TOKENS = 64
+
+
+def _is_capturing() -> bool:
+    return torch.cuda.is_current_stream_capturing()
+
+
 class SharedExpertsOrder(IntEnum):
     # No shared experts.
     NONE = (0,)
@@ -57,6 +71,15 @@ class SharedExperts(torch.nn.Module):
         self._moe_config = moe_config
 
         self._mk_can_overlap_shared_experts = mk_can_overlap_shared_experts
+
+        # HIP graphs keep the first captured branch of a fork on the parent's
+        # stream and move later branches to another queue, which costs the
+        # branch ~3 us of extra start latency and an extra completion hop at the
+        # join. The routed experts are on the critical path and the shared
+        # experts are not, so on ROCm the routed chain is captured first for small
+        # decode batches (_LATE_FORK_MAX_TOKENS).
+        self._defer_capture_launch = current_platform.is_rocm()
+        self._deferred_input: list[torch.Tensor | None] = [None, None]
 
         # With fully-sharded LoRA the shared experts' LoRA layers issue TP
         # collectives themselves, so they must not run on the aux stream
@@ -139,8 +162,15 @@ class SharedExperts(torch.nn.Module):
         else:
             return SharedExpertsOrder.NO_OVERLAP
 
-    def maybe_forward_async(self, shared_experts_input: torch.Tensor) -> bool:
+    def maybe_forward_async(
+        self, shared_experts_input: torch.Tensor, defer_launch: bool = False
+    ) -> bool:
         """Enqueue shared experts on the aux stream without waiting for them.
+
+        With `defer_launch` the aux-stream work is, during CUDA graph capture
+        on ROCm only, not enqueued until `launch_deferred` (or `wait`) is
+        called; the caller must call one of them after enqueueing the routed
+        experts.
 
         Returns true if the shared experts were enqueued, false otherwise. Call
         `wait` to wait for the shared experts to finish if this returns true.
@@ -154,15 +184,39 @@ class SharedExperts(torch.nn.Module):
         idx = self._output_idx
         assert self._output[idx] is None
         self._input_ready_event[idx].record(current_stream())
+        if (
+            defer_launch
+            and self._defer_capture_launch
+            and shared_experts_input.shape[0] <= _LATE_FORK_MAX_TOKENS
+            and _is_capturing()
+        ):
+            # The input-ready event is recorded here, so the shared experts
+            # still depend only on this point of the main stream. Their launch
+            # is deferred to `launch_deferred`, after the routed chain has been
+            # captured (see `_defer_capture_launch`).
+            self._deferred_input[idx] = shared_experts_input
+        else:
+            self._launch(idx, shared_experts_input)
+        return True
+
+    def _launch(self, idx: int, shared_experts_input: torch.Tensor) -> None:
         with torch.cuda.stream(self._stream):
             self._input_ready_event[idx].wait(self._stream)
             self._output[idx] = self._layer(shared_experts_input)
             self._output_ready_event[idx].record(self._stream)
-        return True
+
+    def launch_deferred(self) -> None:
+        """Launch shared experts whose launch `maybe_forward_async` deferred."""
+        idx = self._output_idx
+        shared_experts_input = self._deferred_input[idx]
+        if shared_experts_input is not None:
+            self._deferred_input[idx] = None
+            self._launch(idx, shared_experts_input)
 
     def wait(self) -> None:
         """Block the main stream until `maybe_forward_async` output is ready."""
         assert self._stream is not None
+        self.launch_deferred()
         self._output_ready_event[self._output_idx].wait(current_stream())
 
     @property
