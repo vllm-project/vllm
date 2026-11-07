@@ -248,6 +248,16 @@ Now, you can specify a base_model_name alongside the name and path using JSON fo
 
 To provide the backward compatibility support, you can still use the old key-value format (name=path), but the `base_model_name` will remain unspecified in that case.
 
+## Quantized MoE LoRA on Intel XPU
+
+The native XPU expert backends support LoRA with per-tensor FP8,
+128-block FP8, and symmetric INT4 W4A16 weights. Enable adapters with
+`--enable-lora` and configure them as described above.
+
+This path requires unquantized expert inputs and applies routing weights to
+expert outputs. Fully sharded LoRA and MXFP8 experts are not supported.
+Adapter checkpoint naming and 2D/3D layout requirements still apply.
+
 ## Mixing 2D and 3D MoE LoRA Adapters
 
 To serve 2D-format(based on `megatron`) and 3D-format (based on `peft`) adapters from the same engine instance, start the server with `--enable-mixed-moe-lora-format`
