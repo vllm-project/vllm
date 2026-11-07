@@ -30,12 +30,10 @@ from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2MixtureOfExperts,
     DeepseekV2MoE,
-    _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
-    get_pp_missing_layer_names,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
@@ -368,8 +366,6 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
             ("gate_up_proj", "up_proj", 1),
             ("fused_qkv_a_proj", "q_a_proj", 0),
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
-            ("wk_weights_proj", "wk", 0),
-            ("wk_weights_proj", "weights_proj", 1),
         ]
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
@@ -379,15 +375,8 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
             num_experts=self.config.n_routed_experts,
         )
 
-        pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        # Reordering loaders (e.g. runai_streamer) can split an FP8 indexer wk
-        # weight/scale pair across load_weights() calls; keep the pending
-        # buffer on the model so pairs survive the call boundary.
-        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
-        if _pending_wk_fp8 is None:
-            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name or self.is_unused_checkpoint_weight(name):
                 continue
@@ -404,16 +393,6 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
                     loaded_params.add(name)
                 continue
             name = self._rewrite_spec_layer_name(spec_layer, name)
-
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                _pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                pp_missing_layer_names,
-            ):
-                continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:

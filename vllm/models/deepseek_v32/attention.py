@@ -16,7 +16,6 @@ from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
-    MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
@@ -24,6 +23,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import (
     SparseAttnIndexer,
+    fuse_indexer_wk_weights_proj,
+    init_indexer_wk_weights_proj,
     sparse_attn_indexer,
 )
 from vllm.model_executor.models.deepseek_v2 import (
@@ -80,14 +81,8 @@ class DeepseekV32Indexer(nn.Module):
             prefix=f"{prefix}.wq_b",
         )
 
-        self.wk_weights_proj = MergedColumnParallelLinear(
-            hidden_size,
-            [self.head_dim, self.n_head],
-            bias=False,
-            quant_config=None,
-            disable_tp=True,
-            prefix=f"{prefix}.wk_weights_proj",
-        )
+        # wk + weights_proj run as one BF16 GEMM (wk_weights_proj)
+        init_indexer_wk_weights_proj(self, hidden_size, quant_config, prefix)
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6, dtype=torch.float32)
         self.softmax_scale = self.head_dim**-0.5
 
@@ -120,6 +115,9 @@ class DeepseekV32Indexer(nn.Module):
             self.max_total_seq_len,
             self.topk_indices_buffer,
         )
+
+    def process_weights_after_loading(self) -> None:
+        fuse_indexer_wk_weights_proj(self)
 
 
 class DeepseekV32Attention(MLAAttention):
@@ -291,6 +289,13 @@ class DeepseekV32Attention(MLAAttention):
             or cudagraph_runtime_mode == CUDAGraphMode.FULL
             or torch.cuda.is_current_stream_capturing()
         )
+
+    def process_weights_after_loading(self) -> None:
+        super().process_weights_after_loading()
+        # `finalize_model_weights` skips the children of a layer with a quant
+        # method (here a KV-cache one, e.g. ModelOpt), so fuse the indexer here
+        if self.indexer is not None:
+            self.indexer.process_weights_after_loading()
 
     def forward(  # type: ignore[override]
         self,

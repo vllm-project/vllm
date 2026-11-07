@@ -24,9 +24,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.deepseek_v2 import _try_load_fp8_indexer_wk
 from vllm.model_executor.models.utils import (
-    get_pp_missing_layer_names,
     is_pp_missing_parameter,
     maybe_prefix,
 )
@@ -528,8 +526,6 @@ class HYV4MTP(nn.Module):
         "gate_up_proj": ["gate_proj", "up_proj"],
         # MLA runs both latent down-projections as one GEMM.
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
-        # The indexer fuses wk and weights_proj into one GEMM.
-        "wk_weights_proj": ["wk", "weights_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -730,7 +726,6 @@ class HYV4MTP(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
-        pp_missing_layer_names = get_pp_missing_layer_names(self)
         loaded_params: set[str] = set()
 
         mtp_start = self.config.num_hidden_layers
@@ -767,14 +762,6 @@ class HYV4MTP(nn.Module):
             (".fused_qkv_a_proj", ".q_a_proj", 0),
             (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
         ]
-        # Sparse DSA draft blocks build an Indexer whose wk / weights_proj are
-        # fused into a single MergedColumnParallelLinear (wk_weights_proj).
-        indexer_stacked_mapping = [
-            (".wk_weights_proj", ".wk", 0),
-            (".wk_weights_proj", ".weights_proj", 1),
-        ]
-        # FP8 indexer wk dequant buffer (weight and scale arrive separately).
-        pending_wk_fp8: dict[str, dict[str, torch.Tensor]] = {}
 
         for name, loaded_weight in weights:
             if name in shared_weights:
@@ -816,36 +803,6 @@ class HYV4MTP(nn.Module):
             is_loaded = False
             for param_name, weight_name, shard_id in stacked_mapping:
                 if weight_name not in name or ".experts." in name:
-                    continue
-                name_mapped = name.replace(weight_name, param_name)
-                if name_mapped not in params_dict:
-                    if is_pp_missing_parameter(name_mapped, self):
-                        is_loaded = True
-                    break
-                param = params_dict[name_mapped]
-                param.weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(name_mapped)
-                is_loaded = True
-                break
-            if is_loaded:
-                continue
-
-            # FP8 indexer wk: dequantize to BF16 and load into the fused
-            # wk_weights_proj. PP-aware (skips layers not held by this rank).
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                pp_missing_layer_names,
-            ):
-                continue
-
-            # BF16 indexer wk / weights_proj: merge into the fused param.
-            is_loaded = False
-            for param_name, weight_name, shard_id in indexer_stacked_mapping:
-                if weight_name not in name or "wk_weights" in name:
                     continue
                 name_mapped = name.replace(weight_name, param_name)
                 if name_mapped not in params_dict:
