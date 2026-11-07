@@ -1261,6 +1261,49 @@ class Qwen3VLForSequenceClassificationConfig(Qwen3ForSequenceClassificationConfi
     pass
 
 
+def _default_rocm_aiter_fa_gluon(vllm_config: "VllmConfig") -> None:
+    """Default supported full-attention layers to ROCM_AITER_FA_GLUON on gfx950."""
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        return
+
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.platforms.rocm import on_gfx950
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    attention_config = vllm_config.attention_config
+    parallel_config = vllm_config.parallel_config
+    if (
+        attention_config.backend is not None
+        or attention_config.backend_per_kind
+        or parallel_config.world_size != 1
+        or parallel_config.enable_expert_parallel
+        or vllm_config.speculative_config is not None
+        or not rocm_aiter_ops.is_mha_enabled()
+        or not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        or not on_gfx950()
+    ):
+        return
+
+    from vllm.v1.attention.backends.rocm_aiter_fa_gluon import pa_gluon_supports
+
+    model_config = vllm_config.model_config
+    if pa_gluon_supports(
+        model_config.get_num_attention_heads(parallel_config),
+        model_config.get_num_kv_heads(parallel_config),
+        model_config.get_head_size(),
+        vllm_config.cache_config.cache_dtype,
+    ):
+        attention_config.backend = AttentionBackendEnum.ROCM_AITER_FA_GLUON
+        logger.info_once(
+            "Defaulting full-attention layers to ROCM_AITER_FA_GLUON (gfx950, "
+            "shuffle KV-cache layout, head size 256, GQA group 6); pass "
+            "--attention-backend ROCM_ATTN or unset "
+            "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT to opt out."
+        )
+
+
 class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -1286,6 +1329,7 @@ class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
                 mamba_ssm_dtype,
                 cache_config.mamba_ssm_cache_dtype,
             )
+        _default_rocm_aiter_fa_gluon(vllm_config)
 
 
 class Qwen3_5ForCausalLMConfig(Qwen3_5ForConditionalGenerationConfig):
