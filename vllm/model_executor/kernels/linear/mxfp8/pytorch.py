@@ -49,6 +49,14 @@ class TorchMxFp8LinearKernel(Mxfp8LinearKernel):
         # CUDA activations use FlashInfer's F8_128x4 swizzled scale layout.
         return kMxfp8Dynamic if current_platform.is_cuda() else None
 
+    @classmethod
+    def _supports_quant_scheme(cls, activation_quant_key: QuantKey | None) -> bool:
+        # On CUDA this kernel self-quantizes activations (W8A8); a weight-only
+        # (None) request must go elsewhere. On XPU it keeps activations. #65193.
+        if current_platform.is_cuda():
+            return activation_quant_key is not None
+        return True
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # weight: [N, K] fp8_e4m3; weight_scale: [N, K//32] (E8M0-as-uint8).
         weight = layer.weight.data  # [N, K]

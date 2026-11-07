@@ -959,11 +959,36 @@ def choose_mp_linear_kernel(
     )
 
 
+class _UnspecifiedActivation:
+    """Sentinel for ``init_mxfp8_linear_kernel``: the caller did not declare the
+    checkpoint's activation scheme, so no activation-scheme gating is applied
+    (preserves pre-#65193 selection for callers not yet migrated)."""
+
+
+_MXFP8_ACT_UNSPECIFIED = _UnspecifiedActivation()
+
+
 def init_mxfp8_linear_kernel(
-    *, weight_shape: tuple[int, int], bmm_batch_size: int | None = None
+    *,
+    weight_shape: tuple[int, int],
+    bmm_batch_size: int | None = None,
+    activation_quant_key: QuantKey | None | _UnspecifiedActivation = (
+        _MXFP8_ACT_UNSPECIFIED
+    ),
 ) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
-    current platform and `(N, K)` weight shape."""
+    current platform and `(N, K)` weight shape.
+
+    When ``activation_quant_key`` is provided, kernels that cannot serve that
+    activation scheme are skipped: a weight-only (``None``) request will not
+    select a kernel that quantizes activations to FP8 (see #65193). Callers that
+    omit it keep the historical selection (no scheme gating)."""
+    if isinstance(activation_quant_key, _UnspecifiedActivation):
+        gate_activation = False
+        resolved_activation_key: QuantKey | None = None
+    else:
+        gate_activation = True
+        resolved_activation_key = _resolve_linear_activation_key(activation_quant_key)
     config = Mxfp8LinearLayerConfig(
         weight_shape=weight_shape,
         bmm_batch_size=bmm_batch_size,
@@ -998,6 +1023,15 @@ def init_mxfp8_linear_kernel(
         is_supported, reason = kernel_cls.is_supported()
         if not is_supported:
             failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        if gate_activation and not kernel_cls._supports_quant_scheme(
+            resolved_activation_key
+        ):
+            failure_reasons.append(
+                f"{kernel_cls.__name__}: does not support activation scheme "
+                f"{resolved_activation_key}"
+            )
             continue
 
         can_implement, reason = kernel_cls.can_implement(config)
