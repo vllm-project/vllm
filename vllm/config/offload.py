@@ -55,6 +55,17 @@ class UVAOffloadConfig:
     `examples/features/cpu_offload/record_expert_rankings_offline.py` records
     a rankings file."""
 
+    cpu_offload_expert_state: str | None = None
+    """JSON file in the `cpu_offload_expert_rankings` format that the server
+    keeps its learned rankings in (XPU, int4 GPTQ experts). Selects per-expert
+    placement like `cpu_offload_expert_rankings`; at boot a layer found in this
+    file is placed by it, ahead of the rankings file, and with neither by expert
+    id. While serving, every placed layer counts its routes per expert on the
+    device, and the order is written to this file every few minutes and at
+    shutdown, once the boot has seen about a minute of traffic. One writer per
+    pipeline stage (tensor-parallel rank 0); stages merge their layers into the
+    same file."""
+
 
 @config
 class PrefetchOffloadConfig:

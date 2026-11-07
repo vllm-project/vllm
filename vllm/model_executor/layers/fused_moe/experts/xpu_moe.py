@@ -221,6 +221,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             activation.value,
             self.gemm1_clamp_limit,
         )
+        placement.count_routes(topk_ids)
         if self.moe_config.ep_size > 1:
             topk_ids = remap_unrouted(
                 topk_ids, placement.num_global, self.moe_config.ep_rank

@@ -7,10 +7,14 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import xpu_expert_placement
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
+from vllm.v1.worker.worker_base import CompilationTimes
 from vllm.v1.worker.xpu_model_runner import (
     XPUMMEncoderModelRunner,
     XPUModelRunner,
@@ -225,12 +229,27 @@ class XPUWorker(Worker):
             model_runner = XPUModelRunner  # type: ignore[assignment]
         return model_runner(self.vllm_config, self.device)  # type: ignore
 
+    def compile_or_warm_up_model(self) -> CompilationTimes:
+        # The warm-up's dummy batches reach execute_model: not traffic for the
+        # per-expert offload placement.
+        with xpu_expert_placement.warmup():
+            return super().compile_or_warm_up_model()
+
+    def execute_model(
+        self, scheduler_output: SchedulerOutput
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        # Per-expert offload placement: host-side bookkeeping between steps,
+        # before this step's forward is issued. A no-op unless routes are counted.
+        xpu_expert_placement.step()
+        return super().execute_model(scheduler_output)
+
     def shutdown(self) -> None:
         logger.info(
             "XPUWorker shutdown: cleaning up (rank=%d, local_rank=%d)",
             self.rank,
             self.local_rank,
         )
+        xpu_expert_placement.shutdown()
         super().shutdown()
         from vllm.device_allocator.xpumem import XpuMemAllocator
 

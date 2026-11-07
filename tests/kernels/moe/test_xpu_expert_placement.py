@@ -5,6 +5,7 @@
 import json
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -57,7 +58,7 @@ def _params() -> dict:
     }
 
 
-def _config(tmp_path, gb=1.0, rankings=True, **kwargs) -> OffloadConfig:
+def _config(tmp_path, gb=1.0, rankings=True, state=None, **kwargs) -> OffloadConfig:
     path = None
     if rankings:
         path = tmp_path / "rankings.json"
@@ -66,8 +67,18 @@ def _config(tmp_path, gb=1.0, rankings=True, **kwargs) -> OffloadConfig:
     uva = UVAOffloadConfig(
         cpu_offload_gb=gb,
         cpu_offload_expert_rankings=str(path) if path else None,
+        cpu_offload_expert_state=str(state) if state else None,
     )
     return OffloadConfig(uva=uva, **kwargs)
+
+
+def _reset():
+    xp.load_rankings.cache_clear()
+    xp.load_state.cache_clear()
+    xp._PLACEMENTS.clear()
+    xp._LIVE[0] = False
+    xp._WARMUP[0] = False
+    xp._RECORDER = xp._Recorder()
 
 
 @pytest.fixture
@@ -77,9 +88,10 @@ def xpu(monkeypatch):
         "vllm.utils.platform_utils.is_uva_available", lambda: True, raising=True
     )
     monkeypatch.delenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", raising=False)
-    xp.load_rankings.cache_clear()
+    monkeypatch.setattr(xp, "_capturing", lambda: False)
+    _reset()
     yield monkeypatch
-    xp.load_rankings.cache_clear()
+    _reset()
 
 
 def _place(monkeypatch, config, rank=0, name=NAME, hot=3, method=_GPTQ):
@@ -254,6 +266,271 @@ def test_remap_unrouted_uses_an_expert_this_rank_does_not_own():
     ids = torch.tensor([[-1, 3], [7, -1]])
     assert xp.remap_unrouted(ids, 16, 0).tolist() == [[15, 3], [7, 15]]
     assert xp.remap_unrouted(ids, 16, 1).tolist() == [[0, 3], [7, 0]]
+
+
+# -- route counters and the learned state -----------------------------------------
+
+
+def _counting(layer=3, state_path=None, boot_order=()):
+    p = xp.ExpertPlacement(
+        f"model.layers.{layer}.mlp.experts",
+        list(range(E)),
+        list(range(E)),
+        E,
+        [0, 1, 2],
+    )
+    p.count = True
+    p.state_path = state_path
+    p.boot_order = list(boot_order)
+    p.route_counts = torch.zeros(2, E + 1, dtype=torch.int64)
+    xp._PLACEMENTS[p.layer_idx] = p
+    return p
+
+
+class _Event:
+    def __init__(self):
+        self.done = False
+
+    def query(self):
+        return self.done
+
+
+@pytest.fixture
+def host(xpu):
+    """Device calls stubbed: pinned buffers are plain, events complete on demand,
+    host synchronizations are counted."""
+    events: list[_Event] = []
+    syncs: list[int] = []
+
+    def record(stream=None):
+        events.append(_Event())
+        return events[-1]
+
+    xpu.setattr(xp, "_record_event", record)
+    xpu.setattr(xp, "_current_stream", lambda: None)
+    xpu.setattr(
+        xp, "_pinned_empty", lambda shape, dtype: torch.zeros(shape, dtype=dtype)
+    )
+    xpu.setattr(xp, "_synchronize", lambda: syncs.append(1))
+    return SimpleNamespace(events=events, syncs=syncs)
+
+
+def test_selected_by_the_state_alone(xpu, tmp_path):
+    config = _config(tmp_path, rankings=False, state=tmp_path / "state.json")
+    assert xp.places_experts(config)
+    p = _place(xpu, config)  # no file yet: by id, counting
+    assert p.hot_local == [0, 1, 2] and p.count
+    assert p.state_path == str(tmp_path / "state.json")
+
+
+def test_no_counters_without_a_state(xpu, tmp_path):
+    p = _place(xpu, _config(tmp_path))
+    assert not p.count and p.route_counts is None
+    p.count_routes(torch.tensor([[1, 2]]))  # nothing to count into
+
+
+def test_route_counters_on_synthetic_topk_ids(xpu):
+    p = _counting()
+    ids = torch.tensor([[1, 5], [5, -1], [15, 1]], dtype=torch.int32)
+    p.count_routes(ids)  # before the first step: the memory profile
+    assert not p.route_counts.any()
+    xp._LIVE[0] = True
+    p.count_routes(ids)
+    want = torch.zeros(E + 1, dtype=torch.int64)
+    want[[1, 5, 15, E]] = torch.tensor([2, 2, 1, 1])  # -1 in the last bucket
+    assert torch.equal(p.route_counts[1], want)
+    assert not p.route_counts[0].any()
+    big = torch.randint(0, E, (xp._LARGE_STEP_TOKENS, 8), dtype=torch.int32)
+    p.count_routes(big)  # a large step lands in the prefill row
+    assert torch.equal(
+        p.route_counts[0, :E], torch.bincount(big.flatten().long(), minlength=E)
+    )
+    assert int(p.route_counts[0].sum()) == big.numel()
+
+
+def test_route_counters_are_recorded_into_captured_graphs(xpu):
+    xpu.setattr(xp, "_capturing", lambda: True)
+    p = _counting()
+    p.count_routes(torch.tensor([[2, 3]]))  # captured before the first step
+    assert p.route_counts[1, 2] == 1 and p.route_counts[1, 3] == 1
+
+
+def test_counting_needs_no_host_sync_or_extra_buffer(xpu):
+    p = _counting()
+    xp._LIVE[0] = True
+    buf = xp._ones(torch.device("cpu"))
+    ones = xp._ones(torch.device("cpu"), 16)
+    assert ones.data_ptr() == buf.data_ptr()  # a slice of one buffer
+    p.count_routes(torch.zeros(4, 4, dtype=torch.int32))
+    assert int(p.route_counts[1, 0]) == 16
+
+
+def test_boot_order_learned_state_then_rankings_then_id(xpu, tmp_path):
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"3": [6, 1, 12, 4], "5": [3, 7]}))
+    config = _config(tmp_path, state=state)
+    p0 = _place(xpu, config, 0)
+    assert p0.hot_local == [1, 4, 6]  # the state, not the rankings' 2, 0, 7
+    assert p0.boot_order == [6, 1, 12, 4] and p0.count
+    # rank 1 owns 8..15: 12 from the state, then 8, 9 by id
+    assert _place(xpu, config, 1).hot_local == [0, 1, 4]
+    assert xp.boot_order(config.uva, 5) == ([3, 7], "state")
+    state.write_text(json.dumps({"5": [3, 7]}))
+    xp.load_state.cache_clear()
+    # layer 3 is not in the state: the rankings place it
+    assert _place(xpu, config, 0).hot_local == [0, 2, 7]
+    assert xp.boot_order(config.uva, 9) == ([], "id")
+
+
+def test_missing_state_falls_back_to_the_rankings(xpu, tmp_path):
+    config = _config(tmp_path, state=tmp_path / "missing.json")
+    assert _place(xpu, config).hot_local == [0, 2, 7]
+
+
+@pytest.mark.parametrize("raw", ["{", "[]", '{"3": 7}', '{"x": [1]}', '{"3": ["a"]}'])
+def test_malformed_state_falls_back_to_the_rankings(xpu, tmp_path, raw):
+    state = tmp_path / "state.json"
+    state.write_text(raw)
+    assert _place(xpu, _config(tmp_path, state=state)).hot_local == [0, 2, 7]
+
+
+def test_state_round_trip_in_the_rankings_format(host, tmp_path):
+    path = tmp_path / "state.json"
+    _counting(state_path=str(path), boot_order=[9, 2, 15])
+    rec = xp._Recorder()
+    assert rec._setup(0.0)
+    delta = np.zeros((1, 2, E), np.int64)
+    delta[0, 1, [4, 7]] = [30, 10]  # decode: 4, then 7
+    delta[0, 0, 11] = 1000  # a prefill weighs a tenth of the decode routes
+    for _ in range(xp._STATE_MIN_FOLDS - 1):
+        rec.fold(delta)
+    rec.fold(np.zeros_like(delta))  # idle: neither a fold nor a decay
+    assert rec.folds == xp._STATE_MIN_FOLDS - 1
+    assert not rec.maybe_save(1e9) and not path.exists()  # too young
+    rec.fold(delta)
+    assert rec.maybe_save(1e9)
+    order = xp.load_rankings(str(path))[3]  # readable as a rankings file
+    assert order[:3] == [4, 7, 11]
+    assert order[3:6] == [9, 2, 15]  # unrouted experts keep the boot order
+    assert sorted(order) == list(range(E))
+    config = _config(tmp_path, rankings=False, state=path)
+    assert xp.boot_order(config.uva, 3) == (order, "state")
+
+
+def test_save_waits_for_its_period_and_the_writer(host, tmp_path, monkeypatch):
+    path = tmp_path / "state.json"
+    _counting(state_path=str(path))
+    rec = xp._Recorder()
+    rec._setup(100.0)
+    delta = np.zeros((1, 2, E), np.int64)
+    delta[0, 1, 3] = 5
+    for _ in range(xp._STATE_MIN_FOLDS):
+        rec.fold(delta)
+    assert not rec.maybe_save(100.0 + xp._STATE_SAVE_S / 2)
+    monkeypatch.setattr(xp, "_is_writer", lambda: False)
+    assert not rec.maybe_save(100.0 + xp._STATE_SAVE_S)
+    monkeypatch.setattr(xp, "_is_writer", lambda: True)
+    assert rec.maybe_save(100.0 + xp._STATE_SAVE_S)
+    assert xp.load_rankings(str(path))[3][0] == 3
+
+
+def test_state_writers_merge_their_layers(tmp_path):
+    path = tmp_path / "state.json"
+    xp._write_state(str(path), {3: [1, 2]})
+    xp._write_state(str(path), {7: [5]})  # another pipeline stage
+    xp._write_state(str(path), {3: [2, 1]})
+    assert json.loads(path.read_text()) == {"3": [2, 1], "7": [5]}
+
+
+def test_step_snapshots_on_the_stream_and_folds_once_complete(
+    host, tmp_path, monkeypatch
+):
+    xp._LIVE[0] = True
+    p = _counting(state_path=str(tmp_path / "state.json"))
+    p.count_routes(torch.tensor([[4, 4], [9, 4]]))
+    clock = [1000.0]
+    monkeypatch.setattr(xp, "_now", lambda: clock[0])
+    xp.step()  # set up
+    clock[0] += xp._FOLD_S
+    xp.step()  # snapshot issued, event pending
+    assert len(host.events) == 1
+    clock[0] += xp._FOLD_S
+    xp.step()  # copy still in flight: no fold, no second snapshot
+    assert xp._RECORDER.folds == 0 and len(host.events) == 1
+    host.events[0].done = True
+    xp.step()
+    assert xp._RECORDER.folds == 1
+    assert xp._RECORDER.order(0)[:2] == [4, 9]
+    assert host.syncs == []  # the forward path never waits
+
+
+def test_step_does_nothing_while_capturing(host, tmp_path, monkeypatch):
+    _counting(state_path=str(tmp_path / "state.json"))
+    monkeypatch.setattr(xp, "_capturing", lambda: True)
+    xp.step()
+    assert not xp._RECORDER.ready and host.events == []
+
+
+def test_shutdown_writes_the_state(host, tmp_path, monkeypatch):
+    monkeypatch.setattr(xp, "_STATE_MIN_FOLDS", 1)
+    path = tmp_path / "state.json"
+    xp._LIVE[0] = True
+    p = _counting(state_path=str(path), boot_order=[0, 1, 2])
+    xp.step()  # set up
+    p.count_routes(torch.tensor([[13, 13], [13, 6]]))
+    xp.shutdown()
+    assert xp.load_rankings(str(path))[3][:2] == [13, 6]
+    assert host.syncs  # shutdown may wait
+    assert not xp._PLACEMENTS and not xp._LIVE[0]
+
+
+def test_shutdown_without_counting_is_a_no_op(host, tmp_path):
+    xp.shutdown()
+    assert not list(tmp_path.iterdir()) and host.syncs == []
+
+
+def test_steps_after_a_warmup_under_inference_mode(host, tmp_path, monkeypatch):
+    # A step can come under torch.inference_mode (the kernel warm-up drives
+    # the worker's execute_model inside it), so the buffers it sets up are
+    # inference tensors; the worker calls step() before GPUWorker.execute_model
+    # enters the mode, so serving steps and shutdown come from outside it.
+    monkeypatch.setattr(xp, "_STATE_MIN_FOLDS", 1)
+    path = tmp_path / "state.json"
+    clock = [1000.0]
+    monkeypatch.setattr(xp, "_now", lambda: clock[0])
+    p = _counting(state_path=str(path))
+    with torch.inference_mode():
+        xp.step()  # under the mode: sets up the recorder
+    assert xp._RECORDER.ready
+    with torch.inference_mode():
+        p.count_routes(torch.tensor([[13, 13], [13, 6]]))  # a forward
+    clock[0] += xp._FOLD_S
+    xp.step()  # serving: snapshot issued
+    host.events[-1].done = True
+    xp.step()  # serving: folded
+    assert xp._RECORDER.folds == 1
+    xp.shutdown()
+    assert xp.load_rankings(str(path))[3][:2] == [13, 6]
+
+
+def test_warmup_steps_leave_the_counters_at_zero(host, tmp_path):
+    # The worker's warm-up drives execute_model with dummy batches, under
+    # inference mode, and may replay captured graphs that count: not traffic.
+    p = _counting(state_path=str(tmp_path / "state.json"))
+    ids = torch.tensor([[1, 5], [5, 2]])
+    with xp.warmup(), torch.inference_mode():
+        xp.step()
+        xp.step()
+        p.count_routes(ids)  # an eager dummy forward
+        assert not p.route_counts.any()
+        assert not xp._LIVE[0] and not xp._RECORDER.ready
+        p.route_counts[1, ids.flatten()] += 1  # a graph replayed on dummy tokens
+    assert not xp._WARMUP[0]
+    xp.step()  # the first serving step
+    assert xp._LIVE[0] and xp._RECORDER.ready
+    assert not p.route_counts.any()
+    p.count_routes(ids)
+    assert int(p.route_counts[1].sum()) == ids.numel()
 
 
 def _xpu_ready() -> bool:

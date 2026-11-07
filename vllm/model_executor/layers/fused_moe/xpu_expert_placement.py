@@ -13,12 +13,25 @@ GEMM, each with an ``expert_map`` that maps only its own experts (-1 elsewhere),
 and the two outputs are summed, so results equal the all-resident layer up to the
 order of that sum. The maps are device tensors, so a later placement change can
 rewrite them in place without recapturing graphs.
+
+With ``--cpu-offload-expert-state`` the server learns its own rankings: each
+placed layer counts its routes per expert on the device (inside captured graphs
+too), the worker folds the counts into a long-term score per expert between
+steps, and the order is written to the state file, in the rankings format,
+every few minutes and at shutdown. The next boot places by the state file ahead
+of the rankings file.
 """
 
+import fcntl
 import json
+import os
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from functools import cache
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import regex as re
 import torch
 
@@ -26,9 +39,18 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
-    from vllm.config.offload import OffloadConfig
+    from vllm.config.offload import OffloadConfig, UVAOffloadConfig
 
 logger = init_logger(__name__)
+
+# Route counting and the learned state.
+_LARGE_STEP_TOKENS = 512  # steps this large count as prefill in the counters
+_PREFILL_WEIGHT = 0.1  # prefill touches nearly every expert; decode tells more
+_FOLD_S = 5.0  # counters -> scores
+_STATE_SAVE_S = 300.0
+_STATE_DECAY = 0.999  # per active fold
+_STATE_PRIOR = 0.05  # weight of the boot order in the saved order
+_STATE_MIN_FOLDS = 12  # a boot with less traffic does not overwrite the state
 
 # Decoder layers only: other MoE layers (e.g. MTP) keep their experts in VRAM, so
 # the budget below is exact.
@@ -63,7 +85,10 @@ def places_experts(offload_config: "OffloadConfig") -> bool:
     """
     uva = offload_config.uva
     selected = (
-        uva.cpu_offload_expert_rankings is not None
+        (
+            uva.cpu_offload_expert_rankings is not None
+            or uva.cpu_offload_expert_state is not None
+        )
         and current_platform.is_xpu()
         and offload_config.offload_backend in ("auto", "uva")
         and offload_config.prefetch.offload_group_size == 0
@@ -71,10 +96,10 @@ def places_experts(offload_config: "OffloadConfig") -> bool:
     )
     if selected and not _uva_enabled():
         raise ValueError(
-            "--cpu-offload-expert-rankings reads cold experts from pinned host "
-            "memory through UVA, which is disabled "
+            "--cpu-offload-expert-rankings / --cpu-offload-expert-state read cold "
+            "experts from pinned host memory through UVA, which is disabled "
             "(VLLM_WEIGHT_OFFLOADING_DISABLE_UVA) or unavailable on this "
-            "platform. Drop the rankings to offload parameters in module order."
+            "platform. Drop them to offload parameters in module order."
         )
     return selected
 
@@ -123,14 +148,50 @@ def budget_cold_count(
     return max(0, min(cold, num_local - 1))
 
 
+def _parse_rankings(raw: Any, path: str) -> dict[int, list[int]]:
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: expected an object of layer index -> expert ids")
+    return {int(k): [int(e) for e in v] for k, v in raw.items()}
+
+
 @cache
 def load_rankings(path: str) -> dict[int, list[int]]:
     """JSON ``{"<layer index>": [global expert ids, hottest first], ...}``."""
     with open(path) as handle:
-        raw = json.load(handle)
-    if not isinstance(raw, dict):
-        raise ValueError(f"{path}: expected an object of layer index -> expert ids")
-    return {int(k): [int(e) for e in v] for k, v in raw.items()}
+        return _parse_rankings(json.load(handle), path)
+
+
+@cache
+def load_state(path: str) -> dict[int, list[int]]:
+    """The learned state, in the rankings format; empty when it is missing or
+    unreadable. It only moves where experts live, so a bad file falls back to
+    the rankings instead of failing the boot."""
+    try:
+        with open(path) as handle:
+            return _parse_rankings(json.load(handle), path)
+    except FileNotFoundError:
+        logger.info("Per-expert offload placement: no learned state at %s yet", path)
+    except (OSError, ValueError, TypeError, AttributeError) as err:
+        logger.warning(
+            "Per-expert offload placement: ignoring the learned state %s: %s",
+            path,
+            err,
+        )
+    return {}
+
+
+def boot_order(uva: "UVAOffloadConfig", layer_idx: int) -> tuple[list[int], str]:
+    """(global expert ids hottest first, its source) for one layer at boot: the
+    learned state, else the rankings file, else none (id order)."""
+    if uva.cpu_offload_expert_state is not None:
+        learned = load_state(uva.cpu_offload_expert_state).get(layer_idx)
+        if learned:
+            return learned, "state"
+    if uva.cpu_offload_expert_rankings is not None:
+        ranked = load_rankings(uva.cpu_offload_expert_rankings).get(layer_idx)
+        if ranked:
+            return ranked, "rankings"
+    return [], "id"
 
 
 def hot_experts(
@@ -185,6 +246,283 @@ class _PinnedArena:
 
 
 _ARENA = _PinnedArena()
+# Placements that count routes, by decoder layer index.
+_PLACEMENTS: dict[int, "ExpertPlacement"] = {}
+# Set by the first runner step after the warm-up: the memory profile and the
+# warm-up don't count.
+_LIVE = [False]
+# True inside the worker's warm-up (``warmup()``): its steps are not traffic.
+_WARMUP = [False]
+_ONES: dict[str, torch.Tensor] = {}
+_ONES_N = 1 << 16
+
+
+def _ones(device: torch.device, n: int = _ONES_N) -> torch.Tensor:
+    """``n`` int64 ones for index_add_: a slice of one buffer per device, so
+    counting adds no fill kernel. Created at finalize, outside any capture."""
+    buf = _ONES.get(str(device))
+    if buf is None:
+        buf = _ONES[str(device)] = torch.ones(_ONES_N, dtype=torch.int64, device=device)
+    if n > buf.numel():
+        return torch.ones(n, dtype=torch.int64, device=device)
+    return buf[:n]
+
+
+# Stream and event helpers, one place for the device API (and for tests).
+def _capturing() -> bool:
+    return current_platform.is_xpu() and bool(torch.xpu.is_current_stream_capturing())
+
+
+def _current_stream() -> Any:
+    return torch.xpu.current_stream()
+
+
+def _record_event(stream: Any = None) -> Any:
+    event = torch.xpu.Event()
+    event.record(stream)
+    return event
+
+
+def _pinned_empty(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
+    return torch.empty(shape, dtype=dtype, pin_memory=True)
+
+
+def _synchronize() -> None:
+    torch.xpu.synchronize()
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+def _is_writer() -> bool:
+    """One writer per pipeline stage: TP rank 0 of DP rank 0. Under TP every
+    rank routes the same tokens, so its counts are the stage's."""
+    from vllm.distributed import parallel_state as ps
+
+    if not ps.model_parallel_is_initialized():
+        return True
+    return (
+        ps.get_tensor_model_parallel_rank() == 0
+        and ps.get_dp_group().rank_in_group == 0
+    )
+
+
+def _write_state(path: str, layers: dict[int, list[int]]) -> None:
+    """Replace this writer's layers in the state file, atomically. Pipeline
+    stages own disjoint layers, so the read-merge-write is under a file lock."""
+    with open(f"{path}.lock", "a") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)  # released when the file closes
+        merged: dict[int, list[int]] = {}
+        try:
+            with open(path) as handle:
+                merged = _parse_rankings(json.load(handle), path)
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        merged.update(layers)
+        tmp = f"{path}.tmp{os.getpid()}"
+        with open(tmp, "w") as handle:
+            json.dump({str(k): v for k, v in sorted(merged.items())}, handle)
+        os.replace(tmp, path)
+
+
+class _Recorder:
+    """Route counters -> a long-term score per expert -> the state file.
+
+    Every ``_FOLD_S`` the counters of all counting layers are copied into a
+    pinned snapshot on the forward stream; a later step folds the snapshot
+    once its event is complete, so the forward never waits on the host. A fold
+    turns each layer's new routes into a distribution (decode routes, plus
+    prefill routes at ``_PREFILL_WEIGHT``) and adds it to a decayed score.
+    """
+
+    def __init__(self) -> None:
+        self.placements: list[ExpertPlacement] = []
+        self.ready = False
+        self.event: Any = None
+        self.snap: torch.Tensor | None = None
+        self.last: np.ndarray | None = None  # [layers, 2, num_global]
+        self.score: np.ndarray | None = None  # [layers, num_global]
+        self.prior: np.ndarray | None = None  # boot order, 1 for the hottest
+        self.folds = 0
+        self.t_fold = 0.0
+        self.t_save = 0.0
+        self.path: str | None = None
+
+    def _setup(self, now: float) -> bool:
+        placements = [_PLACEMENTS[k] for k in sorted(_PLACEMENTS)]
+        if not placements:
+            return False
+        num_global = placements[0].num_global
+        self.placements = placements
+        self.path = placements[0].state_path
+        self.snap = _pinned_empty((len(placements), 2, num_global + 1), torch.int64)
+        self.last = np.zeros((len(placements), 2, num_global), dtype=np.int64)
+        self.score = np.zeros((len(placements), num_global))
+        self.prior = np.zeros((len(placements), num_global))
+        for k, p in enumerate(placements):
+            order = [g for g in dict.fromkeys(p.boot_order) if 0 <= g < num_global]
+            seen = set(order)
+            order += [g for g in range(num_global) if g not in seen]
+            self.prior[k, order] = 1 - np.arange(len(order)) / len(order)
+        self.t_fold = self.t_save = now
+        self.ready = True
+        logger.info(
+            "Per-expert offload placement: counting routes in %d layers; learned "
+            "state %s",
+            len(placements),
+            self.path or "off",
+        )
+        return True
+
+    def _snapshot(self) -> None:
+        assert self.snap is not None
+        for k, p in enumerate(self.placements):
+            assert p.route_counts is not None
+            self.snap[k].copy_(p.route_counts, non_blocking=True)
+
+    def poll(self, now: float) -> np.ndarray | None:
+        """Start a snapshot when one is due; the new routes per layer
+        ``[layers, 2, num_global]`` when one is complete, else None."""
+        if not self.ready and not self._setup(now):
+            return None
+        if self.event is None:
+            if now - self.t_fold >= _FOLD_S:
+                self.t_fold = now
+                self._snapshot()
+                self.event = _record_event(_current_stream())
+            return None
+        if not self.event.query():
+            return None  # copy still in flight: the forward goes on
+        self.event = None
+        return self._delta()
+
+    def _delta(self) -> np.ndarray:
+        assert self.snap is not None and self.last is not None
+        counts = self.snap.numpy()[:, :, :-1].copy()
+        delta, self.last = counts - self.last, counts
+        return delta
+
+    def fold(self, delta: np.ndarray) -> None:
+        assert self.score is not None
+        active = False
+        for k in range(delta.shape[0]):
+            pre, dec = delta[k, 0].astype(np.float64), delta[k, 1].astype(np.float64)
+            mass = np.zeros_like(dec)
+            if dec.sum() > 0:
+                mass += dec / dec.sum()
+            if pre.sum() > 0:
+                mass += _PREFILL_WEIGHT * pre / pre.sum()
+            if mass.sum() <= 0:
+                continue  # idle time doesn't decay the score
+            active = True
+            self.score[k] = _STATE_DECAY * self.score[k] + mass / mass.sum()
+        if active:
+            self.folds += 1
+
+    def order(self, k: int) -> list[int]:
+        """Layer ``k``'s experts, hottest first: the learned score, with the
+        boot order as a small prior that also orders unrouted experts."""
+        assert self.score is not None and self.prior is not None
+        top = float(self.score[k].max()) or 1.0
+        key = self.score[k] / top + _STATE_PRIOR * self.prior[k]
+        return [int(g) for g in np.argsort(-key, kind="stable")]
+
+    def maybe_save(self, now: float, force: bool = False) -> bool:
+        if (
+            not self.path
+            or self.folds < _STATE_MIN_FOLDS
+            or (not force and now - self.t_save < _STATE_SAVE_S)
+            or not _is_writer()
+        ):
+            return False
+        self.t_save = now
+        layers = {p.layer_idx: self.order(k) for k, p in enumerate(self.placements)}
+        try:
+            _write_state(self.path, layers)
+        except OSError as err:
+            logger.warning(
+                "Per-expert offload placement: cannot write %s: %s", self.path, err
+            )
+            return False
+        logger.debug(
+            "Per-expert offload placement: learned state %s, %d layers, %d folds",
+            self.path,
+            len(layers),
+            self.folds,
+        )
+        return True
+
+    def flush(self) -> None:
+        """At shutdown: fold what the counters hold now and save."""
+        if not self.ready:
+            return
+        _synchronize()
+        self.event = None
+        self._snapshot()
+        _synchronize()
+        self.fold(self._delta())
+        self.maybe_save(_now(), force=True)
+
+
+_RECORDER = _Recorder()
+
+
+@contextmanager
+def warmup() -> Iterator[None]:
+    """Around the worker's compile and warm-up, whose dummy batches reach
+    ``execute_model``: their steps neither start counting nor set up the
+    recorder."""
+    was_warmup = _WARMUP[0]
+    _WARMUP[0] = True
+    try:
+        yield
+    finally:
+        _WARMUP[0] = was_warmup
+
+
+def _start_counting() -> None:
+    """At the first serving step: zero the counters, which captured graphs
+    replayed in the warm-up may have added dummy routes to, and count from
+    here. The zeroing is queued on the stream ahead of this step's forward."""
+    for p in _PLACEMENTS.values():
+        if p.route_counts is not None:
+            p.route_counts.zero_()
+    _LIVE[0] = True
+
+
+@torch.inference_mode()
+def step() -> None:
+    """Once per runner step, on the host, before the forward is issued. A no-op
+    unless a placed layer counts routes, and inside ``warmup()``.
+
+    Under inference mode like the runner, whichever caller reaches it (the
+    kernel warm-up calls the worker's ``execute_model`` inside the mode, serving
+    steps come before the runner enters it): the buffers a step sets up are
+    inference tensors, and later steps update them in place."""
+    if not _PLACEMENTS or _WARMUP[0]:
+        return
+    if not _LIVE[0]:
+        _start_counting()
+    if _capturing():
+        return
+    now = _now()
+    delta = _RECORDER.poll(now)
+    if delta is not None:
+        _RECORDER.fold(delta)
+        _RECORDER.maybe_save(now)
+
+
+@torch.inference_mode()
+def shutdown() -> None:
+    """Save the learned state and forget the placements of this process."""
+    global _RECORDER
+    try:
+        _RECORDER.flush()
+    finally:
+        _PLACEMENTS.clear()
+        _LIVE[0] = False
+        _RECORDER = _Recorder()
 
 
 def _repack_int4_pinned(qweight: torch.Tensor, device: torch.device) -> torch.Tensor:
@@ -242,6 +580,16 @@ class ExpertPlacement:
         self.hot_map: torch.Tensor | None = None
         self.cold_map: torch.Tensor | None = None
         self._impls: tuple[Any, Any] | None = None
+        match = _LAYER_RE.search(layer_name)
+        self.layer_idx = int(match.group(1)) if match else -1
+        # Route counting (set by maybe_place): the boot order, hottest first,
+        # and the state file it updates.
+        self.boot_order: list[int] = []
+        self.state_path: str | None = None
+        self.count = False
+        # [2, num_global + 1] on the device: row 0 large steps, row 1 small
+        # ones; the last bucket takes negative (unrouted) ids.
+        self.route_counts: torch.Tensor | None = None
 
     @property
     def num_hot(self) -> int:
@@ -323,6 +671,24 @@ class ExpertPlacement:
         self.hot_map = hot_map.to(device)
         self.cold_map = cold_map.to(device)
         experts.placement = self
+        if self.count:
+            self.route_counts = torch.zeros(
+                2, self.num_global + 1, dtype=torch.int64, device=device
+            )
+            _ones(device)
+            _PLACEMENTS[self.layer_idx] = self
+
+    def count_routes(self, topk_ids: torch.Tensor) -> None:
+        """Add this step's routes to the counters: two device kernels, no
+        host sync, recorded into captured graphs like any other kernel."""
+        counts = self.route_counts
+        if counts is None:
+            return
+        if not _LIVE[0] and not _capturing():
+            return  # the memory profile and warm-up are not traffic
+        row = counts[1 if topk_ids.shape[0] < _LARGE_STEP_TOKENS else 0]
+        ids = topk_ids.reshape(-1).remainder(row.shape[0])  # -1 -> last bucket
+        row.index_add_(0, ids, _ones(row.device, ids.numel()))
 
     def impls(
         self,
@@ -448,10 +814,21 @@ def maybe_place(
         bytes_each,
         num_layers,
     )
-    path = config.uva.cpu_offload_expert_rankings
-    assert path is not None
-    ranked = load_rankings(path).get(layer_idx, [])
+    ranked, source = boot_order(config.uva, layer_idx)
+    logger.info_once(
+        "Per-expert offload placement: the first placed layer's hot set comes "
+        "from %s (learned state, then rankings, then expert id)",
+        {
+            "state": config.uva.cpu_offload_expert_state,
+            "rankings": config.uva.cpu_offload_expert_rankings,
+            "id": "expert ids",
+        }[source],
+    )
     hot = hot_experts(ranked, global_ids, len(local_ids) - cold_count)
-    return ExpertPlacement(
+    placement = ExpertPlacement(
         layer_name, local_ids, global_ids, num_global, [local_of[g] for g in hot]
     )
+    placement.boot_order = ranked
+    placement.state_path = config.uva.cpu_offload_expert_state
+    placement.count = placement.state_path is not None
+    return placement
