@@ -332,6 +332,9 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
     def get_draft_model(self) -> torch.nn.Module | None:
         return None
 
+    def on_target_weights_replaced(self) -> None:
+        """Called by the worker after a weight transfer; nothing derives from them."""
+
     def reload_weights(
         self,
         weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,

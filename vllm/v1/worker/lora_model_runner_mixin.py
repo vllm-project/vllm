@@ -25,12 +25,6 @@ class LoRAModelRunnerMixin:
     lora_config: LoRAConfig | None
     get_model: Callable[[], nn.Module]
 
-    def on_target_weights_replaced(self) -> None:
-        """Runs after a reload or weight transfer replaces the target weights.
-
-        LoRA state needs nothing: level-2 sleep keeps it.
-        """
-
     def load_lora_model(
         self,
         model: nn.Module,
