@@ -876,9 +876,7 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
     vllm_config = create_vllm_config(
         block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
     )
-    vllm_config.model_config.hf_config.sparse_attention_config = {
-        "sparse_num_index_heads": num_idx_heads
-    }
+    vllm_config.model_config.hf_config.index_n_heads = num_idx_heads
 
     # Decode-first mixed batch: 2 decode reqs (q_len 1) then 2 prefill reqs. Long
     # prefixes so every token sees > TOPK causal blocks (non-trivial selection).
@@ -1060,10 +1058,8 @@ def test_aiter_indexer_impl_matches_reference(
     vllm_config = create_vllm_config(
         block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
     )
-    vllm_config.model_config.hf_config.sparse_attention_config = {
-        "sparse_num_index_heads": num_idx_heads,
-        "sparse_block_size": BLOCK_SIZE,
-    }
+    vllm_config.model_config.hf_config.index_n_heads = num_idx_heads
+    vllm_config.model_config.hf_config.index_block_size = BLOCK_SIZE
 
     # Decode-first mixed batch; two rows see fewer than TOPK blocks.
     batch = BatchSpec(
@@ -1340,9 +1336,7 @@ def test_nvfp4_indexer_impl_matches_reference(
     vllm_config = create_vllm_config(
         block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
     )
-    vllm_config.model_config.hf_config.sparse_attention_config = {
-        "sparse_num_index_heads": num_idx_heads
-    }
+    vllm_config.model_config.hf_config.index_n_heads = num_idx_heads
 
     decode_seq_lens = [2305, 2561, 9]
     prefill = [(2624, 64), (2720, 96), (100, 100), (1500, 1500)]
@@ -1462,9 +1456,7 @@ def test_nvfp4_indexer_decode_cuda_graph_replay(
     vllm_config = create_vllm_config(
         block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
     )
-    vllm_config.model_config.hf_config.sparse_attention_config = {
-        "sparse_num_index_heads": num_idx_heads
-    }
+    vllm_config.model_config.hf_config.index_n_heads = num_idx_heads
     num_reqs, max_blocks = 4, 24
     num_tokens = num_reqs * decode_query_len
     num_physical = num_reqs * max_blocks
@@ -1594,6 +1586,9 @@ def test_decode_index_topk_correctness(
     max_decode_query_len: int,
     num_padded_reqs: int,
 ):
+    # A local generator, so the inputs don't depend on the RNG state that
+    # earlier tests in the shard leave behind.
+    gen = torch.Generator(device="cuda").manual_seed(0)
     topk = 6
     init_blocks = 0
     local_blocks = 1
@@ -1615,14 +1610,28 @@ def test_decode_index_topk_correctness(
     num_pages = active_batch * max_blocks
 
     active_block_table = torch.randperm(
-        num_pages, device="cuda", dtype=torch.int32
+        num_pages, device="cuda", dtype=torch.int32, generator=gen
     ).reshape(active_batch, max_blocks)
     block_table = torch.zeros(batch, max_blocks, device="cuda", dtype=torch.int32)
     block_table[:active_batch] = active_block_table
-    idx_q = torch.randn(
-        batch * decode_query_len, num_idx_heads, head_dim, device="cuda"
+    # bf16-representable values make the kernel's TF32 dot exact, so near-tied
+    # blocks rank the same as in the FP32 reference.
+    idx_q = (
+        torch.randn(
+            batch * decode_query_len,
+            num_idx_heads,
+            head_dim,
+            device="cuda",
+            generator=gen,
+        )
+        .bfloat16()
+        .float()
     )
-    index_kv_cache = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda")
+    index_kv_cache = (
+        torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda", generator=gen)
+        .bfloat16()
+        .float()
+    )
 
     actual = minimax_m3_index_decode(
         idx_q,
@@ -2007,17 +2016,32 @@ def test_amd_decode_index_topk_end_to_end(
     assert torch.count_nonzero(completion_counter).item() == 0
 
 
+def _gfx942() -> bool:
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx942
+
+        return on_gfx942()
+
+    return False
+
+
 @pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
-    reason="fp8 e4m3 indexer cache is the SM100 (MSA) path.",
+    not (current_platform.is_device_capability_family(100) or _gfx942()),
+    reason="fp8 e4m3 indexer decode is the SM100 (MSA) or gfx942 (Triton) path.",
 )
 @pytest.mark.parametrize("num_idx_heads", [1, 4])
-def test_decode_index_topk_fp8(num_idx_heads: int):
+@pytest.mark.parametrize(("decode_query_len", "max_decode_query_len"), [(1, 1), (3, 8)])
+def test_decode_index_topk_fp8(
+    num_idx_heads: int, decode_query_len: int, max_decode_query_len: int
+):
     """The standalone Triton path must score FP8 inputs in FP32 so its top-k
-    matches a reference computed from the dequantized FP8 values."""
+    matches a reference computed from the dequantized FP8 values. On gfx942
+    the AMD scorer runs instead; the single-head single-query case covers its
+    degenerate GEMV branch, every wider query tile the tl.dot branch with
+    speculative decode's per-row causal masking."""
     torch.manual_seed(0)
     topk, init_blocks, local_blocks, head_dim = 8, 0, 1, 128
-    decode_query_len = 1
+    fp8_dtype = current_platform.fp8_dtype()
     active_seq_lens = torch.tensor((129, 1025, 4097), device="cuda", dtype=torch.int32)
     q_lens = torch.full_like(active_seq_lens, decode_query_len)
     prefix_lens = active_seq_lens - decode_query_len
@@ -2030,12 +2054,20 @@ def test_decode_index_topk_fp8(num_idx_heads: int):
     )
     idx_q = torch.randn(
         batch * decode_query_len, num_idx_heads, head_dim, device="cuda"
-    ).to(torch.float8_e4m3fn)
+    ).to(fp8_dtype)
     index_kv_cache = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda").to(
-        torch.float8_e4m3fn
+        fp8_dtype
     )
 
-    actual = minimax_m3_index_decode(
+    if current_platform.is_rocm():
+        from vllm.models.minimax_m3.amd.ops.index_topk import (
+            minimax_m3_index_decode as amd_minimax_m3_index_decode,
+        )
+
+        decode = amd_minimax_m3_index_decode
+    else:
+        decode = minimax_m3_index_decode
+    actual = decode(
         idx_q,
         index_kv_cache,
         block_table,
@@ -2046,7 +2078,7 @@ def test_decode_index_topk_fp8(num_idx_heads: int):
         local_blocks=local_blocks,
         num_kv_heads=num_idx_heads,
         decode_query_len=decode_query_len,
-        max_decode_query_len=decode_query_len,
+        max_decode_query_len=max_decode_query_len,
     )
     # Reference from the DEQUANTIZED fp8 values (the kernel computes the fp8 QK
     # in fp32 with no scaling, so it must match an unscaled fp32 matmul of the
@@ -2332,6 +2364,44 @@ def test_main_cache_layout_contract():
         order = layout.layer_view_order
         # Valid permutation: no duplicates, covers every axis.
         assert set(order) == set(range(len(order)))
+
+
+def test_sparse_metadata_build_does_not_sync():
+    """Building the prefill metadata reads only host-side lengths: it must not
+    wait for queued GPU work (it runs while the previous step executes)."""
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm.models.minimax_m3.common.sparse_attention import (
+        MiniMaxM3SparseMetadataBuilder,
+    )
+
+    device = torch.device(current_platform.device_type)
+    vllm_config = create_vllm_config(
+        block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
+    )
+    spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_DIM,
+        dtype=torch.bfloat16,
+    )
+    builder = MiniMaxM3SparseMetadataBuilder(spec, ["layer.0"], vllm_config, device)
+    batch = BatchSpec(seq_lens=[300, 2000, 129, 4096], query_lens=[1, 1, 129, 700])
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, device)
+
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        md = builder.build(0, common)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+
+    assert md.num_decodes == 2 and md.num_prefills == 2
+    assert md.prefill is not None
+    assert md.prefill.cu_seqlens_k.tolist() == [0, 129, 129 + 4096]
+    assert md.prefill.total_kv_blocks == 2 + 32
 
 
 @pytest.mark.parametrize("layout", [KVCacheLayout.LHBNC, KVCacheLayout.LBHNC])
@@ -2885,7 +2955,7 @@ def _build_decode_inputs(
         dtype=torch.int32,
     )
     token_id = 0
-    for req_id, seq_len in enumerate(seq_lens_list):
+    for seq_len in seq_lens_list:
         for local_q in range(decode_query_len):
             query_pos = seq_len - decode_query_len + local_q
             current_block = query_pos // BLOCK_SIZE

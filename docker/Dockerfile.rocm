@@ -142,7 +142,7 @@ ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
 ARG LMCACHE_REF="140819c9d57a975dbc5678a6459a218e544cb58b"
 ARG LMCACHE_VERSION="0.5.3"
 
-# Remove NVIDIA-only dependencies and accept the runtime's NumPy version.
+# Remove NVIDIA-only dependencies and align NumPy and OpenTelemetry with the runtime.
 RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
     && git clone --depth=1 --branch "v${LMCACHE_VERSION}" \
         "${LMCACHE_REPO}" /app/lmcache \
@@ -151,9 +151,15 @@ RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
         /app/lmcache/requirements/common.txt)" -eq 2 \
     && test "$(grep -Fxc 'numpy<=2.2.6' \
         /app/lmcache/requirements/common.txt)" -eq 1 \
+    && test "$(grep -Fxc 'opentelemetry-api >= 1.20.0, <= 1.40.0' \
+        /app/lmcache/requirements/common.txt)" -eq 1 \
+    && test "$(grep -Fxc 'opentelemetry-exporter-prometheus >= 0.50b0, <= 0.61b0' \
+        /app/lmcache/requirements/common.txt)" -eq 1 \
     && sed -i -E \
         -e '/^(cufile-python|nvtx)([<=>[:space:]]|$)/d' \
         -e 's/^numpy<=2\.2\.6$/numpy<=2.3.5/' \
+        -e '/^opentelemetry-api /s/<= 1\.40\.0$/<= 1.45.2/' \
+        -e '/^opentelemetry-exporter-prometheus /s/<= 0\.61b0$/<= 0.66b2/' \
         /app/lmcache/requirements/common.txt \
     && rm -rf /app/lmcache/.git
 
@@ -214,6 +220,21 @@ RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
  && cd DeepEP \
  && git checkout ${DEEPEP_BRANCH} \
  && LDFLAGS="-fuse-ld=mold" MAX_JOBS="${MAX_JOBS:-$(nproc)}" python3 setup.py --variant rocm --rocm-explicit-ctx --nic ${DEEPEP_NIC} --rocm-gfx942-fp8-fnuz-max 224 bdist_wheel --dist-dir=/app/deep_install
+
+# mamba-ssm and causal-conv1d, the fast path transformers uses for the hybrid-model references in the
+# language model tests. CI only. Their setup.py targets HIP_ARCHITECTURES (default: the local GPU).
+FROM dev AS build_mamba
+ARG MAMBA_COMMIT="269cbe654d10883374736eb936e61d3ee5625695"
+ARG CAUSAL_CONV1D_COMMIT="da6dbaa9fd5a919967f14d3fd031da1288ad5025"
+ARG HIP_ARCHITECTURES="gfx942,gfx950"
+RUN MAMBA_FORCE_BUILD=TRUE CAUSAL_CONV1D_FORCE_BUILD=TRUE \
+    python3 -m pip wheel --no-build-isolation --no-deps -w /app/mamba_install \
+        "git+https://github.com/AndreasKaratzas/mamba@${MAMBA_COMMIT}" \
+        "git+https://github.com/Dao-AILab/causal-conv1d@${CAUSAL_CONV1D_COMMIT}" \
+    && for w in /app/mamba_install/*.whl; do python3 -m zipfile -e "$w" /tmp/whl; done \
+    && for so in /tmp/whl/*.so; do for a in $(echo "$HIP_ARCHITECTURES" | tr , ' '); do \
+         llvm-objdump --offloading "$so" | grep -qw "$a" || { echo "$so lacks $a" >&2; exit 1; }; done; done \
+    && rm -rf /tmp/whl
 
 # rdma-core recent enough for DeepEP's rocshmem. CI only: it replaces the distro libibverbs, which
 # the vendor NIC providers in the runtime (AINIC, Broadcom bnxt_re) are built against.
@@ -308,10 +329,13 @@ RUN --mount=type=bind,source=requirements/common.txt,target=/r/common.txt \
 # USE_ROCM and can detect libamdhip64.so at runtime.
 RUN --mount=type=bind,source=requirements/test/rocm.txt,target=/r/test.txt \
     --mount=type=cache,target=/root/.cache/pip \
-    FASTSAFETENSORS_REQ="$(grep -E '^fastsafetensors(==| @ )' /r/test.txt | head -1)" \
-    && test -n "${FASTSAFETENSORS_REQ}" \
-    && python3 -m pip install --force-reinstall --no-deps \
-        --no-binary fastsafetensors "${FASTSAFETENSORS_REQ}"
+    awk '/^fastsafetensors(==| @ )/ {keep=1} \
+         keep {print; if ($0 !~ /\\$/) exit}' \
+        /r/test.txt > /tmp/fastsafetensors-req.txt \
+    && test -s /tmp/fastsafetensors-req.txt \
+    && python3 -m pip install --force-reinstall --no-deps --require-hashes \
+        --no-binary fastsafetensors -r /tmp/fastsafetensors-req.txt \
+    && rm /tmp/fastsafetensors-req.txt
 
 # ROCm profiler limits workaround.
 RUN echo "ROCTRACER_MAX_EVENTS=10000000" > /app/libkineto.conf
@@ -363,6 +387,9 @@ RUN --mount=type=bind,source=requirements/test/rocm.txt,target=/t.txt --mount=ty
     sp="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
     && pip freeze --path "$sp" | sort >/tmp/shipped && uv pip install --system -c /etc/rocm-constraints.txt -r /t.txt /tu \
     && ! pip freeze --path "$sp" | sort | comm -23 /tmp/shipped - | grep . # a test dep changed a shipped package (apt's python3-* may be shadowed)
+RUN --mount=type=bind,from=build_mamba,src=/app/mamba_install,target=/mamba \
+    --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
+    uv pip install --system --no-deps /mamba/*.whl
 ENV HF_XET_HIGH_PERFORMANCE=1
 
 # ==== per-commit stages: nothing below is part of the runtime key ====
@@ -424,14 +451,51 @@ RUN CARGO_BUILD_JOBS="$(nproc)" SETUPTOOLS_SCM_PRETEND_VERSION="$(cat /tmp/vllm-
     bash tools/build_rust.sh \
     && test -x vllm/vllm-rs
 
+# What setup.py reads of pyproject.toml and vllm/envs.py: the project and setuptools tables, and the
+# variables setup.py names with the definitions they use (ast.unparse drops comments); vllm/__init__.py
+# only has to exist. COPY --from keys on content, so a new env var or lint rule no longer recompiles
+# all HIP code.
+FROM dev AS csrc-inputs
+COPY setup.py pyproject.toml vllm/envs.py /in/
+RUN cd /in && mkdir -p /out/vllm && : > /out/vllm/__init__.py \
+    && awk '/^\[/ { keep = /^\[(project|tool\.setuptools)/ } keep' pyproject.toml > /out/pyproject.toml \
+    && PYTHONDONTWRITEBYTECODE=1 python3 - <<'EOF'
+import ast, re
+setup, body = open("setup.py").read(), ast.parse(open("envs.py").read()).body
+def names(n):
+    targets = getattr(n, "targets", [getattr(n, "target", None)])
+    return {n.name} if isinstance(n, ast.FunctionDef) else {t.id for t in targets if isinstance(t, ast.Name)}
+defs = {name: n for n in body for name in names(n)}
+table, words = defs["environment_variables"].value, set(re.findall(r"\w+", setup))
+table.keys, table.values = map(list, zip(*[kv for kv in zip(table.keys, table.values) if kv[0].value in words]))
+need, todo = set(), ["__getattr__", *re.findall(r"\benvs\.(\w+)", setup)]
+while todo:  # the module-level definitions those use, transitively
+    if (name := todo.pop()) in defs and name not in need:
+        need.add(name)
+        todo += [x.id for x in ast.walk(defs[name]) if isinstance(x, ast.Name)]
+keep = [n for n in body if isinstance(n, (ast.Import, ast.ImportFrom)) or names(n) & need]
+for n in keep:  # docstring edits must not recompile either
+    if isinstance(n, ast.FunctionDef) and ast.get_docstring(n):
+        n.body = n.body[1:] or [ast.Pass()]
+open("/out/vllm/envs.py", "w").write(ast.unparse(ast.Module(keep, [])))
+import importlib.util as u  # the filter must not change what setup.py reads
+def load(path):
+    spec = u.spec_from_file_location("envs", path)
+    spec.loader.exec_module(mod := u.module_from_spec(spec))
+    return mod
+orig, pruned = load("envs.py"), load("/out/vllm/envs.py")
+for n in sorted(set(re.findall(r"\benvs\.(\w+)", setup)) & set(orig.environment_variables)):
+    assert getattr(orig, n) == getattr(pruned, n), f"envs.{n} differs: update csrc-inputs in Dockerfile.rocm"
+EOF
+
 # Native extensions only: copies just the files that affect the HIP/C++ build (and the map tool).
 FROM triton-kernels AS csrc
 WORKDIR /app/vllm
-COPY setup.py CMakeLists.txt pyproject.toml ./
+COPY setup.py CMakeLists.txt ./
+COPY --from=csrc-inputs /out/ ./
 COPY tools/build_rust.py tools/build_rust.py
 COPY cmake cmake/
 COPY csrc csrc/
-COPY vllm/envs.py vllm/__init__.py vllm/
 # Empty: the stack's full PYTORCH_ROCM_ARCH (release); CI passes the arches it can test.
 ARG ARCH
 # setup.py reads requirements/rocm.txt for install_requires. This wheel only carries the .so files
@@ -554,12 +618,18 @@ RUN --mount=type=bind,source=.buildkite/scripts/rocm/select_aiter_nightly_wheel.
     fi
 
 FROM test-base AS test
+# Native fault reporter for AMD CI pytest runs (.buildkite/scripts/hardware_ci/amd_ci_fast_exit.py).
+RUN --mount=type=bind,source=.buildkite/scripts/hardware_ci/amd_ci_fault_trap.c,target=/tmp/trap.c \
+    cc -O2 -shared -fPIC -o /usr/local/lib/libamd_ci_fault_trap.so /tmp/trap.c
 COPY --link --from=native /out /
 COPY --link --from=install /out /
 COPY --link --exclude=vllm --exclude=.git . /vllm-workspace/
 # Source under src/ so it does not shadow the installed package in tests.
 COPY --link vllm /vllm-workspace/src/vllm
 WORKDIR /vllm-workspace
+# run-amd-test.sh's pytest plugin, in site-packages: commands that set PYTHONPATH still load it.
+RUN cp .buildkite/scripts/hardware_ci/amd_ci_fast_exit.py \
+    "$(python3 -P -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/"
 
 FROM test AS test-smoke
 RUN --network=none python3 -c "import vllm, vllm._C, vllm._rocm_C; print(vllm.__version__)"

@@ -44,10 +44,12 @@ from vllm.v1.outputs import ModelRunnerOutput
 
 from ...utils import create_new_process_for_each_test, multi_gpu_test
 
-if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
+if not current_platform.is_cuda_alike():
+    pytest.skip(
+        reason="V1 currently only supported on CUDA and ROCm.", allow_module_level=True
+    )
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 # test_engine_core_concurrent_batches assumes exactly 12 tokens per prompt.
 # Adjust prompt if changing model to maintain 12-token length.
@@ -426,6 +428,7 @@ def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
     sampled.set_result(None if encoder_only else output)
     core.model_executor.execute_model.return_value = executed
     core.model_executor.sample_tokens.return_value = sampled
+    core._wait_for_output.side_effect = lambda future: future.result()
 
     EngineCore.step_with_batch_queue(core)
     if core.batch_queue:
@@ -539,6 +542,7 @@ def test_encoder_instance_zero_kv_cache(
         trust_remote_code=True,
         dtype="float16",
         seed=42,
+        max_model_len=512,
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=10,
@@ -653,6 +657,7 @@ def _cadenced_dp_engine_core(
     """A bare DPEngineCoreProc whose all-reduce is scripted by `results`;
     returns the core and the step numbers at which the all-reduce ran."""
     core = object.__new__(DPEngineCoreProc)
+    core.enable_fault_tolerance = False
     core.dp_group = object()
     core.vllm_config = MagicMock(parallel_config=ParallelConfig())
     core.dp_sync_interval = dp_sync_interval
@@ -752,6 +757,7 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     """A bare EngineCoreProc holding just the state pause_scheduler touches."""
     core = object.__new__(EngineCoreProc)
     core.model_executor = MagicMock()
+    core.model_executor.vllm_config.cache_config.enable_extensible_kv_cache = False
     core.scheduler = MagicMock()
     core.scheduler.has_requests.return_value = False
     core.batch_queue = None
@@ -850,8 +856,8 @@ def test_wake_up_republishes_kv_connector_handshake_metadata(tags, republished):
     core.model_executor.wake_up.side_effect = lambda tags: calls.append("wake_up")
     core.model_executor.get_kv_connector_handshake_metadata.return_value = [{}]
     kv_connector = core.scheduler.get_kv_connector.return_value
-    kv_connector.set_xfer_handshake_metadata_pp_aware.side_effect = (
-        lambda metadata: calls.append("publish")
+    kv_connector.set_xfer_handshake_metadata_pp_aware.side_effect = lambda metadata: (
+        calls.append("publish")
     )
     EngineCore.wake_up(core, tags)
     assert calls == (["wake_up", "publish"] if republished else ["wake_up"])

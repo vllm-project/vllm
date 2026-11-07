@@ -7,10 +7,9 @@ import pytest
 import torch
 import torch.nn as nn
 
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import ParallelConfig
-from vllm.model_executor.model_loader.mtp_validation import (
-    disable_mtp_completeness_check,
-)
+from vllm.model_executor.model_loader.reload import lifecycle
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
     spec_decode_needs_target_embed,
@@ -91,45 +90,42 @@ def test_mtp_style_drafter_is_left_alone_under_pp(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "method,pp_size,is_last_rank,expected",
+    "method,may_use_target_embed,pp_size,is_last_rank,expected",
     [
-        ("eagle", 2, True, True),
-        ("eagle3", 2, True, True),
-        ("dflash", 2, True, True),
-        ("dspark", 2, True, True),
-        ("eagle3", 1, True, False),
-        ("eagle3", 2, False, False),
-        ("mtp", 2, True, False),
-        (None, 2, True, False),
+        ("eagle", True, 2, True, True),
+        ("eagle3", True, 2, True, True),
+        ("dflash", True, 2, True, True),
+        ("dspark", True, 2, True, True),
+        ("eagle3", True, 1, True, False),
+        ("eagle3", True, 2, False, False),
+        # Depends on the MTP draft model (e.g. MiniMax-M3's may use it).
+        ("mtp", True, 2, True, True),
+        ("mtp", False, 2, True, False),
+        # Not a hidden-state drafter, so never reuses the target's embedding.
+        ("draft_model", True, 2, True, False),
+        (None, True, 2, True, False),
     ],
 )
 def test_target_embedding_provisioning(
-    monkeypatch, method, pp_size, is_last_rank, expected
+    monkeypatch, method, may_use_target_embed, pp_size, is_last_rank, expected
 ):
     monkeypatch.setattr(
         "vllm.distributed.parallel_state.get_pp_group",
         _fake_pp(pp_size, is_last_rank),
         raising=True,
     )
-    speculative_config = None if method is None else SimpleNamespace(method=method)
+    speculative_config = (
+        None
+        if method is None
+        else fake_speculative_config(
+            method=method,
+            draft_model_config=SimpleNamespace(
+                may_use_target_embed=may_use_target_embed
+            ),
+        )
+    )
     config = SimpleNamespace(speculative_config=speculative_config)
     assert spec_decode_needs_target_embed(config) is expected
-
-
-@pytest.mark.parametrize(
-    "pp_size,is_last_rank,expected",
-    [(2, True, True), (2, False, False), (1, True, False)],
-)
-def test_mtp_target_embedding_requires_model_opt_in(
-    monkeypatch, pp_size, is_last_rank, expected
-):
-    monkeypatch.setattr(
-        "vllm.distributed.parallel_state.get_pp_group",
-        _fake_pp(pp_size, is_last_rank),
-    )
-    config = SimpleNamespace(speculative_config=SimpleNamespace(method="mtp"))
-    assert spec_decode_needs_target_embed(config, include_mtp=True) is expected
-    assert not spec_decode_needs_target_embed(config)
 
 
 @pytest.fixture
@@ -150,14 +146,17 @@ def m3_config():
         hidden_size=HIDDEN,
         num_local_experts=0,
         num_hidden_layers=0,
+        layer_types=[],
         rms_norm_eps=1e-5,
     )
     return SimpleNamespace(
-        use_v2_model_runner=True,
         load_config=SimpleNamespace(load_format="auto"),
         model_config=SimpleNamespace(hf_text_config=hf_config),
-        speculative_config=SimpleNamespace(
-            method="mtp", draft_model_config=SimpleNamespace(hf_config=hf_config)
+        speculative_config=fake_speculative_config(
+            method="mtp",
+            draft_model_config=SimpleNamespace(
+                hf_config=hf_config, may_use_target_embed=True
+            ),
         ),
         parallel_config=ParallelConfig(),
         quant_config=None,
@@ -187,7 +186,7 @@ def make_m3_draft(monkeypatch, m3_modules, m3_config):
     "key",
     [None, "model.embed_tokens.weight", "language_model.model.embed_tokens.weight"],
 )
-def test_m3_checkpoint_embedding_ownership(make_m3_draft, key):
+def test_m3_checkpoint_embedding_ownership(monkeypatch, make_m3_draft, key):
     """Actual M3 loading determines sharing and survives an unrelated reload."""
     draft = make_m3_draft()
     assert draft.has_own_embed_tokens
@@ -196,8 +195,8 @@ def test_m3_checkpoint_embedding_ownership(make_m3_draft, key):
         weights.append((key, torch.ones(VOCAB, HIDDEN)))
     loaded = draft.load_weights(weights)
     assert ("model.embed_tokens.weight" in loaded) is (key is not None)
-    with disable_mtp_completeness_check():
-        draft.load_weights([("lm_head.weight", torch.zeros(VOCAB, HIDDEN))])
+    monkeypatch.setattr(lifecycle, "_weight_update_active", True)
+    draft.load_weights([("lm_head.weight", torch.zeros(VOCAB, HIDDEN))])
     assert draft.has_own_embed_tokens is (key is not None)
     target = _inner(_embed(fill=2.0))
     original = draft.model.embed_tokens
@@ -212,15 +211,17 @@ def test_m3_checkpoint_embedding_ownership(make_m3_draft, key):
 @pytest.mark.parametrize(
     "load_format", ["dummy", "sharded_state", "runai_streamer_sharded", "tensorizer"]
 )
-def test_m3_direct_loader_embedding_ownership(make_m3_draft, m3_config, load_format):
+def test_m3_direct_loader_embedding_ownership(
+    monkeypatch, make_m3_draft, m3_config, load_format
+):
     """Directly loaded embeddings survive transfers and share only when equal."""
     m3_config.load_config.load_format = load_format
     draft = make_m3_draft()
     draft.load_state_dict(
         {key: torch.ones_like(value) for key, value in draft.state_dict().items()}
     )
-    with disable_mtp_completeness_check():
-        draft.load_weights([("model.mtp.layers.0.weight", torch.zeros(1, 1))])
+    monkeypatch.setattr(lifecycle, "_weight_update_active", True)
+    draft.load_weights([("model.mtp.layers.0.weight", torch.zeros(1, 1))])
     target = _inner(_embed(fill=2.0))
     original = draft.model.embed_tokens
     eagle_utils.maybe_share_target_embed(draft, draft.model, target)
@@ -233,13 +234,9 @@ def test_m3_direct_loader_embedding_ownership(make_m3_draft, m3_config, load_for
         assert draft.model.embed_tokens is equal_target.embed_tokens
 
 
-@pytest.mark.parametrize("use_v2,pp_size", [(True, 1), (False, 1), (False, 2)])
-def test_m3_preserves_legacy_embedding_sharing(
-    monkeypatch, m3_modules, m3_config, make_m3_draft, use_v2, pp_size
-):
+def test_m3_preserves_legacy_embedding_sharing(monkeypatch, m3_modules, make_m3_draft):
     mtp, _ = m3_modules
-    m3_config.use_v2_model_runner = use_v2
-    monkeypatch.setattr(mtp, "get_pp_group", _fake_pp(pp_size))
+    monkeypatch.setattr(mtp, "get_pp_group", _fake_pp(1))
     draft = make_m3_draft()
     draft.load_weights(
         [
@@ -247,21 +244,21 @@ def test_m3_preserves_legacy_embedding_sharing(
             ("model.embed_tokens.weight", torch.ones(VOCAB, HIDDEN)),
         ]
     )
-    assert not hasattr(draft, "has_own_embed_tokens")
+    # Not tracked, so the target's embedding is shared.
+    assert draft.has_own_embed_tokens is False
 
 
 @pytest.mark.parametrize(
-    "rank,use_v2,method,expected",
+    "rank,method,expected",
     [
-        (0, True, "mtp", True),
-        (1, True, "mtp", False),
-        (2, True, "mtp", True),
-        (2, False, "mtp", False),
-        (2, True, None, False),
+        (0, "mtp", True),
+        (1, "mtp", False),
+        (2, "mtp", True),
+        (2, None, False),
     ],
 )
 def test_m3_target_allocates_embedding_on_required_stage(
-    monkeypatch, m3_modules, m3_config, rank, use_v2, method, expected
+    monkeypatch, m3_modules, m3_config, rank, method, expected
 ):
     _, model = m3_modules
     pp = lambda: SimpleNamespace(
@@ -276,7 +273,6 @@ def test_m3_target_allocates_embedding_on_required_stage(
     monkeypatch.setattr(model, "VocabParallelEmbedding", lambda *_, **kw: _embed())
     monkeypatch.setattr(model, "make_layers", lambda *_, **kw: (0, 0, nn.ModuleList()))
     monkeypatch.setattr(model, "MiniMAXGemmaRMSNorm", lambda *_, **kw: nn.Identity())
-    m3_config.use_v2_model_runner = use_v2
     if method is None:
         m3_config.speculative_config = None
     target = model.MiniMaxM3Model(vllm_config=m3_config)
@@ -284,19 +280,21 @@ def test_m3_target_allocates_embedding_on_required_stage(
 
 
 @pytest.mark.parametrize("initial_embed", [False, True])
-def test_m3_weight_transfer_updates_embedding_ownership(make_m3_draft, initial_embed):
+def test_m3_weight_transfer_updates_embedding_ownership(
+    monkeypatch, make_m3_draft, initial_embed
+):
     """Layer transfers retain ownership; newly loaded embeddings become owned."""
     draft = make_m3_draft()
     weights = [("model.mtp.layers.0.weight", torch.ones(1, 1))]
     if initial_embed:
         weights.append(("model.embed_tokens.weight", torch.ones(VOCAB, HIDDEN)))
     draft.load_weights(weights)
-    with disable_mtp_completeness_check():
-        draft.load_weights([("model.mtp.layers.0.weight", torch.zeros(1, 1))])
-        assert draft.has_own_embed_tokens is initial_embed
-        draft.load_weights(
-            [("model.embed_tokens.weight", torch.full((VOCAB, HIDDEN), 3.0))]
-        )
+    monkeypatch.setattr(lifecycle, "_weight_update_active", True)
+    draft.load_weights([("model.mtp.layers.0.weight", torch.zeros(1, 1))])
+    assert draft.has_own_embed_tokens is initial_embed
+    draft.load_weights(
+        [("model.embed_tokens.weight", torch.full((VOCAB, HIDDEN), 3.0))]
+    )
     assert draft.has_own_embed_tokens
     target = _inner(_embed(fill=2.0))
     original = draft.model.embed_tokens
