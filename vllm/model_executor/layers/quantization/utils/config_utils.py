@@ -150,7 +150,6 @@ def is_shared_expert_quant_fse_compatible(
     from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        is_layer_skipped,
         kMxfp4Static,
         kMxfp8Static,
     )
@@ -374,17 +373,10 @@ def is_shared_expert_quant_fse_compatible(
                 "checkpoints",
             )
 
-        def is_ignored(layer_name: str) -> bool:
-            return is_layer_skipped(
-                prefix=layer_name,
-                ignored_layers=quant_config.ignored_layers,
-                fused_mapping=quant_config.packed_modules_mapping,
-                match_mode=quant_config.ignored_layers_match_mode,
-            )
-
-        expert_ignored = is_ignored(expert_prefix)
+        expert_ignored = quant_config.is_layer_excluded(expert_prefix)
         if any(
-            is_ignored(f"{shared_expert_prefix}.{projection_name}") != expert_ignored
+            quant_config.is_layer_excluded(f"{shared_expert_prefix}.{projection_name}")
+            != expert_ignored
             for projection_name in projection_names
         ):
             return (

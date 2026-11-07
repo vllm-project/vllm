@@ -6,9 +6,17 @@
 Note: these tests will only pass on L4 GPU.
 """
 
-import pytest
+import json
 
-from tests.quantization.utils import is_quant_method_supported
+import pytest
+import torch
+
+from tests.quantization.utils import (
+    is_quant_method_supported,
+    load_model_without_vllm_runner,
+)
+from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_kv_cache_dtype
 from vllm.platforms import current_platform
 from ..utils import check_logprobs_close
@@ -176,4 +184,89 @@ def test_cpu_models(
             outputs_1_lst=test_outputs,
             name_0="bf16_kv_cache",
             name_1="fp8_kv_cache",
+        )
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="fp8 is not supported on this GPU type.",
+)
+def test_fp8_modules_to_not_convert_keeps_modules_unquantized(
+    tmp_path, dist_init, workspace_init
+):
+    """HF FP8 exports such as Ministral-3 list whole modules in
+    `modules_to_not_convert`, under transformers' module names. Every layer
+    inside them must keep its BF16 checkpoint weight."""
+    from safetensors.torch import load_file, save_file
+    from transformers import Mistral3Config, Mistral3ForConditionalGeneration
+
+    config = Mistral3Config(
+        text_config={
+            "model_type": "mistral",
+            "hidden_size": 128,
+            "intermediate_size": 256,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 32,
+            "vocab_size": 1024,
+        },
+        vision_config={
+            "model_type": "pixtral",
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "head_dim": 32,
+            "image_size": 56,
+            "patch_size": 14,
+        },
+        image_token_index=10,
+        projector_hidden_act="gelu",
+        multimodal_projector_bias=False,
+    )
+    torch.manual_seed(0)
+    Mistral3ForConditionalGeneration(config).to(torch.bfloat16).save_pretrained(
+        tmp_path
+    )
+    weights = load_file(tmp_path / "model.safetensors")
+    for name in [n for n in weights if n.startswith("language_model.model.layers.")]:
+        if name.endswith("_proj.weight"):
+            layer = name.removesuffix(".weight")
+            weights[name] = weights[name].to(torch.float8_e4m3fn)
+            weights[f"{layer}.weight_scale_inv"] = torch.tensor(1.0).bfloat16()
+            weights[f"{layer}.activation_scale"] = torch.tensor(1.0).bfloat16()
+    save_file(weights, tmp_path / "model.safetensors", metadata={"format": "pt"})
+    hf_config = json.loads((tmp_path / "config.json").read_text())
+    hf_config["quantization_config"] = {
+        "quant_method": "fp8",
+        "activation_scheme": "static",
+        "modules_to_not_convert": [
+            "model.vision_tower",
+            "model.multi_modal_projector",
+            "lm_head",
+        ],
+    }
+    (tmp_path / "config.json").write_text(json.dumps(hf_config))
+
+    model, _ = load_model_without_vllm_runner(str(tmp_path))
+
+    for name, module in model.named_modules():
+        if isinstance(module, LinearBase):
+            expected = (
+                Fp8LinearMethod
+                if name.startswith("language_model.")
+                else UnquantizedLinearMethod
+            )
+            assert isinstance(module.quant_method, expected), name
+    for name in [
+        "multi_modal_projector.linear_1",
+        "multi_modal_projector.linear_2",
+        "vision_tower.transformer.layers.0.attention.o_proj",
+    ]:
+        torch.testing.assert_close(
+            model.get_submodule(name).weight.cpu(),
+            weights[f"{name}.weight"],
+            rtol=0,
+            atol=0,
         )
