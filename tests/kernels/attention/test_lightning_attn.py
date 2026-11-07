@@ -266,3 +266,52 @@ def test_lightning_attention_reference(
 
     assert ref_output.shape == (batch_size, num_heads, seq_len, head_size)
     assert ref_kv_cache.shape == actual_kv_cache.shape
+
+
+@pytest.mark.parametrize("seq_len", [1, 63, 64, 65, 255, 256, 257, 300, 512, 769])
+@pytest.mark.parametrize("with_history", [False, True])
+@torch.inference_mode()
+def test_lightning_attention_prefill_decay(seq_len, with_history):
+    """Prefill must decay prior state once before attending to each token."""
+    from vllm.model_executor.layers.lightning_attn import lightning_attention
+
+    set_random_seed(42)
+    shape = (2, 4, seq_len, 64)
+    q, k, v = [
+        torch.nn.functional.silu(torch.randn(shape, device=DEVICE)) for _ in range(3)
+    ]
+    slopes = torch.tensor([0.0, 0.01, 0.5, 0.917], device=DEVICE)
+    history = torch.randn(2, 4, 64, 64, device=DEVICE) if with_history else None
+    original_history = history.clone() if history is not None else None
+
+    # Evaluate the causal recurrence in closed form, in double precision.
+    q64, k64, v64 = [x.double() for x in (q, k, v)]
+    positions = torch.arange(seq_len, device=DEVICE)
+    distance = positions[:, None] - positions[None, :]
+    weights = torch.exp(-slopes.double()[:, None, None] * distance.clamp(min=0))
+    weights = weights * (distance >= 0)
+    expected = ((q64 @ k64.transpose(-1, -2)) * weights) @ v64
+    decay = torch.exp(-slopes.double()[:, None, None] * (positions[:, None] + 1))
+    if history is not None:
+        expected += (q64 @ history.double()) * decay
+    final_weights = torch.exp(-slopes.double()[:, None] * positions.flip(0))
+    expected_state = (k64.transpose(-1, -2) * final_weights[:, None, :]) @ v64
+    if history is not None:
+        expected_state += torch.exp(-slopes.double()[:, None, None] * seq_len) * history
+
+    output, states = lightning_attention(q, k, v, slopes, kv_history=history)
+
+    # Allow TF32 rounding, while keeping errors relative to each head's scale.
+    output_scale = expected.square().mean(dim=(-2, -1), keepdim=True).sqrt()
+    state_scale = expected_state.square().mean(dim=(-2, -1), keepdim=True).sqrt()
+    torch.testing.assert_close(
+        output.double() / output_scale, expected / output_scale, atol=0.03, rtol=0.01
+    )
+    torch.testing.assert_close(
+        states[:, :, -1].double() / state_scale,
+        expected_state / state_scale,
+        atol=0.03,
+        rtol=0.01,
+    )
+    if history is not None:
+        torch.testing.assert_close(history, original_history, atol=0, rtol=0)
