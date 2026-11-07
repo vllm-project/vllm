@@ -3,7 +3,16 @@
 import copy
 
 import pytest
+import torch
 
+from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
+from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
 from vllm.v1.request import FinishReason, RequestStatus
 
@@ -13,6 +22,7 @@ from .utils import (
     create_request,
     create_scheduler,
     create_vllm_config,
+    make_kv_cache_config,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -260,3 +270,265 @@ def test_abort_during_kv_transfer():
     )
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert_scheduler_empty(scheduler)
+
+
+@pytest.mark.parametrize(
+    "num_tokens,token_budget,num_lookahead_tokens",
+    [
+        (40, 24, 0),  # chunk 2 = tokens 24..39: rest of b1 plus b2
+        (20, 18, 0),  # chunk 2 = tokens 18..19: fits in b1, no new block
+        (40, 30, 3),  # spec decode: chunk 1 also allocates lookahead block b2
+    ],
+)
+def test_host_buffer_save_resaves_block_straddling_chunk_boundary(
+    num_tokens: int, token_budget: int, num_lookahead_tokens: int
+):
+    """Host-buffer mode (kv_buffer_device="cpu") copies each prefill step's
+    blocks to host memory. When a chunk boundary is not block aligned, the
+    next chunk writes the rest of the previous chunk's last block, so that
+    block must be copied again. Blocks allocated ahead of the written tokens
+    (spec-decode lookahead) must not be copied before they are written."""
+    block_size = 16
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=token_budget,
+        kv_role="kv_producer",
+    )
+    scheduler = create_scheduler(vllm_config)
+    scheduler.num_lookahead_tokens = num_lookahead_tokens
+    connector_scheduler = scheduler.get_kv_connector().connector_scheduler
+    connector_scheduler.use_host_buffer = True
+    request = create_request(
+        request_id=1,
+        num_tokens=num_tokens,
+        block_size=block_size,
+        do_remote_decode=True,
+    )
+    req_id = request.request_id
+    scheduler.add_request(request)
+
+    out1 = scheduler.schedule()
+    (saved1,) = out1.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    (table,) = scheduler.kv_cache_manager.get_block_ids(req_id)
+    # Only the blocks holding tokens written in chunk 1.
+    assert saved1 == table[: -(-token_budget // block_size)]
+    model_output = create_model_runner_output([request])
+    model_output.sampled_token_ids = [[]]
+    scheduler.update_from_output(out1, model_output)
+    assert request.num_computed_tokens % block_size != 0
+    first = request.num_computed_tokens // block_size
+    straddling = table[first]
+
+    out2 = scheduler.schedule()
+    (saved2,) = out2.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    (table,) = scheduler.kv_cache_manager.get_block_ids(req_id)
+    assert saved2[0] == straddling
+    assert saved2 == table[first : -(-num_tokens // block_size)]
+    assert req_id not in connector_scheduler._reqs_need_save
+    assert req_id not in connector_scheduler._reqs_save_state
+
+
+def test_host_buffer_save_includes_prefix_cache_hit_blocks():
+    """A first chunk that starts after a local prefix-cache hit still copies
+    the cached blocks: D pulls the whole prompt from the host buffer."""
+    block_size = 16
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=64,
+        kv_role="kv_producer",
+    )
+    scheduler = create_scheduler(vllm_config)
+    connector_scheduler = scheduler.get_kv_connector().connector_scheduler
+    connector_scheduler.use_host_buffer = True
+
+    # Request 1 computes and caches a 32-token (2-block) prefix.
+    first = create_request(
+        request_id=1,
+        num_tokens=40,
+        common_prefix_len=32,
+        block_size=block_size,
+        do_remote_decode=True,
+    )
+    scheduler.add_request(first)
+    out = scheduler.schedule()
+    (cached_prefix,) = scheduler.kv_cache_manager.get_block_ids(first.request_id)
+    cached_prefix = cached_prefix[:2]
+    scheduler.update_from_output(out, create_model_runner_output([first]))
+
+    # Request 2 hits the prefix and needs two chunks for the rest.
+    second = create_request(
+        request_id=2,
+        num_tokens=110,
+        common_prefix_len=32,
+        block_size=block_size,
+        do_remote_decode=True,
+    )
+    req_id = second.request_id
+    scheduler.add_request(second)
+    out1 = scheduler.schedule()
+    (saved1,) = out1.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    (table,) = scheduler.kv_cache_manager.get_block_ids(req_id)
+    assert table[:2] == cached_prefix  # the prefix came from the cache
+    assert saved1 == table[: (32 + 64) // block_size]
+    model_output = create_model_runner_output([second])
+    model_output.sampled_token_ids = [[]]
+    scheduler.update_from_output(out1, model_output)
+
+    out2 = scheduler.schedule()
+    (saved2,) = out2.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    (table,) = scheduler.kv_cache_manager.get_block_ids(req_id)
+    assert saved2 == table[96 // block_size : -(-110 // block_size)]
+    assert req_id not in connector_scheduler._reqs_save_state
+
+
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+def test_host_buffer_save_restarts_after_preemption(use_v2_model_runner: bool):
+    """Preemption between prefill chunks frees the request's blocks. When it is
+    scheduled again (as a resumed request with the V1 model runner, as a new
+    one with V2), every block it covers is copied again from token 0."""
+    block_size = 16
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=24,
+        kv_role="kv_producer",
+    )
+    scheduler = create_scheduler(vllm_config)
+    scheduler.use_v2_model_runner = use_v2_model_runner
+    connector_scheduler = scheduler.get_kv_connector().connector_scheduler
+    connector_scheduler.use_host_buffer = True
+    request = create_request(
+        request_id=1,
+        num_tokens=40,
+        block_size=block_size,
+        do_remote_decode=True,
+    )
+    req_id = request.request_id
+    scheduler.add_request(request)
+
+    out1 = scheduler.schedule()
+    model_output = create_model_runner_output([request])
+    model_output.sampled_token_ids = [[]]
+    scheduler.update_from_output(out1, model_output)
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+
+    out2 = scheduler.schedule()
+    if use_v2_model_runner:
+        assert [r.req_id for r in out2.scheduled_new_reqs] == [req_id]
+    else:
+        assert out2.scheduled_cached_reqs.resumed_req_ids == {req_id}
+    (saved2,) = out2.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    (table,) = scheduler.kv_cache_manager.get_block_ids(req_id)
+    assert saved2 == table[: -(-40 // block_size)]
+    assert req_id not in connector_scheduler._reqs_save_state
+
+
+def test_host_buffer_save_hybrid_attention_and_mamba():
+    """Hybrid model with mamba_cache_mode="none" (one SSM state block per
+    request). The attention group is saved by token position, so the block
+    straddling the chunk boundary is copied again. Every chunk rewrites the SSM
+    state block in place, so the last chunk must copy it."""
+    block_size, max_model_len, num_tokens, token_budget = 16, 1024, 40, 24
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=token_budget,
+        max_model_len=max_model_len,
+        kv_role="kv_producer",
+    )
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    vllm_config.cache_config.enable_prefix_caching = False
+    kv_cache_config = make_kv_cache_config(
+        block_size, mamba_enabled=True, mamba_block_size=max_model_len
+    )
+    scheduler = create_scheduler(
+        vllm_config,
+        kv_cache_config=kv_cache_config,
+        scheduler_block_size=max_model_len,
+    )
+    connector_scheduler = scheduler.get_kv_connector().connector_scheduler
+    connector_scheduler.use_host_buffer = True
+    request = create_request(
+        request_id=1,
+        num_tokens=num_tokens,
+        block_size=block_size,
+        do_remote_decode=True,
+    )
+    req_id = request.request_id
+    scheduler.add_request(request)
+
+    out1 = scheduler.schedule()
+    attn1, _ = out1.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    attn_table, ssm_table = scheduler.kv_cache_manager.get_block_ids(req_id)
+    assert attn1 == attn_table[: -(-token_budget // block_size)]
+    assert len(ssm_table) == 1
+    model_output = create_model_runner_output([request])
+    model_output.sampled_token_ids = [[]]
+    scheduler.update_from_output(out1, model_output)
+
+    out2 = scheduler.schedule()
+    attn2, ssm2 = out2.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    attn_table, _ = scheduler.kv_cache_manager.get_block_ids(req_id)
+    assert (
+        attn2 == attn_table[token_budget // block_size : -(-num_tokens // block_size)]
+    )
+    assert ssm2 == ssm_table
+    assert req_id not in connector_scheduler._reqs_save_state
+
+
+@pytest.mark.parametrize("group_kind", ["uniform_type", "chunked_local"])
+def test_host_buffer_save_resaves_straddling_block_of_other_attention_groups(
+    group_kind: str,
+):
+    """A UniformTypeKVCacheSpecs group (layers with different head sizes)
+    reaches the scheduler as one of its layer specs, and chunked local
+    attention blocks hold token positions too. Both are saved by position, so
+    the block straddling the chunk boundary is copied again."""
+    block_size, num_tokens, token_budget = 16, 40, 24
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=token_budget,
+        kv_role="kv_producer",
+    )
+    layer_spec = dict(block_size=block_size, num_kv_heads=4, dtype=torch.float16)
+    if group_kind == "uniform_type":
+        spec = UniformTypeKVCacheSpecs.from_specs(
+            {
+                "layer0": FullAttentionSpec(head_size=16, **layer_spec),
+                "layer1": FullAttentionSpec(head_size=32, **layer_spec),
+            }
+        )
+        assert spec is not None
+    else:
+        spec = ChunkedLocalAttentionSpec(
+            head_size=16, attention_chunk_size=64, **layer_spec
+        )
+    kv_cache_config = generate_scheduler_kv_cache_config(
+        [
+            KVCacheConfig(
+                num_blocks=100,
+                kv_cache_tensors=[],
+                kv_cache_groups=[KVCacheGroupSpec(["layer0", "layer1"], spec)],
+            )
+        ]
+    )
+    scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
+    connector_scheduler = scheduler.get_kv_connector().connector_scheduler
+    connector_scheduler.use_host_buffer = True
+    request = create_request(
+        request_id=1,
+        num_tokens=num_tokens,
+        block_size=block_size,
+        do_remote_decode=True,
+    )
+    req_id = request.request_id
+    scheduler.add_request(request)
+
+    out1 = scheduler.schedule()
+    model_output = create_model_runner_output([request])
+    model_output.sampled_token_ids = [[]]
+    scheduler.update_from_output(out1, model_output)
+
+    out2 = scheduler.schedule()
+    (saved2,) = out2.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    (table,) = scheduler.kv_cache_manager.get_block_ids(req_id)
+    assert saved2 == table[token_budget // block_size : -(-num_tokens // block_size)]

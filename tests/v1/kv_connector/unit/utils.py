@@ -211,6 +211,7 @@ def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
     kv_cache_config: KVCacheConfig | None = None,
+    scheduler_block_size: int | None = None,
     hash_block_size: int | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Initialize Scheduler For Testing."""
@@ -241,7 +242,7 @@ def create_scheduler(
         kv_cache_config=kv_cache_config,
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
-        block_size=block_size,
+        block_size=scheduler_block_size or block_size,
         hash_block_size=hash_block_size,
     )
 
@@ -528,6 +529,7 @@ def make_kv_cache_config(
     sw_size: int = 128,
     num_blocks: int = 100,
     mamba_cache_mode: Literal["align", "none"] = "none",
+    mamba_block_size: int | None = None,
 ) -> KVCacheConfig:
     kv_cache_groups = [
         KVCacheGroupSpec(
@@ -558,7 +560,7 @@ def make_kv_cache_config(
             KVCacheGroupSpec(
                 ["mamba0", "mamba1"],
                 MambaSpec(
-                    block_size=block_size,
+                    block_size=mamba_block_size or block_size,
                     shapes=((16,), (16,)),
                     dtypes=(torch.float16,),
                     mamba_cache_mode=mamba_cache_mode,
@@ -618,6 +620,7 @@ def make_nixl_scheduler(
         sched._reqs_in_batch = set()
         sched._reqs_not_processed = set()
         sched._reqs_need_save = {}
+        sched._reqs_save_state = {}
         sched.use_host_buffer = False
         sched.engine_id = "test-engine"
         sched.transfer_tp_size = 1
@@ -656,6 +659,7 @@ def make_nixl_push_scheduler(
     sched._reqs_in_batch = set()
     sched._reqs_not_processed = set()
     sched._reqs_need_save = {}
+    sched._reqs_save_state = {}
     sched._kv_lease_duration = 30
     sched.decoder_kv_blocks_ttl = decoder_kv_blocks_ttl
     sched.use_host_buffer = False
