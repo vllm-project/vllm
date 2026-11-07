@@ -21,6 +21,7 @@ vLLM currently supports the following reasoning models:
 | [DeepSeek-V3.1](https://huggingface.co/collections/deepseek-ai/deepseek-v31-68a491bed32bd77e7fca048f) | `deepseek_v3` | `json`, `regex` | ❌ |
 | [ERNIE-4.5-VL series](https://huggingface.co/baidu/ERNIE-4.5-VL-28B-A3B-PT) | `ernie45` | `json`, `regex` | ❌ |
 | [ERNIE-4.5-21B-A3B-Thinking](https://huggingface.co/baidu/ERNIE-4.5-21B-A3B-Thinking) | `ernie45` | `json`, `regex` | ✅ |
+| [Flint](https://huggingface.co/RecursiveSI/flint) | `flint` | `json`, `regex` | ✅ |
 | [GLM-4.5 series](https://huggingface.co/collections/zai-org/glm-45-687c621d34bda8c9e4bf503b) | `glm45` | `json`, `regex` | ✅ |
 | [Holo2 series](https://huggingface.co/collections/Hcompany/holo2) | `holo2` | `json`, `regex` | ✅ |
 | [Hunyuan A13B series](https://huggingface.co/collections/tencent/hunyuan-a13b-685ec38e5b46321e3ea7c4be) | `hunyuan_a13b` | `json`, `regex` | ✅ |
@@ -43,6 +44,7 @@ vLLM currently supports the following reasoning models:
     Holo2 reasoning is enabled by default. To disable it, you must also pass `thinking=False` in your `chat_template_kwargs`.
     Ripple decides per turn whether to reason and has no switch for it. Structured outputs apply from the first token, so constrained responses answer without reasoning.
     Kolibri 1 reasoning is enabled by default. To disable it, set `reasoning_effort="none"` or pass `enable_thinking=False` in your `chat_template_kwargs`.
+    Flint has no thinking switch or effort levels. Requests that set `enable_thinking`, `thinking` or `reasoning_effort` behave the same as requests that don't. The model decides on each turn whether to reason, and a reply without `<think>` is returned as content.
 
 ## Quickstart
 
