@@ -164,6 +164,9 @@ class K2Build:
     # partials stored device-scope, a flag a CTA (``ardy``) the combine polls
     m1c: bool = False
     m1c_wide: bool = False  # M1c's ``wide`` (its KV pool over 4 GiB, ``k2_launch``)
+    # the fused M1b's W_UV in bf16 MFMAs (vLLM's BF16 weights, ``mla_back``
+    # ``wbf16``), else MXFP4
+    m1b_wbf16: bool = False
     # the OPT_* bits
     opt: int = K2_OPT
 
@@ -530,6 +533,7 @@ def build(key: K2Build):
         name += f"_sp{key.m1b_splits}" if key.m1b_splits else ""
         name += "_c" if key.m1c else ""
         name += "w" if key.m1c_wide else ""
+        name += "_wb" if key.m1b_wbf16 else ""
     if key.opt:
         name += f"_o{key.opt}"
     if key.fault_rank >= 0:
@@ -752,6 +756,7 @@ def build(key: K2Build):
                 TC=m1b_ctok(key),
                 lat=st.m1b.peek().lat.ptr,
                 cw=st.m1b.peek().cw.ptr,
+                wbf16=key.m1b_wbf16,
                 core_cm=CM_DEV,
                 cmb=[preg(b, key.m1b_off, "cmb") for b in bases] if R > 1 else [],
                 cmb_own=preg(own, key.m1b_off, "cmb"),

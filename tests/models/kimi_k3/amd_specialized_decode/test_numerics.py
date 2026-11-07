@@ -369,14 +369,17 @@ def _mla_reference(w, nb: int):
     q = F.linear(q_c, w["w_qb"]).view(-1, NH, NOPE + ROPE)
     q_nope, q_pe = q.split([NOPE, ROPE], -1)
     one = torch.ones(1, dtype=torch.float32, device="cuda")
-    ql = rocm_aiter_ops.batched_gemm_a16wfp4(
-        q_nope.transpose(0, 1),
-        w["w_k"],
-        w["w_k_scale"],
-        transpose_bm=True,
-        prequant=True,
-        y_scale=one,
-    )
+    if w["w_k_scale"] is None:
+        ql = torch.bmm(q_nope.transpose(0, 1), w["w_k"].transpose(1, 2)).transpose(0, 1)
+    else:
+        ql = rocm_aiter_ops.batched_gemm_a16wfp4(
+            q_nope.transpose(0, 1),
+            w["w_k"],
+            w["w_k_scale"],
+            transpose_bm=True,
+            prequant=True,
+            y_scale=one,
+        )
     qb = torch.cat([ql, q_pe], -1)
     q8 = qb.float().clamp(-448, 448).to(fp8)
     cache = w["kv_cache"].clone()
@@ -400,8 +403,10 @@ def _fp8_f(t):
 
 @needs_gfx950
 @pytest.mark.parametrize("qbf16", [False, True])
-@pytest.mark.parametrize("S", [4, 8, 16, 32, 64])
-def test_m1a_single_gpu_matches_vllm_ops(S: int, qbf16: bool) -> None:
+@pytest.mark.parametrize(
+    "S, wbf16", [(s, False) for s in (4, 8, 16, 32, 64)] + [(8, True)]
+)
+def test_m1a_single_gpu_matches_vllm_ops(S: int, qbf16: bool, wbf16: bool) -> None:
     """M1a at DCP1 (ranks = 1: no gather, no peer memory) against attn_res ->
     qkv_a -> q / kv RMSNorm -> q_b -> aiter's fp4 W_UK -> the fp8 query (bf16
     with ``qbf16``, M1c's), the fp8 cache rows and the gate."""
@@ -418,8 +423,16 @@ def test_m1a_single_gpu_matches_vllm_ops(S: int, qbf16: bool) -> None:
 
     nb = 4
     w = _mla_inputs(S, nb)
+    if wbf16:
+        # The loaded W_UK_T has a contiguous latent axis, not a contiguous NoPE axis.
+        w["w_k"] = _randn(
+            torch.Generator(device="cuda").manual_seed(1), NH, 128, KVL, scale=0.1
+        ).transpose(1, 2)
+        w["w_k_scale"] = None
     ref = _mla_reference(w, nb)
-    key = MlaPreBuild(tokens=S, nblocks=nb, delta=True, ranks=1, qbf16=qbf16)
+    key = MlaPreBuild(
+        tokens=S, nblocks=nb, delta=True, ranks=1, qbf16=qbf16, wbf16=wbf16
+    )
     prefix, blocks, cache = (
         w["prefix"].clone(),
         w["blocks"].clone(),
@@ -544,6 +557,9 @@ def _uv_gate(lat, w):
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import NH
 
     S = lat.size(0)
+    if w["w_v_scale"] is None:
+        out = torch.bmm(lat.transpose(0, 1), w["w_v"].transpose(1, 2))
+        return out.transpose(0, 1).reshape(S, -1) * w["gate"]
     out = torch.empty(S, NH, 128, dtype=bf, device=lat.device)
     rocm_aiter_ops.batched_gemm_a16wfp4(
         lat.transpose(0, 1),
@@ -563,8 +579,12 @@ def _mla_back_reference(w):
 
 
 @needs_gfx950
-@pytest.mark.parametrize("S, q", [(4, 4), (8, 4), (16, 4), (32, 4), (64, 4), (64, 8)])
-def test_m1b_single_gpu_matches_vllm_ops(S: int, q: int) -> None:
+@pytest.mark.parametrize(
+    "S, q, wbf16",
+    [(s, q, False) for s, q in ((4, 4), (8, 4), (16, 4), (32, 4), (64, 4), (64, 8))]
+    + [(8, 8, True)],
+)
+def test_m1b_single_gpu_matches_vllm_ops(S: int, q: int, wbf16: bool) -> None:
     """M1b at DCP1 (ranks = 1: no LSE, no peer memory): AITER's strided
     output -> aiter's fp4 W_UV -> the gate."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import GROWS
@@ -575,12 +595,17 @@ def test_m1b_single_gpu_matches_vllm_ops(S: int, q: int) -> None:
     from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import HEALTH_WORDS
 
     w = _mla_back_inputs(S, q, 1)
+    if wbf16:
+        w["w_v"] = _randn(
+            torch.Generator(device="cuda").manual_seed(1), 12, 128, 512, scale=0.05
+        )
+        w["w_v_scale"] = None
     ref = _mla_back_reference(w)
     health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device="cuda")
     flags = torch.zeros(1, dtype=torch.int32, device="cuda")
     core = torch.zeros(S, GROWS, dtype=bf, device="cuda")
     mla_post(
-        MlaPostBuild(tokens=S, qlen=q, ranks=1),
+        MlaPostBuild(tokens=S, qlen=q, ranks=1, wbf16=wbf16),
         o=w["o"],
         lse=None,
         seq_lens=w["seq_lens"],

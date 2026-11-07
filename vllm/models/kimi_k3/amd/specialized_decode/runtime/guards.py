@@ -122,8 +122,8 @@ def mla_weight_reasons(model) -> list[str]:
 
 
 def _mla_reasons(p: str, w, need) -> list[str]:
-    """An MLA layer as M1a / M1b (and ``runtime/mla.py``) run it: AITER MLA's
-    metadata, NoPE, gated, DCP1 or DCP8, an fp8 cache, W_UK / W_UV as MXFP4 bmms."""
+    """An MLA layer as M1a / M1b (and ``runtime/mla.py``) run it: NoPE, gated,
+    DCP1 or DCP8, an fp8 cache, W_UK / W_UV as MXFP4 bmms or BF16 (not FP8)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         HIDDEN as H,
     )
@@ -152,9 +152,10 @@ def _mla_reasons(p: str, w, need) -> list[str]:
         reasons.append(f"{p}: no DCP query gather")
     if a.kv_cache_dtype not in FP8_KV:
         reasons.append(f"{p}: KV cache {a.kv_cache_dtype}, needs fp8 (E4M3)")
-    if not a.is_aiter_triton_fp4_bmm_enabled:
+    if not a.is_aiter_triton_fp4_bmm_enabled and a.is_aiter_triton_fp8_bmm_enabled:
         reasons.append(
-            f"{p}: W_UK / W_UV must be AITER MXFP4 bmms (VLLM_ROCM_USE_AITER_FP4BMM=1)"
+            f"{p}: W_UK / W_UV must be AITER MXFP4 bmms (VLLM_ROCM_USE_AITER_FP4BMM=1) "
+            "or BF16 (both AITER bmms off), not FP8 bmms"
         )
     if float(a._q_scale_float) != 1.0 or float(a._k_scale_float) != 1.0:
         reasons.append(f"{p}: q / k scales must be 1.0")
@@ -182,6 +183,19 @@ def _mla_reasons(p: str, w, need) -> list[str]:
                 reasons.append(f"{p} {name}: needs the last dim dense")
             elif t.element_size() != 1:
                 reasons.append(f"{p} {name}: {t.dtype}, needs bytes (torch.uint8)")
+    elif not getattr(a, "is_aiter_triton_fp8_bmm_enabled", False):
+        # BF16 bmms: vLLM's W_UK_T (N, P, L) and W_UV (N, L, V), any strides
+        for name, shape in (
+            ("W_UK_T", (MLA_HEADS, MLA_NOPE, MLA_KV)),
+            ("W_UV", (MLA_HEADS, MLA_KV, MLA_V)),
+        ):
+            t = getattr(a, name, None)
+            if t is None or not isinstance(t, torch.Tensor):
+                reasons.append(f"{p} {name}: missing (BF16 W_UK / W_UV)")
+            elif tuple(t.shape) != shape or t.dtype != bf:
+                reasons.append(
+                    f"{p} {name}: {tuple(t.shape)} {t.dtype}, needs {shape} {bf}"
+                )
     return reasons
 
 

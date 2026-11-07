@@ -341,6 +341,30 @@ def rows_to_lds(tid, src, rows, row_words, dst, dst_row):
     )  # fmt: skip
 
 
+@traced
+def bf16_weight_operand(ptr, byte_offset, k, stride):
+    """Eight BF16 matrix operands from the original projection's strided K axis."""
+    base = byte_offset // 2 + k * stride
+    operand = fx.Vector.from_elements([fx.Int32(0)] * 4, fx.Int32)
+    if (stride == 1) & (base % 2 == 0):
+        operand = fx.Vector(
+            bo.buffer_load(rsrc(ptr), base // 2, vec_width=4, dtype=T.i32)
+        )
+    else:
+        operand = fx.Vector.from_elements(
+            [
+                fx.BFloat16(
+                    bo.buffer_load(
+                        rsrc(ptr), base + j * stride, vec_width=1, dtype=T.bf16
+                    )
+                )
+                for j in range(8)
+            ],
+            fx.BFloat16,
+        ).bitcast(fx.Int32)
+    return operand
+
+
 def mfma_bf16(a, b, c):
     return fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
 

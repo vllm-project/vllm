@@ -64,6 +64,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.mx import (
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ops import (
     CM_SYS,
     bf16_pair,
+    bf16_weight_operand,
     bf_hi,
     bf_lo,
     butterfly,
@@ -71,6 +72,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ops import (
     hw_rcp,
     ld_i32,
     load_ptr64,
+    mfma_bf16,
     rsrc,
     traced,
     uniform,
@@ -114,6 +116,7 @@ class MlaPostBuild:
     timeline: bool = False
     splits: int = 0  # DCP1: M1c's KV splits (0: ``o`` the attention's output)
     ctok: int = 0  # tokens a combine task (0: ``ctok``'s)
+    wbf16: bool = False  # W_UV bf16 [12, 128, 512] (``wv16_loads``), else MXFP4
 
 
 ABI = KernelAbi(
@@ -419,7 +422,10 @@ def combine_ranks(c, h, t0, tt, cc, t):
 
 # ---------------------------------------------------------------- W_UV
 def wv_loads(c, h):
-    """This lane's W_V operands for the wave's 16 rows: (16 B, scale) a step."""
+    """This lane's W_V operands for the wave's 16 rows: (16 B, scale) a step
+    (``wbf16``: a list of KS x 4 dwordx4, ``wv16_loads``)."""
+    if const_expr(c.get("wbf16", False)):
+        return wv16_loads(c, h)
     a, lane, wave = c["args"], c["lane"], c["wave"]
     v = wave * 16 + lane % 16
     kb = lane // 16
@@ -437,6 +443,28 @@ def wv_loads(c, h):
     return ops
 
 
+def wv16_loads(c, h):
+    """BF16 W_V ([head][v][latent], ``wv_sh`` / ``wv_sn`` byte strides, the
+    latent dense): this lane's A operands for the wave's 16 rows v, a
+    16x16x32 MFMA each. Step (st, q) holds latents 128 st + 32 kb + 8 q .. + 7
+    (kb = lane / 16): the FP4 path's K blocks, each split in four; ``stage_uv``
+    reads the B operand at the same latents (one K order both operands share,
+    so the dot is unchanged)."""
+    a, lane, wave = c["args"], c["lane"], c["wave"]
+    v = wave * 16 + lane % 16
+    kb = lane // 16
+    base = h * a["wv_sh"] + v * a["wv_sn"]
+    ops = []
+    for st in range_constexpr(KS):
+        for q in range_constexpr(4):
+            ops.append(
+                bf16_weight_operand(
+                    a["w_v"], base, st * 128 + kb * 32 + q * 8, a["vs_sk"]
+                )
+            )
+    return ops
+
+
 @traced
 def stage_uv(c, h, t0, ops):
     """The LDS latents of tokens t0 .. t0 + 4 against W_V[h]'s 16 rows of this
@@ -446,7 +474,23 @@ def stage_uv(c, h, t0, ops):
     kb = lane // 16
     row = c["lat"] + fx.min(tl, tc - 1) * LROW
     acc = fx.Vector.filled(4, 0.0, fx.Float32)
-    for st in range_constexpr(KS):
+    if const_expr(c.get("wbf16", False)):
+        # BF16 W_V (``wv16_loads``): the LDS bf16 latents are the B operand as
+        # they are (a lane token tl's latents at the A operand's K, 16 B a
+        # step); a column past the task's tokens reads token tc - 1's row and
+        # is not stored (an MFMA's columns are independent)
+        for st in range_constexpr(KS):
+            for q in range_constexpr(4):
+                xb = fx.Vector(
+                    fx.ptr_load(
+                        row + st * 64 + kb * 16 + 4 * q,
+                        result_type=fx.Vector.make_type(4, fx.Int32),
+                    )
+                )
+                acc = mfma_bf16(
+                    ops[st * 4 + q].bitcast(fx.BFloat16), xb.bitcast(fx.BFloat16), acc
+                )
+    for st in range_constexpr(0 if c.get("wbf16", False) else KS):
         ws = [
             (tl < tc).select(fx.ptr_load(row + st * 64 + kb * 16 + i), fx.Int32(0))
             for i in range(16)
@@ -543,6 +587,7 @@ def build(key: MlaPostBuild):
         not key.splits or key.splits // (s // key.qlen) % (WAVES // tc) == 0
     )
     name += f"_sp{key.splits}_c{tc}" if key.splits else ""
+    name += "_wb" if key.wbf16 else ""
     assert not key.splits or (R == 1 and key.splits % (s // key.qlen) == 0)
     assert key.splits // (s // key.qlen) % 2 == 0
     assert key.splits // (s // key.qlen) <= WMAX
@@ -588,6 +633,7 @@ def build(key: MlaPostBuild):
             "R": R,
             "splits": key.splits,
             "TC": tc,
+            "wbf16": key.wbf16,
             "tid": tid,
             "bid": bid,
             "lane": tid % 64,
@@ -690,13 +736,37 @@ def build(key: MlaPostBuild):
 
 
 def host_args(ranks, o, lse, seq_lens, qsl, w_v, w_v_scale, gate) -> list:
-    """ABI's ``o`` .. ``gate`` (``mla_post``'s, or K2's fused M1b's)."""
-    assert o.stride(-1) == 1 and w_v.stride(-1) == 1
+    """ABI's ``o`` .. ``gate`` (``mla_post``'s, or K2's fused M1b's). ``w_v``'s
+    strides go as bytes: MXFP4 (12, 128, 256) u8 with ``w_v_scale``, or BF16
+    (12, 128, 512) without (``wbf16``; its scale arguments 0)."""
+    assert o.stride(-1) == 1
     assert o.dtype == torch.bfloat16
     assert lse is not None or ranks == 1  # DCP1: M1c's partials carry one
     assert lse is None or lse.dtype == torch.float32
     assert seq_lens.dtype == torch.int32 and qsl.dtype == torch.int32
     assert gate.is_contiguous()
+    es = w_v.element_size()
+    if w_v_scale is None:
+        assert w_v.dtype == torch.bfloat16 and w_v.shape == (NH, VD, KVL), w_v.shape
+        return [
+            o.data_ptr(),
+            o.stride(0),
+            o.stride(1),
+            0 if lse is None else lse.data_ptr(),
+            0 if lse is None else lse.stride(0),
+            0 if lse is None else lse.stride(1),
+            seq_lens.data_ptr(),
+            qsl.data_ptr(),
+            w_v.data_ptr(),
+            w_v.stride(0) * es,
+            w_v.stride(1) * es,
+            0,
+            0,
+            0,
+            w_v.stride(2),
+            gate.data_ptr(),
+        ]
+    assert es == 1 and w_v.stride(-1) == 1, w_v.dtype
     return [
         o.data_ptr(),
         o.stride(0),
