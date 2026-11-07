@@ -199,7 +199,6 @@ class TestProjectionPreservesGroupMetadata:
         group = MagicMock()
         group.layer_names = ["layer1", "layer2", "layer3"]
         group.kv_cache_spec = spec
-        group.is_eagle_group = False
         group.host_resident = True
         group.enable_kv_transfer = False
         group.role = KVCacheGroupRole.HISPARSE_SOURCE

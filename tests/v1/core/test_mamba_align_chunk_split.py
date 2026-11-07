@@ -124,7 +124,6 @@ def _make_hybrid_kv_cache_manager(
         scheduler_block_size=MAMBA_BLOCK_SIZE,
         hash_block_size=ATTN_BLOCK_SIZE,
         enable_caching=True,
-        use_eagle=not num_hash_lookahead_tokens,
         num_prefill_lookahead=num_hash_lookahead_tokens,
         num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
@@ -133,20 +132,15 @@ def _make_hybrid_kv_cache_manager(
 def _split(
     request: Request,
     num_new_tokens: int,
-    use_eagle: bool = True,
-    use_eagle_block_drop: bool | None = None,
     partial_hit: bool = False,
     num_prefill_checkpoint_blocks: int = 0,
     max_num_scheduled_tokens: int = 16384,
     num_hash_lookahead_tokens: int = 0,
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
-    if use_eagle_block_drop is None:
-        use_eagle_block_drop = use_eagle
     stub = SimpleNamespace(
         block_size=MAMBA_BLOCK_SIZE,
         cache_config=SimpleNamespace(block_size=MAMBA_BLOCK_SIZE),
-        use_eagle_block_drop=use_eagle_block_drop,
         num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         max_num_scheduled_tokens=max_num_scheduled_tokens,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
@@ -163,25 +157,24 @@ def _split(
 
 
 @pytest.mark.parametrize(
-    ("prompt_len", "num_new_tokens", "use_eagle", "expected"),
+    ("prompt_len", "num_new_tokens", "lookahead", "expected"),
     [
-        (2002, 2002, False, 2002),
-        (3602, 2000, False, MAMBA_BLOCK_SIZE),
-        (3602, 3602, True, 3602),
-        (2002, 2002, True, 2002),
-        (3602, 512, True, 0),
-        (3602, 1700, True, MAMBA_BLOCK_SIZE),
+        (2002, 2002, 0, 2002),
+        (3602, 2000, 0, MAMBA_BLOCK_SIZE),
+        (3602, 3602, 1, 3602),
+        (3602, 512, 1, 0),
+        (3602, 1700, 1, MAMBA_BLOCK_SIZE),
     ],
 )
 def test_internal_checkpoint_split(
-    prompt_len: int, num_new_tokens: int, use_eagle: bool, expected: int
+    prompt_len: int, num_new_tokens: int, lookahead: int, expected: int
 ) -> None:
     (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
     assert (
         _split(
             request,
             num_new_tokens,
-            use_eagle=use_eagle,
+            num_hash_lookahead_tokens=lookahead,
             num_prefill_checkpoint_blocks=1,
         )
         == expected
@@ -200,7 +193,6 @@ def test_partial_checkpoint_resume_stops_at_mamba_block_boundary() -> None:
         _split(
             request,
             prompt_len - resume_at,
-            use_eagle=False,
             partial_hit=True,
         )
         == MAMBA_BLOCK_SIZE - resume_at % MAMBA_BLOCK_SIZE
@@ -213,7 +205,6 @@ def test_partial_checkpoint_resume_stops_at_mamba_block_boundary() -> None:
         _split(
             request,
             prompt_len - resume_at,
-            use_eagle=False,
             partial_hit=True,
             num_prefill_checkpoint_blocks=1,
         )
@@ -221,14 +212,12 @@ def test_partial_checkpoint_resume_stops_at_mamba_block_boundary() -> None:
     )
 
 
-def test_disabling_eagle_block_drop_keeps_the_trailing_cache_boundary() -> None:
+def test_lookahead_keeps_the_trailing_cache_boundary() -> None:
     (request,) = create_requests(1, num_tokens=3602, block_size=ATTN_BLOCK_SIZE)
-
-    with_drop = _split(request, request.num_tokens, use_eagle_block_drop=True)
-    without_drop = _split(request, request.num_tokens, use_eagle_block_drop=False)
-
-    assert with_drop == MAMBA_BLOCK_SIZE
-    assert without_drop == 2 * MAMBA_BLOCK_SIZE
+    assert (
+        _split(request, request.num_tokens, num_hash_lookahead_tokens=1)
+        == 2 * MAMBA_BLOCK_SIZE
+    )
 
 
 def _run_chunked_prefill(
@@ -299,23 +288,10 @@ def _prefill(prompt_len: int, budgets: list[int]) -> int:
     return _count_cached_boundary_states(manager, request, state_at)
 
 
-def test_fragmented_first_chunk_does_not_poison_mamba_prefix_cache() -> None:
-    """EAGLE zeroes `last_cache_position` for prompts under two blocks.
-
-    Past that point any chunk end used to be accepted, so a short first chunk
-    (concurrent prefills sharing the budget) left slot 0 at state@364 while the
-    next chunk crossed 1600 and published slot 0 as state@1600.
-    """
-    _prefill(PROMPT_LEN, budgets=[364, PROMPT_LEN])
-
-
 def test_fragmented_tail_chunk_does_not_poison_mamba_prefix_cache() -> None:
-    """Same poisoning one block in, where a hit is still cacheable.
-
-    `last_cache_position` is 1600, so the chunk ending there is cached. The next
-    chunk used to be free to stop mid-block (slot 1 at state@2600) and the one
-    after it crossed 3200, publishing slot 1 as state@3200.
-    """
+    """A sub-block fragment after a cached block boundary must not leave a
+    mid-block state (slot 1 at state@2600) that a later chunk publishes as
+    state@3200."""
     assert _prefill(3602, budgets=[1600, 1000, 3602]) > 0
 
 
@@ -342,7 +318,6 @@ def test_lookahead_split_caches_partial_tail_boundary(lookahead: int) -> None:
         manager,
         producer,
         budgets=[],
-        use_eagle_block_drop=False,
         partial_hit=True,
         num_hash_lookahead_tokens=lookahead,
     )
@@ -387,14 +362,14 @@ def test_poisoning_is_block_size_independent(
 @pytest.mark.parametrize("partial_hit", [False, True])
 @pytest.mark.parametrize("resume_at", [331, 1599, 1601, 2531, 3011])
 @pytest.mark.parametrize(
-    ("num_prefill_checkpoint_blocks", "use_eagle"),
-    [(0, True), (1, False)],
+    ("num_prefill_checkpoint_blocks", "lookahead"),
+    [(0, 1), (1, 0)],
 )
 def test_unaligned_resume_never_runs_past_its_block(
     partial_hit: bool,
     resume_at: int,
     num_prefill_checkpoint_blocks: int,
-    use_eagle: bool,
+    lookahead: int,
 ) -> None:
     """A prefill resuming mid-block must re-align before crossing a boundary.
 
@@ -404,12 +379,8 @@ def test_unaligned_resume_never_runs_past_its_block(
     """
     prompt_len = 3602
     (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
-    # Under eagle the partial-tail stop sits one hash unit below the prompt's
-    # last hash boundary: eagle matches a unit past its candidate and drops it,
-    # so nothing proves that last boundary.
+    # The trailing hash boundary has finalized lookahead in this prompt.
     tail_stop = prompt_len // ATTN_BLOCK_SIZE * ATTN_BLOCK_SIZE
-    if use_eagle:
-        tail_stop -= ATTN_BLOCK_SIZE
 
     pos, ends = resume_at, []
     while pos < prompt_len:
@@ -417,7 +388,7 @@ def test_unaligned_resume_never_runs_past_its_block(
         num_new = _split(
             request,
             prompt_len - pos,
-            use_eagle=use_eagle,
+            num_hash_lookahead_tokens=lookahead,
             partial_hit=partial_hit,
             num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
         )

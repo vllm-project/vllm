@@ -218,7 +218,6 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
     # MTP shares embed_tokens with target model
     assert proposer.model.model.embed_tokens == target_model.model.embed_tokens
     assert proposer._draft_attn_layer_names == {"draft_attn_1"}
-    assert all_attn_layers["draft_attn_1"].is_draft_layer is True
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1])

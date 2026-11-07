@@ -137,7 +137,6 @@ class KVCacheManager:
         hash_block_size: int,
         max_in_flight_tokens: int | None = None,
         enable_caching: bool = True,
-        use_eagle: bool = False,
         num_hash_lookahead_tokens: int = 0,
         num_prefill_lookahead: int = 0,
         log_stats: bool = False,
@@ -157,7 +156,6 @@ class KVCacheManager:
 
         self.enable_caching = enable_caching
         self.enable_kv_cache_events = enable_kv_cache_events
-        self.use_eagle = use_eagle
         self.log_stats = log_stats
         self.metrics_collector = metrics_collector
         # FIXME: make prefix cache stats conditional on log_stats. We still need
@@ -169,7 +167,6 @@ class KVCacheManager:
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             max_in_flight_tokens=max_in_flight_tokens,
-            use_eagle=self.use_eagle,
             num_hash_lookahead_tokens=num_hash_lookahead_tokens,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
@@ -187,7 +184,7 @@ class KVCacheManager:
         # manager ``num_computed - num_reprefillable`` rather than the chunk end.
         self.mamba_shared_prefix_checkpoint = (
             enable_mamba_shared_prefix_checkpoint
-            and bool(self.coordinator.eagle_group_ids)
+            and self.coordinator.block_pool.num_hash_lookahead_tokens > 0
             and self.coordinator.enable_partial_hash_hits
             and self.coordinator.num_reprefillable_tokens == 0
         )

@@ -354,6 +354,7 @@ def _vllm_config(
         kv_events_config=None,
         max_in_flight_tokens=64,
         num_prefill_lookahead_tokens=0,
+        num_hash_lookahead_tokens=0,
         parallel_config=SimpleNamespace(**parallel),
     )
 

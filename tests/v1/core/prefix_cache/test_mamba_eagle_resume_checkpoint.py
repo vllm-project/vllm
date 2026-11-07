@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Mamba "align" check-points at the position an EAGLE sibling resumes from.
+"""Mamba "align" check-points at the position a sibling resumes from.
 
-Full attention hits where it holds a key; EAGLE prunes one hash unit off that
-candidate and drops it. Mamba materializes state only on its own block grid, so
-the pruned position holds nothing and the hit floors back a whole Mamba block.
+Lookahead hashes identify the shared prefix. Mamba must materialize state at
+that same position, including hash boundaries inside a physical Mamba block.
 
 Gated by ``CacheConfig.enable_mamba_shared_prefix_checkpoint``. Every test here
 drives the real ``Scheduler._mamba_block_aligned_split`` and the real
 ``KVCacheManager``; no chunk boundary is hard-coded.
 """
 
-from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -34,27 +32,23 @@ def _manager(
     *,
     shared_prefix_checkpoint=True,
     num_blocks=8192,
-    eagle_group=None,
+    num_hash_lookahead_tokens=1,
     num_prefill_lookahead=0,
 ):
     init_none_hash(sha256)
     config = _make_hybrid_kv_cache_config(block_size, num_blocks, ["full", "mamba"])
-    if eagle_group is not None:
-        groups = list(config.kv_cache_groups)
-        groups[eagle_group] = replace(groups[eagle_group], is_eagle_group=True)
-        config = replace(config, kv_cache_groups=groups)
     return make_kv_cache_manager(
         kv_cache_config=config,
         max_model_len=1 << 20,
         enable_caching=True,
         hash_block_size=hash_block_size,
-        use_eagle=True,
         num_prefill_lookahead=num_prefill_lookahead,
         enable_mamba_shared_prefix_checkpoint=shared_prefix_checkpoint,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
 
 
-def _stub(manager, block_size, hash_block_size, *, block_drop=True):
+def _stub(manager, block_size, hash_block_size):
     """``self`` for the real ``Scheduler._mamba_block_aligned_split``.
 
     Derives both gates exactly as ``Scheduler.__init__`` does, so a manager that
@@ -67,13 +61,9 @@ def _stub(manager, block_size, hash_block_size, *, block_drop=True):
         cache_config=SimpleNamespace(block_size=block_size),
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         max_num_scheduled_tokens=1 << 20,
-        use_eagle=True,
-        # The EAGLE adjustments key on the block-drop bit, not plain use_eagle:
-        # they exist only to compensate for the drop.
-        use_eagle_block_drop=block_drop,
-        num_hash_lookahead_tokens=0,
+        num_hash_lookahead_tokens=manager.block_pool.num_hash_lookahead_tokens,
         hash_block_size=hash_block_size,
-        mamba_has_prefill_checkpoint_blocks=False,  # forced False under eagle
+        mamba_has_prefill_checkpoint_blocks=False,
         mamba_partial_cache_hit=partial_hit,
         mamba_shared_prefix_checkpoint=(
             partial_hit and manager.mamba_shared_prefix_checkpoint
@@ -131,13 +121,23 @@ def _orphaned_full_attention_tail(manager, stub, prompt_len):
     partial tail the Mamba group has no state for.
     """
     producer = make_request(
-        "producer", PREFIX[:prompt_len], stub.hash_block_size, sha256
+        "producer",
+        PREFIX[:prompt_len],
+        stub.hash_block_size,
+        sha256,
+        num_hash_lookahead_tokens=manager.block_pool.num_hash_lookahead_tokens,
     )
     _prefill(manager, stub, producer, external=prompt_len - 1)
 
 
 def _sibling_hit(manager, shared, suffix, hash_block_size):
-    request = make_request("sibling", PREFIX[:shared] + suffix, hash_block_size, sha256)
+    request = make_request(
+        "sibling",
+        PREFIX[:shared] + suffix,
+        hash_block_size,
+        sha256,
+        num_hash_lookahead_tokens=manager.block_pool.num_hash_lookahead_tokens,
+    )
     return manager.get_computed_blocks(request)[1]
 
 
@@ -154,13 +154,17 @@ def test_sibling_resumes_from_the_observed_junction():
     _orphaned_full_attention_tail(manager, stub, 2020)
 
     consumer = make_request(
-        "consumer", PREFIX[:2016] + [-1] * 584, hash_block_size, sha256
+        "consumer",
+        PREFIX[:2017] + [-1] * 583,
+        hash_block_size,
+        sha256,
+        num_hash_lookahead_tokens=manager.block_pool.num_hash_lookahead_tokens,
     )
     junction = manager.get_computed_blocks(consumer)[2]
-    assert junction, "expected a junction against the orphaned full-attention tail"
+    assert junction == 2016
     _prefill(manager, stub, consumer)
 
-    hit = _sibling_hit(manager, 2016, [-2] * 584, hash_block_size)
+    hit = _sibling_hit(manager, 2017, [-2] * 583, hash_block_size)
     assert hit == junction, (
         f"the chunk stopped at {junction} but nothing was cached there: "
         f"sibling resumes at {hit}"
@@ -168,53 +172,52 @@ def test_sibling_resumes_from_the_observed_junction():
 
 
 def test_sibling_resumes_below_the_block_grid_when_the_prefix_ends_early():
-    """A system prompt followed by a per-request suffix -- the deployed shape.
-
-    The owner's prompt tail sits over its own suffix, which no sibling shares, so
-    a check-point there is unreachable. The next request's full-attention match
-    stops at the last shared block boundary and EAGLE drops one hash unit below
-    it, so state has to exist just under the block grid too.
-    """
+    """An early prefix end reuses the latest materialized shared block."""
     block_size, hash_block_size = 16, 4
     manager = _manager(block_size, hash_block_size)
     stub = _stub(manager, block_size, hash_block_size)
 
     shared = 24
-    owner = make_request("owner", PREFIX[:shared] + [-1] * 16, hash_block_size, sha256)
+    owner = make_request(
+        "owner",
+        PREFIX[:shared] + [-1] * 16,
+        hash_block_size,
+        sha256,
+        num_hash_lookahead_tokens=manager.block_pool.num_hash_lookahead_tokens,
+    )
     _prefill(manager, stub, owner)
 
-    # The first follower observes the junction (16 shared, dropped to 12) and
-    # registers state there; the second one gets to resume from it.
     follower = make_request(
-        "follower", PREFIX[:shared] + [-2] * 16, hash_block_size, sha256
+        "follower",
+        PREFIX[:shared] + [-2] * 16,
+        hash_block_size,
+        sha256,
+        num_hash_lookahead_tokens=manager.block_pool.num_hash_lookahead_tokens,
     )
     _prefill(manager, stub, follower)
 
-    resume = shared // block_size * block_size - hash_block_size
+    resume = shared // block_size * block_size
     hit = _sibling_hit(manager, shared, [-3] * 16, hash_block_size)
     assert hit == resume, f"expected the resume point at {resume}, got {hit}"
 
 
-@pytest.mark.parametrize("mtp_draft_group_identified", [False, True])
-def test_mamba_prefix_cache_drops_hash_block(mtp_draft_group_identified):
+def test_mamba_prefix_cache_respects_lookahead():
     block_size, hash_block_size = 1024, 64
-    manager = _manager(
-        block_size,
-        hash_block_size,
-        eagle_group=0 if mtp_draft_group_identified else None,
-    )
+    manager = _manager(block_size, hash_block_size)
     prompt_a = PREFIX[:1600]
-    hit_after_mtp_block_drop = len(prompt_a) - hash_block_size
+    hash_ready_boundary = len(prompt_a) - hash_block_size
 
     _prefill(
         manager,
         _stub(manager, block_size, hash_block_size),
-        make_request("A", prompt_a, hash_block_size, sha256),
+        make_request(
+            "A", prompt_a, hash_block_size, sha256, num_hash_lookahead_tokens=1
+        ),
     )
 
     tokens_after_a = [-1] * 500
     hit = _sibling_hit(manager, len(prompt_a), tokens_after_a, hash_block_size)
-    assert hit == hit_after_mtp_block_drop
+    assert hit == hash_ready_boundary
 
 
 # --------------------------------------------------------------------------
@@ -254,7 +257,11 @@ def test_scheduler_never_stops_where_the_manager_refuses():
             shared = prompt_len // hash_block_size * hash_block_size
             suffix = [-1] * (block_size + 3)
             consumer = make_request(
-                "consumer", PREFIX[:shared] + suffix, hash_block_size, sha256
+                "consumer",
+                PREFIX[:shared] + suffix,
+                hash_block_size,
+                sha256,
+                num_hash_lookahead_tokens=manager.block_pool.num_hash_lookahead_tokens,
             )
             junction = manager.get_computed_blocks(consumer)[2]
             if not junction:
@@ -296,7 +303,9 @@ def test_a_junction_past_the_prompt_falls_back_and_registers_nothing():
     manager = _manager(block_size, hash_block_size)
     stub = _stub(manager, block_size, hash_block_size)
 
-    request = make_request("r", PREFIX[:2000], hash_block_size, sha256)
+    request = make_request(
+        "r", PREFIX[:2000], hash_block_size, sha256, num_hash_lookahead_tokens=1
+    )
     for _ in range(2000):
         request.append_output_token_ids(1)
     assert request.num_prompt_tokens == 2000 and request.num_tokens == 4000
@@ -330,20 +339,10 @@ def test_a_junction_past_the_prompt_falls_back_and_registers_nothing():
     )
 
 
-@pytest.mark.parametrize("eagle_group", [None, 0])
-@pytest.mark.parametrize("num_prefill_lookahead", [0, 2, 33])
-def test_enabling_never_reduces_reuse(eagle_group, num_prefill_lookahead):
-    """Turning the flag on may add check-points; it must never move one away.
-
-    Two axes decide whether the manager can honour the junction stop the
-    scheduler makes for it, and both fail silently -- as lost reuse, not as an
-    error. ``is_eagle_group`` annotation: the manager takes the EAGLE drop per
-    group while the scheduler flag is model-wide, so on an annotated model the
-    Mamba group can be outside ``eagle_group_ids``. Multi-module MTP: the
-    coordinator hands the manager ``num_computed - num_reprefillable``, not the
-    chunk end. In either case the junction stop displaces the block-boundary
-    stop and the check-point it replaced is never written.
-    """
+@pytest.mark.parametrize("lookahead", [0, 1])
+@pytest.mark.parametrize("num_prefill_lookahead", [0, 2])
+def test_enabling_never_reduces_reuse(lookahead, num_prefill_lookahead):
+    """Eligible junctions improve reuse; other configurations are unchanged."""
     block_size, hash_block_size = 512, 32
 
     def sibling_hit(shared_prefix_checkpoint):
@@ -351,19 +350,29 @@ def test_enabling_never_reduces_reuse(eagle_group, num_prefill_lookahead):
             block_size,
             hash_block_size,
             shared_prefix_checkpoint=shared_prefix_checkpoint,
-            eagle_group=eagle_group,
+            num_hash_lookahead_tokens=lookahead,
             num_prefill_lookahead=num_prefill_lookahead,
+        )
+        assert manager.mamba_shared_prefix_checkpoint == (
+            shared_prefix_checkpoint and lookahead > 0 and num_prefill_lookahead <= 1
         )
         stub = _stub(manager, block_size, hash_block_size)
         _orphaned_full_attention_tail(manager, stub, 2020)
         consumer = make_request(
-            "consumer", PREFIX[:2016] + [-1] * 584, hash_block_size, sha256
+            "consumer",
+            PREFIX[:2017] + [-1] * 583,
+            hash_block_size,
+            sha256,
+            num_hash_lookahead_tokens=manager.block_pool.num_hash_lookahead_tokens,
         )
         _prefill(manager, stub, consumer)
-        return _sibling_hit(manager, 2016, [-2] * 584, hash_block_size)
+        return _sibling_hit(manager, 2017, [-2] * 583, hash_block_size)
 
     on, off = sibling_hit(True), sibling_hit(False)
-    assert on >= off, f"enabling the flag cut the sibling's hit from {off} to {on}"
+    if lookahead > 0 and num_prefill_lookahead <= 1:
+        assert on > off
+    else:
+        assert on == off
 
 
 def test_disabled_by_default():
@@ -374,14 +383,21 @@ def test_disabled_by_default():
     _orphaned_full_attention_tail(manager, stub, 2020)
 
     consumer = make_request(
-        "consumer", PREFIX[:2016] + [-1] * 584, hash_block_size, sha256
+        "consumer",
+        PREFIX[:2016] + [-1] * 584,
+        hash_block_size,
+        sha256,
+        num_hash_lookahead_tokens=manager.block_pool.num_hash_lookahead_tokens,
     )
     junction = manager.get_computed_blocks(consumer)[2]
     assert junction, "expected a junction"
     _prefill(manager, stub, consumer)
 
-    assert _sibling_hit(manager, 2016, [-2] * 584, hash_block_size) < junction
+    assert junction == 1536
+    assert _sibling_hit(manager, 2016, [-2] * 584, hash_block_size) == junction
 
-    request = make_request("r", PREFIX[:10000], hash_block_size, sha256)
+    request = make_request(
+        "r", PREFIX[:10000], hash_block_size, sha256, num_hash_lookahead_tokens=1
+    )
     request.shared_prefix_boundary = 2000
     assert Scheduler._mamba_block_aligned_split(stub, request, 8192) == 1536

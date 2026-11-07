@@ -201,10 +201,6 @@ class KVCacheSpec:
     ``MultipleOf(n)``: whole kernel blocks, when blocks are split into kernel
     blocks of up to ``n`` tokens."""
 
-    is_draft: bool = field(default=False, kw_only=True, compare=False)
-    """Whether a draft model owns this layer; excluded from equality so it never
-    affects grouping."""
-
     def __post_init__(self):
         alignment = self.block_stride_alignment
         if isinstance(alignment, int) and alignment <= 0:
@@ -698,8 +694,6 @@ class FullAttentionSpec(AttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
-                if not f.compare:
-                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -794,8 +788,6 @@ class MLAAttentionSpec(FullAttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
-                if not f.compare:
-                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -1185,24 +1177,17 @@ class MambaSpec(KVCacheSpec):
         )
 
 
-def get_mamba_prefill_checkpoint_position(
+def get_reusable_prefix_length(
     num_tokens: int,
-    hash_block_size: int,
-    drop_eagle_block: bool,
+    alignment_tokens: int = 1,
     num_hash_lookahead_tokens: int = 0,
 ) -> int:
-    """Return the reusable Mamba checkpoint boundary for a prefill."""
-    # Leave tokens for logits recomputation and the checkpoint's hash.
-    # EAGLE's block drop already leaves tokens to recompute.
-    proof_limit = (
-        num_tokens
-        if drop_eagle_block
-        else num_tokens - max(1, num_hash_lookahead_tokens)
-    )
-    checkpoint_position = proof_limit // hash_block_size * hash_block_size
-    if drop_eagle_block:
-        checkpoint_position -= hash_block_size
-    return max(checkpoint_position, 0)
+    """Bound prefix reuse by known tokens, reserving logits and hash lookahead.
+
+    This does not establish that the corresponding KV has been computed or cached.
+    """
+    token_limit = max(0, num_tokens - max(1, num_hash_lookahead_tokens))
+    return token_limit // alignment_tokens * alignment_tokens
 
 
 def is_mamba_prefill_checkpoint_valid(
@@ -1292,8 +1277,6 @@ class SinkFullAttentionSpec(FullAttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
-                if not f.compare:
-                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -1531,8 +1514,6 @@ class KVCacheGroupSpec:
     layer_names: list[str]
     # The KV cache spec of this manager layer
     kv_cache_spec: KVCacheSpec
-    # Whether this group holds draft layers and takes the EAGLE last-block drop.
-    is_eagle_group: bool = False
     # Host groups use the dedicated HiSparse pool; others share the device pool.
     host_resident: bool = False
     # Whether this group is part of the externally transferable KV state.
