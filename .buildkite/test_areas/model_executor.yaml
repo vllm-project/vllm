@@ -92,6 +92,8 @@ steps:
   source_file_dependencies:
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/model_executor/layers/quantization/kv_cache.py
+  - vllm/model_executor/layers/attention/attention.py
+  - vllm/model_executor/model_loader/reload/
   - tests/model_executor/model_loader/test_reload.py
   commands:
   - pytest -v -s model_executor/model_loader/test_reload.py -k test_kv_scale_reload

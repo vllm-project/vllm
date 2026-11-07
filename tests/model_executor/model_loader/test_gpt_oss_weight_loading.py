@@ -158,20 +158,21 @@ def test_streamed_quantized_expert_layout(case: str) -> None:
 @pytest.mark.parametrize("shard", ["w13", "w2"])
 def test_streamed_mxfp4_expert_splits_like_the_checkpoint_loader(shard: str) -> None:
     """The per-expert loader splits in whole MXFP4 blocks, as the full-checkpoint
-    loader does, not by the padded parameter size. TP rank 1 of 2. w13: 4 blocks,
-    2 per rank, padded to 3. w2: 3 blocks split 2 + 1, padded to 3."""
+    loader does, not by the padded parameter size, and leaves the padding alone.
+    w13: TP rank 0 of 2, 4 blocks, 2 per rank, padded to 3. w2: TP rank 1 of 2,
+    3 blocks split 2 + 1, padded to 3."""
     if shard == "w13":
         experts = _TestExperts(
             "w13_weight",
             (2, 192, 4),
-            tp_rank=1,
+            tp_rank=0,
             intermediate_size=128,
             weight_dtype="gpt_oss_mxfp4",
             dtype=torch.uint8,
         )
         # one distinct value per row, so a wrong row offset is caught
         loaded_weight = (torch.arange(1024) // 4).to(torch.uint8).reshape(256, 2, 2)
-        expected = loaded_weight.reshape(256, 4)[128:]
+        expected = loaded_weight.reshape(256, 4)[:128]
         written, padding = experts.w13_weight[0, :128], experts.w13_weight[:, 128:]
     else:
         experts = _TestExperts(
