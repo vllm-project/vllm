@@ -768,7 +768,10 @@ class ModelConfig:
                 self.tokenizer_mode = "alpamayo2_super"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
-            elif arch == "KimiK3ForConditionalGeneration":
+            elif arch in (
+                "KimiK3ForConditionalGeneration",
+                "KimiK31ForConditionalGeneration",
+            ):
                 self.tokenizer_mode = "kimi_k3"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
