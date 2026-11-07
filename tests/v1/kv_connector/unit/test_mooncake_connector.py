@@ -4,7 +4,11 @@
 import asyncio
 import contextlib
 import errno
+import os
+import signal
 import socket
+import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -54,6 +58,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
 )
+from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -1137,6 +1142,15 @@ def test_scheduler_request_finished():
     assert "id-1" in scheduler_connector._reqs_not_processed
 
 
+def _live_peer_monitor() -> MagicMock:
+    """A ZMQ socket monitor that never reports a lost peer."""
+
+    async def wait_forever():
+        await asyncio.get_running_loop().create_future()
+
+    return MagicMock(recv_multipart=AsyncMock(side_effect=wait_forever))
+
+
 @contextlib.contextmanager
 def patch_worker_dependencies():
     """Helper to mock all distributed and network dependencies for Worker tests."""
@@ -1177,6 +1191,10 @@ def patch_worker_dependencies():
         # Mock ZMQ socket
         mock_socket_object = AsyncMock()
         mock_socket_object.setsockopt = MagicMock()
+        mock_socket_object.get_monitor_socket = MagicMock(
+            return_value=_live_peer_monitor()
+        )
+        mock_socket_object.disable_monitor = MagicMock()
         mock_socket_ctx = MagicMock()
         mock_socket_ctx.__enter__.return_value = mock_socket_object
         mock_make_zmq.return_value = mock_socket_ctx
@@ -1844,6 +1862,8 @@ async def test_kv_consumuer(monkeypatch):
             zmq.DEALER,
             bind=False,
             linger=0,
+            heartbeat_ivl_ms=mooncake_connector._PULL_HEARTBEAT_IVL_MS,
+            heartbeat_timeout_ms=mooncake_connector._PULL_HEARTBEAT_TIMEOUT_MS,
         )
         sent_payload = mocks["mock_socket_object"].send.call_args[0][0]
         sent_meta = decode_worker._xfer_meta_decoder.decode(sent_payload)
@@ -2213,6 +2233,74 @@ async def test_pull_after_expiry_fails_without_waiting(with_live_req):
 
         producer.sender_loop = sender_loop
         producer.shutdown()
+
+
+# A P worker that takes one pull and never answers it.
+_SILENT_PREFILL_WORKER = """
+import zmq
+router = zmq.Context().socket(zmq.ROUTER)
+print(router.bind_to_random_port("tcp://127.0.0.1"), flush=True)
+router.recv_multipart()
+print("pulled", flush=True)
+router.recv_multipart()
+"""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("loss", ["killed", "frozen", "not_listening"])
+async def test_pull_fails_fast_when_prefill_worker_is_lost(loss):
+    """D must not hold a pull's blocks for the full timeout once P is gone."""
+    prefill = subprocess.Popen(
+        [sys.executable, "-c", _SILENT_PREFILL_WORKER],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert prefill.stdout is not None
+    addr = f"tcp://127.0.0.1:{prefill.stdout.readline().strip()}"
+    if loss == "not_listening":
+        prefill.kill()
+        prefill.wait()
+    vllm_config = _make_worker_vllm_config("kv_consumer")
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch.object(mooncake_connector, "make_zmq_socket", make_zmq_socket),
+        patch.object(mooncake_connector, "_PULL_HEARTBEAT_IVL_MS", 100),
+        patch.object(mooncake_connector, "_PULL_HEARTBEAT_TIMEOUT_MS", 500),
+    ):
+        worker = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+        worker._remote_agents = {
+            "p-engine": {0: {0: addr}},
+            "other-engine": {0: {0: "tcp://127.0.0.1:1"}},
+        }
+        metas = {
+            "d-req-1": PullReqMeta(
+                d_req_id="d-req-1",
+                transfer_id="xfer-1",
+                local_block_ids=[[1]],
+                remote_engine_id="p-engine",
+                remote_bootstrap_addr="http://bootstrap:33333",
+                pull_tasks_count=1,
+            )
+        }
+        pull = asyncio.create_task(worker.receive_kv_from_single_worker(addr, metas))
+        try:
+            if loss != "not_listening":
+                await asyncio.to_thread(prefill.stdout.readline)
+                os.kill(
+                    prefill.pid, signal.SIGKILL if loss == "killed" else signal.SIGSTOP
+                )
+            # Far less than the pull's own VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT + 60s.
+            await asyncio.wait_for(pull, timeout=10)
+        finally:
+            prefill.kill()
+            prefill.wait()
+        assert worker.get_block_ids_with_load_errors() == {1}
+        # Later requests for P query its bootstrap server again.
+        assert list(worker._remote_agents) == ["other-engine"]
+        worker.shutdown()
 
 
 @pytest.mark.parametrize(
@@ -2973,6 +3061,12 @@ class _ScriptedSock:
 
     async def recv(self):
         return self._responses.pop(0)
+
+    def get_monitor_socket(self, *_args):
+        return _live_peer_monitor()
+
+    def disable_monitor(self):
+        return None
 
     def __enter__(self):
         return self

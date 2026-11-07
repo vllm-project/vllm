@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import contextlib
 import itertools
 import logging
 import os
@@ -88,6 +89,14 @@ _BOOTSTRAP_MAX_ATTEMPTS: Final[int] = 3
 # Decode restarts mint new layout ids, so stale peer layouts pile up. Evicting
 # one only costs that peer a LAYOUT_MISS and one layout resend.
 _MAX_PEER_LAYOUTS: Final[int] = 1024
+# A pull's reply can only arrive on the connection it was sent on: P's ROUTER
+# drops replies to a lost connection, and a refused reconnect means nothing
+# listens there.
+_PULL_LOST_EVENTS: Final[int] = zmq.EVENT_DISCONNECTED | zmq.EVENT_CONNECT_RETRIED
+# ZMTP heartbeats also drop the connection to a P worker that stopped
+# answering, such as a frozen process or an unreachable host.
+_PULL_HEARTBEAT_IVL_MS: Final[int] = 2000
+_PULL_HEARTBEAT_TIMEOUT_MS: Final[int] = 10000
 
 try:
     from mooncake.engine import TransferEngine
@@ -2672,16 +2681,39 @@ class MooncakeConnectorWorker:
                 "Sending kv transfer request for %s on path: %s", req_ids, worker_addr
             )
             try:
-                with make_zmq_socket(
-                    self.async_zmq_ctx, worker_addr, zmq.DEALER, bind=False, linger=0
-                ) as sock:
+                with (
+                    make_zmq_socket(
+                        self.async_zmq_ctx,
+                        worker_addr,
+                        zmq.DEALER,
+                        bind=False,
+                        linger=0,
+                        heartbeat_ivl_ms=_PULL_HEARTBEAT_IVL_MS,
+                        heartbeat_timeout_ms=_PULL_HEARTBEAT_TIMEOUT_MS,
+                    ) as sock,
+                    _lost_peer_monitor(sock) as monitor,
+                ):
                     sock.setsockopt(
                         zmq.RCVTIMEO,
                         (envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT + 60) * 1000,
                     )
                     await sock.send(encoded_data)
                     while True:
-                        ret_msg = await sock.recv()
+                        ret_msg = await _recv_unless_lost(sock, monitor)
+                        if ret_msg is None:
+                            # Look P up again: it may have restarted elsewhere.
+                            for engine_id, agents in list(self._remote_agents.items()):
+                                if any(
+                                    worker_addr in pp_addrs.values()
+                                    for pp_addrs in agents.values()
+                                ):
+                                    del self._remote_agents[engine_id]
+                            self._handle_failed_recv(
+                                pull_metas,
+                                req_ids,
+                                f"lost connection to prefill worker {worker_addr}",
+                            )
+                            return
                         response = self._xfer_resp_decoder.decode(ret_msg)
                         status = response.status
                         if status == MooncakeXferResponseStatus.LAYOUT_MISS:
@@ -3373,6 +3405,30 @@ def get_mooncake_side_channel_port(vllm_config: VllmConfig) -> int:
         + vllm_config.parallel_config.data_parallel_index
         * vllm_config.parallel_config.tensor_parallel_size
     )
+
+
+@contextlib.contextmanager
+def _lost_peer_monitor(sock: zmq.asyncio.Socket):
+    monitor = sock.get_monitor_socket(_PULL_LOST_EVENTS)
+    try:
+        yield monitor
+    finally:
+        sock.disable_monitor()
+        monitor.close(linger=0)
+
+
+async def _recv_unless_lost(
+    sock: zmq.asyncio.Socket, monitor: zmq.asyncio.Socket
+) -> bytes | None:
+    """Return the peer's next reply, or None once its connection is lost."""
+    recv = asyncio.ensure_future(sock.recv())
+    lost = asyncio.ensure_future(monitor.recv_multipart())
+    try:
+        await asyncio.wait((recv, lost), return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        recv.cancel()
+        lost.cancel()
+    return recv.result() if recv.done() and not recv.cancelled() else None
 
 
 def _async_loop(loop: asyncio.AbstractEventLoop):
