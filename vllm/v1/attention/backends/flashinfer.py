@@ -1217,31 +1217,28 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 return AttentionCGSupport.UNIFORM_BATCH
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
-        num_qo_heads = vllm_config.model_config.get_num_attention_heads(
-            vllm_config.parallel_config
-        )
         is_xqa_arch = current_platform.is_device_capability(
             90
         ) or current_platform.is_device_capability_family(120)
-        has_uniform_batch_support: bool = len(kv_specs) > 0
+        # No head-count check: each attention layer asserts that its query heads
+        # divide by its KV heads, and the model config holds the target's heads,
+        # not a draft layer's.
+        has_uniform_batch_support: bool = (
+            len(kv_specs) > 0
+            and force_use_trtllm_attention() is not False
+            and supports_trtllm_attention(is_prefill=False)
+        )
         for spec in kv_specs:
             if not isinstance(spec, AttentionSpec):
                 # FlashInfer only applies to attention, so we don't consider other types
                 # of KV spec (e.g. Mamba) here. This is mostly for type checking.
                 continue
-            if not can_use_trtllm_attention(
-                num_qo_heads=num_qo_heads,
-                num_kv_heads=spec.num_kv_heads,
-                is_prefill=False,
-            ) or (
-                is_xqa_arch
-                and (
-                    (
-                        spec.kv_quant_mode.is_nvfp4
-                        and not current_platform.is_device_capability_family(120)
-                    )
-                    or not _is_xqa_head_dim_supported(spec.head_size)
+            if is_xqa_arch and (
+                (
+                    spec.kv_quant_mode.is_nvfp4
+                    and not current_platform.is_device_capability_family(120)
                 )
+                or not _is_xqa_head_dim_supported(spec.head_size)
             ):
                 has_uniform_batch_support = False
                 break
