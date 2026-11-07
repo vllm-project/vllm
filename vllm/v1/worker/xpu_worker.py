@@ -206,6 +206,8 @@ class XPUWorker(Worker):
 
         # take current memory snapshot
         self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
+        # Read by disable_extensible_kv_cache to recompute requested_memory.
+        self.external_weight_memory = 0
         self.requested_memory = request_memory(init_snapshot, self.cache_config)
         logger.debug("worker init memory snapshot: %r", self.init_snapshot)
         logger.debug(

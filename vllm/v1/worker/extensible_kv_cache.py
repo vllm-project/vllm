@@ -358,7 +358,10 @@ class ExtensibleKVCache:
         total = torch.accelerator.get_memory_info(self.buffer.device)[1]
         fraction = 1.0 if num_bytes is None else min(num_bytes / total, 1.0)
         # torch.accelerator has no per-process memory fraction.
-        torch.cuda.set_per_process_memory_fraction(fraction, self.buffer.device)
+        device = self.buffer.device
+        torch.get_device_module(device).set_per_process_memory_fraction(
+            fraction, device
+        )
 
     def free(self) -> None:
         # The process may start another engine, which must not inherit the cap.

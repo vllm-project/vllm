@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ctypes bindings for the CUDA (`cuMem*`) and HIP (`hipMem*`) virtual memory
-management APIs, used by :class:`vllm.utils.extensible_tensor.ExtensibleTensor`.
+management APIs, and the XPU equivalents from vllm-xpu-kernels, used by
+:class:`vllm.utils.extensible_tensor.ExtensibleTensor`.
 """
 
 from __future__ import annotations
@@ -10,7 +11,10 @@ import ctypes
 import os
 from collections.abc import Iterable
 from functools import cache
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import torch
 
 _SUCCESS = 0
 _MEM_ALLOCATION_TYPE_PINNED = 1
@@ -162,6 +166,12 @@ class VmmDriver:
     def ensure_context(self, device_index: int) -> None:
         """Make sure a driver context for `device_index` is current."""
         raise NotImplementedError
+
+    def uint8_tensor(
+        self, ptr: int, num_bytes: int, device_index: int
+    ) -> torch.Tensor | None:
+        """Uint8 tensor over mapped memory, or None to wrap it through DLPack."""
+        return None
 
     def _check(self, result: int) -> None:
         if result == _SUCCESS:
@@ -378,6 +388,53 @@ class HipVmmDriver(VmmDriver):
             self._check(self._lib.hipSetDevice(device_index))
 
 
+class XpuVmmDriver(VmmDriver):
+    """Intel XPU VMM on PyTorch's SYCL context, through vllm-xpu-kernels ops."""
+
+    def __init__(self) -> None:
+        import torch
+        import vllm_xpu_kernels._C  # noqa: F401
+
+        self._ops = torch.ops._C
+
+    def error_string(self, code: int) -> str:
+        # The ops raise with the SYCL error message instead of returning codes.
+        return "unknown error"
+
+    def ensure_context(self, device_index: int) -> None:
+        # Every device shares PyTorch's SYCL context, which the ops use.
+        pass
+
+    def granularity(self, device_index: int) -> int:
+        return self._ops.vmm_granularity(device_index)
+
+    def reserve(self, size: int) -> int:
+        return self._ops.vmm_reserve(size)
+
+    def free_reserved(self, ptr: int, size: int) -> None:
+        self._ops.vmm_free_reserved(ptr, size)
+
+    def create(self, size: int, device_index: int) -> int:
+        return self._ops.vmm_create(size, device_index)
+
+    def map(self, ptr: int, size: int, handle: int) -> None:
+        self._ops.vmm_map(ptr, size, handle)
+
+    def set_access(self, ptr: int, size: int, device_index: int) -> None:
+        self._ops.vmm_set_access(ptr, size, device_index)
+
+    def unmap(self, ptr: int, size: int) -> None:
+        self._ops.vmm_unmap(ptr, size)
+
+    def release(self, handle: int) -> None:
+        self._ops.vmm_release(handle)
+
+    def uint8_tensor(self, ptr: int, num_bytes: int, device_index: int) -> torch.Tensor:
+        # DLPack cannot be used: torch infers a kDLOneAPI tensor's device from
+        # its pointer, which fails for addresses outside a USM allocation.
+        return self._ops.vmm_tensor_from_ptr(ptr, num_bytes, device_index)
+
+
 def _set_access_fails_within_reservation(driver: VmmDriver, device_index: int) -> bool:
     """Whether set-access rejects one of two allocations mapped side by side in
     a reservation, as HIP runtimes before ROCm/rocm-systems#2451 do.
@@ -419,6 +476,10 @@ def _set_access_fails_within_reservation(driver: VmmDriver, device_index: int) -
 def get_vmm_driver() -> VmmDriver:
     import torch
 
+    from vllm.platforms import current_platform
+
+    if current_platform.is_xpu():
+        return XpuVmmDriver()
     if torch.version.hip is not None:
         return HipVmmDriver()
     return CudaVmmDriver()
@@ -430,13 +491,13 @@ def vmm_unavailable_reason() -> str | None:
 
     Checks library load, entry points, known runtime defects (by probing), and
     one reserve/create/map/set-access/unmap/release round trip of a single
-    granule. Covers WSL2 and non-CUDA/ROCm builds.
+    granule. Covers WSL2 and non-CUDA/ROCm/XPU builds.
     """
     try:
         import torch
 
         if not torch.accelerator.is_available():
-            return "no CUDA/ROCm device is available"
+            return "no CUDA/ROCm/XPU device is available"
         driver = get_vmm_driver()
         device_index = torch.accelerator.current_device_index()
         driver.ensure_context(device_index)
