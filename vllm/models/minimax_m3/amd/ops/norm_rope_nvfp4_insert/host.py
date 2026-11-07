@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Launch wrapper of the fused norm / RoPE / NVFP4 insert."""
+"""Launch wrapper of the fused norm / RoPE / NVFP4 or MXFP4 insert."""
 
 import functools
 import struct
@@ -10,13 +10,14 @@ import torch
 from vllm.models.minimax_m3.amd.ops.flydsl_utils import (
     run_compiled,
 )
+from vllm.utils.torch_utils import mxfp4_kv_cache_full_dim, nvfp4_kv_cache_full_dim
 
 from . import kernel as _kernel
 
 
 @functools.cache
-def _get_kernel(nq: int, nkv: int, niq: int, rotary_dim: int, tp: int):
-    return _kernel.compile_norm_rope_insert(nq, nkv, niq, rotary_dim, tp)
+def _get_kernel(nq: int, nkv: int, niq: int, rotary_dim: int, tp: int, mx: bool):
+    return _kernel.compile_norm_rope_insert(nq, nkv, niq, rotary_dim, tp, mx)
 
 
 def _token_pairs_per_wave(n: int) -> int:
@@ -33,9 +34,9 @@ def minimax_m3_norm_rope_nvfp4_insert(
     positions: torch.Tensor,  # [n] int64
     slot_mapping: torch.Tensor,  # [n] int64, -1 skips the token
     index_slot_mapping: torch.Tensor,  # [n] int64, -1 skips the token
-    kv_cache: torch.Tensor,  # [blocks, 2 nkv, 128, 72] uint8
-    index_cache: torch.Tensor,  # [blocks, 128, 72] uint8
-    k_scale: torch.Tensor,  # fp32 global scales
+    kv_cache: torch.Tensor,  # [blocks, 2 nkv, 128, 72 (MXFP4: 68)] uint8
+    index_cache: torch.Tensor,  # [blocks, 128, 72 (MXFP4: 68)] uint8
+    k_scale: torch.Tensor,  # fp32 global scales, unused for MXFP4
     v_scale: torch.Tensor,
     q_out: torch.Tensor,  # [n, nq * 128] bf16
     index_q_out: torch.Tensor,  # [n, niq * 128] e4m3, row stride free
@@ -43,13 +44,16 @@ def minimax_m3_norm_rope_nvfp4_insert(
     num_kv_heads: int,
     num_index_heads: int,
     eps: float,
+    mxfp4: bool = False,
 ) -> None:
-    """Norm + RoPE of q / k / index-q / index-k and the NVFP4 K/V and index-K
-    inserts in one launch; k and index-k are not written back into ``qkv``."""
+    """Norm + RoPE of q / k / index-q / index-k and the NVFP4 (``mxfp4``: MXFP4)
+    K/V and index-K inserts in one launch; k and index-k are not written back
+    into ``qkv``."""
     n = qkv.shape[0]
     if n == 0:
         return
     nq, nkv, niq = num_heads, num_kv_heads, num_index_heads
+    slot_w = (mxfp4_kv_cache_full_dim if mxfp4 else nvfp4_kv_cache_full_dim)(_kernel.D)
     rotary_dim = cos_sin_cache.shape[1]
     assert eps >= 2.0**-126  # the kernel's rsqrt skips ocml's denormal scaling
     assert qkv.dtype == torch.bfloat16 and qkv.is_contiguous()
@@ -60,12 +64,12 @@ def minimax_m3_norm_rope_nvfp4_insert(
     assert q_out.dtype == torch.bfloat16 and q_out.is_contiguous()
     assert index_q_out.dtype == torch.float8_e4m3fn and index_q_out.stride(1) == 1
     assert index_q_out.stride(0) % 4 == 0
-    assert kv_cache.shape[1:] == (2 * nkv, _kernel.BLK, 72)
-    assert kv_cache.stride(1) == _kernel.BLK * 72 and kv_cache.stride(3) == 1
-    assert index_cache.shape[1:] == (_kernel.BLK, 72) and index_cache.stride(2) == 1
-    assert index_cache.stride(1) == 72
+    assert kv_cache.shape[1:] == (2 * nkv, _kernel.BLK, slot_w)
+    assert kv_cache.stride(1) == _kernel.BLK * slot_w and kv_cache.stride(3) == 1
+    assert index_cache.shape[1:] == (_kernel.BLK, slot_w) and index_cache.stride(2) == 1
+    assert index_cache.stride(1) == slot_w
     run_compiled(
-        _get_kernel(nq, nkv, niq, rotary_dim, _token_pairs_per_wave(n)),
+        _get_kernel(nq, nkv, niq, rotary_dim, _token_pairs_per_wave(n), mxfp4),
         qkv.data_ptr(),
         q_out.data_ptr(),
         index_q_out.data_ptr(),
