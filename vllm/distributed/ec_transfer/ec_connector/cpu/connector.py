@@ -20,10 +20,20 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
 )
+from vllm.distributed.ec_transfer.ec_connector.cpu.metrics import (
+    ECCPUConnectorProm,
+    ECCPUConnectorStats,
+)
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.ec_transfer.ec_connector.metrics import (
+        ECConnectorPromMetrics,
+        ECConnectorStats,
+        PromMetric,
+        PromMetricT,
+    )
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.outputs import ECConnectorOutput
     from vllm.v1.request import Request
@@ -144,6 +154,31 @@ class ECCPUConnector(ECConnectorBase):
         if self.connector_scheduler is not None:
             return self.connector_scheduler.has_pending_push_work()
         return False
+
+    def get_ec_connector_stats(self) -> "ECConnectorStats | None":
+        if self.connector_worker is not None:
+            return self.connector_worker.get_ec_connector_stats()
+        return None
+
+    @classmethod
+    def build_ec_connector_stats(
+        cls, data: dict[str, Any] | None = None
+    ) -> "ECConnectorStats | None":
+        if data is not None:
+            return ECCPUConnectorStats(data=data)
+        return ECCPUConnectorStats()
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: "VllmConfig",
+        metric_types: "dict[type[PromMetric], type[PromMetricT]]",
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> "ECConnectorPromMetrics":
+        return ECCPUConnectorProm(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
+        )
 
     # Shared.
     def shutdown(self) -> None:
