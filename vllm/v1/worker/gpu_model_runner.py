@@ -240,6 +240,7 @@ from .utils import (
     customize_attention_spec,
     map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
+    profile_mm_embed_input_ids,
     sanity_check_mm_encoder_outputs,
 )
 
@@ -6223,6 +6224,30 @@ class GPUModelRunner(
                         )
                         for i, output in enumerate(dummy_encoder_outputs):
                             self.encoder_cache[f"tmp_{i}"] = output
+
+                        # Encoder-decoder models feed encoder outputs to
+                        # cross-attention instead of merging them into
+                        # `inputs_embeds`.
+                        if (
+                            get_pp_group().is_first_rank
+                            and not self.model_config.is_encoder_decoder
+                        ):
+                            # The LoRA embedding layer reads the punica
+                            # indices, which are unset until a mapping is
+                            # activated.
+                            with self.maybe_dummy_run_with_lora(
+                                self.lora_config,
+                                np.array([self.max_num_tokens], dtype=np.int32),
+                                np.ones(1, dtype=np.int32),
+                            ):
+                                profile_mm_embed_input_ids(
+                                    self.model,
+                                    dummy_encoder_outputs,
+                                    self.max_num_tokens,
+                                    self.device,
+                                    dummy_modality,
+                                    self.model_config,
+                                )
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(

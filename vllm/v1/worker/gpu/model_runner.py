@@ -1077,8 +1077,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.vllm_config, self.mm_registry, enable_cache=False
                 )
                 dummy_mm_inputs = mm_budget.get_dummy_encoder_profile_inputs()
+                max_loras = (
+                    self.lora_config.max_loras if self.lora_config is not None else 0
+                )
                 self.model_state.encoder_runner.profile_encoder_cache(
-                    dummy_mm_inputs, mm_budget
+                    dummy_mm_inputs,
+                    mm_budget,
+                    merge_context=self.maybe_dummy_run_with_lora(
+                        self.lora_config,
+                        num_scheduled_tokens=np.array(
+                            [self.max_num_tokens], dtype=np.int32
+                        ),
+                        num_sampled_tokens=np.ones(1, dtype=np.int32),
+                        num_active_loras=max_loras,
+                    ),
                 )
 
         hidden_states, sample_hidden_states = self._dummy_run(

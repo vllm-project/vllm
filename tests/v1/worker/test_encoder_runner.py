@@ -10,6 +10,7 @@ the processed range still fails loudly.
 """
 
 import weakref
+from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -471,3 +472,97 @@ def test_consumed_cpu_input_releases_storage_before_request_finishes():
     cache.update_encoder_inputs("a", {0: None})
     assert ref() is None
     assert "a" in cache.mm_features
+
+
+class _MergeRecordingModel:
+    """Stands in for a multimodal model, recording the merge-path inputs."""
+
+    def __init__(self):
+        self.calls: list[tuple[torch.Tensor, list[torch.Tensor], torch.Tensor]] = []
+
+    def embed_input_ids(self, input_ids, multimodal_embeddings=None, *, is_multimodal):
+        self.calls.append((input_ids, list(multimodal_embeddings), is_multimodal))
+        return torch.zeros(input_ids.size(0), HIDDEN)
+
+
+def _profile_budget() -> SimpleNamespace:
+    return SimpleNamespace(
+        get_encoder_budget=lambda: 64,
+        mm_max_toks_per_item={"image": 8},
+        model_config=SimpleNamespace(
+            is_encoder_decoder=False, multimodal_config=None, uses_mrope=False
+        ),
+    )
+
+
+def test_profile_encoder_cache_wraps_only_the_merge_in_merge_context():
+    """LoRA state is set up for the merge, not for the encoder run.
+
+    `VocabParallelEmbeddingWithLoRA` reads the punica indices, which hold
+    uninitialized memory until a mapping is activated, so the merge has to run
+    inside the context the model runner hands in.
+    """
+    events: list[str] = []
+
+    class _Model(_MergeRecordingModel):
+        def embed_input_ids(self, *args, **kwargs):
+            events.append("merge")
+            return super().embed_input_ids(*args, **kwargs)
+
+    @contextmanager
+    def merge_context():
+        events.append("enter")
+        yield
+        events.append("exit")
+
+    def execute_mm_encoder(mm_kwargs):
+        events.append("encoder")
+        return [torch.zeros(8, HIDDEN)]
+
+    runner = EncoderRunner(
+        model=_Model(),
+        max_num_tokens=64,
+        hidden_size=HIDDEN,
+        encoder_cache=EncoderCache(),
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+    runner.execute_mm_encoder = execute_mm_encoder
+
+    runner.profile_encoder_cache(
+        [("image", None)], _profile_budget(), merge_context=merge_context()
+    )
+
+    assert events == ["encoder", "enter", "merge", "exit"]
+
+
+def test_profile_encoder_cache_profiles_the_embedding_merge():
+    """Startup profiling must run `embed_input_ids` on a full batch.
+
+    Dummy runs hand the model a slice of the pre-allocated `inputs_embeds`
+    buffer, so without this the merge path -- and temporaries that scale with
+    `max_num_batched_tokens`, such as Qwen3-VL's deepstack embeddings -- is
+    never allocated while profiling and first shows up on a live request,
+    OOMing an engine that started up fine.
+    """
+    model = _MergeRecordingModel()
+    runner = EncoderRunner(
+        model=model,
+        max_num_tokens=64,
+        hidden_size=HIDDEN,
+        encoder_cache=EncoderCache(),
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+    dummy_outputs = [torch.zeros(8, HIDDEN)]
+    runner.execute_mm_encoder = lambda mm_kwargs: dummy_outputs
+
+    runner.profile_encoder_cache([("image", None)], _profile_budget())
+
+    assert model.calls, "the multimodal merge path was not profiled"
+    input_ids, mm_embeds, is_mm_embed = model.calls[0]
+    assert input_ids.size(0) == runner.max_num_tokens
+    assert is_mm_embed.size(0) == runner.max_num_tokens
+    # `_merge_multimodal_embeddings` needs one embedding row per masked
+    # position; the mask must never claim more rows than were passed in.
+    assert sum(e.size(0) for e in mm_embeds) == int(is_mm_embed.sum())
