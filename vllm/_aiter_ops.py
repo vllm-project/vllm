@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ctypes
+import dataclasses
 import functools
+import itertools
 import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -14,7 +16,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import async_tensor_h2d, direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
@@ -2794,15 +2796,57 @@ class rocm_aiter_ops:
         The K5 recurrence is compiled for a fixed 64-token chunk, so the chunk
         size is a property of the AITER kernel rather than of FLA, and is not
         the caller's to choose.
+
+        AITER builds the metadata on the device of `cu_seqlens` with a
+        blocking H2D copy, so build it on the host and upload it with a single
+        non-blocking pinned copy instead.
         """
         from aiter.ops.triton.gated_delta_net import (
             build_gated_delta_rule_prefill_metadata,
         )
 
-        return build_gated_delta_rule_prefill_metadata(
+        host_cu_seqlens = torch.tensor(
+            [0, *itertools.accumulate(seq_lens_cpu)], dtype=torch.int32
+        )
+        metadata = build_gated_delta_rule_prefill_metadata(
             seq_lens_cpu,
-            cu_seqlens=cu_seqlens,
+            cu_seqlens=host_cu_seqlens,
             chunk_size=cls.GDN_FLYDSL_CHUNK_SIZE,
+        )
+        layout, schedule = metadata.layout, metadata.schedule
+        host_tensors = (
+            schedule.sequence_ids,
+            schedule.chunk_ids,
+            schedule.chunk_offsets,
+            schedule.kernel_cu_seqlens,
+            layout.kernel_cu_seqlens,
+        )
+        sequence_ids, chunk_ids, chunk_offsets, kernel_cu_seqlens, layout_cu = (
+            async_tensor_h2d(torch.cat(host_tensors), device=cu_seqlens.device).split(
+                [t.numel() for t in host_tensors]
+            )
+        )
+        try:
+            cu_seqlens_version = cu_seqlens._version
+        except RuntimeError:
+            # Inference tensors do not track a version counter.
+            cu_seqlens_version = None
+        return dataclasses.replace(
+            metadata,
+            layout=dataclasses.replace(
+                layout,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_version=cu_seqlens_version,
+                kernel_cu_seqlens=layout_cu,
+            ),
+            schedule=dataclasses.replace(
+                schedule,
+                grid=dataclasses.replace(
+                    schedule.grid, sequence_ids=sequence_ids, chunk_ids=chunk_ids
+                ),
+                chunk_offsets=chunk_offsets,
+                kernel_cu_seqlens=kernel_cu_seqlens,
+            ),
         )
 
     @classmethod
