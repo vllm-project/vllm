@@ -7,6 +7,9 @@ from __future__ import annotations
 from collections.abc import Callable, Collection, Sequence
 from typing import cast
 
+import torch
+from transformers import PreTrainedConfig
+
 from vllm.entrypoints.generate.base.protocol import MMPayload
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     decode_mm_kwargs_item,
@@ -23,6 +26,8 @@ from vllm.inputs import (
     MultiModalPlaceholders,
 )
 from vllm.multimodal.inputs import (
+    MultiModalBatchedField,
+    MultiModalFlatField,
     MultiModalKwargsItem,
     MultiModalKwargsOptionalItems,
 )
@@ -116,6 +121,74 @@ def mm_kwargs_from_features(
             )
         ]
     return mm_kwargs
+
+
+def validate_qwen_image_features(
+    features: MultiModalFeatures,
+    items: Sequence[MultiModalKwargsItem | None],
+    config: PreTrainedConfig,
+    *,
+    allow_ec_metadata: bool,
+    allow_shm_handles: bool,
+) -> None:
+    """Validate decoded Qwen2/2.5-VL image items before engine admission."""
+    if config.model_type not in ("qwen2_vl", "qwen2_5_vl"):
+        return
+
+    vision = config.vision_config
+    merge_size = vision.spatial_merge_size
+    pixel_width = vision.in_channels * vision.temporal_patch_size * vision.patch_size**2
+    embed_width = config.get_text_config().hidden_size
+    serialized_items = (features.kwargs_data or {}).get("image", [None] * len(items))
+    for item, serialized, placeholder in zip(
+        items, serialized_items, features.mm_placeholders["image"], strict=True
+    ):
+        # Cache-only entries and authenticated SHM references have no inline tensor.
+        if item is None or (allow_shm_handles and "address" in item):
+            continue
+
+        grid_elem = item.get("image_grid_thw")
+        if (
+            grid_elem is None
+            or not isinstance(grid_elem.field, MultiModalBatchedField)
+            or not isinstance(grid := grid_elem.data, torch.Tensor)
+            or grid.shape != (3,)
+            or grid.dtype not in (torch.int32, torch.int64)
+        ):
+            raise ValueError(
+                "image_grid_thw must be a batched integer tensor of size 3"
+            )
+        t, h, w = grid.tolist()
+        if min(t, h, w) <= 0 or h % merge_size or w % merge_size:
+            raise ValueError("image_grid_thw has invalid patch dimensions")
+
+        patches = t * h * w
+        embeds = patches // merge_size**2
+        if placeholder.length != embeds:
+            raise ValueError(
+                "image_grid_thw does not match the image placeholder length"
+            )
+
+        keys = item.keys()
+        if keys == {"image_grid_thw"} and serialized is None and allow_ec_metadata:
+            continue
+        if keys == {"image_grid_thw", "pixel_values"}:
+            key, shape = "pixel_values", (patches, pixel_width)
+        elif keys == {"image_grid_thw", "image_embeds"}:
+            key, shape = "image_embeds", (embeds, embed_width)
+        else:
+            raise ValueError("Image features require pixel_values or image_embeds")
+
+        elem = item[key]
+        if (
+            not isinstance(elem.field, MultiModalFlatField)
+            or elem.field.dim != 0
+            or not isinstance(elem.data, torch.Tensor)
+            or elem.data.shape != shape
+        ):
+            raise ValueError(
+                f"{key} must be a tensor of shape {shape} matching the grid"
+            )
 
 
 def placeholder_ranges_from_engine_input(

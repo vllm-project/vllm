@@ -7,6 +7,7 @@ token_in_token_out generate endpoint.
 import pytest
 import torch
 from pydantic import ValidationError
+from transformers import Qwen2_5_VLConfig, Qwen2VLConfig
 
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -16,6 +17,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
     extract_mm_features,
     merge_mm_kwargs_items,
     mm_kwargs_from_features,
+    validate_qwen_image_features,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     decode_mm_kwargs_item,
@@ -35,6 +37,62 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     PlaceholderRange,
 )
+
+
+@pytest.mark.parametrize("config_cls", [Qwen2VLConfig, Qwen2_5_VLConfig])
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "valid",
+        "grid-override",
+        "patch-count",
+        "empty",
+        "rank",
+        "ec-metadata",
+        "missing-ec",
+    ],
+)
+def test_validate_decoded_qwen_image_features(config_cls, variant):
+    grid = MultiModalBatchedField(keep_on_cpu=True)
+    pixels = MultiModalFlatField(slices=[slice(0, 256)])
+    image = MultiModalKwargsItem(
+        {
+            "image_grid_thw": MultiModalFieldElem(torch.tensor([1, 16, 16]), grid),
+            "pixel_values": MultiModalFieldElem(torch.zeros(256, 1176), pixels),
+        }
+    )
+    metadata = MultiModalKwargsItem({"image_grid_thw": image["image_grid_thw"]})
+    if variant in ("grid-override", "patch-count"):
+        metadata["image_grid_thw"] = MultiModalFieldElem(torch.tensor([1, 2, 2]), grid)
+    elif variant == "empty":
+        image = MultiModalKwargsItem({})
+    elif variant == "rank":
+        image["pixel_values"] = MultiModalFieldElem(torch.zeros(1, 1, 1), pixels)
+    payload = (
+        None
+        if variant in ("ec-metadata", "missing-ec")
+        else encode_mm_kwargs_item(image)
+    )
+    features = MultiModalFeatures(
+        mm_hashes={"image": ["image"]},
+        mm_placeholders={
+            "image": [
+                PlaceholderRangeInfo(
+                    offset=0, length=1 if variant == "patch-count" else 64
+                )
+            ]
+        },
+        kwargs_data={"image": [payload]},
+        mm_metadata={"image": [encode_mm_kwargs_item(metadata)]},
+    )
+    items = mm_kwargs_from_features(features)["image"]
+    config = config_cls()
+    options = dict(allow_ec_metadata=variant == "ec-metadata", allow_shm_handles=False)
+    if variant in ("valid", "ec-metadata"):
+        validate_qwen_image_features(features, items, config, **options)
+    else:
+        with pytest.raises(ValueError, match="image|pixel_values"):
+            validate_qwen_image_features(features, items, config, **options)
 
 
 def test_mm_kwargs_item_roundtrip():

@@ -12,9 +12,15 @@ tests (e.g. entrypoints/rl/weight_transfer/test_offline.py) deadlock-free.
 import httpx
 import pytest
 import pytest_asyncio
+import torch
 from PIL import Image
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+    decode_mm_kwargs_item,
+    encode_mm_kwargs_item,
+)
+from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import encode_image_url
 
 MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
@@ -55,6 +61,65 @@ async def client(server: RemoteOpenAIServer):
         headers=headers,
     ) as c:
         yield c
+
+
+def test_generate_rejects_malformed_qwen_image_features(test_image):
+    model = "Qwen/Qwen2.5-VL-3B-Instruct"
+    args = ["--enable-scale-out", "--enforce-eager", "--max-model-len", "2048"]
+    with (
+        RemoteOpenAIServer(model, args) as server,
+        httpx.Client(
+            base_url=server.url_root,
+            headers={"Authorization": f"Bearer {server.DUMMY_API_KEY}"},
+            timeout=120,
+        ) as client,
+    ):
+        response = client.post(
+            RENDER_ENDPOINT,
+            json={
+                "model": model,
+                "mm_payload": "tensors",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": encode_image_url(test_image)},
+                            },
+                            {"type": "text", "text": "What color is this image?"},
+                        ],
+                    }
+                ],
+            },
+        )
+        response.raise_for_status()
+        valid = response.json()
+        valid["sampling_params"] = {"max_tokens": 1, "temperature": 0}
+        assert client.post(GEN_ENDPOINT, json=valid).status_code == 200
+
+        for variant in ("grid", "empty", "rank"):
+            features = response.json()["features"]
+            features["mm_hashes"]["image"][0] = f"malformed-{variant}"
+            if variant == "grid":
+                metadata = decode_mm_kwargs_item(features["mm_metadata"]["image"][0])
+                metadata["image_grid_thw"].data = torch.tensor([1, 2, 2])
+                features["mm_metadata"]["image"][0] = encode_mm_kwargs_item(metadata)
+            else:
+                item = MultiModalKwargsItem({})
+                if variant == "rank":
+                    item = decode_mm_kwargs_item(features["kwargs_data"]["image"][0])
+                    item["pixel_values"].data = torch.zeros(1, 1, 1)
+                features["kwargs_data"]["image"][0] = encode_mm_kwargs_item(item)
+
+            for stream in (False, True):
+                rejected = client.post(
+                    GEN_ENDPOINT,
+                    json={**valid, "features": features, "stream": stream},
+                )
+                assert rejected.status_code == 400, rejected.text
+                assert rejected.json()["error"]["param"] == "features"
+            assert client.post(GEN_ENDPOINT, json=valid).status_code == 200
 
 
 @pytest.mark.asyncio

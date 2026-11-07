@@ -250,8 +250,10 @@ print(prefill_response["choices"][0]["token_ids"])
 ```
 
 Single-process clients can keep passing the full render response to
-`/inference/v1/generate` unchanged; `mm_metadata` is optional and ignored
-when `kwargs_data` is present.
+`/inference/v1/generate` unchanged. If both payloads contain the same field,
+`mm_metadata` supplies the effective value. For Qwen2-VL and Qwen2.5-VL images,
+generation rejects malformed decoded tensors or grid and placeholder mismatches
+with HTTP 400 before submitting the request to the engine.
 
 ### Payload shape
 
