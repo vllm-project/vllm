@@ -120,7 +120,10 @@ def _check_routed_expert_projections(
     )
     x = weight(num_tokens, hidden)
     ids = (
-        torch.arange(num_tokens * topk, device=device).view(num_tokens, topk) % experts
+        torch.arange(num_tokens * topk, device=device, dtype=torch.int32).view(
+            num_tokens, topk
+        )
+        % experts
     )
     expert_weights = torch.full((num_tokens, topk), 0.5, device=device)
     w1, w2 = (
