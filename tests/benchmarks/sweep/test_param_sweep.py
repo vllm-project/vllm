@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+import sys
 import tempfile
 from pathlib import Path
 
@@ -8,6 +9,8 @@ import pytest
 
 from vllm.benchmarks.sweep import serve as sweep_serve
 from vllm.benchmarks.sweep.param_sweep import ParameterSweep, ParameterSweepItem
+from vllm.benchmarks.sweep.serve_workload import explore_comb_workloads
+from vllm.benchmarks.sweep.server import ServerProcess
 
 
 class TestParameterSweepItem:
@@ -373,3 +376,58 @@ def test_run_comb_warmup_default_is_backward_compatible(
 
     assert calls == [0]
     assert measured == [{"run_number": 0}]
+
+
+@pytest.mark.parametrize(
+    "workload_var,serial,batch,expected",
+    [
+        ("request_rate", 0.2, 0.4, [0.25, 0.3, 0.35]),
+        ("request_rate", 0.0002, 0.0004, [0.00025, 0.0003, 0.00035]),
+        ("request_rate", 1.2, 2.4, [1.5, 1.8, 2.1]),
+        ("max_concurrency", 0.9, 0.9, [1]),
+        ("max_concurrency", 1.0, 5.0, [2, 3, 4]),
+    ],
+)
+def test_workload_explorer_preserves_valid_workload_levels(
+    tmp_path: Path, workload_var, serial, batch, expected
+):
+    """Measured bounds must produce valid commands and retain fractional rates."""
+    benchmark = """
+import argparse
+import json
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--request-rate", type=float, default=float("inf"))
+parser.add_argument("--max-concurrency", type=int, default=10)
+parser.add_argument("--result-dir")
+parser.add_argument("--result-filename")
+args, _ = parser.parse_known_args()
+assert args.request_rate > 0, "non-positive request rate"
+assert args.max_concurrency >= 1, "non-positive concurrency"
+estimate = SERIAL if args.max_concurrency == 1 else BATCH
+metrics = {"request_throughput": estimate, "mean_e2el_ms": 1000.0}
+output = Path(args.result_dir) / args.result_filename
+output.write_text(json.dumps(metrics))
+"""
+    benchmark = f"SERIAL = {serial!r}\nBATCH = {batch!r}\n" + benchmark
+    server = ServerProcess([], [sys.executable, "-c", ""], show_stdout=True)
+    results = explore_comb_workloads(
+        server,
+        [sys.executable, "-c", benchmark, "--num-prompts", "10"],
+        serve_comb=ParameterSweepItem(),
+        bench_comb=ParameterSweepItem(),
+        link_vars=[],
+        workload_var=workload_var,
+        workload_iters=5,
+        experiment_dir=tmp_path,
+        num_runs=1,
+        dry_run=False,
+        warmup_num_prompts=0,
+        continue_on_error=False,
+    )
+
+    assert [run[workload_var] for run in results[1:-1]] == pytest.approx(expected)
+    assert len(list(tmp_path.rglob("summary.json"))) == 2 + len(expected)
+    if workload_var == "max_concurrency":
+        assert all(isinstance(run[workload_var], int) for run in results)
