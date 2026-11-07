@@ -86,12 +86,16 @@ class ServeSubcommand(CLISubcommand):
 
         # If --data_parallel_multi_port_external_lb and --data_parallel_hybrid_lb
         # are unset, default to hybrid if --data-parallel-start-rank is set
+        # on a non-headless node (headless nodes run no API servers, so they
+        # can't be hybrid LB; matches the inference in create_engine_config).
         is_hybrid_lb = is_multi_port = False
         if (
             not args.data_parallel_hybrid_lb
             and not args.data_parallel_multi_port_external_lb
         ):
-            is_hybrid_lb = args.data_parallel_start_rank is not None
+            is_hybrid_lb = (
+                args.data_parallel_start_rank is not None and not args.headless
+            )
         else:
             is_hybrid_lb = args.data_parallel_hybrid_lb
             is_multi_port = args.data_parallel_multi_port_external_lb
