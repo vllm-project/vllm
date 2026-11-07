@@ -2,10 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import Callable, Coroutine
 from http import HTTPStatus
+from typing import Any
 
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.routing import APIRoute
 
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicCountTokensRequest,
@@ -21,6 +25,9 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.exception_handling.error_response import (
     create_error_response,
 )
+from vllm.entrypoints.serve.exception_handling.handlers.validation import (
+    create_validation_error_response,
+)
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
     validate_json_request,
@@ -29,8 +36,6 @@ from vllm.entrypoints.serve.utils.api_utils import (
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-
-router = APIRouter()
 
 
 def messages(request: Request) -> AnthropicServingMessages:
@@ -47,6 +52,29 @@ def translate_error_response(response: ErrorResponse) -> JSONResponse:
     return JSONResponse(
         status_code=response.error.code, content=anthropic_error.model_dump()
     )
+
+
+class AnthropicRoute(APIRoute):
+    """Reports request validation errors in Anthropic's error format.
+
+    FastAPI validates the body before the endpoint runs, so these errors
+    would otherwise reach the app-wide handler and get the OpenAI format.
+    """
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        route_handler = super().get_route_handler()
+
+        async def handler(request: Request) -> Response:
+            try:
+                return await route_handler(request)
+            except RequestValidationError as exc:
+                error = create_validation_error_response(request, exc)
+                return translate_error_response(error)
+
+        return handler
+
+
+router = APIRouter(route_class=AnthropicRoute)
 
 
 @router.post(
