@@ -1333,7 +1333,7 @@ def _correct_decoded_token(
         context = context_token_ids[-num_ctx:]
         full_decoded = tokenizer.decode(context + [token_id])
 
-        if full_decoded.endswith("�"):
+        if "�" in full_decoded:
             continue
 
         clean_end = len(context)
@@ -1483,7 +1483,7 @@ def _resolve_logprobs(
         )
         (token_str, token_bytes), *top_decoded = decoded
 
-        if token_str.endswith("\ufffd"):
+        if "\ufffd" in token_str:
             token_str = _correct_decoded_token(
                 entry.token_id, context_token_ids, tokenizer
             )
@@ -1491,7 +1491,7 @@ def _resolve_logprobs(
 
         resolved_top = []
         for top, (top_str, top_bytes) in zip(top_entries, top_decoded):
-            if top_str.endswith("\ufffd"):
+            if "\ufffd" in top_str:
                 top_str = _correct_decoded_token(
                     top.token_id, context_token_ids, tokenizer
                 )

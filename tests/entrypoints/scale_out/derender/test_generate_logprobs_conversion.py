@@ -7,6 +7,8 @@ byte-fallback correction path; a real SentencePiece tokenizer covers the
 leading-space restoration.
 """
 
+import pytest
+
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateLogProb,
     GenerateLogProbs,
@@ -100,6 +102,38 @@ def test_byte_fallback_second_half_uses_preceding_token_as_context():
     assert resolved.content[0].bytes == []
     assert resolved.content[1].token == "é"
     assert resolved.content[1].bytes == list("é".encode())
+
+
+@pytest.mark.parametrize("chunk_size", [1, 100])
+@pytest.mark.parametrize("split_prefix", [False, True])
+def test_utf8_continuation_before_valid_suffix(chunk_size, split_prefix):
+    tokenizer = get_tokenizer("Qwen/Qwen3-0.6B")
+    token_ids = tokenizer.encode("🍰이 맛있다", add_special_tokens=False)
+    if split_prefix:
+        token_ids[:1] = [tokenizer.get_vocab()[c] for c in ("ð", "Ł")]
+    entries = []
+    for start in range(0, len(token_ids), chunk_size):
+        logprobs = GenerateLogProbs(
+            content=[
+                GenerateLogProbsContent(
+                    token_id=token_id,
+                    logprob=-0.5,
+                    top_logprobs=[GenerateLogProb(token_id=token_id, logprob=-0.5)],
+                )
+                for token_id in token_ids[start : start + chunk_size]
+            ]
+        )
+        resolved = _resolve_logprobs(
+            logprobs,
+            tokenizer,
+            initial_context_token_ids=token_ids[max(0, start - 4) : start],
+        )
+        entries.extend(resolved.content)
+
+    expected = tokenizer.decode(token_ids)
+    for decoded in (entries, [entry.top_logprobs[0] for entry in entries]):
+        assert "".join(entry.token for entry in decoded) == expected
+        assert bytes(b for entry in decoded for b in entry.bytes) == expected.encode()
 
 
 def test_content_none_is_not_an_error():
