@@ -121,6 +121,20 @@ def _installed_version(distribution: str) -> str | None:
         return None
 
 
+# Earlier FP8 ReplaySSM flushes can store NaN for tiny nonzero rows; see
+# flashinfer-ai/flashinfer#8968. Its fix postdates 0.7.4rc1.
+_REPLAYSSM_FP8_MIN_FLASHINFER = "0.7.5"
+
+
+@functools.cache
+def has_flashinfer_replayssm_fp8_checkpoints() -> bool:
+    """Return whether FlashInfer bounds FP8 ReplaySSM checkpoint scales."""
+    version = _installed_version("flashinfer-python")
+    return version is not None and Version(version) >= Version(
+        _REPLAYSSM_FP8_MIN_FLASHINFER
+    )
+
+
 def has_flashinfer_jit_cache_wheels() -> bool:
     """Return whether FlashInfer publishes flashinfer-jit-cache for the installed
     PyTorch's CUDA version, which it does from CUDA 12.9."""
@@ -1326,6 +1340,7 @@ __all__ = [
     "is_flashinfer_autotuning",
     "has_flashinfer_bf16_gemm",
     "has_flashinfer_concat_mla_kv_quant_fp8",
+    "has_flashinfer_replayssm_fp8_checkpoints",
     "is_flashinfer_bf16_gemm_supported",
     "is_flashinfer_cutedsl_bf16_gemm_supported",
     "flashinfer_trtllm_fp8_block_scale_moe",

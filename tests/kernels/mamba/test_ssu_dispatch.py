@@ -12,7 +12,10 @@ import torch
 from vllm.config import CacheConfig
 from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
+)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     FlashInferSSUBackend,
     TritonSSUBackend,
@@ -31,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     MambaSpec,
 )
+from vllm.v1.worker.mamba_utils import _validate_replayssm_read_state_spec
 from vllm.v1.worker.replayssm_utils import (
     ReplaySSMModelContext,
     _compact_replayssm_requests_kernel,
@@ -669,6 +673,7 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.use_replayssm = True
     mixer.use_flashinfer_replayssm = True
     mixer.replayssm_buffer_len = 16
+    mixer.replayssm_state_dtype = "auto"
     mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
     mixer.cache_config = SimpleNamespace(mamba_block_size=16, mamba_cache_mode="none")
     mixer.conv_weights = torch.empty(0)
@@ -755,3 +760,351 @@ def test_replayssm_ring_shape_extends_groups_for_head_shards():
     )
 
     assert shapes == (*base_shapes, (2, 16, 64), (2, 16), (1, 16, 128))
+
+
+def _require_cuda():
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_cuda():
+        pytest.skip("requires the NVIDIA CUDA platform")
+
+
+def _bytes(value):
+    return value.contiguous().view(torch.uint8).cpu()
+
+
+def _encode_rows(value, dtype):
+    value = value.float().cpu()
+    qmax = 127 if dtype == torch.int8 else 448
+    amax = value.abs().amax(-1)
+    multiplier = torch.where(amax == 0, 1.0, qmax / amax)
+    scaled = value * multiplier[..., None]
+    if dtype == torch.int8:
+        scaled = scaled.round()
+    return scaled.to(dtype), multiplier.reciprocal()
+
+
+def _assert_rows(value, payload, scale):
+    expected_payload, expected_scale = _encode_rows(value, payload.dtype)
+    assert torch.equal(_bytes(payload), _bytes(expected_payload))
+    torch.testing.assert_close(scale.cpu(), expected_scale, rtol=0, atol=0)
+
+
+def _source(dtype):
+    qmax = 127 if dtype == torch.int8 else 448
+    value = torch.ones(3, 16, 64, 128)
+    value[..., -1] = qmax
+    factors = torch.exp2(torch.arange(16 * 64).reshape(16, 64) % 3 - 2)
+    return value * factors[None, ..., None], factors
+
+
+def test_shared_fp8_prefill_tiny_rows_keep_valid_scales():
+    """Tiny prefill rows must not overflow the encoder or produce zero scales."""
+    _require_cuda()
+    from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
+        quantize_replayssm_state,
+    )
+
+    floor = 2.0**-117
+    rows = torch.tensor(
+        [0.0, 2.0**-140, 2.0**-118, 448.0 * floor, 448.0, 2.0**-122], device="cuda"
+    )
+    source = rows[None, None, :, None].expand(1, 1, 6, 128).contiguous()
+    # An unbounded encode scale, 448 / 2^-122, overflows FP32 at these zeros.
+    source[0, 0, -1, 1::2] = 0
+    state = torch.zeros(2, 1, 6, 128, dtype=torch.float8_e4m3fn, device="cuda")
+    scales = torch.ones(2, 1, 6, device="cuda")
+    quantize_replayssm_state(
+        source, state, scales, torch.tensor([1], device="cuda", dtype=torch.int32)
+    )
+
+    expected = torch.tensor([0.0, 0.0, 0.5, 448.0, 448.0, 2.0**-5], device="cuda")
+    expected = expected[None, :, None].expand(1, 6, 128).clone()
+    expected[0, -1, 1::2] = 0
+    torch.testing.assert_close(state[1].float(), expected, rtol=0, atol=0)
+    torch.testing.assert_close(
+        scales[1, 0],
+        torch.tensor([1.0, floor, floor, floor, 1.0, floor], device="cuda"),
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
+def test_shared_prefill_selected_slots_and_reuse(dtype):
+    """Pack, gather, and replace prefill states without touching padding."""
+    _require_cuda()
+    from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
+        dequantize_replayssm_state,
+        quantize_replayssm_state,
+    )
+
+    source, _ = _source(dtype)
+    source[0, 0, 0].zero_()
+    source[2] *= 2
+    source = source.cuda()
+    # A larger outer stride reproduces padded cache pages.
+    payload_pages = torch.full((6, 16, 64, 128), 7, dtype=dtype, device="cuda")
+    scale_pages = torch.full((6, 16, 64), 7.0, device="cuda")
+    payload, scale = payload_pages[::2], scale_pages[::2]
+    ids = torch.tensor([2, 0, 1], dtype=torch.int32, device="cuda")
+    quantize_replayssm_state(
+        source,
+        payload,
+        scale,
+        ids,
+        source_indices=torch.tensor([2, -1, 0], device="cuda"),
+    )
+    _assert_rows(source[2], payload[2], scale[2])
+    _assert_rows(source[0], payload[1], scale[1])
+    assert torch.all(payload[0].float() == 7)
+    assert torch.all(scale[0] == 7)
+    decoded = dequantize_replayssm_state(
+        payload,
+        scale,
+        torch.tensor([2, 1, 1, -1], dtype=torch.int32, device="cuda"),
+        torch.tensor([True, True, False, True], device="cuda"),
+    )
+    assert decoded.dtype == torch.float32
+    expected = torch.zeros_like(decoded)
+    expected[0] = payload[2].float() * scale[2, ..., None]
+    expected[1] = payload[1].float() * scale[1, ..., None]
+    torch.testing.assert_close(decoded, expected, rtol=0, atol=0)
+    torch.testing.assert_close(decoded[:2], source[[2, 0]], rtol=0, atol=0)
+    preserved_payload, preserved_scale = _bytes(payload[1]), scale[1].clone()
+
+    source.mul_(4)
+    ids.copy_(torch.tensor([2, -1, -1], dtype=torch.int32, device="cuda"))
+    quantize_replayssm_state(source, payload, scale, ids)
+    _assert_rows(source[0], payload[2], scale[2])
+    assert torch.equal(_bytes(payload[1]), preserved_payload)
+    assert torch.equal(scale[1], preserved_scale)
+    assert torch.all(payload_pages[1::2].float() == 7)
+    assert torch.all(scale_pages[1::2] == 7)
+
+
+@pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
+def test_shared_graph_mixed_flush_checkpoint_bytes(dtype):
+    """Two graph replays update only the flushing slot and preserve its scales."""
+    _require_cuda()
+    from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
+
+    from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
+        quantize_replayssm_state,
+    )
+
+    source, factors = _source(dtype)
+    source[0].zero_()
+    payload = torch.zeros_like(source, dtype=dtype, device="cuda")
+    scale = torch.ones(3, 16, 64, device="cuda")
+    quantize_replayssm_state(
+        source.cuda(), payload, scale, torch.tensor([-1, 1, 2], device="cuda")
+    )
+    initial_payload, initial_scale = payload.clone(), scale.clone()
+    x = (
+        (factors / 8)
+        .cuda()
+        .to(torch.bfloat16)[None, None]
+        .expand(3, 1, -1, -1)
+        .contiguous()
+    )
+    b = torch.zeros(3, 1, 1, 128, device="cuda", dtype=torch.bfloat16)
+    b[..., 0] = 1
+    x_cache = x[:, 0, :, None].expand(-1, -1, 17, -1).contiguous()
+    b_cache = b[:, 0, :, None].expand(-1, -1, 17, -1).contiguous()
+    dt_cache = torch.ones(3, 16, 17, device="cuda")
+    out = torch.empty_like(x)
+    args = dict(
+        state=payload,
+        state_scale=scale,
+        x_cache=x_cache,
+        B_cache=b_cache,
+        dt_cache=dt_cache,
+        ring_start=torch.zeros(3, device="cuda", dtype=torch.int32),
+        prev_num_accepted_tokens=torch.tensor(
+            [0, 0, 16], device="cuda", dtype=torch.int32
+        ),
+        x=x,
+        dt=torch.ones(3, 1, 16, 1, device="cuda", dtype=torch.bfloat16).expand(
+            -1, -1, -1, 64
+        ),
+        A=torch.zeros(16, 1, 1, device="cuda").expand(-1, 64, 128),
+        B=b,
+        C=b,
+        out=out,
+        state_batch_indices=torch.tensor([2, 1, -1], device="cuda"),
+        algorithm="monolith",
+        d_split=1,
+    )
+    checkpointing_ssu(**args)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        checkpointing_ssu(**args)
+    payload.copy_(initial_payload)
+    scale.copy_(initial_scale)
+    for iteration in range(1, 3):
+        graph.replay()
+        expected = source.clone()
+        expected[2, ..., 0] += iteration * 2 * factors
+        _assert_rows(expected, payload, scale)
+        expected_out = torch.stack(
+            ((1 + iteration * 2 + 0.125) * factors, 1.125 * factors)
+        ).to(torch.bfloat16)
+        assert torch.equal(out[:2, 0].cpu(), expected_out)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn, torch.int8])
+def test_shared_bolt_t8_acceptance_and_ring_wrap(dtype):
+    """Rejected candidates must not enter the next Bolt checkpoint or output."""
+    _require_cuda()
+    from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
+
+    from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
+        quantize_replayssm_state,
+    )
+
+    heads, groups, tokens, ring_len = 128, 8, 8, 24
+    source = torch.zeros(4, heads, 64, 128)
+    source[..., -1] = 127 if dtype == torch.int8 else 448
+    source[0].zero_()
+    state = source.to(device="cuda", dtype=dtype)
+    scales = None
+    if dtype != torch.bfloat16:
+        scales = torch.ones(4, heads, 64, device="cuda")
+        quantize_replayssm_state(
+            source.cuda(), state, scales, torch.tensor([-1, 1, 2, 3], device="cuda")
+        )
+    x_ring = torch.full(
+        (4, heads, ring_len, 64), 1 / 8, device="cuda", dtype=torch.bfloat16
+    )
+    b_ring = torch.zeros(4, groups, ring_len, 128, device="cuda", dtype=torch.bfloat16)
+    b_ring[..., 0] = 1
+    dt_ring = torch.ones(4, heads, ring_len, device="cuda")
+    starts = torch.tensor([0, 21, 19, 23], device="cuda", dtype=torch.int32)
+    history = torch.tensor([0, 8, 9, 16], device="cuda", dtype=torch.int32)
+    slots = torch.tensor([3, 1, 2, -1], device="cuda", dtype=torch.int32)
+    increments = torch.arange(1, tokens + 1).float() / 8
+    x = (
+        increments[None, :, None, None]
+        .expand(4, tokens, heads, 64)
+        .cuda()
+        .bfloat16()
+        .contiguous()
+    )
+    b = torch.zeros(4, tokens, groups, 128, device="cuda", dtype=torch.bfloat16)
+    b[..., 0] = 1
+    out = torch.empty_like(x)
+    args = dict(
+        state=state,
+        state_scale=scales,
+        x_cache=x_ring,
+        B_cache=b_ring,
+        dt_cache=dt_ring,
+        ring_start=starts,
+        prev_num_accepted_tokens=history,
+        x=x,
+        dt=torch.ones(4, tokens, heads, 1, device="cuda", dtype=torch.bfloat16).expand(
+            -1, -1, -1, 64
+        ),
+        A=torch.zeros(heads, 1, 1, device="cuda").expand(-1, 64, 128),
+        B=b,
+        C=b,
+        out=out,
+        state_batch_indices=slots,
+        algorithm="monolith",
+        d_split=1,
+    )
+    saved = [value.clone() for value in (state, x_ring, b_ring, dt_ring)]
+    saved_scale = None if scales is None else scales.clone()
+    checkpointing_ssu(**args)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        checkpointing_ssu(**args)
+    for value, initial in zip((state, x_ring, b_ring, dt_ring), saved, strict=True):
+        value.copy_(initial)
+    if scales is not None:
+        scales.copy_(saved_scale)
+
+    expected = source.clone()
+    expected_ring = x_ring.cpu().clone()
+    starts_cpu, history_cpu = starts.cpu(), history.cpu()
+    for accepted in ([1, 7, 8], [8, 1, 7], [7, 8, 1]):
+        expected_output = []
+        for row, slot in enumerate((3, 1, 2)):
+            start, count = int(starts_cpu[slot]), int(history_cpu[slot])
+            positions = (start + torch.arange(count)) % ring_len
+            old_sum = expected_ring[slot, 0, positions, 0].float().sum()
+            current = expected[slot, 0, 0, 0] + old_sum
+            expected_output.append((current + increments.cumsum(0)).bfloat16())
+            if count + tokens > 16:
+                expected[slot, ..., 0] += old_sum
+                if scales is None:
+                    expected[slot] = expected[slot].bfloat16().float()
+                else:
+                    packed, row_scale = _encode_rows(expected[slot], dtype)
+                    expected[slot] = packed.float() * row_scale[..., None]
+            written = (start + count + torch.arange(tokens)) % ring_len
+            expected_ring[slot, :, written, :] = x[row].cpu().permute(1, 0, 2)
+        graph.replay()
+        for row, slot in enumerate((3, 1, 2)):
+            if scales is None:
+                torch.testing.assert_close(
+                    state[slot].cpu(), expected[slot].bfloat16(), rtol=0, atol=0
+                )
+            else:
+                _assert_rows(expected[slot], state[slot], scales[slot])
+            torch.testing.assert_close(
+                out[row].cpu(),
+                expected_output[row][:, None, None].expand(-1, heads, 64),
+                rtol=0,
+                atol=0,
+            )
+            count = int(history_cpu[slot])
+            flushed = count + tokens > 16
+            if flushed:
+                starts_cpu[slot] = (starts_cpu[slot] + count) % ring_len
+            history_cpu[slot] = (0 if flushed else count) + accepted[row]
+        torch.testing.assert_close(x_ring.cpu(), expected_ring, rtol=0, atol=0)
+        assert torch.equal(_bytes(state[0]), _bytes(saved[0][0]))
+        starts.copy_(starts_cpu)
+        history.copy_(history_cpu)
+
+
+@pytest.mark.parametrize("state_dtype", ["fp8", "int8"])
+def test_replayssm_quantized_cache_copies_payload_and_scale(state_dtype):
+    """A checkpoint record must copy its payload and FP32 scale together."""
+    state_shape = (16, 64, 128)
+    spec = MambaSpec(
+        block_size=16,
+        shapes=(
+            (3, 64),
+            state_shape,
+            (16, 17, 64),
+            (16, 17),
+            (1, 17, 128),
+            *MambaStateShapeCalculator.replayssm_read_shapes(state_shape, state_dtype),
+        ),
+        dtypes=(
+            torch.bfloat16,
+            MambaStateDtypeCalculator.replayssm_checkpoint_dtype(state_dtype),
+            torch.bfloat16,
+            torch.float32,
+            torch.bfloat16,
+            *MambaStateDtypeCalculator.replayssm_read_dtypes(state_dtype),
+        ),
+    )
+    _validate_replayssm_read_state_spec(spec)
+    with pytest.raises(ValueError, match="requires an FP32 scale page"):
+        _validate_replayssm_read_state_spec(
+            replace(spec, shapes=spec.shapes[:5], dtypes=spec.dtypes[:5])
+        )
+    with pytest.raises(ValueError, match="Invalid quantized ReplaySSM"):
+        _validate_replayssm_read_state_spec(
+            replace(spec, shapes=(*spec.shapes[:5], (16, 65)))
+        )
+    with pytest.raises(ValueError, match="Invalid quantized ReplaySSM"):
+        _validate_replayssm_read_state_spec(
+            replace(spec, dtypes=(*spec.dtypes[:5], torch.float16))
+        )

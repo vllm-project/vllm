@@ -103,6 +103,22 @@ class MambaStateDtypeCalculator:
         return (*base_dtypes, activation_dtype, torch.float32, activation_dtype)
 
     @classmethod
+    def replayssm_read_dtypes(cls, state_dtype: str) -> tuple[torch.dtype, ...]:
+        if state_dtype == "auto":
+            return ()
+        if state_dtype in ("fp8", "int8"):
+            return (torch.float32,)
+        raise ValueError(f"Unsupported ReplaySSM state format: {state_dtype}")
+
+    @classmethod
+    def replayssm_checkpoint_dtype(cls, state_dtype: str) -> torch.dtype:
+        if state_dtype == "fp8":
+            return torch.float8_e4m3fn
+        if state_dtype == "int8":
+            return torch.int8
+        raise ValueError(f"Unsupported ReplaySSM state format: {state_dtype}")
+
+    @classmethod
     def _mamba_state_dtype(
         cls,
         model_dtype: ModelDType | torch.dtype,
@@ -252,6 +268,21 @@ class MambaStateShapeCalculator:
             (local_nheads, ring_buffer_len),
             (local_ngroups, ring_buffer_len, state_size),
         )
+
+    @classmethod
+    def replayssm_read_shapes(
+        cls, state_shape: tuple[int, ...], state_dtype: str
+    ) -> tuple[tuple[int, int], ...]:
+        if state_dtype == "auto":
+            return ()
+        num_heads, head_dim, state_size = state_shape
+        if (head_dim, state_size) != (64, 128):
+            raise ValueError(
+                "Quantized ReplaySSM requires head dimension 64 and state size 128"
+            )
+        if state_dtype in ("fp8", "int8"):
+            return ((num_heads, head_dim),)
+        raise ValueError(f"Unsupported ReplaySSM state format: {state_dtype}")
 
     @classmethod
     def short_conv_state_shape(
