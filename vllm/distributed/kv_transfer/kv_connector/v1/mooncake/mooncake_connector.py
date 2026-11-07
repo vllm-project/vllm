@@ -736,6 +736,8 @@ class SendBlockMeta:
     need_send: int = 0
     sent: int = 0
     sending: int = 0
+    # Keep an unclaimed placeholder while any pull still uses its ready event.
+    pending_pulls: int = 0
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -1844,144 +1846,166 @@ class MooncakeConnectorWorker:
             send_meta = self.reqs_need_send[transfer_id]
             pending_reqs[d_req_id] = send_meta
 
-        if expired_reqs:
-            logger.warning(
-                "Requests %s were pulled after their KV expired on P side.",
-                expired_reqs,
-            )
-            response = MooncakeXferResponse(
-                status=MooncakeXferResponseStatus.CONTINUE
-                if pending_reqs
-                else MooncakeXferResponseStatus.FINISH,
-                err_reqs=expired_reqs,
-                err_msg="KV expired on P side before the pull.",
-                layout_id=meta.layout_id,
-            )
-            await sock.send_multipart((identity, self._encoder.encode(response)))
-
-        async def wait_and_ret(
-            d_req_id: ReqId, send_meta: SendBlockMeta
-        ) -> tuple[ReqId, SendBlockMeta]:
-            await send_meta.ready.wait()
-            return d_req_id, send_meta
-
-        wait_tasks = [
-            asyncio.create_task(wait_and_ret(d_req_id, send_meta))
-            for d_req_id, send_meta in pending_reqs.items()
-        ]
-
-        while wait_tasks:
-            done, pending = await asyncio.wait(
-                wait_tasks,
-                timeout=envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            if not done:
-                # Timeout, abort all pending requests.
-                for task in wait_tasks:
-                    task.cancel()
+        send_metas = list(pending_reqs.values())
+        for send_meta in send_metas:
+            send_meta.pending_pulls += 1
+        all_wait_tasks: list[asyncio.Task[tuple[ReqId, SendBlockMeta]]] = []
+        try:
+            if expired_reqs:
                 logger.warning(
-                    "Timeout waiting for P side ready: %s", list(pending_reqs)
+                    "Requests %s were pulled after their KV expired on P side.",
+                    expired_reqs,
                 )
                 response = MooncakeXferResponse(
-                    status=MooncakeXferResponseStatus.FINISH,
-                    err_reqs=list(pending_reqs),
-                    err_msg="Timeout waiting for P side ready.",
+                    status=MooncakeXferResponseStatus.CONTINUE
+                    if pending_reqs
+                    else MooncakeXferResponseStatus.FINISH,
+                    err_reqs=expired_reqs,
+                    err_msg="KV expired on P side before the pull.",
                     layout_id=meta.layout_id,
                 )
                 await sock.send_multipart((identity, self._encoder.encode(response)))
-                break
 
-            wait_tasks = list(pending)
-            response_status = (
-                MooncakeXferResponseStatus.CONTINUE
-                if wait_tasks
-                else MooncakeXferResponseStatus.FINISH
-            )
-            ready_reqs: list[tuple[ReqId, SendBlockMeta]] = []
-            for task in done:
-                d_req_id, send_meta = task.result()
-                del pending_reqs[d_req_id]
-                # Do we still in reqs_need_send (not expired)?
-                if send_meta.transfer_id in self.reqs_need_send:
-                    # Mark it sending to avoid expiration.
-                    send_meta.sending += 1
-                    if not send_meta.need_send:
-                        self.resolve_need_send(
-                            send_meta, remote_tp_ranks, meta.remote_pp_size
-                        )
-                    ready_reqs.append((d_req_id, send_meta))
-                else:
-                    # Otherwise (expired, very unlikely), just forget it.
+            async def wait_and_ret(
+                d_req_id: ReqId, send_meta: SendBlockMeta
+            ) -> tuple[ReqId, SendBlockMeta]:
+                await send_meta.ready.wait()
+                return d_req_id, send_meta
+
+            for d_req_id, send_meta in pending_reqs.items():
+                all_wait_tasks.append(
+                    asyncio.create_task(wait_and_ret(d_req_id, send_meta))
+                )
+            wait_tasks = all_wait_tasks
+
+            while wait_tasks:
+                done, pending = await asyncio.wait(
+                    wait_tasks,
+                    timeout=envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if not done:
+                    # Timeout, abort all pending requests.
                     logger.warning(
-                        "Request %s expired before sending on P side.", d_req_id
+                        "Timeout waiting for P side ready: %s", list(pending_reqs)
                     )
+                    response = MooncakeXferResponse(
+                        status=MooncakeXferResponseStatus.FINISH,
+                        err_reqs=list(pending_reqs),
+                        err_msg="Timeout waiting for P side ready.",
+                        layout_id=meta.layout_id,
+                    )
+                    await sock.send_multipart(
+                        (identity, self._encoder.encode(response))
+                    )
+                    break
 
-            (
-                src_ptrs,
-                dst_ptrs,
-                lengths,
-                err_reqs,
-                err_msg,
-            ) = await self._build_transfer_params(
-                ready_reqs,
-                meta,
-                local_regions,
-                remote_regions,
-            )
-            err_req_set = set(err_reqs)
-            ok_ready_reqs = [
-                (d_req_id, send_meta)
-                for d_req_id, send_meta in ready_reqs
-                if d_req_id not in err_req_set
-            ]
+                wait_tasks = list(pending)
+                response_status = (
+                    MooncakeXferResponseStatus.CONTINUE
+                    if wait_tasks
+                    else MooncakeXferResponseStatus.FINISH
+                )
+                ready_reqs: list[tuple[ReqId, SendBlockMeta]] = []
+                for task in done:
+                    d_req_id, send_meta = task.result()
+                    del pending_reqs[d_req_id]
+                    if self.reqs_need_send.get(send_meta.transfer_id) is send_meta:
+                        # Mark it sending to avoid expiration.
+                        send_meta.sending += 1
+                        if not send_meta.need_send:
+                            self.resolve_need_send(
+                                send_meta, remote_tp_ranks, meta.remote_pp_size
+                            )
+                        ready_reqs.append((d_req_id, send_meta))
+                    else:
+                        logger.warning(
+                            "Request %s expired before sending on P side.", d_req_id
+                        )
 
-            if src_ptrs:
-                remote_session = f"{meta.remote_hostname}:{meta.remote_port}"
-                ret_value = await self.sender_loop.run_in_executor(
-                    self._sender_executor,
-                    self._send_blocks,
-                    remote_session,
+                (
                     src_ptrs,
                     dst_ptrs,
                     lengths,
+                    err_reqs,
+                    err_msg,
+                ) = await self._build_transfer_params(
+                    ready_reqs,
+                    meta,
+                    local_regions,
+                    remote_regions,
                 )
+                err_req_set = set(err_reqs)
+                ok_ready_reqs = [
+                    (d_req_id, send_meta)
+                    for d_req_id, send_meta in ready_reqs
+                    if d_req_id not in err_req_set
+                ]
 
-                if ret_value != 0:
-                    transfer_err_msg = f"Mooncake transfer engine returned {ret_value}"
-                    err_msg = (
-                        transfer_err_msg
-                        if err_msg is None
-                        else f"{err_msg}; {transfer_err_msg}"
+                if src_ptrs:
+                    remote_session = f"{meta.remote_hostname}:{meta.remote_port}"
+                    ret_value = await self.sender_loop.run_in_executor(
+                        self._sender_executor,
+                        self._send_blocks,
+                        remote_session,
+                        src_ptrs,
+                        dst_ptrs,
+                        lengths,
                     )
-                    err_reqs = list(err_reqs)
-                    for d_req_id, _ in ok_ready_reqs:
-                        err_reqs.append(d_req_id)
-                        err_req_set.add(d_req_id)
-                    ok_ready_reqs = []
 
-            for d_req_id, send_meta in ready_reqs:
-                send_meta.sending -= 1
+                    if ret_value != 0:
+                        transfer_err_msg = (
+                            f"Mooncake transfer engine returned {ret_value}"
+                        )
+                        err_msg = (
+                            transfer_err_msg
+                            if err_msg is None
+                            else f"{err_msg}; {transfer_err_msg}"
+                        )
+                        err_reqs = list(err_reqs)
+                        for d_req_id, _ in ok_ready_reqs:
+                            err_reqs.append(d_req_id)
+                            err_req_set.add(d_req_id)
+                        ok_ready_reqs = []
 
-                if d_req_id in err_req_set:
-                    continue
+                for d_req_id, send_meta in ready_reqs:
+                    send_meta.sending -= 1
 
-                send_meta.sent += 1
+                    if d_req_id in err_req_set:
+                        continue
+
+                    send_meta.sent += 1
+                    if (
+                        send_meta.sent == send_meta.need_send
+                        and self.reqs_need_send.pop(send_meta.transfer_id, None)
+                        is not None
+                    ):
+                        self.finished_sending_reqs.add(send_meta.p_req_id)
+
+                response = MooncakeXferResponse(
+                    status=response_status,
+                    ok_reqs=[d_req_id for d_req_id, _ in ok_ready_reqs] or None,
+                    err_reqs=err_reqs or None,
+                    err_msg=err_msg,
+                    layout_id=meta.layout_id,
+                )
+                await sock.send_multipart((identity, self._encoder.encode(response)))
+        finally:
+            for task in all_wait_tasks:
+                task.cancel()
+            for send_meta in send_metas:
+                send_meta.pending_pulls -= 1
                 if (
-                    send_meta.sent == send_meta.need_send
-                    and self.reqs_need_send.pop(send_meta.transfer_id, None) is not None
+                    send_meta.pending_pulls == 0
+                    and not send_meta.p_req_id
+                    and not any(send_meta.local_block_ids)
+                    and not send_meta.ready.is_set()
+                    and send_meta.sending == 0
+                    and self.reqs_need_send.get(send_meta.transfer_id) is send_meta
                 ):
-                    self.finished_sending_reqs.add(send_meta.p_req_id)
-
-            response = MooncakeXferResponse(
-                status=response_status,
-                ok_reqs=[d_req_id for d_req_id, _ in ok_ready_reqs] or None,
-                err_reqs=err_reqs or None,
-                err_msg=err_msg,
-                layout_id=meta.layout_id,
-            )
-            await sock.send_multipart((identity, self._encoder.encode(response)))
+                    del self.reqs_need_send[send_meta.transfer_id]
+            await asyncio.gather(*all_wait_tasks, return_exceptions=True)
 
     def resolve_need_send(
         self,
@@ -3016,6 +3040,8 @@ class MooncakeConnectorWorker:
                         local_block_ids=[],
                         ready=asyncio.Event(),
                     )
+                elif not self.reqs_need_send[transfer_id].p_req_id:
+                    self.reqs_need_send[transfer_id].p_req_id = p_req_id
         for transfer_id in metadata.reqs_not_processed:
             send_meta = self.reqs_need_send.pop(transfer_id)
             if send_meta:
