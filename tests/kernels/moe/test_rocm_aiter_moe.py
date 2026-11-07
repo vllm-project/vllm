@@ -637,22 +637,28 @@ def test_aiter_moe_padding_env_var(
 
 
 @pytest.mark.parametrize(
-    ("activation", "use_mxfp4_w4a4", "tp_size", "pads", "expected"),
+    ("activation", "use_mxfp4_w4a4", "use_mxfp4_w4a16", "tp_size", "pads", "expected"),
     [
         # W4A4 SiLU: AITER doubles the pad itself, at TP1 (and EP) as at TP2.
-        ("SILU", True, 1, (0, 64), (0, 64)),
-        ("SILU", True, 1, (0, 128), (0, 128)),
-        ("SILU", True, 2, (0, 64), (0, 64)),
-        # gpt-oss W4A16 at TP1 keeps the doubled pad.
-        ("SWIGLUOAI", False, 1, (0, 192), (0, 384)),
+        ("SILU", True, False, 1, (0, 64), (0, 64)),
+        ("SILU", True, False, 1, (0, 128), (0, 128)),
+        ("SILU", True, False, 2, (0, 64), (0, 64)),
+        # gpt-oss W4A16: AITER doubles the pad itself, at TP1 as at TP2.
+        ("SWIGLUOAI", False, True, 1, (0, 192), (0, 192)),
+        ("SWIGLUOAI", False, True, 2, (0, 96), (0, 64)),
         # BF16 SiLU at TP1 keeps the doubled pad.
-        ("SILU", False, 1, (0, 192), (0, 384)),
+        ("SILU", False, False, 1, (0, 192), (0, 384)),
         # SITU passes through unrounded.
-        ("SITU", False, 1, (40, 96), (40, 96)),
+        ("SITU", False, True, 1, (40, 96), (40, 96)),
     ],
 )
 def test_aiter_moe_pads(
-    activation, use_mxfp4_w4a4, tp_size, pads: tuple[int, int], expected
+    activation,
+    use_mxfp4_w4a4,
+    use_mxfp4_w4a16,
+    tp_size,
+    pads: tuple[int, int],
+    expected,
 ):
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
@@ -660,7 +666,9 @@ def test_aiter_moe_pads(
     )
 
     assert (
-        aiter_moe_pads(*pads, MoEActivation[activation], use_mxfp4_w4a4, tp_size)
+        aiter_moe_pads(
+            *pads, MoEActivation[activation], use_mxfp4_w4a4, use_mxfp4_w4a16, tp_size
+        )
         == expected
     )
 
