@@ -636,7 +636,9 @@ mod tests {
                 .iter()
                 .filter_map(|event| match event {
                     UnifiedParserEvent::Text(text) => Some(text.as_str()),
-                    UnifiedParserEvent::Reasoning(_) | UnifiedParserEvent::ToolCall(_) => None,
+                    UnifiedParserEvent::Reasoning(_)
+                    | UnifiedParserEvent::ToolCall(_)
+                    | UnifiedParserEvent::ToolCallEnd { .. } => None,
                 })
                 .collect()
         }
@@ -646,7 +648,9 @@ mod tests {
                 .iter()
                 .filter_map(|event| match event {
                     UnifiedParserEvent::Reasoning(text) => Some(text.text.as_str()),
-                    UnifiedParserEvent::Text(_) | UnifiedParserEvent::ToolCall(_) => None,
+                    UnifiedParserEvent::Text(_)
+                    | UnifiedParserEvent::ToolCall(_)
+                    | UnifiedParserEvent::ToolCallEnd { .. } => None,
                 })
                 .collect()
         }
@@ -655,7 +659,9 @@ mod tests {
             self.events
                 .iter()
                 .filter_map(|event| match event {
-                    UnifiedParserEvent::Text(_) | UnifiedParserEvent::Reasoning(_) => None,
+                    UnifiedParserEvent::Text(_)
+                    | UnifiedParserEvent::Reasoning(_)
+                    | UnifiedParserEvent::ToolCallEnd { .. } => None,
                     UnifiedParserEvent::ToolCall(call) => Some(call),
                 })
                 .collect()

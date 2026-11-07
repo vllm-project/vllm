@@ -3,14 +3,16 @@
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::multispace0 as ws0;
-use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
+use winnow::combinator::{alt, preceded, seq};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, take_until};
 
 use super::parameters::ToolSchemas;
-use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
-use super::{Result, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput};
+use super::utils::{parse_buffered_event, safe_text_len_mul};
+use super::{
+    Result, ToolCallDelta, ToolParser, ToolParserError, ToolParserEvent, ToolParserOutput,
+};
 use crate::tool::{StructuralTagBuilder, Tool};
 
 const TOOL_CALL_START: &str = "<tool_call>";
@@ -54,19 +56,29 @@ type QwenCoderInput<'i> = Partial<&'i str>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum QwenCoderMode {
     Text,
-    ToolCall { end_marker_scan: MarkerScanState },
+    FunctionName,
+    Parameter,
+    StringValue {
+        at_start: bool,
+        pending_newline: bool,
+    },
+    BufferedValue {
+        name: String,
+        text: String,
+    },
+    ToolCallEnd,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum QwenCoderEvent {
-    Text {
-        len: usize,
-    },
+    Text { len: usize },
     ToolCallStart,
-    ToolCall {
-        name: String,
-        raw_params: Vec<(String, String)>,
-    },
+    FunctionName(String),
+    ParameterName(String),
+    ValueText { len: usize },
+    ParameterEnd,
+    FunctionEnd,
+    ToolCallEnd,
 }
 
 /// Tool parser for Qwen Coder XML-style tool calls.
@@ -81,7 +93,7 @@ enum QwenCoderEvent {
 /// </tool_call>
 /// ```
 ///
-/// Arguments are emitted only after a full `tool_call` block is parsed.
+/// String arguments stream incrementally; other values wait for their closing tag.
 ///
 /// Note: parallel calls are represented as repeated
 /// `<tool_call>...</tool_call>` blocks, not as multiple calls inside one tag.
@@ -89,6 +101,9 @@ pub struct Qwen3CoderToolParser {
     buffer: String,
     mode: QwenCoderMode,
     emitted_tool_count: usize,
+    function_name: String,
+    parameter_count: usize,
+    streamed_arguments: String,
     tool_parameters: ToolSchemas,
     config: QwenCoderConfig,
 }
@@ -106,6 +121,9 @@ impl Qwen3CoderToolParser {
             buffer: String::new(),
             mode: QwenCoderMode::Text,
             emitted_tool_count: 0,
+            function_name: String::new(),
+            parameter_count: 0,
+            streamed_arguments: String::new(),
             tool_parameters: ToolSchemas::from_tools(tools),
             config,
         }
@@ -113,36 +131,135 @@ impl Qwen3CoderToolParser {
 
     /// Apply one parsed Qwen Coder event to parser state and output.
     fn apply_event(&mut self, event: QwenCoderEvent, output: &mut ToolParserOutput) -> Result<()> {
+        let tool_index = self.emitted_tool_count;
+        let call_finished = matches!(event, QwenCoderEvent::ToolCallEnd);
+        let mut name = None;
+        let mut arguments = String::new();
         match event {
-            QwenCoderEvent::Text { len: consumed_len } => {
-                output.push_text(&self.buffer[..consumed_len]);
+            QwenCoderEvent::Text { len } => output.push_text(&self.buffer[..len]),
+            QwenCoderEvent::ToolCallStart => self.mode = QwenCoderMode::FunctionName,
+            QwenCoderEvent::FunctionName(function_name) => {
+                self.function_name.clone_from(&function_name);
+                self.streamed_arguments.clear();
+                name = Some(function_name);
+                arguments.push('{');
+                self.parameter_count = 0;
+                self.mode = QwenCoderMode::Parameter;
             }
-            QwenCoderEvent::ToolCallStart => {
-                self.mode = QwenCoderMode::ToolCall {
-                    end_marker_scan: MarkerScanState::default(),
+            QwenCoderEvent::ParameterName(parameter_name) => {
+                if self.parameter_count > 0 {
+                    arguments.push(',');
+                }
+                arguments.push_str(&serialize_argument(&parameter_name)?);
+                arguments.push(':');
+                let is_string =
+                    self.tool_parameters.is_string_param(&self.function_name, &parameter_name);
+                self.mode = if is_string {
+                    arguments.push('"');
+                    QwenCoderMode::StringValue {
+                        at_start: true,
+                        pending_newline: false,
+                    }
+                } else {
+                    QwenCoderMode::BufferedValue {
+                        name: parameter_name,
+                        text: String::new(),
+                    }
                 };
+                self.parameter_count += 1;
             }
-            QwenCoderEvent::ToolCall { name, raw_params } => {
+            QwenCoderEvent::ValueText { len } => match &mut self.mode {
+                QwenCoderMode::BufferedValue { text, .. } => {
+                    text.push_str(&self.buffer[..len]);
+                }
+                QwenCoderMode::StringValue {
+                    at_start,
+                    pending_newline,
+                } => {
+                    let mut text = self.buffer[..len].to_owned();
+                    if self.config.trim_parameter_newlines {
+                        if *at_start && text.starts_with('\n') {
+                            text.remove(0);
+                        }
+                        if *pending_newline {
+                            text.insert(0, '\n');
+                        }
+                        *pending_newline = text.ends_with('\n');
+                        if *pending_newline {
+                            text.pop();
+                        }
+                    }
+                    *at_start = false;
+                    if !text.is_empty() {
+                        let encoded = serialize_argument(&text)?;
+                        arguments.push_str(&encoded[1..encoded.len() - 1]);
+                    }
+                }
+                _ => unreachable!("value text requires an open parameter"),
+            },
+            QwenCoderEvent::ParameterEnd => {
+                match &mut self.mode {
+                    QwenCoderMode::BufferedValue { name, text } => {
+                        let text = std::mem::take(text);
+                        let text = if self.config.trim_parameter_newlines {
+                            trim_one_wrapping_newline(&text).to_owned()
+                        } else {
+                            text
+                        };
+                        let value = self.tool_parameters.convert_param_with_schema(
+                            &self.function_name,
+                            name,
+                            text,
+                        );
+                        arguments = serialize_argument(&value)?;
+                    }
+                    QwenCoderMode::StringValue { .. } => arguments.push('"'),
+                    _ => unreachable!("parameter end requires an open parameter"),
+                }
+                self.mode = QwenCoderMode::Parameter;
+            }
+            QwenCoderEvent::FunctionEnd => self.mode = QwenCoderMode::ToolCallEnd,
+            QwenCoderEvent::ToolCallEnd => {
+                arguments.push('}');
                 self.mode = QwenCoderMode::Text;
-                let arguments = self.tool_parameters.convert_params_with_schema(&name, raw_params);
-                let arguments = serde_json::to_string(&arguments)
-                    .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
-
-                output.push_call(ToolCallDelta {
-                    tool_index: self.emitted_tool_count,
-                    name: Some(name),
-                    arguments,
-                });
                 self.emitted_tool_count += 1;
             }
+        }
+        if !arguments.is_empty() {
+            self.streamed_arguments.push_str(&arguments);
+            output.push_call(ToolCallDelta {
+                tool_index,
+                name,
+                arguments,
+            });
+        }
+        if call_finished {
+            let arguments: serde_json::Value = serde_json::from_str(&self.streamed_arguments)
+                .map_err(|error| parsing_failed!("invalid completed arguments: {}", error))?;
+            output.events.push(ToolParserEvent::ToolCallEnd {
+                tool_index,
+                arguments: serialize_argument(&arguments)?,
+            });
+            self.streamed_arguments.clear();
         }
         Ok(())
     }
 
     fn reset(&mut self) -> String {
-        self.mode = QwenCoderMode::Text;
+        let mut remaining = match std::mem::replace(&mut self.mode, QwenCoderMode::Text) {
+            QwenCoderMode::BufferedValue { text, .. } => text,
+            QwenCoderMode::StringValue {
+                pending_newline: true,
+                ..
+            } => "\n".to_owned(),
+            _ => String::new(),
+        };
+        remaining.push_str(&std::mem::take(&mut self.buffer));
         self.emitted_tool_count = 0;
-        std::mem::take(&mut self.buffer)
+        self.function_name.clear();
+        self.parameter_count = 0;
+        self.streamed_arguments.clear();
+        remaining
     }
 }
 
@@ -154,6 +271,10 @@ impl ToolParser for Qwen3CoderToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
+    fn reports_tool_call_end(&self) -> bool {
+        true
+    }
+
     fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
         Some(xgrammar_structural_tag::Model::Qwen3Coder.builder())
     }
@@ -163,7 +284,7 @@ impl ToolParser for Qwen3CoderToolParser {
         let config = self.config;
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_qwen_coder_event(input, &mut self.mode, config, self.emitted_tool_count > 0)
+            parse_next_qwen_coder_event(input, &self.mode, config, self.emitted_tool_count > 0)
         })? {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
@@ -174,16 +295,13 @@ impl ToolParser for Qwen3CoderToolParser {
 
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
-        if !self.buffer.is_empty() {
-            if matches!(self.mode, QwenCoderMode::ToolCall { .. })
-                || self.buffer.starts_with(self.config.tool_call_start)
-            {
-                return Err(ToolParserError::IncompleteToolCall {
-                    parser: self.config.parser_name,
-                });
-            }
-            output.push_text(&self.buffer);
+        if self.mode != QwenCoderMode::Text || self.buffer.starts_with(self.config.tool_call_start)
+        {
+            return Err(ToolParserError::IncompleteToolCall {
+                parser: self.config.parser_name,
+            });
         }
+        output.push_text(&self.buffer);
         let _ = self.reset();
         Ok(output)
     }
@@ -196,15 +314,37 @@ impl ToolParser for Qwen3CoderToolParser {
 /// Parse a Qwen Coder event for the current parser mode.
 fn parse_next_qwen_coder_event(
     input: &mut QwenCoderInput<'_>,
-    mode: &mut QwenCoderMode,
+    mode: &QwenCoderMode,
     config: QwenCoderConfig,
     after_tool_call: bool,
 ) -> ModalResult<QwenCoderEvent> {
     match mode {
         QwenCoderMode::Text => parse_text_event(input, config, after_tool_call),
-        QwenCoderMode::ToolCall { end_marker_scan } => {
-            tool_call_event(input, end_marker_scan, config)
-        }
+        QwenCoderMode::FunctionName => preceded(ws0, |input: &mut QwenCoderInput<'_>| {
+            tag_name(input, FUNCTION_START).map(QwenCoderEvent::FunctionName)
+        })
+        .parse_next(input),
+        QwenCoderMode::Parameter => preceded(
+            ws0,
+            alt((
+                literal(FUNCTION_END).value(QwenCoderEvent::FunctionEnd),
+                |input: &mut QwenCoderInput<'_>| {
+                    tag_name(input, PARAMETER_START).map(QwenCoderEvent::ParameterName)
+                },
+            )),
+        )
+        .parse_next(input),
+        QwenCoderMode::StringValue { .. } | QwenCoderMode::BufferedValue { .. } => alt((
+            literal(PARAMETER_END).value(QwenCoderEvent::ParameterEnd),
+            |input: &mut QwenCoderInput<'_>| {
+                safe_text_len_mul(input, &[PARAMETER_END, config.tool_call_end])
+                    .map(|len| QwenCoderEvent::ValueText { len })
+            },
+        ))
+        .parse_next(input),
+        QwenCoderMode::ToolCallEnd => preceded(ws0, literal(config.tool_call_end))
+            .value(QwenCoderEvent::ToolCallEnd)
+            .parse_next(input),
     }
 }
 
@@ -230,74 +370,26 @@ fn parse_text_event(
     .parse_next(input)
 }
 
-/// Parse a complete Qwen Coder tool call.
-fn tool_call_event(
-    input: &mut QwenCoderInput<'_>,
-    end_marker_scan: &mut MarkerScanState,
-    config: QwenCoderConfig,
-) -> ModalResult<QwenCoderEvent> {
-    let (body,) = seq!(
-        _: ws0,
-        take_until_marker(config.tool_call_end, end_marker_scan),
-        _: literal(config.tool_call_end),
-    )
-    .parse_next(input)?;
-
-    parse_tool_call_body(body, config.trim_parameter_newlines)
-}
-
-/// Parse a Qwen Coder function block.
-fn function_event(input: &mut &str, trim_parameter_newlines: bool) -> ModalResult<QwenCoderEvent> {
-    let (name, raw_params) = seq!(
-        _: literal(FUNCTION_START),
+/// Parse the name in a function or parameter opening tag.
+fn tag_name(input: &mut QwenCoderInput<'_>, start: &'static str) -> ModalResult<String> {
+    let (name,) = seq!(
+        _: literal(start),
         take_until(1.., ">"),
         _: ">",
-        _: ws0,
-        repeat(0.., terminated(|input: &mut &str| parameter(input, trim_parameter_newlines), ws0)),
-        _: literal(FUNCTION_END),
     )
     .parse_next(input)?;
-
-    Ok(QwenCoderEvent::ToolCall {
-        name: name.to_string(),
-        raw_params,
-    })
-}
-
-/// Parse a Qwen Coder parameter block.
-fn parameter(input: &mut &str, trim_newlines: bool) -> ModalResult<(String, String)> {
-    let (name, value) = seq!(
-        _: literal(PARAMETER_START),
-        take_until(1.., ">"),
-        _: ">",
-        take_until(0.., PARAMETER_END),
-        _: literal(PARAMETER_END),
-    )
-    .parse_next(input)?;
-
-    let value = if trim_newlines {
-        trim_one_wrapping_newline(value)
-    } else {
-        value
-    };
-    Ok((name.to_string(), value.to_string()))
-}
-
-/// Parse a Qwen Coder tool-call body.
-fn parse_tool_call_body(body: &str, trim_parameter_newlines: bool) -> ModalResult<QwenCoderEvent> {
-    let mut input = body;
-    delimited(
-        ws0,
-        |input: &mut &str| function_event(input, trim_parameter_newlines),
-        (ws0, eof),
-    )
-    .parse_next(&mut input)
+    Ok(name.to_owned())
 }
 
 /// Trim a single leading and trailing newline from a parameter value.
 fn trim_one_wrapping_newline(value: &str) -> &str {
     let value = value.strip_prefix('\n').unwrap_or(value);
     value.strip_suffix('\n').unwrap_or(value)
+}
+
+fn serialize_argument(value: &impl serde::Serialize) -> Result<String> {
+    serde_json::to_string(value)
+        .map_err(|error| parsing_failed!("failed to serialize argument: {}", error))
 }
 
 #[cfg(test)]
@@ -708,7 +800,10 @@ mod tests {
             .unwrap();
 
         assert!(output.normal_text().is_empty());
-        assert!(output.calls().is_empty());
+        assert_eq!(
+            output.clone().coalesce().calls()[0].arguments,
+            r#"{"location":"SF""#
+        );
 
         let mut output = output;
         output.append(parser.parse_chunk("_call>").unwrap());
@@ -725,25 +820,22 @@ mod tests {
     }
 
     #[test]
-    fn qwen_coder_streaming_buffers_long_body_until_end_marker() {
+    fn qwen_coder_streaming_emits_string_before_parameter_end() {
         let long_location = format!("SF-{}", "x".repeat(8192));
-        let text = build_tool_call("get_weather", &[("location", &long_location)]);
-        let split_at = text.len() - "_call>".len();
-        let (body_with_partial_end, end_suffix) = text.split_at(split_at);
-        let chunks = split_by_chars(body_with_partial_end, 31);
         let mut parser = Qwen3CoderToolParser::new(&test_tools());
-        let mut output = ToolParserOutput::default();
+        let mut output = parser
+            .parse_chunk("<tool_call>\n<function=get_weather>\n<parameter=location>")
+            .unwrap();
 
-        assert_eq!(end_suffix, "_call>");
-
-        for chunk in chunks {
-            let chunk_output = parser.parse_chunk(chunk).unwrap();
-            assert!(chunk_output.normal_text().is_empty());
-            assert!(chunk_output.calls().is_empty());
-            output.append(chunk_output);
+        for chunk in split_by_chars(&long_location, 31) {
+            let delta = parser.parse_chunk(chunk).unwrap();
+            assert!(delta.calls().iter().all(|call| call.tool_index == 0));
+            let arguments: String =
+                delta.calls().iter().map(|call| call.arguments.as_str()).collect();
+            assert_eq!(arguments, chunk);
+            output.append(delta);
         }
-
-        output.append(parser.parse_chunk(end_suffix).unwrap());
+        output.append(parser.parse_chunk("</parameter>\n</function>\n</tool_call>").unwrap());
         output.append(parser.finish().unwrap());
         let output = output.coalesce();
 
@@ -757,14 +849,119 @@ mod tests {
     }
 
     #[test]
-    fn qwen_coder_streaming_does_not_emit_incomplete_tool_call() {
+    fn qwen_coder_streaming_keeps_incomplete_tool_arguments_open() {
         let mut parser = Qwen3CoderToolParser::new(&test_tools());
         let output = parser
             .parse_chunk("<tool_call>\n<function=get_weather>\n<parameter=location>SF</parameter>")
             .unwrap();
 
         assert!(output.normal_text().is_empty());
-        assert!(output.calls().is_empty());
+        assert_eq!(
+            output.coalesce().calls()[0].arguments,
+            r#"{"location":"SF""#
+        );
+    }
+
+    #[test]
+    fn qwen_coder_streaming_waits_for_typed_value_before_conversion() {
+        let mut parser = Qwen3CoderToolParser::new(&test_tools());
+        let mut output =
+            parser.parse_chunk("<tool_call><function=get_weather><parameter=days>").unwrap();
+        for chunk in ["1", "2"] {
+            assert!(parser.parse_chunk(chunk).unwrap().calls().is_empty());
+        }
+        output.append(parser.parse_chunk("</parameter></function></tool_call>").unwrap());
+        output.append(parser.finish().unwrap());
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.coalesce().calls()[0].arguments).unwrap(),
+            json!({"days": 12})
+        );
+    }
+
+    #[test]
+    fn qwen_coder_streaming_preserves_values_at_every_chunk_size() {
+        let mut tools = test_tools();
+        tools[0].parameters["$defs"] = json!({"text": {"type": "string"}});
+        tools[0].parameters["properties"]["location"] = json!({"$ref": "#/$defs/text"});
+        tools[0].parameters["properties"]["maybe"] = json!({"type": ["string", "null"]});
+        let value = concat!(
+            "\n\n杭州",
+            r#"\""#,
+            "\t\r\n</function><parameter=literal>&lt;tag&gt;\n\n"
+        );
+        let text = build_tool_call(
+            "get_weather",
+            &[
+                ("location", value),
+                ("days", "12"),
+                ("maybe", "None"),
+                ("unknown", "true"),
+            ],
+        );
+        for size in 1..=text.chars().count() {
+            let mut parser = Qwen3CoderToolParser::new(&tools);
+            let output = collect_stream(&mut parser, &split_by_chars(&text, size));
+            assert_eq!(
+                serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+                json!({
+                    "location": concat!("\n杭州", r#"\""#, "\t\r\n</function><parameter=literal>&lt;tag&gt;\n"),
+                    "days": 12, "maybe": null, "unknown": "true",
+                }),
+                "chunk size {size}",
+            );
+        }
+    }
+
+    #[test]
+    fn qwen_coder_streaming_repeated_parameters_keep_last_value() {
+        let text = build_tool_call(
+            "get_weather",
+            &[
+                ("location", "SF"),
+                ("days", "3"),
+                ("location", "NYC"),
+                ("days", "unknown"),
+            ],
+        );
+        let mut parser = Qwen3CoderToolParser::new(&test_tools());
+        let mut output = ToolParserOutput::default();
+        for chunk in split_by_chars(&text, 1) {
+            output.append(parser.parse_chunk(chunk).unwrap());
+        }
+        output.append(parser.finish().unwrap());
+        let streamed: String = output.calls().iter().map(|call| call.arguments.as_str()).collect();
+        assert_eq!(
+            streamed,
+            r#"{"location":"SF","days":3,"location":"NYC","days":"unknown"}"#
+        );
+        let output = output.coalesce();
+        assert_eq!(
+            output.calls()[0].arguments,
+            r#"{"location":"NYC","days":"unknown"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({"location": "NYC", "days": "unknown"}),
+        );
+    }
+
+    #[test]
+    fn qwen_coder_reset_recovers_uncommitted_value_after_malformed_close() {
+        for (name, value, remaining) in [("days", "\n12\n", "\n12\n"), ("location", "\nSF\n", "\n")]
+        {
+            let mut parser = Qwen3CoderToolParser::new(&test_tools());
+            parser
+                .parse_chunk(&format!(
+                    "<tool_call><function=get_weather><parameter={name}>"
+                ))
+                .unwrap();
+            parser.parse_chunk(value).unwrap();
+            assert!(parser.parse_chunk("</tool_call>").is_err());
+            assert_eq!(parser.reset(), format!("{remaining}</tool_call>"));
+            let output = parser.parse_complete(&build_tool_call("get_weather", &[])).unwrap();
+            assert_eq!(output.calls()[0].tool_index, 0);
+            assert_eq!(output.calls()[0].arguments, "{}");
+        }
     }
 
     #[test]
@@ -795,7 +992,8 @@ mod tests {
             )
             .unwrap_err();
 
-        expect![[r#"tool parser parsing failed: near "\n<function=get_weather>\n<parameter=location>SF</function>\n</tool_call>": "#]].assert_eq(&error.to_report_string());
+        expect![[r#"tool parser parsing failed: near "</tool_call>": "#]]
+            .assert_eq(&error.to_report_string());
     }
 
     #[test]

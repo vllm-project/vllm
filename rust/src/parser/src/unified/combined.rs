@@ -61,6 +61,10 @@ impl CombinedParser {
 }
 
 impl UnifiedParser for CombinedParser {
+    fn reports_tool_call_end(&self) -> bool {
+        self.tool.as_ref().is_some_and(|parser| parser.reports_tool_call_end())
+    }
+
     fn create(_tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn UnifiedParser>>
     where
         Self: Sized + 'static,
