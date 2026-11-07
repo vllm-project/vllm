@@ -44,6 +44,9 @@ log probabilities.
 
 #### How it works
 
+The following label-reading steps apply to `choice`, `noul` and `score`.
+Box questions use [coordinate generation](#generated-bounding-boxes).
+
 1. Each question is one read. The user message is the state, followed by the
    question and its options with the type's labels, and an instruction to
    answer with one label.
@@ -70,9 +73,50 @@ question prefills only its own text, then reads one token.
 | `choice` | map of option name to a description or `null` | `choice`, `probabilities` by option name, `confidence` |
 | `noul` | `null`, or an object with optional `true` and `false` descriptions | `noul` (probability of yes), `probabilities`, `confidence` |
 | `score` | ordered list of level names | `score` (expected 0-indexed level), `legend`, `probabilities` by level index, `confidence` |
+| `box` | `null` | normalized `box` edges, `confidence: null`; see [Generated bounding boxes](#generated-bounding-boxes) |
 
 A choice has at least one option, a score at least two levels. A question id
 is a non-empty string.
+
+#### Generated bounding boxes
+
+`type: "box"` locates a text-described target in one image using a served
+multimodal `NextTokenStrategy` model. Each Box question generates constrained
+coordinate JSON with a 96-token budget, then validates and normalizes its
+coordinates. Ordinary questions retain their label-probability path.
+
+```json
+{
+  "model": "your-served-model",
+  "state": "Locate the requested object in the attached photograph.",
+  "images": ["data:image/jpeg;base64,..."],
+  "questions": {
+    "target": {"type": "box", "instructions": "the red suitcase"},
+    "present": {"type": "noul", "instructions": "Is a red suitcase visible?"}
+  }
+}
+```
+
+The Box answer has `type: "box"`, `box` containing `left`, `top`, `right` and
+`bottom` in [0, 1], and `confidence: null`. Coordinates refer to the full image,
+with the origin at its top-left corner. For example, `{ "left": 0.1, "top": 0.2,
+"right": 0.6, "bottom": 0.8 }` encloses a nonempty rectangle. Generated boxes
+have no calibrated probability or label diagnostics; `diagnostics` contains
+only the ordinary questions. `usage` includes the coordinate generations.
+
+`instructions` accepts a non-empty target string or an object with `target`,
+optional `description`, and optional `exclude`. `criteria` must be absent or
+null. One request can contain up to four Box questions, answered serially,
+and can mix them with `choice`, `noul` and `score` within the model's normal
+question limit. Box requires exactly one image and `joint: false`.
+Classification heads, specialized read strategies and text-only models return
+501 for Box questions. Malformed, truncated or invalid coordinate output
+returns 502; edges are never clamped or reordered.
+
+This is generative localization. Its accuracy depends on the checkpoint and
+image resolution. A valid box does not prove that the target exists; ask a
+separate `noul` question when absence matters. The integration was evaluated
+with Qwen3.5-4B; it does not restrict the served model name or path.
 
 #### Example
 
