@@ -35,10 +35,16 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     align_blocks_to_rows,
     flat_kv_row_view,
 )
+from vllm.v1.attention.ops.mxfp4_mla import row_bytes as mxfp4_row_bytes
+from vllm.v1.attention.ops.mxfp4_mla.decode import (
+    NATIVE_LATENT as MXFP4_NATIVE_LATENT,
+)
+from vllm.v1.attention.ops.mxfp4_mla.store import store_mxfp4_mla
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_decode_bf16,
     rocm_sparse_attn_prefill,
     rocm_sparse_decode_bf16_num_splits,
+    rocm_sparse_decode_mxfp4_native_num_splits,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -355,6 +361,7 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
         "bfloat16",
         "fp8",
         "fp8_e4m3",
+        "mxfp4_mla",
     ]
 
     @staticmethod
@@ -829,7 +836,11 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             **mla_args,
         )
         self.softmax_scale = scale
-        self.supports_dense_mha_prefill = sinks is None  # type: ignore[misc]
+        # Dense-MHA prefill gathers cache rows into a bf16 workspace and would
+        # misread packed mxfp4_mla rows.
+        self.supports_dense_mha_prefill = (  # type: ignore[misc]
+            sinks is None and kv_cache_dtype != "mxfp4_mla"
+        )
         self.masked_mha_available = False
 
         vllm_config = get_current_vllm_config()
@@ -843,6 +854,27 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             (q_concat_shape, vllm_config.model_config.dtype),
         )
         self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
+        rank = self.kv_lora_rank
+        if kv_cache_dtype == "mxfp4_mla" and (rank < 128 or rank & (rank - 1)):
+            # The read loads each packed row as int32 words into one
+            # power-of-two tile.
+            raise ValueError(
+                f"mxfp4_mla needs kv_lora_rank to be a power of two >= 128, got {rank}"
+            )
+        if kv_cache_dtype == "mxfp4_mla" and self.qk_rope_head_dim != 0:
+            raise ValueError(
+                "mxfp4_mla stores only the latent, so it needs a rope-free (NoPE) "
+                f"model; got qk_rope_head_dim={self.qk_rope_head_dim}"
+            )
+        from vllm.platforms.rocm import on_gfx950
+
+        # gfx950 decodes the packed rows on the scaled MFMA; elsewhere, and
+        # for other latent widths, they are unpacked to bf16 first.
+        self.native_mxfp4_decode: bool = (
+            kv_cache_dtype == "mxfp4_mla"
+            and on_gfx950()
+            and rank == MXFP4_NATIVE_LATENT
+        )
 
         if rocm_aiter_ops.is_triton_sparse_mla_enabled():
             reason = self._aiter_sparse_mla_unsupported_reason(vllm_config)
@@ -868,6 +900,34 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         if self.dcp_world_size > 1 or self.pcp_world_size > 1:
             return "context parallelism is not supported"
         return None
+
+    def do_kv_cache_update(
+        self,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor,
+        skip_scale: bool = False,
+    ) -> None:
+        if kv_cache_dtype != "mxfp4_mla":
+            return super().do_kv_cache_update(
+                kv_c_normed,
+                k_pe,
+                kv_cache,
+                slot_mapping,
+                kv_cache_dtype,
+                k_scale,
+                skip_scale,
+            )
+        if kv_cache.numel() == 0:
+            return
+        assert k_pe.numel() == 0, (
+            f"mxfp4_mla expects a rope-free latent, got k_pe with {k_pe.numel()} "
+            "elements"
+        )
+        store_mxfp4_mla(kv_c_normed, slot_mapping.flatten(), kv_cache)
 
     def record_logical_topk_ready(self) -> None:
         # This impl shares the top-k indices buffer via SharedTopkIndicesBuffer
@@ -937,17 +997,23 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     self.sinks.reshape(1, self.num_heads, 1),
                     q.shape[1],
                 ).reshape(-1)
-            kv = kv_c_and_k_pe_cache.view(-1, 1, q.shape[-1])
-            decode_num_splits = (
-                rocm_sparse_decode_bf16_num_splits(
-                    num_tokens,
-                    q.shape[1],
-                    min(attn_metadata.max_seq_len, attn_metadata.topk_tokens),
+            is_mxfp4 = self.kv_cache_dtype == "mxfp4_mla"
+            row_width = mxfp4_row_bytes(self.kv_lora_rank) if is_mxfp4 else q.shape[-1]
+            kv = kv_c_and_k_pe_cache.view(-1, 1, row_width)
+            decode_only = attn_metadata.num_decode_tokens == num_tokens
+            sparse_len = min(attn_metadata.max_seq_len, attn_metadata.topk_tokens)
+            native = self.native_mxfp4_decode and decode_only
+            if native:
+                decode_num_splits = rocm_sparse_decode_mxfp4_native_num_splits(
+                    num_tokens, q.shape[1], sparse_len
                 )
-                if attn_metadata.num_decode_tokens == num_tokens
-                else 1
-            )
-            if decode_num_splits > 1:
+            elif decode_only:
+                decode_num_splits = rocm_sparse_decode_bf16_num_splits(
+                    num_tokens, q.shape[1], sparse_len
+                )
+            else:
+                decode_num_splits = 1
+            if native or decode_num_splits > 1:
                 rocm_sparse_attn_decode_bf16(
                     q=q,
                     kv=kv,
@@ -960,6 +1026,8 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     ragged_indices=attn_metadata.paged_kv_indices,
                     ragged_indptr=attn_metadata.paged_kv_indptr,
                     num_splits=decode_num_splits,
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    native_mxfp4=native,
                 )
             else:
                 rocm_sparse_attn_prefill(
@@ -975,6 +1043,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     output=output,
                     ragged_indices=attn_metadata.paged_kv_indices,
                     ragged_indptr=attn_metadata.paged_kv_indptr,
+                    kv_cache_dtype=self.kv_cache_dtype,
                 )
             output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
             return output, None
