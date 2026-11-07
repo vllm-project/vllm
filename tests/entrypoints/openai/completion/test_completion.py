@@ -231,6 +231,45 @@ async def test_logprob_token_ids_stream(client: openai.AsyncOpenAI):
     assert set(returned_top_logprobs[0]) == {"token_id:42", "token_id:5000"}
 
 
+# 8158 is a leading-byte fragment of U+0E58 (Thai digit 8); 3023 and 378 are
+# other leading fragments. All three decode to "" on their own.
+FRAGMENT_REQUEST = dict(
+    model=MODEL_NAME,
+    prompt="Hello",
+    max_tokens=1,
+    temperature=0.0,
+    logprobs=2,
+    extra_body={"allowed_token_ids": [8158], "logprob_token_ids": [3023, 378]},
+)
+
+
+@pytest.mark.asyncio
+async def test_top_logprobs_keep_sampled_entry_on_string_collision(
+    client: openai.AsyncOpenAI,
+):
+    completion = await client.completions.create(**FRAGMENT_REQUEST)
+    logprobs = completion.choices[0].logprobs
+    assert logprobs is not None
+    assert logprobs.tokens == [""]
+    assert logprobs.top_logprobs == [{"": logprobs.token_logprobs[0]}]
+
+
+@pytest.mark.asyncio
+async def test_top_logprobs_keep_sampled_entry_on_string_collision_stream(
+    client: openai.AsyncOpenAI,
+):
+    stream = await client.completions.create(**FRAGMENT_REQUEST, stream=True)
+    tokens, token_logprobs, top_logprobs = [], [], []
+    async for chunk in stream:
+        logprobs = chunk.choices[0].logprobs
+        if logprobs is not None and logprobs.tokens:
+            tokens += logprobs.tokens
+            token_logprobs += logprobs.token_logprobs
+            top_logprobs += logprobs.top_logprobs
+    assert tokens == [""]
+    assert top_logprobs == [{"": token_logprobs[0]}]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",

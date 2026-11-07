@@ -839,24 +839,27 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 # logprobs, as defined in the openai API
                 # (cf. https://github.com/openai/openai-openapi/blob/
                 # 893ba52242dbd5387a97b96444ee1c742cfce9bd/openapi.yaml#L7153)
-                out_top_logprobs.append(
-                    {
-                        # Convert float("-inf") to the
-                        # JSON-serializable float that OpenAI uses
+                step_out_top_logprobs: dict[str, float] = {}
+                for top_token_id, top_lp in itertools.islice(
+                    step_top_logprobs.items(),
+                    completion_top_logprobs_limit(
+                        num_output_top_logprobs, bool(logprob_token_ids)
+                    ),
+                ):
+                    # Byte fragments all decode to "", so keep the first
+                    # candidate per string; the sampled token is always first.
+                    step_out_top_logprobs.setdefault(
                         self._get_decoded_token(
-                            top_lp[1],
-                            top_lp[0],
+                            top_lp,
+                            top_token_id,
                             tokenizer,
                             return_as_token_id=should_return_as_token_id,
-                        ): max(top_lp[1].logprob, -9999.0)
-                        for top_lp in itertools.islice(
-                            step_top_logprobs.items(),
-                            completion_top_logprobs_limit(
-                                num_output_top_logprobs, bool(logprob_token_ids)
-                            ),
-                        )
-                    }
-                )
+                        ),
+                        # Convert float("-inf") to the
+                        # JSON-serializable float that OpenAI uses
+                        max(top_lp.logprob, -9999.0),
+                    )
+                out_top_logprobs.append(step_out_top_logprobs)
 
             if len(out_text_offset) == 0:
                 out_text_offset.append(initial_text_offset)
