@@ -261,6 +261,9 @@ class XgrammarGrammar(StructuredOutputGrammar):
     )
     _is_terminated: bool = field(default=False, repr=False, hash=False)
 
+    def accept_prefix(self, prefix: str, tokenizer: "TokenizerLike") -> bool:
+        return self.matcher.accept_string(prefix)
+
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """Accepts a list of tokens and advances the FSM.
 

@@ -60,6 +60,46 @@ request. You may also choose a specific backend, along with
 some options. A full set of options is available in the `vllm serve --help`
 text.
 
+### Continuing an assistant message
+
+Set `structured_output_prefill: true` on a Chat Completions request to apply
+the constraint to the final assistant message's existing text plus the new
+generation. Also set `continue_final_message: true` and
+`add_generation_prompt: false`.
+
+```json
+{
+  "model": "HuggingFaceTB/SmolLM2-135M-Instruct",
+  "messages": [
+    {"role": "user", "content": "Describe Paris as JSON."},
+    {"role": "assistant", "content": "{\"city\":\"Paris\","}
+  ],
+  "continue_final_message": true,
+  "add_generation_prompt": false,
+  "structured_output_prefill": true,
+  "response_format": {"type": "json_object"}
+}
+```
+
+With the default `echo: false`, the returned `content` contains only the new
+text. Concatenate it with the assistant prefill to obtain the constrained
+output. With `echo: true`, `content` includes the prefill. The prefill remains
+part of the prompt for token accounting.
+
+This option supports `xgrammar`, `guidance`, and `outlines`, for constraints
+supported by the selected backend. The final assistant `content` must be a
+string containing only the structured output prefix. A prefix that violates
+the constraint or does not match the end of the rendered prompt is rejected
+before generation. This includes prefixes altered by chat templates or prompt
+truncation. For `guidance` and `outlines`, the prefix must also round-trip
+through the tokenizer exactly and contain no special token IDs.
+
+By default, constraints apply to newly generated text only. For example,
+an assistant prefill of `Here is the JSON:` can precede a newly generated JSON
+object with `structured_output_prefill` left disabled.
+
+### Constraint examples
+
 Now let's see an example for each of the cases, starting with the `choice`, as it's the easiest one:
 
 ??? code
