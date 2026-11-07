@@ -41,6 +41,46 @@ CUDA_DEVICES = [
 ]
 
 
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("d", [17, 512])
+@pytest.mark.parametrize("layout", ["2d", "row_gap", "3d", "transpose", "column_gap"])
+@torch.inference_mode()
+def test_swiglustep_layouts(default_vllm_config, dtype, d, layout) -> None:
+    """Shape and storage layout must preserve the contiguous kernel result."""
+    set_random_seed(0)
+    shape = (3, 7, 2 * d) if layout in ("3d", "transpose") else (7, 2 * d)
+    if layout == "column_gap":
+        shape = (7, 4 * d)
+    x = torch.randn(shape, dtype=dtype, device=CUDA_DEVICES[0])
+    if layout == "row_gap":
+        x = x[::2]
+    elif layout == "transpose":
+        x = x.transpose(0, 1)
+    elif layout == "column_gap":
+        x = x[:, ::2]
+    layer = SwigluStepAndMul()
+    expected = layer.forward_cuda(x.contiguous().view(-1, 2 * d)).reshape(
+        *x.shape[:-1], d
+    )
+    actual = layer.forward_cuda(x)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("d", [17, 512])
+@torch.inference_mode()
+def test_swiglustep_strided_output(default_vllm_config, dtype, d) -> None:
+    """Writing a column-strided output must leave adjacent columns untouched."""
+    set_random_seed(0)
+    x = torch.randn((7, 2 * d), dtype=dtype, device=CUDA_DEVICES[0])
+    storage = torch.full((7, 2 * d), 42.0, dtype=dtype, device=x.device)
+    output = storage[:, ::2]
+    expected = SwigluStepAndMul().forward_cuda(x)
+    swiglustep_and_mul_triton(output, x)
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+    assert torch.all(storage[:, 1::2] == 42)
+
+
 def test_masked_moe_activation_rejects_unsupported_activation() -> None:
     input = torch.empty(1, 1, 2)
     output = torch.empty(1, 1, 1)
