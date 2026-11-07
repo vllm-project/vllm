@@ -3,8 +3,9 @@
 """Inference-only Deepseek-OCR model compatible with HuggingFace weights."""
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from functools import partial
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -15,6 +16,7 @@ from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -53,6 +55,13 @@ from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
     CROP_MODE,
     DeepseekOCRProcessor,
+)
+from vllm.v1.worker.encoder_cudagraph_defs import (
+    EncoderCudaGraphCaptureInputs,
+    EncoderCudaGraphConfig,
+    EncoderCudaGraphPathConfig,
+    EncoderCudaGraphReplayBuffers,
+    EncoderItemSpec,
 )
 
 from ...transformers_utils.processors.deepseek_ocr import count_tiles
@@ -231,7 +240,9 @@ class DeepseekOCR2MultiModalProcessor(
     info=DeepseekOCR2ProcessingInfo,
     dummy_inputs=DeepseekOCR2DummyInputsBuilder,
 )
-class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+class DeepseekOCR2ForCausalLM(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsEncoderCudaGraph
+):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # map prefix for language backbone
@@ -258,6 +269,7 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
+        self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
 
         self.vision_config = config.vision_config
@@ -444,3 +456,182 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
             connector="projector",
             tower_model=["sam_model", "qwen2_model"],
         )
+
+    @property
+    def global_image_output_tokens(self) -> int:
+        return (BASE_SIZE // 16 // 4) ** 2
+
+    @property
+    def single_patch_output_tokens(self) -> int:
+        return (IMAGE_SIZE // 16 // 4) ** 2
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["pixel_values"],
+            out_hidden_size=self.projector_config.n_embed,
+            paths={
+                "global": EncoderCudaGraphPathConfig(
+                    min_token_budget=self.global_image_output_tokens
+                ),
+                "local": EncoderCudaGraphPathConfig(
+                    min_token_budget=self.single_patch_output_tokens,
+                    allow_zero_tokens=True,
+                ),
+            },
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self, vllm_config: VllmConfig
+    ) -> tuple[int, int]:
+        return (
+            self.global_image_output_tokens,
+            min(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                self.model_config.max_model_len,
+            ),
+        )
+
+    def get_encoder_cudagraph_item_specs(
+        self, mm_kwargs: dict[str, Any]
+    ) -> list[EncoderItemSpec]:
+        specs = []
+        for crop in mm_kwargs["images_spatial_crop"]:
+            is_tiled = crop[0] > 1 or crop[1] > 1
+            num_patches = int(crop.prod().item()) if is_tiled else 0
+            global_tokens = self.global_image_output_tokens
+            local_tokens = num_patches * self.single_patch_output_tokens
+            specs.append(
+                EncoderItemSpec(
+                    input_size=(BASE_SIZE // 16) ** 2
+                    + num_patches * (IMAGE_SIZE // 16) ** 2,
+                    output_tokens=global_tokens + local_tokens + 1,
+                    path_output_tokens={
+                        "global": global_tokens,
+                        "local": local_tokens,
+                    },
+                )
+            )
+        return specs
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        pixel_values = mm_kwargs["pixel_values"]
+        images_crop = mm_kwargs["images_crop"]
+        images_spatial_crop = mm_kwargs["images_spatial_crop"]
+        if not indices:
+            return {
+                "pixel_values": pixel_values[:0],
+                "images_crop": images_crop[:0],
+                "images_spatial_crop": images_spatial_crop[:0],
+            }
+
+        is_tiled = (images_spatial_crop[:, 0] > 1) | (images_spatial_crop[:, 1] > 1)
+        patches_per_image = torch.where(is_tiled, images_spatial_crop.prod(-1), 0)
+        patch_offsets = [0]
+        for count in patches_per_image:
+            patch_offsets.append(patch_offsets[-1] + int(count))
+        return {
+            "pixel_values": pixel_values[indices],
+            "images_crop": torch.cat(
+                [images_crop[patch_offsets[i] : patch_offsets[i + 1]] for i in indices]
+            ),
+            "images_spatial_crop": images_spatial_crop[indices],
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ) -> EncoderCudaGraphCaptureInputs:
+        if path == "global":
+            count = min(max_batch_size, token_budget // self.global_image_output_tokens)
+            key, side = "pixel_values", BASE_SIZE
+        elif path == "local":
+            count = token_budget // self.single_patch_output_tokens
+            key, side = "images_crop", IMAGE_SIZE
+        else:
+            raise ValueError(f"Unknown encoder CUDA graph path: {path}")
+        return EncoderCudaGraphCaptureInputs(
+            values={key: torch.zeros(count, 3, side, side, device=device, dtype=dtype)}
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ) -> EncoderCudaGraphReplayBuffers:
+        if path == "global":
+            return EncoderCudaGraphReplayBuffers(
+                values={"pixel_values": mm_kwargs["pixel_values"]}
+            )
+        if path == "local":
+            return EncoderCudaGraphReplayBuffers(
+                values={"images_crop": mm_kwargs["images_crop"]}
+            )
+        raise ValueError(f"Unknown encoder CUDA graph path: {path}")
+
+    def _batched_encoder_forward(self, images: torch.Tensor) -> torch.Tensor:
+        features = self.projector(self.qwen2_model(self.sam_model(images)))
+        return features.reshape(-1, features.shape[-1])
+
+    def encoder_cudagraph_forward(
+        self, values: dict[str, torch.Tensor], path: str = "default"
+    ) -> torch.Tensor:
+        if path == "global":
+            return self._batched_encoder_forward(values["pixel_values"])
+        if path == "local":
+            return self._batched_encoder_forward(values["images_crop"])
+        raise ValueError(f"Unknown encoder CUDA graph path: {path}")
+
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
+        if path == "default":
+            image_input = self._parse_and_validate_image_input(**mm_kwargs)
+            assert image_input is not None
+            return torch.cat(self._process_image_input(image_input), dim=0)
+        return self.encoder_cudagraph_forward(mm_kwargs, path=path)
+
+    def postprocess_encoder_output(
+        self,
+        outputs: dict[str, torch.Tensor],
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        assert batch_mm_kwargs is not None
+        crops = batch_mm_kwargs["images_spatial_crop"]
+        is_tiled = (crops[:, 0] > 1) | (crops[:, 1] > 1)
+        patch_counts = torch.where(is_tiled, crops.prod(-1), 0).tolist()
+        hidden_size = outputs["global"].shape[-1]
+        global_features = outputs["global"].reshape(
+            -1, self.global_image_output_tokens, hidden_size
+        )
+        local_features = outputs.get("local")
+        if local_features is not None:
+            local_features = local_features.reshape(
+                -1, self.single_patch_output_tokens, hidden_size
+            )
+
+        patch_offset = 0
+        for i, index in enumerate(indices):
+            count = patch_counts[i]
+            parts = []
+            if count:
+                assert local_features is not None
+                patches = local_features[patch_offset : patch_offset + count]
+                parts.append(patches.flatten(0, 1))
+                patch_offset += count
+            parts.extend((global_features[i], self.view_seperator[None, :]))
+            dest[index] = torch.cat(parts, dim=0)
