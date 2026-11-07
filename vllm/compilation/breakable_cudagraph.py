@@ -35,7 +35,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.compilation.cudagraph_pool import capture_pool
-from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.forward_context import (
     BatchDescriptor,
@@ -379,8 +378,6 @@ class BreakableCUDAGraphWrapper:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> Any:
-        validate_cudagraph_capturing_enabled()
-
         entry.input_addresses = self._collect_tensor_addresses(args, kwargs)
 
         # Match torch.cuda.graph()'s pre-capture cleanup, which we bypass.
