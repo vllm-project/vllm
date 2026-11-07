@@ -671,11 +671,12 @@ def test_mxfp8_grouped_gemm_native(T, N, K, E, top_k, weighted):
 # MXFP8 linear emulation: BF16-at-load (default) vs per-step dequant + switch
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("shape", [(512, 2048), (1, 6144)])
+@pytest.mark.parametrize("num_tokens", [1, 7])
 @pytest.mark.parametrize("act_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("dequant_at_load", [True, False])
 @torch.inference_mode()
 def test_mxfp8_linear_emulation_bf16_at_load(
-    shape, act_dtype, dequant_at_load, monkeypatch
+    shape, num_tokens, act_dtype, dequant_at_load, monkeypatch
 ):
     """EmulationMxfp8LinearKernel load-time BF16 dequant (default) and the
     ``VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=0`` per-step fallback must produce the
@@ -698,7 +699,7 @@ def test_mxfp8_linear_emulation_bf16_at_load(
 
     # Reference: dequant once, plain linear in the activation dtype.
     w_ref = dequant_mxfp8_to_bf16(w_fp8, w_scale).to(act_dtype)
-    x = torch.randn(7, K, device=DEVICE, dtype=act_dtype)
+    x = torch.randn(num_tokens, K, device=DEVICE, dtype=act_dtype)
     out_ref = torch.nn.functional.linear(x, w_ref)
 
     layer = torch.nn.Module()
