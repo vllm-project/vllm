@@ -11,7 +11,6 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, TypeGuard
 
-import regex as re
 import xgrammar as xgr
 
 try:
@@ -124,7 +123,7 @@ def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
     The grammar shape is architecture-independent; callers are responsible for
     wrapping it in the correct structural tag (see ``CohereTagStyle.tools``).
     """
-    tool_dictionary: dict[str, str] = {}
+    tool_grammars: list[xgr.Grammar] = []
     for tool in tool_schema:
         tool_name = tool["name"]
         check_json_nesting(tool["parameters"])
@@ -140,25 +139,22 @@ def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
         for defs_key in ("$defs", "definitions"):
             if defs_key in tool_parameters:
                 json_schema[defs_key] = tool_parameters.pop(defs_key)
-        tool_grammar = str(xgr.Grammar.from_json_schema(json.dumps(json_schema)))
-        for match in re.findall(r"\b(\w+)\s*::=", tool_grammar):
-            tool_grammar = re.sub(
-                rf"\b{re.escape(match)}\b", tool_name + match, tool_grammar
-            )
-        tool_dictionary[tool_name] = f"{tool_name} ::= {tool_name}root\n{tool_grammar}"
+        tool_grammars.append(xgr.Grammar.from_json_schema(json.dumps(json_schema)))
+    # Let xgrammar merge the per-tool grammars: ``union`` renames colliding
+    # rules without touching string literals, and adds a fresh ``root`` rule
+    # matching any one tool. The tool name never becomes rule-name text; it
+    # only reaches the JSON ``tool_name`` const above, escaped by json.dumps.
+    union = str(xgr.Grammar.union(*tool_grammars))
+    tool_rules = "tool" + union.removeprefix("root")
     # Emitted grammar shape:
     #   root  ::= tools
     #   tools ::= ws "[" ws tool (ws "," ws tool)* ws "]" ws
     #   ws    ::= (" " | "\t" | "\n")*
-    #   tool  ::= <tool_a> | <tool_b> | ...         (one alternative per input)
-    #   <tool_x>     ::= <tool_x>root               (per-tool xgrammar rules)
-    #   <tool_x>root ::= ...                        (from xgr.Grammar.from_json_schema)
-    tool_alternatives = "tool ::= " + " | ".join(tool_dictionary.keys())
-    tool_rules = "\n    ".join(tool_dictionary.values())
+    #   tool  ::= ((root_1) | (root_2) | ...)   (one alternative per input)
+    #   ...                                     (per-tool rules from xgrammar)
     grammar = f"""root ::= tools
     tools ::= ws "[" ws tool (ws "," ws tool)* ws "]" ws
     ws    ::= (" " | "\\t" | "\\n")*
-    {tool_alternatives}
     {tool_rules}
     """
     return grammar
