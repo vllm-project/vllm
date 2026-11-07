@@ -849,3 +849,68 @@ def test_mxfp8_marlin_moe_padded_round_trip(shape):
             global_num_experts=e,
         )
     torch.testing.assert_close(out, ref, atol=8e-2, rtol=0)
+
+
+@pytest.mark.parametrize("num_shards", [1, 2, 3])
+def test_fp8_moe_padding_preserves_weight_and_scale_shards(monkeypatch, num_shards):
+    from vllm.model_executor.layers.quantization.utils import marlin_utils_fp8
+
+    n, padded_n, k = 96, 128, 128
+    weight = torch.arange(num_shards * n * k).reshape(1, num_shards * n, k)
+    padded = marlin_utils_fp8._moe_pad_shard_rows(weight, n, padded_n)
+    for shard in range(num_shards):
+        torch.testing.assert_close(
+            padded[:, shard * padded_n : shard * padded_n + n],
+            weight[:, shard * n : (shard + 1) * n],
+        )
+        assert (
+            torch.count_nonzero(
+                padded[:, shard * padded_n + n : (shard + 1) * padded_n]
+            )
+            == 0
+        )
+
+    # Capture scales passed to the layout permutation after shard padding.
+    calls = []
+
+    def capture_scales(**kwargs):
+        calls.append(kwargs["s"].clone())
+        return kwargs["s"]
+
+    monkeypatch.setattr(marlin_utils_fp8, "get_marlin_input_dtype", lambda: None)
+    monkeypatch.setattr(
+        marlin_utils_fp8.ops,
+        "gptq_marlin_repack",
+        lambda **kwargs: kwargs["b_q_weight"],
+    )
+    monkeypatch.setattr(
+        marlin_utils_fp8,
+        "marlin_permute_scales",
+        capture_scales,
+    )
+    monkeypatch.setattr(
+        marlin_utils_fp8, "fp8_fused_exponent_bias_into_scales", lambda scales: scales
+    )
+    layer = SimpleNamespace(
+        num_experts=1,
+        hidden_size=k,
+        intermediate_size_per_partition=n,
+        orig_dtype=torch.float16,
+    )
+    w13 = torch.zeros(1, num_shards * n, k, dtype=torch.float8_e4m3fn)
+    w2 = torch.zeros(1, k, n, dtype=torch.float8_e4m3fn)
+    scales = torch.arange(1, num_shards * n + 1).reshape(1, 1, -1).float()
+    marlin_utils_fp8.prepare_fp8_moe_layer_for_marlin(
+        layer, w13, w2, scales, torch.ones(1, 1, k)
+    )
+    for shard in range(num_shards):
+        torch.testing.assert_close(
+            calls[0][:, shard * padded_n : shard * padded_n + n],
+            scales[0, :, shard * n : (shard + 1) * n].half(),
+        )
+        assert (
+            torch.count_nonzero(
+                calls[0][:, shard * padded_n + n : (shard + 1) * padded_n]
+            )
+            == 0
+        )
