@@ -5,6 +5,7 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
 from typing import Annotated, Any, Literal, TypeAlias
+from typing import Required as _Required
 
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
@@ -17,6 +18,7 @@ from openai.types.responses import (
     ResponseCustomToolCallInputDeltaEvent,
     ResponseCustomToolCallInputDoneEvent,
     ResponseFunctionToolCall,
+    ResponseInputAudioParam,
     ResponseInputItemParam,
     ResponseMcpCallArgumentsDeltaEvent,
     ResponseMcpCallArgumentsDoneEvent,
@@ -47,6 +49,11 @@ from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
 from openai.types.responses.response import IncompleteDetails, ToolChoice
+from openai.types.responses.response_input_message_content_list_param import (
+    ResponseInputFileParam,
+    ResponseInputImageParam,
+    ResponseInputTextParam,
+)
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
 from openai_harmony import Message as OpenAIHarmonyMessage
@@ -59,6 +66,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from typing_extensions import TypedDict as _TypedDict
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
@@ -146,7 +154,37 @@ class ResponseRawMessageAndToken(OpenAIBaseModel):
 ResponseInputOutputMessage: TypeAlias = (
     list[ChatCompletionMessageParam] | list[ResponseRawMessageAndToken]
 )
-ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
+
+
+class _EasyInputMessageWithAudioParam(_TypedDict, total=False):
+    """Extension of EasyInputMessageParam that additionally accepts
+    ``input_audio`` content parts.
+
+    The openai SDK's ``ResponseInputMessageContentListParam`` only permits
+    text, image, and file content parts; ``ResponseInputAudioParam`` is
+    intentionally absent.  As a result, audio messages that are accepted by
+    ``/v1/chat/completions`` fail Pydantic validation on ``/v1/responses``
+    with an opaque 422 error.  This TypedDict mirrors EasyInputMessageParam
+    while extending the content union to include ``ResponseInputAudioParam``,
+    so both endpoints accept the same audio-bearing user messages (#47659).
+    """
+
+    content: _Required[
+        str
+        | list[
+            ResponseInputTextParam
+            | ResponseInputImageParam
+            | ResponseInputFileParam
+            | ResponseInputAudioParam
+        ]
+    ]
+    role: _Required[Literal["user", "assistant", "system", "developer"]]
+    type: Literal["message"]
+
+
+ResponseInputOutputItem: TypeAlias = (
+    _EasyInputMessageWithAudioParam | ResponseInputItemParam | ResponseOutputItem
+)
 
 
 def _default_input_image_details(value: Any) -> Any:
