@@ -24,9 +24,6 @@ use crate::output::{TextDecodeOptions, decoded_text_event_stream};
 use crate::request::{SamplingParams, TextRequest};
 use crate::{TextLlm, TextOutputStream};
 
-/// Python's default `VLLM_MAX_N_SEQUENCES`, which bounds `beam_width`.
-const MAX_BEAM_WIDTH: u32 = 16384;
-
 /// Parameters that only beam search reads; the rest come from the request.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BeamSearchParams {
@@ -331,12 +328,6 @@ impl TextLlm {
             beam_width,
             length_penalty,
         } = params;
-        if beam_width.get() > MAX_BEAM_WIDTH {
-            return Err(Error::BeamWidthTooLarge {
-                beam_width: beam_width.get(),
-                max: MAX_BEAM_WIDTH,
-            });
-        }
         reject_unsupported_params(&request)?;
 
         let sampling_hints = self.processor.backend.sampling_hints()?;
