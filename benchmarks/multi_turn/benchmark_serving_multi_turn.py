@@ -10,7 +10,7 @@ import random
 import time
 from collections import Counter, deque
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from http import HTTPStatus
 from statistics import mean
 from typing import NamedTuple
@@ -39,12 +39,9 @@ TERM_SIGNAL = None
 _SENSITIVE_ARG_FIELDS = ("api_key", "header")
 
 
-class ConversationSampling(str, Enum):
+class ConversationSampling(StrEnum):
     ROUND_ROBIN = "round_robin"
     RANDOM = "random"
-
-    def __str__(self):
-        return self.value
 
 
 class ClientArgs(NamedTuple):
