@@ -22,8 +22,11 @@ steps:
   - pytest -v -s v1/attention
   source_file_dependencies:
   - vllm/config/attention.py
+  - vllm/model_executor/layers/dash_attention.py
   - vllm/model_executor/layers/attention
   - vllm/v1/attention
+  - vllm/v1/hisparse/
+  - csrc/hisparse_kernels.cu
   - tests/v1/attention
   commands:
   - >-
