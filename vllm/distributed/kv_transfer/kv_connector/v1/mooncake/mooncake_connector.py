@@ -9,8 +9,9 @@ import secrets
 import threading
 import time
 from collections import OrderedDict, defaultdict
-from collections.abc import Collection
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Collection, Coroutine
+from concurrent.futures import CancelledError as FutureCancelledError
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Final
@@ -727,6 +728,12 @@ class PullReqMeta:
 
 
 @dataclass
+class _ReceiveTaskState:
+    pending: dict[ReqId, PullReqMeta]
+    request_sent: bool = False
+
+
+@dataclass
 class SendBlockMeta:
     p_req_id: ReqId
     transfer_id: TransferId
@@ -1421,6 +1428,7 @@ class MooncakeConnectorWorker:
 
         self._remote_agents: dict[EngineId, dict[int, dict[int, str]]] = {}
         self._pending_bootstrap_queries: dict[str, asyncio.Event] = {}
+        self._receive_tasks: set[asyncio.Task[None]] = set()
         self.side_channel_port: int = 0  # we will bind it in register_kv_caches()
         self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -2648,9 +2656,12 @@ class MooncakeConnectorWorker:
         self,
         worker_addr: str,
         pull_metas: dict[ReqId, PullReqMeta],
+        state: _ReceiveTaskState | None = None,
     ):
         # Each peer settles its own requests, sharing the per-request counters.
-        pull_metas = pull_metas.copy()
+        if state is None:
+            state = _ReceiveTaskState(pull_metas.copy())
+        pull_metas = state.pending
         req_ids = set(pull_metas)
         include_layout = (
             not self._kv_layout_id or worker_addr not in self._acked_layout_peers
@@ -2658,20 +2669,22 @@ class MooncakeConnectorWorker:
         # Each pass either returns or breaks out of the recv loop to resend
         # the layout after a LAYOUT_MISS.
         while True:
-            metadata = self._build_pull_metadata(
-                pull_metas, include_layout=include_layout
-            )
-            encoded_data = self._encoder.encode(metadata)
-            logger.debug(
-                "MooncakeXferMetadata to %s is %d bytes (%s).",
-                worker_addr,
-                len(encoded_data),
-                "layout" if include_layout else "blocks",
-            )
-            logger.debug(
-                "Sending kv transfer request for %s on path: %s", req_ids, worker_addr
-            )
             try:
+                metadata = self._build_pull_metadata(
+                    pull_metas, include_layout=include_layout
+                )
+                encoded_data = self._encoder.encode(metadata)
+                logger.debug(
+                    "MooncakeXferMetadata to %s is %d bytes (%s).",
+                    worker_addr,
+                    len(encoded_data),
+                    "layout" if include_layout else "blocks",
+                )
+                logger.debug(
+                    "Sending kv transfer request for %s on path: %s",
+                    req_ids,
+                    worker_addr,
+                )
                 with make_zmq_socket(
                     self.async_zmq_ctx, worker_addr, zmq.DEALER, bind=False, linger=0
                 ) as sock:
@@ -2679,6 +2692,8 @@ class MooncakeConnectorWorker:
                         zmq.RCVTIMEO,
                         (envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT + 60) * 1000,
                     )
+                    # A cancelled send may still deliver the request to P.
+                    state.request_sent = True
                     await sock.send(encoded_data)
                     while True:
                         ret_msg = await sock.recv()
@@ -2724,7 +2739,11 @@ class MooncakeConnectorWorker:
                 )
                 return
             except Exception as e:
-                self._handle_failed_recv(pull_metas, req_ids, f"transfer failed: {e}")
+                self._handle_failed_recv(
+                    pull_metas,
+                    req_ids,
+                    f"transfer to {worker_addr} failed ({type(e).__name__}): {e}",
+                )
                 return
 
     def _handle_failed_recv(
@@ -2846,10 +2865,9 @@ class MooncakeConnectorWorker:
                 type(e).__name__,
                 e,
             )
-
-        # Always notify others regardless of connection success or failure.
-        self._pending_bootstrap_queries[remote_bootstrap_addr].set()
-        del self._pending_bootstrap_queries[remote_bootstrap_addr]
+        finally:
+            # Cancellation must also wake requests sharing this query.
+            self._pending_bootstrap_queries.pop(remote_bootstrap_addr).set()
 
     def _select_remote_workers(
         self, remote_engine_id: EngineId
@@ -2882,8 +2900,21 @@ class MooncakeConnectorWorker:
         remote_engine_id: EngineId,
         pull_metas: dict[ReqId, PullReqMeta],
     ):
-        selected_remote_pp = self._select_remote_workers(remote_engine_id)
-        worker_addrs = self._remote_worker_addrs(remote_engine_id, selected_remote_pp)
+        try:
+            selected_remote_pp = self._select_remote_workers(remote_engine_id)
+            worker_addrs = self._remote_worker_addrs(
+                remote_engine_id, selected_remote_pp
+            )
+            if not worker_addrs:
+                raise ValueError("no producer workers selected")
+        except Exception as e:
+            self._handle_failed_recv(
+                pull_metas.copy(),
+                list(pull_metas),
+                f"preparing pull from engine {remote_engine_id} failed "
+                f"({type(e).__name__}): {e}",
+            )
+            return
 
         count = len(worker_addrs)
         logger.debug(
@@ -2896,9 +2927,49 @@ class MooncakeConnectorWorker:
         for pull_meta in pull_metas.values():
             pull_meta.pull_tasks_count = count
         for worker_addr in worker_addrs:
-            asyncio.create_task(
-                self.receive_kv_from_single_worker(worker_addr, pull_metas)
+            state = _ReceiveTaskState(pull_metas.copy())
+            self._create_receive_task(
+                self.receive_kv_from_single_worker(worker_addr, pull_metas, state),
+                state,
             )
+
+    def _create_receive_task(
+        self, coro: Coroutine[Any, Any, None], state: _ReceiveTaskState
+    ) -> None:
+        try:
+            task = asyncio.create_task(coro)
+        except Exception as e:
+            coro.close()
+            self._handle_failed_recv(
+                state.pending,
+                list(state.pending),
+                f"creating receiver task failed ({type(e).__name__}): {e}",
+            )
+            return
+        self._receive_tasks.add(task)
+        task.add_done_callback(lambda done: self._receive_task_done(done, state))
+
+    def _receive_task_done(
+        self, task: asyncio.Task[None], state: _ReceiveTaskState
+    ) -> None:
+        self._receive_tasks.discard(task)
+        try:
+            task.result()
+            return
+        except asyncio.CancelledError:
+            reason = "receiver task cancelled"
+        except Exception as e:
+            reason = f"receiver task failed ({type(e).__name__}): {e}"
+            logger.exception("Mooncake %s", reason)
+        if state.request_sent:
+            # Task cancellation is not cancellation/drain of a remote WRITE.
+            logger.error(
+                "Mooncake %s after sending; retaining pending KV blocks for %s",
+                reason,
+                list(state.pending),
+            )
+        else:
+            self._handle_failed_recv(state.pending, list(state.pending), reason)
 
     async def _query_bootstrap(self, remote_bootstrap_addr: str):
         """Query a bootstrap server, or wait for the query already running."""
@@ -2980,18 +3051,46 @@ class MooncakeConnectorWorker:
             )
             return
 
-        self.receive_kv(remote_engine_id, pull_metas)
+        # Hand ownership to per-peer tasks before dispatch, so the bootstrap
+        # task's supervisor cannot settle requests now owned by those peers.
+        pending = pull_metas.copy()
+        pull_metas.clear()
+        self.receive_kv(remote_engine_id, pending)
 
     async def _start_load_kv(
         self, reqs_to_recv: dict[EngineId, dict[ReqId, PullReqMeta]]
     ):
-        for remote_engine_id, pull_metas in reqs_to_recv.items():
+        for remote_engine_id in list(reqs_to_recv):
+            pull_metas = reqs_to_recv.pop(remote_engine_id)
             if remote_engine_id not in self._remote_agents:
-                asyncio.create_task(
-                    self.handle_new_engine_id(remote_engine_id, pull_metas)
+                state = _ReceiveTaskState(pull_metas.copy())
+                self._create_receive_task(
+                    self.handle_new_engine_id(remote_engine_id, state.pending),
+                    state,
                 )
             else:
                 self.receive_kv(remote_engine_id, pull_metas)
+
+    def _load_kv_done(
+        self,
+        future: Future[None],
+        pending: dict[EngineId, dict[ReqId, PullReqMeta]],
+    ) -> None:
+        try:
+            future.result()
+            return
+        except FutureCancelledError:
+            reason = "load submission cancelled"
+        except Exception as e:
+            reason = f"load submission failed ({type(e).__name__}): {e}"
+            logger.exception("Mooncake %s", reason)
+
+        def fail_pending() -> None:
+            for metas in pending.values():
+                self._handle_failed_recv(metas, list(metas), reason)
+            pending.clear()
+
+        self.receiver_loop.call_soon_threadsafe(fail_pending)
 
     async def record_send_reqs(self, metadata: MooncakeConnectorMetadata):
         for p_req_id, (transfer_id, block_ids) in metadata.reqs_to_send.items():
@@ -3029,9 +3128,14 @@ class MooncakeConnectorWorker:
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         if not self.is_kv_producer and metadata.reqs_to_recv:
-            asyncio.run_coroutine_threadsafe(
-                self._start_load_kv(metadata.reqs_to_recv), self.receiver_loop
+            pending = {
+                engine_id: metas.copy()
+                for engine_id, metas in metadata.reqs_to_recv.items()
+            }
+            future = asyncio.run_coroutine_threadsafe(
+                self._start_load_kv(pending), self.receiver_loop
             )
+            future.add_done_callback(lambda done: self._load_kv_done(done, pending))
 
         if not self.is_kv_producer and metadata.lease_heartbeats:
             asyncio.run_coroutine_threadsafe(

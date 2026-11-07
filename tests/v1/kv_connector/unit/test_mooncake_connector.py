@@ -7,6 +7,7 @@ import errno
 import socket
 import threading
 import time
+from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1167,7 +1168,7 @@ def patch_worker_dependencies():
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.make_zmq_socket"
         ) as mock_make_zmq,
-        patch("httpx.AsyncClient") as mock_async_client,
+        patch.object(mooncake_connector.httpx, "AsyncClient") as mock_async_client,
     ):
         # Mock PP group
         mock_pp_group = MagicMock()
@@ -1315,7 +1316,9 @@ async def test_receive_kv_selects_remote_pp_workers(
         }
         seen_addrs: list[str] = []
 
-        async def fake_receive(worker_addr: str, metas: dict[str, PullReqMeta]):
+        async def fake_receive(
+            worker_addr: str, metas: dict[str, PullReqMeta], state=None
+        ):
             seen_addrs.append(worker_addr)
             for meta in metas.values():
                 meta.pull_tasks_count -= 1
@@ -1331,6 +1334,281 @@ async def test_receive_kv_selects_remote_pp_workers(
         assert seen_addrs == expected_addrs
         assert pull_metas["d-req-1"].pull_tasks_count == 0
         decode_worker.shutdown()
+
+
+@pytest.fixture
+def cpu_decode_connector(request):
+    """Keep the real connector and receiver loop; fake only hardware and peers."""
+    config = _make_worker_vllm_config("kv_consumer")
+    with (
+        set_current_vllm_config(config),
+        patch_worker_dependencies() as mocks,
+        patch("torch.accelerator.current_device_index", return_value=0),
+        patch.object(mooncake_connector.current_platform, "set_device"),
+        patch.object(
+            mooncake_connector,
+            "get_tensor_model_parallel_world_size",
+            return_value=getattr(request, "param", 1),
+        ),
+    ):
+        connector = MooncakeConnector(
+            config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        )
+        try:
+            yield connector, mocks
+        finally:
+            connector.connector_worker.shutdown()
+
+
+def _decode_pull_metadata(transfer_id: str = "xfer-1"):
+    metadata = MooncakeConnectorMetadata()
+    metadata.add_new_req(
+        request_id="d-req-1",
+        local_block_ids=[[100]],
+        kv_transfer_params={
+            "transfer_id": transfer_id,
+            "remote_engine_id": "p-engine",
+            "remote_bootstrap_addr": "http://bootstrap:33333",
+        },
+        load_remote_cache=True,
+    )
+    return metadata
+
+
+def _bootstrap_reply(mocks, worker_addrs):
+    client = mocks["mock_http_client"]
+    client.__aenter__.return_value = client
+    client.get.return_value = httpx.Response(
+        200,
+        request=httpx.Request("GET", "http://bootstrap:33333/query"),
+        json={"0": {"engine_id": "p-engine", "worker_addr": worker_addrs}},
+    )
+
+
+async def _wait_for_decode_condition(condition):
+    async def poll():
+        while not condition():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(poll(), timeout=10)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cpu_decode_connector", [2], indirect=True)
+@pytest.mark.parametrize(
+    "worker_addrs,expected_error",
+    [
+        (
+            {str(rank): {"0": f"tcp://producer-{rank}:1234"} for rank in range(3)},
+            "not divisible",
+        ),
+        (
+            {
+                "1": {"0": "tcp://producer-1:1234"},
+                "2": {"0": "tcp://producer-2:1234"},
+            },
+            "KeyError",
+        ),
+        ({"0": {}}, "no producer workers selected"),
+    ],
+    ids=["nondivisible-tp", "missing-tp-rank", "empty-pp-map"],
+)
+async def test_decode_preparation_failure_completes_without_io(
+    cpu_decode_connector, worker_addrs, expected_error, caplog
+):
+    """New and cached bad topologies must fail instead of waiting forever."""
+    connector, mocks = cpu_decode_connector
+    _bootstrap_reply(mocks, worker_addrs)
+    worker = connector.connector_worker
+    for _ in range(2):
+        worker.start_load_kv(_decode_pull_metadata())
+        await _wait_for_decode_condition(
+            lambda: connector.get_transfer_results(set()).finished_recving
+            == {"d-req-1"}
+        )
+        assert connector.get_block_ids_with_load_errors() == {100}
+        assert connector.get_transfer_results(set()).finished_recving == set()
+        stats = connector.get_kv_connector_stats()
+        assert stats.reduce()["Num failed recvs"] == 1
+    assert mocks["mock_socket_object"].send.await_count == 0
+    assert mocks["mock_http_client"].get.await_count == 1
+    assert expected_error in caplog.text
+
+
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+async def test_decode_metadata_encoding_failure_completes_without_io(
+    cpu_decode_connector, caplog
+):
+    """An unencodable transfer ID fails before any producer can write blocks."""
+    connector, mocks = cpu_decode_connector
+    _bootstrap_reply(mocks, {"0": {"0": "tcp://producer:1234"}})
+    connector.connector_worker.start_load_kv(_decode_pull_metadata("\ud800"))
+    finished = set()
+
+    def completed():
+        finished.update(connector.get_transfer_results(set()).finished_recving)
+        return "d-req-1" in finished
+
+    await _wait_for_decode_condition(completed)
+    assert connector.get_block_ids_with_load_errors() == {100}
+    assert mocks["mock_socket_object"].send.await_count == 0
+    assert connector.get_transfer_results(set()).finished_recving == set()
+    assert "UnicodeEncodeError" in caplog.text
+
+
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+async def test_decode_preparation_failure_waits_for_active_peer(
+    cpu_decode_connector,
+):
+    """One peer's local preparation error cannot release another peer's targets."""
+    connector, mocks = cpu_decode_connector
+    _bootstrap_reply(
+        mocks,
+        {"0": {"0": "tcp://producer-0:1234", "1": "tcp://producer-1:1234"}},
+    )
+    reply: Future[bytes] = Future()
+    socket_context = mocks["mock_make_zmq"].return_value
+
+    async def receive_reply():
+        return await asyncio.wrap_future(reply)
+
+    mocks["mock_socket_object"].recv.side_effect = receive_reply
+    mocks["mock_make_zmq"].side_effect = [
+        socket_context,
+        RuntimeError("socket preparation failed"),
+    ]
+    metadata = _decode_pull_metadata()
+    connector.connector_worker.start_load_kv(metadata)
+    invalid = set()
+
+    def failed():
+        invalid.update(connector.get_block_ids_with_load_errors())
+        return bool(invalid)
+
+    try:
+        await _wait_for_decode_condition(failed)
+        assert invalid == {100}
+        assert mocks["mock_socket_object"].recv.await_count == 1
+        assert connector.get_transfer_results(set()).finished_recving == set()
+        assert metadata.reqs_to_recv["p-engine"]["d-req-1"].pull_tasks_count == 1
+    finally:
+        reply.set_result(
+            msgspec.msgpack.encode(
+                MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.FINISH, ok_reqs=["d-req-1"]
+                )
+            )
+        )
+    finished = set()
+
+    def completed():
+        finished.update(connector.get_transfer_results(set()).finished_recving)
+        return "d-req-1" in finished
+
+    await _wait_for_decode_condition(completed)
+    assert metadata.reqs_to_recv["p-engine"]["d-req-1"].pull_tasks_count == 0
+    assert connector.get_block_ids_with_load_errors() == set()
+    assert connector.get_transfer_results(set()).finished_recving == set()
+    assert connector.get_kv_connector_stats().reduce()["Num failed recvs"] == 1
+
+
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cancelled_coro",
+    ["_start_load_kv", "handle_new_engine_id", "receive_kv_from_single_worker"],
+)
+async def test_decode_cancelled_before_start_reports_failure(
+    cpu_decode_connector, cancelled_coro, caplog
+):
+    """Supervisors must settle a task even if its coroutine body never runs."""
+    connector, mocks = cpu_decode_connector
+    _bootstrap_reply(mocks, {"0": {"0": "tcp://producer:1234"}})
+    worker = connector.connector_worker
+
+    def cancel_before_start(loop, coro, **kwargs):
+        task = asyncio.Task(coro, loop=loop, **kwargs)
+        if coro.cr_code.co_name == cancelled_coro:
+            task.cancel()
+        return task
+
+    async def set_task_factory(factory):
+        asyncio.get_running_loop().set_task_factory(factory)
+
+    asyncio.run_coroutine_threadsafe(
+        set_task_factory(cancel_before_start), worker.receiver_loop
+    ).result(timeout=10)
+    try:
+        worker.start_load_kv(_decode_pull_metadata())
+        finished = set()
+
+        def completed():
+            finished.update(connector.get_transfer_results(set()).finished_recving)
+            return "d-req-1" in finished
+
+        await _wait_for_decode_condition(completed)
+        assert connector.get_block_ids_with_load_errors() == {100}
+        assert mocks["mock_socket_object"].send.await_count == 0
+        assert "cancelled" in caplog.text
+        assert connector.get_transfer_results(set()).finished_recving == set()
+    finally:
+        asyncio.run_coroutine_threadsafe(
+            set_task_factory(None), worker.receiver_loop
+        ).result(timeout=10)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+async def test_decode_cancellation_after_send_does_not_release_blocks(
+    cpu_decode_connector, caplog
+):
+    """Cancelling a Python task cannot establish that P stopped writing."""
+    connector, mocks = cpu_decode_connector
+    _bootstrap_reply(mocks, {"0": {"0": "tcp://producer:1234"}})
+    mocks["mock_socket_object"].recv.side_effect = asyncio.CancelledError
+    metadata = _decode_pull_metadata()
+    connector.connector_worker.start_load_kv(metadata)
+    await _wait_for_decode_condition(
+        lambda: "retaining pending KV blocks" in caplog.text
+    )
+    assert metadata.reqs_to_recv["p-engine"]["d-req-1"].pull_tasks_count == 1
+    assert connector.get_transfer_results(set()).finished_recving == set()
+    assert connector.get_block_ids_with_load_errors() == set()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+async def test_decode_cancelled_bootstrap_can_be_queried_again(cpu_decode_connector):
+    """A cancelled bootstrap query must not strand the next request's waiter."""
+    connector, mocks = cpu_decode_connector
+    _bootstrap_reply(mocks, {"0": {"0": "tcp://producer:1234"}})
+    reply = mocks["mock_http_client"].get.return_value
+    mocks["mock_http_client"].get.side_effect = [asyncio.CancelledError(), reply]
+    worker = connector.connector_worker
+
+    async def load_and_wait():
+        worker.start_load_kv(_decode_pull_metadata())
+        finished = set()
+
+        def completed():
+            finished.update(connector.get_transfer_results(set()).finished_recving)
+            return "d-req-1" in finished
+
+        await _wait_for_decode_condition(completed)
+
+    await load_and_wait()
+    assert connector.get_block_ids_with_load_errors() == {100}
+    mocks["mock_socket_object"].recv.return_value = msgspec.msgpack.encode(
+        MooncakeXferResponse(
+            status=MooncakeXferResponseStatus.FINISH, ok_reqs=["d-req-1"]
+        )
+    )
+    await load_and_wait()
+    assert mocks["mock_http_client"].get.await_count == 2
+    assert connector.get_block_ids_with_load_errors() == set()
 
 
 def test_resolve_need_send_accounts_for_remote_tp_fanout():
