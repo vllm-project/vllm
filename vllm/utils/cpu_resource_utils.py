@@ -4,8 +4,10 @@
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from functools import cache
 
@@ -368,6 +370,26 @@ def _get_cpu_list() -> list[LogicalCPUInfo]:
         lscpu_output, object_hook=LogicalCPUInfo.json_decoder
     )["cpus"]
 
+    # Using hwloc output instead when memory nodes are specified by
+    # the env var CPU_VISIBLE_MEMORY_NODES
+    if (
+        "VLLM_CPU_SIM_MULTI_NUMA" not in os.environ
+        and os.environ.get(DEVICE_CONTROL_ENV_VAR)
+        and shutil.which("hwloc-ls") is not None
+    ):
+        lstopo_output = subprocess.check_output(["hwloc-ls", "--of", "xml"], text=True)
+        root = ET.fromstring(lstopo_output)
+        cpu_list = parse_hwloc_to_cpu_list(root)
+        if cpu_list["cpus"]:
+            cpu_list_json = json.dumps(cpu_list)
+            # Overriding lscpu output when hwloc-ls (same as lstopo)
+            # is available and env var is specified.
+            # A workaround for NUMA systems where some numa nodes
+            # don't have assigned cpu_cores.
+            logical_cpu_list = json.loads(
+                cpu_list_json, object_hook=LogicalCPUInfo.json_decoder
+            )["cpus"]
+
     # Filter CPUs with invalid attributes (only require id, core, node)
     logical_cpu_list = [
         x for x in logical_cpu_list if -1 not in (x.id, x.physical_core, x.numa_node)
@@ -379,3 +401,67 @@ def _get_cpu_list() -> list[LogicalCPUInfo]:
         logical_cpu_list = _synthesize_cpu_list()
 
     return logical_cpu_list
+
+
+def parse_hwloc_to_cpu_list(root_element: ET.Element) -> dict:
+    cpu_list = []
+    parents = {
+        child: obj
+        for obj in root_element.iter("object")
+        for child in obj.findall("object")
+    }
+
+    # Iterate through all objects globally to find Groups
+    # Memory parents may also be Package or Cache objects.
+    for obj in root_element.iter("object"):
+        # 1. Collect ALL NUMANode os_indexes inside this specific group
+        group_nodes = []
+        for child in obj.findall("object"):
+            if child.get("type") == "NUMANode":
+                node_idx = child.get("os_index")
+                if node_idx is not None:
+                    group_nodes.append(str(node_idx))
+
+        # Fallback if a Group somehow doesn't have a NUMANode
+        if not group_nodes:
+            continue
+
+        # 2. Find all Cores inside this specific group
+        for child in obj.iter("object"):
+            if child.get("type") == "Core":
+                # Only use the nearest memory parent, not an enclosing Group.
+                memory_parent = parents.get(child)
+                while memory_parent is not None:
+                    if any(
+                        x.get("type") == "NUMANode"
+                        for x in memory_parent.findall("object")
+                    ):
+                        break
+                    memory_parent = parents.get(memory_parent)
+                if memory_parent is not obj:
+                    continue
+
+                core_id = child.get("os_index")
+                if core_id is None:
+                    continue
+
+                # 3. Find all PUs (CPUs) inside this Core
+                for pu in child.iter("object"):
+                    if pu.get("type") == "PU":
+                        cpu_id = pu.get("os_index")
+                        if cpu_id is None:
+                            continue
+
+                        # 4. Create an entry for EVERY NUMANode this core belongs to
+                        for node_id in group_nodes:
+                            cpu_list.append(
+                                {
+                                    "cpu": str(cpu_id),
+                                    "core": str(core_id),
+                                    "node": node_id,
+                                }
+                            )
+
+    # Sort by CPU ID (as integer) so the list is ordered cleanly
+    cpu_list.sort(key=lambda x: int(x["cpu"]))
+    return {"cpus": cpu_list}
