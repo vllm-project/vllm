@@ -127,9 +127,8 @@ class HpcRopeNorm(CustomOp, HpcModule):
         self.q_size = num_heads * head_dim
         self.kv_size = num_kv_heads * head_dim
 
-        # Register as a non-persistent buffer so it participates in sleep
-        # level-2 save/restore (CuMemAllocator) but is excluded from the
-        # checkpoint state_dict.
+        # Register as a non-persistent buffer so it survives level-2 sleep on
+        # every platform but is excluded from the checkpoint state_dict.
         self.register_buffer("cos_sin_cache", cos_sin_cache.float(), persistent=False)
 
         self.fallback_qnorm = fallback_qnorm
