@@ -151,6 +151,7 @@ _TEXT_GENERATION_MODELS = {
     ),
     "Lfm2ForCausalLM": ("lfm2", "Lfm2ForCausalLM"),
     "Lfm2MoeForCausalLM": ("lfm2_moe", "Lfm2MoeForCausalLM"),
+    "Lfm3ForCausalLM": ("lfm3", "Lfm3ForCausalLM"),
     "LagunaForCausalLM": ("laguna", "LagunaForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     "Llama4ForCausalLM": ("llama4", "Llama4ForCausalLM"),
@@ -488,6 +489,10 @@ _MULTIMODAL_MODELS = {
         "vllm.models.kimi_k3",
         "KimiK3ForConditionalGeneration",
     ),
+    "KimiK31ForConditionalGeneration": (
+        "vllm.models.kimi_k3",
+        "KimiK3ForConditionalGeneration",
+    ),
     "MoonshotKimiaForCausalLM": ("kimi_audio", "KimiAudioForConditionalGeneration"),
     "MossTranscribeDiarizeForConditionalGeneration": (
         "moss_transcribe_diarize",
@@ -498,6 +503,11 @@ _MULTIMODAL_MODELS = {
         "LightOnOCRForConditionalGeneration",
     ),
     "Lfm2VlForConditionalGeneration": ("lfm2_vl", "Lfm2VLForConditionalGeneration"),
+    "Lfm3AudioForConditionalGeneration": (
+        "lfm3_audio",
+        "Lfm3AudioForConditionalGeneration",
+    ),
+    "Lfm3VlForConditionalGeneration": ("lfm3_vl", "Lfm3VlForConditionalGeneration"),
     "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),
     "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
