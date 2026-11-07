@@ -11,6 +11,7 @@ from huggingface_hub.utils import LocalEntryNotFoundError
 
 import vllm.model_executor.model_loader.weight_utils as weight_utils
 from vllm.model_executor.model_loader.weight_utils import (
+    _warn_if_checkpoint_exceeds_numa_binding,
     download_weights_from_hf,
     drop_checkpoint_cache,
     initialize_single_dummy_weight,
@@ -464,6 +465,27 @@ def test_dummy_norm_weights_are_neutral(default_vllm_config):
             param.data.uniform_(-5, 5)
             initialize_single_dummy_weight(param, name=name)
             assert torch.all(param == values[name]), (type(norm).__name__, name)
+
+
+@pytest.mark.parametrize(
+    "numa_memory,size,expected",
+    [
+        (None, 10 << 30, False),  # unbound or unreadable: stay quiet
+        (([0], 20 << 30), 10 << 30, False),  # bound but it fits
+        (([0], 10 << 30), 20 << 30, True),  # bound and it does not
+    ],
+)
+def test_warn_only_when_bound_and_too_big(monkeypatch, numa_memory, size, expected):
+    """MPOL_BIND does not spill, so this is the last message before SIGKILL."""
+    monkeypatch.setattr(weight_utils, "get_numa_available_memory", lambda: numa_memory)
+    # Records the call rather than reading the log: warning_once dedupes, and a
+    # parametrized test would only ever see the first case fire.
+    calls = []
+    monkeypatch.setattr(
+        weight_utils.logger, "warning_once", lambda *a, **kw: calls.append(a)
+    )
+    _warn_if_checkpoint_exceeds_numa_binding(size)
+    assert bool(calls) is expected
 
 
 if __name__ == "__main__":
