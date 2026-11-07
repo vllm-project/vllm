@@ -94,9 +94,10 @@ def _supports_router_bf16x3_device() -> bool:
         return False
 
     # Importing a foreign platform can reload torch extension libraries.
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import get_cdna_version
 
-    return on_gfx950()
+    # Tile tables exist for CDNA3 (gfx942) and CDNA4 (gfx950).
+    return get_cdna_version() in (3, 4)
 
 
 def norm_residual_then_norm(
@@ -296,7 +297,6 @@ class MuseSpark1xMoE(nn.Module):
             self._router_multiplier_folded = True
             self.moe_router.router_output_multiplier = None
         weight = self.router.weight.data
-        # Configs are tuned and validated on gfx950 only.
         if (
             _supports_router_bf16x3_device()
             and weight.dtype == torch.float32
