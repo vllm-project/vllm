@@ -644,20 +644,28 @@ def per_token_group_quant_fp8(
     quantized tensor along with the scaling factor used for quantization.
 
     Args:
-        x: The input tensor with ndim >= 2.
+        x: The input tensor with ndim >= 2 and unit stride in the last
+            dimension. Its last dimension must be divisible by `group_size`.
         group_size: The group size used for quantization.
         eps: The minimum to avoid dividing zero.
         dtype: The dtype of output tensor. Note that only `torch.float8_e4m3fn`
             is supported for now.
         column_major_scales: Outputs scales in column major.
         tma_aligned_scales: Outputs scales in TMA-aligned layout.
-        out_q: Optional output tensor. If not provided, function will create.
-        use_ue8m0: If True, round each scale down to a power of two (UE8M0
+        out_q: Optional contiguous output tensor with the same shape as `x`.
+            If not provided, function will create it.
+        use_ue8m0: If True, round each scale up to a power of two (UE8M0
             format). None defers to the platform default.
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
-        scaling factor.
+        x_q (torch.Tensor): Quantized values with the input shape.
+        x_s (torch.Tensor): FP32 scales with shape
+            `(*x.shape[:-1], x.shape[-1] // group_size)`. Column-major scales
+            are contiguous along the penultimate dimension within each batch.
+            TMA alignment pads that dimension's storage, not its logical shape.
+            Padding is uninitialized and must not be read as a logical scale.
+
+    The separate packed UE8M0 DeepGEMM helper uses a different representation.
 
     """
     if use_ue8m0 is None:
@@ -671,7 +679,33 @@ def per_token_group_quant_fp8(
 
     fp8_min, fp8_max = get_fp8_min_max()
 
-    assert out_q is None or out_q.shape == x.shape
+    assert out_q is None or (out_q.shape == x.shape and out_q.is_contiguous())
+    if x.ndim > 2:
+        # The native and Triton kernels consume two-dimensional scale tensors.
+        flat_x = x.reshape(-1, x.shape[-1])
+        flat_out = None if out_q is None else out_q.view(flat_x.shape)
+        x_q, x_s = per_token_group_quant_fp8(
+            flat_x,
+            group_size,
+            eps=eps,
+            dtype=dtype,
+            out_q=flat_out,
+            use_ue8m0=use_ue8m0,
+        )
+        x_s = x_s.view(*x.shape[:-1], x.shape[-1] // group_size)
+        if column_major_scales:
+            rows = x.shape[-2]
+            storage_rows = get_tma_aligned_size(rows, 4) if tma_aligned_scales else rows
+            scale_storage = torch.empty(
+                (*x.shape[:-2], x_s.shape[-1], storage_rows),
+                device=x.device,
+                dtype=torch.float32,
+            )
+            column_scales = scale_storage.transpose(-1, -2)[..., :rows, :]
+            column_scales.copy_(x_s)
+            x_s = column_scales
+        return x_q.view(x.shape), x_s
+
     x_q = out_q
     if x_q is None:
         x_q = torch.empty(x.shape, device=x.device, dtype=dtype)
@@ -683,11 +717,7 @@ def per_token_group_quant_fp8(
             sf_k = x.shape[-1] // group_size
             tma_aligned_m = get_tma_aligned_size(m, 4)
             shape = x.shape[:-2] + (m, sf_k)
-            stride = (
-                (1, tma_aligned_m)
-                if x.dim() == 2
-                else (tma_aligned_m * sf_k, 1, tma_aligned_m)
-            )
+            stride = (1, tma_aligned_m)
             x_s = torch.empty_strided(
                 shape, stride, device=x.device, dtype=torch.float32
             )
