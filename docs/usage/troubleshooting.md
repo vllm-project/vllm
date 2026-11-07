@@ -22,6 +22,10 @@ It'd be better to store the model in a local disk. Additionally, have a look at 
 
 If the model is too large to fit in a single GPU, you will get an out-of-memory (OOM) error. Consider adopting [these options](../configuration/conserving_memory.md) to reduce the memory consumption.
 
+## `max_num_seqs (N) exceeds available Mamba cache blocks (M)`
+
+A hybrid Mamba/attention model needs one Mamba cache block per decode sequence, and the pool is sized after the KV cache, so at a long `max_model_len` it can be smaller than the default `max_num_seqs`. Pass `--max-num-seqs M` with the number from the message, raise `gpu_memory_utilization`, or reduce `max_model_len`. See [Conserving Memory](../configuration/conserving_memory.md#context-length-and-batch-size); the behaviour is deliberate ([#49064](https://github.com/vllm-project/vllm/issues/49064)).
+
 ## Generation quality changed
 
 In v0.8.0, the source of default sampling parameters was changed in <https://github.com/vllm-project/vllm/pull/12622>. Prior to v0.8.0, the default sampling parameters came from vLLM's set of neutral defaults. From v0.8.0 onwards, the default sampling parameters come from the `generation_config.json` provided by the model creator.
