@@ -544,9 +544,18 @@ def _get_kv_cache_groups_uniform_page_size(
     # is the minimum number of layers among all attention types. Need a better
     # strategy if we want to support more complex patterns (e.g., 20 full + 30
     # sw, where the group size should be 10).
-    min_num_layers = min([len(layers) for layers in layer_buckets])
+    # Exclude draft-only buckets when sizing the repeating pattern so a small
+    # draft model (e.g. a 1-layer or hybrid DFlash/Eagle drafter) does not
+    # fragment the target model's KV cache into single-layer groups.
+    target_bucket_counts = [
+        len(layers)
+        for layers, specs in zip(layer_buckets, spec_buckets)
+        if not all(spec.is_draft for spec in specs)
+    ]
+    bucket_counts = target_bucket_counts or [len(layers) for layers in layer_buckets]
+    min_num_layers = min(bucket_counts)
     group_size = min_num_layers
-    max_num_layers = max([len(layers) for layers in layer_buckets])
+    max_num_layers = max(bucket_counts)
     if max_num_layers < min_num_layers * 1.5:
         # If the number of layers is not much larger than the minimum number of
         # layers, use the maximum number of layers as the group size to avoid
@@ -557,9 +566,11 @@ def _get_kv_cache_groups_uniform_page_size(
         # extra layers to one attention type.
         group_size = max_num_layers
     grouped_layers = []
-    for layers in layer_buckets:
+    for layers, specs in zip(layer_buckets, spec_buckets):
         num_padding_layers = group_size - len(layers) % group_size
-        if num_padding_layers != group_size:
+        if num_padding_layers != group_size and not all(
+            spec.is_draft for spec in specs
+        ):
             logger.warning(
                 "Add %d padding layers, may waste at most %.2f%% KV cache memory",  # noqa
                 num_padding_layers,

@@ -2452,3 +2452,50 @@ def test_null_head_len():
         assert null_head_len(table) == expected
     blocks = KVCacheBlocks(([null] * 4 + real, [null] + real[:1] + [null]))
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 2, 3], [1]]
+
+
+def test_uniform_page_size_groups_ignore_draft_bucket_size():
+    """Draft-only buckets (e.g., a hybrid DFlash drafter with 5 sliding-window
+    layers and 1 full-attention layer) must not shrink the target model's
+    uniform-page-size group_size to 1 and fragment target KV cache groups."""
+    page_size = 560 * 4 * 256 * 2 * 2
+    specs: dict[str, KVCacheSpec] = {}
+    for i in range(24):
+        specs[f"target.mamba.{i}"] = MambaSpec(
+            shapes=((16, 128),),
+            dtypes=(torch.bfloat16,),
+            block_size=8192,
+            page_size_padded=page_size,
+        )
+    for i in range(8):
+        specs[f"target.attn.{i}"] = FullAttentionSpec(
+            block_size=560,
+            num_kv_heads=4,
+            head_size=256,
+            dtype=torch.bfloat16,
+            page_size_padded=page_size,
+        )
+    for i in range(5):
+        specs[f"draft.swa.{i}"] = SlidingWindowSpec(
+            block_size=560,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.bfloat16,
+            sliding_window=4096,
+            page_size_padded=page_size,
+            is_draft=True,
+        )
+    specs["draft.attn.5"] = FullAttentionSpec(
+        block_size=560,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.bfloat16,
+        page_size_padded=page_size,
+        is_draft=True,
+    )
+
+    groups = kv_cache_planning._get_kv_cache_groups_uniform_page_size(specs)
+    # 24 target Mamba (3 groups of 8) + 8 target FullAttn (1 group of 8)
+    # + 5 draft SWA (1 group of 5) + 1 draft FullAttn (1 group of 1) = 6 groups.
+    assert len(groups) == 6
+    assert [len(g.layer_names) for g in groups] == [8, 8, 8, 8, 5, 1]
