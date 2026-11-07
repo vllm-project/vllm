@@ -281,7 +281,7 @@ def reset_eplb_async_state(model_runner: GPUModelRunner) -> None:
             # Wake an async worker waiting on consumed_event; the in-flight
             # layer result is discarded, not applied.
             result.consumed_event.record()
-        ms.expert_load_pass.zero_()
+        ms.reset_load_pass()
         ms.expert_load_window.zero_()
 
     eplb_state.expert_rearrangement_step = 0

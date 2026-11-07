@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections import deque
+from functools import partial
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
+from vllm.distributed.eplb import eplb_state as eplb_state_module
 from vllm.distributed.eplb.eplb_state import (
+    EplbModelState,
+    EplbState,
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
 )
@@ -157,6 +162,48 @@ def test_commit_eplb_maps_for_layer():
 
     # Layer 1 untouched
     assert torch.equal(model_state.physical_to_logical_map[1], original_phy2log[1])
+
+
+def test_log_balancedness_from_physical_load(monkeypatch):
+    """Per-rank load comes from exact physical counts, so a skewed replica shows up
+    even when the logical load would look balanced if split over replicas."""
+    ep_group = MagicMock()
+    ep_group.device_group.size.return_value = 2
+    ep_group.device_group.rank.return_value = 0
+    monkeypatch.setattr(eplb_state_module, "get_ep_group", lambda: ep_group)
+    monkeypatch.setattr(torch, "Event", MagicMock)
+    logger = MagicMock()
+    monkeypatch.setattr(eplb_state_module, "logger", logger)
+    state = EplbState.__new__(EplbState)
+    state.parallel_config = MagicMock()
+    state.parallel_config.eplb_config.log_balancedness_interval = 1
+    state.expert_load_window_size = 1
+    state.expert_rearrangement_step_interval = 100
+    state.expert_load_window_step = state.expert_rearrangement_step = 0
+    state.is_async, state.should_record_tensor = False, None
+    state._pending_balancedness = deque()
+    state._allreduce_list = lambda tensors: tensors
+    # Rank 0 holds [e0, e1], rank 1 holds [e2, e0], all of e0 goes to rank 0.
+    model_state = _make_model_state(
+        phy2log=torch.tensor([[0, 1, 2, 0]]),
+        log2phy=torch.full((1, 3, 2), -1, dtype=torch.long),
+        logcnt=torch.tensor([[2, 1, 1]]),
+    )
+    model_state.expert_load_pass = torch.tensor([[4, 3, 3]])
+    model_state.expert_load_window = torch.zeros((1, 1, 3), dtype=torch.long)
+    # Sized to the map buffer, wider than the active map.
+    model_state.physical_load_pass = torch.tensor([[4, 3, 3, 0, 0, 0]])
+    model_state.reset_load_pass = partial(EplbModelState.reset_load_pass, model_state)
+    state.model_states = {"m": model_state}
+
+    state.step(log_stats=True)
+    state._maybe_log_balancedness()
+
+    avg_tokens, max_tokens, balancedness = logger.info.call_args.args[3:6]
+    assert (avg_tokens, max_tokens, balancedness) == (5.0, 7.0, 5.0 / 7.0)
+    assert model_state.expert_load_window[0].tolist() == [[4, 3, 3]]
+    assert not model_state.expert_load_pass.any()
+    assert not model_state.physical_load_pass.any()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

@@ -25,11 +25,12 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         logical_to_physical_ptr,
         out_ids_ptr,
         out_ptr,
+        physical_load_ptr,
         record_enabled_ptr,
         num_unpadded_tokens_ptr,
         num_logical_experts,
         map_slots,
-        out_size,
+        num_physical_experts,
         numel,
         num_active_experts,
         BLOCK_SIZE: tl.constexpr,
@@ -60,7 +61,8 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
             num_logical_experts,
             map_slots,
             out_ptr,
-            out_size,
+            physical_load_ptr,
+            num_physical_experts,
             record_enabled_ptr,
             num_unpadded_tokens_ptr,
         )
@@ -73,6 +75,7 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         expert_load_view: torch.Tensor,
         record_enabled: torch.Tensor,
         num_unpadded_tokens: torch.Tensor | None,
+        physical_load_view: torch.Tensor | None,
     ) -> torch.Tensor:
         topk_ids_in = topk_ids.contiguous().to(dtype=torch.int32)
         numel = topk_ids_in.numel()
@@ -88,11 +91,12 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
             logical_to_physical_map.contiguous(),
             out_flat,
             expert_load_view,
+            physical_load_view,
             record_enabled,
             num_unpadded_tokens,
             logical_replica_count.shape[0],
             logical_to_physical_map.shape[1],
-            expert_load_view.shape[0],
+            physical_load_view.shape[0] if physical_load_view is not None else 0,
             numel,
             num_active_experts,
             BLOCK_SIZE=256,
@@ -106,6 +110,7 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         logical_replica_count: torch.Tensor,
         record_enabled: torch.Tensor,
         num_unpadded_tokens: torch.Tensor | None = None,
+        physical_load_view: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Fused triton implementation: mapping + optional recording in one kernel.
         return _eplb_map_and_record_triton(
@@ -115,6 +120,7 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
             expert_load_view=expert_load_view,
             record_enabled=record_enabled,
             num_unpadded_tokens=num_unpadded_tokens,
+            physical_load_view=physical_load_view,
         )
 else:
 
@@ -125,6 +131,7 @@ else:
         logical_replica_count: torch.Tensor,
         record_enabled: torch.Tensor,
         num_unpadded_tokens: torch.Tensor | None = None,
+        physical_load_view: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return topk_ids
 
@@ -204,6 +211,7 @@ class BaseRouter(FusedMoERouter):
                 num_unpadded_tokens=eplb_state.num_unpadded_tokens_tensors[
                     dbo_current_ubatch_id()
                 ],
+                physical_load_view=eplb_state.physical_load_view,
             )
         return topk_ids
 

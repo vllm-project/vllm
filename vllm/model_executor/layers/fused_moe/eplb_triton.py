@@ -15,6 +15,7 @@ def eplb_map_and_record(
     num_logical,
     map_stride,
     expert_load,
+    physical_load,
     num_physical,
     record_enabled,
     num_unpadded_tokens,
@@ -22,7 +23,9 @@ def eplb_map_and_record(
     """Map logical expert ids to physical replicas and record expert load.
 
     ``token_idx`` broadcasts against ``logical_ids``; masked-off or
-    out-of-range ids map to -1.
+    out-of-range ids map to -1. ``expert_load`` is per logical expert.
+    ``physical_load`` is per physical expert and optional, ``num_physical`` is
+    its size.
     """
     valid = mask & (logical_ids >= 0) & (logical_ids < num_logical)
     safe_ids = tl.where(valid, logical_ids, 0)
@@ -36,12 +39,13 @@ def eplb_map_and_record(
         other=-1,
     )
 
-    record = (
-        (tl.load(record_enabled) != 0)
-        & (physical_ids >= 0)
-        & (physical_ids < num_physical)
-    )
+    record = (tl.load(record_enabled) != 0) & (physical_ids >= 0)
     if num_unpadded_tokens is not None:
         record &= token_idx < tl.load(num_unpadded_tokens)
-    tl.atomic_add(expert_load + tl.where(record, physical_ids, 0), 1, mask=record)
+    tl.atomic_add(expert_load + safe_ids, 1, mask=record)
+    if physical_load is not None:
+        in_range = record & (physical_ids < num_physical)
+        tl.atomic_add(
+            physical_load + tl.where(in_range, physical_ids, 0), 1, mask=in_range
+        )
     return physical_ids
