@@ -11,6 +11,7 @@ from typing import Any, Final, cast
 
 from fastapi import Request
 from openai.types.responses import (
+    ResponseErrorEvent,
     ResponseOutputItem,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
@@ -18,7 +19,6 @@ from openai.types.responses import (
     ResponseStatus,
 )
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
-from pydantic import TypeAdapter
 
 from vllm import envs
 from vllm.config.utils import replace
@@ -1416,9 +1416,15 @@ class OpenAIServingResponses(GenerateBaseServing):
                 ):
                     yield event_data
             except GenerationError as e:
-                error_json = self._convert_generation_error_to_streaming_response(e)
+                error = self.create_error_response(e).error
                 yield _increment_sequence_number_and_return(
-                    TypeAdapter(StreamingResponsesResponse).validate_json(error_json)
+                    ResponseErrorEvent(
+                        type="error",
+                        sequence_number=-1,
+                        code=str(error.code),
+                        message=error.message,
+                        param=error.param,
+                    )
                 )
                 return
 

@@ -208,6 +208,10 @@ To get prompt token IDs before generation, use
 a self-contained Responses request without inference and returns the prompt
 token IDs, so a separate `/tokenize` call is not needed.
 
+If a request fails after a streamed response has started, the stream ends with
+an `error` event whose `code` is the HTTP status of the failure, for example
+`"500"`, or `"503"` when the request can be retried.
+
 #### Sampling parameters
 
 In addition to the OpenAI request fields, the Responses API forwards vLLM

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 from openai.types.responses import (
+    ResponseErrorEvent,
     ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
@@ -1815,10 +1816,10 @@ async def test_responses_streaming_metrics_only_on_completed_event():
     assert events[-1].response.metrics.time_to_first_token_ms == pytest.approx(500.0)
 
 
-async def _stream_truncated_by_length(serving: OpenAIServingResponses):
+async def _stream_single_output(serving: OpenAIServingResponses, finish_reason: str):
     request = ResponsesRequest(input="hi", tools=[], stream=True, store=False)
     context = _make_simple_context_with_output(
-        "cut mid sen", [10, 20], finish_reason="length"
+        "cut mid sen", [10, 20], finish_reason=finish_reason
     )
 
     async def one_context():
@@ -1843,7 +1844,7 @@ async def test_responses_stream_truncated_by_length_reports_incomplete():
     """A max_output_tokens cut must end the stream with ``response.incomplete``
     and mark the cut item ``incomplete`` in both ``output_item.done`` and the
     final response (#57998)."""
-    events = await _stream_truncated_by_length(_make_serving_instance())
+    events = await _stream_single_output(_make_serving_instance(), "length")
 
     item_done = [e for e in events if e.type == "response.output_item.done"]
     assert [e.item.status for e in item_done] == ["incomplete"]
@@ -1856,11 +1857,28 @@ async def test_responses_stream_truncated_by_length_reports_incomplete():
 
 
 @pytest.mark.asyncio
+async def test_responses_stream_generation_error_ends_with_error_event():
+    """A request that fails during generation must end the stream with an
+    ``error`` event instead of raising out of the SSE generator."""
+    events = await _stream_single_output(_make_serving_instance(), "error")
+
+    assert [e.type for e in events] == [
+        "response.created",
+        "response.in_progress",
+        "error",
+    ]
+    error = events[-1]
+    assert isinstance(error, ResponseErrorEvent)
+    assert (error.code, error.message) == ("500", "Internal server error")
+    assert error.sequence_number == 2
+
+
+@pytest.mark.asyncio
 async def test_background_stream_replay_stops_on_response_incomplete():
     """Replaying a stored background stream must end at ``response.incomplete``
     as it does at ``response.completed``, instead of waiting for more events."""
     serving = _make_serving_instance()
-    events = await _stream_truncated_by_length(serving)
+    events = await _stream_single_output(serving, "length")
     assert isinstance(events[-1], ResponseIncompleteEvent)
     serving.event_store["resp_bg"] = (deque(events), asyncio.Event())
 
