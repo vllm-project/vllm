@@ -806,6 +806,9 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
                           const torch::stable::Tensor& seqLens,
                           torch::stable::Tensor& indices, int64_t numRows,
                           int64_t stride0, int64_t stride1, int64_t topK) {
+  STD_TORCH_CHECK(topK > 0 && topK <= 8192,
+                  "top_k_per_row_decode: topK must be in [1, 8192], got ",
+                  topK);
   constexpr int kSortingAlgorithmThreshold = 12288;
   constexpr int kSplitWorkThreshold = 200 * 1000;
   constexpr int kNumThreadsPerBlock = 512;
