@@ -160,3 +160,24 @@ def test_shard_q_round_trip(use_sm, q_dtype, num_decode_tokens):
         args=(world, get_open_port(), use_sm, q_dtype, num_decode_tokens),
         nprocs=world,
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_indexer_upload_survives_next_build(monkeypatch):
+    """Building the next step must not change a still-queued upload."""
+    from vllm.v1.attention.backends.mla.indexer import upload_shardq_indices
+
+    monkeypatch.setattr(
+        shardq, "get_tp_group", lambda: SimpleNamespace(world_size=2, rank_in_group=0)
+    )
+
+    def upload(lens):
+        split = shardq.ShardQSplit(0, *zigzag_split(np.array(lens), 2))
+        qsl = torch.tensor(np.r_[0, np.cumsum(lens)], dtype=torch.int32)
+        return upload_shardq_indices(split, qsl, torch.device("cuda"))[0], split
+
+    torch.cuda._sleep(1 << 30)  # keep both copies queued
+    first, split = upload([3000, 1200])
+    upload([700])
+    torch.cuda.synchronize()
+    np.testing.assert_array_equal(first.cpu().numpy(), split.local_token_ids)
