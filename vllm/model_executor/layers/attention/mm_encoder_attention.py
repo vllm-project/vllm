@@ -3,6 +3,7 @@
 
 import functools
 import json
+from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -214,6 +215,38 @@ def bucket_flashinfer_max_seqlen(
     )
 
 
+def _pad_cumulative_seqlens_buffer(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+) -> None:
+    n = src.shape[0]
+    dst.zero_()
+    dst[:n].copy_(src)
+    if n < dst.shape[0]:
+        dst[n:] = src[-1]
+
+
+def _pad_flashinfer_cu_seqlens_buffer(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+) -> None:
+    src_mid = src.shape[0] // 2
+    dst_mid = dst.shape[0] // 2
+    assert src_mid <= dst_mid, (
+        f"FlashInfer cu_seqlens replay buffer is larger than capture buffer: "
+        f"src_section={src_mid}, dst_section={dst_mid}"
+    )
+
+    dst.zero_()
+    dst[:src_mid].copy_(src[:src_mid])
+    if src_mid < dst_mid:
+        dst[src_mid:dst_mid] = src[src_mid - 1]
+
+    dst[dst_mid : dst_mid + src_mid].copy_(src[src_mid:])
+    if dst_mid + src_mid < dst.shape[0]:
+        dst[dst_mid + src_mid :] = src[-1]
+
+
 # --8<-- [start:mm_encoder_attn]
 @CustomOp.register("mm_encoder_attn")
 class MMEncoderAttention(CustomOp):
@@ -270,7 +303,14 @@ class MMEncoderAttention(CustomOp):
         tp_size: int,
         device: torch.device,
         fp8_padded_hidden_size: int | None = None,
+        separate_qkv: bool = False,
     ) -> torch.Tensor:
+        """``cu_seqlens`` in the layout ``attn_backend`` reads.
+
+        ``separate_qkv`` tells FlashInfer that Q, K and V are separate
+        contiguous tensors rather than views into a fused QKV projection
+        (out-of-tree overrides keep their own layout and do not receive it).
+        """
         if (oot_class := maybe_get_oot_by_class(cls)) is not cls:
             return oot_class.maybe_recompute_cu_seqlens(  # type: ignore[attr-defined]
                 attn_backend,
@@ -284,11 +324,11 @@ class MMEncoderAttention(CustomOp):
         if attn_backend == AttentionBackendEnum.FLASHINFER:
             batch_size = len(cu_seqlens) - 1
 
-            if fp8_padded_hidden_size is not None:
-                # FP8 path: after quantization Q/K/V are each independent
-                # contiguous tensors with stride H * padded_D per token.
-                # All sections use the same element stride.
-                scale = fp8_padded_hidden_size // tp_size
+            if fp8_padded_hidden_size is not None or separate_qkv:
+                # Q/K/V are each independent contiguous tensors (separate
+                # projections, or FP8 quantization) with stride H * D per
+                # token (D padded for FP8): all sections use the same stride.
+                scale = (fp8_padded_hidden_size or hidden_size) // tp_size
                 cu_seqlens = cu_seqlens * scale
                 cu_seqlens_padded = add_padding_to_seqlens(
                     cu_seqlens, batch_size, cu_seqlens[-1]
@@ -313,6 +353,16 @@ class MMEncoderAttention(CustomOp):
 
         cu_seqlens = async_tensor_h2d(cu_seqlens, device=device)
         return cu_seqlens
+
+    @classmethod
+    def cu_seqlens_buffer_padding(
+        cls, attn_backend: AttentionBackendEnum
+    ) -> Callable[[torch.Tensor, torch.Tensor], None]:
+        """Copy ``maybe_recompute_cu_seqlens``'s output into a larger CUDA
+        graph buffer, padding with empty sequences."""
+        if attn_backend == AttentionBackendEnum.FLASHINFER:
+            return _pad_flashinfer_cu_seqlens_buffer
+        return _pad_cumulative_seqlens_buffer
 
     def __init__(
         self,
