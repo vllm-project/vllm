@@ -83,6 +83,7 @@ from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferSM120Attention,
 )
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
+from vllm.models.deepseek_v4.nvidia.mega_moe import DeepseekV4LocalizedMegaMoEExperts
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.deep_gemm import bf16_mega_gate
@@ -379,7 +380,22 @@ class DeepseekV4MoE(nn.Module):
             and (self.use_sequence_parallel or self.tp_size == 1)
         )
 
-        self.experts = DeepGemmMegaMoEExperts(
+        experts_cls = DeepGemmMegaMoEExperts
+        extra = vllm_config.additional_config
+        if isinstance(extra, dict) and extra.get("dsv4_megamoe_localize_weights"):
+            # Locality-domain memory is outside the CuMem and offload pools.
+            offload = vllm_config.offload_config
+            if (
+                vllm_config.model_config.enable_sleep_mode
+                or offload.uva.cpu_offload_gb > 0
+                or offload.prefetch.offload_group_size > 0
+            ):
+                raise ValueError(
+                    "dsv4_megamoe_localize_weights does not support sleep mode "
+                    "or CPU weight offloading."
+                )
+            experts_cls = DeepseekV4LocalizedMegaMoEExperts
+        self.experts = experts_cls(
             vllm_config,
             num_experts=self.n_physical_experts,
             num_local_experts=self.n_local_physical_experts,
