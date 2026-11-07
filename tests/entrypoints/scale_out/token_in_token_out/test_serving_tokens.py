@@ -217,6 +217,29 @@ async def test_generate_defaults_max_tokens_when_omitted(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [["--override-generation-config", '{"max_new_tokens": 8}']],
+    indirect=True,
+)
+async def test_generate_explicit_null_max_tokens_respects_server_cap(client):
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {
+            "max_tokens": None,
+            "temperature": 0.0,
+            "ignore_eos": True,
+        },
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    data = resp.json()
+    assert len(data["choices"][0]["token_ids"]) == 8
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND,
     reason="parallel sampling (n > 1) is not supported by the Rust frontend",
