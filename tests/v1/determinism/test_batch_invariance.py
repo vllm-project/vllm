@@ -1036,7 +1036,10 @@ def test_sliding_window_logprobs_bitwise_alone_vs_mixed_batch():
     targets = [prompt(rng.randint(256, 512)) for _ in range(4)]
     fillers = [prompt(rng.randint(window // 2, window - max_tokens)) for _ in range(4)]
 
-    sp = SamplingParams(temperature=0.0, max_tokens=max_tokens, logprobs=1)
+    # Random token ids make Gemma emit <end_of_turn> within a few steps.
+    sp = SamplingParams(
+        temperature=0.0, max_tokens=max_tokens, logprobs=1, ignore_eos=True
+    )
     llm = LLM(
         model=model,
         attention_config={"backend": "FLASH_ATTN"},
