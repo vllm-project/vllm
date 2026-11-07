@@ -782,6 +782,9 @@ def test_paused_dp_rank_ignores_start_wave(paused):
 def _pausable_engine_core_proc() -> EngineCoreProc:
     """A bare EngineCoreProc holding just the state pause_scheduler touches."""
     core = object.__new__(EngineCoreProc)
+    core._checkpoint_state = CheckpointState.RUNNING
+    core._checkpoint_error = None
+    core._kv_cache_reclaimable = False
     core.model_executor = MagicMock()
     core.model_executor.vllm_config.cache_config.enable_extensible_kv_cache = False
     core.scheduler = MagicMock()

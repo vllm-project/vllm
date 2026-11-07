@@ -58,7 +58,7 @@ from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.engine import FinishReason
+from vllm.v1.engine import CheckpointState, FinishReason
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
@@ -2647,6 +2647,8 @@ def test_kv_cache_release_after_keep_pause_preserves_requests():
     assert scheduler.kv_cache_manager.get_block_ids(running.request_id)[0]
 
     core = object.__new__(EngineCore)
+    core._checkpoint_state = CheckpointState.RUNNING
+    core._kv_cache_reclaimable = False
     core.scheduler = scheduler
     core.model_executor = Mock(is_sleeping=False)
     core.mm_receiver_cache = None
@@ -2683,6 +2685,8 @@ def test_pause_that_clears_the_kv_cache_lets_weight_updates_borrow_it(extensible
     from types import SimpleNamespace
 
     core = object.__new__(EngineCore)
+    core._checkpoint_state = CheckpointState.RUNNING
+    core._kv_cache_reclaimable = False
     core.scheduler = create_scheduler()
     core.mm_receiver_cache = None
     core.batch_queue = None

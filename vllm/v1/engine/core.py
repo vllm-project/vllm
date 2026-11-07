@@ -129,12 +129,6 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
-    # Class-level defaults so tests can build an EngineCore with
-    # object.__new__.
-    _checkpoint_state = CheckpointState.RUNNING
-    _checkpoint_error: str | None = None
-    _kv_cache_reclaimable = False
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -143,6 +137,12 @@ class EngineCore:
         executor_fail_callback: Callable | None = None,
         include_finished_set: bool = False,
     ):
+        # Process checkpoint lifecycle (prepare/restore).
+        self._checkpoint_state = CheckpointState.RUNNING
+        self._checkpoint_error: str | None = None
+        # Whether the workers' extensible KV cache holds nothing to keep.
+        self._kv_cache_reclaimable = False
+
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
 
