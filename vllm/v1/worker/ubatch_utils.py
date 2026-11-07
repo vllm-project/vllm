@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 import numpy as np
 import torch
@@ -146,6 +146,40 @@ def check_ubatch_thresholds(
         return num_tokens >= config.dbo_decode_token_threshold
     else:
         return num_tokens >= config.dbo_prefill_token_threshold
+
+
+def find_model_streams(model: Any) -> list[torch.cuda.Stream]:
+    """Side streams the model's modules hold, e.g. to overlap work in capture."""
+    streams: dict[int, torch.cuda.Stream] = {}
+    if not isinstance(model, torch.nn.Module):
+        return []
+    for module in model.modules():
+        for value in vars(module).values():
+            values: Iterable[Any] = (value,)
+            if isinstance(value, dict):
+                values = value.values()
+            elif isinstance(value, (list, tuple)):
+                values = value
+            for v in values:
+                if isinstance(v, torch.cuda.Stream):
+                    streams.setdefault(v.cuda_stream, v)
+    return list(streams.values())
+
+
+def create_blas_handles(
+    streams: Iterable[torch.cuda.Stream], dtype: torch.dtype
+) -> None:
+    """Create this thread's BLAS handle on each stream before CUDA graph capture.
+
+    hipBLASLt handles are per thread and stream and only a GEMM creates one;
+    creating it in capture fails.
+    """
+    for stream in streams:
+        with torch.cuda.stream(stream):
+            torch.cuda.current_blas_handle()
+            if current_platform.is_rocm():
+                x = torch.zeros(1, 1, dtype=dtype, device=stream.device)
+                torch.mm(x, x)
 
 
 # This pads the last ubatch slice out to the total number of tokens

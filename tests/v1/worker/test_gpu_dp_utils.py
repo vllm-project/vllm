@@ -64,3 +64,78 @@ def test_dispatch_dp1_returns_no_sync():
         allow_skip_drafts=True,
     )
     assert sync is None
+
+
+def _sync_ubatching(
+    local_num_tokens: int,
+    other_num_tokens: int,
+    num_ubatches: int = 2,
+    graph_num_tokens: int | None = None,
+) -> tuple[int, CUDAGraphMode]:
+    """Run as dp rank 0 of 2 with DBO allowed on both ranks; returns the
+    synced descriptor's num_ubatches and CUDA graph mode. With graph_num_tokens,
+    a FULL microbatched graph of that size matches the step."""
+
+    def fake_all_reduce(tensor):
+        tensor[0][1] = other_num_tokens
+        tensor[1][1] = CUDAGraphMode.NONE.value
+        tensor[2][1] = 0
+        tensor[3][1] = -1
+        tensor[4][1] = 1  # allow_ubatching
+        tensor[5][1] = 1
+        tensor[6][1] = 0
+
+    parallel_config = mock.Mock(
+        enable_fault_tolerance=False,
+        use_ubatching=True,
+        num_ubatches=num_ubatches,
+        dbo_prefill_token_threshold=1,
+        dbo_decode_token_threshold=1,
+    )
+    desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.NONE, num_tokens=local_num_tokens, num_reqs=1
+    )
+    cudagraph_manager = None
+    if graph_num_tokens is not None:
+        cudagraph_manager = mock.Mock()
+        cudagraph_manager.dispatch.return_value = BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.FULL,
+            num_tokens=graph_num_tokens,
+            num_reqs=1,
+            num_ubatches=num_ubatches,
+        )
+    with mock.patch.object(dp_utils, "get_dp_group") as mock_group:
+        mock_group.return_value.cpu_all_reduce_ = fake_all_reduce
+        synced_desc, _ = dp_utils.sync_cudagraph_and_dp_padding(
+            cudagraph_manager=cudagraph_manager,
+            desired_batch_desc=desc,
+            num_tokens=local_num_tokens,
+            num_reqs=1,
+            uniform_token_count=None,
+            dp_size=2,
+            dp_rank=0,
+            parallel_config=parallel_config,
+            allow_ubatching=True,
+        )
+    return synced_desc.num_ubatches or 1, synced_desc.cg_mode
+
+
+def test_ubatching_survives_a_rank_with_an_empty_last_ubatch():
+    # Padded to 600 tokens, rank 1's 100 tokens all land in microbatch 0. Every
+    # rank still splits so the expert all-to-all stays collective.
+    assert _sync_ubatching(600, 100)[0] == 2
+    assert _sync_ubatching(600, 500)[0] == 2
+
+
+def test_eager_when_a_rank_exactly_fills_the_earlier_ubatches():
+    # Rank 1's 64 tokens exactly fill microbatch 0 of a 128-token graph, so its
+    # microbatch 1 is pure padding; a captured graph cannot replay that.
+    assert _sync_ubatching(128, 64, 2, 128) == (2, CUDAGraphMode.NONE)
+    assert _sync_ubatching(128, 65, 2, 128) == (2, CUDAGraphMode.FULL)
+
+
+def test_eager_when_graph_padding_empties_a_last_ubatch():
+    # With 3 microbatches, padding 600 tokens to a 640-token graph moves the last
+    # microbatch's start to 426, past rank 1's 420 tokens; unpadded it starts at 400.
+    assert _sync_ubatching(600, 420, 3, 640) == (3, CUDAGraphMode.NONE)
+    assert _sync_ubatching(600, 500, 3, 640) == (3, CUDAGraphMode.FULL)

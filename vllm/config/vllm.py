@@ -2263,6 +2263,8 @@ class VllmConfig:
                     # reduce-scatter on the comm stream under DBO.
                     "allgather_reducescatter",
                 ]
+                if self.parallel_config.mori_ep_v2:
+                    supported_backends.append("mori")
             else:
                 # CUDA and other platforms.
                 supported_backends = [

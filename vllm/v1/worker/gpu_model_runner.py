@@ -227,7 +227,7 @@ from vllm.v1.worker.utils import (
     EncoderTimingStats,
     raise_if_nan_logits,
 )
-from vllm.v1.worker.workspace import lock_workspace
+from vllm.v1.worker.workspace import lock_workspace, size_workspace_ubatches_alike
 
 from .utils import (
     AttentionGroup,
@@ -6225,9 +6225,20 @@ class GPUModelRunner(
                             self.encoder_cache[f"tmp_{i}"] = output
 
         # Add `is_profile` here to pre-allocate communication buffers
+        # Run unsplit, like V2: microbatch 0's workspace also serves unsplit steps.
         hidden_states, last_hidden_states = self._dummy_run(
-            self.max_num_tokens, is_profile=True, randomize_inputs=randomize_inputs
+            self.max_num_tokens,
+            is_profile=True,
+            allow_microbatching=False,
+            randomize_inputs=randomize_inputs,
         )
+        if self.parallel_config.use_ubatching:
+            # Run split once so the other microbatches create their persistent
+            # resources, then size their workspaces like microbatch 0's.
+            self._dummy_run(
+                self.max_num_tokens, is_profile=True, randomize_inputs=randomize_inputs
+            )
+            size_workspace_ubatches_alike()
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:
                 output = self._dummy_pooler_run(hidden_states)
@@ -6408,6 +6419,20 @@ class GPUModelRunner(
         per_graph_estimate = {}
         encoder_memory_estimate = 0
 
+        # Under DBO, capture_model captures the larger uniform-decode FULL graphs
+        # microbatched only. Profile each of them microbatched; their per-size
+        # buffers outlive the graph pool and vary too much by size to extrapolate.
+        profile_groups = []
+        for mode, descs in capture_descs:
+            split = [
+                self._capture_microbatched(mode, descs[0].uniform, desc.num_tokens)
+                for desc in descs
+            ]
+            for microbatched in (True, False):
+                group = [d for d, s in zip(descs, split) if s == microbatched]
+                if group:
+                    profile_groups.append((mode, microbatched, group))
+
         # Cleanup-only guard: CUDA graph capture errors should still propagate
         # because encoder graph capture is opt-in.
         try:
@@ -6416,8 +6441,8 @@ class GPUModelRunner(
                 torch.accelerator.synchronize()
                 torch.accelerator.empty_cache()
 
-                for mode, descs in capture_descs:
-                    profile_descs = descs[:2]
+                for mode, microbatched, descs in profile_groups:
+                    profile_descs = descs if microbatched else descs[:2]
                     mem_samples: list[int] = []
 
                     for i, desc in enumerate(profile_descs):
@@ -6433,10 +6458,22 @@ class GPUModelRunner(
                                 if mode == CUDAGraphMode.FULL and i == 0
                                 else None
                             ),
+                            allow_microbatching=microbatched,
                         )
                         torch.accelerator.synchronize()
                         free_after = torch.accelerator.get_memory_info()[0]
                         mem_samples.append(mem_before - free_after)
+
+                    if microbatched:
+                        per_graph_estimate[mode, True] = sum(mem_samples)
+                        logger.debug(
+                            "Estimated %s microbatched CUDA graph memory: "
+                            "%.2f MiB for %d graphs",
+                            mode.name,
+                            sum(mem_samples) / (1 << 20),
+                            len(descs),
+                        )
+                        continue
 
                     first_capture = mem_samples[0]
                     # Use at least 1 MiB per graph for driver overhead
@@ -6445,7 +6482,7 @@ class GPUModelRunner(
                     )
 
                     shared_memory_estimate[mode] = first_capture
-                    per_graph_estimate[mode] = per_graph * (len(descs) - 1)
+                    per_graph_estimate[mode, False] = per_graph * (len(descs) - 1)
 
                     logger.debug(
                         "Estimated %s CUDA graph memory: "
@@ -6472,6 +6509,9 @@ class GPUModelRunner(
             set_cudagraph_capturing_enabled(False)
             CUDAGraphWrapper.clear_all_graphs()
             BreakableCUDAGraphWrapper.clear_all_graphs()
+            if isinstance(self.model, UBatchWrapper):
+                # Its microbatched graphs are not in the wrappers cleared above.
+                self.model.clear_graphs()
             if encoder_cudagraph_manager is not None:
                 encoder_cudagraph_manager.clear()
             all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
@@ -6687,28 +6727,37 @@ class GPUModelRunner(
 
         # We skip EPLB here since we don't want to record dummy metrics
         for batch_desc in batch_descriptors:
-            # We currently only capture ubatched graphs when its a FULL
-            # cudagraph, a uniform decode batch, and the number of tokens
-            # is above the threshold. Otherwise we just capture a non-ubatched
-            # version of the graph
-            allow_microbatching = (
-                self.parallel_config.use_ubatching
-                and cudagraph_runtime_mode == CUDAGraphMode.FULL
-                and uniform_decode
-                and check_ubatch_thresholds(
-                    config=self.vllm_config.parallel_config,
-                    num_tokens=batch_desc.num_tokens,
-                    uniform_decode=uniform_decode,
-                )
-            )
             self._warmup_and_capture(
                 batch_desc,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
-                allow_microbatching=allow_microbatching,
+                allow_microbatching=self._capture_microbatched(
+                    cudagraph_runtime_mode, uniform_decode, batch_desc.num_tokens
+                ),
                 profiler=profiler,
             )
             torch.accelerator.synchronize()
         self.maybe_remove_all_loras(self.lora_config)
+
+    def _capture_microbatched(
+        self,
+        cudagraph_runtime_mode: CUDAGraphMode,
+        uniform_decode: bool,
+        num_tokens: int,
+    ) -> bool:
+        # We currently only capture ubatched graphs when its a FULL
+        # cudagraph, a uniform decode batch, and the number of tokens
+        # is above the threshold. Otherwise we just capture a non-ubatched
+        # version of the graph
+        return (
+            self.parallel_config.use_ubatching
+            and cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and uniform_decode
+            and check_ubatch_thresholds(
+                config=self.vllm_config.parallel_config,
+                num_tokens=num_tokens,
+                uniform_decode=uniform_decode,
+            )
+        )
 
     def initialize_attn_backend(
         self,

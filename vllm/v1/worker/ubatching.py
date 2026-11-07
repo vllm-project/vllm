@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import torch
 
@@ -192,6 +194,24 @@ dbo_switch_to_comm_sync = _register_ubatch_function(UBatchContext.switch_to_comm
 dbo_switch_to_compute_sync = _register_ubatch_function(
     UBatchContext.switch_to_compute_sync
 )
+
+
+@contextmanager
+def dbo_comm_region() -> Iterator[None]:
+    """Run a dispatch/combine collective on the comm stream under DBO.
+
+    The peer microbatch computes while it is in flight, and the compute stream
+    waits for it on exit. Without DBO, or under graph capture (which keeps every
+    collective on the capture stream), it runs on the calling stream.
+    """
+    if not dbo_enabled() or torch.cuda.is_current_stream_capturing():
+        yield
+        return
+    dbo_yield_and_switch_from_compute_to_comm()
+    try:
+        yield
+    finally:
+        dbo_switch_to_compute_sync()
 
 
 def dbo_register_recv_hook(recv_hook):

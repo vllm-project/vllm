@@ -14,6 +14,7 @@ import torch.multiprocessing as mp
 
 import vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 as mori_epv2
 import vllm.utils.import_utils as import_utils
+import vllm.v1.worker.ubatching as ubatching
 from vllm.config.parallel import resolve_mori_all2all
 from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 import (
     MoriEPv2PrepareAndFinalize,
@@ -55,8 +56,10 @@ class FakeOp:
         return torch.zeros(1, 4, dtype=torch.bfloat16), None
 
 
-def _make_pf(op, num_local_experts=2, rank_expert_offset=0):
-    return MoriEPv2PrepareAndFinalize(op, 16, 4, num_local_experts, rank_expert_offset)
+def _make_pf(op, num_local_experts=2, rank_expert_offset=0, async_ll=False):
+    return MoriEPv2PrepareAndFinalize(
+        [op], 16, 4, num_local_experts, rank_expert_offset, async_ll=async_ll
+    )
 
 
 def _run(monkeypatch, op, num_tokens_across_dp, topk_ids, **pf_kwargs):
@@ -192,16 +195,26 @@ def test_manager_requires_one_lsa_team(monkeypatch, world_size, lsa_size):
             combine_dtype=None,
             schedule=None,
         )
+        configs: list[dict] = []
+
+        def make_config(**kw):
+            configs.append(kw)
+            return SimpleNamespace(**(cfg | kw))
+
         monkeypatch.setitem(
             sys.modules,
             "mori.ops.dispatch_combine_v2",
             SimpleNamespace(
-                EpDispatchCombineConfig=lambda **kw: SimpleNamespace(**(cfg | kw)),
+                EpDispatchCombineConfig=make_config,
                 EpDispatchCombineOp=lambda config, comm: calls.op,
             ),
         )
         manager = all2all.MoriEPv2All2AllManager(object())
         assert manager.get_handle({}) is calls.op
+        # A DBO microbatch's op is a separate op; its id is not a MORI setting.
+        manager.get_handle({"ubatch_id": 1})
+        assert len(manager._ops) == 2
+        assert all("ubatch_id" not in kw for kw in configs)
         # The cache holds ops weakly; the manager keeps them alive itself.
         manager.handle_cache._cache.clear()
         manager.destroy()
@@ -356,8 +369,10 @@ def _quark(qscheme):
         # The LSA team may span hosts (gfx1250); the manager checks it.
         ({"data_parallel_size": 16, "lsa_spans_hosts": True}, {}, "aiter", {}, True),
         ({}, {}, "aiter", {"MORI_ENABLE_SDMA": "1"}, False),
+        # A MoRI with EPv2 AsyncLL moves the tokens by SDMA itself.
+        ({"has_async_ll": True}, {}, "aiter", {"MORI_ENABLE_SDMA": "1"}, True),
         # gfx1250 keeps EPv2 under SDMA.
-        ({"sdma_picks_epv1": False}, {}, "aiter", {"MORI_ENABLE_SDMA": "1"}, True),
+        ({"sdma_moves_tokens": False}, {}, "aiter", {"MORI_ENABLE_SDMA": "1"}, True),
         ({}, {}, "aiter_mega_moe", {}, False),
         ({}, {"dtype": torch.float16}, "aiter", {}, False),
         # An explicit VLLM_MORI_EP_V2 wins over the deployment checks.
@@ -389,12 +404,14 @@ def test_mori_picks_epv2_where_supported(
         monkeypatch.setenv(name, value)
     parallel = dict(parallel)
     lsa_spans_hosts = parallel.pop("lsa_spans_hosts", False)
-    sdma_picks_epv1 = parallel.pop("sdma_picks_epv1", True)
+    sdma_moves_tokens = parallel.pop("sdma_moves_tokens", True)
     validated_arch = parallel.pop("validated_arch", True)
     mori_reason = parallel.pop("mori_reason", None)
+    has_async_ll = parallel.pop("has_async_ll", False)
     monkeypatch.setattr(
         import_utils, "mori_epv2_unavailable_reason", lambda: mori_reason
     )
+    monkeypatch.setattr(import_utils, "mori_epv2_has_async_ll", lambda: has_async_ll)
     parallel_config = _parallel_config(**parallel)
     model_config = _model_config(**model)
     resolve_mori_all2all(
@@ -402,10 +419,36 @@ def test_mori_picks_epv2_where_supported(
         model_config,
         moe_backend,
         lsa_spans_hosts,
-        sdma_picks_epv1,
+        sdma_moves_tokens,
         validated_arch,
     )
     assert parallel_config.mori_ep_v2 is ep_v2
+
+
+@pytest.mark.parametrize(
+    "ep_v2,sdma,has_async_ll,sdma_moves_tokens,async_ll",
+    [
+        (None, True, True, True, True),
+        (None, False, True, True, False),
+        # MoRI without AsyncLL: SDMA selects EPv1.
+        (None, True, False, True, False),
+        (False, True, True, True, False),
+        # gfx1250 keeps native EPv2 under SDMA.
+        (None, True, True, False, False),
+    ],
+)
+def test_mori_epv2_runs_async_ll_under_sdma(
+    monkeypatch, ep_v2, sdma, has_async_ll, sdma_moves_tokens, async_ll
+):
+    monkeypatch.delenv("VLLM_MORI_EP_V2", raising=False)
+    monkeypatch.setenv("MORI_ENABLE_SDMA", "1" if sdma else "0")
+    monkeypatch.setattr(import_utils, "mori_epv2_unavailable_reason", lambda: None)
+    monkeypatch.setattr(import_utils, "mori_epv2_has_async_ll", lambda: has_async_ll)
+    parallel_config = _parallel_config(mori_ep_v2=ep_v2)
+    resolve_mori_all2all(
+        parallel_config, _model_config(), "aiter", sdma_moves_tokens=sdma_moves_tokens
+    )
+    assert parallel_config.mori_epv2_async_ll is async_ll
 
 
 @pytest.mark.parametrize(
@@ -469,3 +512,245 @@ def test_mori_epv1_kernel_choice(monkeypatch, backend, internode, max_tokens, ke
         num_experts_per_token=8,
     )
     assert kwargs["kernel_type"] == kernel
+
+
+class _DBOProbe:
+    """Stands in for vLLM's ubatching: which microbatch runs, and the handoffs."""
+
+    def __init__(self, monkeypatch, enabled=True):
+        self.ubatch_id = 0
+        self.events: list[tuple] = []
+        monkeypatch.setattr(ubatching, "dbo_enabled", lambda: enabled)
+        monkeypatch.setattr(mori_epv2, "dbo_current_ubatch_id", lambda: self.ubatch_id)
+        monkeypatch.setattr(
+            ubatching,
+            "dbo_yield_and_switch_from_compute_to_comm",
+            lambda: self.events.append(("to_comm", self.ubatch_id)),
+        )
+        monkeypatch.setattr(
+            ubatching,
+            "dbo_switch_to_compute_sync",
+            lambda: self.events.append(("to_compute", self.ubatch_id)),
+        )
+
+
+class _RecordingOp(FakeOp):
+    def __init__(self, name, events, **kwargs):
+        super().__init__(**kwargs)
+        self.name = name
+        self.events = events
+
+    def dispatch(self, *args, **kwargs):
+        self.events.append(("dispatch", self.name))
+        return super().dispatch(*args, **kwargs)
+
+    def combine(self, *args, **kwargs):
+        self.events.append(("combine", self.name))
+        return super().combine(*args, **kwargs)
+
+
+@pytest.mark.parametrize("num_ubatches", [2, 3])
+@pytest.mark.parametrize("num_spec_tokens", [0, 1, 3])
+def test_later_microbatch_ops_hold_their_share(
+    monkeypatch, num_ubatches, num_spec_tokens
+):
+    import numpy as np
+
+    import vllm.model_executor.layers.fused_moe.all2all_utils as all2all_utils
+    from vllm.v1.worker.ubatch_utils import maybe_create_ubatch_slices
+
+    spec = SimpleNamespace(num_speculative_tokens=num_spec_tokens)
+    monkeypatch.setattr(
+        all2all_utils,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(speculative_config=spec if num_spec_tokens else None),
+    )
+    max_tokens = 64
+    bound = all2all_utils._mori_ubatch_max_tokens(max_tokens, num_ubatches)
+    assert bound < max_tokens
+
+    q = 1 + num_spec_tokens
+    for num_tokens in range(num_ubatches, max_tokens + 1):
+        # Split as gpu/ubatch_utils.create_ubatch_slices does.
+        split_point = None
+        if q > 1 and num_tokens // (q * num_ubatches) > 0:
+            split_point = q * (num_tokens // (q * num_ubatches))
+        _, slices = maybe_create_ubatch_slices(
+            True,
+            np.full(num_tokens, 1, dtype=np.int32),
+            num_tokens,
+            num_tokens,
+            num_ubatches,
+            split_point=split_point,
+        )
+        assert slices is not None
+        for s in slices[1:]:
+            assert s.token_slice.stop - s.token_slice.start <= bound
+
+
+def test_dbo_microbatches_interleave_on_their_own_ops(monkeypatch):
+    dbo = _DBOProbe(monkeypatch)
+    ops = [_RecordingOp(f"op{i}", dbo.events, recv=3 + i) for i in range(2)]
+    ops[1].routing = object()
+    prepare_finalize = MoriEPv2PrepareAndFinalize(ops, 16, 4, 2, 0)
+    # Each microbatch's forward context carries its own DP token counts; the
+    # second microbatch is larger, so its receive bound is too.
+    contexts = [
+        SimpleNamespace(
+            dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=torch.tensor([n] * 4))
+        )
+        for n in (4, 9)
+    ]
+    monkeypatch.setattr(mori_epv2, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(
+        mori_epv2, "get_forward_context", lambda: contexts[dbo.ubatch_id]
+    )
+    monkeypatch.setattr(
+        mori_epv2, "get_dp_group", lambda: SimpleNamespace(rank_in_group=0)
+    )
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    quant_config = SimpleNamespace(is_per_tensor=False, a1_scale=None)
+
+    def prepare(ubatch_id):
+        dbo.ubatch_id = ubatch_id
+        n = (4, 9)[ubatch_id]
+        return prepare_finalize.prepare(
+            torch.ones(n, 4, dtype=torch.bfloat16),
+            torch.ones(n, 2, dtype=torch.bfloat16),
+            torch.zeros(n, 2, dtype=torch.int64),
+            num_experts=8,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+            quant_config=quant_config,
+        )
+
+    def finalize(ubatch_id, prepared):
+        dbo.ubatch_id = ubatch_id
+        prepare_finalize.finalize(
+            torch.empty((4, 9)[ubatch_id], 4, dtype=torch.bfloat16),
+            prepared[0],
+            prepared[4],
+            prepared[3],
+            False,
+            SimpleNamespace(),
+        )
+
+    # The DBO order: both dispatches, then both combines.
+    prepared = [prepare(0), prepare(1)]
+    finalize(0, prepared[0])
+    finalize(1, prepared[1])
+
+    assert dbo.events == [
+        ("to_comm", 0),
+        ("dispatch", "op0"),
+        ("to_compute", 0),
+        ("to_comm", 1),
+        ("dispatch", "op1"),
+        ("to_compute", 1),
+        ("to_comm", 0),
+        ("combine", "op0"),
+        ("to_compute", 0),
+        ("to_comm", 1),
+        ("combine", "op1"),
+        ("to_compute", 1),
+    ]
+    for i, op in enumerate(ops):
+        a1, _, meta, _, _ = prepared[i]
+        # Received rows come from this microbatch's op, bounded by its own
+        # token counts: 4 * 4 rows -> 32 and 4 * 9 rows -> 64.
+        assert a1.data_ptr() == op.recv_a1.data_ptr()
+        assert a1.shape[0] == (32, 64)[i]
+        assert int(meta.expert_num_tokens) == 3 + i
+        # Each combine used the routing of its own microbatch's dispatch.
+        assert op.combine_routing is op.routing
+        assert op.combine_input is not None and op.combine_input.shape[0] == a1.shape[0]
+    assert prepare_finalize._routings == [None, None]
+
+
+class _AsyncLLOp(_RecordingOp):
+    """AsyncLL op: each phase splits into a send and a receive."""
+
+    def dispatch_send(self, *args, **kwargs):
+        self.events.append(("dispatch_send", self.name))
+        return FakeOp.dispatch(self, *args, **kwargs)
+
+    def dispatch_recv(self):
+        self.events.append(("dispatch_recv", self.name))
+
+    def combine_send(self, *args, **kwargs):
+        self.events.append(("combine_send", self.name))
+        return FakeOp.combine(self, *args, **kwargs)
+
+    def combine_recv(self):
+        self.events.append(("combine_recv", self.name))
+
+
+def test_async_ll_microbatches_receive_in_the_peers_seam(monkeypatch):
+    dbo = _DBOProbe(monkeypatch)
+    monkeypatch.setattr(
+        mori_epv2,
+        "dbo_maybe_run_recv_hook",
+        lambda: dbo.events.append(("run_peer_hook", dbo.ubatch_id)),
+    )
+    monkeypatch.setattr(mori_epv2, "is_forward_context_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    ops = [_AsyncLLOp(f"op{i}", dbo.events, recv=2) for i in range(2)]
+    ops[1].routing = object()
+    prepare_finalize = MoriEPv2PrepareAndFinalize(ops, 16, 4, 2, 0, async_ll=True)
+    assert prepare_finalize.supports_async() and prepare_finalize.supports_dbo()
+    quant_config = SimpleNamespace(is_per_tensor=False, a1_scale=None)
+
+    def prepare_async(ubatch_id):
+        dbo.ubatch_id = ubatch_id
+        return prepare_finalize.prepare_async(
+            torch.ones(2, 4, dtype=torch.bfloat16),
+            torch.ones(2, 2, dtype=torch.bfloat16),
+            torch.zeros(2, 2, dtype=torch.int64),
+            8,
+            None,
+            False,
+            quant_config,
+        )
+
+    def finalize_async(ubatch_id, prepared, output):
+        dbo.ubatch_id = ubatch_id
+        return prepare_finalize.finalize_async(
+            output, prepared[0], prepared[4], prepared[3], False, SimpleNamespace()
+        )
+
+    # The modular kernel's DBO order: a microbatch's receive hook runs on the
+    # peer, after the peer's compute is queued.
+    hooks, receivers = zip(*(prepare_async(i) for i in range(2)))
+    prepared = []
+    for i in range(2):
+        hooks[i]()
+        dbo.ubatch_id = i
+        prepared.append(receivers[i]())
+    outputs = [torch.empty(2, 4, dtype=torch.bfloat16) for _ in range(2)]
+    hooks, receivers = zip(
+        *(finalize_async(i, prepared[i], outputs[i]) for i in range(2))
+    )
+    for i in range(2):
+        hooks[i]()
+        dbo.ubatch_id = i
+        receivers[i]()
+
+    for i, op in enumerate(ops):
+        # Each microbatch used its own op, in AsyncLL's call order.
+        names = [e[0] for e in dbo.events if e[1] == op.name]
+        assert names == [
+            "dispatch_send",
+            "dispatch_recv",
+            "combine_send",
+            "combine_recv",
+        ]
+        assert prepared[i][0].data_ptr() == op.recv_a1.data_ptr()
+        assert op.combine_routing is op.routing
+        assert (outputs[i] == 0).all()
+    # No comm-stream handoff: AsyncLL's transfers leave the compute stream.
+    assert not any(e[0] in ("to_comm", "to_compute") for e in dbo.events)
+    # finalize_async queues the peer's pending receive before its send.
+    assert dbo.events.index(("run_peer_hook", 0)) < dbo.events.index(
+        ("combine_send", "op0")
+    )
+    assert prepare_finalize._routings == [None, None]

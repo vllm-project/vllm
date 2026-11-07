@@ -88,6 +88,37 @@ def test_workspace_lanes_compose_with_ubatches(monkeypatch) -> None:
     assert len(pointers) == 4
 
 
+def test_ubatch_slots_are_sized_like_the_largest(monkeypatch) -> None:
+    """A run that does not microbatch sizes only microbatch 0's slots; the
+    others must fit the same requests before the workspace is locked."""
+    active_ubatch = [0]
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: active_ubatch[0])
+    manager = workspace.WorkspaceManager(
+        torch.device("cpu"), num_ubatches=2, num_lanes=2
+    )
+    (target,) = manager.get_simultaneous(((4096,), torch.uint8))
+    with workspace.use_workspace_lane(1):
+        manager.get_simultaneous(((512,), torch.uint8))
+    active_ubatch[0] = 1
+    with workspace.use_workspace_lane(1):
+        (draft,) = manager.get_simultaneous(((2048,), torch.uint8))
+
+    manager.size_ubatches_alike()
+    manager.lock()
+
+    # Slots are (ubatch, lane) = 0: (0, 0), 1: (0, 1), 2: (1, 0), 3: (1, 1).
+    slots = manager._current_workspaces
+    assert all(ws is not None for ws in slots)
+    assert [ws.numel() for ws in slots if ws is not None] == [4096, 2048, 4096, 2048]
+    # Existing slots that were large enough keep their storage.
+    assert slots[0] is not None and slots[0].data_ptr() == target.data_ptr()
+    assert slots[3] is not None and slots[3].data_ptr() == draft.data_ptr()
+    (fits,) = manager.get_simultaneous(((4096,), torch.uint8))
+    assert slots[2] is not None and fits.data_ptr() == slots[2].data_ptr()
+    with pytest.raises(AssertionError, match="locked"):
+        manager.size_ubatches_alike()
+
+
 def test_workspace_lock_blocks_growth_and_unlock_restores(monkeypatch) -> None:
     """Once locked, oversized requests fail loudly instead of reallocating the
     buffer that captured CUDA graphs point at; unlock restores growth."""

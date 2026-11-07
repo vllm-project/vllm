@@ -147,6 +147,7 @@ def test_profile_run_creates_aux_output_connector_before_forward(
     monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.vllm_config = vllm_config
+    runner.parallel_config = SimpleNamespace(use_ubatching=False)
     runner.model = model
     runner.aux_output_connector = None
     runner.supports_mm_inputs = False

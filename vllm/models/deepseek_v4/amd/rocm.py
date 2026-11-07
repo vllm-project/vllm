@@ -1501,7 +1501,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 inv_rope=prefill_rotated,
             )
         rotated = 0
-        if num_decodes > 0:
+        # A DBO microbatch of pure DP padding has a decode with no rows.
+        if num_decodes > 0 and num_decode_tokens > 0:
             fuse_decode_inv_rope = fuse_inv_rope and not on_gfx1250() and not on_rdna()
             rotated = self._forward_decode(
                 q=q[:num_decode_tokens],
@@ -1910,10 +1911,15 @@ class DeepseekV4RocmMxfp4Compressor(DeepseekCompressor):
         attn_metadata: dict[str, Any],
         pdl_kwargs: dict,
     ) -> None:
-        num_tokens = state_metadata.slot_mapping.shape[0]
+        k_cache_metadata = attn_metadata[self.k_cache_prefix]
+        # The state slot mapping spans the DP-padded batch, but the K cache slot
+        # mapping and token_to_req_indices cover only real tokens; launch over
+        # those (a DBO microbatch of pure padding has none).
+        num_tokens = min(
+            state_metadata.slot_mapping.shape[0], k_cache_metadata.slot_mapping.shape[0]
+        )
         if num_tokens == 0:
             return
-        k_cache_metadata = attn_metadata[self.k_cache_prefix]
         kv_slot_mapping = k_cache_metadata.slot_mapping[:num_tokens]
         kv_cache = self._static_forward_context[self.k_cache_prefix].kv_cache
         pooled_k = self._pooled_k(num_tokens)

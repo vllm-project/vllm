@@ -193,7 +193,11 @@ from vllm.v1.worker.utils import (
     copy_kv_cache_blocks_inplace,
     get_uniform_decode_token_count,
 )
-from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
+from vllm.v1.worker.workspace import (
+    lock_workspace,
+    size_workspace_ubatches_alike,
+    use_workspace_lane,
+)
 
 logger = init_logger(__name__)
 
@@ -1087,6 +1091,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_profile=True,
             randomize_inputs=randomize_inputs,
         )
+        if self.parallel_config.use_ubatching:
+            # The profile run does not microbatch, so it sized only microbatch
+            # 0's workspace; size the others alike before capture locks them.
+            size_workspace_ubatches_alike()
 
         # Only run sampler/pooler on last PP rank (non-last ranks return None).
         if self.is_last_pp_rank:

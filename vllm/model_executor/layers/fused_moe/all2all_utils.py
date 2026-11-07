@@ -41,7 +41,9 @@ from vllm.utils.import_utils import (
     has_moonep,
     has_mori,
     has_nixl_ep,
+    mori_epv2_has_own_sdma_queue,
 )
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from flashinfer.fused_moe import QuantFormat
@@ -186,6 +188,46 @@ def maybe_roundup_layer_hidden_size(
         )
 
     return hidden_size
+
+
+def _mori_ubatch_max_tokens(max_num_tokens: int, num_ubatches: int) -> int:
+    """Most tokens a later DBO microbatch holds on one rank.
+
+    DBO cuts each rank's padded N <= max_num_tokens tokens at multiples of
+    N // n (n = num_ubatches), or of q * (N // (q * n)) for uniform q-token
+    queries, so a later microbatch holds fewer than N / n + (n - 1) * q.
+    """
+    if num_ubatches <= 1:
+        return max_num_tokens
+    spec_config = get_current_vllm_config().speculative_config
+    q = 1
+    if spec_config is not None and spec_config.num_speculative_tokens:
+        q += spec_config.num_speculative_tokens
+    bound = cdiv(max_num_tokens, num_ubatches) + (num_ubatches - 1) * q
+    return min(max_num_tokens, bound)
+
+
+def _make_mori_epv2_ops(
+    all2all_manager: Any, all_to_all_args: dict[str, Any]
+) -> list[Any]:
+    """One MORI EPv2 op per DBO microbatch, or a single op without DBO.
+
+    Microbatch 0's op also serves unsplit steps and keeps the full size; the
+    later ones are sized to a microbatch's share.
+    """
+    from vllm.v1.worker.ubatch_utils import get_num_ubatches
+
+    num_ops = get_num_ubatches(get_current_vllm_config().parallel_config)
+    later_args = {
+        **all_to_all_args,
+        "max_num_inp_token_per_rank": _mori_ubatch_max_tokens(
+            all_to_all_args["max_num_inp_token_per_rank"], num_ops
+        ),
+    }
+    return [all2all_manager.get_handle({**all_to_all_args, "ubatch_id": 0})] + [
+        all2all_manager.get_handle({**later_args, "ubatch_id": i})
+        for i in range(1, num_ops)
+    ]
 
 
 def maybe_make_prepare_finalize(
@@ -350,13 +392,22 @@ def maybe_make_prepare_finalize(
             num_experts_per_rank=num_local_experts,
             num_experts_per_token=moe.experts_per_token,
         )
-        handle = all2all_manager.get_handle(all_to_all_args)
+        async_ll = get_current_vllm_config().parallel_config.mori_epv2_async_ll
+        if async_ll:
+            # Only MORI's hip backend has the AsyncLL kernels.
+            all_to_all_args.update(
+                async_ll=True, async_ll_transport="sdma", kernel_backend="hip"
+            )
+            # DBO issues both microbatches on one stream: one SDMA queue per op.
+            if mori_epv2_has_own_sdma_queue():
+                all_to_all_args.update(async_ll_own_sdma_queue=True)
         prepare_finalize = MoriEPv2PrepareAndFinalize(
-            handle,
+            _make_mori_epv2_ops(all2all_manager, all_to_all_args),
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             num_local_experts=num_local_experts,
             rank_expert_offset=all2all_manager.rank * num_local_experts,
+            async_ll=async_ll,
         )
 
     elif moe.use_mori_epv1_kernels:
