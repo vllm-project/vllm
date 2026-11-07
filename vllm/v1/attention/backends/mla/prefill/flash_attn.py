@@ -298,6 +298,45 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
         )
 
 
+@functools.cache
+def _aiter_fp8_mla_varlen_importable() -> bool:
+    try:
+        from aiter.ops.triton.attention.mha_fp8 import (  # noqa: F401
+            mha_fwd_mla_varlen,
+        )
+    except ImportError:
+        return False
+    return True
+
+
+def is_kimi_k3_on_gfx1250(vllm_config: "VllmConfig") -> bool:
+    """Kimi-K3 on gfx1250: the only model the gfx1250 aiter MLA paths are
+    enabled for so far."""
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx1250
+
+    # The resolved architecture survives with_hf_config, so K3's text submodel
+    # (hf_config.model_type "kimi_linear", shared with Kimi-Linear) still matches.
+    model_config = vllm_config.model_config
+    return (
+        on_gfx1250()
+        and model_config is not None
+        and getattr(model_config, "_architecture", None)
+        == "KimiK3ForConditionalGeneration"
+    )
+
+
+def aiter_fp8_mla_prefill_available(vllm_config: "VllmConfig") -> bool:
+    """Whether MLA prefill runs in FP8 on aiter's mha_fwd_mla_varlen: Kimi-K3 on
+    gfx1250 with an FP8 KV cache and an aiter that has the kernel."""
+    return (
+        is_kimi_k3_on_gfx1250(vllm_config)
+        and vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3")
+        and _aiter_fp8_mla_varlen_importable()
+    )
+
+
 class FlashAttnPrefillBackend(MLAPrefillBackend):
     """FlashAttention backend for MLA prefill."""
 
@@ -395,6 +434,10 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
 
         # Track whether we're using vllm's FA or upstream (for ROCm)
         self._is_vllm_fa = current_platform.is_cuda() or current_platform.is_xpu()
+        # FP8 prefill on gfx1250 runs aiter's mha_fwd_mla_varlen: it takes k_pe
+        # and an unpadded v, writes out / lse_out in place and merges into
+        # o_init / lse_init.
+        self._aiter_fp8_mla = aiter_fp8_mla_prefill_available(vllm_config)
 
     def supports_quant_output(self, quant_key: "QuantKey") -> bool:
         device_capability = current_platform.get_device_capability()
@@ -465,6 +508,46 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         # a v_head_dim `out`; only the unpadded path honors `out`.
         return not self.requires_v_padding
 
+    def supports_k_pe_and_merge(self) -> bool:
+        return self._aiter_fp8_mla
+
+    def _aiter_fp8_mla_varlen(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        causal: bool,
+        out: torch.Tensor | None,
+        k_pe: torch.Tensor,
+        lse_out: torch.Tensor | None = None,
+        o_init: torch.Tensor | None = None,
+        lse_init: torch.Tensor | None = None,
+        return_lse: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        from aiter.ops.triton.attention.mha_fp8 import mha_fwd_mla_varlen
+
+        return mha_fwd_mla_varlen(
+            q,
+            k,
+            v,
+            k_pe,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            sm_scale=self.scale,
+            causal=causal,
+            out=out,
+            lse_out=lse_out,
+            return_lse=return_lse,
+            o_init=o_init,
+            lse_init=lse_init,
+        )
+
     def run_prefill_new_tokens(
         self,
         q: torch.Tensor,
@@ -473,7 +556,24 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         return_softmax_lse: bool,
         out: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
+        **kwargs: Any,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self._aiter_fp8_mla and "k_pe" in kwargs:
+            assert output_scale is None
+            o, lse = self._aiter_fp8_mla_varlen(
+                q,
+                k,
+                v,
+                self._prefill_metadata.query_start_loc,
+                self._prefill_metadata.query_start_loc,
+                self._prefill_metadata.max_query_len,
+                self._prefill_metadata.max_query_len,
+                causal=True,
+                out=out,
+                return_lse=return_softmax_lse,
+                **kwargs,
+            )
+            return (o, lse) if return_softmax_lse else o
         return self._flash_attn_varlen_diff_headdims(
             q=q,
             k=k,
@@ -487,6 +587,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             return_softmax_lse=return_softmax_lse,
             out=out,
             output_scale=output_scale,
+            **kwargs,
         )
 
     def run_prefill_context_chunk(
@@ -496,7 +597,22 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         k: torch.Tensor,
         v: torch.Tensor,
         out: torch.Tensor | None = None,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._aiter_fp8_mla and "k_pe" in kwargs:
+            return self._aiter_fp8_mla_varlen(  # type: ignore[return-value]
+                q,
+                k,
+                v,
+                chunk.query_start_loc,
+                chunk.cu_seq_lens,
+                chunk.max_query_len,
+                chunk.max_seq_len,
+                causal=False,  # Context is unmasked
+                out=out,
+                return_lse=True,
+                **kwargs,
+            )
         return self._flash_attn_varlen_diff_headdims(
             q=q,
             k=k,
@@ -509,6 +625,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             causal=False,  # Context is unmasked
             return_softmax_lse=True,
             out=out,
+            **kwargs,
         )
 
 

@@ -1989,16 +1989,30 @@ def backend_supports_prefill_query_quantization() -> bool:
     Not supported:
     - FlashAttention (FA3/FA4)
     - Non-GB200 devices (FP8 prefill requires device capability 100)
+
+    On ROCm gfx1250, FlashAttention runs FP8 prefill on aiter's
+    mha_fwd_mla_varlen when the KV cache is FP8.
     """
+    from vllm.config import get_current_vllm_config
+    from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
+
+    vllm_config = get_current_vllm_config()
+    if current_platform.is_rocm():
+        from vllm.v1.attention.backends.mla.prefill.flash_attn import (
+            aiter_fp8_mla_prefill_available,
+        )
+
+        # Kimi-K3 on gfx1250 only; every other ROCm model returns False first.
+        return (
+            aiter_fp8_mla_prefill_available(vllm_config)
+            and get_mla_prefill_backend(vllm_config).get_name() == "FLASH_ATTN"
+        )
+
     # FP8 prefill query quantization requires GB200 (device capability 100)
     # for the necessary FP8 kernels at the moment.
     if not current_platform.is_device_capability_family(100):
         return False
 
-    from vllm.config import get_current_vllm_config
-    from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
-
-    vllm_config = get_current_vllm_config()
     backend_cls = get_mla_prefill_backend(vllm_config)
     return backend_cls.get_name() in (
         "FLASHINFER",
@@ -2441,9 +2455,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         Return FP8 dtype if cache is FP8 and prefill query quantization
         is enabled, else model dtype.
         """
+        # On ROCm the only backend that supports it (gfx1250, aiter FP8 MLA
+        # prefill) turns FP8 prefill on with an FP8 KV cache, without the flag.
         use_fp8 = (
             is_quantized_kv_cache(vllm_config.cache_config.cache_dtype)
-            and vllm_config.attention_config.use_prefill_query_quantization
+            and (
+                vllm_config.attention_config.use_prefill_query_quantization
+                or current_platform.is_rocm()
+            )
             and backend_supports_prefill_query_quantization()
         )
 
@@ -3048,7 +3067,12 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
+        out: torch.Tensor | None = None,
+        lse: torch.Tensor | None = None,
     ):
+        """Attention over the gathered context. With ``out``/``lse`` (a backend
+        that supports_k_pe_and_merge), each chunk is merged into them in place
+        and nothing is returned."""
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.prefill_backend is not None
@@ -3137,6 +3161,22 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 kv_nope = kv_nope.to(prefill_metadata.q_data_type)
                 k_pe = k_pe.to(prefill_metadata.q_data_type)
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+            if out is not None:
+                assert lse is not None
+                ts = chunk.token_slice
+                prefill_metadata.prefill_backend.run_prefill_context_chunk(  # type: ignore[call-arg]
+                    chunk=chunk,
+                    q=q[ts],
+                    k=k_nope,
+                    v=v,
+                    out=out[ts],
+                    k_pe=k_pe,
+                    lse_out=lse[:, ts],
+                    o_init=out[ts],
+                    lse_init=lse[:, ts],
+                )
+                continue
 
             k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
@@ -3341,6 +3381,42 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
         )
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+        if (
+            prefill_metadata.prefill_backend.supports_k_pe_and_merge()
+            and use_fp8_prefill
+            and output_scale is None
+            and self.dcp_world_size <= 1
+        ):
+            # FP8 prefill with k_pe kept separate: the new tokens are written
+            # straight into output, and each context chunk is merged into
+            # (output, lse) in place.
+            fp8_dtype = prefill_metadata.q_data_type
+            k_nope, v = kv_nope.to(fp8_dtype).split(
+                [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+            )
+            k_pe = k_pe.to(fp8_dtype)
+            output = output.view(-1, self.num_heads, self.v_head_dim)
+            lse = None
+            if has_context:
+                lse = torch.empty(
+                    (self.num_heads, q.shape[0]), dtype=torch.float32, device=q.device
+                )
+            prefill_metadata.prefill_backend.run_prefill_new_tokens(  # type: ignore[call-arg]
+                q=q,
+                k=k_nope,
+                v=v,
+                return_softmax_lse=False,
+                out=output,
+                k_pe=k_pe,
+                lse_out=lse,
+            )
+            if has_context:
+                self._compute_prefill_context(
+                    q, kv_c_and_k_pe_cache, attn_metadata, k_scale, out=output, lse=lse
+                )
+            return
+
         k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
         if use_fp8_prefill:
