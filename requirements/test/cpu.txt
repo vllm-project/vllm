@@ -911,9 +911,9 @@ colorlog==6.10.1 \
     --hash=sha256:2d7e8348291948af66122cff006c9f8da6255d224e7cf8e37d8de2df3bad8c9c \
     --hash=sha256:eb4ae5cb65fe7fec7773c2306061a8e63e02efc2c72eba9d27b0fa23c94f1321
     # via optuna
-compressed-tensors==0.17.0 \
-    --hash=sha256:15c20d06bdbcf35b51fc99fd125e7b9be1e1855567c33b7a46dfac26ad6fb126 \
-    --hash=sha256:4a1b89b508f7efb8ffb4eee8a6e69e0452d9b080cae130146025c64fbe9fa9aa
+compressed-tensors==0.20.1 \
+    --hash=sha256:15307c904904219cafcb57d55f16b1bd6baf108d0421b65dfa79eece01672382 \
+    --hash=sha256:d06d475945d27cb1959a53dd9e3005e0d29237897c56ce3335bb220f9f2fa8ae
     # via -r requirements/test/../common.txt
 contourpy==1.3.0 \
     --hash=sha256:00ccd0dbaad6d804ab259820fa7cb0b8036bda0686ef844d24125d8287178ce0 \
@@ -4429,6 +4429,7 @@ psutil==6.1.0 \
     # via
     #   -r requirements/test/../common.txt
     #   accelerate
+    #   compressed-tensors
     #   peft
     #   tensorizer
 py==1.11.0 \
