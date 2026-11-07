@@ -357,6 +357,7 @@ steps:
     label: production
     gpu: 2+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s tests/distributed/test_context_parallel.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
@@ -457,6 +458,9 @@ steps:
   - '!vllm/distributed/kv_transfer/'
   - vllm/engine/
   - vllm/v1/executor/
+  - vllm/v1/core/kv_cache_planning.py
+  - vllm/v1/core/kv_cache_utils.py
+  - vllm/v1/kv_cache_interface.py
   - vllm/model_executor/models/
   - vllm/v1/worker/gpu/
   - vllm/v1/worker/gpu_worker.py

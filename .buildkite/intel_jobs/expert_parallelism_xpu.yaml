@@ -3,7 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: ':nvidia: (H200 MIG 18GB) EPLB Algorithm'
-  key: eplb-algorithm-2
+  key: eplb-algorithm-xpu
   device: intel_gpu
   timeout_in_minutes: 20
   optional: true
@@ -63,6 +63,34 @@ steps:
     'cd tests &&
     pytest --continue-on-collection-errors -v -s distributed/test_eplb_execute.py || true &&
     pytest --continue-on-collection-errors -v -s distributed/test_eplb_spec_decode.py || true'
+- label: ':nvidia: (B200) [Nightly] EP Weight Filter with EPLB'
+  key: ep-weight-filter-eplb-2xb200
+  device: intel_gpu
+  timeout_in_minutes: 20
+  num_devices: 2
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  _raw_old_commands:
+  - pytest -v -s model_executor/model_loader/test_ep_weight_filter_eplb.py
+  source_file_dependencies:
+  - vllm/model_executor/model_loader/default_loader.py
+  - vllm/model_executor/model_loader/ep_weight_filter.py
+  - vllm/distributed/eplb
+  - tests/model_executor/model_loader/test_ep_weight_filter_eplb.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s model_executor/model_loader/test_ep_weight_filter_eplb.py || true'
 - label: ':nvidia: (H100) [Nightly] Elastic EP Scaling'
   key: elastic-ep-scaling-test
   device: intel_gpu
@@ -80,7 +108,7 @@ steps:
     gpu: 4+
     mem: 16+
   _raw_old_commands:
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - pytest -v -s distributed/test_elastic_ep.py
   source_file_dependencies:
   - vllm/distributed/
@@ -93,4 +121,5 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
     pytest --continue-on-collection-errors -v -s distributed/test_elastic_ep.py || true'

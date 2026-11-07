@@ -19,7 +19,7 @@ steps:
     gpu: 4+
     mem: 16+
   _raw_old_commands:
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   - GPU_MEMORY_UTILIZATION=0.6 SLEEP_WAKE=1 bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
   source_file_dependencies:
@@ -29,6 +29,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
     bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh || true &&
     GPU_MEMORY_UTILIZATION=0.6 SLEEP_WAKE=1 bash v1/kv_connector/nixl_integration/run_accuracy_test.sh || true'
 - label: ':nvidia: (L4) [Nightly] Distributed FlashInfer NixlConnector PD accuracy'
@@ -48,7 +49,7 @@ steps:
     gpu: 4+
     mem: 16+
   _raw_old_commands:
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - FLASHINFER=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -57,6 +58,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
     FLASHINFER=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh || true'
 - label: ':nvidia: (L4) [Nightly] Push NixlConnector PP prefill PD accuracy'
   key: push-nixlconnector-pp-prefill-pd-accuracy-4-gpus
@@ -75,7 +77,7 @@ steps:
     gpu: 4+
     mem: 16+
   _raw_old_commands:
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - bash v1/kv_connector/nixl_push_integration/config_sweep_accuracy_test.sh
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -85,6 +87,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
     bash v1/kv_connector/nixl_push_integration/config_sweep_accuracy_test.sh || true'
 - label: ':nvidia: (L4) [Nightly] DP EP Distributed NixlConnector PD accuracy'
   key: dp-ep-distributed-nixlconnector-pd-accuracy-tests-4-gpus
@@ -103,7 +106,7 @@ steps:
     gpu: 4+
     mem: 16+
   _raw_old_commands:
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -112,6 +115,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
     DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh || true'
 - label: ':nvidia: (L4) [Nightly] CrossLayer KV layout Distributed NixlConnector PD accuracy'
   key: crosslayer-kv-layout-distributed-nixlconnector-pd-accuracy-tests-4-gpus
@@ -130,7 +134,7 @@ steps:
     gpu: 4+
     mem: 16+
   _raw_old_commands:
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - CROSS_LAYERS_BLOCKS=True bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -139,6 +143,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
     CROSS_LAYERS_BLOCKS=True bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh || true'
 - label: ':nvidia: (L4) [Nightly] Hybrid SSM NixlConnector PD accuracy'
   key: hybrid-ssm-nixlconnector-pd-accuracy-tests-4-gpus
@@ -157,7 +162,7 @@ steps:
     gpu: 4+
     mem: 16+
   _raw_old_commands:
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - HYBRID_SSM=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -166,6 +171,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
     HYBRID_SSM=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh || true'
 - label: ':nvidia: (L4) NixlConnector PD accuracy core'
   key: nixlconnector-pd-accuracy-core-2-gpus
@@ -184,7 +190,7 @@ steps:
     gpu: 2+
     mem: 16+
   _raw_old_commands:
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_core_test.sh
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -194,6 +200,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
     bash v1/kv_connector/nixl_integration/config_sweep_accuracy_core_test.sh || true'
 - label: ':nvidia: (L4) NixlConnector PD edge case'
   key: nixlconnector-pd-edge-cases-2-gpus
@@ -212,7 +219,7 @@ steps:
     gpu: 2+
     mem: 16+
   _raw_old_commands:
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - bash v1/kv_connector/nixl_integration/run_edge_case_test.sh
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -222,6 +229,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
     bash v1/kv_connector/nixl_integration/run_edge_case_test.sh || true'
 - label: ':nvidia: (L4) Hybrid SSM NixlConnector PD prefix cache'
   key: hybrid-ssm-nixlconnector-pd-prefix-cache-2-gpus
@@ -240,7 +248,7 @@ steps:
     gpu: 2+
     mem: 16+
   _raw_old_commands:
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -251,6 +259,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
     bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh || true'
 - label: ':nvidia: (L4) MultiConnector (Nixl+Offloading) PD accuracy'
   key: multiconnector-nixl-offloading-pd-accuracy-2-gpus
@@ -269,7 +278,7 @@ steps:
     gpu: 2+
     mem: 16+
   _raw_old_commands:
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -281,6 +290,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
     bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh || true'
 - label: ':nvidia: (L4) MultiConnector (Nixl+Offloading) PD edge cases'
   key: multiconnector-nixl-offloading-pd-edge-cases-2-gpus
@@ -299,7 +309,7 @@ steps:
     gpu: 2+
     mem: 16+
   _raw_old_commands:
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -311,6 +321,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
     bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh || true'
 - label: ':nvidia: (H200) [Nightly] Kimi-Linear-48B-A3B Disaggregated DP EP'
   key: kimi-linear-disaggregated
@@ -329,10 +340,11 @@ steps:
     gpu: 4+
     mem: 16+
   _raw_old_commands:
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
     bash v1/kv_connector/nixl_integration/run_accuracy_test.sh || true'
