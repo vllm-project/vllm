@@ -424,7 +424,8 @@ void fused_experts_kernel_impl(
     float alpha,
     float limit,
     CPUActMethod act_func,
-    bool with_bias) {
+    bool with_bias,
+    bool skip_weighted) {
   // handle 2 tiles per block
   constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n();
@@ -631,10 +632,10 @@ void fused_experts_kernel_impl(
         }
       }
       // 2.b copy from C to ic2 in original order
-      //   and also mul topk_weights in float32
+      //   and also mul topk_weights in float32 (unless skip_weighted is true)
       for (int64_t m = 0; m < m_size; ++m) {
         int32_t index = A_ids[m];
-        float weight = topk_weights[index];
+        float weight = skip_weighted ? 1.0f : topk_weights[index];
         copy_mul_stub(ic2 + index * K + nb * BLOCK_N, C + m * BLOCK_N, weight, n_size);
       }
     });
@@ -916,7 +917,8 @@ void fused_experts_cpu(
     const std::optional<double>& alpha,
     const std::optional<double>& limit,
     bool is_vnni,
-    int64_t act_method) {
+    int64_t act_method,
+    bool skip_weighted = false) {
   const CPUActMethod act_func = act_method_from_int(act_method);
   TORCH_CHECK(
       act_func != CPUActMethod::swiglu || (alpha.has_value() && limit.has_value()),
@@ -976,6 +978,10 @@ void fused_experts_cpu(
                   : (moe_comp_method == CPUQuantMethod::FP8_W8A8 ? w2.size(2) : w1.size(1) / 2);
   int64_t E = w1.size(0);
   int64_t topk = topk_weights_.size(1);
+
+  // skip_weighted is only supported for topk=1 (same as cpu_fused_moe_int8)
+  TORCH_CHECK(!skip_weighted || topk == 1,
+              "skip_weighted is only supported for topk=1 on CPU");
 
   // we use int32_t compensation for int8 w8a8
   int64_t packed_K = get_row_size(static_cast<CPUQuantMethod>(moe_comp_method), K);
@@ -1117,7 +1123,8 @@ void fused_experts_cpu(
           E,
           topk,
           num_tokens_post_pad,
-          act_func);
+          act_func,
+          skip_weighted);
     } else if (moe_comp_method == CPUQuantMethod::FP8_W8A16) {
       // here we just ignore C_tmp as it is not used
       scalar_t* __restrict__ A_tmp = (scalar_t*)((void*)(intermediate_cache2 + M * topk * K));
@@ -1157,7 +1164,8 @@ void fused_experts_cpu(
           alpha.has_value() ? float(alpha.value()) : 0,
           limit.has_value() ? float(limit.value()) : 0,
           act_func,
-          with_bias);
+          with_bias,
+          skip_weighted);
     } else if (moe_comp_method == CPUQuantMethod::MXFP4) {
       scalar_t* __restrict__ A_tmp = (scalar_t*)((void*)(intermediate_cache2 + M * topk * K));
       float* __restrict__ C_tmp = (float*)((void*)(A_tmp + num_threads * BLOCK_M * K));
@@ -1201,7 +1209,8 @@ void fused_experts_cpu(
           alpha.has_value() ? float(alpha.value()) : 0,
           limit.has_value() ? float(limit.value()) : 0,
           act_func,
-          with_bias);
+          with_bias,
+          skip_weighted);
     } else if (moe_comp_method == CPUQuantMethod::INT4_W4A8) {
       uint8_t* __restrict__ A_tmp = (uint8_t*)((void*)(intermediate_cache2 + M * topk * K));
       float* __restrict__ C_tmp = (float*)((void*)(A_tmp + num_threads * BLOCK_M * K));
@@ -1244,7 +1253,8 @@ void fused_experts_cpu(
           E,
           topk,
           num_tokens_post_pad,
-          act_func);
+          act_func,
+          skip_weighted);
     } else if (moe_comp_method == CPUQuantMethod::FP8_W8A8) {
       // Stage 1: FP8×FP8 GEMM (hidden_states is FP8 input)
       // Stage 2: BF16×FP8 GEMM (W8A16 path for down-projection)
@@ -1286,7 +1296,8 @@ void fused_experts_cpu(
           E,
           topk,
           num_tokens_post_pad,
-          act_func);
+          act_func,
+          skip_weighted);
     } else {
       scalar_t* __restrict__ A_tmp = intermediate_cache2 + M * topk * K;
       float* __restrict__ C_tmp = (float*)((void*)(A_tmp + num_threads * BLOCK_M * K));
@@ -1316,7 +1327,8 @@ void fused_experts_cpu(
           alpha.has_value() ? float(alpha.value()) : 0,
           limit.has_value() ? float(limit.value()) : 0,
           act_func,
-          with_bias);
+          with_bias,
+          skip_weighted);
     }
   });
 }

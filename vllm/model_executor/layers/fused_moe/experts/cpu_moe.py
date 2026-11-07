@@ -575,14 +575,6 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        if apply_router_weight_on_input:
-            # fused_experts_cpu always applies topk_weights internally on
-            # combine; MoEPrepareAndFinalizeNoDPEPModular.prepare() would
-            # also pre-apply it to hidden_states, double-weighting the
-            # output. Not needed by any CPU FP8 model today.
-            raise NotImplementedError(
-                "CPUExpertsFp8 does not support apply_router_weight_on_input=True."
-            )
         block_shape = (
             list(self.quant_config.block_shape)
             if self.quant_config.block_shape
@@ -613,6 +605,7 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
             True,  # is_vnni
             None,  # a1_scale
             _CPU_ACT_METHODS[activation],
+            skip_weighted=apply_router_weight_on_input,
         )
 
 
@@ -748,14 +741,6 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        if apply_router_weight_on_input:
-            # fused_experts_cpu always applies topk_weights internally on
-            # combine; MoEPrepareAndFinalizeNoDPEPModular.prepare() would
-            # also pre-apply it to hidden_states, double-weighting the
-            # output. Not needed by any CPU MXFP4 model today.
-            raise NotImplementedError(
-                "CPUExpertsMxfp4 does not support apply_router_weight_on_input=True."
-            )
         # Get bias and swiglu params from quant config
         w1_bias = self.quant_config.w1_bias
         w2_bias = self.quant_config.w2_bias
@@ -782,6 +767,7 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsModular):
             True,  # is_vnni
             None,  # a1_scale
             _CPU_ACT_METHODS[activation],
+            skip_weighted=apply_router_weight_on_input,
         )
 
 
@@ -989,12 +975,6 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        if apply_router_weight_on_input:
-            raise NotImplementedError(
-                "CPUExpertsInt4 (W4A16) does not support "
-                "apply_router_weight_on_input=True. "
-            )
-
         fused_experts_cpu(
             output,
             hidden_states,
@@ -1015,6 +995,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
             True,  # is_vnni
             None,  # a1_scale
             _CPU_ACT_METHODS[activation],
+            skip_weighted=apply_router_weight_on_input,
         )
 
 
@@ -1163,14 +1144,6 @@ class CPUExpertsInt8(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        if apply_router_weight_on_input:
-            # fused_experts_cpu always applies topk_weights internally on
-            # combine; MoEPrepareAndFinalizeNoDPEPModular.prepare() would
-            # also pre-apply it to hidden_states, double-weighting the
-            # output. Not needed by any CPU INT8 W8A8 model today.
-            raise NotImplementedError(
-                "CPUExpertsInt8 does not support apply_router_weight_on_input=True."
-            )
         fused_experts_cpu(
             output,
             hidden_states,
@@ -1191,6 +1164,7 @@ class CPUExpertsInt8(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModular):
             True,  # is_vnni
             None,  # a1_scale
             _CPU_ACT_METHODS[activation],
+            skip_weighted=apply_router_weight_on_input,
         )
 
 
@@ -1827,15 +1801,6 @@ class CPUExpertsFp8W8A8(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        if apply_router_weight_on_input:
-            # fused_experts_cpu always applies topk_weights internally on
-            # combine; MoEPrepareAndFinalizeNoDPEPModular.prepare() would
-            # also pre-apply it to hidden_states, double-weighting the
-            # output. Not needed by any CPU FP8 model today.
-            raise NotImplementedError(
-                "CPUExpertsFp8W8A8 does not support apply_router_weight_on_input=True."
-            )
-
         block_shape = (
             list(self.quant_config.block_shape)
             if self.quant_config.block_shape
@@ -1875,4 +1840,5 @@ class CPUExpertsFp8W8A8(mk.FusedMoEExpertsModular):
             True,  # is_vnni
             x_scales,  # a1_scale: per-token FP8 activation scales
             _CPU_ACT_METHODS[activation],
+            skip_weighted=apply_router_weight_on_input,
         )
