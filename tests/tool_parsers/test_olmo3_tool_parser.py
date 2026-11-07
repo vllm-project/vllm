@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -75,12 +76,14 @@ def test_no_tool_call(streaming: bool, default_tokenizer: TokenizerLike):
     )
     model_output = "How can I help you today?"
 
-    content, tool_calls = run_tool_extraction(
-        tool_parser, model_output, streaming=streaming
-    )
+    with patch("vllm.tool_parsers.olmo3_tool_parser.logger.exception") as log_exception:
+        content, tool_calls = run_tool_extraction(
+            tool_parser, model_output, streaming=streaming
+        )
 
     assert content == model_output
     assert len(tool_calls) == 0
+    log_exception.assert_not_called()
 
 
 TEST_CASES = [
@@ -180,6 +183,30 @@ TEST_CASES = [
         [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
         id="parallel_calls_nonstreaming",
     ),
+    pytest.param(
+        True,
+        "<function_calls>write_file(content='a\nb')\nget_time()</function_calls>",
+        [
+            FunctionCall(
+                name="write_file",
+                arguments=json.dumps({"content": "a\nb"}),
+            ),
+            FunctionCall(name="get_time", arguments="{}"),
+        ],
+        id="raw_newline_in_string_then_second_call_streaming",
+    ),
+    pytest.param(
+        False,
+        "<function_calls>write_file(content='a\nb')\nget_time()</function_calls>",
+        [
+            FunctionCall(
+                name="write_file",
+                arguments=json.dumps({"content": "a\nb"}),
+            ),
+            FunctionCall(name="get_time", arguments="{}"),
+        ],
+        id="raw_newline_in_string_then_second_call_nonstreaming",
+    ),
 ]
 
 
@@ -249,3 +276,63 @@ def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLik
         assert content == fake_problematic_input
         assert len(tool_calls) == 0
         mock_regex.match.assert_called_once()
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.parametrize(
+    "model_output, name, arguments",
+    [
+        pytest.param(
+            '<function_calls>write_file(path="a.py", content="""def f():\n'
+            "    return 1\n"
+            '""")</function_calls>',
+            "write_file",
+            {"path": "a.py", "content": "def f():\n    return 1\n"},
+            id="triple_quoted_newlines",
+        ),
+        pytest.param(
+            '<function_calls>write_file(path="a.py", content="""import os\n'
+            "\n"
+            'print(1)""")</function_calls>',
+            "write_file",
+            {"path": "a.py", "content": "import os\n\nprint(1)"},
+            id="triple_quoted_blank_line",
+        ),
+        pytest.param(
+            '<function_calls>write_file(path="a.py", content="def f():\\n'
+            '    return 1\\n")</function_calls>',
+            "write_file",
+            {"path": "a.py", "content": "def f():\n    return 1\n"},
+            id="escaped_newline_unchanged",
+        ),
+        pytest.param(
+            "<function_calls>get_weather(\n"
+            "    city='SF',\n"
+            "    metric='celsius'\n"
+            ")</function_calls>",
+            "get_weather",
+            {"city": "SF", "metric": "celsius"},
+            id="call_split_across_lines",
+        ),
+    ],
+)
+def test_newlines_inside_strings_and_calls(
+    streaming: bool,
+    model_output: str,
+    name: str,
+    arguments: dict[str, str],
+    default_tokenizer: TokenizerLike,
+):
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
+        default_tokenizer
+    )
+    content, tool_calls = run_tool_extraction(
+        tool_parser, model_output, streaming=streaming
+    )
+    assert content is None
+    assert [call.function for call in tool_calls] == [
+        FunctionCall(
+            name=name,
+            arguments=json.dumps(arguments, ensure_ascii=False),
+        )
+    ]
