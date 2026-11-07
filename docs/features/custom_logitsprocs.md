@@ -113,7 +113,7 @@ This section details different ways of making your logits processor visible to v
 This method is supported in both offline and online vLLM usage scenarios. The custom logits processor's FQCN (in the form of `dotted.path.to.module:ClassName`) can be passed as an argument to the `LLM` and `AsyncLLM` Python constructors, or as a CLI argument to `vllm serve` with the following syntax
 
 ``` bash
-vllm serve ... --logits_processors <logits processor 1> <logits processor 2> ...
+vllm serve ... --logits-processors <logits processor 1> <logits processor 2> ...
 ```
 
 The only requirements on the FQCN are
@@ -148,7 +148,7 @@ See examples below:
 ??? code "Passing custom logits processor FQCN to vLLM server via CLI"
 
     ```bash
-    vllm serve facebook/opt-125m --logits_processors your.module.path:TargetTokenLogitsProcessor
+    vllm serve facebook/opt-125m --logits-processors your.module.path:TargetTokenLogitsProcessor
     ```
 
 ### Method 2: Automatically Detect Custom Logits Processors Installed in Your Python Environment As Entry Points
