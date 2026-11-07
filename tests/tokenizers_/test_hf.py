@@ -11,7 +11,9 @@ from transformers import AutoTokenizer, TokenizersBackend
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.hf import (
     CachedHfTokenizer,
+    HfTokenizerBase,
     ThreadSafeHFTokenizerMixin,
+    encode_with_special_tokens_mask,
     get_cached_tokenizer,
     maybe_make_thread_pool,
 )
@@ -43,6 +45,25 @@ def test_cached_tokenizer_preserves_standard_chat_template(local_tokenizer_dir):
     assert tokenizer.chat_template == "standard"
 
 
+@pytest.mark.parametrize("wrapper", ["cached", "pooled", "recached"])
+def test_special_tokens_mask_survives_wrapping_and_pickle(local_tokenizer_dir, wrapper):
+    tokenizer = CachedHfTokenizer.from_pretrained(
+        local_tokenizer_dir, bos_token="[BOS]", add_bos_token=True
+    )
+    if wrapper == "pooled":
+        tokenizer = maybe_make_thread_pool(tokenizer, copies=2)
+    elif wrapper == "recached":
+        tokenizer = get_cached_tokenizer(tokenizer)
+
+    expected_ids = tokenizer.encode("prompt")
+    for candidate in (tokenizer, pickle.loads(pickle.dumps(tokenizer))):
+        assert isinstance(candidate, HfTokenizerBase)
+        encoding = encode_with_special_tokens_mask(candidate, "prompt")
+        assert encoding == candidate.encode_with_special_tokens_mask("prompt")
+        assert encoding["input_ids"] == expected_ids
+        assert encoding["special_tokens_mask"] == [1, 0]
+
+
 @pytest.mark.parametrize("model_id", ["openai-community/gpt2", "zai-org/chatglm3-6b"])
 def test_cached_tokenizer(model_id: str):
     reference_tokenizer = AutoTokenizer.from_pretrained(
@@ -57,6 +78,23 @@ def test_cached_tokenizer(model_id: str):
     pickled_tokenizer = pickle.dumps(cached_tokenizer)
     unpickled_tokenizer = pickle.loads(pickled_tokenizer)
     _check_consistency(unpickled_tokenizer, reference_tokenizer)
+
+
+def test_mask_request_preserves_legacy_proxy_encoding(local_tokenizer_dir):
+    class LegacyTokenizer:
+        def __init__(self, tokenizer):
+            self.tokenizer = tokenizer
+
+        def __getattr__(self, name):
+            return getattr(self.tokenizer, name)
+
+        def __call__(self, text):
+            return self.tokenizer(text)
+
+    tokenizer = CachedHfTokenizer.from_pretrained(local_tokenizer_dir)
+    encoding = encode_with_special_tokens_mask(LegacyTokenizer(tokenizer), "prompt")
+    assert encoding == tokenizer("prompt")
+    assert "special_tokens_mask" not in encoding
 
 
 def _check_consistency(target: TokenizerLike, expected: TokenizerLike):

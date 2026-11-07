@@ -3,7 +3,10 @@
 
 from typing import Any
 
+from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
+
 from vllm.config import VllmConfig
+from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -15,9 +18,16 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async
 
 from .base import BaseRenderer
+from .hf import (
+    HfTokensPrompt,
+    _get_detokenization_tokens,
+    detokenize_prompt,
+    detokenize_prompt_async,
+    tokenize_prompt,
+)
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
-from .params import ChatParams
+from .params import ChatParams, TokenizeParams
 
 logger = init_logger(__name__)
 
@@ -72,6 +82,36 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         self._apply_chat_template_async = make_async(
             safe_apply_chat_template, executor=self._executor
         )
+
+    def _tokenize_prompt(
+        self, prompt: TextPrompt, params: TokenizeParams
+    ) -> HfTokensPrompt:
+        return tokenize_prompt(
+            self.get_tokenizer(),
+            prompt,
+            params,
+            want_offsets=self._wants_offsets(prompt, params),
+        )
+
+    def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
+        tokenizer = self.get_tokenizer()
+        if not tokenizer.is_tekken and "prompt_special_tokens_mask" in prompt:
+            # SentencePiece KEEP returns pieces; decode text prompts natively.
+            prompt["prompt"] = tokenizer.tokenizer.decode(
+                _get_detokenization_tokens(prompt), SpecialTokenPolicy.IGNORE
+            )
+            return prompt
+        return detokenize_prompt(tokenizer, prompt)
+
+    async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
+        tokenizer = self.get_tokenizer()
+        if not tokenizer.is_tekken and "prompt_special_tokens_mask" in prompt:
+            decode = make_async(tokenizer.tokenizer.decode, executor=self._executor)
+            prompt["prompt"] = await decode(
+                _get_detokenization_tokens(prompt), SpecialTokenPolicy.IGNORE
+            )
+            return prompt
+        return await detokenize_prompt_async(self._async_tokenizer_decode, prompt)
 
     def render_messages(
         self,
