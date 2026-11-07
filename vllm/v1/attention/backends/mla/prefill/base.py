@@ -90,6 +90,15 @@ class MLAPrefillBackend(ABC):
         """
         return False
 
+    def supports_k_pe_and_merge(self) -> bool:
+        """Whether `run_prefill_new_tokens` and `run_prefill_context_chunk` also
+        take `k_pe=` (k then holds only the nope part, v is unpadded),
+        `lse_out=` (fp32 `[num_heads, num_tokens]`) and, for context chunks,
+        `o_init=`/`lse_init=` (an earlier result to merge with; may alias
+        `out`/`lse_out`). Implies `supports_out()`.
+        """
+        return False
+
     @classmethod
     def validate_configuration(
         cls,

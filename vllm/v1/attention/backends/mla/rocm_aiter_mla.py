@@ -377,6 +377,10 @@ def _gluon_mla_decode_supported() -> bool:
 # kernel's own within_2gb bound, so the fallback engages exactly where it does.
 _GLUON_MAX_KV_CACHE_BYTES = 1 << 31
 
+# gfx1250 decode reads the KV cache in 64-token pages: the tile size of aiter's
+# Gluon MLA decode, which takes the page size as its tile.
+_GFX1250_DECODE_PAGE_SIZE: Final = 64
+
 
 def _gluon_kv_cache_in_bounds(kv_cache_bytes: int | None) -> bool:
     """Whether this layer's KV cache keeps Gluon on its bounds-checked path.
@@ -902,6 +906,10 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     has_persistent_metadata: bool = False
     varlen_q_rows: torch.Tensor | None = None
     varlen_o_rows: torch.Tensor | None = None
+    # gfx1250: 64-token page table for aiter's Gluon MLA decode wrapper; set
+    # when this batch takes that path.
+    gfx1250_page_table: torch.Tensor | None = None
+    gfx1250_max_seq_len: int = 0
 
 
 @dataclass
@@ -1194,6 +1202,34 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         self.paged_kv_indices = torch.zeros(
             max_num_pages, dtype=torch.int32, device=device
         )
+
+        # Kimi-K3 on gfx1250: causal decode runs aiter's Gluon MLA decode through
+        # its public wrapper, which reads the KV cache through a 64-token page
+        # table (a view of the cache blocks). The table is persistent for FULL
+        # CUDA graphs.
+        from vllm.v1.attention.backends.mla.prefill.flash_attn import (
+            is_kimi_k3_on_gfx1250,
+        )
+
+        self._gfx1250_decode = (
+            is_kimi_k3_on_gfx1250(vllm_config)
+            and self.dcp_world_size == 1
+            and self.kernel_block_size % _GFX1250_DECODE_PAGE_SIZE == 0
+        )
+        if self._gfx1250_decode:
+            pages_per_block = self.kernel_block_size // _GFX1250_DECODE_PAGE_SIZE
+            self._gfx1250_page_offsets = torch.arange(
+                pages_per_block, dtype=torch.int32, device=device
+            )
+            self._gfx1250_page_table = torch.zeros(
+                (
+                    max_num_reqs,
+                    cdiv(vllm_config.model_config.max_model_len, self.kernel_block_size)
+                    * pages_per_block,
+                ),
+                dtype=torch.int32,
+                device=device,
+            )
 
         from aiter import dtypes, get_mla_metadata_info_v1
 
@@ -1914,6 +1950,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             causal,
             self._kv_cache_bytes,
         )
+        # The gfx1250 wrapper is causal only; a non-causal block keeps the
+        # existing routes.
+        gfx1250_decode = self._gfx1250_decode and causal
         dcp_route = _DCPDecodeRoute.PLAIN
         if self.dcp_world_size > 1:
             dcp_route = _select_dcp_decode_route(
@@ -1958,7 +1997,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # buffer alone and hand the metadata None, so a future reader cannot
         # pick up whatever the previous batch left behind.
         paged_kv_indices = None
-        if not _is_row_view_dcp_route(dcp_route) and not use_triton_verify:
+        if (
+            not _is_row_view_dcp_route(dcp_route)
+            and not use_triton_verify
+            and not gfx1250_decode
+        ):
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
                 self.paged_kv_indices.fill_(-1)
 
@@ -2042,7 +2085,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # running the same asm kernels. Gluon and the row-view DCP routes
         # (segmented and gfx942 Triton) cover the non-ASM decode/verify paths.
         use_persistent_metadata = (
-            not use_gluon_decode
+            not gfx1250_decode
+            and not use_gluon_decode
             and not use_gluon_verify
             and not _is_row_view_dcp_route(dcp_route)
             and not use_triton_verify
@@ -2154,6 +2198,21 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 dcp_tot_seq_lens_device,
             )
 
+        gfx1250_page_table = None
+        if gfx1250_decode:
+            # Cache block b holds 64-token pages b * R .. b * R + R - 1.
+            num_blocks = block_table_tensor.shape[1]
+            pages_per_block = self._gfx1250_page_offsets.numel()
+            gfx1250_page_table = self._gfx1250_page_table[
+                :num_kernel_reqs, : num_blocks * pages_per_block
+            ]
+            torch.add(
+                block_table_tensor[:num_kernel_reqs, :, None].to(torch.int32)
+                * pages_per_block,
+                self._gfx1250_page_offsets,
+                out=gfx1250_page_table.view(num_kernel_reqs, num_blocks, -1),
+            )
+
         attn_metadata = AiterMLADecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_for_kernel,
@@ -2193,6 +2252,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             has_persistent_metadata=has_persistent_metadata,
             varlen_q_rows=varlen_q_rows,
             varlen_o_rows=varlen_o_rows,
+            gfx1250_page_table=gfx1250_page_table,
+            gfx1250_max_seq_len=max_seq_len,
         )
 
         return attn_metadata
@@ -2828,8 +2889,16 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
+        out: torch.Tensor | None = None,
+        lse: torch.Tensor | None = None,
     ):
         """Attend the cached prefix, gathering and expanding it in one kernel"""
+        if out is not None:
+            # A supports_k_pe_and_merge backend merges each chunk into out / lse
+            # in place: the common path does that.
+            return super()._compute_prefill_context(
+                q, kv_c_and_k_pe_cache, attn_metadata, k_scale, out=out, lse=lse
+            )
         assert isinstance(attn_metadata, AiterMLAMetadata)
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
@@ -3433,6 +3502,48 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             lse = lse.index_select(0, o_rows)
         return o.index_select(0, o_rows), lse
 
+    def _forward_mqa_gfx1250(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        decode: AiterMLADecodeMetadata,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, None]:
+        """Causal decode (and uniform multi-token verify) on aiter's Gluon MLA
+        decode wrapper. FP8 Q comes in quantized with layer._q_scale."""
+        from aiter.ops.triton.attention.mla import mla_decode_fwd
+
+        if isinstance(q, tuple):
+            q = torch.cat(q, dim=-1)
+        fp8_dtype = current_platform.fp8_dtype()
+        kv_cache = kv_c_and_k_pe_cache
+        if kv_cache.dtype == torch.uint8:
+            kv_cache = kv_cache.view(fp8_dtype)
+        num_tokens, num_heads, _ = q.shape
+        o = torch.empty(
+            num_tokens,
+            num_heads,
+            self.kv_lora_rank,
+            dtype=decode.attn_out_dtype,
+            device=q.device,
+        )
+        mla_decode_fwd(
+            q,
+            kv_cache.view(-1, _GFX1250_DECODE_PAGE_SIZE, 1, kv_cache.shape[-1]),
+            o,
+            decode.qo_indptr,
+            decode.seq_lens,
+            decode.gfx1250_max_seq_len,
+            decode.gfx1250_page_table,
+            self.scale,
+            self.kv_lora_rank,
+            self.qk_rope_head_dim,
+            True,
+            layer._q_scale if q.dtype == fp8_dtype else None,
+            layer._k_scale if kv_cache.dtype == fp8_dtype else None,
+        )
+        return o, None
+
     def _forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -3445,6 +3556,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         decode = attn_metadata.decode
         assert decode.max_qo_len is not None
+        if decode.gfx1250_page_table is not None:
+            return self._forward_mqa_gfx1250(q, kv_c_and_k_pe_cache, decode, layer)
         if decode.use_gluon_decode:
             assert decode.paged_kv_indptr is not None
             assert decode.paged_kv_indices is not None
