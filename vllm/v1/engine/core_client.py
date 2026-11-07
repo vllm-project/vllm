@@ -1385,6 +1385,9 @@ class AsyncMPClient(MPClient):
     async def is_scheduler_paused_async(self) -> bool:
         return await self.call_utility_consensus_async("is_scheduler_paused")
 
+    async def check_ready_async(self) -> bool:
+        return all(await self.call_utility_all_async("check_ready"))
+
     async def profile_async(
         self,
         is_start: bool = True,

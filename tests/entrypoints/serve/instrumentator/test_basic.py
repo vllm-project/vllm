@@ -97,6 +97,17 @@ async def test_check_health(server: RemoteOpenAIServer):
     assert response.status_code == HTTPStatus.OK
 
 
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="/ready is not implemented in the Rust frontend",
+)
+async def test_check_ready(server: RemoteOpenAIServer):
+    response = requests.get(server.url_for("ready"), timeout=30)
+
+    assert response.status_code == HTTPStatus.OK
+
+
 @pytest.mark.parametrize(
     "server_args",
     [
@@ -224,3 +235,73 @@ async def test_health_check_engine_dead_error():
 
     # Assert that it returns 503 Service Unavailable
     assert response.status_code == 503
+
+
+def test_ready_route_is_registered():
+    from vllm.entrypoints.serve.instrumentator.health import router
+
+    assert any(route.path == "/ready" for route in router.routes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("ready", "status_code"), [(True, 200), (False, 503)])
+async def test_health_ready(ready: bool, status_code: int):
+    """Not ready without a dead engine (e.g. sleeping) also returns 503."""
+    from vllm.entrypoints.serve.instrumentator.health import health_ready
+
+    mock_request = Mock(spec=Request)
+    mock_app_state = Mock()
+    mock_engine_client = AsyncMock()
+    mock_engine_client.check_health_gpu.return_value = ready
+    mock_app_state.engine_client = mock_engine_client
+    mock_request.app.state = mock_app_state
+
+    response = await health_ready(mock_request)
+    assert response.status_code == status_code
+    mock_engine_client.check_health_gpu.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_health_ready_engine_dead():
+    from vllm.entrypoints.serve.instrumentator.health import health_ready
+
+    mock_request = Mock(spec=Request)
+    mock_app_state = Mock()
+    mock_engine_client = AsyncMock()
+    mock_engine_client.check_health_gpu.side_effect = EngineDeadError()
+    mock_app_state.engine_client = mock_engine_client
+    mock_request.app.state = mock_app_state
+
+    response = await health_ready(mock_request)
+    assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_health_ready_falls_back_to_liveness():
+    """EngineClients without check_health_gpu answer /ready like /health."""
+    from vllm.entrypoints.serve.instrumentator.health import health_ready
+
+    mock_request = Mock(spec=Request)
+    mock_app_state = Mock()
+    mock_engine_client = AsyncMock()
+    mock_engine_client.check_health_gpu.side_effect = NotImplementedError
+    mock_app_state.engine_client = mock_engine_client
+    mock_request.app.state = mock_app_state
+
+    response = await health_ready(mock_request)
+    assert response.status_code == 200
+    mock_engine_client.check_health.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_health_ready_no_engine():
+    """Render-only servers have no engine; they are always healthy."""
+    from vllm.entrypoints.serve.instrumentator.health import health_ready
+
+    mock_request = Mock(spec=Request)
+    mock_app_state = Mock()
+    mock_app_state.engine_client = None
+    mock_request.app.state = mock_app_state
+
+    response = await health_ready(mock_request)
+    assert response.status_code == 200
