@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
@@ -35,6 +35,15 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         i = rfind_tokens(input_ids, (self.end_token_id, self.start_token_id))
         return i >= 0 and input_ids[i] == self.end_token_id
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+    ) -> bool:
+        # Only a delta holding the end token can end reasoning, so the full
+        # check runs on that step, not on every decode step.
+        if self.end_token_id is None:
+            return False
+        return self.end_token_id in delta_ids and self.is_reasoning_end(input_ids)
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         return input_ids

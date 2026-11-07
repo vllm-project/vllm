@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from tests.reasoning.utils import check_streaming_end_matches_default
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser import ParserManager
 from vllm.reasoning.cohere_command_reasoning_parser import (
@@ -166,6 +167,30 @@ class TestIsReasoningEnd:
         assert not parser.is_reasoning_end([start_id, end_id, chatbot_id, *content_ids])
         assert parser.is_reasoning_end(
             [start_id, end_id, chatbot_id, start_id, *content_ids, end_id]
+        )
+
+    @pytest.mark.parametrize(
+        "parser_cls",
+        [CohereCommand3ReasoningParser, CohereCommand4ReasoningParser],
+        ids=["cmd3", "cmd4"],
+    )
+    def test_is_reasoning_end_streaming_matches_default(self, tokenizer, parser_cls):
+        parser = parser_cls(tokenizer)
+        start, end = parser.start_token_id, parser.end_token_id
+        chatbot = parser.chatbot_token_id
+        check_streaming_end_matches_default(
+            parser,
+            alphabet=[99, 100, start, end, chatbot],
+            hand_cases=[
+                ([], [end], True),
+                # End then start in one delta: reasoning reopened.
+                ([start, 99], [end, start], False),
+                # A chatbot token newest after the end.
+                ([start, 99], [end, chatbot], False),
+                # End inside a multi-token delta.
+                ([start], [99, end, 100], True),
+                ([chatbot, 99], [start, 100], False),
+            ],
         )
 
 
