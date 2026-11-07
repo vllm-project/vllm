@@ -6,6 +6,7 @@ These tests verify that ParsableContext correctly delegates to the unified
 Parser (via parse) and properly builds response output items.
 """
 
+import asyncio
 import json
 from collections.abc import Sequence
 from types import SimpleNamespace
@@ -480,3 +481,15 @@ def test_length_truncation_marks_last_item_incomplete():
     ctx.append_output(_make_request_output(text="cut mid sen", finish_reason="length"))
     assert ctx.response_messages[-1].type == "message"
     assert ctx.response_messages[-1].status == "incomplete"
+
+
+def test_call_python_tool_missing_code_raises_value_error():
+    """code_interpreter args that omit 'code' must raise a controlled
+    ValueError, not an uncaught KeyError -> HTTP 500 (issue #49954)."""
+    ctx = _make_context(None)
+    # Valid JSON, but no required "code" field.
+    last_msg = FunctionCall(
+        id="call_1", name="code_interpreter", arguments='{"language": "python"}'
+    )
+    with pytest.raises(ValueError, match="code"):
+        asyncio.run(ctx.call_python_tool(MagicMock(), last_msg))
