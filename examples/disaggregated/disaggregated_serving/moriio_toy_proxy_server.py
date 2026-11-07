@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Minimal single-node reference proxy for MoRI-IO prefill/decode disaggregation.
-# It demonstrates the DP-rank pinning contract the connector expects: pick one
-# prefill DP rank per request (flat_interleaved_dp_route) and pin BOTH legs to it
-# via the ``X-data-parallel-rank`` header plus ``kv_transfer_params``
-# (``remote_dp_rank`` / ``remote_dp_size`` / ``remote_tp_size``).
+# It selects each leg's DP rank independently with flat_interleaved_dp_route.
+# Each leg's ``X-data-parallel-rank`` selects its own engine; decode's
+# ``kv_transfer_params.remote_dp_rank`` identifies the prefill engine holding KV.
 #
 # Scope: single-node only. It intentionally does NOT supply the cross-pod
 # Wide-EP (2P2D) peer info -- ``remote_hosts`` / ``multi_pod_hosts``,
@@ -204,8 +203,7 @@ async def start_decode_request(endpoint, req_data, request_id, selected_dp_rank=
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id,
     }
-    # Pin the decode leg to the same DP rank as its prefill leg so both land on
-    # the same rank (vLLM reads this header directly; no engine-side routing).
+    # Pin the decode leg to its selected decode DP rank.
     if selected_dp_rank is not None:
         headers["X-data-parallel-rank"] = str(selected_dp_rank)
     response = await session.post(url=endpoint, json=req_data, headers=headers)
@@ -302,10 +300,9 @@ async def handle_request(api: str, request: Request):
         pid, selected_prefill_dp_rank = flat_interleaved_dp_route(
             request_nums, prefill_instances
         )
-        # Decode instance selection uses the same interleaved walk; in READ
-        # mode the decode reads KV from selected_prefill_dp_rank, so the
-        # decode's own dp_rank is not forwarded here.
-        did, _ = flat_interleaved_dp_route(request_nums, decode_instances)
+        did, selected_decode_dp_rank = flat_interleaved_dp_route(
+            request_nums, decode_instances
+        )
         prefill_instance_endpoint = prefill_instances[pid]
         decode_instance_endpoint = decode_instances[did]
 
@@ -383,7 +380,7 @@ async def handle_request(api: str, request: Request):
         decode_request_url = decode_instance_endpoint["request_address"] + api
         decode_request_task = asyncio.create_task(
             start_decode_request(
-                decode_request_url, req_data, request_id, selected_prefill_dp_rank
+                decode_request_url, req_data, request_id, selected_decode_dp_rank
             )
         )
 
