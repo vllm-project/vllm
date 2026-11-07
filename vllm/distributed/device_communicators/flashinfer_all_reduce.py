@@ -228,6 +228,7 @@ def get_fi_ar_workspace(
             "'trtllm' backend. Please use 'mnnvl' backend instead."
         )
 
+    requested_token_num = max_token_num
     if (
         envs.VLLM_ALLREDUCE_USE_FLASHINFER
         and (max_size := _get_tuned_standalone_max_size(world_size, backend, group))
@@ -251,6 +252,8 @@ def get_fi_ar_workspace(
             "multicast support); falling back to trtllm backend for single node."
         )
         backend = "trtllm"
+        # Tuned cutoffs are for MNNVL; the fallback keeps the requested size.
+        max_token_num = requested_token_num
         _fi_ar_workspace = _get_or_create(backend)
 
     if _fi_ar_workspace is not None:
@@ -462,10 +465,10 @@ class FlashInferAllReduce:
             backend,
             self.group,
         )
+        # _ensure_workspace() drops to the default for a TRTLLM workspace.
+        self.default_max_size = int(default_max_size_mb * MiB)
         self.max_workspace_size = (
-            tuned_max_size
-            if tuned_max_size is not None
-            else int(default_max_size_mb * MiB)
+            tuned_max_size if tuned_max_size is not None else self.default_max_size
         )
         self.max_num_tokens = 0
         self.disabled = False
@@ -475,10 +478,12 @@ class FlashInferAllReduce:
         if self.max_num_tokens == 0:
             element_size = torch.tensor([], dtype=dtype, device="cpu").element_size()
             self.max_num_tokens = self.max_workspace_size // (hidden_dim * element_size)
+        default_max_tokens = self.default_max_size // (hidden_dim * dtype.itemsize)
         workspace = get_fi_ar_workspace(
             world_size=self.world_size,
             rank=self.rank,
-            max_token_num=self.max_num_tokens,
+            # get_fi_ar_workspace() grows an MNNVL workspace to the tuned cutoff.
+            max_token_num=default_max_tokens,
             hidden_dim=hidden_dim,
             dtype=dtype,
             group=self.group,
@@ -487,6 +492,9 @@ class FlashInferAllReduce:
         if workspace is None:
             self.disabled = True
             return False
+        if workspace.backend != "mnnvl":
+            self.max_workspace_size = self.default_max_size
+            self.max_num_tokens = default_max_tokens
         return True
 
     def should_use_fi_ar(self, input_tensor: torch.Tensor) -> bool:
@@ -523,10 +531,10 @@ class FlashInferAllReduce:
         if not self.max_num_tokens:
             self.max_num_tokens = self.max_workspace_size // (hidden_dim * element_size)
 
-        if num_tokens > self.max_num_tokens:
+        if not self._ensure_workspace(hidden_dim, input_tensor.dtype):
             return False
 
-        if not self._ensure_workspace(hidden_dim, input_tensor.dtype):
+        if num_tokens > self.max_num_tokens:
             return False
 
         workspace = get_fi_ar_workspace(

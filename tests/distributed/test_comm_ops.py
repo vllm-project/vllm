@@ -409,6 +409,8 @@ def test_cuda_communicator_resume_retries_failed_restore(
         ("mnnvl", 103, 8, 1, 128 * flashinfer_all_reduce.MiB),
         ("trtllm", 103, 8, 2, None),
         ("mnnvl", 90, 8, 2, None),
+        ("mnnvl", 90, 4, 1, 64 * flashinfer_all_reduce.MiB),
+        ("mnnvl", 90, 8, 1, 64 * flashinfer_all_reduce.MiB),
     ],
 )
 def test_flashinfer_standalone_size_tuning(
@@ -441,7 +443,7 @@ def test_flashinfer_standalone_size_tuning(
 def test_flashinfer_standalone_workspace_size(
     monkeypatch: pytest.MonkeyPatch, enabled: bool, hidden_dim: int, expected: int
 ) -> None:
-    create_workspace = Mock(return_value=Mock(backend="mnnvl"))
+    create_workspace = Mock(side_effect=[None, Mock(backend="trtllm")])
     monkeypatch.setattr(
         flashinfer_all_reduce.envs, "VLLM_ALLREDUCE_USE_FLASHINFER", enabled
     )
@@ -450,7 +452,7 @@ def test_flashinfer_standalone_workspace_size(
     monkeypatch.setattr(
         flashinfer_all_reduce,
         "_resolve_fi_ar_backend",
-        Mock(return_value=("mnnvl", False)),
+        Mock(return_value=("mnnvl", True)),
     )
     monkeypatch.setattr(
         flashinfer_all_reduce,
@@ -463,7 +465,10 @@ def test_flashinfer_standalone_workspace_size(
         8, 0, 128, hidden_dim, torch.bfloat16, Mock()
     )
 
-    assert create_workspace.call_args.args[3] == expected
+    mnnvl, trtllm = create_workspace.call_args_list
+    assert mnnvl.args[3] == expected
+    # The tuned size is for MNNVL; the TRTLLM fallback keeps the requested 128.
+    assert trtllm.args[3] == 128
 
 
 @pytest.mark.parametrize(
