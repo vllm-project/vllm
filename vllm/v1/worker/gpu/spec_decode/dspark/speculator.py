@@ -97,6 +97,9 @@ class DSparkSpeculator(DFlashSpeculator):
         # Set when the sequential sampling can be batch-sharded across TP.
         self._sharded_sequential_comm: PyNcclCommunicator | None = None
 
+        # Whether the markov bias is fused into the Gumbel sample kernel.
+        self._fuse_markov_bias: bool = False
+
     def load_model(self, target_model: torch.nn.Module) -> None:
         super().load_model(target_model)
         tp_size = get_tp_group().world_size
@@ -104,6 +107,14 @@ class DSparkSpeculator(DFlashSpeculator):
             self.vllm_config, target_model
         ):
             self._try_enable_sharded_sequential_sampling()
+
+        self._fuse_markov_bias = (
+            self.draft_logits is not None
+            and self._d2t_scatter_index is None
+            and self.draft_watermarker is None
+            and self.acceptance_estimator is None
+            and not hasattr(self.model, "apply_output_logit_transform")
+        )
 
     def _try_enable_sharded_sequential_sampling(self) -> None:
         tp_size = get_tp_group().world_size
@@ -185,18 +196,8 @@ class DSparkSpeculator(DFlashSpeculator):
         step: int,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Sample draft ids from `logits + bias`.
-
-        The Gumbel kernel adds `bias` itself unless a step below needs the sum.
-        """
-        if bias is not None and (
-            self.draft_logits is None
-            or self._d2t_scatter_index is not None
-            or self.draft_watermarker is not None
-            or self.acceptance_estimator is not None
-            or bias.dtype != logits.dtype
-        ):
-            logits, bias = logits + bias, None
+        """Sample draft ids from the logits. If `bias` is provided, the Gumbel
+        kernel adds it."""
         self._maybe_predict_acceptance(logits, idx_map, self._step_cols[step])
         if self.draft_logits is None:
             draft_ids = greedy_argmax(logits)
@@ -316,10 +317,14 @@ class DSparkSpeculator(DFlashSpeculator):
             markov_embed, state = self._markov_step(prev, hidden_by_step[:, i], state)
             if self.use_confidence_head:
                 markov_embeds.append(markov_embed)
+            bias = self.model.markov_bias(markov_embed)
             logits_i = base_logits[:, i]
-            bias: torch.Tensor | None = self.model.markov_bias(markov_embed)
-            if hasattr(self.model, "apply_output_logit_transform"):
-                logits_i = self.model.apply_output_logit_transform(logits_i + bias)
+            # The kernel rounds the sum to the logits dtype, as `logits + bias`
+            # does only when the dtypes match.
+            if not self._fuse_markov_bias or bias.dtype != logits_i.dtype:
+                logits_i = logits_i + bias
+                if hasattr(self.model, "apply_output_logit_transform"):
+                    logits_i = self.model.apply_output_logit_transform(logits_i)
                 bias = None
             draft_sampled_i = self._sample_logits(
                 logits_i, idx_map[:, i], sample_pos[:, i], i, bias

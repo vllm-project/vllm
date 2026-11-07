@@ -372,6 +372,8 @@ def test_markov_chain_matches_adding_bias_first(
                 dtype=cache_dtype,
                 device=device,
             )
+        # As load_model sets it; the mixed-dtype case falls back in the loop.
+        spec._fuse_markov_bias = not (greedy or reduced_vocab or transform)
         return spec
 
     fused_steps = []
