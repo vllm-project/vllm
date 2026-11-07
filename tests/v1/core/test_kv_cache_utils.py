@@ -1901,7 +1901,26 @@ def test_generate_scheduler_kv_cache_config():
     assert scheduler_kv_cache_config == KVCacheConfig(
         num_blocks=10,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["layer_1", "layer_2"], new_kv_cache_spec())],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer_1", "layer_2"],
+                new_kv_cache_spec(),
+                full_kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=16, kv_cache_specs=kv_cache_specs
+                ),
+            )
+        ],
+    )
+
+    # Projection owns its metadata and can safely be applied twice.
+    worker_spec = kv_cache_configs[0].kv_cache_groups[0].kv_cache_spec
+    scheduler_group = scheduler_kv_cache_config.kv_cache_groups[0]
+    assert isinstance(worker_spec, UniformTypeKVCacheSpecs)
+    assert scheduler_group.full_kv_cache_spec == worker_spec
+    assert scheduler_group.full_kv_cache_spec is not worker_spec
+    assert (
+        generate_scheduler_kv_cache_config([scheduler_kv_cache_config])
+        == scheduler_kv_cache_config
     )
 
 

@@ -1130,10 +1130,10 @@ def generate_scheduler_kv_cache_config(
     cfg = copy.deepcopy(kv_cache_configs[0])
     for group in cfg.kv_cache_groups:
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            # All layers in the UniformTypeKVCacheSpecs have the same type,
-            # so use an arbitrary one to initialize the scheduler.
+            group.full_kv_cache_spec = group.kv_cache_spec
+            # The scheduler needs one representative for block management.
             group.kv_cache_spec = next(
-                iter(group.kv_cache_spec.kv_cache_specs.values())
+                iter(group.full_kv_cache_spec.kv_cache_specs.values())
             )
     return cfg
 
