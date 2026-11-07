@@ -58,6 +58,17 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
     name="get_weather",
     arguments='{"city": "Martha\'s Vineyard", "metric": "\\"cool units\\""}',
 )
+# The "=" in the URL lets the next call's arguments stream before it closes.
+URL_FUNCTION_OUTPUT = "fetch(url='https://example.com/search?q=sf&page=2')"
+URL_FUNCTION_CALL = FunctionCall(
+    name="fetch",
+    arguments='{"url": "https://example.com/search?q=sf&page=2"}',
+)
+NUMBERS_FUNCTION_OUTPUT = "locate(lat=37.7749, lon=-122.4194, scale=1.5e3, eps=5e-3)"
+NUMBERS_FUNCTION_CALL = FunctionCall(
+    name="locate",
+    arguments='{"lat": 37.7749, "lon": -122.4194, "scale": 1500.0, "eps": 0.005}',
+)
 PYTHON_TAG_FUNCTION_OUTPUT = (
     "<|python_start|>[get_weather(city='LA', metric='C')]<|python_end|>"
 )
@@ -199,6 +210,18 @@ TEST_CASES = [
             FunctionCall(name="register_user", arguments='{"name": "Doe", "age": 9}'),
         ],
         id="parallel_calls_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"[{URL_FUNCTION_OUTPUT}, {NUMBERS_FUNCTION_OUTPUT}]",
+        [URL_FUNCTION_CALL, NUMBERS_FUNCTION_CALL],
+        id="numbers_after_call_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{URL_FUNCTION_OUTPUT}, {NUMBERS_FUNCTION_OUTPUT}]",
+        [URL_FUNCTION_CALL, NUMBERS_FUNCTION_CALL],
+        id="numbers_after_call_nonstreaming",
     ),
 ]
 
