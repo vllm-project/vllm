@@ -15,6 +15,7 @@ from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
+from vllm.v1.worker.gpu.spec_decode import rejection_sampler as rs_module
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
@@ -158,6 +159,56 @@ def test_chunked_scores_match_full_batch(
         == full_logprobs.cu_num_generated_tokens
     )
     assert sampling_mask_tensors is None
+
+
+@pytest.mark.parametrize("fly_window_size", [0, 2])
+def test_fly_verifies_processed_logits(
+    monkeypatch: pytest.MonkeyPatch, fly_window_size: int
+):
+    """FLy takes its entropy from the logits _verify passes on, so it must keep
+    apply_sampling_params even when only temperature and top-p are active."""
+    seen = {}
+
+    def fake_rejection_sample(*args, target_logits_pre_scaled, **kwargs):
+        seen["pre_scaled"] = target_logits_pre_scaled
+        return torch.zeros(1, 2, dtype=torch.int64), torch.ones(1, dtype=torch.int32)
+
+    monkeypatch.setattr(rs_module, "rejection_sample", fake_rejection_sample)
+    temperature = torch.ones(1)
+    rejection_sampler = _make_rejection_sampler(
+        SimpleNamespace(
+            logprobs_mode="raw_logprobs",
+            return_sampling_mask=False,
+            needs_only_temperature_scaling=lambda _: True,
+            needs_only_temperature_and_top_p=lambda _: True,
+            apply_sampling_params=lambda logits, *args: logits.float(),
+            sampling_states=SimpleNamespace(
+                temperature=SimpleNamespace(gpu=temperature),
+                seeds=SimpleNamespace(gpu=torch.zeros(1, dtype=torch.int64)),
+            ),
+            use_fp64_gumbel=False,
+            trace_replay_state=None,
+            may_mask_logits=np.zeros(1, dtype=bool),
+        ),
+        num_speculative_steps=1,
+    )
+    rejection_sampler.fly_window_size = fly_window_size
+    idx_mapping_np = np.zeros(1, dtype=np.int32)
+    batch = _make_input_batch(np.array([0, 2], dtype=np.int32), idx_mapping_np, "cpu")
+    rejection_sampler._verify(
+        torch.zeros(2, 8, dtype=torch.bfloat16),
+        None,
+        torch.zeros(2, dtype=torch.int64),
+        torch.arange(2),
+        batch.cu_num_logits,
+        batch.idx_mapping,
+        idx_mapping_np,
+        batch.expanded_idx_mapping,
+        batch.expanded_local_pos,
+        np.full(1, 64, dtype=np.int32),
+    )
+
+    assert seen["pre_scaled"] == (fly_window_size > 0)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")

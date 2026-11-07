@@ -220,6 +220,15 @@ class Sampler:
         )
         return sampler_output
 
+    def needs_only_temperature_scaling(self, idx_mapping_np: np.ndarray) -> bool:
+        """True when every request's required logits processing is, at most,
+        temperature scaling: no thinking-budget forcing, logits processors,
+        or (for non-greedy rows) min_p/top_k/top_p restriction. A caller can
+        then skip apply_sampling_params and pass raw logits straight into
+        rejection_sample() with target_logits_pre_scaled=False instead.
+        """
+        return not np.any(self.may_mask_logits[idx_mapping_np])
+
     def apply_sampling_params(
         self,
         logits: torch.Tensor,
