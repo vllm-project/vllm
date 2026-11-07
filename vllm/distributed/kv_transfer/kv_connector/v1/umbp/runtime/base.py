@@ -70,6 +70,10 @@ class UMBPWorkerHandle(Protocol):
 
 
 class IUMBPRuntime(Protocol):
+    # True when every rank of an engine reads and writes one pool, so
+    # TP-replicated objects can be stored once instead of once per rank.
+    shares_pool_across_ranks: bool = False
+
     def create_scheduler_handle(
         self,
         namespace: str,
