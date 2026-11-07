@@ -25,8 +25,8 @@ import jinja2.sandbox
 import pytest
 
 from tests.tool_parsers.utils import run_tool_extraction
-from vllm.entrypoints.chat_utils import _postprocess_messages
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.renderers.chat_utils.chat_message import _postprocess_messages
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParserManager
 
