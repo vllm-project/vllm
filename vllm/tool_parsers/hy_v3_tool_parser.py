@@ -617,13 +617,7 @@ class HYV3ToolParser(ToolParser):
             # WITHOUT the closing quote, so the prefix stays stable
             # as the value grows.  The closing `"` and `}` will be
             # sent when the value or tool_call closes.
-            escaped_val = (
-                partial_value.replace("\\", "\\\\")
-                .replace('"', '\\"')
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t")
-            )
+            escaped_val = json.dumps(partial_value, ensure_ascii=False)[1:-1]
             # Note: no closing " here – it's appended only on close
             snapshot_parts.append(f'{k_json}: "{escaped_val}')
 
