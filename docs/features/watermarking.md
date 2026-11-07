@@ -50,6 +50,10 @@ and defaults to 4. Larger values make the watermark less robust to
 edits because an insertion, deletion, or substitution changes more subsequent
 contexts. Values above 16 are allowed but emit a warning.
 
+Watermark contexts use generated tokens only. The first `context_width` tokens
+use ordinary sampling, independently of context deduplication. Prompt tokens
+are not needed for detection.
+
 `allow_target_only_watermarking` defaults to false and only has an effect when
 speculative decoding is enabled. It permits speculative decoding with a
 watermarking algorithm that does not support it natively, at the cost of
@@ -74,8 +78,7 @@ When `watermark_config` is set, the Prometheus counter
 Each finished request has exactly one status, so the sum over `status` equals
 `vllm:request_success_total` on the same instance. Requests that the client
 aborts are in neither counter. The counter does not exist without
-`watermark_config`. The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) does not
-export this counter yet. With `n > 1`, each sequence counts once. In a
+`watermark_config`. With `n > 1`, each sequence counts once. In a
 disaggregated prefill/decode deployment, both instances count a request: sum
 over decode instances only. For streaming input, the first input chunk sets
 the status.

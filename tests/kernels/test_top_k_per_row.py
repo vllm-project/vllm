@@ -156,7 +156,14 @@ COOPERATIVE_TOPK_BACKEND = pytest.param(
         reason="cooperative_topk requires SM90+",
     ),
 )
-WORKSPACE_TOPK_BACKENDS = ["persistent_topk", COOPERATIVE_TOPK_BACKEND]
+PERSISTENT_TOPK_BACKEND = pytest.param(
+    "persistent_topk",
+    marks=pytest.mark.skipif(
+        not current_platform.is_cuda(),
+        reason="persistent_topk requires CUDA",
+    ),
+)
+WORKSPACE_TOPK_BACKENDS = [PERSISTENT_TOPK_BACKEND, COOPERATIVE_TOPK_BACKEND]
 TOPK_BACKENDS = ["top_k_per_row_decode", *WORKSPACE_TOPK_BACKENDS]
 
 
@@ -349,7 +356,9 @@ def validate_topk_against_reference(
 @pytest.mark.parametrize("num_rows", NUM_ROWS)
 @pytest.mark.parametrize("top_k", TOP_K_VALUES)
 @pytest.mark.parametrize("clean_logits", [True, False])
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @torch.inference_mode()
 def test_top_k_per_row(
     num_rows: int,
@@ -460,7 +469,9 @@ def _run_top_k_per_row_decode_test(
 @pytest.mark.parametrize("next_n", NEXT_N)
 @pytest.mark.parametrize("clean_logits", [True, False])
 @pytest.mark.parametrize("data_generation", DATA_GENERATION)
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @torch.inference_mode()
 def test_top_k_per_row_decode(
     top_k: int,
@@ -477,7 +488,9 @@ def test_top_k_per_row_decode(
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("clean_logits", [True, False])
 @torch.inference_mode()
 def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
@@ -1605,7 +1618,9 @@ def test_workspace_topk_stress(backend: str) -> None:
         )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("backend", TOPK_BACKENDS)
 @pytest.mark.parametrize("top_k", [512, 1024, 2048])
 @torch.inference_mode()
@@ -1631,19 +1646,21 @@ def test_deepseek_topk_backends_no_error_and_reference(
 # 1-4 rows take the 16-CTA cluster on SM100 (8-CTA below), then 8, 4 and 2.
 @pytest.mark.parametrize("num_rows", [1, 4, 8, 33, 64])
 @pytest.mark.parametrize("stride", [65536, 1048576])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @torch.inference_mode()
 def test_cooperative_topk_rows_shorter_than_stride(
-    top_k: int, num_rows: int, stride: int
+    top_k: int, num_rows: int, stride: int, dtype: torch.dtype
 ) -> None:
     """Each row picks its single-pass or streaming path from its own length,
-    so one launch over a wide logits buffer mixes both."""
+    so one launch over a wide logits buffer mixes both. BF16 logits are read
+    as-is."""
     torch.set_default_device("cuda:0")
     set_random_seed(0)
     # Trivial (<= top_k), register (<= 16384) and cluster paths, the longest
     # rows streaming through two passes on small clusters.
     row_lengths = [min(stride, 300000), 40000, 16384, 5000, 300]
     lengths = [row_lengths[i % len(row_lengths)] for i in range(num_rows)]
-    logits = torch.randn(num_rows, stride)
+    logits = torch.randn(num_rows, stride).to(dtype)
     workspace = torch.empty(RADIX_TOPK_WORKSPACE_SIZE, dtype=torch.uint8)
     out = torch.empty(num_rows, top_k, dtype=torch.int32)
     torch.ops._C.cooperative_topk(
@@ -1653,6 +1670,9 @@ def test_cooperative_topk_rows_shorter_than_stride(
         k = min(top_k, length)
         idx = out[row]
         assert torch.all(idx[k:] == -1)
+        # BF16 logits carry exact ties, among which any index may win, so
+        # compare the selected values.
+        assert idx[:k].unique().numel() == k
         torch.testing.assert_close(
             logits[row, idx[:k].long()].sort().values,
             logits[row, :length].topk(k).values.sort().values,
@@ -1723,14 +1743,16 @@ def test_cooperative_topk_candidate_overflow(seq_len: int, top_k: int) -> None:
 @pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
 @pytest.mark.parametrize("num_rows", [9, 34, 64])
 @pytest.mark.parametrize("seq_len", [65535, 65536, 65537])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @torch.inference_mode()
 def test_cooperative_topk_overflow_cluster_boundary(
-    num_rows: int, seq_len: int
+    num_rows: int, seq_len: int, dtype: torch.dtype
 ) -> None:
     top_k = 2048
-    stride = (seq_len + 3) & ~3
+    # Rows are 16-byte aligned: 4 FP32 or 8 BF16 scores.
+    stride = (seq_len + 7) & ~7 if dtype == torch.bfloat16 else (seq_len + 3) & ~3
     row = 1.0 + torch.arange(seq_len, dtype=torch.float32) * (0.01 / seq_len)
-    logits = torch.full((num_rows, stride), float("inf"), device="cuda")
+    logits = torch.full((num_rows, stride), float("inf"), device="cuda", dtype=dtype)
     logits[:, :seq_len] = row.cuda()
     lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
@@ -1743,11 +1765,16 @@ def test_cooperative_topk_overflow_cluster_boundary(
 @pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
 @pytest.mark.parametrize("num_rows", [1, 64])
 @pytest.mark.parametrize("top_k", [512, 2048])
+# 8192 takes the register path, 32768 the cluster path.
+@pytest.mark.parametrize("seq_len", [8192, 32768])
+# The same BF16-grid values, widened to FP32 or read as BF16.
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @torch.inference_mode()
-def test_cooperative_topk_16bit_grid_overflow(num_rows: int, top_k: int) -> None:
-    seq_len = 32768
+def test_cooperative_topk_16bit_grid_overflow(
+    num_rows: int, top_k: int, seq_len: int, dtype: torch.dtype
+) -> None:
     row = 1.0 + torch.arange(seq_len, dtype=torch.float32) * (0.01 / seq_len)
-    logits = row.to(torch.bfloat16).float().cuda().repeat(num_rows, 1)
+    logits = row.to(torch.bfloat16).to(dtype).cuda().repeat(num_rows, 1)
     lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
 
@@ -1833,14 +1860,16 @@ def test_cooperative_topk_negative_inf_ties(
 @pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
 @pytest.mark.parametrize("top_k", [512, 2048])
 @pytest.mark.parametrize("num_rows,seq_len", [(9, 262144), (34, 131072), (64, 262144)])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @torch.inference_mode()
 def test_cooperative_topk_streaming_overflow(
-    num_rows: int, seq_len: int, top_k: int
+    num_rows: int, seq_len: int, top_k: int, dtype: torch.dtype
 ) -> None:
     # Per-CTA partitions exceed the resident stages, so recovery rescans
     # global memory (kFused=false).
     generator = torch.Generator().manual_seed(seq_len + top_k)
-    logits = (1.0 + torch.rand((num_rows, seq_len), generator=generator) * 0.01).cuda()
+    scores = 1.0 + torch.rand((num_rows, seq_len), generator=generator) * 0.01
+    logits = scores.to(dtype).cuda()
     lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
     indices = torch.full((num_rows, top_k), -1, dtype=torch.int32, device="cuda")
 
@@ -1935,9 +1964,10 @@ def test_cooperative_topk_overflow_special_bins(
 @pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
 @pytest.mark.parametrize("top_k", [512, 2048])
 @pytest.mark.parametrize("num_rows", [9, 64])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @torch.inference_mode()
 def test_cooperative_topk_overflow_mixed_lengths(
-    num_rows: int, top_k: int, backend: str
+    num_rows: int, top_k: int, backend: str, dtype: torch.dtype
 ) -> None:
     # One launch mixes short, cluster, overflowing and non-overflowing rows;
     # scores past each row's length must never be selected.
@@ -1951,7 +1981,7 @@ def test_cooperative_topk_overflow_mixed_lengths(
             logits[row, :length] = 1.0 + torch.rand(length, generator=generator) * 0.01
         else:
             logits[row, :length] = torch.randn(length, generator=generator)
-    logits = logits.cuda()
+    logits = logits.to(dtype).cuda()
     lengths = torch.tensor(row_lengths, dtype=torch.int32, device="cuda")
     indices = torch.full((num_rows, top_k), -1, dtype=torch.int32, device="cuda")
 
@@ -1968,13 +1998,16 @@ def test_cooperative_topk_overflow_mixed_lengths(
 )
 @pytest.mark.parametrize("num_rows", [1, 9, 64])
 @pytest.mark.parametrize("seq_len", [65536, 262144, 1048576])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @torch.inference_mode()
-def test_cooperative_topk_overflow_nan(num_rows: int, seq_len: int) -> None:
+def test_cooperative_topk_overflow_nan(
+    num_rows: int, seq_len: int, dtype: torch.dtype
+) -> None:
     # More NaNs than top_k overflow the top coarse bin. The exact keys must
     # order NaN above +inf as the coarse bins do (and as torch.topk does).
     top_k = 512
     gen = torch.Generator(device="cuda").manual_seed(0)
-    logits = torch.randn((num_rows, seq_len), generator=gen, device="cuda")
+    logits = torch.randn((num_rows, seq_len), generator=gen, device="cuda").to(dtype)
     nan_pos = torch.rand((num_rows, seq_len), generator=gen, device="cuda")
     logits.scatter_(1, nan_pos.topk(4 * top_k, dim=1).indices, float("nan"))
     lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
@@ -2599,7 +2632,7 @@ SPARSE_INDEXER_EXPLICIT_BACKENDS = [
     pytest.param(
         "per_row",
         marks=pytest.mark.skipif(
-            not current_platform.is_cuda(), reason="requires CUDA"
+            not current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
         ),
     ),
     "torch",
@@ -2688,7 +2721,7 @@ def test_sparse_indexer_decode_topk_explicit_backends(
         pytest.param(
             "per_row",
             marks=pytest.mark.skipif(
-                not current_platform.is_cuda(), reason="requires CUDA"
+                not current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
             ),
         ),
         pytest.param(
@@ -2821,6 +2854,20 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
     if not is_sm100:
         with pytest.raises(RuntimeError, match="SM100a/SM103a"):
             resolve("deep_select")
+
+    def takes_bf16(backend: str, t: torch.Tensor, num_rows: int = 64) -> bool:
+        cfg = VllmConfig(kernel_config={"sparse_indexer_topk_backend": backend})
+        with set_current_vllm_config(cfg):
+            return SparseIndexerTopk().takes_bf16_logits(t, 2048, num_rows)
+
+    # cooperative_topk reads BF16 rows as-is when they are 16B-aligned
+    # (8 elements).
+    assert takes_bf16("cooperative", logits.to(torch.bfloat16)) == has_coop
+    # Row stride 131076 is 8B- but not 16B-aligned in BF16.
+    bf16_unaligned = torch.randn(64, 131076, dtype=torch.bfloat16, device="cuda")[
+        :, :131072
+    ]
+    assert not takes_bf16("cooperative", bf16_unaligned)
 
 
 def _patch_aiter_topk(monkeypatch, decode_kernel, enabled: bool = True) -> None:
@@ -2988,7 +3035,7 @@ def test_sparse_indexer_resolved_persistent_bf16(
     assert selector.resolve_backend(fp32, k, rows) == resolved
     takes_bf16 = selector.takes_bf16_logits(logits, k, rows)
     assert takes_bf16 == (
-        resolved == "persistent" and current_platform.is_device_capability_family(100)
+        resolved == "cooperative" or current_platform.is_device_capability_family(100)
     )
     assert not selector.takes_bf16_logits(fp32, k, rows)
     assert not selector.takes_bf16_logits(logits[:, ::2], k, rows)
@@ -3004,16 +3051,20 @@ def test_sparse_indexer_resolved_persistent_bf16(
     assert torch.equal(actual_scores, reference_scores)
 
 
+@pytest.mark.parametrize("itemsize", [2, 4])
 @pytest.mark.parametrize(
     "rows,capacity",
     [(33, 32), (65, 64), (96, 64), (1025, 512), (8192, 1536), (8193, 2048)],
 )
-def test_decode_chunk_ranges_cover_rows_with_bounded_balanced_slices(rows, capacity):
-    """No query is lost/duplicated; small tails share work with preceding chunks."""
+def test_decode_chunk_ranges_cover_rows_with_bounded_balanced_slices(
+    rows, capacity, itemsize
+):
+    """No query is lost/duplicated; small tails share work with preceding chunks.
+    The budget counts BF16 or FP32 logits bytes."""
     from vllm.model_executor.layers.sparse_attn_indexer import _decode_chunk_ranges
 
     width = 1024
-    ranges = _decode_chunk_ranges(rows, width, capacity * width * 2)
+    ranges = _decode_chunk_ranges(rows, width, capacity * width * itemsize, itemsize)
     assert ranges[0][0] == 0 and ranges[-1][1] == rows
     assert all(a[1] == b[0] for a, b in zip(ranges, ranges[1:]))
     lengths = [end - start for start, end in ranges]
@@ -3026,12 +3077,12 @@ def test_decode_chunk_ranges_cover_rows_with_bounded_balanced_slices(rows, capac
 def test_decode_chunk_budget_disabled_fitting_and_invalid():
     from vllm.model_executor.layers.sparse_attn_indexer import _decode_chunk_ranges
 
-    assert _decode_chunk_ranges(8192, 1024, 0) == []
-    assert _decode_chunk_ranges(32, 1024, 65536) == []
+    assert _decode_chunk_ranges(8192, 1024, 0, 2) == []
+    assert _decode_chunk_ranges(32, 1024, 65536, 2) == []
     with pytest.raises(ValueError):
-        _decode_chunk_ranges(32, 1024, -1)
-    with pytest.raises(ValueError, match="16 BF16 rows"):
-        _decode_chunk_ranges(32, 1024, 1024)
+        _decode_chunk_ranges(32, 1024, -1, 2)
+    with pytest.raises(ValueError, match="16 logits rows"):
+        _decode_chunk_ranges(32, 1024, 1024, 2)
 
 
 @pytest.mark.parametrize("rows,width", [(129, 521), (12290, 6145)])

@@ -486,6 +486,9 @@ class HiSparseHotSpec(KVCacheSpec):
     def page_size_bytes(self) -> int:
         return self.page_size
 
+    def get_block_stride_alignment(self) -> int:
+        return math.lcm(self.page_size, super().get_block_stride_alignment())
+
     @property
     def block_table_token_alignment(self) -> int | None:
         return None
@@ -1011,6 +1014,8 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     bounded_replay: bool = False
     # Hit tokens a bounded replay recomputes; None replays one window.
     replay_tokens: int | None = None
+    # See MLAAttentionSpec.non_causal_multi_token_decode (windowed DSpark drafts).
+    non_causal_multi_token_decode: bool = False
 
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
@@ -1046,6 +1051,8 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         bounded_replay_set = set(spec.bounded_replay for spec in specs)
         replay_tokens_set = set(spec.replay_tokens for spec in specs)
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
+        kv_quant_mode_set = {spec.kv_quant_mode for spec in specs}
+        alignment_set = {spec.alignment for spec in specs}
         assert len({spec.dcp_sharded for spec in specs}) == 1
         assert len({spec.max_tp_shards for spec in specs}) == 1
         assert (
@@ -1057,10 +1064,13 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             and len(bounded_replay_set) == 1
             and len(replay_tokens_set) == 1
             and len(block_stride_alignment_set) == 1
+            and len(kv_quant_mode_set) == 1
+            and len(alignment_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, tokens per state, model version, sliding "
-            "window size, retained token count, and replay policy."
+            "window size, retained token count, replay policy, KV quant mode "
+            "and alignment."
         )
         return cls(
             block_size=specs[0].block_size,
@@ -1070,7 +1080,6 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             dtype=specs[0].dtype,
             dcp_sharded=specs[0].dcp_sharded,
             max_tp_shards=specs[0].max_tp_shards,
-            kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
@@ -1082,6 +1091,11 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             model_version=model_version_set.pop(),
             bounded_replay=bounded_replay_set.pop(),
             replay_tokens=replay_tokens_set.pop(),
+            kv_quant_mode=kv_quant_mode_set.pop(),
+            alignment=alignment_set.pop(),
+            non_causal_multi_token_decode=any(
+                spec.non_causal_multi_token_decode for spec in specs
+            ),
         )
 
     def is_uniform_with_collection(
@@ -1100,6 +1114,8 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtypes: tuple[torch.dtype, ...]
+    state_alignment: int = 1
+    """Byte alignment of each state within a page."""
     page_size_padded: int | None = None
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
@@ -1112,10 +1128,17 @@ class MambaSpec(KVCacheSpec):
     # rank holds the full state (e.g. the replicated PLE conv state).
     tp_replicated: bool = False
 
+    def __post_init__(self):
+        super().__post_init__()
+        if self.page_size_padded is not None:
+            assert self.page_size_padded % self.state_alignment == 0, (
+                "page_size_padded must be aligned to state_alignment"
+            )
+
     @property
     def state_content_size_bytes(self) -> int:
         return sum(
-            prod(shape) * get_dtype_size(dtype)
+            round_up(prod(shape) * get_dtype_size(dtype), self.state_alignment)
             for (shape, dtype) in zip(self.shapes, self.dtypes)
         )
 
@@ -1125,10 +1148,7 @@ class MambaSpec(KVCacheSpec):
 
     @property
     def page_size_bytes(self) -> int:
-        page_size = sum(
-            prod(shape) * get_dtype_size(dtype)
-            for (shape, dtype) in zip(self.shapes, self.dtypes)
-        )
+        page_size = self.state_content_size_bytes
         if self.page_size_padded is not None:
             assert self.page_size_padded >= page_size
             return self.page_size_padded
@@ -1167,6 +1187,7 @@ class MambaSpec(KVCacheSpec):
             and spec.num_prefill_checkpoint_blocks == self.num_prefill_checkpoint_blocks
             and spec.prefill_checkpoint_alignment == self.prefill_checkpoint_alignment
             and spec.page_size_bytes == self.page_size_bytes
+            and spec.state_alignment == self.state_alignment
             and spec.tp_replicated == self.tp_replicated
             for spec in kv_cache_specs.values()
         )

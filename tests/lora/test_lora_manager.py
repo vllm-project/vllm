@@ -289,7 +289,10 @@ def test_wrap_gate_linear(default_vllm_config, dist_init, dummy_model):
     )
 
 
-def test_dedup_shared_module_across_paths(default_vllm_config, dist_init, dummy_model):
+@pytest.mark.parametrize("runner_first", [False, True])
+def test_dedup_shared_module_across_paths(
+    default_vllm_config, dist_init, dummy_model, monkeypatch, runner_first
+):
     """A module reachable from two attribute paths (e.g. a MoE gate held
     both directly on the block and inside its inner runner) must produce a
     single LoRA wrapper. Both paths must end up pointing to that same
@@ -299,21 +302,22 @@ def test_dedup_shared_module_across_paths(default_vllm_config, dist_init, dummy_
     """
     from vllm.model_executor.layers.linear import ReplicatedLinear
 
+    # Holds the SAME gate instance under another path. This mirrors how
+    # MoERunner.runner.gate references the block's gate in qwen3_moe.
+    class _Runner(nn.Module):
+        def __init__(self, g):
+            super().__init__()
+            self.gate = g  # alias path: "moe.runner.gate"
+
     class AliasContainer(nn.Module):
         def __init__(self, gate: nn.Module):
             super().__init__()
             self.gate = gate  # canonical path: "moe.gate"
-
-            # Inner submodule holding the SAME gate instance under another
-            # path. This mirrors how MoERunner.runner.gate references the
-            # block's gate in qwen3_moe.
-            class _Runner(nn.Module):
-                def __init__(self, g):
-                    super().__init__()
-                    self.gate = g  # alias path: "moe.runner.gate"
-
             self.runner = _Runner(gate)
+            if runner_first:
+                self._modules["gate"] = self._modules.pop("gate")
 
+    monkeypatch.setattr("vllm.lora.model_manager.MoERunner", _Runner)
     gate = ReplicatedLinear(10, 4, bias=False)
     model = dummy_model
     model.add_module("moe", AliasContainer(gate))
