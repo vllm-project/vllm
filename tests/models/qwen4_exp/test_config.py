@@ -9,7 +9,7 @@ import pytest
 import torch
 from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
-from vllm.config import CacheConfig, ParallelConfig
+from vllm.config import CacheConfig, CUDAGraphMode, ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
@@ -17,11 +17,17 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 from vllm.model_executor.models.config import (
     Qwen4ExpForConditionalGenerationConfig,
 )
+from vllm.models.qwen4_exp.nvidia.gdn_decode.config import (
+    gdn_decode_enabled,
+    validate_decode_deployment,
+)
+from vllm.models.qwen4_exp.nvidia.gdn_decode.dispatch import is_gdn_decode_context
 from vllm.models.qwen4_exp.nvidia.model import (
     Qwen4ExpForCausalLM,
     Qwen4ExpForConditionalGeneration,
 )
 from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from ...utils import spawn_new_process_for_each_test
@@ -335,3 +341,114 @@ def test_qkv_proj_mapping_allows_bf16_indexer(model_cls) -> None:
         ignore=["model.layers.3.self_attn.indexer.index_qk_proj"],
         fused_mapping=model_cls.packed_modules_mapping,
     )
+
+
+@pytest.mark.parametrize("config", [None, {}, {"gdn_norm_quant_decode": False}])
+def test_gdn_decode_is_default_off(config) -> None:
+    assert not gdn_decode_enabled(config)
+    assert gdn_decode_enabled({"gdn_norm_quant_decode": True})
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", [], {}])
+def test_gdn_decode_rejects_non_boolean_options(value) -> None:
+    with pytest.raises(ValueError, match="must be a boolean"):
+        gdn_decode_enabled({"gdn_norm_quant_decode": value})
+
+
+def _gdn_metadata(batch: int, **overrides) -> GDNAttentionMetadata:
+    values = dict(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=batch,
+        num_decode_tokens=batch,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=batch,
+        # The dispatch decision must not read or synchronize device tensors.
+        non_spec_state_indices_tensor=torch.empty(batch, device="meta"),
+    )
+    values.update(overrides)
+    return GDNAttentionMetadata(**values)
+
+
+@pytest.mark.parametrize("batch,live", [(1, 1), (2, 1), (2, 2)])
+@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+def test_gdn_decode_accepts_padded_decode(batch, live, mode) -> None:
+    entry = _gdn_metadata(batch, num_decodes=live, num_decode_tokens=live)
+    assert is_gdn_decode_context({"layer0": entry, "layer1": entry}, batch, mode)
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_DECODE_ONLY, None, "FULL"],
+)
+def test_gdn_decode_rejects_non_runtime_graph_modes(mode) -> None:
+    assert not is_gdn_decode_context({"layer": _gdn_metadata(2)}, 2, mode)
+
+
+@pytest.mark.parametrize("batch", [0, 3, 4, 8])
+def test_gdn_decode_respects_physical_batch_cap(batch) -> None:
+    assert not is_gdn_decode_context(
+        {"layer": _gdn_metadata(batch)}, batch, CUDAGraphMode.FULL
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"num_prefills": 1},
+        {"num_prefill_tokens": 1},
+        {"num_spec_decodes": 1},
+        {"num_spec_decode_tokens": 1},
+        {"spec_sequence_masks": torch.empty(2, device="meta", dtype=torch.bool)},
+        {"num_decodes": 0, "num_decode_tokens": 0},
+        {"num_decodes": 1, "num_decode_tokens": 2},
+        {"num_actual_tokens": 1},
+    ],
+)
+def test_gdn_decode_rejects_prefill_speculation_and_invalid_counts(changes) -> None:
+    assert not is_gdn_decode_context(
+        {"layer": _gdn_metadata(2, **changes)}, 2, CUDAGraphMode.FULL
+    )
+
+
+def test_gdn_decode_requires_consistent_known_metadata() -> None:
+    for unknown in (None, {}, {"other": object()}):
+        assert not is_gdn_decode_context(unknown, 2, CUDAGraphMode.FULL)
+    conflicting = {
+        "layer0": _gdn_metadata(2),
+        "layer1": _gdn_metadata(2, num_decodes=1, num_decode_tokens=1),
+    }
+    assert not is_gdn_decode_context(conflicting, 2, CUDAGraphMode.FULL)
+
+
+@pytest.mark.parametrize(
+    "changes,requirement",
+    [
+        ({"dtype": torch.float32}, "BF16"),
+        ({"device_capability": (10, 0)}, "SM120"),
+        ({"quantization": None}, "ModelOpt mixed"),
+        ({"has_speculative": True}, "speculative"),
+        ({"has_weight_offload": True}, "offload"),
+        ({"batch_invariant": True}, "VLLM_BATCH_INVARIANT"),
+    ],
+)
+def test_gdn_decode_rejects_unsupported_deployments(changes, requirement) -> None:
+    text = _text_config(
+        hidden_size=2560,
+        num_experts=512,
+        moe_intermediate_size=640,
+        shared_expert_intermediate_size=640,
+        num_experts_per_tok=10,
+        hidden_act="silu",
+        norm_topk_prob=True,
+    )
+    parallel = ParallelConfig(distributed_executor_backend="mp")
+    supported = dict(
+        dtype=torch.bfloat16,
+        quantization="modelopt_mixed",
+        device_capability=(12, 0),
+    )
+    validate_decode_deployment(text, parallel, **supported)
+    with pytest.raises(ValueError, match=requirement):
+        validate_decode_deployment(text, parallel, **(supported | changes))

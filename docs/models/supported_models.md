@@ -5,6 +5,10 @@ vLLM supports [generative](./generative_models.md) and [pooling](./pooling_model
 For each task, we list the model architectures that have been implemented in vLLM.
 Alongside each architecture, we include some popular models that use it.
 
+For the experimental, default-off optimization of a pinned Qwen3.8 checkpoint, see
+[Qwen3.8 GDN decode fusion on SM120](hardware_supported_models/qwen38_sm120_gdn_decode.md).
+Its hardware, batch and validation limits are narrower than general model support.
+
 ## Model Implementation
 
 ### vLLM
