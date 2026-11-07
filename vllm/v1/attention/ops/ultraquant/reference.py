@@ -19,7 +19,6 @@ from dataclasses import dataclass
 import torch
 
 from vllm.v1.attention.ops.ultraquant.format import (
-    FP4_LEVELS_SORTED,
     GROUP_SIZE,
     MIDPOINTS_SORTED,
     SORTED_TO_BITS,
@@ -27,18 +26,8 @@ from vllm.v1.attention.ops.ultraquant.format import (
     get_constant_c,
 )
 
-_LEVELS_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 _MIDPOINTS_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 _SORTED_TO_BITS_CACHE: dict[torch.device, torch.Tensor] = {}
-
-
-def _get_levels(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    key = (device, dtype)
-    t = _LEVELS_CACHE.get(key)
-    if t is None:
-        t = torch.tensor(FP4_LEVELS_SORTED, device=device, dtype=dtype)
-        _LEVELS_CACHE[key] = t
-    return t
 
 
 def _get_midpoints(device: torch.device, dtype: torch.dtype) -> torch.Tensor:

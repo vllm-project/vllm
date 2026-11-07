@@ -698,20 +698,6 @@ def stage_woa(c, task, ops, t0, n):
     gpu.barrier()
 
 
-def woa_loads(c, task):
-    a = c["args"]
-    return gemv_loads(
-        c,
-        a["woa"],
-        a["woa_s"],
-        c["d"].group_k,
-        task * WOA_ROWS,
-        WOA_SPLIT_K,
-        tiled=True,
-        ld=ld(c["d"].group_k),
-    )
-
-
 def wob_loads(c, task, pred=None):
     a, d = c["args"], c["d"]
     return gemv_loads(
