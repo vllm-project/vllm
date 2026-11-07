@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.tiering.base import SecondaryTierManager
+from vllm.v1.kv_offload.tiering.base import ParentContext, SecondaryTierManager
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.backpressure import BackpressureDetector
@@ -62,7 +62,7 @@ class SecondaryTierFactory:
     def create_secondary_tier(
         cls,
         tier_config: dict,
-        primary_kv_view: memoryview,
+        parent_ctx: ParentContext,
         offloading_spec: "OffloadingSpec",
     ) -> SecondaryTierManager:
         tier_cls = cls.get_tier_class(tier_config)
@@ -90,7 +90,7 @@ class SecondaryTierFactory:
             bp_detector = detector_cls(policy=policy, **bp_config)
         return tier_cls(
             offloading_spec=offloading_spec,
-            primary_kv_view=primary_kv_view,
+            parent_ctx=parent_ctx,
             tier_type=tier_type,
             backpressure_detector=bp_detector,
             **config,

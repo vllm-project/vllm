@@ -26,6 +26,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
+    ParentContext,
     SecondaryTierManager,
     TransferJob,
 )
@@ -61,7 +62,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
-        primary_kv_view: memoryview,
+        parent_ctx: "ParentContext",
         tier_type: str,
         custom_param: int = 0,
         backpressure_detector: "BackpressureDetector | None" = None,
@@ -70,7 +71,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
         Args:
             offloading_spec: The offloading spec this tier belongs to.
-            primary_kv_view: Memoryview over the primary tier's KV buffer.
+            parent_ctx: Handles into the composing tiering manager.
             tier_type: Name identifying this tier type.
             custom_param: Dummy parameter demonstrating custom args.
             backpressure_detector: Optional backpressure detector.
@@ -78,7 +79,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         """
         super().__init__(
             offloading_spec=offloading_spec,
-            primary_kv_view=primary_kv_view,
+            parent_ctx=parent_ctx,
             tier_type=tier_type,
             backpressure_detector=backpressure_detector,
         )
@@ -94,8 +95,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
         # Completed jobs waiting to be retrieved by get_finished_jobs()
         self.completed_jobs: list[JobResult] = []
-        assert primary_kv_view.strides is not None
-        self._chunk_size = primary_kv_view.strides[0]
+        self._chunk_size = self.block_size_bytes
 
     @classmethod
     @override
@@ -155,6 +155,12 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
                           spec for writing chunks into the primary tier.
 
         """
+        if not job_metadata.materialize():
+            # Materialization / Allocation failed.
+            self.completed_jobs.append(
+                JobResult(job_id=job_metadata.job_id, success=True)
+            )
+            return
         keys = job_metadata.keys
         chunk_ids = job_metadata.chunk_ids
 

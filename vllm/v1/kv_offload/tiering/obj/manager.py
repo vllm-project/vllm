@@ -26,6 +26,7 @@ from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobResult,
+    ParentContext,
     RequestOffloadingContext,
     ScheduleEndContext,
     SecondaryTierManager,
@@ -106,7 +107,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
-        primary_kv_view: memoryview,
+        parent_ctx: "ParentContext",
         tier_type: str,
         store_config: dict,
         prefix: str = "",
@@ -117,7 +118,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     ):
         """Args:
         offloading_spec: Offloading configuration.
-        primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+        parent_ctx: Handles into the composing tiering manager.
         tier_type: Tier type identifier, set by SecondaryTierFactory.
         store_config: Object store connection parameters (see ObjStoreConfig).
         prefix: Key prefix prepended to all object keys.
@@ -130,12 +131,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         backpressure_detector: Optional backpressure detector.
 
         """
-        super().__init__(
-            offloading_spec,
-            primary_kv_view,
-            tier_type,
-            backpressure_detector,
-        )
+        super().__init__(offloading_spec, parent_ctx, tier_type, backpressure_detector)
         self.locality = Locality(locality) if locality is not None else None
 
         self.events: list[OffloadingEvent] | None = None
@@ -179,16 +175,15 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
         self._probe_connectivity()
 
-        base_addr = ctypes.addressof(ctypes.c_char.from_buffer(primary_kv_view))
-        assert primary_kv_view.strides is not None
-        stride = primary_kv_view.strides[0]
+        base_addr = ctypes.addressof(ctypes.c_char.from_buffer(self._primary_kv_view))
+        stride = self.block_size_bytes
         self._primary_reg = self._agent.register_memory(
-            [(base_addr, primary_kv_view.nbytes, NIXL_DEV_ID, "")], "DRAM"
+            [(base_addr, self._primary_kv_view.nbytes, NIXL_DEV_ID, "")], "DRAM"
         )
         self._block_size_bytes = stride
         all_blocks = [
             (base_addr + i * stride, stride, NIXL_DEV_ID)
-            for i in range(len(primary_kv_view))
+            for i in range(len(self._primary_kv_view))
         ]
         # NIXL_INIT_AGENT marks this as the local side; make_prepped_xfer requires
         # local_xfer_side tagged with NIXL_INIT_AGENT and remote_xfer_side tagged
@@ -301,6 +296,12 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         )
 
     def submit_load(self, job_metadata: TransferJob) -> None:
+        if not job_metadata.materialize():
+            # Allocation / Materialization failed.
+            self._pending_results.append(
+                JobResult(job_id=job_metadata.job_id, success=True)
+            )
+            return
         self._load_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(

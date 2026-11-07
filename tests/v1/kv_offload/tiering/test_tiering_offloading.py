@@ -10,7 +10,9 @@ These tests verify:
 5. Eviction coordination between tiers
 """
 
+import os
 import threading
+import time
 from collections.abc import Iterable
 from unittest.mock import MagicMock, patch
 
@@ -32,6 +34,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingCounterMetadata,
     OffloadingEvent,
     OffloadingGaugeMetadata,
+    OffloadingKVEventsConfig,
     OffloadKey,
     OffloadPolicy,
     ReqContext,
@@ -41,24 +44,37 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
+from vllm.v1.kv_offload.config import (
+    OffloadingCacheConfig,
+    OffloadingConfig,
+    OffloadingModelConfig,
+    OffloadingParallelConfig,
+)
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
+    ParentContext,
     SecondaryTierManager,
     TieringOffloadingMetrics,
     TransferJob,
 )
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
+from vllm.v1.kv_offload.tiering.fs.manager import FileSystemTierManager
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
+    TieringTransferJob,
 )
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 _CTX = ReqContext(req_id="test")
 _MOCK_OFFLOADING_SPEC = MagicMock()
+
+
+def _parent_ctx(view, lock=None):
+    return ParentContext(lock or threading.Lock(), view)
 
 
 def _mock_mmap_region(num_chunks: int, row_bytes: int = 16):
@@ -193,14 +209,14 @@ def test_tiering_spec_collects_secondary_metric_definitions(monkeypatch):
         assert metrics[metric_name].labelnames == ("tier",)
 
 
-def test_tiering_manager_aggregates_secondary_stats():
+def test_tiering_manager_aggregates_secondary_stats(manager_lock):
     mock_region = _mock_mmap_region(5)
     primary_tier = CPUPrimaryTierOffloadingManager(
         num_chunks=5, mmap_region=mock_region
     )
     secondary_tier = MetricsSecondaryTierManager(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
-        primary_kv_view=mock_region.create_kv_memoryview(),
+        parent_ctx=_parent_ctx(mock_region.create_kv_memoryview(), manager_lock),
         tier_type="test_metrics",
     )
     secondary_stats = OffloadingConnectorStats()
@@ -209,6 +225,7 @@ def test_tiering_manager_aggregates_secondary_stats():
     )
     secondary_tier.stats = secondary_stats
     manager = TieringOffloadingManager(
+        lock=manager_lock,
         primary_tier=primary_tier,
         secondary_tiers=[secondary_tier],
     )
@@ -231,6 +248,90 @@ def test_tiering_manager_aggregates_secondary_stats():
     assert MetricsSecondaryTierManager.MY_TIER_METRIC not in second_stats.data["data"]
 
 
+def _make_deferred_promotion_job(alloc_fn, keys=None):
+    if keys is None:
+        keys = to_keys([1, 2])
+    return TieringTransferJob(
+        is_promotion=True,
+        job_id=1,
+        req_context=_CTX,
+        keys=keys,
+        alloc_fn=alloc_fn,
+    )
+
+
+class TestTieringTransferJobPromotion:
+    def test_materialization_contract(self):
+        """A deferred job is not materialized until materialize(); after a
+        successful materialize() the keys/chunk_ids properties return the
+        acquired claim.
+        """
+        keys = to_keys([1, 2])
+        chunk_ids = np.array([3, 7], dtype=np.int32)
+
+        job = _make_deferred_promotion_job(lambda keys, ctx: (list(keys), chunk_ids))
+        assert not job.is_materialized()
+        with pytest.raises(ValueError):
+            _ = job.keys
+        with pytest.raises(ValueError):
+            _ = job.chunk_ids
+
+        assert job.materialize()
+        assert list(job.keys) == keys
+        assert np.array_equal(job.chunk_ids, chunk_ids)
+        assert job.is_materialized()
+
+    def test_alloc_fn_receives_requested_keys_and_ctx(self):
+        """alloc_fn is called with exactly the requested keys and req_context."""
+        keys = to_keys([10, 20])
+        received = {}
+
+        def capturing_alloc(k, ctx):
+            received["keys"] = list(k)
+            received["ctx"] = ctx
+            return (list(k), np.array([0, 1], dtype=np.int32))
+
+        job = _make_deferred_promotion_job(capturing_alloc, keys=keys)
+        job.materialize()
+
+        assert received["keys"] == keys
+        assert received["ctx"] is _CTX
+
+    def test_materialize_double_call_raises(self):
+        """A second materialize() fails an assert; alloc_fn ran once."""
+        call_count = [0]
+
+        def counting_alloc(keys, ctx):
+            call_count[0] += 1
+            return (list(keys), np.array([0, 1], dtype=np.int32))
+
+        job = _make_deferred_promotion_job(counting_alloc)
+        assert job.materialize()
+        assert job.is_materialized()
+        with pytest.raises(AssertionError, match="more than once"):
+            job.materialize()
+        assert call_count[0] == 1
+
+
+class TestTieringTransferJobCascade:
+    def test_claim_available_immediately(self):
+        """Cascades are materialized at construction; keys/chunk_ids are
+        claim readbacks."""
+        keys = to_keys([1])
+        chunk_ids = np.array([0], dtype=np.int32)
+        job = TieringTransferJob(
+            is_promotion=False,
+            job_id=1,
+            req_context=_CTX,
+            keys=keys,
+            chunk_ids=chunk_ids,
+        )
+
+        assert list(job.keys) == keys
+        assert np.array_equal(job.chunk_ids, chunk_ids)
+        assert job.is_materialized()
+
+
 class TestExampleSecondaryTierManager:
     """Tests for ExampleSecondaryTierManager implementation."""
 
@@ -239,7 +340,7 @@ class TestExampleSecondaryTierManager:
         mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
         tier = ExampleSecondaryTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
-            primary_kv_view=mock_view,
+            parent_ctx=_parent_ctx(mock_view),
             tier_type="example",
             custom_param=67,
         )
@@ -264,7 +365,7 @@ class TestExampleSecondaryTierManager:
         mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
         tier = ExampleSecondaryTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
-            primary_kv_view=mock_view,
+            parent_ctx=_parent_ctx(mock_view),
             tier_type="example",
             custom_param=67,
         )
@@ -306,7 +407,7 @@ class TestTieringOffloadingManager:
     """Tests for TieringOffloadingManager."""
 
     @pytest.fixture
-    def manager_setup(self):
+    def manager_setup(self, manager_lock):
         # Create primary tier (CPU-based)
         mock_region = _mock_mmap_region(5)
         self.primary_tier = CPUPrimaryTierOffloadingManager(
@@ -316,19 +417,21 @@ class TestTieringOffloadingManager:
         mock_view = mock_region.create_kv_memoryview()
 
         # Create secondary tiers with the primary view
+        parent_ctx = _parent_ctx(mock_view, manager_lock)
         self.secondary_tier1 = ExampleSecondaryTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
-            primary_kv_view=mock_view,
+            parent_ctx=parent_ctx,
             tier_type="example",
         )
         self.secondary_tier2 = ExampleSecondaryTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
-            primary_kv_view=mock_view,
+            parent_ctx=parent_ctx,
             tier_type="example",
         )
 
         # Create tiered manager
         self.manager = TieringOffloadingManager(
+            lock=manager_lock,
             primary_tier=self.primary_tier,
             secondary_tiers=[self.secondary_tier1, self.secondary_tier2],
         )
@@ -353,16 +456,22 @@ class TestTieringOffloadingManager:
         self._start_request()
         # Register an in-flight promotion job for tier1 by hand.
         job_id = self.manager._next_job_id()
-        self.manager._register_job(
-            TransferJob(
-                job_id=job_id,
-                keys=to_keys([1, 2]),
-                chunk_ids=np.array([0, 1], dtype=np.int64),
-                is_promotion=True,
-                req_context=_CTX,
-            ),
-            0,
+
+        def alloc_fn_impl(keys, ctx):
+            self.manager._metrics.on_promotion_allocated(0, 2)
+            return keys, np.array([0, 1], dtype=np.int32)
+
+        job = TieringTransferJob(
+            is_promotion=True,
+            job_id=job_id,
+            req_context=_CTX,
+            keys=to_keys([1, 2]),
+            alloc_fn=alloc_fn_impl,
         )
+        self.manager._register_job(job, 0)
+        # Hand-built job: the tier normally redeems the allocation in
+        # submit_load; do it here so the job is materialized.
+        job.materialize()
         failed = JobResult(job_id=job_id, success=False)
         with (
             patch.object(
@@ -371,7 +480,56 @@ class TestTieringOffloadingManager:
             patch.object(self.primary_tier, "complete_write") as completed,
         ):
             self.manager._process_finished_jobs()
-        completed.assert_called_once_with(to_keys([1, 2]), _CTX, False)
+        completed.assert_called_once_with(set(to_keys([1, 2])), _CTX, False)
+
+    def test_promotion_failure_flags_request_while_live(self, manager_setup):
+        """A promotion that fails while its request is still live marks the
+        request so later lookups do not re-initiate promotions for it."""
+        self._start_request()
+        job = TieringTransferJob(
+            job_id=self.manager._next_job_id(),
+            req_context=_CTX,
+            keys=to_keys([1, 2]),
+            alloc_fn=lambda keys, ctx: None,
+            is_promotion=True,
+        )
+        self.manager._register_job(job, 0)
+        failed = JobResult(job_id=job.job_id, success=False)
+        with patch.object(
+            self.secondary_tier1, "get_finished_jobs", return_value=[failed]
+        ):
+            self.manager._process_finished_jobs()
+        assert _CTX.req_id in self.manager._promotion_failed_requests
+
+    def test_promotion_failure_after_finalize_does_not_leak(self, manager_setup):
+        """A promotion resolving after its request finalized must not re-add
+        the req_id to _promotion_failed_requests: the request state is gone,
+        nothing will discard it, and no future promotion can name it."""
+        self._start_request()
+        job = TieringTransferJob(
+            job_id=self.manager._next_job_id(),
+            req_context=_CTX,
+            keys=to_keys([1, 2]),
+            alloc_fn=lambda keys, ctx: None,
+            is_promotion=True,
+        )
+        self.manager._register_job(job, 0)
+
+        # No pending stores or cascades, so finalization runs immediately --
+        # the in-flight promotion is not part of the finalize gate.
+        self.manager.on_request_finished(_CTX)
+        assert _CTX.req_id not in self.manager._req_state
+        assert _CTX.req_id not in self.manager._promotion_failed_requests
+
+        # The promotion now resolves with allocation failed (e.g. the primary
+        # tier reports the request finalized).
+        failed = JobResult(job_id=job.job_id, success=False)
+        with patch.object(
+            self.secondary_tier1, "get_finished_jobs", return_value=[failed]
+        ):
+            self.manager._process_finished_jobs()
+
+        assert _CTX.req_id not in self.manager._promotion_failed_requests
 
     def test_successful_promotion_finalizes_primary_with_success(self, manager_setup):
         from unittest.mock import patch
@@ -380,16 +538,22 @@ class TestTieringOffloadingManager:
 
         self._start_request()
         job_id = self.manager._next_job_id()
-        self.manager._register_job(
-            TransferJob(
-                job_id=job_id,
-                keys=to_keys([1]),
-                chunk_ids=np.array([0], dtype=np.int64),
-                is_promotion=True,
-                req_context=_CTX,
-            ),
-            0,
+
+        def alloc_fn_impl(keys, ctx):
+            self.manager._metrics.on_promotion_allocated(0, 1)
+            return (keys, np.array([0], dtype=np.int32))
+
+        job = TieringTransferJob(
+            is_promotion=True,
+            job_id=job_id,
+            req_context=_CTX,
+            keys=to_keys([1]),
+            alloc_fn=alloc_fn_impl,
         )
+
+        self.manager._register_job(job, 0)
+        job.materialize()
+
         ok = JobResult(job_id=job_id, success=True)
         with (
             patch.object(self.secondary_tier1, "get_finished_jobs", return_value=[ok]),
@@ -529,6 +693,33 @@ class TestTieringOffloadingManager:
         # Lookup should find all chunks in primary
         assert count_hits(self.manager, chunks) == 3
 
+    def test_promotion_batch_larger_than_primary_capacity(self, manager_setup):
+        """A promotion batch larger than the primary capacity shrinks to the
+        primary capacity: only a capacity-sized prefix is promoted, the rest
+        MISS.
+        """
+        keys = to_keys(range(15))
+        for key in keys:
+            self.secondary_tier1.chunks[key] = True
+
+        self._start_request()
+        results = [self.manager.lookup(key, _CTX) for key in keys]
+        assert all(r is LookupResult.HIT_PENDING for r in results[:5])
+        assert all(r is LookupResult.MISS for r in results[5:])
+
+        self._simulate_on_schedule_end()
+        # After the promotion lands, the connector walk stops at the first
+        # MISS: a stable capacity-sized prefix hit, no retry loop back to
+        # HIT_PENDING on all 15.
+        walked: list[LookupResult] = []
+        for key in keys:
+            result = self.manager.lookup(key, _CTX)
+            if result is LookupResult.MISS:
+                break
+            walked.append(result)
+        assert len(walked) == 5
+        assert all(r is LookupResult.HIT for r in walked)
+
     @pytest.mark.parametrize(
         "source",
         [CacheHitSource.EXTERNAL_UNSPECIFIED, CacheHitSource.DISK, CacheHitSource.P2P],
@@ -549,6 +740,8 @@ class TestTieringOffloadingManager:
             original_submit_load(job_metadata)
 
         self.secondary_tier1.submit_load = submit_load  # type: ignore[method-assign]
+
+        self._start_request()
 
         # Lookup each chunk to initiate promotion for all of them
         for chunk in chunks:
@@ -597,6 +790,43 @@ class TestTieringOffloadingManager:
             for chunk in chunks
         )
 
+    def test_finished_request_drops_queued_promotion(self, manager_setup):
+        """A finished request's already-submitted promotion runs to
+        completion, while its queued-but-unsubmitted promotion is dropped
+        outright. No promotion book-keeping is left behind."""
+        req1_chunk, req2_chunk = to_keys([1, 2])
+        self.secondary_tier1.chunks[req1_chunk] = True
+        self.secondary_tier1.chunks[req2_chunk] = True
+
+        req1_ctx = ReqContext(req_id="req1")
+        self._start_request(req1_ctx)
+        assert self.manager.lookup(req1_chunk, req1_ctx) is LookupResult.HIT_PENDING
+
+        # Synchronous tier: the flush submits and materializes req1's
+        # promotion; its completion is not reaped yet.
+        self._simulate_on_schedule_end()
+
+        # req2's promotion is still queued when the requests finish: no
+        # schedule end runs between its lookup and finalization.
+        req2_ctx = ReqContext(req_id="req2")
+        self._start_request(req2_ctx)
+        assert self.manager.lookup(req2_chunk, req2_ctx) is LookupResult.HIT_PENDING
+
+        # Both requests finish: req1's promotion is submitted and
+        # materialized, req2's is queued.
+        self.manager.on_request_finished(req1_ctx)
+        self.manager.on_request_finished(req2_ctx)
+
+        # req2's queued promotion is dropped outright.
+        assert not self.manager._pending_load_submissions
+
+        # req1's submitted promotion runs to completion despite the
+        # finalization.
+        self._simulate_on_schedule_end()
+        assert count_hits(self.primary_tier, [req1_chunk]) == 1
+        assert not self.manager._jobs
+        assert not self.manager.has_pending_work()
+
     @pytest.mark.parametrize(
         "source",
         [CacheHitSource.EXTERNAL_UNSPECIFIED, CacheHitSource.DISK, CacheHitSource.P2P],
@@ -624,6 +854,9 @@ class TestTieringOffloadingManager:
             self.secondary_tier1.chunks[chunk] = True
 
         def submit_partial(job_metadata: TransferJob) -> None:
+            # The real submit_load redeems the deferred allocation; do the
+            # same so the job is materialized.
+            job_metadata.materialize()
             successful_keys = (
                 None
                 if successful_indices is None
@@ -639,6 +872,7 @@ class TestTieringOffloadingManager:
 
         monkeypatch.setattr(self.secondary_tier1, "submit_load", submit_partial)
 
+        self._start_request()
         for chunk in chunks:
             assert self.manager.lookup(chunk, _CTX) is LookupResult.HIT_PENDING
 
@@ -669,6 +903,7 @@ class TestTieringOffloadingManager:
         events: list[threading.Event] = []
 
         def submit_deferring(job_metadata: TransferJob) -> None:
+            assert job_metadata.materialize()
             event = threading.Event()
             if preset:
                 event.set()
@@ -1077,6 +1312,8 @@ class TestTieringOffloadingManager:
 
         ctx_a = ReqContext(req_id="req_a")
         ctx_b = ReqContext(req_id="req_b")
+        self._start_request(ctx_a)
+        self._start_request(ctx_b)
 
         # All lookups return HIT_PENDING: secondary hit triggers promotion
         assert self.manager.lookup(chunks[0], ctx_a) is LookupResult.HIT_PENDING
@@ -1116,6 +1353,8 @@ class TestTieringOffloadingManager:
 
         ctx_a = ReqContext(req_id="req_a")
         ctx_b = ReqContext(req_id="req_b")
+        self._start_request(ctx_a)
+        self._start_request(ctx_b)
 
         result_a = self.manager.lookup(shared_chunk, ctx_a)
         result_b = self.manager.lookup(shared_chunk, ctx_b)
@@ -1371,8 +1610,8 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: (
-                RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
 
@@ -1409,8 +1648,8 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: (
-                RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
 
@@ -1447,8 +1686,8 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: (
-                RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
         ctx = ReqContext(req_id=req_id)
@@ -1485,7 +1724,7 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.manager.primary_tier,
             "lookup",
-            lambda key, req_context: (LookupResult.RETRY),
+            lambda key, req_context: LookupResult.RETRY,
         )
 
         with pytest.raises(AssertionError):
@@ -1580,18 +1819,17 @@ class TestTieringOffloadingManager:
         # the lookup that staged it).
         promo_chunk = to_keys([99])[0]
         self.secondary_tier1.chunks[promo_chunk] = True
-        assert (
-            self.manager.lookup(promo_chunk, ReqContext(req_id="pending"))
-            is LookupResult.HIT_PENDING
-        )
+        pending_ctx = ReqContext(req_id="pending")
+        self.manager.on_new_request(pending_ctx)
+        assert self.manager.lookup(promo_chunk, pending_ctx) is LookupResult.HIT_PENDING
         assert self.manager._pending_load_submissions
 
         # Request-level tier registration.
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: (
-                RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
         rl_ctx = ReqContext(req_id="rl")
@@ -1611,7 +1849,11 @@ class TestTieringOffloadingManager:
         assert self.manager._jobs == {}
         assert self.manager._pending_load_submissions == {}
         assert self.manager._request_load_sources == {}
-        assert set(self.manager._req_state) == {_CTX.req_id, rl_ctx.req_id}
+        assert set(self.manager._req_state) == {
+            _CTX.req_id,
+            rl_ctx.req_id,
+            pending_ctx.req_id,
+        }
         assert self.manager._processed_jobs_this_step is False
 
         # Primary tier reset to a fresh state.
@@ -1697,8 +1939,57 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(self.secondary_tier1, "lookup", tier1_lookup)
 
         ctx = ReqContext(req_id="r2", load_tier_filter=load_tier_filter)
+        self.manager.on_new_request(ctx)
         assert self.manager.lookup(chunks[0], ctx) is LookupResult.HIT_PENDING
         tier1_lookup.assert_called()
+
+    def test_promotion_keys_lifecycle(self, manager_setup):
+        """_inflight_promotion_keys tracks in-flight promotions.
+
+        Lifecycle: two keys looked up across two requests → both appear in
+        _inflight_promotion_keys → on_schedule_end flushes and completes → both cleared.
+        Then a third lookup without a flush is followed by reset_cache to verify
+        pending (not-yet-flushed) keys are also cleared.
+        """
+        key1 = to_keys([1])[0]
+        key2 = to_keys([2])[0]
+        key3 = to_keys([3])[0]
+        self.secondary_tier1.chunks[key1] = True
+        self.secondary_tier1.chunks[key2] = True
+
+        # req1 looks up key1
+        ctx1 = ReqContext(req_id="r1")
+        self._start_request(ctx1)
+        assert self.manager.lookup(key1, ctx1) is LookupResult.HIT_PENDING
+        assert key1 in self.manager._inflight_promotion_keys
+
+        # req2 looks up key2 — both keys now in _promoting_keys
+        ctx2 = ReqContext(req_id="r2")
+        self._start_request(ctx2)
+        assert self.manager.lookup(key2, ctx2) is LookupResult.HIT_PENDING
+        assert key1 in self.manager._inflight_promotion_keys
+        assert key2 in self.manager._inflight_promotion_keys
+
+        # Flush submissions; Example tier completes synchronously on next step
+        self._simulate_on_schedule_end()
+        self._simulate_on_schedule_end()
+
+        # Both cleared after job completion
+        assert key1 not in self.manager._inflight_promotion_keys
+        assert key2 not in self.manager._inflight_promotion_keys
+
+        # Lookup key3 without flushing → pending but not yet a registered job
+        self.secondary_tier1.chunks[key3] = True
+        ctx3 = ReqContext(req_id="r3")
+        self._start_request(ctx3)
+        assert self.manager.lookup(key3, ctx3) is LookupResult.HIT_PENDING
+        assert key3 in self.manager._inflight_promotion_keys
+        assert self.manager._pending_load_submissions
+
+        # reset_cache must clear _promoting_keys even for unflushed pending keys
+        self.manager.reset_cache()
+        assert key3 not in self.manager._inflight_promotion_keys
+        assert not self.manager._pending_load_submissions
 
 
 class TestTieringOffloadingWithoutSecondaryTiers:
@@ -1712,7 +2003,7 @@ class TestTieringOffloadingWithoutSecondaryTiers:
 
         # Create manager with no secondary tiers
         manager = TieringOffloadingManager(
-            primary_tier=primary_tier, secondary_tiers=[]
+            lock=threading.Lock(), primary_tier=primary_tier, secondary_tiers=[]
         )
 
         chunks = to_keys(range(3))
@@ -1802,11 +2093,78 @@ def test_parse_tier_filter_skips_bad_entries():
     )
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+class TestPromotionAllocation:
+    """Unit tests for TieringOffloadingManager._promotion_allocation."""
+
+    def _make_manager(self, num_chunks: int, manager_lock: threading.Lock):
+        mmap = _mock_mmap_region(num_chunks)
+        primary = CPUPrimaryTierOffloadingManager(
+            num_chunks=num_chunks, mmap_region=mmap
+        )
+
+        parent_ctx = _parent_ctx(mmap.create_kv_memoryview(), manager_lock)
+        secondary_tiers = [
+            ExampleSecondaryTierManager(
+                offloading_spec=_MOCK_OFFLOADING_SPEC,
+                parent_ctx=parent_ctx,
+                tier_type="example",
+            )
+        ]
+
+        return TieringOffloadingManager(
+            lock=manager_lock,
+            primary_tier=primary,
+            secondary_tiers=secondary_tiers,
+        ), mmap
+
+    def test_returns_none_and_fires_failure_metric_when_primary_full(
+        self, manager_lock
+    ):
+        """When prepare_write returns None (primary full), _promotion_allocation
+        returns None and increments the allocation-failure counter."""
+        num_chunks = 1
+        manager, mmap = self._make_manager(num_chunks, manager_lock)
+
+        req_ctx = ReqContext(req_id="req")
+        key = to_keys([1])[0]
+
+        # Fill the single primary chunk so prepare_write returns None
+        out = manager.primary_tier.prepare_store([key], req_ctx)
+        assert out is not None
+
+        failure_key = TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES
+        assert manager._metrics._stats._values.get(failure_key, {}).get((), 0) == 0
+
+        # Trigger a failure.
+        result = manager._promotion_allocation(0, to_keys([2]), req_ctx)
+        assert result is None
+        assert manager._metrics._stats._values.get(failure_key, {}).get((), 0) == 1
+
+        # Release blocks by completing the store
+        manager.primary_tier.complete_store([key], req_ctx, success=True)
+
+    def test_allocation_records_chunk_count_metric(self, manager_lock):
+        """_promotion_allocation records the chunk count for every promotion:
+        eager tiers call it at initiate, deferred tiers via the job's alloc_fn
+        when materialize() redeems the claim."""
+        num_chunks = 4
+        manager, mmap = self._make_manager(num_chunks, manager_lock)
+        req_ctx = ReqContext(req_id="req")
+        key = to_keys([1])[0]
+
+        tier_state = manager._metrics._tier_states[0]
+        assert tier_state.primary_write_chunk_count == 0
+
+        result = manager._promotion_allocation(0, [key], req_ctx)
+
+        assert result is not None
+        keys_out, chunk_ids_out = result
+        assert key in keys_out
+        assert len(chunk_ids_out) > 0
+        assert tier_state.primary_write_chunk_count == len(chunk_ids_out)
 
 
-def test_tiering_manager_reports_one_config_info_series_for_each_tier():
+def test_tiering_manager_reports_one_config_info_series_for_each_tier(manager_lock):
     """The info metric holds one series for each tier, and the tier label tells
     the series apart. A tier cannot know its own index, so the manager adds the
     label. A tier fills the names it owns only. The primary tier here gets no
@@ -1817,15 +2175,17 @@ def test_tiering_manager_reports_one_config_info_series_for_each_tier():
     primary_tier = CPUPrimaryTierOffloadingManager(
         num_chunks=5, mmap_region=mock_region
     )
+    parent_ctx = _parent_ctx(mock_region.create_kv_memoryview(), manager_lock)
     secondary_tiers = [
         MetricsSecondaryTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
-            primary_kv_view=mock_region.create_kv_memoryview(),
+            parent_ctx=parent_ctx,
             tier_type="test_metrics",
         )
         for _ in range(2)
     ]
     manager = TieringOffloadingManager(
+        lock=manager_lock,
         primary_tier=primary_tier,
         secondary_tiers=secondary_tiers,
     )
@@ -1843,6 +2203,7 @@ def test_tiering_manager_reports_the_primary_series_with_no_secondary_tier():
     the frontend publishes one series and not a bare metric."""
     mock_region = _mock_mmap_region(5)
     manager = TieringOffloadingManager(
+        lock=threading.Lock(),
         primary_tier=CPUPrimaryTierOffloadingManager(
             num_chunks=5, mmap_region=mock_region
         ),
@@ -1864,6 +2225,7 @@ def test_tiering_manager_rejects_a_primary_tier_with_two_info_mappings():
 
     mock_region = _mock_mmap_region(5)
     manager = TieringOffloadingManager(
+        lock=threading.Lock(),
         primary_tier=_TwoMappingPrimary(num_chunks=5, mmap_region=mock_region),
         secondary_tiers=[],
     )
@@ -1872,7 +2234,7 @@ def test_tiering_manager_rejects_a_primary_tier_with_two_info_mappings():
         manager.config_info()
 
 
-def test_tiering_manager_keeps_the_tier_label_out_of_the_tier_mapping():
+def test_tiering_manager_keeps_the_tier_label_out_of_the_tier_mapping(manager_lock):
     """The manager adds the tier label to a copy. A tier that returns a stored
     mapping must not gain a foreign key that outlives the call."""
 
@@ -1885,12 +2247,14 @@ def test_tiering_manager_keeps_the_tier_label_out_of_the_tier_mapping():
             return self.info
 
     mock_region = _mock_mmap_region(5)
+    parent_ctx = _parent_ctx(mock_region.create_kv_memoryview(), manager_lock)
     tier = _StoredInfoTier(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
-        primary_kv_view=mock_region.create_kv_memoryview(),
+        parent_ctx=parent_ctx,
         tier_type="test_metrics",
     )
     manager = TieringOffloadingManager(
+        lock=manager_lock,
         primary_tier=CPUPrimaryTierOffloadingManager(
             num_chunks=5, mmap_region=mock_region
         ),
@@ -1902,7 +2266,7 @@ def test_tiering_manager_keeps_the_tier_label_out_of_the_tier_mapping():
     assert tier.info == {"path": "/mnt/a"}
 
 
-def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
+def test_tiering_spec_declares_the_config_info_keys_the_manager_fills(manager_lock):
     """The spec declares the info label names in the API-server process, and
     the manager fills the values in the engine process. A drift between the two
     empties every declared label and drops every filled value, so this pins
@@ -1910,7 +2274,9 @@ def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
     so the order of the names does not have to agree."""
     tier_configs = [{"type": "test_metrics"}, {"type": "test_metrics"}]
     mock_region = _mock_mmap_region(5)
+    parent_ctx = _parent_ctx(mock_region.create_kv_memoryview(), manager_lock)
     manager = TieringOffloadingManager(
+        lock=manager_lock,
         primary_tier=CPUPrimaryTierOffloadingManager(
             num_chunks=5,
             mmap_region=mock_region,
@@ -1923,7 +2289,7 @@ def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
         secondary_tiers=[
             MetricsSecondaryTierManager(
                 offloading_spec=_MOCK_OFFLOADING_SPEC,
-                primary_kv_view=mock_region.create_kv_memoryview(),
+                parent_ctx=parent_ctx,
                 tier_type=tier_config["type"],
             )
             for tier_config in tier_configs
@@ -1991,3 +2357,254 @@ def test_tiering_spec_rejects_a_tier_that_declares_the_reserved_tier_label():
         pytest.raises(AssertionError, match="reserved label 'tier'"),
     ):
         TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
+
+
+# ---------------------------------------------------------------------------
+# FS-tier integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestTieringOffloadingManagerWithFsTier:
+    """Integration tests for TieringOffloadingManager backed by a real FS tier."""
+
+    @staticmethod
+    def _make_fs_tier(
+        mmap_region, root_dir: str, lock: threading.Lock
+    ) -> FileSystemTierManager:
+        """Construct a FileSystemTierManager wired to the given mmap region."""
+        offloading_spec = MagicMock()
+        offloading_spec.blocks_per_chunk = 1
+        offloading_spec.kv_events_config = OffloadingKVEventsConfig(
+            enable_kv_cache_events=False,
+            self_describing_kv_events=False,
+        )
+        offloading_spec.config = OffloadingConfig(
+            groups=(),
+            worker_kv_bytes_per_block=0,
+            enable_kv_cache_events=False,
+            extra_config={},
+            engine_id="test-engine",
+            model=OffloadingModelConfig(name="test-model", dtype="float32"),
+            cache=OffloadingCacheConfig(tokens_per_hash=16, blocks_per_chunk=1),
+            parallel=OffloadingParallelConfig(
+                rank=0,
+                world_size=1,
+                tp_size=1,
+                pp_size=1,
+                pcp_size=1,
+                dcp_size=1,
+                data_parallel_index=0,
+                data_parallel_size=1,
+                data_parallel_rank_local=None,
+                is_parallelism_agnostic=True,
+            ),
+        )
+        return FileSystemTierManager(
+            offloading_spec=offloading_spec,
+            parent_ctx=ParentContext(lock, mmap_region.create_kv_memoryview()),
+            tier_type="fs",
+            root_dir=root_dir,
+            n_read_threads=4,
+            n_write_threads=4,
+        )
+
+    @pytest.fixture
+    def fs_manager_setup(self, tmp_path, manager_lock):
+        """Real FileSystemTierManager inside TieringOffloadingManager on a tmp disk."""
+        # Small block size so tests are fast and don't require O_DIRECT
+        # alignment; the FS tier gracefully falls back to buffered I/O when
+        # O_DIRECT is unavailable.
+        n_chunks, block_bytes = 8, 64
+        mmap = _mock_mmap_region(n_chunks, block_bytes)
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_chunks=n_chunks, mmap_region=mmap
+        )
+        fs_tier = self._make_fs_tier(mmap, str(tmp_path), manager_lock)
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[fs_tier],
+            lock=manager_lock,
+        )
+        yield manager, primary_tier, fs_tier
+        manager.reset_cache()
+        fs_tier.shutdown()
+
+    @staticmethod
+    def _wait_lookup_workers(
+        *fs_tiers: FileSystemTierManager, timeout: float = 2.0
+    ) -> None:
+        """Block until the lookup worker thread has delivered results for all
+        in-flight probes.
+        """
+        deadline = time.monotonic() + timeout
+        for tier in fs_tiers:
+            while time.monotonic() < deadline:
+                if not tier._lookup_manager._pending_results.empty():
+                    break
+                time.sleep(0.005)
+            else:
+                raise TimeoutError(
+                    f"Lookup worker did not produce results within {timeout}s"
+                )
+
+    @staticmethod
+    def _drain_fs_results(
+        manager: TieringOffloadingManager, *fs_tiers: FileSystemTierManager
+    ) -> None:
+        """Deterministically drain all in-flight FS work and promotion jobs."""
+        ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+        manager.on_schedule_end(ctx)  # flush pending lookups to thread pool
+        for tier in fs_tiers:
+            tier.drain_jobs()
+
+    @staticmethod
+    def _write_keys_to_fs(fs_tier: FileSystemTierManager, keys) -> None:
+        """Create key files directly in the FS tier's backing directory, bypassing
+        the store-job mechanism."""
+        for k in keys:
+            path = fs_tier.file_mapper.get_file_name(k)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(bytes(64))
+
+    def test_one_fs_tier_promotion(self, fs_manager_setup):
+        """Store keys in FS, verify all lookups return HIT_PENDING, wait for
+        promotion to finish (with a timeout), then verify all keys are loaded."""
+        manager, _, fs_tier = fs_manager_setup
+        keys = to_keys(range(4))
+        self._write_keys_to_fs(fs_tier, keys)
+
+        req_ctx = ReqContext(req_id="r1")
+        manager.on_new_request(req_ctx)
+        for k in keys:
+            r = manager.lookup(k, req_ctx)
+            assert r == LookupResult.RETRY, "Lookups are submit now"
+
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=["r1"], preempted_req_ids=[])
+        )
+        self._wait_lookup_workers(fs_tier)
+
+        for k in keys:
+            r = manager.lookup(k, req_ctx)
+            assert r == LookupResult.HIT_PENDING
+
+        self._drain_fs_results(manager, fs_tier)
+
+        for k in keys:
+            r = manager.lookup(k, req_ctx)
+            assert r == LookupResult.HIT, (
+                f"key {k!r} expected HIT after promotion, got {r!r}"
+            )
+
+    def test_two_fs_tier_promotions_different_keys(self, tmp_path, manager_lock):
+        """Two FS tiers each hold different keys; promotions go to correct tier."""
+        mmap = _mock_mmap_region(8, 64)
+        primary_tier = CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=mmap)
+        path0, path1 = tmp_path / "tier0", tmp_path / "tier1"
+        path0.mkdir()
+        path1.mkdir()
+
+        fs_tier0 = self._make_fs_tier(mmap, str(path0), manager_lock)
+        fs_tier1 = self._make_fs_tier(mmap, str(path1), manager_lock)
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[fs_tier0, fs_tier1],
+            lock=manager_lock,
+        )
+
+        keys0 = to_keys(range(2))
+        keys1 = to_keys(range(2, 4))
+        self._write_keys_to_fs(fs_tier0, keys0)
+        self._write_keys_to_fs(fs_tier1, keys1)
+
+        req_ctx = ReqContext(req_id="r2")
+        manager.on_new_request(req_ctx)
+        for k in keys0 + keys1:
+            assert manager.lookup(k, req_ctx) == LookupResult.RETRY, (
+                "Lookups submit now"
+            )
+
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=["r2"], preempted_req_ids=[])
+        )
+        self._wait_lookup_workers(fs_tier0)
+        self._wait_lookup_workers(fs_tier1)
+
+        for k in keys0 + keys1:
+            assert manager.lookup(k, req_ctx) == LookupResult.HIT_PENDING, (
+                "Promotions initiate here"
+            )
+
+        self._drain_fs_results(manager, fs_tier0, fs_tier1)
+
+        for k in keys0 + keys1:
+            assert manager.lookup(k, req_ctx) == LookupResult.HIT
+
+        manager._metrics.assert_idle()
+
+        fs_tier0.shutdown()
+        fs_tier1.shutdown()
+
+    def test_finished_request_cancels_submitted_fs_promotion(
+        self, fs_manager_setup, monkeypatch
+    ):
+        """Test FSTier promotion job cancellation."""
+        manager, primary_tier, fs_tier = fs_manager_setup
+        req1_chunk, req2_chunk = to_keys([1, 2])
+        self._write_keys_to_fs(fs_tier, [req1_chunk, req2_chunk])
+
+        req1_ctx = ReqContext(req_id="req1")
+        manager.on_new_request(req1_ctx)
+        req2_ctx = ReqContext(req_id="req2")
+        manager.on_new_request(req2_ctx)
+        assert manager.lookup(req1_chunk, req1_ctx) is LookupResult.RETRY
+        assert manager.lookup(req2_chunk, req2_ctx) is LookupResult.RETRY
+
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=["req1", "req2"], preempted_req_ids=[])
+        )
+        self._wait_lookup_workers(fs_tier)
+
+        # Gate fs tier threadpool's enqueue_load so we control when materialization
+        # happens.
+        load_gate = threading.Event()
+        real_enqueue_load = fs_tier._pool.enqueue_load
+
+        def gated_enqueue_load(job_id, n_tasks, tasks):
+            real_enqueue_load(job_id, n_tasks + 1, [load_gate.wait] + list(tasks))
+
+        monkeypatch.setattr(fs_tier._pool, "enqueue_load", gated_enqueue_load)
+
+        # req1's chunk is submitted for promotion below.
+        assert manager.lookup(req1_chunk, req1_ctx) is LookupResult.HIT_PENDING
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
+        )
+        # req2's chunk enters pending_load_submissions
+        assert manager.lookup(req2_chunk, req2_ctx) is LookupResult.HIT_PENDING
+
+        # finalize both requests
+        manager.on_request_finished(req1_ctx)
+        manager.on_request_finished(req2_ctx)
+
+        # req2's queued promotion is dropped outright.
+        assert not manager._pending_load_submissions
+
+        # Release the gate: allowing load_task to run materialize().
+        load_gate.set()
+        fs_tier.drain_jobs()
+        for _ in range(2):
+            manager.on_schedule_end(
+                ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
+            )
+
+        assert count_hits(primary_tier, [req1_chunk]) == 0
+        assert not manager._inflight_promotion_keys
+        assert not manager._jobs
+        assert not manager.has_pending_work()
+        manager._metrics.assert_idle()
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

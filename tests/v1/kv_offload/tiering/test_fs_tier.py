@@ -35,12 +35,15 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.tiering.base import TransferJob
+from vllm.v1.kv_offload.tiering.base import ParentContext, TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
 )
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
+from vllm.v1.kv_offload.tiering.manager import (
+    TieringTransferJob,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -50,6 +53,10 @@ _NUM_BLOCKS = 8
 _BLOCK_ELEMENTS = 128 * mmap.PAGESIZE  # 2MB per block for pagesize 4096.
 _DTYPE: torch.dtype = torch.float32
 _CTX = ReqContext(req_id="test")
+
+
+def _parent_ctx(view, lock=None):
+    return ParentContext(lock or threading.Lock(), view)
 
 
 def _make_offloading_spec(
@@ -110,11 +117,23 @@ def make_job(
 ) -> TransferJob:
     if chunk_ids is None:
         chunk_ids = list(range(len(keys)))
-    return TransferJob(
+    if is_promotion:
+        chunk_ids_list = list(chunk_ids)
+        return TieringTransferJob(
+            is_promotion=True,
+            job_id=job_id,
+            req_context=_CTX,
+            keys=keys,
+            alloc_fn=lambda k, ctx: (
+                list(k),
+                np.array(chunk_ids_list, dtype=np.int32),
+            ),
+        )
+    return TieringTransferJob(
+        is_promotion=False,
         job_id=job_id,
         keys=keys,
         chunk_ids=np.array(chunk_ids, dtype=np.int64),
-        is_promotion=is_promotion,
         req_context=_CTX,
     )
 
@@ -180,7 +199,7 @@ def fs_tier(tmp_path):
     mock_view = memoryview(tensor.numpy())
     tier = FileSystemTierManager(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
-        primary_kv_view=mock_view,
+        parent_ctx=_parent_ctx(mock_view),
         tier_type="fs",
         root_dir=str(tmp_path),
         n_read_threads=4,
@@ -196,7 +215,7 @@ def fs_tier_with_events(tmp_path):
     mock_view = memoryview(tensor.numpy())
     tier = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(enable_kv_cache_events=True),
-        primary_kv_view=mock_view,
+        parent_ctx=_parent_ctx(mock_view),
         tier_type="fs",
         root_dir=str(tmp_path),
         n_read_threads=4,
@@ -325,7 +344,7 @@ def test_invalid_path_raises_at_construction():
     with pytest.raises(OSError):
         FileSystemTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
-            primary_kv_view=mock_view,
+            parent_ctx=_parent_ctx(mock_view),
             tier_type="fs",
             root_dir="/dev/null/invalid_path",
         )
@@ -338,7 +357,7 @@ def test_invalid_locality_raises_at_construction(tmp_path, locality):
     with pytest.raises(ValueError, match="Locality"):
         FileSystemTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
-            primary_kv_view=memoryview(tensor.numpy()),
+            parent_ctx=_parent_ctx(memoryview(tensor.numpy())),
             tier_type="fs",
             root_dir=str(tmp_path),
             locality=locality,
@@ -355,7 +374,7 @@ def test_factory_forwards_locality_to_fs_tier(tmp_path):
             "n_write_threads": 1,
             "locality": "LOCAL",
         },
-        memoryview(tensor.numpy()),
+        _parent_ctx(memoryview(tensor.numpy())),
         _MOCK_OFFLOADING_SPEC,
     )
     try:
@@ -479,7 +498,7 @@ def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
     tensor = _page_aligned_rand_tensor(4, _BLOCK_ELEMENTS)
     tier = FileSystemTierManager(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
-        primary_kv_view=memoryview(tensor.numpy()),
+        parent_ctx=_parent_ctx(memoryview(tensor.numpy())),
         tier_type="fs",
         root_dir=str(tmp_path),
         n_read_threads=4,
@@ -850,7 +869,7 @@ def test_store_event_uses_configured_locality(tmp_path, locality, expected):
     locality_config = {} if locality is None else {"locality": locality}
     tier = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(enable_kv_cache_events=True),
-        primary_kv_view=memoryview(tensor.numpy()),
+        parent_ctx=_parent_ctx(memoryview(tensor.numpy())),
         tier_type="fs",
         root_dir=str(tmp_path),
         enable_kv_events=True,
@@ -952,7 +971,7 @@ def test_events_require_global_kv_events_flag(tmp_path):
     tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
     tier = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(enable_kv_cache_events=False),
-        primary_kv_view=memoryview(tensor.numpy()),
+        parent_ctx=_parent_ctx(memoryview(tensor.numpy())),
         tier_type="fs",
         root_dir=str(tmp_path),
         enable_kv_events=True,
@@ -969,7 +988,7 @@ def test_events_require_global_kv_events_flag(tmp_path):
         tier.shutdown()
 
 
-def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
+def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path, manager_lock):
     """A GPU->CPU->fs cascade surfaces the tier-owned FS stored event via the
     TieringOffloadingManager's aggregated take_events()."""
     from vllm.v1.kv_offload.tiering.manager import (
@@ -984,12 +1003,14 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
     primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=mock_region)
     tier = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(enable_kv_cache_events=True),
-        primary_kv_view=primary.get_kv_memoryview(),
+        parent_ctx=_parent_ctx(primary.get_kv_memoryview(), manager_lock),
         tier_type="fs",
         root_dir=str(tmp_path),
         enable_kv_events=True,
     )
-    manager = TieringOffloadingManager(primary_tier=primary, secondary_tiers=[tier])
+    manager = TieringOffloadingManager(
+        primary_tier=primary, secondary_tiers=[tier], lock=manager_lock
+    )
     try:
         keys = [key(1), key(2)]
         manager.on_new_request(_CTX)
@@ -1022,7 +1043,7 @@ def test_fs_tier_cross_tp_round_trip(tmp_path):
         offloading_spec=_make_offloading_spec(
             tp_size=2, world_size=2, rank=0, replicated_layout=True
         ),
-        primary_kv_view=memoryview(writer_tensor.numpy()),
+        parent_ctx=_parent_ctx(memoryview(writer_tensor.numpy())),
         tier_type="fs",
         root_dir=root,
         n_read_threads=2,
@@ -1041,7 +1062,7 @@ def test_fs_tier_cross_tp_round_trip(tmp_path):
         offloading_spec=_make_offloading_spec(
             tp_size=4, world_size=4, rank=3, replicated_layout=True
         ),
-        primary_kv_view=memoryview(reader_tensor.numpy()),
+        parent_ctx=_parent_ctx(memoryview(reader_tensor.numpy())),
         tier_type="fs",
         root_dir=root,
         n_read_threads=2,
@@ -1056,3 +1077,200 @@ def test_fs_tier_cross_tp_round_trip(tmp_path):
         assert torch.allclose(reader_tensor[1], expected)
     finally:
         reader.shutdown()
+
+
+class TestFSPromotion:
+    """Test deferred promotion. FS tier defers allocation by default."""
+
+    def test_submit_load_rejects_materialized_promotion_job(self, fs_tier):
+        """A promotion job materialized on the scheduler thread is a bug: the
+        FS tier defers allocation, so the second materialize() in load_task is
+        a double call. The worker stashes the error and get_finished_jobs()
+        re-raises it on the polling (scheduler) thread."""
+        tier, _ = fs_tier
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        drain(tier)
+
+        job = TieringTransferJob(
+            is_promotion=True,
+            job_id=2,
+            req_context=_CTX,
+            keys=[key(1)],
+            alloc_fn=lambda k, ctx: ([key(1)], np.array([0], dtype=np.int32)),
+        )
+        job.materialize()  # Simulates allocation on the scheduler thread
+        tier.submit_load(job)
+
+        with pytest.raises(AssertionError, match="materialized more than once"):
+            drain(tier)
+
+    def test_promotion_allocation_failure(self, fs_tier):
+        """alloc_fn returning None → materialize() redeems to None and the job
+        finishes with zero keys."""
+        tier, _ = fs_tier
+        job = TieringTransferJob(
+            is_promotion=True,
+            job_id=42,
+            req_context=_CTX,
+            keys=[key(1), key(2)],
+            alloc_fn=lambda keys, ctx: None,
+        )
+        tier.submit_load(job)
+        results = drain(tier)
+
+        # The claim was never acquired; the job finishes with zero keys.
+        assert not job.is_materialized()
+
+        assert len(results) == 1
+        result = results[0]
+        assert result.job_id == 42
+        assert result.success
+        assert result.successful_keys is None
+
+    def test_promotion_primary_key_availability(self, fs_tier):
+        """alloc_fn controls which subset of requested keys are loaded from FS.
+
+        Three sub-cases exercised in sequence,
+          - None cached:  alloc returns all 4 keys → all 4 loaded
+          - Half cached:  alloc returns 2 keys     → only those 2 loaded
+          - All cached:   alloc returns 0 keys     → no FS reads, job still succeeds.
+        """
+        tier, _ = fs_tier
+        all_keys = [key(1), key(2), key(3), key(4)]
+
+        # Store all four files on disk so every sub-case can request any key.
+        tier.submit_store(make_job(1, all_keys, [0, 1, 2, 3]))
+        drain(tier)
+
+        # None cached
+        job = TieringTransferJob(
+            is_promotion=True,
+            job_id=10,
+            req_context=_CTX,
+            keys=all_keys,
+            alloc_fn=lambda req_keys, ctx: (
+                list(req_keys),
+                np.array([0, 1, 2, 3], dtype=np.int32),
+            ),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is True
+        assert set(job.keys) == set(all_keys)
+        assert list(job.chunk_ids) == [0, 1, 2, 3]
+
+        # Half cached
+        uncached = all_keys[2:]
+        job = TieringTransferJob(
+            is_promotion=True,
+            job_id=11,
+            req_context=_CTX,
+            keys=all_keys,
+            alloc_fn=lambda req_keys, ctx: (
+                list(uncached),
+                np.array([0, 1], dtype=np.int32),
+            ),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is True
+        assert set(job.keys) == set(uncached)
+        assert list(job.chunk_ids) == [0, 1]
+
+        # All cached
+        job = TieringTransferJob(
+            is_promotion=True,
+            job_id=12,
+            req_context=_CTX,
+            keys=all_keys,
+            alloc_fn=lambda req_keys, ctx: ([], np.array([], dtype=np.int32)),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is True
+        assert len(list(job.keys)) == 0
+        assert len(list(job.chunk_ids)) == 0
+
+    def test_promotion_fs_file_availability(self, fs_tier):
+        """FS file availability determines promotion success and partial-success
+        reporting.
+
+        Three sub-cases, each using its own keys and non-overlapping chunk slots:
+          - All files present:  full success, successful_keys is None.
+          - Half files present: partial failure, successful_keys holds the loaded half.
+          - No files present:   immediate failure, successful_keys is None.
+        """
+        tier, _ = fs_tier
+
+        # All files present → full success
+        all_keys = [key(1), key(2), key(3), key(4)]
+        tier.submit_store(make_job(1, all_keys, [0, 1, 2, 3]))
+        drain(tier)
+
+        job = TieringTransferJob(
+            is_promotion=True,
+            job_id=20,
+            req_context=_CTX,
+            keys=all_keys,
+            alloc_fn=lambda req_keys, ctx: (
+                list(req_keys),
+                np.array([0, 1, 2, 3], dtype=np.int32),
+            ),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is True
+        assert result.successful_keys is None  # all loaded; no partial set reported
+        assert set(job.keys) == set(all_keys)
+        assert list(job.chunk_ids) == [0, 1, 2, 3]
+
+        # Half files deleted; partial failure
+        # Delete files for key(3) and key(4); key(1) and key(2) remain on disk.
+        for k in all_keys[2:]:
+            path = tier.file_mapper.get_file_name(k)
+            if os.path.exists(path):
+                os.remove(path)
+
+        job = TieringTransferJob(
+            is_promotion=True,
+            job_id=21,
+            req_context=_CTX,
+            keys=all_keys,
+            alloc_fn=lambda req_keys, ctx: (
+                list(req_keys),
+                np.array([0, 1, 2, 3], dtype=np.int32),
+            ),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is False
+        assert result.successful_keys is not None
+        assert set(result.successful_keys) == {key(1), key(2)}
+        # The claim reflects the full originally-requested set, not just what
+        # loaded
+        assert set(job.keys) == set(all_keys)
+        assert list(job.chunk_ids) == [0, 1, 2, 3]
+
+        # All files deleted → nothing loaded
+        for k in all_keys[:2]:
+            path = tier.file_mapper.get_file_name(k)
+            if os.path.exists(path):
+                os.remove(path)
+
+        job = TieringTransferJob(
+            is_promotion=True,
+            job_id=22,
+            req_context=_CTX,
+            keys=all_keys,
+            alloc_fn=lambda req_keys, ctx: (
+                list(req_keys),
+                np.array([0, 1, 2, 3], dtype=np.int32),
+            ),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is False
+        assert result.successful_keys is None  # nothing loaded before the first failure
+        # The claim still reflects the full originally-requested set
+        assert set(job.keys) == set(all_keys)
+        assert list(job.chunk_ids) == [0, 1, 2, 3]

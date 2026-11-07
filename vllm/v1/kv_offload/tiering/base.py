@@ -6,7 +6,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
@@ -71,16 +71,43 @@ class TieringOffloadingMetrics:
     DEFERRED_RELEASE_HOLD = "vllm:kv_offload_tiering_deferred_release_hold_seconds"
 
 
-@dataclass
-class TransferJob:
-    """Metadata for an in-flight async transfer job."""
+class TransferJob(ABC):
+    """Handle to an async transfer between the primary tier and a secondary
+    tier.
+    """
 
-    job_id: JobId
-    keys: Collection[OffloadKey]
-    chunk_ids: np.ndarray
-    is_promotion: bool
-    req_context: ReqContext
-    submit_time: float = field(default_factory=time.monotonic)
+    def __init__(self, job_id: JobId, req_context: ReqContext, is_promotion: bool):
+        self.job_id = job_id
+        self.req_context = req_context
+        self.is_promotion = is_promotion
+        self.submit_time = time.monotonic()
+
+    @abstractmethod
+    def materialize(self) -> bool:
+        """Materialize transfer keys and chunk-ids for this TransferJob.
+
+        materialize() may only be called once and only by the tiers, when
+        they wish to access the keys and chunk_ids for this TransferJob.
+
+        Returns:
+            True if the job is materialized after the call (acquisition
+            succeeded, or the job was materialized at construction); False
+            if acquisition failed, in which case keys/chunk_ids stay
+            unavailable (they raise ValueError).
+
+        """
+
+    @property
+    @abstractmethod
+    def keys(self) -> Collection[OffloadKey]:
+        """Transfer keys. Raise ValueError if not materialized."""
+        pass
+
+    @property
+    @abstractmethod
+    def chunk_ids(self) -> np.ndarray:
+        """Transfer chunk_ids. Raise ValueError if not materialized."""
+        pass
 
 
 @dataclass
@@ -103,6 +130,17 @@ class JobResult:
     # I/O can no longer touch those chunks; the manager applies the release on
     # its own polling path.
     deferred_release: threading.Event | None = None
+
+
+@dataclass(frozen=True)
+class ParentContext:
+    """Handles into the composing manager, shared by all its secondary tiers."""
+
+    # Held while calling back into the parent, e.g. when a tier worker thread
+    # materializes a promotion's deferred CPU allocation.
+    lock: threading.Lock
+    # The primary tier's KV buffer.
+    kv_view: memoryview
 
 
 class ParentManager(ABC):
@@ -187,27 +225,30 @@ class SecondaryTierManager(ABC):
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
-        primary_kv_view: memoryview,
+        parent_ctx: "ParentContext",
         tier_type: str,
         backpressure_detector: BackpressureDetector | None = None,
     ) -> None:
         """Args:
         offloading_spec: Offloading configuration.
-        primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+        parent_ctx: Handles into the composing TieringOffloadingManager.
         tier_type: Tier type identifier, set by SecondaryTierFactory
             from the registered tier type.
         backpressure_detector: Optional `BackpressureDetector`.
 
         """
         self._offloading_spec = offloading_spec
-        self._primary_kv_view: memoryview = primary_kv_view
-        assert primary_kv_view.strides is not None, (
+        self._primary_kv_view: memoryview = parent_ctx.kv_view
+        assert self._primary_kv_view.strides is not None, (
             "primary_kv_view.strides cannot be None"
         )
-        self._block_size_bytes: int = primary_kv_view.strides[0]
+        self._block_size_bytes: int = self._primary_kv_view.strides[0]
         self.tier_type = tier_type
         self.locality: Locality | None = None
         self._bp_detector = backpressure_detector
+        # Held while calling back into the manager, e.g. when a tier worker
+        # thread materializes a promotion's deferred CPU allocation.
+        self.manager_lock: threading.Lock = parent_ctx.lock
 
     @property
     def block_size_bytes(self) -> int:
@@ -243,8 +284,9 @@ class SecondaryTierManager(ABC):
         calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.chunk_ids`` are valid primary-tier slots, pinned
-            (ref-counted) for the duration of the transfer.
+          - the job's chunk_ids (see ``TransferJob.materialize()``) are valid
+            primary-tier slots, pinned (ref-counted) for the duration of the
+            transfer.
 
         The implementation is responsible for:
           1. Filtering out chunks already present in this tier
@@ -271,8 +313,11 @@ class SecondaryTierManager(ABC):
         on the calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.chunk_ids`` are allocated primary-tier slots
-            ready to receive data.
+          - The job's chunk_ids are not allocated by the caller.
+            Implementations must call job_metadata.materialize() to
+            materialize the keys and chunk_ids. materialize() may fail
+            (primary allocation failure), in which case no transfer happens
+            and the tier must report success.
 
         The implementation must copy data from this tier into the
         primary-tier slots identified by ``chunk_ids``.
