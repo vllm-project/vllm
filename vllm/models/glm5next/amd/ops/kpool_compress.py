@@ -763,6 +763,7 @@ def kpool_decode_update_and_maybe_write_cache_batched(
     if page_size > 1:
         assert page_size % 16 == 0, "ROCm preshuffle requires 16-token tiles"
 
+    block_d = triton.next_power_of_2(head_dim)
     _kpool_decode_update_batched_kernel[(num_requests,)](
         buf_fp8,
         buf_fp32,
@@ -790,7 +791,9 @@ def kpool_decode_update_and_maybe_write_cache_batched(
         FP8_MAX=FP8_MAX,
         PRESHUFFLE=page_size > 1,
         ROUND_SCALE=round_scale,
-        BLOCK_D=triton.next_power_of_2(head_dim),
+        BLOCK_D=block_d,
+        # Extra wavefronts replicate the block: triton-lang/triton#12616.
+        num_warps=min(4, max(1, block_d // 64)),
     )
 
 
