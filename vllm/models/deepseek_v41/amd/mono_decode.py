@@ -444,15 +444,16 @@ class MonoDecodeLayer:
             return MonoDecodeLayer(ffn_only=True, experts=experts, topk=topk)
         # the whole layer: the kernels' attention takes the standard layers; an
         # index source's compressor and indexer run between its two launches
-        from vllm.models.deepseek_v41.amd.rocm import DeepseekV41RocmMxfp4Indexer
         from vllm.models.deepseek_v41.attention import DeepseekV4Indexer
 
-        # The indexer that _select drives. The MXFP4 indexer cache needs CDNA4,
-        # so gfx942 has vLLM's FP8 indexer, whose wq_b also reads K1's bf16 qr.
-        indexer_cls = DeepseekV4Indexer if gfx942 else DeepseekV41RocmMxfp4Indexer
+        # _select drives the indexer only through DeepseekV4Indexer's own
+        # methods, so both indexer caches qualify: aiter's MXFP4 one and vLLM's
+        # FP8 one, the default and the only one on gfx942
         if attn.compressor is not None and attn.indexer is None:
             why = "a compressor without an indexer"
-        elif attn.indexer is not None and not isinstance(attn.indexer, indexer_cls):
+        elif attn.indexer is not None and not isinstance(
+            attn.indexer, DeepseekV4Indexer
+        ):
             why = f"a {type(attn.indexer).__name__}"
         elif attn.compress_ratio not in (0, 1, 2):
             why = f"compress ratio {attn.compress_ratio}"

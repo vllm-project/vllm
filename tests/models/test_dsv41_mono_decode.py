@@ -311,6 +311,12 @@ def _indexer():
     return object.__new__(DeepseekV41RocmMxfp4Indexer)
 
 
+def _fp8_indexer():
+    from vllm.models.deepseek_v41.attention import DeepseekV4Indexer
+
+    return object.__new__(DeepseekV4Indexer)
+
+
 @pytest.mark.parametrize(
     "layer, path",
     [
@@ -319,6 +325,8 @@ def _indexer():
         (_decoder_layer(engram=object()), "whole"),
         (_decoder_layer(compressor=object(), indexer=_indexer()), "whole"),
         (_decoder_layer(indexer=_indexer()), "whole"),
+        (_decoder_layer(compressor=object(), indexer=_fp8_indexer()), "whole"),
+        (_decoder_layer(indexer=_fp8_indexer()), "whole"),
         (_decoder_layer(compressor=object()), "ffn"),
         (_decoder_layer(indexer=object()), "ffn"),
         (_decoder_layer(kv_cache_dtype="auto"), "ffn"),
@@ -330,6 +338,8 @@ def _indexer():
         "engram",
         "kv-source",
         "index-source",
+        "fp8-kv-source",
+        "fp8-index-source",
         "compressor-only",
         "other-indexer",
         "kv",
@@ -338,8 +348,9 @@ def _indexer():
 )
 def test_layers_take_whole_or_ffn_launch(monkeypatch, layer, path):
     """The whole-layer kernels serve every backbone layer of the checkpoint (an
-    index source's compressor and indexer run between them); a layer outside
-    them keeps vLLM's attention and runs its FFN half as one launch."""
+    index source's compressor and indexer run between them, with either indexer
+    cache); a layer outside them keeps vLLM's attention and runs its FFN half as
+    one launch."""
     _deployment(monkeypatch)
     mono = md.MonoDecodeLayer.create(layer, _config())
     got = None if mono is None else "ffn" if mono.ffn_only else "whole"

@@ -14,7 +14,8 @@ On gfx942 the indexer is vLLM's FP8 indexer, because the MXFP4 indexer cache
 needs CDNA4, and the kernels read the copies of the weights that the model
 makes when it loads them. A decode step of 8 rows there takes two GEMV passes
 of 6 rows, the second one padded, and a step of 42 rows, the most that the
-gfx942 kernels take, takes seven.
+gfx942 kernels take, takes seven. CDNA4 runs aiter's MXFP4 indexer, and at TP2
+also vLLM's FP8 one, the default indexer cache.
 
 Every layer takes the whole-layer path (K1 + K2); the five hold each variant:
 - 0: the first layer, sliding window only (K1 takes the embedding settled)
@@ -258,7 +259,14 @@ class MonoProbe:
 
 
 def _decode(
-    vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str, arch: str
+    vllm_runner,
+    monkeypatch,
+    tp: int,
+    mono: bool,
+    prompts,
+    path: str,
+    arch: str,
+    fp8_indexer: bool = False,
 ):
     """Greedy decode of `prompts` with the mono path on or off: (each
     prompt's output, the workers' mono layers); each decoder layer's outputs
@@ -272,7 +280,7 @@ def _decode(
     # CDNA4 has the MXFP4 indexer cache with 128-token blocks. gfx942 keeps
     # vLLM's FP8 indexer, which needs 64-token blocks.
     indexer: dict = dict(block_size=64)
-    if arch == "cdna4":
+    if arch == "cdna4" and not fp8_indexer:
         indexer = dict(
             attention_config={
                 "indexer_kv_dtype": "mxfp4",
@@ -314,13 +322,19 @@ def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
     return ((a - b).norm() / b.norm()).item()
 
 
+@pytest.mark.parametrize("fp8_indexer", [False, True], ids=["", "fp8-indexer"])
 @pytest.mark.parametrize(("tp", "rows"), [(2, 8), (4, 8), (4, 42), (8, 8), (8, 28)])
-def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, rows):
+def test_mono_decode_matches_the_model(
+    vllm_runner, monkeypatch, tmp_path, tp, rows, fp8_indexer
+):
     arch = _arch()
     if not arch:
         pytest.skip("the mono kernels target CDNA4 and gfx942")
     if (tp, rows) not in CASES[arch]:
         pytest.skip(f"not a case of {arch}")
+    if fp8_indexer and (arch, tp) != ("cdna4", 2):
+        # gfx942 runs vLLM's FP8 indexer in every case; CDNA4 checks it at TP2
+        pytest.skip("the FP8 indexer case is CDNA4 at TP2")
     if torch.accelerator.device_count() < tp:
         pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
@@ -339,10 +353,17 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
     prompts = [torch.randint(1000, 60000, (n,), generator=g).tolist() for n in lens]
 
     on, probe_on = _decode(
-        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/on", arch
+        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/on", arch, fp8_indexer
     )
     off, probe_off = _decode(
-        vllm_runner, monkeypatch, tp, False, prompts, f"{tmp_path}/off", arch
+        vllm_runner,
+        monkeypatch,
+        tp,
+        False,
+        prompts,
+        f"{tmp_path}/off",
+        arch,
+        fp8_indexer,
     )
 
     # both layer kinds took the mono path on every rank, at every decode step,
