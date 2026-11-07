@@ -2565,6 +2565,11 @@ def compile_factors() -> dict[str, object]:
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
+        # Shared-memory queue wait policy: changes how processes wait for queue
+        # messages, never the compiled graphs.
+        "VLLM_SHM_WAIT_BACKEND",
+        "VLLM_SHM_READER_STRIDE",
+        "VLLM_SHM_SPIN_NS",
         "VLLM_ASSETS_CACHE",
         "VLLM_ASSETS_CACHE_MODEL_CLEAN",
         "VLLM_WORKER_MULTIPROC_METHOD",
