@@ -365,7 +365,6 @@ export HF_TOKEN ZE_AFFINITY_MASK VLLM_DISABLE_COMPILE_CACHE
     --device /dev/dri:/dev/dri \
     --net=host \
     --ipc=host \
-    --privileged \
     -v /dev/dri/by-path:/dev/dri/by-path \
     -v "/data/huggingface:/root/.cache/huggingface" \
     --entrypoint='' \
