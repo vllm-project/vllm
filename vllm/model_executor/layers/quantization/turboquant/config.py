@@ -38,6 +38,30 @@ TQ_PRESETS: dict[str, dict] = {
         "value_quant_bits": 3,
         "norm_correction": True,
     },
+    # OSCAR: K and V both Hadamard-rotated, clipped and uniform-quantized
+    # (vllm/v1/attention/ops/oscar_kv.py), plus a recent-token window kept at
+    # higher precision. Lower bit widths need a wider window to hold accuracy.
+    "turboquant_k3v3_oscar": {
+        "key_quant_bits": 3,
+        "value_quant_bits": 3,
+        "norm_correction": True,
+        "oscar_recent": 256,
+        "oscar_sink": 16,
+    },
+    "turboquant_k3v2_oscar": {
+        "key_quant_bits": 3,
+        "value_quant_bits": 2,
+        "norm_correction": True,
+        "oscar_recent": 1024,
+        "oscar_sink": 16,
+    },
+    "turboquant_k2v2_oscar": {
+        "key_quant_bits": 2,
+        "value_quant_bits": 2,
+        "norm_correction": True,
+        "oscar_recent": 1024,
+        "oscar_sink": 16,
+    },
 }
 
 
@@ -91,6 +115,14 @@ class TurboQuantConfig:
     value_quant_bits: int = 4  # 3-4 = uniform quantized values
     seed: int = 42  # kept for backward compatibility; no longer used internally
     norm_correction: bool = False
+    oscar_sink: int = (
+        0  # leading tokens also kept in the OSCAR window (attention sinks)
+    )
+    oscar_recent: int = 0  # > 0 selects the OSCAR format with this recent window
+
+    @property
+    def oscar(self) -> bool:
+        return self.oscar_recent > 0
 
     @property
     def key_fp8(self) -> bool:
@@ -139,7 +171,7 @@ class TurboQuantConfig:
         if self.key_fp8:
             return self.head_dim  # 1 byte per element
         mse_bytes = math.ceil(self.head_dim * self.key_mse_bits / 8)
-        norm_bytes = 2  # vec_norm fp16
+        norm_bytes = 4 if self.oscar else 2  # vec_norm fp16 (OSCAR: scale + min fp16)
         return mse_bytes + norm_bytes
 
     @property
@@ -230,6 +262,8 @@ class TurboQuantConfig:
             key_quant_bits=preset["key_quant_bits"],
             value_quant_bits=preset["value_quant_bits"],
             norm_correction=preset["norm_correction"],
+            oscar_recent=preset.get("oscar_recent", 0),
+            oscar_sink=preset.get("oscar_sink", 0),
         )
 
 

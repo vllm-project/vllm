@@ -61,6 +61,10 @@ class KVQuantMode(IntEnum):
     OCTAVE_K3V4 = 12
     OCTAVE_K3V3 = 13
     OCTAVE_K3V3_COMPACT = 14
+    # OSCAR: clipped uniform K/V codes + recent-token window (ops/oscar_kv.py)
+    TURBOQUANT_K3V3_OSCAR = 15
+    TURBOQUANT_K3V2_OSCAR = 16
+    TURBOQUANT_K2V2_OSCAR = 17
 
     # Backend self-manages kernel dispatch. Reads as quantized but matches no
     # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
@@ -99,6 +103,9 @@ class KVQuantMode(IntEnum):
             KVQuantMode.TURBOQUANT_4BIT_NC,
             KVQuantMode.TURBOQUANT_K3V4_NC,
             KVQuantMode.TURBOQUANT_3BIT_NC,
+            KVQuantMode.TURBOQUANT_K3V3_OSCAR,
+            KVQuantMode.TURBOQUANT_K3V2_OSCAR,
+            KVQuantMode.TURBOQUANT_K2V2_OSCAR,
         )
 
     @property

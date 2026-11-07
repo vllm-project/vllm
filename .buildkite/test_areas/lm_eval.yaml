@@ -1047,6 +1047,17 @@ steps:
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-k8v4-rocm.txt
 
+- label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant k3v3 OSCAR"
+  key: lm-eval-turboquant-k3v3-oscar
+  timeout_in_minutes: 30
+  device: h200_18gb
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/turboquant/
+  - vllm/v1/attention/backends/turboquant_attn.py
+  - vllm/v1/attention/ops/oscar_kv.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-k3v3-oscar.txt
+
 - label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant t4nc"
   key: lm-eval-turboquant-t4nc
   automatic_shard: true
