@@ -104,9 +104,11 @@ class UVAOffloader(BaseOffloader):
         self.uva_offloading = (
             is_uva_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
         )
-        # CUDA only: ROCm kernels read per-tensor dispatch attributes (e.g.
-        # `is_shuffled`) that a staging buffer does not carry.
-        stage = self.uva_offloading and current_platform.is_cuda()
+        # CUDA and XPU, not ROCm: ROCm kernels read per-tensor dispatch
+        # attributes (e.g. `is_shuffled`) that a staging buffer does not carry.
+        stage = self.uva_offloading and (
+            current_platform.is_cuda() or current_platform.is_xpu()
+        )
         self.expert_stager = UVAExpertStager(max(stage_min_tokens, 0) if stage else 0)
         if self.expert_stager.min_tokens > 0:
             logger.info(

@@ -57,7 +57,7 @@ class UVAOffloadConfig:
           more than `compilation_config.max_cudagraph_capture_size` tokens,
           and at least 512.
         - N > 0: stage steps with at least N tokens.
-    Steps inside CUDA graphs never stage. CUDA only.
+    Steps inside CUDA graphs never stage. CUDA and XPU.
     """
 
     @field_validator("cpu_offload_stage_min_tokens", mode="before")
