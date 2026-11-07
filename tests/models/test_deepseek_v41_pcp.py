@@ -198,7 +198,8 @@ def test_pcp_replay_pads_inputs_and_scatters_only_real_rows(rows):
         ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={}),
         num_padded=4,
     )
-    (output,) = layers(hidden)
+    with override_forward_context(layers.replay_batch.forward_context):
+        (output,) = layers(hidden)
     expected = torch.zeros_like(hidden)
     expected[rows] = hidden[rows] + 1
     torch.testing.assert_close(output, expected)

@@ -140,6 +140,7 @@ class ForwardBench:
         # context the runner built.
         context = get_forward_context()
         saved = dict(vars(context))
+        saved["cudagraph_runtime_mode"] = CUDAGraphMode.FULL
         if self.include_drafter and self.runner.speculator is not None:
             from vllm.benchmarks.forward.speculator import DraftBench
 
