@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
 
+import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -127,20 +128,26 @@ class BlockTables:
         req_index: int,
         new_block_ids: tuple[list[int], ...],
         overwrite: bool,
+        null_heads: tuple[int, ...] | None = None,
     ) -> None:
         for i in range(self.num_kv_cache_groups):
             start = self.num_blocks.np[i, req_index] if not overwrite else 0
             block_ids = new_block_ids[i]
+            head = null_heads[i] if null_heads is not None else 0
             if self.redirect_writes_to_null_block:
                 block_ids = [0] * len(block_ids)
-            end = start + len(block_ids)
+            end = start + head + len(block_ids)
             row_capacity = self.block_tables[i].gpu.shape[1]
             if end > row_capacity:
                 raise RuntimeError(
                     f"Block table write for request {req_index}, group {i} exceeds "
                     f"row capacity ({end} > {row_capacity})"
                 )
-            self.block_tables[i].stage_write(req_index, start, block_ids)
+            if head:
+                self.block_tables[i].stage_write(
+                    req_index, start, np.zeros(head, dtype=np.int32)
+                )
+            self.block_tables[i].stage_write(req_index, start + head, block_ids)
             self.num_blocks.np[i, req_index] = end
 
     def apply_staged_writes(self) -> None:
