@@ -55,6 +55,8 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     PrepareStoreOutput,
     RequestOffloadingContext,
+    StoreMode,
+    StoreTrigger,
     TransferResult,
     make_offload_key,
 )
@@ -163,6 +165,15 @@ class MockOffloadingSpec(OffloadingSpec):
             return result
 
         _cm.resolve_device_pointers = _tracking_resolve
+        # Like the CPU manager: the store mode selects the trigger, and the
+        # store_triggers key sets the triggers directly.
+        default_trigger = (
+            "ON_OVERWRITE" if self.store_mode is StoreMode.LAZY else "ON_COMPUTE"
+        )
+        self.manager.store_triggers = tuple(
+            StoreTrigger[name]
+            for name in self.extra_config.get("store_triggers", [default_trigger])
+        )
 
     def get_manager(self) -> OffloadingManager:
         return self.manager
@@ -543,7 +554,7 @@ class RequestRunner:
             # and no pending finished_req_ids awaiting build_connector_meta.
             if (
                 not self.scheduler.requests
-                and not self.connector_scheduler._jobs
+                and not self.connector_scheduler._job_statuses
                 and not self.scheduler.finished_req_ids
             ):
                 break
@@ -611,7 +622,7 @@ class RequestRunner:
                 and prev_token_id != token_id
                 and (
                     self.scheduler.requests
-                    or self.connector_scheduler._jobs
+                    or self.connector_scheduler._job_statuses
                     or self.scheduler.finished_req_ids
                 )
             ):
@@ -632,7 +643,7 @@ class RequestRunner:
                     # Request still running, just exhausted decoded_tokens.
                     break
                 if not self.scheduler.finished_req_ids and (
-                    not complete_transfers or not self.connector_scheduler._jobs
+                    not complete_transfers or not self.connector_scheduler._job_statuses
                 ):
                     break
 

@@ -13,7 +13,7 @@ from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
     SchedulerOffloadConfig,
 )
 from vllm.platforms import current_platform

@@ -64,7 +64,7 @@ class ARCCachePolicy(CachePolicy):
 
     @override
     def insert(
-        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext
+        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext | None
     ) -> None:
         self.t1[key] = chunk
         self.b1.pop(key, None)
@@ -90,7 +90,7 @@ class ARCCachePolicy(CachePolicy):
 
     @override
     def on_store_miss(
-        self, keys: Iterable[OffloadKey], req_context: ReqContext
+        self, keys: Iterable[OffloadKey], req_context: ReqContext | None
     ) -> None:
         for key in reversed(list(keys)):
             self._adapt_to_ghost_hit(key)

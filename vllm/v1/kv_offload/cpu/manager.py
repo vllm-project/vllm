@@ -20,6 +20,8 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
+    StoreMode,
+    StoreTrigger,
     get_offload_group_idx,
 )
 from vllm.v1.kv_offload.cpu.common import (
@@ -70,6 +72,7 @@ class CPUOffloadingManager(OffloadingManager):
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
         info: CPUOffloadingInfo | None = None,
+        store_mode: StoreMode = StoreMode.EAGER,
     ):
         self.medium: Medium = Medium.CPU
         self._num_chunks: int = num_chunks
@@ -87,6 +90,18 @@ class CPUOffloadingManager(OffloadingManager):
         self._num_evictable_cache_chunks: int = 0
         # Track chunks with an in-flight store (ref_cnt -1, not yet completed).
         self._num_write_pending_chunks: int = 0
+
+        self._store_triggers: tuple[StoreTrigger, ...] = (
+            (StoreTrigger.ON_OVERWRITE,)
+            if store_mode is StoreMode.LAZY
+            else (StoreTrigger.ON_COMPUTE,)
+        )
+        # A late store (store_threshold >= 2) needs a second offer of a chunk,
+        # and an ON_OVERWRITE store offers its chunk once.
+        if StoreTrigger.ON_OVERWRITE in self._store_triggers and store_threshold >= 2:
+            raise ValueError(
+                "store_threshold >= 2 is not supported with ON_OVERWRITE stores"
+            )
 
         self.store_threshold: int = store_threshold
         self.max_tracker_size: int = max_tracker_size
@@ -199,6 +214,38 @@ class CPUOffloadingManager(OffloadingManager):
             key for key in reused_keys if key not in state.inserted_keys
         )
 
+    def _record_store_misses(
+        self,
+        keys: list[OffloadKey],
+        state: _RequestCacheAccess | None,
+        req_context: ReqContext | None,
+    ) -> None:
+        miss_keys = keys
+        if state is not None:
+            # One policy observation per request.
+            miss_keys = [key for key in keys if key not in state.store_miss_keys]
+            state.store_miss_keys.update(miss_keys)
+        if miss_keys:
+            # ARC learns from B1/B2 before insert() removes the ghost entry.
+            self._policy.on_store_miss(miss_keys, req_context)
+
+    def _record_store_offer(
+        self,
+        keys: list[OffloadKey],
+        keys_to_store: list[OffloadKey],
+        ready_existing_keys: list[OffloadKey],
+        req_context: ReqContext,
+    ) -> None:
+        recorded_keys = set(keys_to_store)
+        recorded_keys.update(ready_existing_keys)
+        # Record once before any allocation-related early return. Store
+        # candidates are classified as insertions only after allocation succeeds.
+        self._record_request_cache_access(
+            (key for key in keys if key in recorded_keys),
+            req_context,
+            reused_keys=ready_existing_keys,
+        )
+
     # --- OffloadingManager interface ---
 
     @override
@@ -264,16 +311,36 @@ class CPUOffloadingManager(OffloadingManager):
                 self._num_evictable_cache_chunks += 1  # ref_cnt 1 -> 0
                 self._policy.mark_evictable(key)
 
+    @property
+    @override
+    def store_triggers(self) -> tuple[StoreTrigger, ...]:
+        return self._store_triggers
+
     @override
     def prepare_store(
         self,
         keys: Collection[OffloadKey],
-        req_context: ReqContext,
+        req_context: ReqContext | None,
+        *,
+        trigger: StoreTrigger,
+    ) -> PrepareStoreOutput | None:
+        assert trigger in self._store_triggers, (
+            f"{trigger} not in {self._store_triggers}"
+        )
+        # The request of an ON_OVERWRITE store is finished.
+        assert (req_context is None) == (trigger == StoreTrigger.ON_OVERWRITE)
+        return self._prepare_store(keys, req_context)
+
+    def _prepare_store(
+        self, keys: Collection[OffloadKey], req_context: ReqContext | None
     ) -> PrepareStoreOutput | None:
         keys = list(keys)
-        state = self._get_request_cache_access(req_context)
+        # A store can belong to no request, and then it records no accesses.
+        state = (
+            None if req_context is None else self._get_request_cache_access(req_context)
+        )
         if self.counts is not None:
-            self._record_accesses(keys, state.counted_keys)
+            self._record_accesses(keys, () if state is None else state.counted_keys)
         # Partition the original offer before admission filtering. Ready
         # resident chunks are request reuses even if their tracker entry was
         # aged out; the threshold applies only to new store candidates.
@@ -292,29 +359,18 @@ class CPUOffloadingManager(OffloadingManager):
             for key in keys_to_store:
                 if self.counts.get(key, 0) >= self.store_threshold:
                     admitted_keys.append(key)
-                elif key not in state.counted_keys:
+                elif state is None or key not in state.counted_keys:
                     self.stores_skipped_in_current_batch += 1
             keys_to_store = admitted_keys
-            state.counted_keys.update(keys)
+            if state is not None:
+                state.counted_keys.update(keys)
 
-        new_store_misses = [
-            key for key in keys_to_store if key not in state.store_miss_keys
-        ]
-        if new_store_misses:
-            # ARC learns from B1/B2 before insert() removes the ghost entry.
-            # Deduplication makes this one policy observation per request.
-            self._policy.on_store_miss(new_store_misses, req_context)
-            state.store_miss_keys.update(new_store_misses)
-
-        recorded_keys = set(keys_to_store)
-        recorded_keys.update(ready_existing_keys)
-        # Record once before any allocation-related early return. Store
-        # candidates are classified as insertions only after allocation succeeds.
-        self._record_request_cache_access(
-            (key for key in keys if key in recorded_keys),
-            req_context,
-            reused_keys=ready_existing_keys,
-        )
+        # A policy hears the misses of the offer before the accesses.
+        self._record_store_misses(keys_to_store, state, req_context)
+        if req_context is not None:
+            self._record_store_offer(
+                keys, keys_to_store, ready_existing_keys, req_context
+            )
 
         if not keys_to_store:
             return PrepareStoreOutput(
@@ -366,7 +422,9 @@ class CPUOffloadingManager(OffloadingManager):
         for key, chunk in zip(keys_to_store, chunks):
             self._policy.insert(key, chunk, req_context)
         self._num_write_pending_chunks += len(keys_to_store)
-        state.inserted_keys.update(keys_to_store)
+        # The state is None when the store has no request.
+        if state is not None:
+            state.inserted_keys.update(keys_to_store)
 
         # build store specs for allocated chunks
         store_spec = self._get_load_store_spec(keys_to_store, chunks)
@@ -381,7 +439,17 @@ class CPUOffloadingManager(OffloadingManager):
     def complete_store(
         self,
         keys: Collection[OffloadKey],
-        req_context: ReqContext,
+        req_context: ReqContext | None,
+        *,
+        trigger: StoreTrigger,
+        success: bool = True,
+    ) -> None:
+        self._complete_store(keys, req_context, success)
+
+    def _complete_store(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext | None,
         success: bool = True,
     ) -> None:
         stored_keys: list[OffloadKey] = []
