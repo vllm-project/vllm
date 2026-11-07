@@ -1179,6 +1179,177 @@ def test_aiter_indexer_impl_matches_reference(
     assert torch.equal(sparse_ctx.cpu(), expected_ctx)
 
 
+def _run_indexer_impl_pair(
+    vllm_config, device, common, index_cache, index_q, impl_kwargs, specs
+):
+    """Construct, wire, and run indexer impls on the same metadata; each spec
+    is (impl_cls, builder_cls, prefix, topk_indices_buffer). Returns the impls
+    and their forward results, in spec order."""
+    from vllm.config import set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+
+    kv_spec = MLAAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=impl_kwargs["index_head_dim"],
+        dtype=DTYPE,
+    )
+    impls, builders = [], []
+    with set_current_vllm_config(vllm_config):
+        for impl_cls, builder_cls, prefix, _ in specs:
+            impl = impl_cls(prefix=prefix, **impl_kwargs)
+            impls.append(impl)
+            builders.append(
+                builder_cls(kv_spec, [impl.index_cache.prefix], vllm_config, device)
+            )
+    attn_metadata = {}
+    for impl, builder, (_, _, _, buf) in zip(impls, builders, specs):
+        impl.index_cache.kv_cache = index_cache
+        impl.topk_indices_buffer = buf
+        attn_metadata[impl.index_cache.prefix] = builder.build(0, common)
+    with set_forward_context(attn_metadata, vllm_config):
+        results = [impl(index_q) for impl in impls]
+    return impls, results
+
+
+def _has_flashinfer_msa_platform() -> bool:
+    from vllm.utils.flashinfer import has_flashinfer_msa, has_flashinfer_msa_sm90
+
+    if current_platform.is_device_capability(90):
+        return has_flashinfer_msa_sm90()
+    return current_platform.is_device_capability_family(120) and has_flashinfer_msa()
+
+
+def _skip_if_sm90_needs_fp8(dtype: torch.dtype) -> None:
+    # The SM90 kernels read fp8 E4M3 index and main caches only.
+    if current_platform.is_device_capability(90) and dtype != torch.float8_e4m3fn:
+        pytest.skip("FlashInfer MSA on SM90 requires an fp8 E4M3 cache.")
+
+
+# The SM90 / SM120 / SM121 FlashInfer indexer must match the Triton impl when
+# driven through the real metadata builders. The short decode request covers
+# the -1 clamp; local_blocks=1 covers the local-window bias, with cache values
+# decreasing by block id so the window never wins on score alone.
+@pytest.mark.skipif(
+    not _has_flashinfer_msa_platform(),
+    reason="FlashInfer MSA indexer requires SM90 or SM120/SM121 and "
+    "flashinfer.msa_ops.",
+)
+@pytest.mark.parametrize("local_blocks", [0, 1])
+@pytest.mark.parametrize("index_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_flashinfer_indexer_impl_matches_triton(local_blocks, index_dtype, monkeypatch):
+    _skip_if_sm90_needs_fp8(index_dtype)
+    import vllm.models.minimax_m3.common.indexer as indexer_mod
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm.models.minimax_m3.common.indexer import (
+        MiniMaxM3IndexerTritonImpl,
+        MiniMaxM3IndexerTritonMetadataBuilder,
+    )
+    from vllm.models.minimax_m3.nvidia.indexer_flashinfer import (
+        MiniMaxM3IndexerFlashInferImpl,
+        MiniMaxM3IndexerFlashInferMetadataBuilder,
+    )
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    num_idx_heads, head_dim, topk = 4, HEAD_DIM, TOPK
+    # TP=1: avoid requiring an initialized distributed group in a unit test.
+    monkeypatch.setattr(indexer_mod, "get_tensor_model_parallel_world_size", lambda: 1)
+
+    vllm_config = create_vllm_config(
+        block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
+    )
+    vllm_config.model_config.hf_config.sparse_attention_config = {
+        "sparse_num_index_heads": num_idx_heads,
+        "sparse_local_block": local_blocks,
+    }
+
+    # Decode-first mixed batch: one short and one long decode request, then
+    # two prefill requests whose prefixes exceed topk causal blocks.
+    batch = BatchSpec(seq_lens=[300, 2561, 2624, 2720], query_lens=[1, 1, 64, 96])
+    common = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device, arange_block_indices=True
+    )
+    num_tokens = batch.compute_num_tokens()
+    # The production model runner always provides positions; the test helper
+    # does not.
+    common.positions = torch.cat(
+        [
+            torch.arange(s - q, s, dtype=torch.int64, device=device)
+            for s, q in zip(batch.seq_lens, batch.query_lens)
+        ]
+    )
+
+    # Distinct e4m3-exact per-block values, decreasing with the block id.
+    block_table = common.block_table_tensor
+    num_pages = int(block_table.max().item()) + 1
+    max_blocks = (max(batch.seq_lens) + BLOCK_SIZE - 1) // BLOCK_SIZE
+    assert max_blocks <= len(_E4M3_EXACT_VALUES)
+    index_cache = torch.zeros(
+        num_pages, BLOCK_SIZE, head_dim, device=device, dtype=index_dtype
+    )
+    for r, seq_len in enumerate(batch.seq_lens):
+        for b in range((seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE):
+            index_cache[block_table[r, b]] = float(
+                _E4M3_EXACT_VALUES[max_blocks - 1 - b]
+            )
+    index_q = torch.ones(
+        num_tokens, num_idx_heads * head_dim, device=device, dtype=index_dtype
+    )
+
+    impl_kwargs = dict(
+        num_kv_heads=num_idx_heads,
+        scale=head_dim**-0.5,
+        topk_blocks=topk,
+        sparse_block_size=BLOCK_SIZE,
+        num_index_heads=num_idx_heads,
+        index_head_dim=head_dim,
+        init_blocks=0,
+        local_blocks=local_blocks,
+    )
+
+    (fi_impl, triton_impl), _ = _run_indexer_impl_pair(
+        vllm_config,
+        device,
+        common,
+        index_cache,
+        index_q,
+        impl_kwargs,
+        [
+            (
+                MiniMaxM3IndexerFlashInferImpl,
+                MiniMaxM3IndexerFlashInferMetadataBuilder,
+                "idx_fi",
+                torch.full(
+                    (num_tokens, num_idx_heads, topk),
+                    -2,
+                    dtype=torch.int32,
+                    device=device,
+                ),
+            ),
+            (
+                MiniMaxM3IndexerTritonImpl,
+                MiniMaxM3IndexerTritonMetadataBuilder,
+                "idx_triton",
+                torch.full(
+                    (num_tokens, num_idx_heads, topk),
+                    -2,
+                    dtype=torch.int32,
+                    device=device,
+                ),
+            ),
+        ],
+    )
+
+    _assert_topk_indices_equal_unordered(
+        fi_impl.topk_indices_buffer, triton_impl.topk_indices_buffer
+    )
+
+
 # NVFP4 index cache (SM100/SM103): MSA Q8KV4 decode on the packed pages, FP8
 # gather + Q8KV8 prefill. Both rank pages from e4m3_rn_satfinite(e2m1 * scale).
 _E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
@@ -2348,6 +2519,135 @@ def test_prefill_sparse_attention_correctness(
     assert error.max().item() < 1.7e-2
 
 
+def _has_flashinfer_msa_packed_kv_platform() -> bool:
+    if not _has_flashinfer_msa_platform():
+        return False
+    if current_platform.is_device_capability(90):
+        return True  # SM90 reads only packed K/V
+    from vllm.utils.flashinfer import has_flashinfer_msa_packed_kv
+
+    return has_flashinfer_msa_packed_kv()
+
+
+# FlashInfer attend vs the Triton kernels' reference, at the impl's call shape.
+@pytest.mark.skipif(
+    not _has_flashinfer_msa_packed_kv_platform(),
+    reason="FlashInfer MSA attend requires SM90, or SM120/SM121 with packed-KV "
+    "support.",
+)
+@pytest.mark.parametrize("kv_dtype", [DTYPE, torch.float8_e4m3fn])
+@pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
+@pytest.mark.parametrize(
+    ("q_lens", "kv_lens"),
+    [
+        ((129, 257), (129, 257)),
+        ((65, 129, 257), (129, 257, 385)),
+        ((1, 1, 1), (129, 257, 385)),  # decode path
+    ],
+)
+def test_flashinfer_sparse_attention_matches_reference(
+    kv_layout: str,
+    kv_dtype: torch.dtype,
+    q_lens: tuple[int, ...],
+    kv_lens: tuple[int, ...],
+):
+    _skip_if_sm90_needs_fp8(kv_dtype)
+    if current_platform.is_device_capability(90) and kv_layout != KVCacheLayout.LBHNC:
+        pytest.skip("The SM90 FlashInfer backend declares the LBHNC layout only.")
+    from flashinfer.msa_ops import (
+        msa_sparse_attention,
+        msa_sparse_decode_attention,
+    )
+
+    assert all(kv_len >= q_len for q_len, kv_len in zip(q_lens, kv_lens))
+    is_decode = all(q_len == 1 for q_len in q_lens)
+
+    batch = len(q_lens)
+    pages_per_req = [(kv_len + BLOCK_SIZE - 1) // BLOCK_SIZE for kv_len in kv_lens]
+    max_blocks = max(pages_per_req)
+    num_pages = sum(pages_per_req)
+    physical_pages = torch.randperm(num_pages, device="cuda", dtype=torch.int32)
+    block_table = torch.zeros(batch, max_blocks, device="cuda", dtype=torch.int32)
+    base_page = 0
+    for req_id, num_req_pages in enumerate(pages_per_req):
+        block_table[req_id, :num_req_pages] = physical_pages[
+            base_page : base_page + num_req_pages
+        ]
+        base_page += num_req_pages
+
+    q_lens_t = torch.tensor(q_lens, device="cuda", dtype=torch.int32)
+    seq_lens = torch.tensor(kv_lens, device="cuda", dtype=torch.int32)
+    prefix_lens = seq_lens - q_lens_t
+    cu_seqlens = torch.zeros(batch + 1, device="cuda", dtype=torch.int32)
+    cu_seqlens[1:] = q_lens_t.cumsum(0)
+    total_q = sum(q_lens)
+
+    q = torch.randn(total_q, NUM_Q_HEADS, HEAD_DIM, device="cuda", dtype=DTYPE)
+    kv_cache = _allocate_main_kv_via_contract(num_pages, kv_layout)
+    # preserve_format keeps the layout's permuted strides through the cast.
+    kv_cache = kv_cache.to(kv_dtype)
+    k_cache, v_cache = kv_cache.split(HEAD_DIM, dim=-1)
+
+    topk_shape = (NUM_KV_HEADS, total_q, TOPK)
+    topk_idx = torch.full(topk_shape, -1, device="cuda", dtype=torch.int32)
+    q_start = 0
+    for q_len, prefix_len in zip(q_lens_t.tolist(), prefix_lens.tolist()):
+        for local_q in range(q_len):
+            current_block = (prefix_len + local_q) // BLOCK_SIZE
+            older_blocks = torch.randperm(
+                current_block, device="cuda", dtype=torch.int32
+            )
+            selected = torch.cat(
+                [
+                    torch.tensor([current_block], device="cuda", dtype=torch.int32),
+                    older_blocks[: TOPK - 1],
+                ]
+            )
+            topk_idx[:, q_start + local_q, : selected.numel()] = selected
+        q_start += q_len
+
+    if is_decode:
+        actual = msa_sparse_decode_attention(
+            q,
+            k_cache,
+            v_cache,
+            topk_idx,
+            page_table=block_table,
+            seqused_k=seq_lens,
+            seqlen_q=1,
+            causal=True,
+            softmax_scale=SM_SCALE,
+        )
+    else:
+        actual = msa_sparse_attention(
+            q,
+            k_cache,
+            v_cache,
+            topk_idx,
+            cu_seqlens,
+            causal=True,
+            softmax_scale=SM_SCALE,
+            page_table=block_table,
+            seqused_k=seq_lens,
+        )
+
+    # The reference attends the same (dequantized) cache values.
+    expected = _reference_sparse_attn(
+        q,
+        kv_cache.to(DTYPE),
+        topk_idx,
+        block_table,
+        q_lens_t,
+        seq_lens,
+        prefix_lens,
+    )
+    torch.accelerator.synchronize()
+
+    error = (actual.float() - expected.float()).abs()
+    assert error.mean().item() < 2.5e-4
+    assert error.max().item() < 1.7e-2
+
+
 def test_main_cache_layout_contract():
     """The standardized per-layer logical shape is [B, H, N, C] with packed
     K/V content, and the legacy layout aliases resolve to the expected
@@ -2498,6 +2798,48 @@ def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
     assert impl_cls.__name__ == "MiniMaxM3SparseAiterPAImpl"
     assert backend.__name__ == "MiniMaxM3SparseAiterPABackend"
     assert backend.get_builder_cls().__name__ == "MiniMaxM3SparseAiterPAMetadataBuilder"
+
+
+_SM90_FLASHINFER_MSA_SUPPORTED = dict(
+    topk_blocks=TOPK,
+    kv_cache_dtype="fp8_e4m3",
+    num_heads=64,
+    num_kv_heads=4,
+    indexer_kv_dtype="fp8",
+    model_dtype=torch.bfloat16,
+)
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        ({}, True),
+        ({"num_heads": 32}, True),  # GQA group 8
+        ({"num_heads": 16}, False),  # GQA group 4
+        ({"kv_cache_dtype": "auto"}, False),
+        ({"indexer_kv_dtype": "bf16"}, False),
+        ({"num_heads": 128, "num_kv_heads": 8}, False),  # 8 index heads
+    ],
+)
+def test_flashinfer_msa_sm90_gate(override, expected, monkeypatch):
+    """On SM90 the FlashInfer pair engages only for configurations FlashInfer
+    supports; anything else keeps the Triton pair."""
+    import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod
+
+    platform = sparse_attn_mod.current_platform
+    monkeypatch.setattr(platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        platform, "is_device_capability", lambda cap, device_id=0: cap == 90
+    )
+    monkeypatch.setattr(sparse_attn_mod, "has_flashinfer_msa_sm90", lambda: True)
+    monkeypatch.setattr(
+        sparse_attn_mod, "has_flashinfer_msa_per_token_topk", lambda: True
+    )
+
+    use = sparse_attn_mod.minimax_m3_use_flashinfer_msa(
+        **{**_SM90_FLASHINFER_MSA_SUPPORTED, **override}
+    )
+    assert use == expected
 
 
 def test_msa_indexer_requires_the_aiter_attend(monkeypatch):

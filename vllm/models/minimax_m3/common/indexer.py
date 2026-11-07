@@ -511,13 +511,16 @@ def select_indexer_impl_cls(
     *,
     topk_blocks: int,
     indexer_kv_dtype: IndexerKVDType | str = "bf16",
+    use_flashinfer_msa: bool = False,
 ) -> type[MiniMaxM3IndexerImpl]:
     """Pick the indexer impl off the platform, top-k count, and cache dtype.
 
     On Blackwell (SM100) with ``topk_blocks == 16`` (the only width fmha_sm100's
     ``sparse_topk_select`` kernel supports), the fmha_sm100 score + top-k path is
     used for both bf16 and fp8 index caches. An nvfp4 index cache uses the MSA
-    Q8KV4/Q8KV8 paged indexers (SM100/SM103/SM107 only). Everything else falls back to
+    Q8KV4/Q8KV8 paged indexers (SM100/SM103/SM107 only). On SM90 and SM120/SM121, the
+    flashinfer.msa_ops impl is used when the caller passes the
+    ``minimax_m3_use_flashinfer_msa`` verdict. Everything else falls back to
     the Triton indexer, with fp8 restricted to CUDA platforms that advertise fp8
     support and to ROCm gfx942 (MI300-series, CDNA3). gfx950 (MI350-series)
     takes the fp8 path through the AITER indexer instead, so this fallback
@@ -608,6 +611,19 @@ def select_indexer_impl_cls(
             indexer_kv_dtype,
         )
         return MiniMaxM3IndexerMSAImpl
+    if use_flashinfer_msa:
+        # Lazy import so unsupported / flashinfer-less setups never import it.
+        from vllm.models.minimax_m3.nvidia.indexer_flashinfer import (
+            MiniMaxM3IndexerFlashInferImpl,
+        )
+
+        logger.info_once(
+            "MiniMax M3 indexer: selected FlashInfer MSA (proxy score + top-k) "
+            "[topk_blocks=%d, indexer_kv_dtype=%s]",
+            topk_blocks,
+            indexer_kv_dtype,
+        )
+        return MiniMaxM3IndexerFlashInferImpl
     if indexer_kv_dtype not in ("bf16", "fp8", "fp8_e4m3"):
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
@@ -646,11 +662,13 @@ class MiniMaxM3Indexer(nn.Module):
         cache_config: CacheConfig | None = None,
         indexer_kv_dtype: IndexerKVDType | str = "bf16",
         topk_indices_buffer: torch.Tensor | None = None,
+        use_flashinfer_msa: bool = False,
     ) -> None:
         super().__init__()
         impl_cls = select_indexer_impl_cls(
             topk_blocks=topk_blocks,
             indexer_kv_dtype=indexer_kv_dtype,
+            use_flashinfer_msa=use_flashinfer_msa,
         )
         self.impl = impl_cls(
             num_kv_heads=num_kv_heads,
