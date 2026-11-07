@@ -17,6 +17,9 @@ from vllm.utils.flashinfer import has_flashinfer
 
 if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import (
+        _topk_split_chunk,
+        _topk_split_combine,
+        _topk_split_supported,
         _topk_topp,
         _topp_split_mask,
         _topp_split_stats,
@@ -35,6 +38,9 @@ def register_top_k_top_p_warmups() -> None:
             _topp_split_stats.register_warmup()
             _topp_split_step.register_warmup()
             _topp_split_mask.register_warmup()
+        if _topk_split_supported():
+            _topk_split_chunk.register_warmup()
+            _topk_split_combine.register_warmup()
 
 
 def _aiter_temp_gumbel_sample(
@@ -506,18 +512,24 @@ def apply_top_k_top_p(
     k: torch.Tensor | None,
     p: torch.Tensor | None,
     has_topp_only_rows: bool = True,
+    max_top_k: int | None = None,
 ) -> torch.Tensor:
     """Apply top-k and/or top-p masking to logits.
 
     has_topp_only_rows must be True if any row has p < 1 and
-    k >= logits.shape[-1] (no active top-k).
+    k >= logits.shape[-1] (no active top-k). max_top_k, when given, must bound
+    every row's k.
     """
     if p is None and k is None:
         return logits
 
     if HAS_TRITON:
         return apply_top_k_top_p_triton(
-            logits, k, p, has_topp_only_rows=has_topp_only_rows
+            logits,
+            k,
+            p,
+            has_topp_only_rows=has_topp_only_rows,
+            max_top_k=max_top_k,
         )
 
     is_cpu = current_platform.is_cpu()
