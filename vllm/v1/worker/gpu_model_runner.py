@@ -5334,7 +5334,6 @@ class GPUModelRunner(
             weights_path=weights_path,
             is_checkpoint_format=is_checkpoint_format,
         )
-        self.reset_lora_state()
         self.reset_encoder_cache()
         self.reset_mm_cache()
 

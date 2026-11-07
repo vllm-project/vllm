@@ -344,7 +344,6 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         reload_weights(
             vllm_config, model, weights_iterator, weights_path, is_checkpoint_format
         )
-        self.reset_lora_state()
         self.reset_encoder_cache()
         self.reset_mm_cache()
 
