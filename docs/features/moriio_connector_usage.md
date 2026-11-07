@@ -269,6 +269,12 @@ docker run \
 
 ## Troubleshooting
 
+### Notification listener cannot bind
+
+**Problem:** vLLM startup fails with `HandshakeError: Failed to start MoRIIO notification listener: Address already in use`.
+
+**Fix:** Free the conflicting port or choose a different `notify_port` base in `kv_connector_extra_config`. Ensure the rank-specific notification ports derived from that base are available on the host. The notification listener must initialize successfully before startup can continue; receiving messages remains asynchronous afterward.
+
 ### `availDevices.size() > 0` assertion failure
 
 **Problem:** vLLM fails to launch with the following log:
