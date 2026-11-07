@@ -1169,10 +1169,8 @@ class OpenPanguModelBase(nn.Module, SupportsPP, SupportsLoRA):
 class OpenPanguMoEModel(OpenPanguModelBase, MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        config = vllm_config.model_config.hf_config
 
         # Set MoE hyperparameters
-        self.num_moe_layers = config.num_hidden_layers - config.first_k_dense_replace
         self.num_expert_groups = 1
 
         self.moe_layers = []
@@ -1187,14 +1185,16 @@ class OpenPanguMoEModel(OpenPanguModelBase, MixtureOfExperts):
                 example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
 
+        self.num_moe_layers = len(self.moe_layers)
+
         if example_moe is None:
             raise RuntimeError("No MOE layer found in model.layers.")
 
         self.num_logical_experts = example_moe.n_logical_experts
         self.num_physical_experts = example_moe.n_physical_experts
         self.num_local_physical_experts = example_moe.n_local_physical_experts
-        self.n_routed_experts = example_moe.n_routed_experts
-        self.n_shared_experts = example_moe.n_shared_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_shared_experts = example_moe.n_shared_experts
         self.num_redundant_experts = example_moe.n_redundant_experts
 
     def update_physical_experts_metadata(
