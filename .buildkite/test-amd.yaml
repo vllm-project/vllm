@@ -4378,6 +4378,20 @@ steps:
   commands:
   - pytest -v -s kernels/fla
 
+- label: ":amd: (MI300) FLA gfx942 Autotune Configs"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/third_party/flash_linear_attention/
+  - vllm/platforms/rocm.py
+  - tests/kernels/fla/test_gdn_gfx942_autotune_configs.py
+  commands:
+  - pytest -v -s kernels/fla/test_gdn_gfx942_autotune_configs.py
+
 - label: ":amd: (MI355) Miscellaneous Kernels"
   timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
