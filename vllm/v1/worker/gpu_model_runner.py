@@ -3026,7 +3026,9 @@ class GPUModelRunner(
                     cudagraph_output = None
                     if (
                         self.encoder_cudagraph_manager is not None
-                        and self.encoder_cudagraph_manager.supports_modality(modality)
+                        and self.encoder_cudagraph_manager.supports_batch(
+                            modality, mm_kwargs_batch
+                        )
                     ):
                         cudagraph_output = self.encoder_cudagraph_manager.execute(
                             mm_kwargs_batch,

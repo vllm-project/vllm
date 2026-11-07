@@ -75,6 +75,9 @@ def test_encoder_graph_unsupported_modality_uses_eager_output():
     manager.supports_modality.side_effect = lambda modality: (
         EncoderCudaGraphManager.supports_modality(manager, modality)
     )
+    manager.supports_batch.side_effect = lambda modality, mm_kwargs: (
+        EncoderCudaGraphManager.supports_batch(manager, modality, mm_kwargs)
+    )
     runner.cudagraph_manager = manager
     with patch(
         "vllm.v1.worker.gpu.mm.encoder_runner.group_and_batch_mm_kwargs",
