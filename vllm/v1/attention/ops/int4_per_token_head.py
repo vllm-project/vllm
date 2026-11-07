@@ -12,6 +12,7 @@ kernel, the RHT transform, and the public ``reshape_and_cache_int4`` /
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -37,6 +38,50 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 
 # 2 x int4 packed per storage byte.
 _INT4_PACKING_FACTOR = 2
+
+
+@dataclass(frozen=True)
+class Int4KeyBias:
+    """Unrotated key bias and the RoPE table used to restore its scores."""
+
+    bias: torch.Tensor  # [num_kv_heads, head_size]
+    cos_sin_cache: torch.Tensor  # [position, rotary_dim], cos then sin
+    rotary_dim: int
+    is_neox_style: bool
+
+
+def key_bias_query_coeffs(q: torch.Tensor, key_bias: Int4KeyBias) -> torch.Tensor:
+    """Return U such that U @ RoPE_table[position] = q @ RoPE(bias, position).
+
+    Query heads are mapped to key heads in the same contiguous groups as GQA.
+    This path is restricted to fully rotary heads because a non-rotary tail
+    would require a separate position-independent correction.
+    """
+    bias = key_bias.bias
+    rotary_dim = key_bias.rotary_dim
+    if q.ndim != 3 or bias.ndim != 2:
+        raise ValueError("Expected query [token, head, dim] and key bias [head, dim]")
+    if rotary_dim != q.shape[-1] or bias.shape[-1] != q.shape[-1]:
+        raise ValueError("INT4 key-bias correction requires fully rotary heads")
+    if rotary_dim % 2 or q.shape[1] % bias.shape[0]:
+        raise ValueError("Invalid rotary dimension or grouped-query head count")
+    if (
+        key_bias.cos_sin_cache.ndim != 2
+        or key_bias.cos_sin_cache.shape[1] != rotary_dim
+    ):
+        raise ValueError("RoPE cache must contain rotary_dim cosine/sine columns")
+
+    q_f = q.float()
+    b_f = bias.float().repeat_interleave(q.shape[1] // bias.shape[0], dim=0)
+    if key_bias.is_neox_style:
+        q0, q1 = q_f.chunk(2, dim=-1)
+        b0, b1 = b_f.chunk(2, dim=-1)
+    else:
+        q0, q1 = q_f[..., 0::2], q_f[..., 1::2]
+        b0, b1 = b_f[..., 0::2], b_f[..., 1::2]
+    cos_coeff = q0 * b0 + q1 * b1
+    sin_coeff = q1 * b0 - q0 * b1
+    return torch.cat((cos_coeff, sin_coeff), dim=-1).contiguous()
 
 
 # ----------------------------------------------------------------------
@@ -338,6 +383,8 @@ def _attn_packed(
     softcap,
     k_scale_cache_ptr,
     v_scale_cache_ptr,
+    key_bias_coeff_ptr,
+    cos_sin_ptr,
     num_query_heads: tl.constexpr,
     num_queries_per_kv: tl.constexpr,
     block_table_stride: tl.int64,
@@ -346,6 +393,9 @@ def _attn_packed(
     output_stride_0: tl.int64,
     output_stride_1: tl.int64,
     qq_bias_stride_0: tl.int64,
+    key_bias_coeff_stride_0: tl.int64,
+    key_bias_coeff_stride_1: tl.int64,
+    cos_sin_stride_0: tl.int64,
     BLOCK_SIZE: tl.constexpr,
     TILE_SIZE: tl.constexpr,
     HEAD_SIZE: tl.constexpr,
@@ -356,6 +406,9 @@ def _attn_packed(
     USE_QQ_BIAS: tl.constexpr,
     USE_SOFTCAP: tl.constexpr,
     USE_SINKS: tl.constexpr,
+    USE_KEY_BIAS: tl.constexpr,
+    ROTARY_DIM: tl.constexpr,
+    ROTARY_DIM_PADDED: tl.constexpr,
     SLIDING_WINDOW: tl.constexpr,
     USE_MM_PREFIX: tl.constexpr,
     MAX_MM_RANGES: tl.constexpr,
@@ -451,6 +504,17 @@ def _attn_packed(
 
     # INT4 asymmetric correction needs sum(Q) per row.
     Q_sum = tl.sum(Q_s0, axis=1) + tl.sum(Q_s1, axis=1)
+
+    if USE_KEY_BIAS:
+        rot_offs = tl.arange(0, ROTARY_DIM_PADDED)
+        KB = tl.load(
+            key_bias_coeff_ptr
+            + query_offset_0[:, None] * key_bias_coeff_stride_0
+            + query_offset_1[:, None] * key_bias_coeff_stride_1
+            + rot_offs[None, :],
+            mask=q_mask & (rot_offs[None, :] < ROTARY_DIM),
+            other=0.0,
+        )
 
     block_table_offset = seq_idx * block_table_stride
 
@@ -574,6 +638,16 @@ def _attn_packed(
             scale * k_token_head_scales[None, :]
         )
 
+        if USE_KEY_BIAS:
+            CS = tl.load(
+                cos_sin_ptr
+                + seq_offset[None, :] * cos_sin_stride_0
+                + rot_offs[:, None],
+                mask=(rot_offs[:, None] < ROTARY_DIM) & tile_mask[None, :],
+                other=0.0,
+            ).to(tl.float32)
+            S += tl.dot(KB, CS, input_precision="ieee")
+
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
 
@@ -687,6 +761,8 @@ def _launch_packed_attn(
     mm_prefix_range,
     k_scale_cache,
     v_scale_cache,
+    key_bias_coeffs,
+    cos_sin_cache,
     seq_threshold_3D,
     num_par_softmax_segments,
     softmax_segm_output,
@@ -779,6 +855,8 @@ def _launch_packed_attn(
         softcap=softcap,
         k_scale_cache_ptr=k_scale_cache,
         v_scale_cache_ptr=v_scale_cache,
+        key_bias_coeff_ptr=key_bias_coeffs if key_bias_coeffs is not None else q,
+        cos_sin_ptr=cos_sin_cache if cos_sin_cache is not None else q,
         num_query_heads=num_query_heads,
         num_queries_per_kv=num_queries_per_kv,
         block_table_stride=block_table.stride(0),
@@ -787,6 +865,13 @@ def _launch_packed_attn(
         output_stride_0=out.stride(0),
         output_stride_1=out.stride(1),
         qq_bias_stride_0=qq_bias.stride(0) if qq_bias is not None else 0,
+        key_bias_coeff_stride_0=(
+            key_bias_coeffs.stride(0) if key_bias_coeffs is not None else 0
+        ),
+        key_bias_coeff_stride_1=(
+            key_bias_coeffs.stride(1) if key_bias_coeffs is not None else 0
+        ),
+        cos_sin_stride_0=cos_sin_cache.stride(0) if cos_sin_cache is not None else 0,
         BLOCK_SIZE=block_size,
         TILE_SIZE=tile_size,
         HEAD_SIZE=head_size,
@@ -797,6 +882,13 @@ def _launch_packed_attn(
         USE_QQ_BIAS=qq_bias is not None,
         USE_SOFTCAP=(softcap > 0),
         USE_SINKS=(sinks is not None),
+        USE_KEY_BIAS=key_bias_coeffs is not None,
+        ROTARY_DIM=key_bias_coeffs.shape[-1] if key_bias_coeffs is not None else 0,
+        ROTARY_DIM_PADDED=(
+            triton.next_power_of_2(key_bias_coeffs.shape[-1])
+            if key_bias_coeffs is not None
+            else 16
+        ),
         SLIDING_WINDOW=(1 + window_size[0]),
         USE_MM_PREFIX=use_mm_prefix,
         MAX_MM_RANGES=max_mm_ranges,
@@ -901,6 +993,7 @@ def unified_attention_int4(
     mm_prefix_range: torch.Tensor | None,
     k_scale_cache: torch.Tensor,
     v_scale_cache: torch.Tensor,
+    key_bias: Int4KeyBias | None = None,
     seq_threshold_3D: int | None = None,
     num_par_softmax_segments: int | None = None,
     softmax_segm_output: torch.Tensor | None = None,
@@ -915,6 +1008,13 @@ def unified_attention_int4(
     by ``b`` as well.
     """
     q_orig_dtype = q.dtype
+    key_bias_coeffs = None
+    cos_sin_cache = None
+    if key_bias is not None:
+        key_bias_coeffs = key_bias_query_coeffs(q, key_bias) * softmax_scale
+        cos_sin_cache = key_bias.cos_sin_cache
+        if cos_sin_cache.stride(1) != 1:
+            cos_sin_cache = cos_sin_cache.contiguous()
     q = single_rht(q.float()).to(q_orig_dtype)
     rht_norm = largest_power_of_2_divisor(q.shape[2])
     softmax_scale = softmax_scale / rht_norm
@@ -939,6 +1039,8 @@ def unified_attention_int4(
         mm_prefix_range=mm_prefix_range,
         k_scale_cache=k_scale_cache,
         v_scale_cache=v_scale_cache,
+        key_bias_coeffs=key_bias_coeffs,
+        cos_sin_cache=cos_sin_cache,
         seq_threshold_3D=seq_threshold_3D,
         num_par_softmax_segments=num_par_softmax_segments,
         softmax_segm_output=softmax_segm_output,
