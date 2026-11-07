@@ -51,6 +51,18 @@ class KVConnectorStats:
 
 
 class KVConnectorLogging:
+    """Periodically logs KV connector transfer metrics.
+
+    Pipeline: ``observe()`` -> ``aggregate()`` -> ``reduce()`` -> ``log()``.
+
+    ``observe()`` is called each time the connector syncs with the scheduler;
+    the payload it receives is already aggregated across all workers, i.e. it
+    consists of observations from every rank combined into one pool (see
+    ``KVConnectorStats.aggregate``). Successive payloads are accumulated via
+    ``aggregate()`` until ``log()`` calls ``reduce()`` to summarize the
+    interval and then resets the accumulator.
+    """
+
     def __init__(self, kv_transfer_config: KVTransferConfig | None):
         # Instantiate the connector's stats class.
         if kv_transfer_config and kv_transfer_config.kv_connector:
