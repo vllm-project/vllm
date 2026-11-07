@@ -67,6 +67,10 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import _encode_layer_name
 from vllm.v1.attention.backends.mla import indexer as v32_indexer
+from vllm.v1.attention.backends.mla.index_group import (
+    SparseMLAIndexGroupBuilder,
+    get_sparse_mla_index_group_max_rows,
+)
 from vllm.v1.attention.ops.dcp_topk_merge import init_dcp_topk_merge
 
 logger = init_logger(__name__)
@@ -655,6 +659,10 @@ class KimiK3DSAAttention(nn.Module):
             indexer_rotary_emb=self.rotary_emb,
             is_sparse=True,
             topk_indices_buffer=self.topk_indices_buffer,
+            index_group_builder=SparseMLAIndexGroupBuilder(
+                self.topk_indices_buffer,
+                get_sparse_mla_index_group_max_rows(vllm_config),
+            ),
         )
         self.mla_attn = MultiHeadLatentAttentionWrapper(
             self.hidden_size,

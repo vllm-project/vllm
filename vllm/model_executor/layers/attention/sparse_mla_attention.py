@@ -43,7 +43,6 @@ from vllm.v1.attention.backends.mla.index_group import (
     HiSparseMLAIndexGroup,
     SparseMLAIndexGroup,
     SparseMLAIndexGroupBuilder,
-    get_sparse_mla_index_group_max_rows,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
@@ -823,10 +822,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         self.index_group: SparseMLAIndexGroup | None = None
         self.index_group_index = 0
         if index_group_builder is None and self.topk_indices_buffer is not None:
-            index_group_builder = SparseMLAIndexGroupBuilder(
-                self.topk_indices_buffer,
-                get_sparse_mla_index_group_max_rows(get_current_vllm_config()),
-            )
+            index_group_builder = SparseMLAIndexGroupBuilder(self.topk_indices_buffer)
         if index_group_builder is not None:
             vllm_config = get_current_vllm_config()
             self.index_group, self.index_group_index = (
