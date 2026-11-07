@@ -151,7 +151,7 @@ def _init_rescue(vllm_config: Any, topk: int, local_topk: int) -> int:
             "using the generic merge."
         )
         return 0
-    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
+    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
         init_dcp_topk_rescue_workspace,
         register_dcp_topk_merge_warmup,
     )

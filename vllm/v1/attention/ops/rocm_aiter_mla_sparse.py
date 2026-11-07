@@ -212,6 +212,7 @@ def indexer_k_quant_and_cache_triton(
     scale_fmt,
     block_tile_size=16,
     head_tile_size=16,
+    cache_layout: str | None = None,
 ):
     num_blocks = kv_cache.shape[0]
     head_dim = k.shape[-1]
@@ -223,7 +224,10 @@ def indexer_k_quant_and_cache_triton(
     kv_cache_value = kv_cache[:, : block_size * head_dim].view(FP8_DTYPE)
     kv_cache_scale = kv_cache[:, block_size * head_dim :].view(torch.float32)
     head_tile_size = head_tile_size // kv_cache.element_size()
-    layout = "NORMAL" if block_size == 1 else "SHUFFLE"
+    if cache_layout is None:
+        layout = "NORMAL" if block_size == 1 else "SHUFFLE"
+    else:
+        layout = cache_layout
     grid = (num_tokens,)
     _indexer_k_quant_and_cache_kernel[grid](
         k,
@@ -793,6 +797,7 @@ def rocm_fp8_paged_mqa_logits(
     max_model_len: int,
     *,
     compress_ratio: int = 1,
+    cache_layout: str | None = None,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits using paged KV-cache.
 
@@ -810,6 +815,8 @@ def rocm_fp8_paged_mqa_logits(
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
         compress_ratio: C4A (4) takes block-flat Triton; 1 and 2 stay on AITER.
+        cache_layout: Explicit cache layout override; "NORMAL" (block-flat)
+            also takes the Triton path.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
@@ -821,11 +828,12 @@ def rocm_fp8_paged_mqa_logits(
     batch_size, next_n = q_fp8.shape[:2]
     block_size = kv_cache_fp8.shape[1]
 
-    # C4A only: Flash/DSv3.2 also skip insert but still write SHUFFLE.
+    # Block-flat (NORMAL) caches take the Triton path: C4A by ratio, others
+    # by explicit cache_layout. Flash/DSv3.2 also skip insert but write SHUFFLE.
     if (
         (_ON_GFX950 or _ON_GFX942)
-        and _indexer_k_is_c4a_block_flat(compress_ratio)
         and block_size > 1
+        and (cache_layout == "NORMAL" or _indexer_k_is_c4a_block_flat(compress_ratio))
     ):
         if block_size % 64 == 0:
             return rocm_fp8_paged_mqa_logits_triton(
@@ -1299,6 +1307,67 @@ def _max_decode_logits_rows(num_batched_tokens: int) -> int:
     return min(num_batched_tokens, max_num_seqs * (1 + num_spec))
 
 
+def _score_rows_over_global_keys(
+    q_fp8: torch.Tensor,
+    weights: torch.Tensor,
+    keys: torch.Tensor,
+    scales: torch.Tensor,
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    q_start: int,
+    selected: torch.Tensor,
+    topk_tokens: int,
+    max_seqlen_k: int,
+) -> None:
+    """Exact top-k of ``len(row_starts)`` query rows over the gathered keys.
+
+    ``row_starts`` / ``row_ends`` bound each row in the global key space, so
+    the selected ids are already the request's token ids and need no merge.
+    Rows are scored in tiles, because the logits of a tile are
+    ``rows x len(keys)`` fp32 and the key set here is the whole context, not
+    this rank's shard of it.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    width = triton.cdiv(keys.shape[0], 256) * 256
+    budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    step = max(1, min(8192, budget // max(1, 4 * width)))
+    for lo in range(0, row_starts.shape[0], step):
+        hi = min(lo + step, row_starts.shape[0])
+        tile_starts, tile_ends = row_starts[lo:hi], row_ends[lo:hi]
+        logits = rocm_fp8_mqa_logits(
+            q_fp8[q_start + lo : q_start + hi],
+            (keys, scales),
+            weights[q_start + lo : q_start + hi],
+            tile_starts,
+            tile_ends,
+        )
+        out = selected[lo:hi]
+        num_rows = hi - lo
+        if rocm_aiter_ops.is_indexer_top_k_supported(
+            is_prefill=True,
+            compress_ratio=1,
+            num_rows=num_rows,
+            max_valid_seq_len=max_seqlen_k,
+            topk_tokens=topk_tokens,
+        ):
+            _launch_aiter_top_k_per_row_prefill(
+                logits, tile_starts, tile_ends, out, topk_tokens
+            )
+        else:
+            torch.ops._C.top_k_per_row_prefill(
+                logits,
+                tile_starts,
+                tile_ends,
+                out,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
+        del logits
+
+
 def rocm_aiter_sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
@@ -1318,6 +1387,10 @@ def rocm_aiter_sparse_attn_indexer_fake(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    cache_layout: str | None = None,
+    dcp_rank: int = 0,
+    dcp_world_size: int = 1,
+    cp_interleave: int = 1,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -1342,8 +1415,30 @@ def rocm_aiter_sparse_attn_indexer(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    cache_layout: str | None = None,
+    dcp_rank: int = 0,
+    dcp_world_size: int = 1,
+    cp_interleave: int = 1,
 ) -> torch.Tensor:
     from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.distributed import get_dcp_group
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_rocm import (
+        gather_global_indexer_keys,
+    )
+    from vllm.model_executor.layers.sparse_attn_indexer import _merge_dcp_topk_global
+    from vllm.utils.math_utils import cdiv
+
+    if dcp_world_size > 1 and (compress_ratio != 1 or candidate_blocks is not None):
+        raise NotImplementedError(
+            "ROCm DCP indexing requires uncompressed full candidates"
+        )
+
+    # Decode scores only this rank's keys; keep the bound valid for graph replay.
+    decode_max_model_len = (
+        cdiv(max_model_len, dcp_world_size * cp_interleave) * cp_interleave
+        if dcp_world_size > 1
+        else max_model_len
+    )
 
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -1371,12 +1466,12 @@ def rocm_aiter_sparse_attn_indexer(
         decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
         if _ON_GFX942 or _ON_GFX950 or _ON_RDNA:
             workspace_manager.get_simultaneous(
-                ((decode_rows, max_model_len), torch.float32),
+                ((decode_rows, decode_max_model_len), torch.float32),
             )
         else:
             workspace_manager.get_simultaneous(
                 (
-                    (q_fp8.shape[1], decode_rows, max_model_len),
+                    (q_fp8.shape[1], decode_rows, decode_max_model_len),
                     torch.float32,
                 ),
             )
@@ -1386,8 +1481,19 @@ def rocm_aiter_sparse_attn_indexer(
         # VLLM_SPARSE_INDEXER_MAX_LOGITS_MB via chunking in
         # split_indexer_prefill_chunks; decode logits are smaller.
         max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        gather_elems = 0
+        if dcp_world_size > 1 and envs.VLLM_ROCM_DSA_DCP_GLOBAL_KEY_PREFILL:
+            # Global-key prefill holds, per chunk: this rank's packed keys
+            # (a world-th of the chunk), the all-gathered copy of every
+            # rank's (the whole chunk), and the restored global keys plus
+            # their fp32 scales. One row of slack covers the padding the
+            # gather adds on top of the chunk.
+            row_bytes = head_dim + 4
+            gather_elems = total_seq_lens * (2 * row_bytes + head_dim + 4)
         _ = torch.empty(
-            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
+            max_logits_elems + gather_elems,
+            dtype=torch.uint8,
+            device=hidden_states.device,
         )
 
         return rocm_aiter_sparse_attn_indexer_fake(
@@ -1409,6 +1515,7 @@ def rocm_aiter_sparse_attn_indexer(
             candidate_blocks,
             candidate_block_size,
             candidate_write,
+            cache_layout,
         )
     layer_attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
@@ -1435,7 +1542,14 @@ def rocm_aiter_sparse_attn_indexer(
             slot_mapping,
             quant_block_size,
             scale_fmt,
+            cache_layout=cache_layout,
         )
+
+    # C4A caches are block-flat by ratio; other block-flat callers pass
+    # cache_layout="NORMAL" explicitly. The rest keep the auto-selected layout.
+    resolved_cache_layout = cache_layout
+    if resolved_cache_layout is None and _indexer_k_is_c4a_block_flat(compress_ratio):
+        resolved_cache_layout = "NORMAL"
 
     if has_prefill:
         prefill_metadata = layer_attn_metadata.prefill
@@ -1446,19 +1560,136 @@ def rocm_aiter_sparse_attn_indexer(
             ((total_seq_lens, head_dim), FP8_DTYPE),
             ((total_seq_lens, 4), torch.uint8),
         )
+        # Global-key prefill: gather every rank's index keys once per chunk
+        # and take the top-k over the whole context, instead of scoring this
+        # rank's shard and merging the per-rank candidates afterwards.
+        use_global_keys = (
+            dcp_world_size > 1
+            and envs.VLLM_ROCM_DSA_DCP_GLOBAL_KEY_PREFILL
+            and compress_ratio == 1
+            and candidate_blocks is None
+            and resolved_cache_layout == "NORMAL"
+            and kv_cache.dim() == 3
+            and all(c.global_cu_seqlen_ks is not None for c in prefill_metadata.chunks)
+        )
+        rowshard = use_global_keys and envs.VLLM_ROCM_DSA_DCP_ROWSHARD_PREFILL
+        if dcp_world_size > 1:
+            logger.info_once(
+                "DSA DCP prefill: global_keys=%s rowshard=%s layout=%s "
+                "indexer cache shape=%s stride=%s block_table width=%d",
+                use_global_keys,
+                rowshard,
+                resolved_cache_layout,
+                tuple(kv_cache.shape),
+                tuple(kv_cache.stride()),
+                prefill_metadata.chunks[0].block_table.shape[1]
+                if prefill_metadata.chunks
+                else -1,
+            )
+        pending: list[tuple[int, int, torch.Tensor]] = []
+        gathered_keys: tuple[tuple[int, int, int], tuple[torch.Tensor, ...]] | None = (
+            None
+        )
         for chunk in prefill_metadata.chunks:
-            k_fp8 = k_fp8_full[: chunk.total_seq_lens]
-            k_scale = k_scale_full[: chunk.total_seq_lens]
+            if use_global_keys:
+                # Consecutive chunks that split one request set's queries share
+                # its keys; keep the last gather only, to bound memory.
+                cache_key = (
+                    chunk.block_table.data_ptr(),
+                    chunk.num_reqs,
+                    chunk.total_seq_lens,
+                )
+                if gathered_keys is not None and gathered_keys[0] == cache_key:
+                    keys, scales = gathered_keys[1]
+                else:
+                    keys, scales = gather_global_indexer_keys(
+                        kv_cache, chunk, dcp_world_size, cp_interleave, head_dim
+                    )
+                    gathered_keys = (cache_key, (keys, scales))
+                ks = chunk.global_cu_seqlen_ks
+                ke = chunk.global_cu_seqlen_ke
+                assert ks is not None and ke is not None
+                token_start, token_end = chunk.token_start, chunk.token_end
+                if not rowshard:
+                    _score_rows_over_global_keys(
+                        q_fp8,
+                        weights,
+                        keys,
+                        scales,
+                        ks,
+                        ke,
+                        token_start,
+                        topk_indices_buffer[token_start:token_end, :topk_tokens],
+                        topk_tokens,
+                        chunk.max_seqlen_k,
+                    )
+                    continue
+                num_rows = token_end - token_start
+                per_rank = cdiv(num_rows, dcp_world_size)
+                lo = min(dcp_rank * per_rank, num_rows)
+                hi = min(lo + per_rank, num_rows)
+                mine = torch.full(
+                    (per_rank, topk_tokens),
+                    -1,
+                    dtype=topk_indices_buffer.dtype,
+                    device=q_fp8.device,
+                )
+                if hi > lo:
+                    _score_rows_over_global_keys(
+                        q_fp8,
+                        weights,
+                        keys,
+                        scales,
+                        ks[lo:hi],
+                        ke[lo:hi],
+                        token_start + lo,
+                        mine[: hi - lo],
+                        topk_tokens,
+                        chunk.max_seqlen_k,
+                    )
+                pending.append((token_start, token_end, mine))
+                continue
+            local_length = chunk.total_seq_lens
+            cu_lens, token_to_seq = chunk.cu_seq_lens, chunk.token_to_seq
+            if dcp_world_size > 1:
+                local_length = chunk.local_total_seq_lens
+                cu_lens = chunk.local_cu_seq_lens
+                token_to_seq = (
+                    torch.searchsorted(
+                        cu_lens,
+                        torch.arange(local_length, device=q_fp8.device),
+                        right=True,
+                    ).to(torch.int32)
+                    - 1
+                )
+                if local_length == 0:
+                    selected = topk_indices_buffer[
+                        chunk.token_start : chunk.token_end, :topk_tokens
+                    ]
+                    selected.fill_(-1)
+                    _merge_dcp_topk_global(
+                        torch.empty(
+                            (selected.shape[0], 0),
+                            dtype=torch.float32,
+                            device=q_fp8.device,
+                        ),
+                        selected,
+                        topk_tokens,
+                        dcp_rank,
+                        dcp_world_size,
+                        cp_interleave,
+                    )
+                    continue
+            k_fp8 = k_fp8_full[:local_length]
+            k_scale = k_scale_full[:local_length]
             cp_gather_indexer_k_quant_cache_triton(
                 kv_cache,
                 k_fp8,
                 k_scale,
                 chunk.block_table,
-                chunk.cu_seq_lens,
-                token_to_seq=chunk.token_to_seq,
-                cache_layout=(
-                    "NORMAL" if _indexer_k_is_c4a_block_flat(compress_ratio) else None
-                ),
+                cu_lens,
+                token_to_seq=token_to_seq,
+                cache_layout=resolved_cache_layout,
             )
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
@@ -1522,6 +1753,32 @@ def rocm_aiter_sparse_attn_indexer(
                     logits.stride(1),
                     topk_tokens,
                 )
+            _merge_dcp_topk_global(
+                logits,
+                topk_indices,
+                topk_tokens,
+                dcp_rank,
+                dcp_world_size,
+                cp_interleave,
+                chunk.cu_seqlen_ks,
+            )
+
+        if pending:
+            # One all-gather per layer returns every rank's row slice.
+            mine = (
+                torch.cat([rows for _, _, rows in pending])
+                if len(pending) > 1
+                else pending[0][2]
+            )
+            exchanged = get_dcp_group().all_gather(mine, dim=0)
+            exchanged = exchanged.view(dcp_world_size, mine.shape[0], -1)
+            offset = 0
+            for token_start, token_end, rows in pending:
+                per_rank = rows.shape[0]
+                topk_indices_buffer[token_start:token_end, :topk_tokens] = exchanged[
+                    :, offset : offset + per_rank
+                ].reshape(-1, exchanged.shape[-1])[: token_end - token_start]
+                offset += per_rank
 
     if has_decode:
         decode_metadata = layer_attn_metadata.decode
@@ -1555,8 +1812,9 @@ def rocm_aiter_sparse_attn_indexer(
             decode_metadata.seq_lens,
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
-            max_model_len=max_model_len,
+            max_model_len=decode_max_model_len,
             compress_ratio=compress_ratio,
+            cache_layout=cache_layout,
         )
 
         if candidate_blocks is not None:
@@ -1598,7 +1856,7 @@ def rocm_aiter_sparse_attn_indexer(
         # FULL graphs are not keyed by context length, so use a replay-safe
         # upper bound when choosing the captured kernel.
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            max_compressed_seq_len = max_model_len
+            max_compressed_seq_len = decode_max_model_len
         else:
             max_compressed_seq_len = layer_attn_metadata.max_seq_len // compress_ratio
         if rocm_aiter_ops.is_indexer_top_k_supported(
@@ -1631,6 +1889,14 @@ def rocm_aiter_sparse_attn_indexer(
                 topk_tokens,
             )
 
+        _merge_dcp_topk_global(
+            logits,
+            topk_indices,
+            topk_tokens,
+            dcp_rank,
+            dcp_world_size,
+            cp_interleave,
+        )
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
             # the topk indices removing padded tokens

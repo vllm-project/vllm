@@ -14,9 +14,12 @@ from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  
 from vllm.distributed.device_communicators.cuda_wrapper import find_loaded_library
 from vllm.distributed.parallel_state import (
     GraphCaptureContext,
+    get_dcp_group,
     get_dp_group,
     get_tp_group,
     graph_capture,
+    init_distributed_environment,
+    initialize_model_parallel,
 )
 from vllm.envs import disable_envs_cache
 from vllm.platforms import current_platform
@@ -395,3 +398,140 @@ def test_rocm_aiter_custom_ag_rs(
         test_target,
         data_parallel_size=data_parallel_size,
     )
+
+
+# (shape, dtype, dim, expect_aiter) for the DCP all_gather. The last four rows
+# are the payloads AITER cannot take: a row that is not a multiple of 16 bytes,
+# a payload that is not, one larger than the IPC buffer holds per rank, and an
+# empty one.
+dcp_all_gather_cases = [
+    ((96, 2048), torch.int64, 1, True),
+    ((96, 2048), torch.int64, -1, True),
+    ((96, 8, 576), torch.bfloat16, 1, True),
+    ((96, 8, 576), torch.float8_e4m3fn, 1, True),
+    ((96, 64), torch.float32, 0, True),
+    ((4, 16, 512), torch.bfloat16, 2, True),
+    ((96, 3), torch.float32, 1, False),
+    ((7, 5), torch.bfloat16, 0, False),
+    ((8192, 4096), torch.bfloat16, 0, False),
+    ((0, 16), torch.bfloat16, 0, False),
+]
+
+
+def _make_dcp_input(shape, dtype, seed, rank, device):
+    gen = torch.Generator(device=device).manual_seed(seed * 8 + rank)
+    if dtype == torch.int64:
+        return torch.randint(
+            -(2**30), 2**30, shape, generator=gen, device=device, dtype=dtype
+        )
+    return torch.randn(shape, generator=gen, device=device).to(dtype)
+
+
+def _init_dcp_environment(world_size: int, rank: int, distributed_init_port) -> None:
+    """Start a run where the DCP group holds the same ranks as the TP group.
+
+    The DCP AITER all-gather borrows the TP group's comm, so it only runs when
+    the two groups match.
+    """
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    with set_current_vllm_config(VllmConfig()):
+        init_distributed_environment(
+            world_size=world_size,
+            rank=rank,
+            distributed_init_method=f"tcp://localhost:{distributed_init_port}",
+            local_rank=rank,
+            backend=current_platform.dist_backend,
+        )
+        initialize_model_parallel(
+            tensor_model_parallel_size=world_size,
+            decode_context_model_parallel_size=world_size,
+        )
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def dcp_all_gather(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+) -> None:
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ROCM_DCP_AITER_ALLGATHER", "1")
+        _configure_aiter_custom_ar_env(m)
+
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        _init_dcp_environment(tp_size, rank, distributed_init_port)
+
+        dcp = get_dcp_group()
+        comm = dcp.device_communicator
+        assert comm._dcp_ag_candidate
+
+        def reference(x, dim):
+            parts = [torch.empty_like(x) for _ in range(tp_size)]
+            dist.all_gather(parts, x, group=dcp.device_group)
+            return torch.cat(parts, dim=dim)
+
+        def same_bytes(a, b):
+            return a.shape == b.shape and torch.equal(
+                a.view(torch.uint8), b.view(torch.uint8)
+            )
+
+        took_aiter = []
+        for i, (shape, dtype, dim, expect_aiter) in enumerate(dcp_all_gather_cases):
+            x = _make_dcp_input(shape, dtype, i, rank, device)
+            pos_dim = dim % x.dim()
+            assert same_bytes(dcp.all_gather(x, dim), reference(x, pos_dim)), (
+                shape,
+                dim,
+            )
+            used = comm._dcp_aiter_all_gather(x, pos_dim) is not None
+            assert used == expect_aiter, (shape, dtype, dim)
+            took_aiter.append(used)
+        assert comm._dcp_ag_comm is get_tp_group().device_communicator.aiter_ar_comm
+
+        # Every rank must pick the same path for every case. If one rank runs
+        # AITER and another runs RCCL, the collective does not match and the
+        # job hangs with no error.
+        decided = torch.tensor(took_aiter, dtype=torch.int32, device=device)
+        lowest, highest = decided.clone(), decided.clone()
+        dist.all_reduce(lowest, op=dist.ReduceOp.MIN, group=dcp.device_group)
+        dist.all_reduce(highest, op=dist.ReduceOp.MAX, group=dcp.device_group)
+        assert torch.equal(lowest, highest), "ranks picked different all_gather paths"
+
+        # Capture and replay. The inputs are allocated before graph_capture, so
+        # AITER binds buffers the host allocated outside the capture window.
+        graph_cases = [((96, 2048), torch.int64, 1), ((96, 8, 576), torch.bfloat16, 1)]
+        inputs = [_make_dcp_input(s, d, 50, rank, device) for s, d, _ in graph_cases]
+        torch.accelerator.synchronize()
+        with graph_capture(device) as ctx:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=ctx.stream):
+                outputs = [
+                    dcp.all_gather(x, dim)
+                    for x, (_, _, dim) in zip(inputs, graph_cases)
+                ]
+        for step in range(3):
+            for j, (s, d, _) in enumerate(graph_cases):
+                inputs[j].copy_(
+                    _make_dcp_input(s, d, 100 + 10 * step + j, rank, device)
+                )
+            graph.replay()
+            torch.accelerator.synchronize()
+            for x, out, (_, _, dim) in zip(inputs, outputs, graph_cases):
+                assert same_bytes(out, reference(x, dim))
+
+
+@pytest.mark.skipif(not is_aiter_found(), reason="AITER is not installed")
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("tp_size", [2])
+@pytest.mark.parametrize("pipeline_parallel_size", [1])
+def test_rocm_aiter_dcp_all_gather(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pipeline_parallel_size,
+):
+    """DCP all_gather over the TP AITER comm is byte-exact and rank-uniform."""
+    multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, dcp_all_gather)

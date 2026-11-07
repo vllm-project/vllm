@@ -71,6 +71,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SharedTopkIndicesBuffer,
     SparseMLACommonMetadata,
 )
+from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import current_stream
@@ -257,6 +258,7 @@ def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
         block_size=32,
         num_decode_tokens=1,
         topk_start=0,
+        kv_gathered=False,
     )
     recorded_scale = None
 
@@ -679,6 +681,11 @@ def test_sparse_backend_decode_correctness(
         device_capability = current_platform.get_device_capability()
         if device_capability is None or device_capability.major != 10:
             pytest.skip("The NVFP4 DS-MLA kv-cache dtype requires SM 10.x")
+        if (
+            backend_cls == FlashInferMLASparseTRTLLMBackend
+            and not has_flashinfer_prims_ts_sparse_mla()
+        ):
+            pytest.skip("nvfp4_ds_mla on FlashInfer needs its prims_ts kernel")
 
     if not backend_cls.supports_block_size(block_size):
         pytest.skip(
@@ -1044,13 +1051,61 @@ def test_sparse_backend_decode_correctness(
     assert torch.isfinite(backend_output).all()
 
     # FP8 quantization introduces some error, but should be within reasonable bounds
-    # BF16 (auto) should be very accurate, FP8 allows slightly more tolerance
-    if kv_cache_dtype.startswith("fp8"):
+    # BF16 (auto) should be very accurate, FP8 allows slightly more tolerance.
+    # nvfp4_ds_mla with an E4M3 query (FlashInfer prims_ts) has the FP8 error.
+    if kv_cache_dtype.startswith("fp8") or (
+        kv_cache_dtype == "nvfp4_ds_mla" and impl.supports_quant_query_input
+    ):
         torch.testing.assert_close(
             backend_output, sdpa_reference, rtol=0.065, atol=0.05
         )
     else:
         torch.testing.assert_close(backend_output, sdpa_reference, rtol=0.01, atol=0.01)
+
+
+@pytest.mark.parametrize("batch_name", ["large_q_prefill", "large_q_pure_prefill"])
+def test_flashmla_sparse_mixed_batch_chunks_long_steps(
+    default_vllm_config, dist_init, workspace_init, batch_name, monkeypatch
+):
+    """DeepSeek-layout heads at TP8 (16 per rank, e.g. Kimi K3.1 prefill) take
+    the fp8 mixed-batch path; a small chunk size splits each step across
+    several kernel calls, with a ragged tail chunk."""
+    chunk_tokens = 96
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse.FP8_MIXED_BATCH_CHUNK_TOKENS",
+        chunk_tokens,
+    )
+    call_tokens: list[int] = []
+    fp8_kernel = FlashMLASparseImpl._fp8_flash_mla_kernel
+
+    def counting_fp8_kernel(self, q, *args, **kwargs):
+        call_tokens.append(q.shape[1])
+        return fp8_kernel(self, q, *args, **kwargs)
+
+    monkeypatch.setattr(
+        FlashMLASparseImpl, "_fp8_flash_mla_kernel", counting_fp8_kernel
+    )
+    test_sparse_backend_decode_correctness(
+        default_vllm_config,
+        dist_init,
+        FlashMLASparseBackend,
+        batch_name,
+        "fp8_ds_mla",
+        8,
+        64,
+        workspace_init,
+        1.0,
+        1.0,
+        128,
+        128,
+        64,
+        128,
+        monkeypatch,
+    )
+    total_tokens = sum(SPARSE_BACKEND_BATCH_SPECS[batch_name].query_lens)
+    assert sum(call_tokens) == total_tokens
+    assert len(call_tokens) == cdiv(total_tokens, chunk_tokens)
+    assert max(call_tokens) == chunk_tokens
 
 
 @pytest.mark.parametrize(
@@ -4341,6 +4396,7 @@ def test_flashattn_shared_indices_match_independent_conversion(
         ).repeat_interleave(query_len),
         num_decode_tokens=num_decode_tokens,
         topk_start=0,
+        kv_gathered=False,
     )
     q_nope = torch.randn(num_tokens, 8, 512, dtype=torch.bfloat16, device=device)
     q_rope = torch.randn(num_tokens, 8, 64, dtype=torch.bfloat16, device=device)
@@ -4478,6 +4534,7 @@ def test_sparse_mqa_plain_lane_wiring(monkeypatch):
         req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32),
         cp_kv_cache_interleave_size=2,
         topk_start=0,
+        kv_gathered=False,
     )
     index_filter = MagicMock(return_value=(None, None))
     monkeypatch.setattr(sparse_mla, "triton_filter_and_convert_dcp_index", index_filter)
@@ -4525,7 +4582,10 @@ def test_sparse_mqa_hisparse_lanes(
     staged = torch.zeros(3, block_size, head_dim, dtype=torch.bfloat16)
     q = torch.arange(num_tokens, dtype=torch.float32).view(num_tokens, 1, 1)
     metadata = SimpleNamespace(
-        num_decode_tokens=num_decode_tokens, block_size=block_size, topk_start=0
+        num_decode_tokens=num_decode_tokens,
+        block_size=block_size,
+        topk_start=0,
+        kv_gathered=False,
     )
 
     def converted(rows, fill):
@@ -4777,6 +4837,7 @@ def _fa4_inputs(counts, *, num_heads=16, topk=128, num_blocks=4, device=DEVICE_T
             num_decode_tokens=num_tokens,
             cp_kv_cache_interleave_size=1,
             topk_start=0,
+            kv_gathered=False,
         ),
     )
 
@@ -5094,6 +5155,7 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
         num_actual_tokens=num_batch_tokens,
         num_decode_tokens=num_decode_tokens,
         topk_start=0,
+        kv_gathered=False,
         req_id_per_token=torch.empty(
             num_batch_tokens, dtype=torch.int32, device=DEVICE_TYPE
         ),
@@ -5148,8 +5210,8 @@ def _build_sparse_dcp_vllm_config(
     comm_backend: str = "ag_rs",
     cache_dtype: str = "fp8_ds_mla",
 ):
-    """Minimal sparse-MLA VllmConfig for the FlashMLASparse DCP builder
-    guards. TP is simulated by mocking ``get_num_attention_heads`` to return the
+    """Minimal sparse-MLA VllmConfig for the FlashMLASparse DCP builder tests.
+    TP is simulated by mocking ``get_num_attention_heads`` to return the
     per-rank head count, as the decode-correctness test above does.
     """
     kv_lora_rank = 512
@@ -5216,19 +5278,19 @@ def _build_sparse_dcp_vllm_config(
 @pytest.mark.parametrize(
     "local_heads,dcp_world_size,should_raise",
     [
-        (16, 8, True),
-        (24, 4, True),
+        (12, 8, False),  # Kimi K3.1 TP8 DCP8: 96 gathered heads, padded to 128
+        (16, 8, False),  # 128 gathered heads: the kernel maximum
+        (24, 4, False),
+        (24, 8, True),  # 192 gathered heads
         (16, 4, False),
         (16, 1, False),
     ],
 )
-def test_fp8_dcp_head_envelope_guard(
+def test_fp8_dcp_gathered_head_limit(
     monkeypatch, local_heads, dcp_world_size, should_raise
 ):
-    """The fp8 decode envelope (head padding + tile-scheduler metadata) is
-    sized from the local head count while the kernel runs on the DCP-gathered
-    heads, so the builder must reject configs where the two pad differently.
-    """
+    """The fp8 kernel runs on the DCP-gathered heads, padded to 64 or 128 at
+    run time, so DCP may gather past the local head padding up to 128 heads."""
     device = torch.device(DEVICE_TYPE)
     vllm_config = _build_sparse_dcp_vllm_config(
         monkeypatch, local_heads, dcp_world_size
@@ -5237,15 +5299,11 @@ def test_fp8_dcp_head_envelope_guard(
     builder_cls = FlashMLASparseBackend.get_builder_cls()
 
     if should_raise:
-        with pytest.raises(NotImplementedError, match="envelope"):
+        with pytest.raises(NotImplementedError, match="runs at most 128"):
             builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
     else:
         builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
-        gathered_heads = local_heads * dcp_world_size
-        local_pad = 64 if local_heads <= 64 else 128
-        gathered_pad = 64 if gathered_heads <= 64 else 128
-        assert builder.fp8_decode_padded_heads == local_pad
-        assert local_pad == gathered_pad
+        assert builder.fp8_use_mixed_batch
 
 
 @pytest.mark.skipif(

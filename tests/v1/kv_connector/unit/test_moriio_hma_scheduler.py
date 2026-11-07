@@ -10,6 +10,7 @@ wiring.
 """
 
 import importlib
+import mmap
 import threading
 from collections import defaultdict
 from dataclasses import asdict
@@ -27,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
+    KVCacheGroupSpec,
     KVCacheSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
@@ -182,6 +184,29 @@ def _gate_vllm_config(
 # --------------------------------------------------------------------------
 # split_block_groups
 # --------------------------------------------------------------------------
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_group_classification_preserves_packed_kda_groups(wrapped):
+    attention = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32
+    )
+    mamba = _mamba_spec()
+    groups = []
+    for i, spec in enumerate([mamba, mamba, mamba, attention]):
+        names = [f"layer{i}a", f"layer{i}b"]
+        if wrapped:
+            spec = UniformTypeKVCacheSpecs.from_specs(dict.fromkeys(names, spec))
+            assert spec is not None
+        groups.append(KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec))
+    groups.insert(
+        1,
+        KVCacheGroupSpec(
+            layer_names=["replica"], kv_cache_spec=attention, enable_kv_transfer=False
+        ),
+    )
+    config = KVCacheConfig(num_blocks=16, kv_cache_tensors=[], kv_cache_groups=groups)
+    assert moriio_connector._split_kv_cache_group_kinds(config) == ([3], [0, 1, 2])
+
+
 def test_split_block_groups_separates_attention_and_mamba():
     sched = _FakeScheduler(_has_mamba=True, _attn_group_ids=[0], _mamba_group_ids=[1])
     block_ids = ([1, 2], [99])
@@ -1275,8 +1300,8 @@ def _make_register_worker(caches, geoms, *, disable_hma: bool = True):
     worker._is_mla_cache_layer = lambda _n: False
     worker._get_layer_transfer_geometry = lambda n, remote_num_blocks=None: geoms[n]
     worker._iter_layer_registration_regions = lambda n: [(caches[n], caches[n].nbytes)]
-    worker._moriio_handshake_listener = (
-        lambda _m, ready_event, *_a, **_k: ready_event.set()
+    worker._moriio_handshake_listener = lambda _m, ready_event, *_a, **_k: (
+        ready_event.set()
     )
     return worker
 
@@ -1668,3 +1693,82 @@ def test_worker_rejects_missing_mamba_block_group():
 
     with pytest.raises(moriio_common.MoRIIOError, match="no block group"):
         worker._mamba_blocks_for_layer("kda.0", ([10], [40]))
+
+
+@pytest.mark.parametrize("nbytes", [8192, 8175])
+def test_shared_mr_includes_packed_kda_regions(nbytes):
+    backing = torch.frombuffer(mmap.mmap(-1, nbytes), dtype=torch.uint8)
+    attn = backing[128:256]
+    conv = backing[512:640]
+    ssm = backing[1024:1280]
+    regions = {"attn": [(attn, 128)], "kda": [(conv, 128), (ssm, 256)]}
+    worker = _FakeWorker(_iter_layer_registration_regions=regions.__getitem__)
+
+    registered, offsets = worker._build_shared_kv_mr({"attn": attn, "kda": (conv, ssm)})
+
+    assert registered.data_ptr() == backing.data_ptr()
+    assert registered.numel() == nbytes
+    assert offsets == {"attn": 128, "kda": 512}
+    assert worker.kv_region_mr_offsets == {"attn": [128], "kda": [512, 1024]}
+    assert registered.data_ptr() + 1024 == ssm.data_ptr()
+
+
+@pytest.mark.parametrize("mode", ["read", "write"])
+def test_packed_kda_rdma_uses_each_peers_region_offsets(mode):
+    engine = importlib.import_module(
+        "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine"
+    )
+    worker = _FakeWorker(
+        kv_layer_mr_offset={"kda": 512},
+        kv_region_mr_offsets={"kda": [512, 1024]},
+        layer_base_addr_index={"kda": 1},
+        layer_name_to_remote_kv_cache_metadata={"peer": {"kda": [b"mr", b"mr"]}},
+        moriio_wrapper=SimpleNamespace(
+            get_unpack_memory_metadata=lambda _: SimpleNamespace(data=10000)
+        ),
+        _compute_mamba_transfer_offsets=lambda *a, **kw: (
+            [16, 32],
+            [48, 64],
+            [8, 16],
+            1,
+        ),
+        _region_session_indices=lambda _: [0, 1],
+        _mamba_blocks_for_layer=lambda name, groups: groups[1],
+    )
+    metadata = SimpleNamespace(kv_caches_base_addr=[10000, 12048, 14096])
+    if mode == "read":
+        worker._post_read_with_backoff = Mock(return_value="done")
+        worker._post_mamba_reads(
+            "kda",
+            ["conv", "ssm"],
+            [0, 1],
+            [1],
+            [3],
+            8,
+            "request",
+            99,
+            metadata,
+            "peer",
+        )
+        offsets = [
+            (call.args[2], call.args[3])
+            for call in worker._post_read_with_backoff.call_args_list
+        ]
+    else:
+        writer = object.__new__(engine.MoRIIOWriter)
+        writer._worker_ref = lambda: worker
+        task = SimpleNamespace(
+            layer_name="kda",
+            local_block_ids=[[], [1]],
+            remote_tp_size=8,
+            request_id="request",
+            transfer_id="transfer",
+        )
+        plans = writer._prepare_mamba_transfer_plans(
+            task, SimpleNamespace(block_ids=[[], [3]]), None, metadata, "peer"
+        )
+        offsets = [
+            (plan.transfer_local_offsets, plan.transfer_remote_offsets)
+            for plan in plans
+        ]
+    assert offsets == [([528], [2096]), ([1056], [4160])]
