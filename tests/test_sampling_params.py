@@ -280,3 +280,8 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+def test_bad_words_rejects_whitespace_only():
+    with pytest.raises(VLLMValidationError, match="empty or whitespace-only"):
+        SamplingParams(bad_words=[" "])
