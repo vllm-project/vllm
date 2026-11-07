@@ -39,6 +39,8 @@ This is the same on CUDA, ROCm and XPU.
 
 **Host memory** is what non-parameter state takes, plus any preserved parameters. For example, DeepSeek-V4.1-Flash at TP 4 frees 80 GiB per GPU and backs up 2.35 GiB per rank. An allocation that mixes parameters with other tensors is backed up whole.
 
+After level 2 sleep, a `wake_up()` that remaps the weights and resumes scheduling in one call, such as a call without tags, leaves no point to restore the weights before scheduling starts. Requests queued while asleep are therefore failed with a retryable error (HTTP 503 on the server) instead of running on the discarded weights, and requests that arrive before you restore the weights run on them. If the engine may receive requests while it sleeps, wake the `weights` tag, restore the weights, then wake `kv_cache`, as in the examples below: scheduling resumes only with the last call, and queued requests then run on the restored weights.
+
 ## Usage
 
 ### Offline inference
