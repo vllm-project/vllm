@@ -5421,9 +5421,15 @@ class GPUModelRunner(
                 scores = logits.to(torch.float32)
             else:
                 scores = self.sampler.compute_logprobs(logits)
+            vocab_size = scores.shape[-1]
+            oov_mask = (tgt_token_ids < 0) | (tgt_token_ids >= vocab_size)
+            # Multimodal placeholders may not belong to the output vocabulary.
             token_ids, logprobs, ranks, *_ = self.sampler.gather_logprobs(
-                scores, num_prompt_logprobs, tgt_token_ids
+                scores, num_prompt_logprobs, tgt_token_ids.clamp(0, vocab_size - 1)
             )
+            token_ids[:, 0] = tgt_token_ids
+            logprobs[:, 0].masked_fill_(oov_mask, float("-inf"))
+            ranks.masked_fill_(oov_mask, vocab_size + 1)
 
             # Transfer GPU->CPU async.
             chunk_slice = slice(start_idx, start_idx + num_logits)

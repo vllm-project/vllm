@@ -1753,3 +1753,179 @@ def test_trace_replay_with_spec_decode(monkeypatch):
                 rel_tol=5e-2,
                 abs_tol=2.5e-1,
             )
+
+
+@pytest.mark.parametrize("logprobs_mode", ["raw_logprobs", "raw_logits"])
+@pytest.mark.parametrize("num_prompt_logprobs", [0, 3, -1])
+def test_prompt_logprobs_out_of_vocab(
+    logprobs_mode: LogprobsMode, num_prompt_logprobs: int
+) -> None:
+    """OOV prompt tokens score -inf without changing vocabulary scores."""
+    from vllm.v1.worker.gpu.sample.prompt_logprob import (
+        CHUNK_SIZE,
+        compute_prompt_logprobs_with_chunking,
+    )
+
+    vocab_size = 32
+    device = current_platform.device_type
+    # A padded row makes an unguarded OOV read deterministic and in-allocation.
+    backing = torch.full((CHUNK_SIZE + 3, vocab_size + 1), 7.0, device=device)
+    logits = backing[:, :vocab_size]
+    logits[:] = torch.arange(vocab_size, device=device) / vocab_size
+    prompt_token_ids = torch.arange(len(logits), device=device) % vocab_size
+    prompt_token_ids[[0, CHUNK_SIZE - 1, CHUNK_SIZE, CHUNK_SIZE + 2]] = vocab_size
+    oov_mask = prompt_token_ids == vocab_size
+
+    token_ids, scores, ranks = compute_prompt_logprobs_with_chunking(
+        prompt_token_ids,
+        logits,
+        lambda hidden_states: hidden_states,
+        num_prompt_logprobs,
+        logprobs_mode,
+    )
+
+    torch.testing.assert_close(token_ids[:, 0].long(), prompt_token_ids)
+    assert torch.isneginf(scores[oov_mask, 0]).all()
+    assert (ranks[oov_mask] == vocab_size + 1).all()
+    reference = logits if logprobs_mode == "raw_logits" else logits.log_softmax(-1)
+    expected = (
+        reference[~oov_mask].gather(1, prompt_token_ids[~oov_mask, None]).squeeze(1)
+    )
+    torch.testing.assert_close(scores[~oov_mask, 0], expected)
+    assert (ranks[~oov_mask] == vocab_size - prompt_token_ids[~oov_mask]).all()
+    num_logprobs = vocab_size if num_prompt_logprobs == -1 else num_prompt_logprobs
+    expected_scores, expected_ids = reference.topk(num_logprobs, dim=-1)
+    torch.testing.assert_close(token_ids[:, 1:].long(), expected_ids)
+    torch.testing.assert_close(scores[:, 1:], expected_scores)
+
+
+@pytest.fixture(scope="module")
+def llava_oov_model_path(tmp_path_factory: pytest.TempPathFactory) -> str:
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from transformers import (
+        CLIPImageProcessor,
+        CLIPVisionConfig,
+        LlamaConfig,
+        LlavaConfig,
+        LlavaForConditionalGeneration,
+        LlavaProcessor,
+        TokenizersBackend,
+    )
+
+    model_path = tmp_path_factory.mktemp("llava-oov-image-token")
+    vocab = {"<unk>": 0, "<s>": 1, "</s>": 2, "hello": 3, "world": 4}
+    vocab.update({f"token{i}": i for i in range(5, 32)})
+    vocab["<image>"] = 32
+    backend = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
+    backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    tokenizer = TokenizersBackend(
+        tokenizer_object=backend,
+        unk_token="<unk>",
+        bos_token="<s>",
+        eos_token="</s>",
+        pad_token="<unk>",
+        additional_special_tokens=["<image>"],
+    )
+    LlavaProcessor(
+        image_processor=CLIPImageProcessor(
+            size={"shortest_edge": 32}, crop_size={"height": 32, "width": 32}
+        ),
+        tokenizer=tokenizer,
+        patch_size=16,
+        num_additional_image_tokens=1,
+        vision_feature_select_strategy="default",
+    ).save_pretrained(model_path)
+    config = LlavaConfig(
+        text_config=LlamaConfig(
+            vocab_size=32,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+        ),
+        vision_config=CLIPVisionConfig(
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            image_size=32,
+            patch_size=16,
+        ),
+        image_token_index=32,
+        image_seq_length=4,
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(42)
+        model = LlavaForConditionalGeneration(config)
+        # Transformers 5 flattened CLIPVisionModel; write the checkpoint layout
+        # consumed by vLLM's CLIP vision tower.
+        state_dict = {
+            key.replace("model.vision_tower.", "model.vision_tower.vision_model.")
+            if key.startswith("model.vision_tower.")
+            and not key.startswith("model.vision_tower.vision_model.")
+            else key: value
+            for key, value in model.state_dict().items()
+        }
+        model.save_pretrained(model_path, state_dict=state_dict)
+    return str(model_path)
+
+
+@pytest.mark.parametrize("use_v2", [False, True])
+@pytest.mark.parametrize("logprobs_mode", ["raw_logprobs", "raw_logits"])
+def test_multimodal_oov_prompt_logprobs(
+    vllm_runner,
+    llava_oov_model_path: str,
+    monkeypatch: pytest.MonkeyPatch,
+    use_v2: bool,
+    logprobs_mode: LogprobsMode,
+) -> None:
+    """OOV image placeholders retain their IDs without affecting generation."""
+    from PIL import Image
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2 else "0")
+    vocab_size = 32
+    image_token_id = vocab_size
+    prompt = {
+        "prompt": "hello <image> world",
+        "multi_modal_data": {"image": Image.new("RGB", (32, 32), color="red")},
+    }
+    with vllm_runner(
+        llava_oov_model_path,
+        dtype="half",
+        max_model_len=64,
+        max_num_seqs=1,
+        max_num_batched_tokens=4,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        enforce_eager=True,
+        kv_cache_memory_bytes=16 << 20,
+        limit_mm_per_prompt={"image": 1},
+        logprobs_mode=logprobs_mode,
+        seed=42,
+    ) as vllm_model:
+        baseline = vllm_model.llm.generate(
+            prompt, SamplingParams(temperature=0, max_tokens=2), use_tqdm=False
+        )[0]
+        output = vllm_model.llm.generate(
+            prompt,
+            SamplingParams(temperature=0, max_tokens=2, prompt_logprobs=1),
+            use_tqdm=False,
+        )[0]
+        assert output.prompt_token_ids == [3] + [image_token_id] * 4 + [4]
+        assert output.outputs[0].token_ids == baseline.outputs[0].token_ids
+        assert output.prompt_logprobs is not None
+        assert len(output.prompt_logprobs) == len(output.prompt_token_ids)
+        assert output.prompt_logprobs[0] is None
+        for token_id, entry in zip(
+            output.prompt_token_ids[1:], output.prompt_logprobs[1:]
+        ):
+            assert entry is not None
+            assert token_id in entry
+            for logprob_token_id, logprob in entry.items():
+                if logprob_token_id == image_token_id:
+                    assert logprob.logprob == -math.inf
+                    assert logprob.rank == vocab_size + 1
+                else:
+                    assert 0 <= logprob_token_id < vocab_size
+                    assert math.isfinite(logprob.logprob)
+                    assert 1 <= logprob.rank <= vocab_size
