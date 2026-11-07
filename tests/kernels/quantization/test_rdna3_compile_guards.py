@@ -41,7 +41,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa:
     kInt4StaticAsym,
     kInt8Static,
 )
-from vllm.platforms.rocm import on_gfx1100  # noqa: E402
+from vllm.platforms.rocm import on_gfx1100, on_gfx1151  # noqa: E402
 
 gfx1100_only = pytest.mark.skipif(
     not on_gfx1100(),
@@ -53,16 +53,29 @@ not_gfx1100 = pytest.mark.skipif(
     reason="This test verifies non-gfx1100 builds — skip on gfx1100",
 )
 
+# The RDNA3 sources are also compiled for gfx1151, so its _rocm_C has the ops.
+not_rdna3_build = pytest.mark.skipif(
+    on_gfx1100() or on_gfx1151(),
+    reason="This test verifies builds without the RDNA3 kernels",
+)
+
+# The CMake block that compiles the RDNA3 sources (gfx1100, and gfx1151 for MXFP4).
+RDNA3_CMAKE_GATE = re.compile(r'VLLM_GPU_ARCHES MATCHES "gfx1100(\|gfx1151)?"')
+
 RDNA3_OPS = [
     "gptq_gemm_rdna3",
     "gptq_gemm_rdna3_wmma",
     "moe_gptq_gemm_rdna3",
+    "mxfp4_gemm_rdna3",
+    "moe_mxfp4_gemm_rdna3",
     "mxfp4_w4a8_gemv_rdna3",
 ]
 RDNA3_CU_FILES = [
     "q_gemm_rdna3.cu",
     "q_gemm_rdna3_wmma.cu",
     "moe_q_gemm_rdna3.cu",
+    "mxfp4_gemm_rdna3.cu",
+    "moe_mxfp4_gemm_rdna3.cu",
     "mxfp4_w4a8_gemv_rdna3.cu",
 ]
 # torch_bindings.cpp guards that keep RDNA ops out of CDNA builds: gfx1100
@@ -163,7 +176,7 @@ def test_all_ops_present_or_all_absent():
 # ============================================================================
 
 
-@not_gfx1100
+@not_rdna3_build
 @pytest.mark.parametrize("op_name", RDNA3_OPS)
 def test_op_absent_on_non_gfx1100(op_name):
     """On non-gfx1100 (CDNA), RDNA3 ops must NOT exist in _rocm_C.
@@ -230,7 +243,8 @@ class TestCMakeGuards:
 
     def test_rdna3_cu_files_inside_gfx1100_conditional(self):
         """All RDNA3 .cu files must be listed inside the
-        ``if(VLLM_GPU_ARCHES MATCHES "gfx1100")`` block, not unconditionally.
+        ``if(VLLM_GPU_ARCHES MATCHES "gfx1100|gfx1151")`` block, not
+        unconditionally.
         """
         cmake = self._read_cmake()
         for cu_file in RDNA3_CU_FILES:
@@ -239,7 +253,7 @@ class TestCMakeGuards:
             lines = cmake.splitlines()
             in_gfx1100_block = False
             for line in lines:
-                if 'VLLM_GPU_ARCHES MATCHES "gfx1100"' in line:
+                if RDNA3_CMAKE_GATE.search(line):
                     in_gfx1100_block = True
                 if in_gfx1100_block and "endif()" in line:
                     in_gfx1100_block = False
