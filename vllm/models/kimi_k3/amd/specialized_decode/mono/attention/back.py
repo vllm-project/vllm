@@ -103,7 +103,7 @@ def sent_on(c, which="ar"):
 
 def sent_ix(src, col, t, s, width):
     """(OPT_SENT) Word index of (src rank, pair at ``col``, token t), blocked
-    [src][16-col group][token][8 pairs]; shared by push and reduce."""
+    `[src][16-col group][token][8 pairs]`; shared by push and reduce."""
     return ((src * (width // 16) + col // 16) * s + t) * 8 + (col % 16) // 2
 
 

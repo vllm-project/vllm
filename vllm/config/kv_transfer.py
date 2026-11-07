@@ -5,8 +5,7 @@ import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
-from vllm.config.utils import config
-from vllm.utils.hashing import safe_hash
+from vllm.config.utils import CompileFactors, config
 
 KVProducer = Literal["kv_producer", "kv_both"]
 KVConsumer = Literal["kv_consumer", "kv_both"]
@@ -50,7 +49,12 @@ def hisparse_host_pool_gib(
 # Connectors that register the device KV cache with an RDMA engine whatever
 # their buffer device; NIXL is checked separately as it can stage through host.
 _KV_CACHE_REGISTERING_CONNECTORS = frozenset(
-    {"MooncakeConnector", "MooncakeStoreConnector", "MoRIIOConnector"}
+    {
+        "MooncakeConnector",
+        "MooncakeStoreConnector",
+        "MoRIIOConnector",
+        "UMBPStoreConnector",
+    }
 )
 
 
@@ -77,7 +81,8 @@ class KVTransferConfig:
 
     kv_role: KVRole | None = None
     """Whether this vLLM instance produces, consumes KV cache, or both. Choices
-    are 'kv_producer', 'kv_consumer', and 'kv_both'."""
+    are 'kv_producer', 'kv_consumer', and 'kv_both'. With MultiConnector, the
+    roles of its connectors decide this instead."""
 
     kv_port: int = 14579
     """The KV connector port, used to build distributed connection."""
@@ -97,22 +102,14 @@ class KVTransferConfig:
     'recompute': reschedule the request to recompute failed blocks
     'fail': immediately fail the request with an error finish reason (default)"""
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def compile_factors(self) -> CompileFactors:
+        """This config does not affect the compiled graph.
 
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        If a field starts affecting it, return
+        `get_compile_factors(self, ignored_factors)` with every other field in
+        `ignored_factors`.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        return {}
 
     def __post_init__(self) -> None:
         if self.engine_id is None:
@@ -136,11 +133,23 @@ class KVTransferConfig:
 
     @property
     def is_kv_producer(self) -> bool:
-        return self.kv_connector is not None and self.kv_role in get_args(KVProducer)
+        return any(role in get_args(KVProducer) for role in self._connector_roles())
 
     @property
     def is_kv_consumer(self) -> bool:
-        return self.kv_connector is not None and self.kv_role in get_args(KVConsumer)
+        return any(role in get_args(KVConsumer) for role in self._connector_roles())
+
+    def _connector_roles(self) -> list[str | None]:
+        """The kv_role of each connector. MultiConnector does not pass its own
+        kv_role to its connectors, so only theirs count."""
+        if self.kv_connector is None:
+            return []
+        if self.kv_connector == "MultiConnector":
+            return [
+                child.get("kv_role")
+                for child in self.kv_connector_extra_config.get("connectors", [])
+            ]
+        return [self.kv_role]
 
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)
@@ -158,7 +167,7 @@ class KVTransferConfig:
 
     def registers_kv_cache_memory(self) -> bool:
         """Whether a connector registers the device KV cache itself with UCX or
-        RDMA (NIXL, Mooncake, MoRIIO), directly or in MultiConnector. NIXL with
+        RDMA (NIXL, Mooncake, MoRIIO, UMBP), directly or in MultiConnector. NIXL with
         a CPU kv_buffer_device registers only its host staging buffers."""
         children = [{"kv_connector": self.kv_connector}]
         if self.kv_connector == "MultiConnector":

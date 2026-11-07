@@ -44,7 +44,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
-from vllm.model_executor.utils import is_weights_pre_processed, set_weight_attrs
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import (
     PREFILL_CONV_BLOCK_M,
     KimiK3ROCmKDABackend,
@@ -345,9 +345,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         compilation_config.static_forward_context[prefix] = self
 
     @torch.no_grad()
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
-        if is_weights_pre_processed():
-            return
+    def process_weights_after_loading(self) -> None:
         if self.decode_conv1d_weight is not None:
             self.decode_conv1d_weight.copy_(
                 self.conv1d.weight.view(
