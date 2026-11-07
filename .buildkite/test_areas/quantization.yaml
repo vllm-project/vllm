@@ -96,6 +96,7 @@ steps:
   - tests/quantization/test_online.py
   - vllm/config/quantization.py
   - vllm/model_executor/layers/quantization/__init__.py
+  - vllm/model_executor/layers/quantization/base_config.py
   - vllm/model_executor/layers/quantization/utils/quant_utils.py
   - requirements/cuda.txt
   - tests/model_executor/model_loader/test_reload_moe_kernels.py

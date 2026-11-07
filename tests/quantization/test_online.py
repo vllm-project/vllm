@@ -2501,6 +2501,91 @@ def test_online_nf12_generation_matches_bf16(
     not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
     reason="NF12 requires CUDA SM80 or newer.",
 )
+@pytest.mark.parametrize("targets", [False, True])
+def test_online_nf12_preserves_unsupported_quantized_moe(
+    vllm_runner, tmp_path, targets
+) -> None:
+    """Unsupported NF12 experts retain checkpoint kernels and generation results."""
+    from safetensors.torch import save_file
+    from transformers import GptOssConfig, GptOssForCausalLM
+
+    from vllm import SamplingParams
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        downcast_to_mxfp,
+    )
+
+    config = GptOssConfig(
+        vocab_size=128,
+        hidden_size=256,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=64,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=128,
+        layer_types=["full_attention"],
+        rope_parameters={
+            "rope_type": "yarn",
+            "rope_theta": 10000.0,
+            "factor": 1.0,
+            "original_max_position_embeddings": 128,
+            "beta_fast": 32.0,
+            "beta_slow": 1.0,
+        },
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        weights = GptOssForCausalLM(config).to(torch.bfloat16).state_dict()
+    for name in list(weights):
+        if name.endswith((".experts.gate_up_proj", ".experts.down_proj")):
+            weight = weights.pop(name).transpose(-1, -2).contiguous().cuda()
+            experts, rows, cols = weight.shape
+            packed, scales, _ = downcast_to_mxfp(weight.reshape(-1, cols), axis=-1)
+            weights[name + "_blocks"] = packed.reshape(experts, rows, cols // 2).cpu()
+            weights[name + "_scales"] = scales.reshape(experts, rows, cols // 32).cpu()
+    config.architectures = ["GptOssForCausalLM"]
+    config.quantization_config = {"quant_method": "mxfp4"}
+    config.save_pretrained(tmp_path)
+    save_file(weights, str(tmp_path / "model.safetensors"))
+    override = {"targets": {"*.mlp.experts": "nf12"}} if targets else {"moe": "nf12"}
+    results = []
+    for quantization_config in (None, override):
+        with vllm_runner(
+            str(tmp_path),
+            quantization_config=quantization_config,
+            dtype="bfloat16",
+            skip_tokenizer_init=True,
+            enforce_eager=True,
+            max_model_len=64,
+            max_num_seqs=1,
+            gpu_memory_utilization=0.4,
+            kv_cache_memory_bytes=256 * 1024**2,
+            kernel_config={"moe_backend": "triton"},
+            seed=0,
+        ) as llm:
+            output = (
+                llm.get_llm()
+                .generate(
+                    {"prompt_token_ids": [1, 3, 5, 7]},
+                    SamplingParams(
+                        temperature=0, max_tokens=4, logprobs=5, ignore_eos=True
+                    ),
+                )[0]
+                .outputs[0]
+            )
+            results.append((output.token_ids, output.logprobs))
+    assert results[0] == results[1]
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
+    reason="NF12 requires CUDA SM80 or newer.",
+)
 def test_online_nf12_rejects_checkpoint_reload(vllm_runner, monkeypatch) -> None:
     """Reject re-encoding weights that captured graphs may still reference."""
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")

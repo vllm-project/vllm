@@ -57,7 +57,7 @@ vllm serve Qwen/Qwen3.6-35B-A3B --quantization lut_b_moe
 | `mxfp4` | fp4_e2m1 data, e8m0 per-1x32-block scale ([OCP MX specs](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)) | - linear: fp4_e2m1 data, e8m0 per-1x32-block scale in some backends, or BF16. <br> - MOE: fp4_e2m1 data, e8m0 per-1x32-block scale. | Linear MXFP4 backend is auto-selected per platform, not enforcing activation dtype. Some use BF16 activation. Use `--linear-backend` to pin one (e.g. `--linear-backend flashinfer`). |
 | `lut_b_moe` | MoE only: 3-bit indices into an E4M3 codebook with an e8m0 scale per 8x64 tile | MoE only: fp8_e4m3 data, e8m0 per-1x32-block scale | Native on Rubin (SM 10.7) via the tensor core LUT decode. Other GPUs emulate the same numerics for accuracy checks with dequantized weights. Dense layers stay unquantized. |
 | `mxfp4_hadamard32` | `mxfp4`, with the weight rotated along its input dimension by a 32-wide block Hadamard matrix before quantization | `mxfp4`, with activations rotated by the same matrix before quantization | Linear only. The rotation is orthogonal, so the GEMM is unchanged up to quantization error, which it shrinks by spreading outliers across each 32-element block. The activation rotation runs in PyTorch before the selected MXFP4 linear backend. |
-| `nf12` | Lossless BF16 weight encoding with packed values and escapes | BF16, unquantized | Dense and supported MoE layers. Requires NVIDIA CUDA SM80+ and `nf12==1.0.0`. |
+| `nf12` | Lossless BF16 weight encoding with packed values and escapes | BF16, unquantized | Dense and supported MoE layers. Requires NVIDIA CUDA SM80+ and `nf12==1.0.0`. Unsupported MoE layers retain their checkpoint format. |
 
 ## Advanced Configuration
 
