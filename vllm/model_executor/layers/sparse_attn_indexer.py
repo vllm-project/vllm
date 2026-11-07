@@ -821,7 +821,7 @@ def sparse_attn_indexer(
                 k_quant.shape[0],
                 topk_tokens,
                 q_slice.shape[0],
-                dense_rows,
+                heads=q_slice.shape[1],
             ):
                 fused_mqa_topk_prefill(
                     q_slice,

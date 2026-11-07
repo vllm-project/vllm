@@ -1,13 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// Single-launch fused FP8 MQA-logits + top-k (k = 512, 1024, 2048) prefill
-// selection (SM100 family): one persistent kernel (persistent_kernel.cuh, one
-// CTA per SM; sampled gate, candidate emission and selection, exact rescan of
-// out-of-range blocks) scores every visible key of a row and selects its top-k
-// keys without materializing the [rows, keys] logits matrix.
-// This file is the libtorch-stable host wrapper. All scratch memory is passed
-// in by the caller (no allocation here), so the op is CUDA-graph friendly.
+// Fused FP8 MQA-logits + top-k (k = 512, 1024, 2048) prefill selection for
+// 32 or 64 index heads (SM100 family), LiteTopK sample -> filter -> select
+// without materializing the [rows, keys] logits:
+//   1. candidate producer (fp8_indexer.cuh, persistent, one CTA per SM): per
+//      block of 256 / heads rows it scores a strided key sample, takes a
+//      per-row threshold from it, then scores every visible key and appends
+//      the (score, key) pairs above the threshold to the row's candidate slab;
+//   2. candidate selector (topk_candidates_fp32.cuh, one CTA per row): the
+//      exact fp32 top-k of each slab;
+//   3. recovery (fp8_recovery_kernel): rows whose slab overflowed or holds
+//      fewer than min(k, visible) candidates are rescored densely into a
+//      bounded scratch pool and selected exactly; other blocks exit at once.
+// The kernels are adapted from SGLang PR #47469 (see fp8_indexer.cuh).
+// This file is the libtorch-stable host wrapper (and holds the selector
+// kernels; the producer and recovery are in fp8_indexer.cu). All scratch
+// memory is passed in by the caller and nothing is read back on the host, so
+// the op is CUDA-graph friendly.
 //
 // Acknowledgement: LiteTopK (arXiv:2607.11976) was the first to fuse
 // sparse-attention indexer scoring with top-k selection without materializing
@@ -23,26 +33,22 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <map>
+#include <initializer_list>
 #include <mutex>
+#include <set>
 #include <utility>
 
-#include "constants.h"
-#include "persistent_kernel.cuh"
+#include "fp8_indexer.cuh"
+#include "topk_candidates_fp32.cuh"
 
 namespace {
 
-using fused_mqa_topk::kBlockRows;
-using fused_mqa_topk::kCandidatesPerRow;
-using fused_mqa_topk::kHeadDim;
-using fused_mqa_topk::kMaxKeys;
-using fused_mqa_topk::kNumHeads;
-using fused_mqa_topk::kNumThreads;
-using fused_mqa_topk::kRetainedPerRow;
-using fused_mqa_topk::kSlotsPerCta;
-using fused_mqa_topk::kTileKeys;
+using fused_mqa_topk::device::fp8_indexer::Fp8Impl;
 using torch::headeronly::ScalarType;
-namespace persist = fused_mqa_topk::persist;
+using torch::stable::Tensor;
+
+// Most gathered keys per call: the threshold sample strides are sized for it.
+constexpr int64_t kMaxKeys = int64_t(1) << 20;
 
 void check_cuda(cudaError_t err) {
   STD_TORCH_CHECK(err == cudaSuccess, cudaGetErrorString(err));
@@ -63,232 +69,273 @@ PFN_cuTensorMapEncodeTiled_v12000 encode_tiled() {
   return fn;
 }
 
-// SM count of `device`, queried once per device.
-int sm_count(int device) {
-  static std::mutex mutex;
-  static std::map<int, int> cache;
-  const std::lock_guard<std::mutex> lock(mutex);
-  auto [it, inserted] = cache.try_emplace(device, 0);
-  if (inserted) {
-    const cudaError_t err = cudaDeviceGetAttribute(
-        &it->second, cudaDevAttrMultiProcessorCount, device);
-    if (err != cudaSuccess) cache.erase(it);
-    check_cuda(err);
-  }
-  return it->second;
-}
-
-// Adapted from DeepGEMM's make_tma_2d_desc
-// (csrc/jit_kernels/impls/runtime_utils.hpp at 88965b078186)
-CUtensorMap make_2d(void* ptr, CUtensorMapDataType dt, int elem_size,
-                    int gmem_inner, int gmem_outer, int smem_inner,
-                    int smem_outer, long gmem_outer_stride, int swizzle_mode) {
-  if (swizzle_mode != 0) smem_inner = swizzle_mode / elem_size;
-  CUtensorMap tm;
-  const cuuint64_t gdims[2] = {(cuuint64_t)gmem_inner, (cuuint64_t)gmem_outer};
-  const cuuint32_t sdims[2] = {(cuuint32_t)smem_inner, (cuuint32_t)smem_outer};
-  const cuuint64_t gstrides[1] = {(cuuint64_t)(gmem_outer_stride * elem_size)};
-  const cuuint32_t estrides[2] = {1, 1};
-  CUtensorMapSwizzle swizzle = swizzle_mode == 128  ? CU_TENSOR_MAP_SWIZZLE_128B
-                               : swizzle_mode == 64 ? CU_TENSOR_MAP_SWIZZLE_64B
-                               : swizzle_mode == 32
-                                   ? CU_TENSOR_MAP_SWIZZLE_32B
-                                   : CU_TENSOR_MAP_SWIZZLE_NONE;
-  CUresult r = encode_tiled()(&tm, dt, 2, ptr, gdims, gstrides, sdims, estrides,
-                              CU_TENSOR_MAP_INTERLEAVE_NONE, swizzle,
-                              CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
-                              CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-  STD_TORCH_CHECK(r == CUDA_SUCCESS, "cuTensorMapEncodeTiled failed: ", (int)r);
-  return tm;
-}
-
-// KV [keys,128] bytes viewed as {128, groups, stride} with strides
-// {128*stride, 128}: box {128, 256, 1} at (0, 0, o) loads keys o, o+stride, ...
-// with 128B swizzle. The view spans groups * stride keys, which can exceed
-// `keys` by < stride / 2; that is safe only because the kernel loads offset
-// o = stride / 2, whose last key ((groups - 1) * stride + stride / 2) is
-// always < keys (launch_config sizes `groups` for that).
-CUtensorMap make_strided_kv(void* ptr, uint32_t groups, uint32_t stride) {
-  CUtensorMap tm;
-  constexpr uint64_t kRowBytes = kHeadDim;
-  const cuuint64_t gdims[3] = {kRowBytes, groups, stride};
-  const cuuint64_t gstrides[2] = {kRowBytes * stride, kRowBytes};
-  const cuuint32_t box[3] = {kRowBytes, kTileKeys, 1};
-  const cuuint32_t estrides[3] = {1, 1, 1};
-  CUresult r = encode_tiled()(
-      &tm, CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, ptr, gdims, gstrides, box,
-      estrides, CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+// A tiled tensor map: dims and box innermost first, byte strides of dims
+// 1..rank-1.
+CUtensorMap make_map(const void* base, CUtensorMapDataType dtype,
+                     std::initializer_list<cuuint64_t> dims,
+                     std::initializer_list<cuuint64_t> strides,
+                     std::initializer_list<cuuint32_t> box,
+                     CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_NONE) {
+  static constexpr cuuint32_t kUnit[5] = {1, 1, 1, 1, 1};
+  CUtensorMap map{};
+  const CUresult r = encode_tiled()(
+      &map, dtype, static_cast<cuuint32_t>(dims.size()),
+      const_cast<void*>(base), dims.begin(), strides.begin(), box.begin(),
+      kUnit, CU_TENSOR_MAP_INTERLEAVE_NONE, swizzle,
       CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   STD_TORCH_CHECK(r == CUDA_SUCCESS,
-                  "strided KV cuTensorMapEncodeTiled failed: ", (int)r);
-  return tm;
+                  "cuTensorMapEncodeTiled failed: ", static_cast<int>(r));
+  return map;
 }
 
-// -------- launch configuration --------
-// Keys per row above which the long-context instantiations (Interval 64, 128)
-// and gate settings apply.
-constexpr uint32_t kLongContextKeys = 131072;
-
-using PersistentKernel =
-    decltype(&persist::fused_mqa_topk_fp8_prefill_kernel<16, 2048>);
-
-// vLLM dispatches chunks of >= 32K keys per row here (fused_mqa_topk_min_keys);
-// smaller key counts are supported but take the same <= 32K configuration.
-template <uint32_t TopK>
-PersistentKernel persistent_kernel(uint32_t keys) {
-  return keys <= 32768 ? persist::fused_mqa_topk_fp8_prefill_kernel<16, TopK>
-         : keys <= kLongContextKeys
-             ? persist::fused_mqa_topk_fp8_prefill_kernel<32, TopK>
-         : keys <= 524288
-             ? persist::fused_mqa_topk_fp8_prefill_kernel<64, TopK>
-             : persist::fused_mqa_topk_fp8_prefill_kernel<128, TopK>;
-}
-
-struct LaunchConfig {
-  PersistentKernel kernel;
-  int smem;              // dynamic shared memory bytes
-  uint32_t phase_bytes;  // selection scratch bytes past the Q / weights region
-  // Gate sample: sample_tiles tiles of 256 keys on a uniform grid (stride
-  // sample_stride).
-  uint32_t sample_target, sample_stride, sample_groups, sample_tiles;
-};
-
-// Dynamic shared memory of `kernel` on `device`: everything past its static
-// shared memory up to the device's opt-in limit (232448 bytes on SM100; the
-// staged selection uses it all), at least the exact rescan's layout. Sets
-// the opt-in attribute; both are computed once per device and kernel.
-cudaError_t kernel_smem(int device, PersistentKernel kernel, int& smem) {
-  // The exact rescan reuses the same dynamic shared memory with its own layout.
-  constexpr int kRescanSmem = int(sizeof(fused_mqa_topk::dense::SharedStorage) +
-                                  sizeof(persist::RescanShared));
-  constexpr int kMinSmem = int(
-      sizeof(persist::KernelSmem) +
-      std::max(sizeof(persist::HandoffRing), sizeof(persist::SampleShared)));
-  static std::mutex mutex;
-  static std::map<std::pair<int, PersistentKernel>, int> cache;
-  const std::lock_guard<std::mutex> lock(mutex);
-  if (const auto it = cache.find({device, kernel}); it != cache.end()) {
-    smem = it->second;
-    return cudaSuccess;
-  }
-  int max_smem = 0;
-  if (const cudaError_t e = cudaDeviceGetAttribute(
-          &max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-      e != cudaSuccess)
-    return e;
-  cudaFuncAttributes attr;
-  if (const cudaError_t e =
-          cudaFuncGetAttributes(&attr, reinterpret_cast<const void*>(kernel));
-      e != cudaSuccess)
-    return e;
-  const int bytes = std::max(kRescanSmem, max_smem - int(attr.sharedSizeBytes));
-  if (bytes < kMinSmem) return cudaErrorInvalidConfiguration;
-  if (const cudaError_t e = cudaFuncSetAttribute(
-          reinterpret_cast<const void*>(kernel),
-          cudaFuncAttributeMaxDynamicSharedMemorySize, bytes);
-      e != cudaSuccess)
-    return e;
-  cache.emplace(std::make_pair(device, kernel), bytes);
-  smem = bytes;
-  return cudaSuccess;
-}
-
-// Picks the kernel instantiation, its shared memory and the gate sample for
-// `keys` keys and top-`topk` rows on `device` (the current device).
-cudaError_t launch_config(int device, uint32_t keys, uint32_t topk,
-                          LaunchConfig& c) {
-  // The gate aims for `target` candidates per row and sizes the sample so its
-  // quantile rank is `rank` (count error ~1/sqrt(rank)); a row whose count
-  // falls below the top-k is rescanned exactly. Up to 128K keys the candidate
-  // stream dominates, so smaller top-ks aim lower with a coarser sample. Above
-  // 128K the sample is clamped to 16-32 tiles (rank ~32 at 1M keys): a sample
-  // tile costs about two scan tiles, so a larger sample costs more than a
-  // smaller candidate set saves. Tuned on B300 real captures.
-  struct Gate {
-    uint32_t target, rank;
-  };
-  constexpr Gate kGates[3][2] = {
-      // <= 128K       > 128K
-      {{1024, 32}, {1536, 64}},  // top-512
-      {{1536, 48}, {2048, 48}},  // top-1024
-      {{3072, 64}, {4096, 64}},  // top-2048
-  };
-  const bool long_ctx = keys > kLongContextKeys;
-  const Gate gate =
-      kGates[topk == 512 ? 0 : (topk == 1024 ? 1 : 2)][long_ctx ? 1 : 0];
-  c.sample_target = gate.target;
-  const uint32_t rank = gate.rank;
-  const uint64_t tile = kTileKeys;
-  const uint32_t rank_tiles = std::max(
-      1u, uint32_t((uint64_t(rank) * keys + tile * c.sample_target - 1) /
-                   (tile * c.sample_target)));
-  c.sample_tiles =
-      long_ctx ? std::min(32u, std::max(16u, rank_tiles)) : rank_tiles;
-  c.sample_stride = std::max(1u, uint32_t((keys + tile * c.sample_tiles - 1) /
-                                          (tile * c.sample_tiles)));
-  c.sample_groups =
-      (keys - c.sample_stride / 2 + c.sample_stride - 1) / c.sample_stride;
-  c.kernel = topk == 512    ? persistent_kernel<512>(keys)
-             : topk == 1024 ? persistent_kernel<1024>(keys)
-                            : persistent_kernel<2048>(keys);
-  if (const cudaError_t e = kernel_smem(device, c.kernel, c.smem);
-      e != cudaSuccess)
-    return e;
-  c.phase_bytes = uint32_t(c.smem) - persist::kSelBase;
-  return cudaSuccess;
-}
-
-void check_tensor(const torch::stable::Tensor& t, int32_t device,
-                  ScalarType dtype, const char* name) {
+void check_tensor(const Tensor& t, int32_t device, ScalarType dtype,
+                  const char* name) {
   STD_TORCH_CHECK(t.is_cuda() && t.get_device_index() == device, name,
                   " must be on the same CUDA device as q");
   STD_TORCH_CHECK(t.scalar_type() == dtype, name, " has the wrong dtype");
   STD_TORCH_CHECK(t.is_contiguous(), name, " must be contiguous");
 }
 
-// TMA tensor maps need 16-byte aligned base addresses.
-void check_aligned(const torch::stable::Tensor& t, const char* name) {
+// TMA tensor maps and bulk copies need 16-byte aligned base addresses.
+void check_aligned(const Tensor& t, const char* name) {
   STD_TORCH_CHECK(reinterpret_cast<uintptr_t>(t.data_ptr()) % 16 == 0, name,
                   " must be 16-byte aligned");
 }
 
+// Opts `kernel` into `smem` bytes of dynamic shared memory on the current
+// device (once per device and kernel).
+void set_smem(const void* kernel, size_t smem) {
+  const cudaDeviceProp* prop = get_device_prop();
+  STD_TORCH_CHECK(smem <= prop->sharedMemPerBlockOptin,
+                  "fused_mqa_topk_prefill needs more shared memory per block "
+                  "than this GPU allows");
+  int device = 0;
+  check_cuda(cudaGetDevice(&device));
+  static std::mutex mutex;
+  static std::set<std::pair<int, const void*>> done;
+  const std::lock_guard<std::mutex> lock(mutex);
+  if (done.count({device, kernel}) == 0) {
+    check_cuda(cudaFuncSetAttribute(
+        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, int(smem)));
+    done.insert({device, kernel});
+  }
+}
+
+template <typename... Params, typename... Args>
+void launch(void (*kernel)(Params...), uint32_t grid, uint32_t block,
+            size_t smem, cudaStream_t stream, bool pdl, Args&&... args) {
+  cudaLaunchAttribute attr{};
+  attr.id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attr.val.programmaticStreamSerializationAllowed = 1;
+  cudaLaunchConfig_t config{};
+  config.gridDim = grid;
+  config.blockDim = block;
+  config.dynamicSmemBytes = smem;
+  config.stream = stream;
+  config.attrs = pdl ? &attr : nullptr;
+  config.numAttrs = pdl ? 1 : 0;
+  check_cuda(cudaLaunchKernelEx(&config, kernel, std::forward<Args>(args)...));
+}
+
+// Scan pieces per block of the last, partial wave of the producer: the split
+// that minimizes the modelled duration (a piece costs ~10 tile scans extra).
+uint32_t tail_chunks(int64_t blocks, int64_t sms, int64_t tiles) {
+  const double cost = 10.0 / double(std::max<int64_t>(tiles, 1));
+  uint32_t best = 1;
+  double best_time = 0.0;
+  for (const uint32_t chunks : {1u, 2u, 4u, 8u, 16u, 32u}) {
+    const int64_t grid = std::min<int64_t>(sms, blocks * chunks);
+    const int64_t tail = blocks % grid;
+    const int64_t units = (tail * chunks + grid - 1) / grid;
+    const double time =
+        double(blocks / grid) * (1.0 + cost) +
+        (tail ? double(units) / chunks + double(units) * cost : 0.0);
+    if (chunks == 1 || time < best_time) best = chunks, best_time = time;
+  }
+  return best;
+}
+
+// The candidate selector for top-`kTopK` over `rows` candidate slabs.
+template <uint32_t kTopK>
+void select_topk(const Tensor& values, const Tensor& indices,
+                 const int32_t* counts, const float* thresholds,
+                 const Tensor& out, cudaStream_t stream) {
+  using Impl = fused_mqa_topk::TopKCandidatesFP32Impl<kTopK>;
+  const int64_t rows = values.size(0), cap = values.size(1);
+  const fused_mqa_topk::TopKCandidatesFP32Params p{
+      .scores = static_cast<const float*>(values.data_ptr()),
+      .indices = static_cast<const int32_t*>(indices.data_ptr()),
+      .count = counts,
+      .thr = thresholds,
+      .out = static_cast<int32_t*>(out.data_ptr()),
+      .cap = static_cast<uint32_t>(cap),
+  };
+  const auto kernel = fused_mqa_topk::topk_candidates_fp32_kernel<Impl>;
+  set_smem(reinterpret_cast<const void*>(kernel), Impl::kSmemBytes);
+  // PDL: the selector's prologue overlaps the producer's tail.
+  launch(kernel, static_cast<uint32_t>(rows), Impl::kBlockSize,
+         Impl::kSmemBytes, stream, true, p);
+}
+
+template <uint32_t kHeads>
+void run(const Tensor& q, const Tensor& k, const Tensor& scales,
+         const Tensor& weights, const Tensor& starts, const Tensor& ends,
+         const Tensor& out, const Tensor& counter, const Tensor& codes,
+         const Tensor& values, const Tensor& indices, const Tensor& row_state,
+         const Tensor& recovery) {
+  using Impl = Fp8Impl<kHeads, false>;
+  using RecoveryImpl = Fp8Impl<kHeads, true>;
+  static_assert(Impl::kSmemBytes == RecoveryImpl::kSmemBytes &&
+                Impl::kBlockQ == RecoveryImpl::kBlockQ);
+  constexpr uint32_t kHeadDim = Impl::kHeadDim;
+  const int64_t rows = q.size(0), keys = k.size(0), topk = out.size(1);
+  const int64_t blocks = (rows + Impl::kBlockQ - 1) / Impl::kBlockQ;
+  STD_TORCH_CHECK(counter.numel() >= 2 * blocks,
+                  "counter must hold 2 * ceil(rows / ", Impl::kBlockQ,
+                  ") zeros");
+  STD_TORCH_CHECK(recovery.numel() >= int64_t(Impl::kBlockQ) * keys,
+                  "recovery must hold at least ", Impl::kBlockQ,
+                  " * keys floats (one block of rows)");
+
+  const int sms = get_device_prop()->multiProcessorCount;
+  // One CTA per SM at most. A scan piece waits for its block's thresholds,
+  // published by its own CTA or a lower one (see unit_at), so the grid does not
+  // need to be co-resident.
+  const uint32_t chunks = tail_chunks(blocks, sms, keys / Impl::kSplitKV);
+  const auto grid =
+      static_cast<uint32_t>(std::min<int64_t>(sms, blocks * chunks));
+  STD_TORCH_CHECK(
+      codes.numel() >= 2 * int64_t(grid) * Impl::kCodesPerCta,
+      "codes must hold ", 2 * Impl::kCodesPerCta,
+      " int32 per producer CTA (at most min(SMs, 32 * row blocks))");
+
+  // Q: rows * heads rows of 128 bytes, a block's per box; KV: keys rows of 128
+  // bytes, a tile's 256 per box (both 128B-swizzled); weights: a block's rows;
+  // per-key scales: a tile's 256 as one row.
+  fused_mqa_topk::Fp8IndexerTensorMaps tmaps{};
+  tmaps.q = make_map(q.data_ptr(), CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                     {kHeadDim, uint64_t(rows) * kHeads}, {kHeadDim},
+                     {kHeadDim, Impl::kQTmaRows}, CU_TENSOR_MAP_SWIZZLE_128B);
+  tmaps.weights = make_map(weights.data_ptr(), CU_TENSOR_MAP_DATA_TYPE_FLOAT32,
+                           {kHeads, uint64_t(rows)}, {kHeads * 4ull},
+                           {kHeads, Impl::kBlockQ});
+  tmaps.kv = make_map(k.data_ptr(), CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                      {kHeadDim, uint64_t(keys)}, {kHeadDim},
+                      {kHeadDim, Impl::kSplitKV}, CU_TENSOR_MAP_SWIZZLE_128B);
+  // Threshold samples: KV as [keys / S, S, 128] (key = row * S + phase), one
+  // map per sample stride S.
+  for (uint32_t m = 0; m < 2; ++m) {
+    const uint64_t S = Impl::sample_stride(m);
+    tmaps.kv_strided[m] =
+        make_map(k.data_ptr(), CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                 {kHeadDim, S, std::max<uint64_t>(keys / S, 1)},
+                 {kHeadDim, S * kHeadDim}, {kHeadDim, 1, Impl::kSplitKV},
+                 CU_TENSOR_MAP_SWIZZLE_128B);
+  }
+  tmaps.sf_kv = make_map(
+      scales.data_ptr(), CU_TENSOR_MAP_DATA_TYPE_FLOAT32, {uint64_t(keys), 1},
+      {uint64_t((keys * 4 + 15) / 16 * 16)}, {Impl::kSplitKV, 1});
+
+  auto* counts = static_cast<int32_t*>(row_state.data_ptr());
+  auto* thresholds = reinterpret_cast<float*>(counts + rows);
+  fused_mqa_topk::Fp8IndexerParams p{};
+  p.ks = static_cast<const int32_t*>(starts.data_ptr());
+  p.ke = static_cast<const int32_t*>(ends.data_ptr());
+  p.kv_scale = static_cast<const float*>(scales.data_ptr());
+  p.block_ready = static_cast<uint32_t*>(counter.data_ptr());
+  p.block_done = p.block_ready + blocks;
+  p.sample_codes = static_cast<uint2*>(codes.data_ptr());
+  p.cand_scores = static_cast<float*>(values.data_ptr());
+  p.cand_indices = static_cast<int32_t*>(indices.data_ptr());
+  p.cand_count = counts;
+  p.thresholds = thresholds;
+  p.overflow = counts + 2 * rows;
+  p.num_rows = static_cast<uint32_t>(rows);
+  p.num_blocks = static_cast<uint32_t>(blocks);
+  p.num_keys = static_cast<uint32_t>(keys);
+  for (uint32_t m = 0; m < 2; ++m) {
+    p.sample_limit[m] = static_cast<uint32_t>(keys / Impl::sample_stride(m) *
+                                              Impl::sample_stride(m));
+  }
+  p.cap = static_cast<uint32_t>(values.size(1));
+  p.topk = static_cast<uint32_t>(topk);
+  // Rows that see at most top-k keys keep them all (threshold -inf).
+  p.dense_bound = static_cast<uint32_t>(topk);
+  p.tail_chunks = chunks;
+
+  const cudaStream_t stream = get_current_cuda_stream(q.get_device_index());
+  const auto producer = fused_mqa_topk::fp8_kernel(kHeads, false);
+  set_smem(reinterpret_cast<const void*>(producer), Impl::kSmemBytes);
+  launch(producer, grid, Impl::kNumThreads, Impl::kSmemBytes, stream, false, p,
+         tmaps);
+
+  switch (topk) {
+    case 512:
+      select_topk<512>(values, indices, counts, thresholds, out, stream);
+      break;
+    case 1024:
+      select_topk<1024>(values, indices, counts, thresholds, out, stream);
+      break;
+    default:
+      select_topk<2048>(values, indices, counts, thresholds, out, stream);
+  }
+
+  // The recovery: one CTA per block; blocks without a bad row exit at once.
+  // A bad block borrows one of min(32, pool / (block rows * keys)) slots of the
+  // pool for its dense scores.
+  p.recovery_scores = static_cast<float*>(recovery.data_ptr());
+  p.recovery_out = static_cast<int32_t*>(out.data_ptr());
+  p.recovery_weights = static_cast<const float*>(weights.data_ptr());
+  p.recovery_stride = keys;
+  p.recovery_slots = static_cast<uint32_t>(std::min<int64_t>(
+      32, recovery.numel() / (int64_t(Impl::kBlockQ) * keys)));
+  const auto recover = fused_mqa_topk::fp8_kernel(kHeads, true);
+  set_smem(reinterpret_cast<const void*>(recover), RecoveryImpl::kSmemBytes);
+  launch(recover, static_cast<uint32_t>(blocks), RecoveryImpl::kNumThreads,
+         RecoveryImpl::kSmemBytes, stream, false, p, tmaps);
+}
+
 }  // namespace
 
-// Inputs: q [rows,32,128] fp8e4m3, k [keys,128] fp8e4m3, scales [keys] fp32,
-// weights [rows,32] fp32, starts/ends [rows] int32 (the visible key range
-// [start,end) of each row), with 0 < rows < 2^26 and 0 < keys <= 1048576 (the
-// last 8-row block may be partial). starts/ends are expected in [0, keys] with
-// start <= end; they are read as uint32_t and clamped to keys, so a negative
-// value means `keys` and an end before its start means an empty row.
+// Inputs: q [rows, H, 128] fp8e4m3 with H (the index heads) 32 or 64,
+// k [keys, 128] fp8e4m3, scales [keys] fp32, weights [rows, H] fp32,
+// starts/ends [rows] int32 (the visible key range [start, end) of each row),
+// with rows >= 1, rows * H < 2^31 and 1 <= keys <= 1048576. starts/ends are
+// clamped to [0, keys]; an end before its start means an empty row.
 //
-// Output: out [rows,K] int32 with K (the top-k) 512, 1024 or 2048: key indices
-// relative to the row's start (key - start, the top_k_per_row_prefill
-// convention), unordered; -1 padded when fewer than K keys are visible. Rows
-// that see at most K keys get them all, in order. Exact up to ties: the gated
-// path ranks fp24 score codes (the low 8 mantissa bits dropped), the exact
-// rescan ranks fp32 scores.
+// Output: out [rows, K] int32 with K (the top-k) 512, 1024 or 2048: key
+// indices relative to the row's start (key - start, the top_k_per_row_prefill
+// convention), unordered, -1 padded when fewer than K keys are visible. Exact
+// on the kernels' fp32 scores up to ties at the K-th score. The thresholds are
+// fp16 distances to a sampled score of each row, so a common offset of the
+// scores does not matter; rows whose top scores spread over more than 65504
+// (or are packed within 2^-24) may overflow and take the recovery: exact, but
+// seconds at 1M keys.
 //
-// All tensors are contiguous; q, k, scales, weights and out are 16-byte aligned
-// (TMA / vector stores).
+// All tensors are contiguous; q, k, scales, weights, out, codes, values and
+// indices are 16-byte aligned (TMA / bulk copies / vector stores).
 //
-// Workspace (caller-owned, reused across calls), with B = ceil(rows / 8) and
-// S >= 2 slots per CTA of the persistent grid (one CTA per SM):
-//   counter [2] int32 (zero between calls; the kernel leaves it zeroed, so a
-//     workspace must not be shared by launches that can run concurrently, e.g.
-//     on two streams),
-//   values [8S,16384] uint16 (low 16 bits of the fp24 candidate codes),
-//   indices [8S,16384] int32 (key index in bits 0-19, the code's high 8 bits
-//   in bits 20-27),
-//   retained [8S,4096] fp32, retained_indices [8S,4096] int32,
-//   counts [>=8B] int32, defer [>=B] int32.
+// Workspace (caller-owned), with B = ceil(rows / (256 / H)) row blocks and
+// G <= min(SMs, 32 B) the producer's grid:
+//   counter [>= 2B] int32: zero between calls; the kernels leave it zeroed, so
+//     a workspace must not be shared by launches that can run concurrently
+//     (e.g. on two streams),
+//   codes [>= 32768 G] int32: the producer's per-CTA sample codes,
+//   values [rows, C] fp32 and indices [rows, C] int32: the candidate slab, C in
+//     [4096, 12288] and a multiple of 4 (a row with more candidates is
+//     recovered),
+//   row_state [3, rows] int32: candidate counts, thresholds (fp32 bits),
+//     overflow flags,
+//   recovery [>= (256 / H) * keys] fp32: the recovery's dense score pool, used
+//     as min(32, numel / ((256 / H) * keys)) slots.
 void fused_mqa_topk_prefill(
     torch::stable::Tensor q, torch::stable::Tensor k,
     torch::stable::Tensor scales, torch::stable::Tensor weights,
     torch::stable::Tensor starts, torch::stable::Tensor ends,
     torch::stable::Tensor out, torch::stable::Tensor counter,
-    torch::stable::Tensor values, torch::stable::Tensor indices,
-    torch::stable::Tensor retained, torch::stable::Tensor retained_indices,
-    torch::stable::Tensor counts, torch::stable::Tensor defer) {
+    torch::stable::Tensor codes, torch::stable::Tensor values,
+    torch::stable::Tensor indices, torch::stable::Tensor row_state,
+    torch::stable::Tensor recovery) {
   STD_TORCH_CHECK(q.is_cuda(), "q must be a CUDA tensor");
   const int32_t dev = q.get_device_index();
   check_tensor(q, dev, ScalarType::Float8_e4m3fn, "q");
@@ -299,100 +346,55 @@ void fused_mqa_topk_prefill(
   check_tensor(ends, dev, ScalarType::Int, "ends");
   check_tensor(out, dev, ScalarType::Int, "out");
   check_tensor(counter, dev, ScalarType::Int, "counter");
-  check_tensor(values, dev, ScalarType::UInt16, "values");
+  check_tensor(codes, dev, ScalarType::Int, "codes");
+  check_tensor(values, dev, ScalarType::Float, "values");
   check_tensor(indices, dev, ScalarType::Int, "indices");
-  check_tensor(retained, dev, ScalarType::Float, "retained");
-  check_tensor(retained_indices, dev, ScalarType::Int, "retained_indices");
-  check_tensor(counts, dev, ScalarType::Int, "counts");
-  check_tensor(defer, dev, ScalarType::Int, "defer");
+  check_tensor(row_state, dev, ScalarType::Int, "row_state");
+  check_tensor(recovery, dev, ScalarType::Float, "recovery");
 
   STD_TORCH_CHECK(
-      q.dim() == 3 && q.size(1) == kNumHeads && q.size(2) == kHeadDim,
-      "q must be [rows, 32, 128]");
-  STD_TORCH_CHECK(k.dim() == 2 && k.size(1) == kHeadDim,
-                  "k must be [keys, 128]");
-  const int64_t rows = q.size(0), keys = k.size(0);
-  // TMA row coordinates (rows * 32 Q rows) are int32.
-  STD_TORCH_CHECK(rows > 0 && rows < (int64_t(1) << 26),
-                  "rows must be in [1, 2^26)");
+      q.dim() == 3 && (q.size(1) == 32 || q.size(1) == 64) && q.size(2) == 128,
+      "q must be [rows, 32 or 64, 128]");
+  STD_TORCH_CHECK(k.dim() == 2 && k.size(1) == 128, "k must be [keys, 128]");
+  const int64_t rows = q.size(0), heads = q.size(1), keys = k.size(0);
+  // TMA row coordinates (rows * heads Q rows) are int32.
+  STD_TORCH_CHECK(rows > 0 && rows * heads <= INT32_MAX,
+                  "rows must be in [1, 2^31 / heads)");
   STD_TORCH_CHECK(keys > 0 && keys <= kMaxKeys, "keys must be in [1, 1048576]");
-  const int64_t blocks = (rows + kBlockRows - 1) / kBlockRows;
   STD_TORCH_CHECK(scales.numel() == keys, "scales must be [keys]");
-  STD_TORCH_CHECK(weights.dim() == 2 && weights.size(0) == rows &&
-                      weights.size(1) == kNumHeads,
-                  "weights must be [rows, 32]");
+  STD_TORCH_CHECK(
+      weights.dim() == 2 && weights.size(0) == rows && weights.size(1) == heads,
+      "weights must be [rows, heads]");
   STD_TORCH_CHECK(starts.numel() == rows && ends.numel() == rows,
                   "starts/ends must be [rows]");
-  STD_TORCH_CHECK(out.dim() == 2 && out.size(0) == rows &&
-                      fused_mqa_topk::is_supported_topk(out.size(1)),
-                  "out must be [rows, K] with K in {512, 1024, 2048}");
+  STD_TORCH_CHECK(
+      out.dim() == 2 && out.size(0) == rows &&
+          (out.size(1) == 512 || out.size(1) == 1024 || out.size(1) == 2048),
+      "out must be [rows, K] with K in {512, 1024, 2048}");
+  STD_TORCH_CHECK(values.dim() == 2 && values.size(0) == rows &&
+                      indices.dim() == 2 && indices.size(0) == rows &&
+                      indices.size(1) == values.size(1),
+                  "values/indices must be [rows, C]");
+  const int64_t cap = values.size(1);
+  STD_TORCH_CHECK(cap >= 4096 && cap <= 12288 && cap % 4 == 0,
+                  "values/indices must be [rows, C] with C in [4096, 12288] "
+                  "and a multiple of 4");
+  STD_TORCH_CHECK(row_state.numel() == 3 * rows, "row_state must be [3, rows]");
   check_aligned(q, "q");
   check_aligned(k, "k");
   check_aligned(scales, "scales");
   check_aligned(weights, "weights");
   check_aligned(out, "out");
+  check_aligned(codes, "codes");
+  check_aligned(values, "values");
+  check_aligned(indices, "indices");
 
   torch::stable::accelerator::DeviceGuard guard(dev);
-  const cudaStream_t stream = get_current_cuda_stream(dev);
-  const uint32_t urows = static_cast<uint32_t>(rows),
-                 ukeys = static_cast<uint32_t>(keys),
-                 ublocks = static_cast<uint32_t>(blocks),
-                 topk = static_cast<uint32_t>(out.size(1));
-  const auto* starts_p = static_cast<const uint32_t*>(starts.data_ptr());
-  const auto* ends_p = static_cast<const uint32_t*>(ends.data_ptr());
-  auto* out_p = static_cast<int*>(out.data_ptr());
-  // Q: rows * 32 head rows of 128 bytes, a block's 256 per box; K: keys rows of
-  // 128 bytes, a tile's 256 per box (both 128B-swizzled); per-key scales: a
-  // tile's 256; weights: a block's 8 rows of 32.
-  const int head_rows = int(rows) * int(kNumHeads);
-  auto tq = make_2d(q.data_ptr(), CU_TENSOR_MAP_DATA_TYPE_UINT8, 1, kHeadDim,
-                    head_rows, kHeadDim, kBlockRows * kNumHeads, kHeadDim, 128);
-  auto tk = make_2d(k.data_ptr(), CU_TENSOR_MAP_DATA_TYPE_UINT8, 1, kHeadDim,
-                    int(keys), kHeadDim, kTileKeys, kHeadDim, 128);
-  auto ts = make_2d(scales.data_ptr(), CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4,
-                    int(keys), 1, kTileKeys, 1, 0, 0);
-  auto tw = make_2d(weights.data_ptr(), CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4,
-                    kNumHeads, int(rows), kNumHeads, kBlockRows, kNumHeads, 0);
-
-  STD_TORCH_CHECK(counter.numel() == 2, "counter must be [2]");
-  constexpr int64_t kCtaRows = kSlotsPerCta * kBlockRows;
-  STD_TORCH_CHECK(values.dim() == 2 && values.size(1) == kCandidatesPerRow &&
-                      values.size(0) % kCtaRows == 0 && indices.dim() == 2 &&
-                      indices.size(0) == values.size(0) &&
-                      indices.size(1) == kCandidatesPerRow,
-                  "values/indices must be [8 * slots, 16384], slots even");
-  STD_TORCH_CHECK(values.size(0) > 0, "the candidate workspace is empty");
-  STD_TORCH_CHECK(retained.dim() == 2 && retained.size(1) == kRetainedPerRow &&
-                      retained.size(0) == values.size(0) &&
-                      retained_indices.dim() == 2 &&
-                      retained_indices.size(0) == retained.size(0) &&
-                      retained_indices.size(1) == kRetainedPerRow,
-                  "retained/retained_indices must be [8 * slots, 4096]");
-  STD_TORCH_CHECK(
-      counts.numel() >= blocks * kBlockRows && defer.numel() >= blocks,
-      "per-row workspace too small");
-  // One persistent CTA per SM (capped by the blocks and the workspace slots);
-  // CTA c owns candidate slots 2c and 2c + 1.
-  const uint32_t grid = static_cast<uint32_t>(std::min<int64_t>(
-      {int64_t(sm_count(dev)), blocks, values.size(0) / kCtaRows}));
-  LaunchConfig c;
-  const cudaError_t config_err = launch_config(dev, ukeys, topk, c);
-  STD_TORCH_CHECK(config_err != cudaErrorInvalidConfiguration,
-                  "fused_mqa_topk_prefill needs more shared memory per block "
-                  "than this GPU allows");
-  check_cuda(config_err);
-  auto tks = make_strided_kv(k.data_ptr(), c.sample_groups, c.sample_stride);
-  const fused_mqa_topk::rescan::RescanBuffers rescan{
-      static_cast<float*>(retained.data_ptr()),
-      static_cast<int*>(retained_indices.data_ptr())};
-  c.kernel<<<grid, kNumThreads, c.smem, stream>>>(
-      urows, ukeys, starts_p, ends_p, out_p,
-      static_cast<uint16_t*>(values.data_ptr()),
-      static_cast<int*>(indices.data_ptr()),
-      static_cast<int*>(counts.data_ptr()), rescan, c.phase_bytes,
-      c.sample_target, c.sample_stride, c.sample_groups, c.sample_tiles,
-      static_cast<const float*>(scales.data_ptr()), tks, tq, ts, tk, tw,
-      ublocks, static_cast<uint32_t*>(counter.data_ptr()),
-      static_cast<int*>(defer.data_ptr()));
-  check_cuda(cudaGetLastError());
+  if (heads == 32) {
+    run<32>(q, k, scales, weights, starts, ends, out, counter, codes, values,
+            indices, row_state, recovery);
+  } else {
+    run<64>(q, k, scales, weights, starts, ends, out, counter, codes, values,
+            indices, row_state, recovery);
+  }
 }
