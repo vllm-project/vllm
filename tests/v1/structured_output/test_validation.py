@@ -361,6 +361,21 @@ def test_auto_backend_falls_back_on_unsupported_schema(schema, expected_backend)
     assert params.structured_outputs._backend == expected_backend
 
 
+@pytest.mark.parametrize("backend", ["auto", "xgrammar", "guidance", "outlines"])
+def test_disable_any_whitespace_allowed(backend):
+    """The default "auto" backend resolves to xgrammar, guidance or outlines,
+    all of which honour the flag, so it must not be refused at startup."""
+    config = StructuredOutputsConfig(backend=backend, disable_any_whitespace=True)
+    assert config.disable_any_whitespace
+
+
+def test_disable_any_whitespace_rejected_for_lm_format_enforcer():
+    with pytest.raises(ValueError, match="disable_any_whitespace"):
+        StructuredOutputsConfig(
+            backend="lm-format-enforcer", disable_any_whitespace=True
+        )
+
+
 # ================================================
 # Test validate_structured_outputs functionality
 # ================================================
