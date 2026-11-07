@@ -36,6 +36,7 @@ class Question:
     instructions: str
     options: tuple[Option, ...]
     labels: tuple[str, ...]
+    winnow_options: tuple[str, ...] | None = None
 
 
 class QuestionType(ABC):
