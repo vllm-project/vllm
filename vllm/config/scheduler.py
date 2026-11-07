@@ -87,6 +87,14 @@ class SchedulerConfig:
     and loads start only when a running slot is free.
     """
 
+    max_async_kv_loads_per_step: int | None = Field(default=None, ge=1)
+    """Maximum number of async KV connector loads (e.g. a P/D NIXL pull) that
+    start in one scheduling step. Each start allocates KV blocks for the whole
+    prompt on the main thread, and with data parallelism every rank waits for the
+    slowest step. ``max_num_inflight_kv_loads`` bounds how many loads are held;
+    this bounds how fast they start. ``None`` (default) means no limit.
+    """
+
     long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens. 0 disables the cap (default).

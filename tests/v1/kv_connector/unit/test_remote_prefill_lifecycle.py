@@ -36,6 +36,32 @@ def _kv_fetch_stages(scheduler) -> tuple[int, ...]:
     return tuple(scheduler._kv_fetch_counts[s] for s in KV_FETCH_STAGES)
 
 
+@pytest.mark.parametrize("max_num_seqs, max_inflight", [(16, None), (16, 8), (1, 8)])
+def test_max_async_kv_loads_per_step(max_num_seqs, max_inflight):
+    """At most N loads start per step, also under the in-flight cap and while the
+    batch is full, when loads leave from async_kv_waiting."""
+    vllm_config = create_vllm_config(max_num_seqs=max_num_seqs)
+    vllm_config.scheduler_config.max_async_kv_loads_per_step = 2
+    vllm_config.scheduler_config.max_num_inflight_kv_loads = max_inflight
+    scheduler = create_scheduler(vllm_config)
+    block_size = vllm_config.cache_config.block_size
+    local = create_request(block_size=block_size, num_tokens=block_size)
+    scheduler.add_request(local)
+    scheduler_output = scheduler.schedule()
+    for _ in range(5):
+        scheduler.add_request(
+            create_request(
+                block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+            )
+        )
+    for num_loading in (2, 4, 5):
+        scheduler.update_from_output(
+            scheduler_output, create_model_runner_output([local])
+        )
+        scheduler_output = scheduler.schedule()
+        assert _kv_fetch_stages(scheduler)[1] == num_loading
+
+
 def _remote_scheduler(max_num_seqs: int, max_num_inflight_kv_loads: int):
     vllm_config = create_vllm_config(max_num_seqs=max_num_seqs)
     vllm_config.scheduler_config.max_num_inflight_kv_loads = max_num_inflight_kv_loads
