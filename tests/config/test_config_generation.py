@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
+import os
+
 import pytest
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.quantization.quark.utils import deep_compare
+from vllm.platforms.interface import Platform
 
 
 def test_cuda_empty_vs_unset_configs(monkeypatch: pytest.MonkeyPatch):
@@ -171,3 +175,21 @@ def test_generation_config_penalties_survive_diff_sampling_filter():
     assert diff["presence_penalty"] == 1.1
     assert diff["frequency_penalty"] == 0.7
     assert diff["temperature"] == 0.9
+
+
+@pytest.mark.parametrize("value", ["0", "", "true"])
+def test_model_runner_v1_env_fails_startup(monkeypatch, value):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", value)
+    with pytest.raises(ValueError, match="Model Runner V1 has been removed"):
+        Platform.validate_environ(hard_fail=False)
+
+
+def test_model_runner_v2_env_only_warns(monkeypatch, caplog_vllm):
+    """Unlike an unknown variable, it must not fail even with hard_fail."""
+    for env in list(os.environ):
+        if env.startswith("VLLM_"):
+            monkeypatch.delenv(env)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
+        Platform.validate_environ(hard_fail=True)
+    assert "VLLM_USE_V2_MODEL_RUNNER=1 is redundant" in caplog_vllm.text

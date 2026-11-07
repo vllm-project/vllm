@@ -3,7 +3,6 @@
 
 import torch
 
-import vllm.envs as envs
 from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import (
     CacheConfig,
@@ -75,7 +74,6 @@ def create_scheduler(
     max_model_len: int | None = None,
     num_speculative_tokens: int | None = None,
     speculative_method: str | None = None,
-    parallel_drafting: bool = False,
     skip_tokenizer_init: bool = False,
     async_scheduling: bool = False,
     pipeline_parallel_size: int = 1,
@@ -83,7 +81,6 @@ def create_scheduler(
     num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
-    use_v2_model_runner: bool | None = None,
     kv_cache_spec: KVCacheSpec | None = None,
     runner: RunnerOption = "auto",
     per_request_spec_decode_metrics: str = "none",
@@ -194,7 +191,6 @@ def create_scheduler(
             spec_kwargs["prompt_lookup_max"] = num_speculative_tokens
             spec_kwargs["prompt_lookup_min"] = 1
         speculative_config = SpeculativeConfig(**spec_kwargs)
-        speculative_config.parallel_drafting = parallel_drafting
 
     ec_transfer_config = (
         ECTransferConfig(
@@ -252,9 +248,6 @@ def create_scheduler(
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
-    if use_v2_model_runner is None:
-        use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER is not False
-    scheduler.use_v2_model_runner = use_v2_model_runner
     return scheduler
 
 

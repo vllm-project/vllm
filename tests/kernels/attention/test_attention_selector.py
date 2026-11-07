@@ -501,7 +501,7 @@ def test_non_causal_backend_selection(
 ):
     """Test that use_non_causal on AttentionConfig controls backend filtering.
 
-    DFlashProposer sets use_non_causal=True on the draft model's
+    DFlash draft model configs set use_non_causal=True on the
     AttentionConfig so only non-causal-capable backends are selected.
     The target model keeps use_non_causal=False (default) and can use
     any backend.

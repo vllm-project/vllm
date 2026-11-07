@@ -14,7 +14,6 @@ from vllm.config import CUDAGraphMode
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
 from ...utils import check_logprobs_close, check_outputs_equal
 
@@ -207,15 +206,11 @@ def test_mamba_cache_cg_padding(
     _set_conv_state_layout(monkeypatch, conv_state_layout)
 
     vllm_config = EngineArgs(model=model, trust_remote_code=True).create_engine_config()
-    cudagraph_dispatcher = CudagraphDispatcher(vllm_config)
-    cudagraph_dispatcher.initialize_cudagraph_keys(
-        vllm_config.compilation_config.cudagraph_mode
-    )
-    if cudagraph_dispatcher.cudagraph_mode == CUDAGraphMode.NONE:
+    compilation_config = vllm_config.compilation_config
+    if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
         pytest.skip("CUDA/XPU graph is disabled. Please enable it to run this test.")
-    while (
-        len(example_prompts)
-        == cudagraph_dispatcher.dispatch(len(example_prompts))[1].num_tokens
+    while len(example_prompts) in (
+        compilation_config.decode_cudagraph_capture_request_sizes or ()
     ):
         example_prompts.append(example_prompts[0])
 

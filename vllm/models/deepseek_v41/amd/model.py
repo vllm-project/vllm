@@ -622,7 +622,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         cut = max(config.kv_source_layer_ids)
         if (
             vllm_config.cache_config.swa_bounded_replay
-            and vllm_config.use_v2_model_runner
             and cut < self.end_layer - 1
             and self._decoder_replay_supported(vllm_config, cut)
         ):
@@ -769,14 +768,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 image_mask = image_sentinel_mask(input_ids)
                 engram_mask = ~image_mask
                 if lookback_token_ids is None:
-                    if not self.engram_hash.use_slot_cache:
-                        raise NotImplementedError(
-                            "engram needs `lookback_token_ids` from the model "
-                            "runner (the DBO/ubatch wrapper drops model kwargs)"
-                        )
-                    num_reqs = swa_metadata.num_decodes + swa_metadata.num_prefills
-                    lookback_token_ids = input_ids.new_full(
-                        (num_reqs, self.engram_hash.lookback_depth), -1
+                    raise NotImplementedError(
+                        "engram needs `lookback_token_ids` from the model runner"
                     )
                 engram_hashes = self.engram_hash(
                     input_ids,
@@ -785,8 +778,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     image_mask,
                     lookback_token_ids,
                     image_sentinel_mask(lookback_token_ids),
-                    swa_metadata.slot_mapping,
-                    swa_metadata.block_table,
                 )
             else:
                 # DP-sharded lookups are collective, so a replica skipping the

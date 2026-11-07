@@ -450,12 +450,9 @@ def test_pp_mixed_precision_kv_cache():
         "--distributed-executor-backend",
         "mp",
     ]
-    env = {"VLLM_USE_V2_MODEL_RUNNER": "1"}
     compare_two_settings(
         "Qwen/Qwen3-0.6B",
         [*common_args, "--pipeline-parallel-size", "2"],
         common_args,
-        env,
-        env,
         method="generate_close",
     )

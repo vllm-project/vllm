@@ -217,9 +217,7 @@ class TestPushScheduler:
 
         scheduler_output = MagicMock()
         scheduler_output.scheduled_new_reqs = []
-        scheduler_output.scheduled_cached_reqs = MagicMock(
-            req_ids=[], resumed_req_ids=set()
-        )
+        scheduler_output.scheduled_cached_reqs = MagicMock(req_ids=[])
 
         # Patch parent build_connector_meta so we don't have to set up
         # all the base scheduler plumbing.
@@ -253,9 +251,7 @@ class TestPushScheduler:
         # Drain via build_connector_meta - lease still pending until WRITE.
         scheduler_output = MagicMock()
         scheduler_output.scheduled_new_reqs = []
-        scheduler_output.scheduled_cached_reqs = MagicMock(
-            req_ids=[], resumed_req_ids=set()
-        )
+        scheduler_output.scheduled_cached_reqs = MagicMock(req_ids=[])
         with patch.object(
             sched.__class__.__mro__[1],
             "build_connector_meta",
@@ -317,9 +313,7 @@ class TestPushScheduler:
 
         scheduler_output = MagicMock()
         scheduler_output.scheduled_new_reqs = []
-        scheduler_output.scheduled_cached_reqs = MagicMock(
-            req_ids=[], resumed_req_ids=set()
-        )
+        scheduler_output.scheduled_cached_reqs = MagicMock(req_ids=[])
         with patch.object(
             sched.__class__.__mro__[1],
             "build_connector_meta",

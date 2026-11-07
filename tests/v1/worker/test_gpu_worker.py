@@ -20,11 +20,13 @@ from vllm.v1.worker.startup_plan import (
 )
 
 
-def test_v2_gpu_worker_requires_triton(monkeypatch):
+def test_gpu_worker_requires_triton(monkeypatch):
     monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
-    monkeypatch.setattr(gpu_worker.current_platform, "is_cpu", lambda: False)
-    config = SimpleNamespace(use_v2_model_runner=True)
-    with pytest.raises(ValueError, match="Model Runner V2 requires Triton"):
+    monkeypatch.setattr(
+        gpu_worker.current_platform, "uses_standalone_cpu_model_runner", lambda: False
+    )
+    config = SimpleNamespace()
+    with pytest.raises(ValueError, match="model runner requires Triton"):
         gpu_worker.Worker(
             config,
             local_rank=0,
@@ -279,24 +281,21 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
 
 
 @pytest.mark.parametrize(
-    "use_v2,extensible,cudagraphs,estimate_enabled,estimate,warns",
+    "extensible,cudagraphs,estimate_enabled,estimate,warns",
     [
-        # MRV1: the flag decides whether the estimate runs and is applied.
-        (False, False, True, True, 3, False),
-        (False, False, True, False, 3, True),
-        # MRV2 with the extensible cache: the estimate is 0 by design, and
-        # neither flag value warns about unaccounted graph memory.
-        (True, True, True, True, 0, False),
-        (True, True, True, False, 0, False),
-        # MRV2 fallback (extensible cache off).
-        (True, False, True, True, 3, False),
-        (True, False, True, False, 3, True),
-        # MRV2 with no graphs to capture and the flag at 1.
-        (True, False, False, True, 0, False),
+        # With the extensible cache: the estimate is 0 by design, and neither
+        # flag value warns about unaccounted graph memory.
+        (True, True, True, 0, False),
+        (True, True, False, 0, False),
+        # Fallback (extensible cache off).
+        (False, True, True, 3, False),
+        (False, True, False, 3, True),
+        # No graphs to capture and the flag at 1.
+        (False, False, True, 0, False),
     ],
 )
 def test_cudagraph_memory_profile_runs_only_when_applied(
-    monkeypatch, use_v2, extensible, cudagraphs, estimate_enabled, estimate, warns
+    monkeypatch, extensible, cudagraphs, estimate_enabled, estimate, warns
 ):
     """The graph memory estimate is a throwaway capture pass; with the
     estimate disabled it is neither run nor subtracted from the KV cache
@@ -319,7 +318,6 @@ def test_cudagraph_memory_profile_runs_only_when_applied(
             )
         ),
         randomize_dummy_inputs=False,
-        use_v2_model_runner=use_v2,
         cache_config=SimpleNamespace(
             kv_cache_memory_bytes=None,
             gpu_memory_utilization=0.9,
@@ -577,7 +575,6 @@ def test_execute_model_waits_previous_pp_send_before_forward(
                 pipeline_parallel_size=2, distributed_executor_backend="mp"
             ),
         ),
-        use_v2_model_runner=True,
         model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
         annotate_profile=lambda scheduler_output: nullcontext(),
         _pp_send_work=[previous_tensor_send],
@@ -657,7 +654,6 @@ def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
         vllm_config=SimpleNamespace(kv_transfer_config=None),
         model_runner=runner,
         _maybe_get_memory_pool_context=lambda tag: nullcontext(),
-        _v2_model_runner=lambda: runner,
     )
     # Warmup commits what every rank can: another can commit two fewer.
     monkeypatch.setattr(gpu_worker, "_min_across_ranks", lambda value: value - 2)

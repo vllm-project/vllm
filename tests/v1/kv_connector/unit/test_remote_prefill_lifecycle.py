@@ -656,13 +656,9 @@ def test_cannot_schedule_after_recv():
     # request is retrieved from preempted list.
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output(reqs=[request_remote])
-    # V2 emits a resumed (previously preempted) request as a NewRequestData
+    # A resumed (previously preempted) request is emitted as a NewRequestData
     # rather than a cached request.
-    if scheduler.use_v2_model_runner:
-        num_computed = scheduler_output.scheduled_new_reqs[0].num_computed_tokens
-    else:
-        cached = scheduler_output.scheduled_cached_reqs
-        num_computed = cached.num_computed_tokens[0]
+    num_computed = scheduler_output.scheduled_new_reqs[0].num_computed_tokens
     assert num_computed == NUM_PROMPT_BLOCKS * BLOCK_SIZE
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 1
@@ -839,7 +835,6 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
     # Model returns no tokens for intermediate prefill chunk
     intermediate_output = ModelRunnerOutput(
         req_ids=[request.request_id],
-        req_id_to_index={request.request_id: 0},
         sampled_token_ids=[[]],
     )
     scheduler.update_from_output(scheduler_output, intermediate_output)

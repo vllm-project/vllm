@@ -5,8 +5,6 @@
 2. test multi loras request
 """
 
-import os
-
 import pytest
 
 from tests.utils import multi_gpu_test
@@ -39,18 +37,6 @@ def format_chatml_messages(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": prompt},
     ]
-
-
-@pytest.fixture(autouse=True)
-def set_mrv2_env():
-    original = os.environ.get("VLLM_USE_V2_MODEL_RUNNER", "0")
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
-    yield
-
-    if original is None:
-        os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
-    else:
-        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = original
 
 
 def make_add_lora_request(name: str, path: str):

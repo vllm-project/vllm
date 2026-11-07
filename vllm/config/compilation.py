@@ -23,7 +23,6 @@ from vllm.config.utils import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if TYPE_CHECKING:
@@ -1521,12 +1520,16 @@ class CompilationConfig:
         min_cg_support: "AttentionCGSupport",
         min_cg_attn_backend: str | None,
         uniform_decode_query_len: int = 1,
-        use_v2_model_runner: bool = False,
         kv_cache_config: "KVCacheConfig | None" = None,
         max_num_reqs: int | None = None,
         is_profiling: bool = False,
         piecewise_capture_available: bool = True,
     ) -> CUDAGraphMode:
+        """Resolve the CUDA Graphs mode the attention backends can support.
+
+        Downgrades the configured mode to the best supported one and stores it, or
+        raises a `ValueError` if the requested CUDA Graphs cannot be supported.
+        """
         from vllm.v1.attention.backend import AttentionCGSupport
 
         cudagraph_mode = self.cudagraph_mode
@@ -1636,18 +1639,6 @@ class CompilationConfig:
                 "and make sure compilation mode is VLLM_COMPILE"
             )
 
-        # MRV1 adjusts cudagraph sizes to be a multiple of uniform_decode_query_len
-        # to avoid: https://github.com/vllm-project/vllm/issues/28207 and temp-fix:
-        # https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
-        # MRV2 takes separate uniform decode and mixed capture sizes and doesn't
-        # need below: https://github.com/vllm-project/vllm/pull/45953
-        if (
-            not use_v2_model_runner
-            and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and uniform_decode_query_len > 1
-        ):
-            self.adjust_cudagraph_sizes_for_spec_decode(uniform_decode_query_len)
-
         # For Mamba models with FULL decode cudagraphs, each decode
         # sequence needs one Mamba cache block. The decode cudagraph
         # dispatcher already caps batch sizes at max_num_seqs, so we just
@@ -1674,36 +1665,6 @@ class CompilationConfig:
 
         self.cudagraph_mode = cudagraph_mode
         return cudagraph_mode
-
-    def adjust_cudagraph_sizes_for_spec_decode(self, uniform_decode_query_len: int):
-        multiple_of = uniform_decode_query_len
-        if not self.cudagraph_capture_sizes or multiple_of <= 1:
-            return
-
-        assert self.max_cudagraph_capture_size is not None
-        rounded_sizes = sorted(
-            set(
-                round_up(size, multiple_of)
-                for size in self.cudagraph_capture_sizes
-                if round_up(size, multiple_of) <= self.max_cudagraph_capture_size
-            )
-        )
-
-        if len(rounded_sizes) == 0 and multiple_of <= self.max_cudagraph_capture_size:
-            # if one valid but would be round_down use that
-            rounded_sizes = [multiple_of]
-
-        if len(rounded_sizes) == 0:
-            raise ValueError(
-                f"No valid cudagraph sizes after rounding to multiple of {multiple_of} "
-                f"(num_speculative_tokens + 1)"
-                f" please adjust num_speculative_tokens ({uniform_decode_query_len - 1}"
-                f") or max_cudagraph_capture_size ({self.max_cudagraph_capture_size})"
-                f" or cudagraph_capture_sizes ({self.cudagraph_capture_sizes})"
-            )
-
-        self.max_cudagraph_capture_size = rounded_sizes[-1]
-        self.cudagraph_capture_sizes = rounded_sizes
 
     def get_compile_ranges(self) -> list[Range]:
         """Get the compile ranges for the compilation config."""

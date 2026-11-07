@@ -276,7 +276,6 @@ def _assert_outputs_match(ref_outputs, shard_outputs, params) -> None:
 
 
 def _configure_test_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     # Required for the collective_rpc mode check below.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     # Queue every request before the first step, so both boots schedule the

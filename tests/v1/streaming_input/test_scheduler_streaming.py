@@ -40,7 +40,7 @@ STOP_TOKEN = 128001
 
 
 class CachedState(TypedDict):
-    """The subset of `CachedRequestState` the model runner is simulated to cache."""
+    """The subset of request state the model runner is simulated to cache."""
 
     req_id: str
     prompt_token_ids: list[int]
@@ -130,7 +130,6 @@ class TestStreamingScheduler(unittest.TestCase):
                 )
                 runner_output = ModelRunnerOutput(
                     req_ids=[session.request_id],
-                    req_id_to_index={session.request_id: 0},
                     sampled_token_ids=[[STOP_TOKEN]],
                     logprobs=logprobs,
                     prompt_logprobs_dict={},
@@ -509,9 +508,7 @@ class TestStreamingScheduler(unittest.TestCase):
         )
 
         # Step 3: Simulate model runner caching the prompt_token_ids
-        # This simulates gpu_model_runner.py:706-720 CachedRequestState creation
-        # The model runner makes a copy of prompt_token_ids when creating
-        # CachedRequestState
+        # The model runner makes a copy of prompt_token_ids when adding the request
         cached_state_cycle1: CachedState = {
             "req_id": session.request_id,
             "prompt_token_ids": list(
@@ -530,7 +527,6 @@ class TestStreamingScheduler(unittest.TestCase):
 
         mro_cycle1 = ModelRunnerOutput(
             req_ids=[session.request_id],
-            req_id_to_index={session.request_id: 0},
             sampled_token_ids=[[output_token_1]],
             logprobs=None,
             prompt_logprobs_dict={session.request_id: None},
@@ -605,7 +601,6 @@ class TestStreamingScheduler(unittest.TestCase):
 
         mro_cycle2 = ModelRunnerOutput(
             req_ids=[session.request_id],
-            req_id_to_index={session.request_id: 0},
             sampled_token_ids=[[output_token_2]],
             logprobs=None,
             prompt_logprobs_dict={session.request_id: None},
@@ -667,8 +662,7 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session._output_token_ids == []  # Output tokens are cleared
 
         # Step 14: Model runner caches NEW prompt_token_ids reference
-        # The model runner makes a copy of prompt_token_ids when creating
-        # CachedRequestState
+        # The model runner makes a copy of prompt_token_ids when adding the request
         new_req_data_cycle3 = scheduler_output_cycle3.scheduled_new_reqs[0]
         cached_state_cycle3: CachedState = {
             "req_id": session.request_id,
@@ -703,7 +697,6 @@ class TestStreamingScheduler(unittest.TestCase):
 def _model_output(request_id: str, token_ids: list[int]) -> ModelRunnerOutput:
     return ModelRunnerOutput(
         req_ids=[request_id],
-        req_id_to_index={request_id: 0},
         sampled_token_ids=[token_ids],
         logprobs=None,
         prompt_logprobs_dict={request_id: None},

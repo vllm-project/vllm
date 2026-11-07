@@ -30,7 +30,7 @@ but at 32 and 64 rows they lose to vLLM's decode, so a served step is capped at 
 ## Enabling
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=1 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_FP4BMM=1 \
+VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_FP4BMM=1 \
   vllm serve <Kimi-K3> -tp 8 --max-num-seqs 1 \
   [--decode-context-parallel-size 8 --dcp-comm-backend a2a] --kv-cache-dtype fp8 \
   --speculative-config '{"method": "dspark", "num_speculative_tokens": 7, ...}' \
@@ -42,12 +42,12 @@ There are no other options. `decode_backend=auto` (the default) runs vLLM's deco
 ## Supported deployments
 
 TP8 on MI355X with all 256 CUs, decode context parallel 1 or 8, speculative
-decoding, Model Runner V2, AITER (`VLLM_ROCM_USE_AITER=1`: K2's MoE is AITER's
-SiTU MXFP4 MoE), BF16 conv / FP32 recurrent KDA states. `--max-num-seqs` is 1, 2,
-4 or 8, with max_num_seqs x (num_speculative_tokens + 1) <= 16 (a full step is
-one launch). DCP1 runs M1c only: 3 or 7 speculative tokens, max_num_seqs 1 or 2.
-M1 assumes no KV cache interleave (it writes the slots vLLM maps), but at DCP8
-vLLM's AITER MLA backend serves DSpark at interleave 1 only.
+decoding, AITER (`VLLM_ROCM_USE_AITER=1`: K2's MoE is AITER's SiTU MXFP4 MoE),
+BF16 conv / FP32 recurrent KDA states. `--max-num-seqs` is 1, 2, 4 or 8, with
+max_num_seqs x (num_speculative_tokens + 1) <= 16 (a full step is one launch).
+DCP1 runs M1c only: 3 or 7 speculative tokens, max_num_seqs 1 or 2. M1 assumes
+no KV cache interleave (it writes the slots vLLM maps), but at DCP8 vLLM's AITER
+MLA backend serves DSpark at interleave 1 only.
 
 M1 also needs the `ROCM_AITER_MLA` attention backend (it reads AITER MLA's decode
 metadata), an fp8 E4M3 KV cache (`fp8` or `fp8_e4m3`) and MLA's W_UK / W_UV as
@@ -67,8 +67,7 @@ If you request the specialized decode for anything else, startup fails with one
   routed-expert capture, sleep mode, CPU weight offload, weight updates,
   no speculative decoding, an unserved max_num_seqs / speculative tokens / DCP,
   adaptive verification, dynamic speculative decoding, ReplaySSM / RecoverSSM,
-  the V1 model runner, `STOCK_TORCH_COMPILE`, another model's shapes, another
-  GPU.
+  `STOCK_TORCH_COMPILE`, another model's shapes, another GPU.
 - **Loaded weights, when the model state builds the executor:** each kernel
   layer's weight shapes and dtypes and the MoE backend (`AITER_MXFP4_BF16`, K3
   SiTU). Each MLA layer's attention backend, shapes, gate, DCP setup, fp8 E4M3

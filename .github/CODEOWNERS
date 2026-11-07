@@ -115,7 +115,6 @@
 /vllm/v1/executor @njhill
 /vllm/v1/worker @njhill
 /vllm/v1/worker/mamba_utils.py @njhill @ZJY0516
-/vllm/v1/worker/kv_connector_model_runner_mixin.py @orozery @NickLucche @ivanium
 /vllm/v1/worker/encoder_cudagraph.py @shen-shanshan
 /vllm/v1/worker/encoder_cudagraph_defs.py @shen-shanshan
 

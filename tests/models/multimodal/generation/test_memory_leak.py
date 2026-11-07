@@ -196,7 +196,6 @@ def _live_mm_payloads(worker) -> dict[str, list[bool]]:
 @pytest.mark.core_model
 def test_consumed_cpu_inputs_released_during_generation(llm) -> None:
     """An M-RoPE model must release pixels while its request is still decoding."""
-    assert llm.llm_engine.vllm_config.use_v2_model_runner
     engine = llm.llm_engine
     engine.add_request(
         "cpu-input-lifetime",

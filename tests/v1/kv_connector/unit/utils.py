@@ -4,7 +4,7 @@ import tempfile
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from itertools import chain, count
+from itertools import count
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import Mock
 
@@ -322,7 +322,6 @@ def create_model_runner_output(
     """Make dummy model runner output for testing."""
     # Make request data.
     req_ids = [req.request_id for req in reqs]
-    req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
 
     # Make sampled tokens.
     sampled_token = EOS_TOKEN_ID if use_eos else token_id
@@ -349,7 +348,6 @@ def create_model_runner_output(
     # Make output data structure.
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index=req_id_to_index,
         sampled_token_ids=sampled_token_ids,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -487,16 +485,8 @@ class MockKVConnector(KVConnectorBase_V1):
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         metadata = MockKVConnectorMetadata()
-        cached_reqs = scheduler_output.scheduled_cached_reqs
-        for req_id in chain(
-            (req.req_id for req in scheduler_output.scheduled_new_reqs),
-            (
-                req_id
-                for req_id in cached_reqs.req_ids
-                if req_id in cached_reqs.resumed_req_ids
-            ),
-        ):
-            metadata.requests.append({"req_id": req_id})
+        for req in scheduler_output.scheduled_new_reqs:
+            metadata.requests.append({"req_id": req.req_id})
         return metadata
 
     def start_load_kv(self, kv_caches, finished_req_ids):

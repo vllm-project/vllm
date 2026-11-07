@@ -122,7 +122,7 @@ def _dspark_speculative_config(tmp_path, **draft) -> SpeculativeConfig:
 
 def test_dspark_speculative_config_preserves_architecture(tmp_path):
     config = _dspark_speculative_config(tmp_path)
-    assert config.parallel_drafting
+    assert config.speculator_config.parallel_drafting
     assert config.draft_model_config.architectures == ["MuseSparkDSparkModel"]
     assert isinstance(config.draft_model_config.hf_config, MuseSparkDSparkConfig)
 

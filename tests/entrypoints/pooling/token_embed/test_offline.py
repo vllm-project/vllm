@@ -241,12 +241,8 @@ def test_e5_late_chunking_mixed_requests(llm: LLM, normalize: bool):
         )
 
 
-@pytest.mark.parametrize("use_v2_runner", [False, True])
-def test_late_chunking_recomputes_cached_prefix_with_chunked_prefill(
-    vllm_runner, monkeypatch, use_v2_runner
-):
+def test_late_chunking_recomputes_cached_prefix_with_chunked_prefill(vllm_runner):
     # Dummy weights suffice for testing scheduling and reduction of the same states.
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2_runner else "0")
     with vllm_runner(
         "openai-community/gpt2",
         runner="pooling",

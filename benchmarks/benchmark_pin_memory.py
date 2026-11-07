@@ -24,13 +24,6 @@ Run only throughput or latency tests::
     python benchmarks/benchmark_pin_memory.py -v -k test_throughput
     python benchmarks/benchmark_pin_memory.py -v -k test_latency
 
-Run only the v1 or v2 runner variant::
-
-    python benchmarks/benchmark_pin_memory.py -v -k v1
-    python benchmarks/benchmark_pin_memory.py -v -k v2
-
-Note: on WSL2, v1 runner tests are skipped because pin memory is not available
-for the v1 runner without cpu_offload_gb.  Run on other platforms to exercise v1.
 """
 
 import argparse
@@ -90,14 +83,8 @@ def _skip_if_pin_memory_not_available(engine_args_kwargs: dict) -> None:
     with set_current_vllm_config(vllm_config):
         pu.is_pin_memory_available.cache_clear()
         if not pu.is_pin_memory_available():
-            import os
-
-            runner = "v2" if os.environ.get("VLLM_USE_V2_MODEL_RUNNER") == "1" else "v1"
             model = engine_args_kwargs.get("model", "unknown")
-            print(
-                f"\033[33mSKIP: pin_memory not available for "
-                f"{runner} runner, model={model}\033[0m"
-            )
+            print(f"\033[33mSKIP: pin_memory not available, model={model}\033[0m")
             pytest.skip("pin_memory not available for this configuration")
 
 
@@ -105,7 +92,6 @@ def _throughput_worker(
     pin: bool,
     engine_args_kwargs: dict,
     q: "multiprocessing.Queue[float]",
-    v2_mode: bool = False,
 ) -> None:
     """Run throughput benchmark in a fresh spawn subprocess.
 
@@ -113,9 +99,9 @@ def _throughput_worker(
     so the methodology matches the official benchmark.  Results are written to a
     temp JSON file and forwarded through the queue as tokens/s.
 
-    v2_mode: when True, monkeypatches is_uva_available() to always return True
-    so the v2 model runner's UVA buffers remain functional even when pin=False.
-    This isolates the non-UVA pin_memory paths in v2.
+    is_uva_available() is monkeypatched to always return True so the model
+    runner's UVA buffers remain functional even when pin=False. This isolates
+    the non-UVA pin_memory paths.
     """
     import vllm.utils.platform_utils as pu
     from vllm.platforms import current_platform
@@ -123,8 +109,7 @@ def _throughput_worker(
     pu.is_pin_memory_available.cache_clear()
     pu.is_uva_available.cache_clear()
     type(current_platform).is_pin_memory_available = classmethod(lambda cls: pin)
-    if v2_mode:
-        pu.is_uva_available = lambda: True
+    pu.is_uva_available = lambda: True
 
     from vllm.benchmarks.throughput import add_cli_args
     from vllm.benchmarks.throughput import main as throughput_main
@@ -161,13 +146,12 @@ def _throughput_worker(
 def _run_throughput_benchmark(
     pin: bool,
     engine_args_kwargs: dict,
-    v2_mode: bool = False,
 ) -> float:
     ctx = multiprocessing.get_context("spawn")
     q = ctx.Queue()
     p = ctx.Process(
         target=_throughput_worker,
-        args=(pin, engine_args_kwargs, q, v2_mode),
+        args=(pin, engine_args_kwargs, q),
     )
     p.start()
     p.join()
@@ -182,7 +166,6 @@ def _latency_worker(
     pin: bool,
     engine_args_kwargs: dict,
     q: "multiprocessing.Queue[dict]",
-    v2_mode: bool = False,
 ) -> None:
     """Run latency benchmark in a fresh spawn subprocess.
 
@@ -197,8 +180,7 @@ def _latency_worker(
     pu.is_pin_memory_available.cache_clear()
     pu.is_uva_available.cache_clear()
     type(current_platform).is_pin_memory_available = classmethod(lambda cls: pin)
-    if v2_mode:
-        pu.is_uva_available = lambda: True
+    pu.is_uva_available = lambda: True
 
     from vllm.benchmarks.latency import add_cli_args
     from vllm.benchmarks.latency import main as latency_main
@@ -231,13 +213,12 @@ def _latency_worker(
 def _run_latency_benchmark(
     pin: bool,
     engine_args_kwargs: dict,
-    v2_mode: bool = False,
 ) -> dict:
     ctx = multiprocessing.get_context("spawn")
     q = ctx.Queue()
     p = ctx.Process(
         target=_latency_worker,
-        args=(pin, engine_args_kwargs, q, v2_mode),
+        args=(pin, engine_args_kwargs, q),
     )
     p.start()
     p.join()
@@ -248,17 +229,10 @@ def _run_latency_benchmark(
     return q.get()
 
 
-@pytest.mark.parametrize(
-    "test_v2_runner",
-    [
-        pytest.param(False, id="v1"),
-        pytest.param(True, id="v2"),
-    ],
-)
 class TestPinnedMemory:
     """Verify pinned memory yields >= throughput vs unpinned via real vLLM inference."""
 
-    def test_throughput(self, monkeypatch, test_v2_runner, model, max_model_len):
+    def test_throughput(self, monkeypatch, model, max_model_len):
         """Benchmark throughput with pin_memory forced on then off.
 
         Delegates to vllm/benchmarks/throughput.py main() with the random
@@ -266,7 +240,6 @@ class TestPinnedMemory:
         start from a cold CUDA context, giving an unbiased comparison.
         """
         monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if test_v2_runner else "0")
 
         engine_args_kwargs = dict(
             model=model,
@@ -277,17 +250,12 @@ class TestPinnedMemory:
 
         _skip_if_pin_memory_not_available(engine_args_kwargs)
 
-        unpinned_tps = _run_throughput_benchmark(
-            False, engine_args_kwargs, v2_mode=test_v2_runner
-        )
-        pinned_tps = _run_throughput_benchmark(
-            True, engine_args_kwargs, v2_mode=test_v2_runner
-        )
+        unpinned_tps = _run_throughput_benchmark(False, engine_args_kwargs)
+        pinned_tps = _run_throughput_benchmark(True, engine_args_kwargs)
 
         pct_diff = (pinned_tps - unpinned_tps) / unpinned_tps * 100
-        runner = "v2" if test_v2_runner else "v1"
         print(
-            f"\n=== Throughput results ({runner} runner, {model}) ==="
+            f"\n=== Throughput results ({model}) ==="
             f"\npin_memory=True:  {pinned_tps:.1f} tok/s"
             f"\npin_memory=False: {unpinned_tps:.1f} tok/s"
             f"\nDifference: {pct_diff:+.1f}% (pinned vs unpinned)"
@@ -299,7 +267,7 @@ class TestPinnedMemory:
             f"unpinned ({unpinned_tps:.1f} tok/s)."
         )
 
-    def test_latency(self, monkeypatch, test_v2_runner, model, max_model_len):
+    def test_latency(self, monkeypatch, model, max_model_len):
         """Benchmark per-batch latency with pin_memory forced on then off.
 
         Follows vllm/benchmarks/latency.py: fixed dummy-token batch, warmup
@@ -308,7 +276,6 @@ class TestPinnedMemory:
         context without GPU memory pressure from the other run.
         """
         monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if test_v2_runner else "0")
 
         engine_args_kwargs = dict(
             model=model,
@@ -319,21 +286,16 @@ class TestPinnedMemory:
 
         _skip_if_pin_memory_not_available(engine_args_kwargs)
 
-        unpinned = _run_latency_benchmark(
-            False, engine_args_kwargs, v2_mode=test_v2_runner
-        )
-        pinned = _run_latency_benchmark(
-            True, engine_args_kwargs, v2_mode=test_v2_runner
-        )
+        unpinned = _run_latency_benchmark(False, engine_args_kwargs)
+        pinned = _run_latency_benchmark(True, engine_args_kwargs)
 
         pct_diff = (
             (pinned["avg_latency"] - unpinned["avg_latency"])
             / unpinned["avg_latency"]
             * 100
         )
-        runner = "v2" if test_v2_runner else "v1"
         print(
-            f"\n=== Latency results ({runner} runner, {model}) ==="
+            f"\n=== Latency results ({model}) ==="
             f"\npin_memory=True:  avg={pinned['avg_latency']:.3f}s"
             f"  p50={pinned['percentiles']['50']:.3f}s"
             f"  p99={pinned['percentiles']['99']:.3f}s"

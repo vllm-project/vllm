@@ -22,12 +22,9 @@ class SuffixSpeculatorConfig(SpeculatorConfig):
 
     @classmethod
     def configure(cls, spec: "SpeculativeConfig") -> None:
-        # Arctic Inference is only needed by the V1 model runner; its proposer
-        # checks for it. Model Runner V2 runs suffix decoding on the GPU.
         if spec.num_speculative_tokens is None:
-            # On V1, Arctic sizes each draft dynamically up to this limit. On
-            # V2 every slot is verified (unless adaptive verification trims
-            # it), so a deep default costs throughput at high concurrency.
+            # Every slot is verified (unless adaptive verification trims it),
+            # so a deep default costs throughput at high concurrency.
             spec.num_speculative_tokens = min(8, spec.suffix_decoding_max_tree_depth)
             logger.warning(
                 "Defaulted num_speculative_tokens to %s for suffix decoding.",

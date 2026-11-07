@@ -12,8 +12,6 @@ tolerance: 0.02
 # Measured TP1 acceptance length: 4.115; allow a 0.2 regression.
 min_acceptance_length: 3.915
 
-env:
-  VLLM_USE_V2_MODEL_RUNNER: "1"
 server_args: >-
   --tensor-parallel-size 2
   --max-model-len 4096

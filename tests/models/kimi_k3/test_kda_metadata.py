@@ -21,7 +21,6 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
     KimiK3KDAMetadataBuilder,
-    _mamba_get_block_table_tensor,
     stage_spec_decode_metadata,
 )
 from vllm.models.kimi_k3.nvidia.model import KimiLinearForCausalLM
@@ -218,7 +217,6 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         speculative_config=SimpleNamespace(
             num_speculative_tokens=2,
-            parallel_drafting=False,
             max_num_new_slots_for_drafting=0,
             enable_adaptive_verification=False,
             use_eagle_block_drop=Mock(return_value=False),
@@ -232,7 +230,6 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         additional_config={},
         num_speculative_tokens=2,
         num_hash_lookahead_tokens=0,
-        use_v2_model_runner=True,
     )
     builder = KimiK3KDAMetadataBuilder(
         kv_cache_spec=kv_cache_spec,
@@ -1043,43 +1040,6 @@ def test_stage_spec_decode_metadata_matches_pytorch():
     torch.testing.assert_close(staged_state_indices, expected_state_indices)
     torch.testing.assert_close(staged_query_start_loc, expected_query_start_loc)
     torch.testing.assert_close(staged_num_accepted_tokens, expected_num_accepted_tokens)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_aligned_block_table_matches_shared_gdn():
-    device = torch.device("cuda")
-    seq_lens = torch.tensor(
-        [0, 1, 15, 16, 17, 31, 32, 33, 511, 512, 513],
-        dtype=torch.int32,
-        device=device,
-    ).repeat(6)[:65]
-    block_table_storage = torch.arange(
-        seq_lens.numel() * 128,
-        dtype=torch.int32,
-        device=device,
-    ).reshape(seq_lens.numel(), 128)
-    block_table = block_table_storage[:, ::2]
-    kv_cache_spec = MambaSpec(
-        block_size=BLOCK_SIZE,
-        shapes=((16, 64),),
-        dtypes=(torch.float16,),
-        num_speculative_blocks=2,
-    )
-
-    expected = mamba_get_block_table_tensor(
-        block_table,
-        seq_lens,
-        kv_cache_spec,
-        "align",
-    )
-    actual = _mamba_get_block_table_tensor(
-        block_table,
-        seq_lens,
-        kv_cache_spec,
-        "align",
-    )
-
-    torch.testing.assert_close(actual, expected)
 
 
 def _build_non_spec(batch, is_prefilling, full_cuda_graph=False):

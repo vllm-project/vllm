@@ -149,10 +149,8 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         # the draft-logits hidden (compute_logits applies the LM head only) and
         # the recycled previous_hidden_states. Recycling the pre-final-norm
         # hidden mismatches the draft model's hnorm and lowers MTP acceptance;
-        # post-norm recycle matches deepseek_mtp.py (PR #45895). The tuple form
-        # is understood by both the V2 speculator (isinstance-tuple check) and
-        # the legacy proposer (model_returns_tuple is True for the
-        # DeepSeekMTPModel architecture).
+        # post-norm recycle matches deepseek_mtp.py (PR #45895). The speculator
+        # recognizes the tuple form with an isinstance check.
         if is_sequence_parallel:
             hidden_states, _ = self.shared_head.norm(hidden_states, residual)
             hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]

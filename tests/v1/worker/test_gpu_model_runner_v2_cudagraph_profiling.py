@@ -64,6 +64,7 @@ def _make_profiling_runner(
     runner.cudagraph_manager = _FakeCudaGraphManager(
         needs_capture, num_full_descs, piecewise_only
     )
+    runner.speculator = None
     runner.vllm_config = SimpleNamespace()
     runner.model_state = SimpleNamespace(
         supports_mm_inputs=encoder_only,

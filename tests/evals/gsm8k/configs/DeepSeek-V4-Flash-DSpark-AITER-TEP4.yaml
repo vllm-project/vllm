@@ -24,6 +24,5 @@ server_args: >-
   "draft_sample_method":"probabilistic",
   "enable_adaptive_verification":false}'
 env:
-  VLLM_USE_V2_MODEL_RUNNER: "1"
   VLLM_ROCM_USE_AITER: "1"
   VLLM_ROCM_USE_AITER_MOE: "1"

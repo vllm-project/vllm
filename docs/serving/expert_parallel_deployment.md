@@ -391,8 +391,8 @@ coordinates recovery across the engines.
 ### Configuring recovery
 
 Both retry and scale-down require `--enable-fault-tolerance`,
-`--enable-expert-parallel`, an FT-capable `--all2all-backend` (`nixl_ep` or
-`deepep_low_latency`), and the v2 model runner (`VLLM_USE_V2_MODEL_RUNNER=1`).
+`--enable-expert-parallel`, and an FT-capable `--all2all-backend` (`nixl_ep` or
+`deepep_low_latency`).
 Retry can recover from a fault when all workers remain alive.
 
 For scale-down recovery, also enable `--enable-eplb` and configure enough

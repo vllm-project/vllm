@@ -404,7 +404,6 @@ steps:
   device: h200_18gb
   working_dir: "/vllm-workspace"
   source_file_dependencies:
-    - vllm/v1/spec_decode/extract_hidden_states.py
     - vllm/model_executor/models/extract_hidden_states.py
     - vllm/transformers_utils/configs/extract_hidden_states.py
     - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
@@ -424,7 +423,6 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
-      - vllm/v1/spec_decode/extract_hidden_states.py
       - vllm/model_executor/models/extract_hidden_states.py
       - vllm/transformers_utils/configs/extract_hidden_states.py
       - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
@@ -443,7 +441,6 @@ steps:
   num_devices: 2
   working_dir: "/vllm-workspace"
   source_file_dependencies:
-    - vllm/v1/spec_decode/extract_hidden_states.py
     - vllm/model_executor/models/extract_hidden_states.py
     - vllm/transformers_utils/configs/extract_hidden_states.py
     - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
@@ -477,8 +474,6 @@ steps:
       - vllm/v1/attention/backends/
       - vllm/v1/attention/selector.py
       - vllm/v1/kv_cache_interface.py
-      - vllm/v1/spec_decode/extract_hidden_states.py
-      - vllm/v1/worker/gpu_model_runner.py
       - vllm/_aiter_ops.py
       - tests/v1/kv_connector/extract_hidden_states_integration/
       - vllm/platforms/rocm.py

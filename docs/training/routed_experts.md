@@ -13,7 +13,6 @@ The flag sets `AuxOutputConfig.enable_return_routed_experts` (full form: `--aux-
 
 Startup fails with a `ValueError` unless:
 
-- **Model Runner V2** is used (`VLLM_USE_V2_MODEL_RUNNER=1` if vLLM falls back to V1);
 - the runner is `generate` and the model is **MoE**;
 - **prefix caching is enabled** (the default). `--no-enable-prefix-caching` fails; the old v0.21 advice to disable it is wrong.
 
