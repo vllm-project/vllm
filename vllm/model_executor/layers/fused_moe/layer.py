@@ -342,6 +342,8 @@ def FusedMoEFactory(
                 )
                 else 1.0
             ),
+            # MoERunner appends the shared-expert gate logits only in this case.
+            has_shared_expert_gate=gate is not None and shared_expert_gate is not None,
             zero_expert_type=zero_expert_type,
             num_logical_experts=logical_num_experts,
             hash_indices_table=hash_indices_table,

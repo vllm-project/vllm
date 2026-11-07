@@ -51,6 +51,7 @@ def create_fused_moe_router(
     scoring_func: str = "softmax",
     num_fused_shared_experts: int = 0,
     shared_expert_weight: float = 1.0,
+    has_shared_expert_gate: bool = False,
     # grouped topk + fused topk bias parameters
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
@@ -98,6 +99,10 @@ def create_fused_moe_router(
         topk_group: Top-k within each group (for grouped routing)
         scoring_func: Scoring function to use ("softmax" or "sigmoid")
         num_fused_shared_experts: Number of fused shared experts (for ROCm AITER)
+        shared_expert_weight: Constant routing weight of the fused shared
+            experts (must be 1.0 for the AITER shared-expert router)
+        has_shared_expert_gate: Whether the last num_fused_shared_experts
+            columns of router_logits are shared-expert gate logits
         skip_padding: Whether to invalidate routes for padding rows
 
     Grouped topk and fused topk bias arguments:
@@ -247,6 +252,11 @@ def create_fused_moe_router(
             and scoring_func == "softmax"
             and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         ):
+            assert shared_expert_weight == 1.0, (
+                "The AITER shared-expert buffer is shared by all layers and "
+                "pre-filled with weight 1.0; got shared_expert_weight="
+                f"{shared_expert_weight}."
+            )
             router = AiterSharedRoutedFusedMoERouter(
                 top_k=top_k,
                 global_num_experts=global_num_experts,
@@ -254,6 +264,7 @@ def create_fused_moe_router(
                 num_fused_shared_experts=num_fused_shared_experts,
                 renormalize=renormalize,
                 scoring_func=scoring_func,
+                has_shared_expert_gate=has_shared_expert_gate,
             )
 
         else:
