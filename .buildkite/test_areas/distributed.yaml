@@ -13,6 +13,10 @@ steps:
   - vllm/distributed
   - "!vllm/distributed/kv_transfer/"
   - tests/distributed
+  # FP16 partial sums (VLLM_TP_FP16_PARTIAL_SUMS) tests in test_comm_ops.py
+  - vllm/model_executor/layers/linear.py
+  - vllm/model_executor/kernels/linear/
+  - vllm/lora/layers/row_parallel_linear.py
   commands:
   - pytest -v -s distributed/test_localization.py
   - pytest -v -s distributed/test_comm_ops.py

@@ -1830,7 +1830,8 @@ class RowParallelLinear(LinearBase):
         self._partial_sum_unscale = 2.0**shift
         if self._fp16_partials is not None:
             # An FP32 factor makes the unscale and the BF16 cast one kernel,
-            # computed in FP32 (an FP16 product could overflow).
+            # computed in FP32 (an FP16 product could overflow). It must be
+            # 1-D: a 0-dim factor would not promote the product to FP32.
             self.register_buffer(
                 "_partial_sum_unscale_fp32",
                 torch.tensor([self._partial_sum_unscale], dtype=torch.float32),
@@ -1978,6 +1979,14 @@ class RowParallelLinear(LinearBase):
         self.partial_sum_dtype = None
         self.partial_sum_scale = 1.0
         self._partial_sum_unscale = 1.0
+        # Prescaled copies stored after loading by the kernels.
+        for name in (
+            "_partial_sum_unscale_fp32",
+            "partial_sum_alpha",
+            "partial_sum_block_scale",
+        ):
+            if hasattr(self, name):
+                delattr(self, name)
 
     def extra_repr(self) -> str:
         s = f"in_features={self.input_size_per_partition}"
