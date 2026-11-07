@@ -839,7 +839,13 @@ _AUTOMATIC_CONVERTED_MODELS = {
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "Alpamayo2Super": _HfExamplesInfo("nvidia/Alpamayo2-Super", max_model_len=8192),
-    "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
+    "AriaForConditionalGeneration": _HfExamplesInfo(
+        "rhymes-ai/Aria",
+        min_transformers_version="5.18.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/48907"
+        },
+    ),
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/audio-flamingo-3-hf"
     ),
@@ -1066,6 +1072,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "KimiK3ForConditionalGeneration": _HfExamplesInfo(
         "moonshotai/Kimi-K3",
         trust_remote_code=True,
+    ),
+    "KimiK31ForConditionalGeneration": _HfExamplesInfo(
+        "moonshotai/Kimi-K3.1",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "KimiVLForConditionalGeneration": _HfExamplesInfo(
         "moonshotai/Kimi-VL-A3B-Instruct",

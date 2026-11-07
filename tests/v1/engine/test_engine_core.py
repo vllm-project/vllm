@@ -44,8 +44,10 @@ from vllm.v1.outputs import ModelRunnerOutput
 
 from ...utils import create_new_process_for_each_test, multi_gpu_test
 
-if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
+if not current_platform.is_cuda_alike():
+    pytest.skip(
+        reason="V1 currently only supported on CUDA and ROCm.", allow_module_level=True
+    )
 
 MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -854,8 +856,8 @@ def test_wake_up_republishes_kv_connector_handshake_metadata(tags, republished):
     core.model_executor.wake_up.side_effect = lambda tags: calls.append("wake_up")
     core.model_executor.get_kv_connector_handshake_metadata.return_value = [{}]
     kv_connector = core.scheduler.get_kv_connector.return_value
-    kv_connector.set_xfer_handshake_metadata_pp_aware.side_effect = (
-        lambda metadata: calls.append("publish")
+    kv_connector.set_xfer_handshake_metadata_pp_aware.side_effect = lambda metadata: (
+        calls.append("publish")
     )
     EngineCore.wake_up(core, tags)
     assert calls == (["wake_up", "publish"] if republished else ["wake_up"])
