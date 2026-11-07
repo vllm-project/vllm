@@ -19,6 +19,7 @@ Raw ROCm AITER helper-op coverage such as `group_fp8_quant` and
 This file only keeps the MoE-shaped integration angle for those helpers.
 """
 
+import dataclasses
 import importlib
 import math
 import warnings
@@ -915,6 +916,80 @@ def test_aiter_mxfp4_w4a16_intermediate_pad_reaching_aiter(
         )
 
     assert fused_moe_mock.call_args.kwargs["intermediate_pad"] == expected_pad
+
+
+# Clamped-SwiGLU limit forwarding test -------------------------------------
+
+
+@pytest.mark.parametrize(
+    "moe_limit,quant_limit,expected",
+    [
+        (None, None, 0.0),
+        (7.0, None, 7.0),
+        # GPT-OSS MXFP4 sets the clamp on the quant config only.
+        (None, 7.0, 7.0),
+        # A quant-config clamp overrides the model's.
+        (10.0, 7.0, 7.0),
+    ],
+)
+def test_aiter_moe_swiglu_limit_forwarded_to_fused_moe(
+    moe_limit: float | None,
+    quant_limit: float | None,
+    expected: float,
+):
+    """The clamped-SwiGLU limit should reach rocm_aiter_ops.fused_moe from
+    either config, with the precedence of ApplyMoEActivationConfig.from_configs:
+    quant_config.gemm1_clamp_limit first, then moe_config.swiglu_limit.
+    """
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FUSED_MOE_UNQUANTIZED_CONFIG,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterQuantType,
+        rocm_aiter_fused_experts,
+    )
+
+    _assert_aiter_supported()
+    case = _make_moe_case(
+        num_tokens=8,
+        hidden_dim=256,
+        intermediate_dim=512,
+        num_experts=4,
+        topk=2,
+        seed=5,
+    )
+    w1_shuffled, w2_shuffled = _shuffle_moe_weights(case["w1"], case["w2"])
+    moe_config = make_dummy_moe_config(
+        num_experts=4,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=512,
+        in_dtype=torch.bfloat16,
+    )
+    moe_config.swiglu_limit = moe_limit
+    quant_config = dataclasses.replace(
+        FUSED_MOE_UNQUANTIZED_CONFIG, gemm1_clamp_limit=quant_limit
+    )
+
+    with mock.patch.object(
+        rocm_aiter_ops, "fused_moe", wraps=rocm_aiter_ops.fused_moe
+    ) as fused_moe_mock:
+        rocm_aiter_fused_experts(
+            hidden_states=case["hidden_states"],
+            w1=w1_shuffled,
+            w2=w2_shuffled,
+            topk_weights=case["topk_weights"],
+            topk_ids=case["topk_ids"],
+            moe_config=moe_config,
+            quant_type=AiterQuantType.NO,
+            activation=MoEActivation.SILU,
+            quant_config=quant_config,
+        )
+
+    assert fused_moe_mock.call_args.kwargs["swiglu_limit"] == expected
 
 
 @pytest.mark.skipif(
