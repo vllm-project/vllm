@@ -431,6 +431,12 @@ def rocm_aiter_fused_experts(
     ):
         intermediate_pad = 0
 
+    # A quant-config clamp overrides the model's, as in
+    # ApplyMoEActivationConfig.from_configs; GPT-OSS MXFP4 sets only the former.
+    swiglu_limit = quant_config.gemm1_clamp_limit
+    if swiglu_limit is None:
+        swiglu_limit = moe_config.swiglu_limit
+
     # AITER's stage1 GEMM needs gate_mode to match how weights were shuffled
     # at load time (oracle/mxfp4.py).
     from aiter.ops.flydsl.moe_common import GateMode
@@ -473,9 +479,7 @@ def rocm_aiter_fused_experts(
         bias1=bias1,
         bias2=bias2,
         moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
-        swiglu_limit=(
-            0.0 if moe_config.swiglu_limit is None else float(moe_config.swiglu_limit)
-        ),
+        swiglu_limit=0.0 if swiglu_limit is None else float(swiglu_limit),
         beta=moe_config.activation_situ_beta,
         linear_beta=moe_config.activation_situ_linear_beta,
         shared_w1=shared_w1,
