@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
 from vllm.tracing import instrument
 from vllm.utils.deep_gemm import (
     _import_deep_gemm,
+    deep_gemm_supports_scale_fmt,
     fp8_gemm_nt,
     get_mk_alignment_for_contiguous_layout,
     m_grouped_fp8_gemm_nt_contiguous,
@@ -133,6 +134,12 @@ def _deep_gemm_linear_data(
 
 def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     if not (envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM):
+        return False
+
+    # The grouped GEMM below is called directly, bypassing the experts'
+    # dispatch, so it has to repeat the scale format check that
+    # _valid_deep_gemm() does.
+    if not deep_gemm_supports_scale_fmt():
         return False
 
     if not isinstance(module, MoERunner):
