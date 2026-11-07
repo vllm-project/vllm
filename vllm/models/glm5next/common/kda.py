@@ -46,6 +46,7 @@ from vllm.model_executor.utils import (
     maybe_disable_graph_partition,
     set_weight_attrs,
 )
+from vllm.models.glm5next.quant_config import bf16_projection_quant_config
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd_block
@@ -241,13 +242,15 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
-        # KDA projections remain BF16 because fp8 checkpoints omit their scales.
+        # KDA projections remain BF16 because fp8 checkpoints omit their scales;
+        # only explicit online quantization may apply to them.
         saved_quant_config = vllm_config.quant_config
         try:
             vllm_config.quant_config = None
             super().__init__(config, vllm_config, prefix)
         finally:
             vllm_config.quant_config = saved_quant_config
+        proj_quant_config = bf16_projection_quant_config(saved_quant_config)
 
         self.head_dim = config.linear_head_dim
         self.num_heads = config.linear_num_heads
@@ -283,7 +286,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             replicated_shard_ids=(4, 5),
             tp_size=self.tp_size,
             bias=False,
-            quant_config=self.quant_config,
+            quant_config=proj_quant_config,
             prefix=f"{prefix}.in_proj_qkvbfg_a",
         )
 
@@ -291,7 +294,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.head_dim,
             projection_size,
             bias=False,
-            quant_config=self.quant_config,
+            quant_config=proj_quant_config,
             prefix=f"{prefix}.f_b_proj",
         )
         self.dt_bias = nn.Parameter(
@@ -317,7 +320,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.head_dim,
             projection_size,
             bias=False,
-            quant_config=self.quant_config,
+            quant_config=proj_quant_config,
             prefix=f"{prefix}.g_b_proj",
         )
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
@@ -325,7 +328,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             projection_size,
             self.hidden_size,
             bias=False,
-            quant_config=self.quant_config,
+            quant_config=proj_quant_config,
             prefix=f"{prefix}.o_proj",
         )
 
