@@ -66,6 +66,25 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _full_dummy_descriptor_valid(
+    *,
+    num_tokens: int,
+    num_reqs: int | None,
+    max_query_len: int | None,
+) -> bool:
+    """Check whether a FULL capture descriptor can produce valid dummy metadata.
+
+    When each dummy request gets ceil(num_tokens/num_reqs) tokens and that
+    exceeds max_query_len, the dummy batch would have an impossible query
+    shape.  Skip such descriptors so the capture set stays consistent.
+    """
+    if max_query_len is None or num_reqs is None:
+        return True
+    if num_reqs <= 0:
+        return False
+    return cdiv(num_tokens, num_reqs) <= max_query_len
+
+
 class AttentionState(NamedTuple):
     attn_metadata: dict[str, Any] | None
     slot_mappings: dict[str, torch.Tensor]
@@ -368,12 +387,21 @@ class CudaGraphManager:
                 # from the forward context; in-graph kernels handle the token padding
                 # themselves from the padded slot_mapping (rows with slot == -1).
                 num_reqs = None
+                max_query_len = None
                 if mixed_mode == CUDAGraphMode.FULL:
                     num_reqs = min(num_tokens, self.max_num_reqs)
+                    max_query_len = self.decode_query_len
+                    if not _full_dummy_descriptor_valid(
+                        num_tokens=num_tokens,
+                        num_reqs=num_reqs,
+                        max_query_len=max_query_len,
+                    ):
+                        continue
                 desc = BatchExecutionDescriptor(
                     cg_mode=mixed_mode,
                     num_tokens=num_tokens,
                     num_reqs=num_reqs,
+                    max_query_len=max_query_len,
                     num_active_loras=num_active_loras,
                 )
                 token_keyed_descs.append(desc)
