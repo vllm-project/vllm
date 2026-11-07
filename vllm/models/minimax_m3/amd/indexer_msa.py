@@ -147,6 +147,9 @@ class MiniMaxM3IndexerMSAMetadata(MiniMaxM3IndexerMetadata):
     prefill_row_req_id: torch.Tensor | None = None
     # [num_prefill_tokens] int32, causal token count (position + 1) per row.
     prefill_kv_lens: torch.Tensor | None = None
+    # Decode CP's 4-row requests (block table, seq_lens): built in the forward by
+    # the step's first NVFP4 indexer layer, so a full cudagraph records it.
+    cp_requests: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
