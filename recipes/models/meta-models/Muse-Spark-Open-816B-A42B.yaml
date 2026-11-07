@@ -13,6 +13,7 @@ meta:
   default_hardware: mi355x
   default_variant:
     amd: mxfp4
+    nvidia: default
   hardware:
     h200: verified
     gb200: verified
