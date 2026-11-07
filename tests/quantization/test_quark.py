@@ -2225,6 +2225,42 @@ def test_glm5next_attn_loader_accepts_deepseek_weight_scale_inv():
     assert torch.equal(target.loaded_weight, _dequant_fp8_block(weight, scale, 128))
 
 
+@pytest.mark.parametrize("lora_wrapped", [False, True])
+def test_glm5next_fp8_loaders_dequantize_into_fused_targets(lora_wrapped):
+    # LoRA moves each fused target under ``base_layer``; an FP8 refit must
+    # still dequantize into it instead of falling through with raw FP8 bytes.
+    from vllm.models.glm5next.common.model import (
+        _dequant_fp8_block,
+        _try_load_fp8_attn_proj,
+        _try_load_fp8_indexer_wk,
+    )
+
+    prefix = "layers.3.self_attn"
+    wrap = ".base_layer" if lora_wrapped else ""
+    attn, wk = _GLM5RecordingParam(), _GLM5RecordingParam()
+    params_dict = {
+        f"{prefix}.fused_qkv_a_proj{wrap}.weight": attn,
+        f"{prefix}.indexer.wk_weights_proj{wrap}.weight": wk,
+    }
+    buf: dict = {}
+    loaded: set = set()
+
+    weight, scale = _glm5_block_fp8(256, 256)
+    for suffix, tensor in (("weight", weight), ("weight_scale_inv", scale)):
+        assert _try_load_fp8_attn_proj(
+            f"{prefix}.q_a_proj.{suffix}", tensor, buf, params_dict, loaded, 0
+        )
+        assert _try_load_fp8_indexer_wk(
+            f"{prefix}.indexer.wk.{suffix}", tensor, buf, params_dict, loaded
+        )
+
+    expected = _dequant_fp8_block(weight, scale, 128)
+    assert attn.loaded_shard == 0 and wk.loaded_shard == 0
+    assert torch.equal(attn.loaded_weight, expected)
+    torch.testing.assert_close(wk.loaded_weight, expected)
+    assert loaded == set(params_dict)
+
+
 _REVERSE_AWQ_PACK_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
 
 

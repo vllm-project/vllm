@@ -12,13 +12,17 @@ from types import SimpleNamespace
 import pytest
 import torch
 from torch import nn
+from transformers import Glm5NextConfig, Glm5NextTextConfig
 
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.lora.layers import ColumnParallelLinearWithLoRA
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
 from vllm.models.glm5next.common import kda
+from vllm.models.glm5next.common.model import Glm5NextModel
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 CHANNELS, KERNEL = 8, 4
@@ -48,6 +52,49 @@ def test_fused_conv_loads_checkpoint_shards_in_qkv_order(conv1d):
     _load(conv1d, [w.view(CHANNELS, KERNEL) for w in weights[:1]] + weights[1:])
     assert conv1d.weight.shape == (3 * CHANNELS, 1, KERNEL)
     assert torch.equal(_kernel_view(conv1d), torch.cat(weights).squeeze(1))
+
+
+def test_model_refits_lora_wrapped_conv(dist_init, tmp_path):
+    """Plain HF shard names must update the actual packed parameter after wrapping."""
+    text_config = Glm5NextTextConfig(
+        vocab_size=32,
+        pad_token_id=0,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        layer_types=["linear_attention"],
+        mlp_layer_types=["dense"],
+        linear_num_heads=1,
+        linear_head_dim=CHANNELS,
+        linear_conv_kernel_dim=KERNEL,
+        index_topk=16,
+        mla_use_nope=True,
+        mhc=False,
+    )
+    Glm5NextConfig(
+        text_config=text_config, architectures=["Glm5NextForConditionalGeneration"]
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            max_model_len=32,
+        )
+    )
+    with set_current_vllm_config(config):
+        model = Glm5NextModel(vllm_config=config)
+        attn = model.layers[0].self_attn
+        attn.conv1d = ColumnParallelLinearWithLoRA(attn.conv1d)
+        weights = _checkpoint_weights(seed=0)
+        loaded = model.load_weights(
+            (f"layers.0.self_attn.{part}_conv1d.weight", weight)
+            for part, weight in zip("qkv", weights, strict=True)
+        )
+    assert loaded == {"layers.0.self_attn.conv1d.base_layer.weight"}
+    assert torch.equal(_kernel_view(attn.conv1d), torch.cat(weights).squeeze(1))
 
 
 def test_refit_updates_fused_conv_without_moving_it(conv1d):

@@ -77,6 +77,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsEagle3,
     SupportsPP,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -1091,6 +1092,10 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
                 name_mapped = name.replace(weight_name, param_name)
+                if name_mapped not in params_dict:
+                    wrapped = _lora_base_layer_name(name_mapped)
+                    if wrapped in params_dict:
+                        name_mapped = wrapped
                 # QKV fusion: skip if fused module doesn't exist in model
                 if param_name == ".fused_qkv_a_proj" and name_mapped not in params_dict:
                     continue
@@ -1278,16 +1283,23 @@ class Glm5NextForConditionalGeneration(
     has_inner_state: ClassVar[Literal[True]] = True
     is_hybrid: ClassVar[Literal[True]] = True
 
-    # GLM-5.3-Flash stores the dense-MLP gate/up as separate tensors (like
-    # ``Glm4vMoeForConditionalGeneration``, ``glm4_moe`` and ``deepseek_v2``),
-    # so the fused ``gate_up_proj`` must expand to its real shard names for
-    # per-layer quant-scheme resolution. The identity ``gate_up_proj`` entry
-    # inherited from ``Glm4vForConditionalGeneration`` (pre-fused gate_up_proj)
-    # would otherwise route the module to ``global_quant_config`` and mismatch
-    # at load for mixed-precision Quark checkpoints.
+    # Fused projections for LoRA
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvbfg_a": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "b_proj",
+            "f_a_proj",
+            "g_a_proj",
+        ],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+        "wk_weights_proj": ["wk", "weights_proj"],
+        "qkv": ["qkv"],
     }
+
+    embedding_modules = {"lm_head": "output_embeddings"}
 
     # NOTE: weight-prefix mapping is inherited from Glm4vForConditionalGeneration
     # (``model.visual.`` -> ``visual.``, ``model.language_model.`` ->
@@ -1295,6 +1307,13 @@ class Glm5NextForConditionalGeneration(
     # matching the GLM-OCR / GLM-4V serialization convention. If the real
     # checkpoint's safetensors keys differ (e.g. ``language_model.model.`` with
     # no outer ``model.``), override ``hf_to_vllm_mapper`` accordingly.
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="visual.merger.",
+            tower_model="visual.",
+        )
 
     @classmethod
     def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
@@ -1475,6 +1494,24 @@ def _fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
     return name.replace("mlp.shared_experts.", f"mlp.experts.{n_routed_experts}.", 1)
 
 
+def _lora_base_layer_name(name: str) -> str:
+    """Where a LoRA wrapper keeps parameter ``name``: on its ``base_layer``."""
+    module, _, leaf = name.rpartition(".")
+    return f"{module}.base_layer.{leaf}"
+
+
+def _find_unique_weight_name(params_dict, name):
+    """Resolve a checkpoint weight against the live namespace by exact suffix,
+    looking through LoRA wrappers."""
+    names = (name, _lora_base_layer_name(name))
+    for candidate in names:
+        if candidate in params_dict:
+            return candidate
+    suffixes = tuple(f".{candidate}" for candidate in names)
+    matches = [candidate for candidate in params_dict if candidate.endswith(suffixes)]
+    return matches[0] if len(matches) == 1 else None
+
+
 def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):
     if "indexer.wk." not in name or "wk_weights" in name:
         return False
@@ -1483,6 +1520,11 @@ def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):
     if not is_weight and not is_scale:
         return False
     layer_prefix = name.rsplit(".wk.", 1)[0]
+    fused_name = _find_unique_weight_name(
+        params_dict, f"{layer_prefix}.wk_weights_proj.weight"
+    )
+    if fused_name is None:
+        return False
     entry = buf.setdefault(layer_prefix, {})
     entry["weight" if is_weight else "scale"] = tensor
     if "weight" not in entry or "scale" not in entry:
@@ -1498,7 +1540,6 @@ def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):
         out_dtype=torch.bfloat16,
     )
 
-    fused_name = f"{layer_prefix}.wk_weights_proj.weight"
     param = params_dict[fused_name]
     param.weight_loader(param, weight_bf16, 0)
     loaded_params.add(fused_name)
@@ -1575,8 +1616,13 @@ def _try_load_fp8_attn_proj(
         return False
 
     layer_prefix = name.rsplit(suffix, 1)[0]
-    target_w = f"{layer_prefix}.{target_base}.weight"
-    target_s = f"{layer_prefix}.{target_base}.weight_scale_inv"
+    target_w = _find_unique_weight_name(
+        params_dict, f"{layer_prefix}.{target_base}.weight"
+    )
+    if target_w is None:
+        return False
+    target_s = target_w.removesuffix(".weight") + ".weight_scale_inv"
+
     # If the model actually kept this projection in FP8, let the normal path
     # handle it (it has a weight_scale_inv param).
     if target_s in params_dict:
