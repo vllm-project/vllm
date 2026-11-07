@@ -11,7 +11,7 @@ use std::sync::LazyLock;
 use regex_automata::meta::Regex;
 use serde_json::{Map, Value};
 
-use super::pattern::Captures;
+use super::template::Captures;
 use super::{Result, invalid};
 use crate::unified::{self, parsing_failed};
 
