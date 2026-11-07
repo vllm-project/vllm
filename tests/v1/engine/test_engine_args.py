@@ -247,13 +247,14 @@ def test_extensible_kv_cache_from_cli():
     assert engine_args.enable_extensible_kv_cache is False
 
 
-# Off CUDA the platform check trips first, before the behavior under test.
-requires_cuda = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="requires CUDA"
+# Off CUDA and XPU the platform check trips first, before the behavior under test.
+requires_vmm_device = pytest.mark.skipif(
+    not (torch.cuda.is_available() or torch.xpu.is_available()),
+    reason="requires CUDA or XPU",
 )
 
 
-@requires_cuda
+@requires_vmm_device
 def test_extensible_kv_cache_defaults():
     """Unset, the extensible KV cache is on for the V2 runner on CUDA and the
     budget is the whole device; turned off, or where unsupported, the standard
@@ -298,7 +299,7 @@ def test_extensible_kv_cache_defaults():
     "manual_size",
     [dict(kv_cache_memory_bytes=1 << 30), dict(num_gpu_blocks_override=64)],
 )
-@requires_cuda
+@requires_vmm_device
 def test_extensible_kv_cache_rejects_manual_kv_cache_size(manual_size):
     """Measured sizing and a manual size conflict: silently clamping the manual
     one would misreport the cache, so an explicit request is an error."""
@@ -324,7 +325,7 @@ def _fake_executor(vllm_config, collective_rpc):
     return fake
 
 
-@requires_cuda
+@requires_vmm_device
 def test_extensible_kv_cache_falls_back_when_driver_unsupported():
     calls: list[str] = []
 
@@ -456,13 +457,13 @@ def test_kv_transfer_registers_kv_cache_memory(
     assert transfer.registers_kv_cache_memory() is registers
 
 
-@pytest.mark.parametrize("rocm", [False, True])
+@pytest.mark.parametrize("platform", ["cuda", "rocm", "xpu"])
 @pytest.mark.parametrize("requested", [None, True])
-def test_extensible_kv_cache_off_for_rocm_registering_connector(
-    monkeypatch, rocm, requested
+def test_extensible_kv_cache_off_for_registering_connector(
+    monkeypatch, platform, requested
 ):
-    """UCX and RDMA cannot yet register driver-mapped memory on ROCm, so a
-    connector that registers the KV cache keeps the extensible cache off there
+    """UCX and RDMA cannot yet register driver-mapped memory on ROCm or XPU, so
+    a connector that registers the KV cache keeps the extensible cache off there
     by default and an explicit request is an error; CUDA is unaffected."""
     from types import SimpleNamespace
 
@@ -473,7 +474,11 @@ def test_extensible_kv_cache_off_for_rocm_registering_connector(
     monkeypatch.setattr(
         vllm.platforms,
         "current_platform",
-        SimpleNamespace(is_cuda_alike=lambda: True, is_rocm=lambda: rocm),
+        SimpleNamespace(
+            is_cuda_alike=lambda: platform != "xpu",
+            is_rocm=lambda: platform == "rocm",
+            is_xpu=lambda: platform == "xpu",
+        ),
     )
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
@@ -489,12 +494,13 @@ def test_extensible_kv_cache_off_for_rocm_registering_connector(
             kv_connector="NixlConnector", kv_role="kv_both", kv_buffer_device="cuda"
         ),
     )
-    if rocm and requested:
-        with pytest.raises(ValueError, match="ROCm"):
+    unsupported = platform != "cuda"
+    if unsupported and requested:
+        with pytest.raises(ValueError, match="ROCm" if platform == "rocm" else "XPU"):
             VllmConfig._resolve_extensible_kv_cache(config)
         return
     VllmConfig._resolve_extensible_kv_cache(config)
-    assert config.cache_config.enable_extensible_kv_cache is not rocm
+    assert config.cache_config.enable_extensible_kv_cache is not unsupported
 
 
 @pytest.mark.parametrize("multi", [False, True])
@@ -543,7 +549,7 @@ def test_extensible_kv_cache_off_with_lmcache_mp(monkeypatch, multi, requested):
         assert config.cache_config.enable_extensible_kv_cache is False
 
 
-@requires_cuda
+@requires_vmm_device
 @pytest.mark.parametrize("multi", [False, True])
 def test_extensible_kv_cache_rejects_connector_memory_pool(multi):
     """A connector's custom memory pool (Mooncake NVLink/BAREX) must own the KV
@@ -575,7 +581,7 @@ def test_extensible_kv_cache_rejects_connector_memory_pool(multi):
         make_config(enable_extensible_kv_cache=True)
 
 
-@requires_cuda
+@requires_vmm_device
 def test_extensible_kv_cache_connector_needs_block_compact_layout():
     from vllm.config.kv_transfer import KVTransferConfig
     from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
