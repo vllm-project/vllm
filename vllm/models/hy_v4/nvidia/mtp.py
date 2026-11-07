@@ -31,9 +31,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.v1.outputs import SamplerOutput
-from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.sampler import Sampler
 
 from .model import HYV4DecoderLayer, _normalize_hyv4_config
 
@@ -539,7 +536,6 @@ class HYV4MTP(nn.Module):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.quant_config = self.model.quant_config
-        self.sampler = Sampler()
 
     def set_topk_indices_buffer(self, topk_indices_buffer: torch.Tensor) -> None:
         """Share the target sparse-index buffer with every draft consumer.
@@ -593,13 +589,6 @@ class HYV4MTP(nn.Module):
     ) -> torch.Tensor | None:
         self.model.spec_step_idx = spec_step_idx
         return self.model.compute_logits(hidden_states)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput | None:
-        return self.sampler(logits, sampling_metadata)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         if f"model.layers.{spec_layer}.embed_tokens" in name:
