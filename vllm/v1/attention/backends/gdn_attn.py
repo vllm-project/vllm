@@ -688,6 +688,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
+        if spec_state_indices_tensor is not None:
+            spec_state_indices_tensor = spec_state_indices_tensor.contiguous()
+
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -797,6 +800,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             )
             non_spec_indices = self.non_spec_state_indices_tensor[:batch_size]
             non_spec_indices[m.num_decodes :].fill_(NULL_BLOCK_ID)
+
+        if spec_indices is not None:
+            spec_indices = spec_indices.contiguous()
 
         return replace(
             m,
