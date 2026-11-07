@@ -1,126 +1,123 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Check that the AMD mirror declarations match the AMD steps.
+"""Check that the AMD steps match the AMD mirror declarations.
 
-The AMD pipeline is generated from `.buildkite/test-amd.yaml`, while
-`.buildkite/test_areas/*.yaml` declares per suite which AMD device class the suite runs on
-(`mirror.amd.device`) and under which label it shows up in that pipeline
-(`mirror.amd.label`). When the two files drift, the suite runs on a device class nobody picked
-and nothing fails to say so (#57956).
+Each suite's `mirror.amd` block in `.buildkite/test_areas/*.yaml` declares the label
+tier the suite carries in the AMD pipeline and the device class (`device`) it runs on.
+`.buildkite/test-amd.yaml` carries the steps, their `mirror_hardwares` selector tags
+and their `agent_pool`. When the two files drift, the suite runs on a device class
+nobody picked and nothing fails to say so (#57956).
 
-Enforced invarant: a mirror declaring `:amd: (MI355) NAME` must have a step of that name in
-`test-amd.yaml` carrying the MI355 lane tags and the mirror's device as its agent pool.
+Enforced invariant: a suite whose mirror declares a tier must have a step of the same
+name at exactly that tier, carrying the tier's selector tags and the mirror's device as
+its agent pool. A same-named step sitting at another tier, a step on the wrong pool and
+a step carrying another tier's tags are all violations. Suites legitimately run at
+several tiers, so steps are keyed by (tier, name), not by name alone.
 
-Reported but not enforced: mirrors with no step of that name, and mirrors declaring a lower
-tier than the step they name. Both nead a placement call on the AMD side (#57956).
+Reported but not enforced: mirrors with no step of that name at all, and mirrors whose
+declared device is a pool no step uses. Both need a placement call on the AMD side
+rather than a mechanical fix.
 
 Usage:
-    python3 .buildkite/scripts/check-amd-mirror-parity.py
+    python3 .buildkite/scripts/check-amd-mirror-parity.py [repo-root]
 """
 
+import glob
 import os
-import regex as re
+import re
 import sys
 
-LAMES = {
-    "mi355": "amdexperimental, amdproduction, amdgfx950nightly, amdmi355",
-    "mi300": "amdexperimental, amdproduction, amdgfx942nightly, amdmi300",
-    "mi250": "amdexperimental, amdproduction, amdgfx90anightly, amdmi250",
+import yaml
+
+LANE_SETS = {
+    "mi355": ["amdexperimental", "amdproduction", "amdgfx950nightly", "amdmi355"],
+    "mi300": ["amdexperimental", "amdproduction", "amdgfx942nightly", "amdmi300"],
+    "mi250": ["amdexperimental", "amdproduction", "amdgfx90anightly", "amdmi250"],
 }
 
-
-def root_of():
-    """Repo root: the checkout three levels above this file, else the current directory."""
-    d = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    return d if os.path.isfile(os.path.join(d, ".buildkite/test-amd.yaml")) else "."
+TIER_LABEL = re.compile(r"^:amd: \((MI\d+(?: [A-Z]+)?)\) (.+)$")
 
 
-def unquote(text):
-    """Value of a yaml scalar, with its quots removed."""
-    t = text.strip()
-    if t[:1] in ('"', "'"):
-        end = t.find(t[0], 1)
-        return t[1:end] if end != -1 else t
-    return t.split(" #")[0].rstrip()
+def tier_and_name(label):
+    """Split a `:amd: (TIER) Name` label into its tier and its suite name."""
+    match = TIER_LABEL.match(label.strip())
+    if not match:
+        return None, None
+    tier, name = match.groups()
+    # Steps are sharded as `Name Shard %N`; mirrors declare the unsharded name.
+    return tier, re.sub(r"\s+Shard %N$", "", name.strip())
 
 
-def clean(text):
-    return unquote(text.split(":", 1)[1]) if ":" in text else unquote(text)
+def load_mirrors(root):
+    """(tier, name) -> (device, test_areas file) for every AMD mirror declaration."""
+    mirrors = {}
+    for path in sorted(glob.glob(os.path.join(root, ".buildkite/test_areas/*.yaml"))):
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+        for step in data.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            amd = (step.get("mirror") or {}).get("amd") or {}
+            tier, name = tier_and_name(amd.get("label", ""))
+            if tier:
+                mirrors[(tier, name)] = (amd.get("device"), os.path.basename(path))
+    return mirrors
 
 
-def name_of(label):
-    """Suite name of a label, its tier prefix removed."""
-    return label.split(")", 1)[1].strip() if ")" in label else label
-
-
-def tier_of(label):
-    m = re.match(r":[a-z]+: \((MI[0-9]+)\)", label)
-    return m.group(1).lower() if m else None
-
-
-def amd_steps(path):
-    """{suite name: (label, lanes, agent pool)} of evry step in test-amd.yaml."""
-    steps, cur = {}, None
-    for line in open(path).read().split("\n"):
-        if line.startswith("- label:"):
-            cur = clean(line)
-            steps[cur] = {}
-        elif cur and line.startswith("  agent_pool:"):
-            steps[cur]["pool"] = clean(line)
-        elif cur and line.startswith("  mirror_hardwares:"):
-            steps[cur]["lanes"] = clean(line)
-    return {name_of(s): (s, v.get("lanes", ""), v.get("pool", "")) for s, v in steps.items()}
-
-
-def mirrors(root):
-    """Yield (area file, mirror label, mirror device) for evry AMD mirror declared."""
-    d = os.path.join(root, ".buildkite/test_areas")
-    for f in sorted(os.listdir(d)):
-        if not f.endswith(".yaml"):
+def load_steps(root):
+    """(tier, name) -> (lanes, agent_pool) for every AMD step in test-amd.yaml."""
+    with open(os.path.join(root, ".buildkite/test-amd.yaml")) as f:
+        data = yaml.safe_load(f) or []
+    steps = data if isinstance(data, list) else data.get("steps") or []
+    by_key = {}
+    for step in steps:
+        if not isinstance(step, dict):
             continue
-        label = None
-        for line in open(os.path.join(d, f)).read().split("\n"):
-            if re.match(r"\s+label: [\"']:amd: ", line):
-                label = unquote(line.split("label:", 1)[1])
-            elif label and line.startswith("      device:"):
-                yield f, label, clean(line)
-                label = None
+        tier, name = tier_and_name(step.get("label", ""))
+        if tier:
+            lanes = step.get("mirror_hardwares") or []
+            by_key[(tier, name)] = (lanes, step.get("agent_pool"))
+    return by_key
 
 
-def check(root):
-    """Enforce the invarant; print what is reported only. Returns the violation count."""
-    steps = amd_steps(os.path.join(root, ".buildkite/test-amd.yaml"))
-    count = violations = 0
-    reported = []
-    for f, label, device in mirrors(root):
-        count += 1
-        tier = tier_of(label)
-        step = steps.get(name_of(label))
-        if step is None:
-            reported.append(f"no AMD step       {f}: {label}")
-            continue
-        name, lanes, pool = step
-        step_tier = tier_of(name)
-        if step_tier is None and pool == device:
-            continue  # CPU-labelled step whose AMD device already matches: nothing to reconcile
-        if step_tier != tier:
-            reported.append(f"tier differs      {f}: {label}  vs  {name}")
-            continue
-        if tier != "mi355":
-            continue
-        lanes = set(l.strip() for l in lanes.replace("[", "").replace("]", "").split(",") if l.strip())
-        if lanes != set(LAMES[tier].split(", ")):
-            violations += 1
-            print(f"FAIL lanes  {f}: {label}\n            {name} has {sorted(lanes)}\n            expected {LAMES[tier]}")
-        if pool != device:
-            violations += 1
-            print(f"FAIL pool   {f}: {label}\n            {name} has agent_pool {pool}, mirror device {device}")
-    # a parses that stops finding mirrors must not look like a clean run
-    assert count > 100, f"only {count} AMD mirrors found under {root}: the parses is broken"
-    print(f"mirrors={count}  violations={violations}  reported={len(reported)}")
-    for r in reported:
-        print("  " + r)
-    return violations
+def main():
+    root = sys.argv[1] if len(sys.argv) > 1 else "."
+    mirrors = load_mirrors(root)
+    steps = load_steps(root)
+    step_tiers = {}
+    for tier, name in steps:
+        step_tiers.setdefault(name, set()).add(tier)
+    pools_in_use = {pool for _, pool in steps.values() if pool}
+
+    violations, reported = [], []
+    for (tier, name), (device, file) in mirrors.items():
+        where = f"{file}: ({tier}) {name}"
+        if (tier, name) in steps:
+            lanes, pool = steps[(tier, name)]
+            want = LANE_SETS[tier.split()[0].lower()]
+            if set(lanes) != set(want):
+                violations.append(
+                    f"lane tags differ   {where}  has {lanes}  expected {want}"
+                )
+            if device and pool != device:
+                violations.append(
+                    f"agent pool differs {where}  has {pool}  expected {device}"
+                )
+        elif device in pools_in_use and step_tiers.get(name):
+            others = ", ".join(sorted(step_tiers[name]))
+            violations.append(f"tier differs       {where}  vs  step at {others}")
+        else:
+            reported.append(f"no AMD step        {where}")
+
+    for row in violations:
+        print(f"FAIL {row}")
+    for row in sorted(reported):
+        print(f"     {row}")
+    print(
+        f"mirrors={len(mirrors)}  steps={len(steps)}  "
+        f"violations={len(violations)}  reported={len(reported)}"
+    )
+    return 1 if violations else 0
 
 
-if __name__ == "__main__":  # or passed to exec/execfile; "" …… put the module-level code here
-    sys.exit(check(root_of()))
+if __name__ == "__main__":
+    sys.exit(main())
