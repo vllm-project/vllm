@@ -24,7 +24,6 @@ from vllm.v1.attention.backends.short_conv_attn import (
 )
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
-from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -182,9 +181,6 @@ class MambaHybridModelState(DefaultModelState):
             copy_funcs=self._mamba_state_copy_funcs,
             forward_context=self.vllm_config.compilation_config.static_forward_context,
             device=self.device,
-            make_buffer=lambda n, dtype: CpuGpuBuffer(
-                n, dtype=dtype, device=self.device
-            ),
         )
         # Under PP a step's postprocess runs after later steps re-gathered the
         # batch-ordered input tables, so state copies read the per-request-slot

@@ -421,6 +421,12 @@ def maybe_make_prepare_finalize(
     elif moe.use_fi_nvl_two_sided_kernels:
         assert quant_config is not None
         prepare_finalize = FlashInferNVLinkTwoSidedPrepareAndFinalize(
+            max_num_tokens=(
+                get_current_vllm_config().scheduler_config.max_num_batched_tokens
+            ),
+            top_k=moe.experts_per_token,
+            num_experts=moe.num_experts,
+            hidden_size=moe.hidden_dim,
             num_dispatchers=all2all_manager.world_size,
         )
 
