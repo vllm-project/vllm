@@ -110,7 +110,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 device=self.device,
             )
             if is_symmetric_memory_enabled():
-                register_nccl_symmetric_ops(self.pynccl_comm)
+                register_nccl_symmetric_ops()
 
         self.ca_comm: CustomAllreduce | None = None
         self.qr_comm: QuickAllReduce | None = None
@@ -398,10 +398,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # return symm_output, we don't need to check if input is symmetric
         if (
             self.pynccl_comm is not None
+            and not self.pynccl_comm.disabled
             and not use_fi_ar
             and should_nccl_symm_mem_allreduce(self.pynccl_comm.world_size, input_)
         ):
-            out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
+            out = torch.ops.vllm.all_reduce_symmetric_with_copy(
+                input_, self.unique_name
+            )
             if out is not None:
                 return out
         qr_comm = self.qr_comm

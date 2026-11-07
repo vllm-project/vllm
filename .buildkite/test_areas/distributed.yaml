@@ -447,6 +447,9 @@ steps:
   - vllm/v1/worker/gpu_worker.py
   - tests/distributed/test_mnnvl_alltoall.py
   - tests/distributed/test_eplb_execute.py
+  - tests/distributed/test_nccl_symm_mem.py
+  - vllm/config/engram.py
+  - vllm/models/qwen4_exp/
 
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
@@ -455,6 +458,9 @@ steps:
   - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
   # The L4 EPLB Execution job has no NVLink, so it skips symm_mem.
   - pytest -v -s distributed/test_eplb_execute.py -k symm_mem
+  - >-
+    REQUIRE_ETP_CUDA_GPUS=1 pytest -v -s
+    distributed/test_nccl_symm_mem.py::test_llm_nccl_symm_mem_allreduce_uses_etp_group
   mirror:
     amd:
       automatic_shard: true
