@@ -157,6 +157,8 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
         # Qwen3.5 migrates to breakable CUDA graphs on NVIDIA only; other
         # platforms keep the torch.compile path.
         return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES | _QWEN3_5_ARCHITECTURES
+    if current_platform.is_xpu():
+        return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES | _QWEN3_5_ARCHITECTURES
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
 

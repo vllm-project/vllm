@@ -64,6 +64,59 @@ Note: Online FP8 = [Online Quantization](https://docs.vllm.ai/en/latest/features
 | THUDM/GLM-4v-9B               | GLM4vForConditionalGeneration        | BF16/Online FP8 |
 | openbmb/MiniCPM-V-4           | MiniCPMVForConditionalGeneration     | BF16/Online FP8 |
 
+### Qwen3.5 eager execution and MoE decode fusion
+
+Qwen3.5 dense, MoE and MTP models on XPU use the dedicated eager implementation.
+Breakable graphs are enabled by default for these architectures, and model-level
+`torch.compile` is disabled. No environment variable is required to select this
+execution path. ROCm and other fallback platforms retain their existing model
+implementations.
+
+The routed/shared expert fusion is optional. It requires a companion
+`vllm-xpu-kernels` build providing
+`vllm_xpu_kernels.moe_shared_fused_interface.XpuFusedMoeWithSharedExpert` and the native
+`torch.ops._xpu_C.moe_shared_fused_decode_interface` operator. A build without
+this provider uses the existing MoE implementation. The model's
+`xpu/specialized_decode` modules qualify loaded weights and bind an executor
+after quantization, before graph capture. Runtime token-row eligibility is
+checked in vLLM before dispatching the fused operator.
+Failed static checks report a fallback reason once during initialization.
+Fusion is enabled by default when the provider and configuration qualify.
+
+Fusion applies to eligible calls with **1–8 input token rows**, contiguous,
+64-byte-aligned FP16/BF16 activations, `rows * top_k <= 512`,
+FP8-e4m3 routed/shared weights with FP32
+per-expert/per-tensor scales, matching expert dimensions and a supported routing
+configuration. Both shared projections must use `XPUW8A16FP8LinearKernel`.
+Explicit `--linear-backend=xpu` selects W8A8 activation quantization and keeps
+these projections on the existing MoE path. Tensor parallelism uses one
+reduction for the combined routed and shared outputs. Larger token batches,
+other quantization formats and
+unsupported features such as LoRA, expert/sequence parallelism, DBO or EPLB use
+the existing MoE path. Dense models do not use this expert fusion.
+
+For example, with the companion provider installed:
+
+```bash
+vllm serve Qwen/Qwen3.5-35B-A3B \
+  --tensor-parallel-size 2 --dtype bfloat16 --quantization fp8_per_tensor \
+  --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}'
+```
+
+To run eager inference without graph capture, set
+`--compilation-config '{"mode":0,"cudagraph_mode":"NONE"}'`. This keeps the XPU
+model implementation and eligible MoE fusion. The executor reads model-owned
+parameters directly, so in-place weight reloads/updates are visible to captured
+graphs without a worker refresh callback. Changes to weight storage, metadata
+or fusion eligibility require rebuilding the executor and recapturing graphs.
+
+`FULL_DECODE_ONLY` is a graph mode and can use the breakable XPU-graph capture
+mechanism. The post-load hook prepares necessary contiguous parameter layouts
+before binding the executor; forward does not initialize or prepare weights.
+The fused and stock paths can differ in accumulation order and intermediate
+rounding. This model integration uses standard post-load hooks and has no
+Model Runner V2-only dependency.
+
 ### Embedding and Reranker Language Models
 
 | Model                   | Architecture                   | Dtype           |
