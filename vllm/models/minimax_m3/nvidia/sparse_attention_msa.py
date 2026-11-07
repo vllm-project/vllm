@@ -316,6 +316,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseMSABaseImpl):
         topk_blocks: int,
         sparse_block_size: int,
         msa_decode_backend: MiniMaxM3MSADecodeBackend = "cutlass",
+        msa_decode_fp16_dot: bool = False,
     ) -> None:
         super().__init__(
             num_heads,
@@ -325,6 +326,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseMSABaseImpl):
             kv_cache_dtype,
             topk_blocks=topk_blocks,
             sparse_block_size=sparse_block_size,
+            msa_decode_fp16_dot=msa_decode_fp16_dot,
         )
         self.use_cutlass_decode = supports_cutlass_sparse_decode(
             decode_backend=msa_decode_backend,
@@ -405,6 +407,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseMSABaseImpl):
                     d.decode_query_len,
                     k_scale=k_scale,
                     v_scale=v_scale,
+                    fp16_dot=self.fp16_dot,
                 )
 
         # Prefill [nd:]: MSA sparse FMHA over the selected blocks.
@@ -465,6 +468,7 @@ class MiniMaxM3SparseMSANvfp4Impl(MiniMaxM3SparseMSABaseImpl):
         topk_blocks: int,
         sparse_block_size: int,
         msa_decode_backend: MiniMaxM3MSADecodeBackend = "cutlass",
+        msa_decode_fp16_dot: bool = False,
     ) -> None:
         super().__init__(
             num_heads,
@@ -474,6 +478,7 @@ class MiniMaxM3SparseMSANvfp4Impl(MiniMaxM3SparseMSABaseImpl):
             kv_cache_dtype,
             topk_blocks=topk_blocks,
             sparse_block_size=sparse_block_size,
+            msa_decode_fp16_dot=msa_decode_fp16_dot,
         )
         if not (
             current_platform.is_cuda()
