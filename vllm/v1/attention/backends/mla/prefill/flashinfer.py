@@ -149,7 +149,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         prefill_metadata: "MLACommonPrefillMetadata",
     ) -> None:
         global_hyperparameters = self._resolve_global_hyperparameters()
-        qo_indptr = prefill_metadata.query_start_loc
+        qo_indptr = prefill_metadata.query_start_loc_cpu
         has_context = prefill_metadata.chunked_context is not None
         (workspace_buffer,) = current_workspace_manager().get_simultaneous(
             self._workspace_spec
