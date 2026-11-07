@@ -322,11 +322,6 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from
-        # ``kv_a_proj_with_mqa``; pad them with zeros for the model shape.
-        kv_a_pad_size = 0
-        if self.config.mla_use_nope and self.config.qk_rope_head_dim > 0:
-            kv_a_pad_size = self.config.qk_rope_head_dim
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -355,7 +350,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                 name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
             name, loaded_weight = _mla_proj_checkpoint_tensor(
-                name, loaded_weight, params_dict, self.config, kv_a_pad_size
+                name, loaded_weight, params_dict, self.config
             )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:

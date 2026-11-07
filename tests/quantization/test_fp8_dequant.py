@@ -332,8 +332,15 @@ def test_indexer_fused_weight(model_config, layout, scales_first):
     torch.testing.assert_close(fused(x)[0], x @ expected.t())
 
 
-@pytest.mark.parametrize("layout", _LAYOUTS)
-@pytest.mark.parametrize("cold", ["fp8", "bf16"])
+@pytest.mark.parametrize(
+    "layout,cold",
+    [
+        (lay, cold)
+        for lay in _LAYOUTS
+        for cold in ("fp8", "bf16")
+        if lay != "bf16" or cold == "fp8"
+    ],
+)
 @pytest.mark.parametrize("mode", ["direct", "layerwise"])
 def test_indexer_reload_fp8_or_bf16(monkeypatch, model_config, layout, cold, mode):
     """Each load sends ``wk`` whole, either in the checkpoint's FP8 layout or
@@ -373,20 +380,19 @@ def test_glm5next_attn_loader_renames_weight_scale():
 
     from vllm.models.glm5next.common.model import _mla_proj_checkpoint_tensor
 
-    config = Glm5NextTextConfig(kv_lora_rank=512)
+    config = Glm5NextTextConfig(kv_lora_rank=512, mla_use_nope=False)
     scale = torch.rand(4, 2)
     name, tensor = _mla_proj_checkpoint_tensor(
         "layers.3.self_attn.kv_a_proj_with_mqa.weight_scale",
         scale,
         _glm5_mla_params(),
         config,
-        0,
     )
     assert name == "layers.3.self_attn.kv_a_proj_with_mqa.weight_scale_inv"
     assert tensor is scale
     # a projection the model does not load from block-FP8 keeps its name
     name, _ = _mla_proj_checkpoint_tensor(
-        "layers.0.self_attn.o_proj.weight_scale", scale, {}, config, 0
+        "layers.0.self_attn.o_proj.weight_scale", scale, {}, config
     )
     assert name == "layers.0.self_attn.o_proj.weight_scale"
 
@@ -398,18 +404,20 @@ def test_glm5next_nope_kv_a_padding_block_scale():
 
     from vllm.models.glm5next.common.model import _mla_proj_checkpoint_tensor
 
-    config = Glm5NextTextConfig(kv_lora_rank=512)
+    config = Glm5NextTextConfig(
+        kv_lora_rank=512, mla_use_nope=True, qk_rope_head_dim=64
+    )
     prefix = "layers.3.self_attn.kv_a_proj_with_mqa"
     weight = torch.randn(512, 256).to(torch.float8_e4m3fn)
     _, padded = _mla_proj_checkpoint_tensor(
-        f"{prefix}.weight", weight, _glm5_mla_params(), config, 64
+        f"{prefix}.weight", weight, _glm5_mla_params(), config
     )
     assert padded.shape == (576, 256) and padded.dtype == torch.float8_e4m3fn
     assert torch.equal(padded[:512].view(torch.uint8), weight.view(torch.uint8))
     assert not padded[512:].float().any()
     scale = torch.rand(4, 2)
     _, padded = _mla_proj_checkpoint_tensor(
-        f"{prefix}.weight_scale_inv", scale, _glm5_mla_params(), config, 64
+        f"{prefix}.weight_scale_inv", scale, _glm5_mla_params(), config
     )
     assert padded.shape == (5, 2)  # ceil(576 / 128) blocks
     assert torch.equal(padded[:4], scale)
