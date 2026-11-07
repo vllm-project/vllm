@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Mid-size Qwen3.5 multimodal MoE (122B total / 10B active) with gated delta networks, 256 experts, and 262K context"
   date_added: 2026-04-22
-  date_updated: 2026-10-07
+  date_updated: 2026-11-04
   tasks:
     - multimodal
     - text
@@ -13,7 +13,10 @@ meta:
     - "Qwen/Qwen3.5-397B-A17B"
     - "Qwen/Qwen3.5-35B-A3B"
   hardware:
+    # FP8 validated 2026-11-03/04 on one MI325X and one MI350X (TP1) on
+    # vllm/vllm-openai-rocm:v0.33.0 (ROCm 10.0, AITER 0.1.26). MI355X: 2026-10-07 on v0.31.0.
     mi325x: verified
+    mi350x: verified
     mi355x: verified
 
 model:
@@ -21,8 +24,8 @@ model:
   min_vllm_version: "0.17.0"
   default_frontend: rust
   docker_image:
-    # Stable release the AMD numbers in the guide were measured on (2026-10-07).
-    amd: "vllm/vllm-openai-rocm:v0.31.0"
+    # Stable release the AMD numbers in the guide were measured on (2026-11-03/04).
+    amd: "vllm/vllm-openai-rocm:v0.33.0"
   architecture: moe
   parameter_count: "122B"
   active_parameters: "10B"
@@ -127,12 +130,10 @@ hardware_overrides:
   amd:
     # AITER is opt-in on ROCm and the image does not set it; without these two the
     # server runs ROCM_ATTN + the Triton FP8 MoE and single-stream decode of this
-    # hybrid GDN model drops 4x from ~200 to ~12k prompt tokens. With AITER on, the
-    # auto-selection still picks ROCM_ATTN, so name the backend. ROCM_AITER_FA rather
-    # than ROCM_AITER_UNIFIED_ATTN: on gfx950 with v0.31.0 the unified backend runs
-    # AITER's new Gluon kernel, ~20% slower and with MTP decode that slows down as
-    # the prompt grows. Verified 2026-10-07 on one MI325X and one MI355X with the FP8
-    # checkpoint (see the AMD section of the guide).
+    # hybrid GDN model drops ~5x from ~200 to ~30k prompt tokens. With AITER on, the
+    # auto-selection still picks ROCM_ATTN, so name the backend. Verified 2026-11-03/04
+    # on one MI325X and one MI350X with the FP8 checkpoint (see the AMD section of
+    # the guide).
     extra_args:
       - "--attention-backend"
       - "ROCM_AITER_FA"
@@ -210,7 +211,7 @@ guide: |
     --reasoning-parser qwen3
   ```
 
-  ### AMD (MI325X / MI355X, single GPU, FP8)
+  ### AMD (MI325X / MI350X / MI355X, single GPU, FP8)
 
   The FP8 checkpoint fits one MI300X-class GPU. Three settings matter on ROCm and none is on by
   default: `VLLM_ROCM_USE_AITER=1` switches the MoE to the AITER FP8 kernels,
@@ -228,18 +229,19 @@ guide: |
   `--max-num-seqs 64` because the default exceeds the Mamba block budget on 192 GB. MTP
   (`--speculative-config '{"method":"mtp","num_speculative_tokens":1}'`) works with the same
   flags. Single-stream decode (tokens/s at ~200 / ~2k / ~12k / ~30k prompt tokens, 128 output
-  tokens, prefix caching off), measured 2026-10-07 on `vllm/vllm-openai-rocm:v0.31.0`:
+  tokens, prefix caching off), measured 2026-11-03/04 on `vllm/vllm-openai-rocm:v0.33.0`:
 
-  | | MI325X | MI355X |
+  | | MI325X | MI350X |
   |---|---|---|
-  | AITER + `ROCM_AITER_FA` | 128 / 127 / 127 / 127 | 143 / 143 / 143 / 143 |
-  | + MTP | 184 / 169 / 172 / 164 | 204 / 193 / 195 / 190 |
+  | AITER + `ROCM_AITER_FA` | 145 / 145 / 144 / 144 | 144 / 144 / 144 / 144 |
+  | + MTP | 232 / 209 / 209 / 208 | 238 / 219 / 224 / 214 |
 
-  This recipe used `ROCM_AITER_UNIFIED_ATTN` before v0.31.0. Avoid it on MI350X/MI355X with
-  v0.31.0: there it runs AITER's new gfx950 Gluon kernel, which decodes at 110 tokens/s and,
-  with MTP, falls from 200 to 72 tokens/s between ~200 and ~30k prompt tokens
-  ([vllm-project/vllm#60408](https://github.com/vllm-project/vllm/issues/60408)). MI325X is
-  unaffected (126 tokens/s; 182 to 162 with MTP).
+  `ROCM_AITER_UNIFIED_ATTN` decodes at the same speed on v0.33.0 (145 / 145 / 143 / 142 on
+  MI325X, 144 / 144 / 142 / 142 on MI350X). Avoid it on MI350X/MI355X with v0.31.0 and v0.32.0:
+  there it runs an earlier AITER Gluon kernel, which decodes at 110 tokens/s and, with MTP,
+  falls from 200 to 72 tokens/s between ~200 and ~30k prompt tokens
+  ([vllm-project/vllm#60408](https://github.com/vllm-project/vllm/issues/60408)). AITER 0.1.26
+  fixed it.
 
   ## Client Usage
 
