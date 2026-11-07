@@ -1793,7 +1793,10 @@ def make_kv_cache_config_three_types(
 
 
 @pytest.mark.parametrize("draft_sharded", [True, False])
-def test_prefix_cache_hit_uses_per_group_dcp_geometry(draft_sharded):
+@pytest.mark.parametrize(
+    "evicted_group", [None, 1, 2], ids=["intact", "draft", "mamba"]
+)
+def test_prefix_cache_hit_uses_per_group_dcp_geometry(draft_sharded, evicted_group):
     """Prefix lookup must use each group's DCP size, not the process-wide one.
 
     Target MLA is sharded; draft MLA can opt out and Mamba stays replicated.
@@ -1875,6 +1878,21 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry(draft_sharded):
     ]
 
     manager.free(req0)
+    if evicted_group is not None:
+        manager.block_pool.evict_blocks(
+            {computed_blocks.blocks[evicted_group][-1].block_id}
+        )
+    connector_blocks, local_hit, _, hit_diverged = (
+        manager.get_computed_blocks_for_connector(req1)
+    )
+    if evicted_group == 1:
+        # Draft KV cannot be restored by the Mamba-only transfer fast path.
+        assert local_hit == manager.get_computed_blocks(req1)[1] == 0
+        assert not hit_diverged
+    else:
+        assert local_hit == len(common_token_ids)
+        assert hit_diverged == (evicted_group == 2)
+    manager.truncate_computed_blocks(connector_blocks, local_hit)
     manager.free(req1)
 
 
