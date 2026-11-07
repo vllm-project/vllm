@@ -172,17 +172,19 @@ A normal abort writes a manifest for the computed positions. Request-private obj
 
 **Blocks and tails** keep the rules of §4–§6. Their columns below layer 20 are exact and are delivered as before. Readers ignore their columns from layer 20 up.
 
-**Cone patches.** Each request collects, per step, the deep cells inside that step's exact range, first computation first, for R3 and for the indexer slots of layers 20 and up. At finish it writes one patch object per output (`<req>/t/c/r3`, `<req>/t/c/idx`) holding the cells the cones of its sampled tokens need that no earlier patch of the trajectory holds. Each cell carries its weight version.
+**Which cells are needed.** A sampled token at position `t` depends on the cell at layer `L ≥ 20` of the rows `[t − need(L), t)`, with `need(L) = 1 + (39 − L) × 127`: one 127-row window step per later layer. `cone(L)` is at least `need(L)`, so every step computes the cells its own sampled token needs.
+
+**Cone patches.** Each request collects, per step, the deep cells inside that step's exact range, first computation first, for R3 and for the indexer slots of layers 20 and up. At finish it writes one patch object per output (`<req>/t/c/r3`, `<req>/t/c/idx`) holding the needed cells that no earlier patch of the trajectory holds. Each cell carries its weight version. For deep cells that per-cell version is the authoritative one; the manifest's version segments describe the blocks and the tail. The two differ in one case: a fork whose fork-point tail is gone recomputes that block's shallow rows under its own version, while the parent's deep cells below the fork point stay.
 
 **The patch list.** The manifest field `r3_cone` lists every patch of the trajectory in request order, each with the end up to which its rows belong to this trajectory:
 
-- At finish, earlier patches are clipped to the request's cut: `aux_start`, or `aux_start + 1` when the previous request (or the parent, for a fork) computed position `aux_start` itself. That is the same rule as the shallow splice (§6.3), including a position that completed a block. When a fork's fork-point tail is gone, the cut is `aux_start` and the parent's cells below it stay.
+- At finish, earlier patches are clipped to the request's cut. The cut is `aux_start + 1` when the previous request of the trajectory (or the parent, for a fork) computed position `aux_start` itself and this request holds that computation: the previous tail contains it, or it completed a block whose hash this request shares. Otherwise the cut is `aux_start`; a request that edits the context inside that block, or a fork whose fork-point tail is gone, owns the rows from `aux_start` on.
 - A fork starts from the parent's list clipped at the fork point.
-- `uncovered` counts the needed cells that no patch holds (for example, cells of a window the request did not compute). Nothing is substituted for them.
+- `uncovered` counts the needed cells that no patch holds, for example cells of a window the request did not compute. Nothing is substituted for them.
 
 **Reader.** Set every deep cell to no-replay (R3 `65535`, indexer `−2`), then overlay the listed patches in order, each up to its end, first written wins. The trainer runs its own routing (or indexer) at no-replay cells, cell by cell. A replay hook that gathers at the sentinel instead is wrong.
 
-**Preemption.** The request's cells are stashed and restored on resume, so cells computed before the preemption win over the recompute. A recompute of the same step adds nothing.
+**Preemption.** The request's cells are stashed and restored on resume, so cells computed before the preemption win over the recompute. A recompute of the same step adds nothing. A request aborted while it replays below the preemption point finishes at that point from the stash, like a request that finished while parked; needed cells the stash cannot supply count in `uncovered`.
 
 Partial capture changes what is stored, not the invariants: every cell a sampled token depends on is delivered from its first computation, with its version, or counted in `uncovered`.
 
