@@ -20,6 +20,7 @@
 
 from collections.abc import Iterable, Mapping
 from itertools import islice
+import copy
 
 import torch
 from torch import nn
@@ -87,6 +88,60 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk,
 )
 from vllm.sequence import IntermediateTensors
+
+
+def _get_nemotron_h_layer_config(
+    config: NemotronHConfig, layer_idx: int
+) -> NemotronHConfig:
+    """Resolve the per-layer config for heterogeneous (puzzle) models.
+
+    Some Nemotron-H variants (e.g. NVIDIA Nemotron 3.5 Bolt) use a different
+    MoE configuration per layer - expert count, intermediate size and top-k -
+    described by ``config.block_configs``. When the HF config implements
+    ``get_nemotron_h_config_for_layer`` (as NVIDIA's ``NemotronHPuzzleConfig``
+    does), that takes precedence. Otherwise the per-layer config is built
+    from ``block_configs`` directly, so MoE layers are not silently
+    constructed from the global config with wrong shapes (``n_routed_experts``)
+    or wrong routing (``num_experts_per_tok`` / ``moe_intermediate_size``
+    falling back to unrelated HF defaults).
+    """
+    get_layer_config = getattr(config, "get_nemotron_h_config_for_layer", None)
+    if get_layer_config is not None:
+        return get_layer_config(layer_idx)
+
+    block_configs = getattr(config, "block_configs", None)
+    if block_configs and 0 <= layer_idx < len(block_configs):
+        block = block_configs[layer_idx]
+        if isinstance(block, dict):
+            block_type = block.get("block_type")
+            overrides = {
+                key: block[key]
+                for key in (
+                    "n_routed_experts",
+                    "moe_intermediate_size",
+                    "num_experts_per_tok",
+                )
+                if block.get(key) is not None
+            }
+        else:
+            # HF may materialize block configs as objects (e.g. dataclasses).
+            block_type = getattr(block, "block_type", None)
+            overrides = {
+                key: getattr(block, key)
+                for key in (
+                    "n_routed_experts",
+                    "moe_intermediate_size",
+                    "num_experts_per_tok",
+                )
+                if getattr(block, key, None) is not None
+            }
+        if block_type == "moe" and overrides:
+            layer_config = copy.copy(config)
+            for key, value in overrides.items():
+                setattr(layer_config, key, value)
+            return layer_config
+
+    return config
 
 
 class NemotronHMLP(nn.Module):
@@ -291,10 +346,8 @@ class NemotronHMLPDecoderLayer(nn.Module):
 
         hybrid_override_pattern = config.hybrid_override_pattern
         mlp_index = hybrid_override_pattern[: layer_idx + 1].count("-") - 1
-        # Get per-layer config for heterogeneous models if exist
-        get_layer_config = getattr(config, "get_nemotron_h_config_for_layer", None)
-        layer_config = get_layer_config(layer_idx) if get_layer_config else config
-        config = layer_config
+        # Get per-layer config for heterogeneous models if exists
+        config = _get_nemotron_h_layer_config(config, layer_idx)
 
         if isinstance(config.intermediate_size, list):
             if len(config.intermediate_size) == 1:
@@ -346,8 +399,7 @@ class NemotronHMoEDecoderLayer(nn.Module):
         self.config = config
 
         # Get per-layer config for heterogeneous models if exists
-        get_layer_config = getattr(config, "get_nemotron_h_config_for_layer", None)
-        layer_config = get_layer_config(layer_idx) if get_layer_config else config
+        layer_config = _get_nemotron_h_layer_config(config, layer_idx)
 
         self.mixer = NemotronHMoE(
             layer_config,
@@ -514,8 +566,7 @@ class NemotronHAttentionDecoderLayer(nn.Module):
         super().__init__()
 
         # Get per-layer config for heterogeneous models if exists
-        get_layer_config = getattr(config, "get_nemotron_h_config_for_layer", None)
-        layer_config = get_layer_config(layer_idx) if get_layer_config else config
+        layer_config = _get_nemotron_h_layer_config(config, layer_idx)
 
         self.mixer = NemotronHAttention(
             layer_config,
