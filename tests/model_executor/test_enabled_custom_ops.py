@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections import Counter
+
 import pytest
 import torch
 
+import vllm.config.compilation as compilation
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import (
     CompilationConfig,
@@ -11,7 +15,9 @@ from vllm.config import (
     get_cached_compilation_config,
     set_current_vllm_config,
 )
+from vllm.model_executor import custom_op as classic_custom_op
 from vllm.model_executor.custom_op import CustomOp, op_registry
+from vllm.model_executor.hw_agnostic import custom_op as hw_agnostic_custom_op
 from vllm.model_executor.layers.activation import (
     GeluAndMul,
     ReLUSquaredActivation,
@@ -33,6 +39,20 @@ RMS_NORM_SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
 @CustomOp.register("relu3")
 class Relu3(ReLUSquaredActivation):
     pass
+
+
+# Dummy class used as a registry value. Only the keys matter here.
+class DummyOp:
+    pass
+
+
+# Names held by only one registry. The real hw-agnostic layers use rms_norm and
+# silu_and_mul, which the classic stack also has, so those cannot show which
+# registry a name came from. The oot registries stay empty without a plugin, so
+# the tests fill them in.
+HW_ONLY_IN_TREE = "hw_only_op"
+HW_ONLY_OOT = "HwOnlyOotOp"
+CLASSIC_OOT_ONLY = "ClassicOotOnlyOp"
 
 
 @pytest.mark.parametrize(
@@ -125,6 +145,65 @@ def test_enabled_ops_invalid(env: str):
         )
         with set_current_vllm_config(vllm_config):
             RMSNorm(1024).enabled()
+
+
+def _add_hw_only_ops(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(hw_agnostic_custom_op.op_registry, HW_ONLY_IN_TREE, DummyOp)
+    monkeypatch.setitem(hw_agnostic_custom_op.op_registry_oot, HW_ONLY_OOT, DummyOp)
+    monkeypatch.setitem(classic_custom_op.op_registry_oot, CLASSIC_OOT_ONLY, DummyOp)
+    # Read the flag live, even if the envs cache is enabled.
+    envs.disable_envs_cache()
+
+
+@pytest.mark.parametrize("hw_agnostic", [False, True])
+def test_get_known_op_names_reads_registry_keys(
+    monkeypatch: pytest.MonkeyPatch, hw_agnostic: bool
+):
+    _add_hw_only_ops(monkeypatch)
+    monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1" if hw_agnostic else "0")
+
+    names = classic_custom_op.get_known_op_names()
+
+    # Classic keys always count, from both of its registries.
+    assert "rms_norm" in names
+    assert CLASSIC_OOT_ONLY in names
+
+    # hw-agnostic keys count only when the flag is on, from both registries.
+    hw_names = {HW_ONLY_IN_TREE, HW_ONLY_OOT}
+    if hw_agnostic:
+        assert hw_names <= names
+    else:
+        assert hw_names.isdisjoint(names)
+
+
+@pytest.mark.parametrize(
+    "hw_agnostic,expected",
+    [
+        (False, "doesn't exist (or wasn't imported/registered)"),
+        (True, "not present in model"),
+    ],
+)
+def test_custom_op_log_check_uses_hw_agnostic_names(
+    monkeypatch: pytest.MonkeyPatch, hw_agnostic: bool, expected: str
+):
+    _add_hw_only_ops(monkeypatch)
+    monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1" if hw_agnostic else "0")
+
+    compilation_config = CompilationConfig(custom_ops=["all", f"+{HW_ONLY_IN_TREE}"])
+    # The op is registered but unused by this model, so the warning wording
+    # shows whether the hw-agnostic keys were visible.
+    compilation_config.enabled_custom_ops = Counter({"rms_norm": 1})
+
+    warnings: list[tuple] = []
+    monkeypatch.setattr(
+        compilation.logger, "warning_once", lambda *args: warnings.append(args)
+    )
+
+    compilation_config.custom_op_log_check()
+
+    assert len(warnings) == 1
+    # args are (message, op_name, missing_str, enable_str, op)
+    assert warnings[0][2] == expected
 
 
 @pytest.mark.parametrize(
