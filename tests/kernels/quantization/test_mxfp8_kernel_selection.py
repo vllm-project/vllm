@@ -11,8 +11,11 @@ from unittest.mock import patch
 import pytest
 
 from vllm.model_executor.kernels.linear import (
+    _POSSIBLE_MXFP8_KERNELS,
+    EmulationMxfp8LinearKernel,
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
+    HummingMxfp8LinearKernel,
     MarlinMxfp8LinearKernel,
     Mxfp8LinearLayerConfig,
     init_mxfp8_linear_kernel,
@@ -103,8 +106,26 @@ def _patch_cuda_platform(capability: int):
         patch.object(
             MarlinMxfp8LinearKernel, "is_supported", return_value=(True, None)
         ),
+        # The Humming-vs-Marlin priority reads the real device's capability;
+        # pin it to the mocked one so the tests do not depend on the host.
+        patch(
+            "vllm.model_executor.layers.quantization.utils.humming.priority."
+            "prefers_humming",
+            side_effect=lambda compute_capability=None: capability == 90,
+        ),
     ):
         platform._enum = PlatformEnum.CUDA
+        platform.is_cuda.return_value = True
+        yield
+
+
+@contextmanager
+def _humming_supported(supported: bool):
+    with patch.object(
+        HummingMxfp8LinearKernel,
+        "is_supported",
+        return_value=(supported, None if supported else "patched out"),
+    ):
         yield
 
 
@@ -133,3 +154,80 @@ def test_init_mxfp8_linear_kernel(capability, weight_shape, expected_kernel_cls)
 
     assert isinstance(kernel, expected_kernel_cls)
     assert kernel.config == Mxfp8LinearLayerConfig(weight_shape=weight_shape)
+
+
+def test_only_row_independent_kernels_claim_batch_invariance():
+    """Marlin and the FlashInfer kernels pick their tiling from the token
+    count, so a row's output changes with the batch; they must not be
+    selectable under VLLM_BATCH_INVARIANT."""
+    claiming = {
+        kernel
+        for kernel in _POSSIBLE_MXFP8_KERNELS[PlatformEnum.CUDA]
+        if kernel.supports_batch_invariance()
+    }
+    assert claiming == {HummingMxfp8LinearKernel, EmulationMxfp8LinearKernel}
+
+
+@pytest.mark.parametrize("capability", [80, 89, 90, 100, 120])
+@pytest.mark.parametrize("weight_shape", [_SUPPORTED_SHAPE, (130, 256), (32, 256)])
+def test_batch_invariance_selects_humming(monkeypatch, capability, weight_shape):
+    """Every shape that would otherwise land on FlashInfer or Marlin goes to
+    Humming under VLLM_BATCH_INVARIANT, on every architecture."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    with _patch_cuda_platform(capability), _humming_supported(True):
+        kernel = init_mxfp8_linear_kernel(weight_shape=weight_shape)
+
+    assert isinstance(kernel, HummingMxfp8LinearKernel)
+
+
+@pytest.mark.parametrize(
+    ("linear_backend", "expected_kernel_cls"),
+    [
+        ("marlin", HummingMxfp8LinearKernel),
+        ("flashinfer_cutedsl", HummingMxfp8LinearKernel),
+        ("humming", HummingMxfp8LinearKernel),
+        ("emulation", EmulationMxfp8LinearKernel),
+    ],
+)
+def test_batch_invariance_overrides_non_invariant_linear_backend(
+    monkeypatch, linear_backend, expected_kernel_cls
+):
+    """--linear-backend is honored only when it names a batch-invariant
+    kernel; a request for Marlin or FlashInfer is overridden."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    with (
+        _patch_cuda_platform(100),
+        _humming_supported(True),
+        patch(
+            "vllm.model_executor.kernels.linear._get_linear_backend",
+            return_value=linear_backend,
+        ),
+    ):
+        kernel = init_mxfp8_linear_kernel(weight_shape=_SUPPORTED_SHAPE)
+
+    assert isinstance(kernel, expected_kernel_cls)
+
+
+def test_batch_invariance_falls_back_to_emulation_without_humming(monkeypatch):
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    with _patch_cuda_platform(90), _humming_supported(False):
+        kernel = init_mxfp8_linear_kernel(weight_shape=_SUPPORTED_SHAPE)
+
+    assert isinstance(kernel, EmulationMxfp8LinearKernel)
+
+
+def test_batch_invariance_error_names_excluded_kernels(monkeypatch):
+    """When no batch-invariant kernel can run, the error says which kernels
+    were excluded for batch invariance rather than hiding them."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    with (
+        _patch_cuda_platform(90),
+        _humming_supported(False),
+        patch.object(
+            EmulationMxfp8LinearKernel,
+            "is_supported",
+            return_value=(False, "patched out"),
+        ),
+        pytest.raises(ValueError, match="MarlinMxfp8LinearKernel: not batch invariant"),
+    ):
+        init_mxfp8_linear_kernel(weight_shape=_SUPPORTED_SHAPE)

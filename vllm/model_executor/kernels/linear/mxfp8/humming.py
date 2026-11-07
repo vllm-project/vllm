@@ -40,6 +40,12 @@ class HummingMxfp8LinearKernel(Mxfp8LinearKernel):
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # Humming constrains its tuning (no Stream-K, fixed K tile) when the
+        # compute config carries VLLM_BATCH_INVARIANT.
+        return True
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight_scale.data = layer.weight_scale.data.view(torch.float8_e8m0fnu)
         name_map = {"weight": "weight", "weight_scale": "weight_scale"}
