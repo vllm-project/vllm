@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, ClassVar
+from collections.abc import Hashable, Iterable, Mapping, Sequence
+from typing import Any, ClassVar, cast
 
 import torch
 import torch.nn.functional as F
@@ -63,12 +63,22 @@ from vllm.transformers_utils.processors.cohere_asr import (
 )
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionType,
+)
+from vllm.v1.worker.encoder_cudagraph_defs import (
+    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG,
+    EncoderCudaGraphCaptureInputs,
+    EncoderCudaGraphConfig,
+    EncoderCudaGraphPathConfig,
+    EncoderCudaGraphReplayBuffers,
+    EncoderItemSpec,
 )
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
     SupportsMultiModal,
     SupportsTranscription,
 )
@@ -2002,7 +2012,7 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
-            length=MultiModalFieldConfig.batched("audio"),
+            length=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -2032,8 +2042,9 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
     dummy_inputs=CohereASRDummyInputsBuilder,
 )
 class CohereAsrForConditionalGeneration(
-    nn.Module, SupportsTranscription, SupportsMultiModal
+    nn.Module, SupportsTranscription, SupportsMultiModal, SupportsEncoderCudaGraph
 ):
+    _encoder_graph_time_buckets = (64, 128, 192, 256, 320, 384, 448, 512)
     packed_modules_mapping = {
         "self_attn.qkv_proj": [
             "self_attn.q_proj",
@@ -2203,6 +2214,8 @@ class CohereAsrForConditionalGeneration(
         quant_config = vllm_config.quant_config
         self.config = config
         self.dtype = vllm_config.model_config.dtype
+        self._encoder_graph_config = vllm_config.compilation_config
+        self._encoder_graph_has_lora = vllm_config.lora_config is not None
 
         with self._mark_composite_model(
             vllm_config,
@@ -2259,6 +2272,159 @@ class CohereAsrForConditionalGeneration(
 
         return out
 
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        if self._encoder_graph_has_lora or self.model.encoder.att_context_size != [
+            -1,
+            -1,
+        ]:
+            raise ValueError("Cohere encoder graphs require full context and no LoRA")
+        max_items = (
+            self._encoder_graph_config.encoder_cudagraph_max_vision_items_per_batch or 8
+        )
+        batch_buckets = [1]
+        while batch_buckets[-1] < max_items:
+            batch_buckets.append(min(batch_buckets[-1] * 2, max_items))
+        budgets = self._encoder_graph_config.encoder_cudagraph_token_budgets
+        max_budget = max(budgets) if budgets else 512 * max_items
+        return EncoderCudaGraphConfig(
+            modalities=["audio"],
+            buffer_keys=["input_features", "length"],
+            out_hidden_size=self.config.transf_decoder["config_dict"]["hidden_size"],
+            padding_logics={"input_features": self._copy_encoder_graph_features},
+            paths={"default": EncoderCudaGraphPathConfig(min_token_budget=max_budget)},
+            capture_axes=(tuple(batch_buckets), self._encoder_graph_time_buckets),
+        )
+
+    @staticmethod
+    def _copy_encoder_graph_features(dst: torch.Tensor, src: torch.Tensor) -> None:
+        dst.zero_()
+        dst[: src.shape[0], :, : src.shape[-1]].copy_(src)
+
+    def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
+        return "audio"
+
+    def get_max_frames_per_video(self) -> int:
+        return 1
+
+    def get_encoder_cudagraph_budget_range(
+        self, vllm_config: VllmConfig
+    ) -> tuple[int, int]:
+        max_items = (
+            self._encoder_graph_config.encoder_cudagraph_max_vision_items_per_batch or 8
+        )
+        return 512, 512 * max_items
+
+    def get_encoder_cudagraph_item_specs(
+        self, mm_kwargs: dict[str, Any]
+    ) -> list[EncoderItemSpec]:
+        factor = self.model.encoder.subsampling_factor
+        lengths = [int(length) for length in mm_kwargs["length"].reshape(-1).tolist()]
+        return [
+            EncoderItemSpec(input_size=length, output_tokens=math.ceil(length / factor))
+            for length in lengths
+        ]
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        features = mm_kwargs["input_features"]
+        length_tensor = mm_kwargs["length"].reshape(-1)
+        index = async_tensor_h2d(indices, device=length_tensor.device, dtype=torch.long)
+        selected_features: torch.Tensor | list[torch.Tensor]
+        if isinstance(features, torch.Tensor):
+            feature_index = index
+            if index.device != features.device:
+                feature_index = async_tensor_h2d(
+                    indices, device=features.device, dtype=torch.long
+                )
+            selected_features = features.index_select(0, feature_index)
+            frames = features.shape[-1]
+        else:
+            selected_features = [features[i] for i in indices]
+            frames = max(
+                (feature.shape[-1] for feature in selected_features), default=0
+            )
+        batches = cast(
+            tuple[int, ...], self.get_encoder_cudagraph_config().capture_axes[0]
+        )
+        batch = next((b for b in batches if b >= len(indices)), len(indices))
+        time = math.ceil(frames / self.model.encoder.subsampling_factor)
+        time = next((t for t in self._encoder_graph_time_buckets if t >= time), time)
+        return {
+            "input_features": selected_features,
+            "length": length_tensor.index_select(0, index),
+            ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: (batch, time),
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ) -> EncoderCudaGraphCaptureInputs:
+        assert axis_keys is not None and len(axis_keys) == 2
+        batch, time = axis_keys
+        assert isinstance(batch, int) and isinstance(time, int)
+        frames = time * self.model.encoder.subsampling_factor
+        return EncoderCudaGraphCaptureInputs(
+            values={
+                "input_features": torch.zeros(
+                    batch,
+                    self.config.encoder["feat_in"],
+                    frames,
+                    device=device,
+                    dtype=dtype,
+                ),
+                "length": torch.full((batch,), frames, device=device, dtype=torch.long),
+            }
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ) -> EncoderCudaGraphReplayBuffers:
+        features, length = self._parse_and_validate_audio_input(**mm_kwargs)
+        return EncoderCudaGraphReplayBuffers(
+            values={"input_features": features, "length": length}
+        )
+
+    def encoder_cudagraph_forward(
+        self, inputs: dict[str, torch.Tensor], path: str = "default"
+    ) -> torch.Tensor:
+        out, _ = self.model.encoder(inputs["input_features"], length=inputs["length"])
+        out = out.transpose(1, 2)
+        if hasattr(self.model, "encoder_decoder_proj"):
+            out = self.model.encoder_decoder_proj(out)
+        return out
+
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
+        features, length = self._parse_and_validate_audio_input(**mm_kwargs)
+        return self.encoder_cudagraph_forward(
+            {"input_features": features, "length": length}
+        )
+
+    def postprocess_encoder_output(
+        self,
+        outputs: dict[str, torch.Tensor],
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        for row, index in enumerate(indices):
+            output = outputs["default"][row, : per_item_out_tokens[index]]
+            dest[index] = output.clone() if clone else output
+
     def _parse_and_validate_audio_input(
         self, **kwargs: object
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -2290,6 +2456,9 @@ class CohereAsrForConditionalGeneration(
                 input_features, batch_first=True, padding_value=0.0
             )
             input_features = input_features.transpose(1, 2)
+
+        if seq_lens.is_cpu and not input_features.is_cpu:
+            seq_lens = async_tensor_h2d(seq_lens, device=input_features.device)
 
         return input_features, seq_lens
 

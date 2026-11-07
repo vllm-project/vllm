@@ -7,7 +7,14 @@ import pytest
 import torch
 from torch import nn
 
-from vllm.config import SpeechToTextConfig
+from vllm.config import (
+    CompilationConfig,
+    ModelConfig,
+    SchedulerConfig,
+    SpeechToTextConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.model_executor.models.cohere_asr import (
     CohereAsrForConditionalGeneration,
     CohereASRModel,
@@ -130,3 +137,153 @@ def test_load_weights_preserves_runtime_bias_dtype() -> None:
 
     assert output.dtype == torch.float16
     assert output.shape == (1, 3, 4)
+
+
+@pytest.fixture
+def cohere_encoder_graph(tmp_path, dist_init):
+    from transformers import CohereAsrConfig
+
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+
+    hf_config = CohereAsrConfig(
+        encoder_config={
+            "hidden_size": 32,
+            "intermediate_size": 64,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_mel_bins": 8,
+            "subsampling_conv_channels": 4,
+            "conv_kernel_size": 3,
+        },
+        hidden_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        intermediate_size=512,
+        max_position_embeddings=64,
+        vocab_size=64,
+        architectures=["CohereAsrForConditionalGeneration"],
+    )
+    hf_config.save_pretrained(tmp_path)
+
+    def legacy_config(config):
+        config.encoder = {
+            "feat_in": 8,
+            "n_layers": 2,
+            "d_model": 32,
+            "feat_out": -1,
+            "causal_downsampling": False,
+            "subsampling": "dw_striding",
+            "subsampling_factor": 8,
+            "subsampling_conv_channels": 4,
+            "ff_expansion_factor": 2,
+            "self_attention_model": "rel_pos",
+            "n_heads": 4,
+            "att_context_size": [-1, -1],
+            "xscaling": False,
+            "untie_biases": True,
+            "pos_emb_max_len": 5000,
+            "conv_kernel_size": 3,
+            "conv_norm_type": "batch_norm",
+            "conv_context_size": None,
+        }
+        config.transf_decoder = {
+            "config_dict": {
+                "hidden_size": 256,
+                "num_layers": 1,
+                "num_attention_heads": 4,
+                "inner_size": 512,
+                "max_sequence_length": 64,
+                "hidden_act": "relu",
+            }
+        }
+        config.head = {"hidden_size": 256, "num_classes": 64}
+        config.preprocessor = {"sample_rate": 16000, "window_stride": 0.01}
+        return config
+
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        dtype="bfloat16",
+        max_model_len=64,
+        hf_overrides=legacy_config,
+    )
+    config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_model_len=64,
+            max_num_seqs=4,
+            max_num_batched_tokens=64,
+            is_encoder_decoder=True,
+        ),
+        compilation_config=CompilationConfig(
+            cudagraph_mm_encoder=True,
+            encoder_cudagraph_max_vision_items_per_batch=4,
+        ),
+    )
+    with (
+        set_current_vllm_config(config),
+        torch.backends.cudnn.flags(allow_tf32=False),
+        torch.random.fork_rng(),
+    ):
+        torch.manual_seed(7)
+        # The decoder requires a half-precision cross-attention backend. Keep
+        # the encoder/projection in float32 for strict replay comparisons.
+        with set_default_torch_dtype(torch.bfloat16):
+            model = CohereAsrForConditionalGeneration(vllm_config=config).cuda().eval()
+        model.model.encoder.float()
+        model.model.encoder_decoder_proj.float()
+        manager = EncoderCudaGraphManager(
+            vllm_config=config,
+            device=torch.device("cuda"),
+            dtype=torch.float32,
+            model=model,
+        )
+        with torch.inference_mode():
+            manager.capture(torch.cuda.graph_pool_handle())
+            yield model, manager
+        manager.clear()
+
+
+def test_encoder_graph_replay_preserves_frames_and_owned_outputs(cohere_encoder_graph):
+    """Replay must update lengths/data without overwriting retained outputs."""
+    from vllm.utils.torch_utils import async_tensor_h2d
+
+    model, manager = cohere_encoder_graph
+    features = torch.randn(3, 8, 513, device="cuda")
+    lengths = torch.tensor([513, 173, 93])
+    inputs = {"input_features": features, "length": lengths}
+    with torch.inference_mode():
+        reference = model.embed_multimodal(
+            input_features=features, length=async_tensor_h2d(lengths, device="cuda")
+        )
+        actual = manager.execute(inputs)
+        assert len(actual) == len(reference) == 3
+        for expected, output in zip(reference, actual):
+            torch.testing.assert_close(output, expected)
+        retained = [output.clone() for output in actual]
+        lengths.copy_(torch.tensor([511, 170, 90]))
+        inputs["input_features"] = features + 0.1
+        updated = manager.execute(inputs)
+        expected = model.embed_multimodal(
+            input_features=inputs["input_features"],
+            length=async_tensor_h2d(lengths, device="cuda"),
+        )
+        assert len(updated) == len(expected) == 3
+        for first, saved, output, target in zip(actual, retained, updated, expected):
+            assert torch.equal(first, saved)
+            torch.testing.assert_close(output, target)
+    assert manager.get_cumulative_stats()["graph_hits"] == 6
+
+
+def test_encoder_graph_oversized_axis_uses_original_eager_path(cohere_encoder_graph):
+    """An uncaptured time axis must preserve the original encoder result."""
+    model, manager = cohere_encoder_graph
+    features = torch.randn(1, 8, 4097, device="cuda")
+    lengths = torch.tensor([4097])
+    with torch.inference_mode():
+        reference = model.embed_multimodal(input_features=features, length=lengths)
+        actual = manager.execute({"input_features": features, "length": lengths})
+    torch.testing.assert_close(actual[0], reference[0], rtol=0, atol=0)
+    stats = manager.get_cumulative_stats()
+    assert stats["graph_hits"] == 0 and stats["graph_misses"] == 1

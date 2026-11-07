@@ -69,3 +69,15 @@ steps:
       - vllm/config/compilation.py
       - vllm/compilation
       - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H200 MIG 18GB) Cohere Encoder CUDAGraph"
+  device: h200_18gb
+  key: cohere-encoder-cudagraph
+  timeout_in_minutes: 20
+  source_file_dependencies:
+  - vllm/model_executor/models/cohere_asr.py
+  - vllm/v1/worker/encoder_cudagraph.py
+  - vllm/v1/worker/encoder_cudagraph_defs.py
+  - tests/models/multimodal/test_cohere_asr.py
+  commands:
+    - pytest -v -s models/multimodal/test_cohere_asr.py
