@@ -63,6 +63,66 @@ def test_flashinfer_gdn_prefill_passes_cu_seqlens_through(monkeypatch):
     assert final_state is None
 
 
+def test_flashinfer_gdn_prefill_omits_cp_kwargs_when_inactive(monkeypatch):
+    """FlashInfer <= 0.6.6 does not accept CP checkpointing kwargs in
+    chunk_gated_delta_rule; verify they are omitted when CP is inactive and
+    passed when CP checkpointing is requested."""
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_chunk_gated_delta_rule(**kwargs):
+        captured_kwargs.clear()
+        captured_kwargs.update(kwargs)
+        return kwargs["q"], kwargs["initial_state"]
+
+    monkeypatch.setattr(
+        flashinfer.gdn_prefill,
+        "chunk_gated_delta_rule",
+        fake_chunk_gated_delta_rule,
+    )
+    q = torch.zeros(1, 2, 1, 2)
+    cu_seqlens = torch.tensor([0, 2], dtype=torch.int32)
+
+    fi_chunk_gated_delta_rule(
+        q=q,
+        k=q,
+        v=q,
+        g=torch.zeros(1, 2, 1),
+        beta=torch.zeros(1, 2, 1),
+        initial_state=torch.zeros(1, 1, 2, 2),
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        use_qk_l2norm_in_kernel=False,
+    )
+    for cp_key in (
+        "state_checkpoints",
+        "checkpoint_cu_starts",
+        "checkpoint_every_n_tokens",
+        "use_cp",
+        "backend",
+    ):
+        assert cp_key not in captured_kwargs
+
+    checkpoints = torch.zeros(1, 1, 2, 2)
+    fi_chunk_gated_delta_rule(
+        q=q,
+        k=q,
+        v=q,
+        g=torch.zeros(1, 2, 1),
+        beta=torch.zeros(1, 2, 1),
+        initial_state=torch.zeros(1, 1, 2, 2),
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        use_qk_l2norm_in_kernel=False,
+        state_checkpoints=checkpoints,
+        checkpoint_every_n_tokens=64,
+        use_cp=True,
+    )
+    assert captured_kwargs["state_checkpoints"] is checkpoints
+    assert captured_kwargs["checkpoint_every_n_tokens"] == 64
+    assert captured_kwargs["use_cp"] is True
+    assert captured_kwargs["backend"] == "flashinfer"
+
+
 @pytest.mark.skipif(
     not (
         current_platform.is_device_capability(90)

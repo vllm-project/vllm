@@ -7,7 +7,7 @@ import itertools
 import os
 from collections.abc import Callable
 from dataclasses import replace
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from einops import rearrange
@@ -426,6 +426,20 @@ def fi_chunk_gated_delta_rule(
     fi_g = g.to(torch.float32)
     fi_beta = beta.to(torch.float32)
     # cu_seqlens goes through as is: FlashInfer accepts int32 and int64.
+    extra_kwargs: dict[str, Any] = {}
+    if (
+        state_checkpoints is not None
+        or checkpoint_cu_starts is not None
+        or checkpoint_every_n_tokens != 0
+        or use_cp not in ("auto", False)
+    ):
+        extra_kwargs.update(
+            state_checkpoints=state_checkpoints,
+            checkpoint_cu_starts=checkpoint_cu_starts,
+            checkpoint_every_n_tokens=checkpoint_every_n_tokens,
+            use_cp=use_cp,
+            backend="flashinfer",
+        )
     result = chunk_gated_delta_rule_fi(
         q=q,
         k=k,
@@ -436,11 +450,7 @@ def fi_chunk_gated_delta_rule(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         output=output,
-        state_checkpoints=state_checkpoints,
-        checkpoint_cu_starts=checkpoint_cu_starts,
-        checkpoint_every_n_tokens=checkpoint_every_n_tokens,
-        use_cp=use_cp,
-        backend="flashinfer",
+        **extra_kwargs,
     )
     # FlashInfer returns (output, state) when output_final_state=True,
     # or just output when output_final_state=False.
