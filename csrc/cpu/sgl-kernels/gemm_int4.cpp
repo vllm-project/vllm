@@ -314,18 +314,18 @@ inline fixed_i32x8_t gemm_accum_uint8_int8_rvv(fixed_i32x8_t acc, uint8_t a, fix
   return RVVI(__riscv_vwmacc_vx_i32, LMUL_256)(acc, static_cast<int16_t>(a), b_i16, vl);
 }
 
+// Accumulates the raw sum_k a_k * b_k. The weight zero-point is not applied
+// here: it is loop-invariant in k, so
+//     sum_k a_k * (b_k - zb) = sum_k a_k * b_k - zb * sum_k a_k
+// and the correction is folded into the epilogue using sum_k a_k. That keeps
+// the qzeros load and the subtract out of the innermost loop.
 template <int64_t N, int64_t ldb, int group>
 inline fixed_i32x8_t gemm_accum_uint4_rvv(
     fixed_i32x8_t acc,
     const uint8_t* __restrict__ B,
-    const int8_t* __restrict__ qzeros_b,
     uint8_t a,
     int64_t k) {
-  constexpr int64_t n_group_size = 8;
   fixed_i8x8_t b = load_uint4_as_int8_rvv<N, ldb, group>(B, k);
-  fixed_i8x8_t qzeros =
-      RVVI(__riscv_vle8_v_i8, LMUL_64)(qzeros_b + group * n_group_size, n_group_size);
-  b = RVVI(__riscv_vsub_vv_i8, LMUL_64)(b, qzeros, n_group_size);
   return gemm_accum_uint8_int8_rvv(acc, a, b);
 }
 
@@ -336,28 +336,34 @@ inline void _dequant_and_store_rvv(
     const float* __restrict__ scales_a,
     const int32_t* __restrict__ qzeros_a,
     const float* __restrict__ scales_b,
+    const int8_t* __restrict__ qzeros_b,
     const int32_t* __restrict__ compensation,
+    int32_t asum,
     int64_t m,
     int64_t ldc) {
   constexpr int64_t n_group_size = 8;
   constexpr int64_t n = group * n_group_size;
   constexpr int64_t vl = n_group_size;
 
-  // Dequant compensation: remove activation zero-point contribution.
+  // Weight zero-point, hoisted out of the K loop: acc -= zb * sum_k a_k.
+  fixed_i32x8_t zb = RVVI(__riscv_vsext_vf4_i32, LMUL_256)(
+      RVVI(__riscv_vle8_v_i8, LMUL_64)(qzeros_b + n, vl), vl);
+  acc = RVVI(__riscv_vnmsac_vx_i32, LMUL_256)(acc, asum, zb, vl);
+
+  // Activation zero-point: acc -= compensation[n] * qzeros_a[m].
   fixed_i32x8_t comp = RVVI(__riscv_vle32_v_i32, LMUL_256)(compensation + n, vl);
-  fixed_i32x8_t zp_comp = RVVI(__riscv_vmul_vx_i32, LMUL_256)(comp, qzeros_a[m], vl);
-  acc = RVVI(__riscv_vsub_vv_i32, LMUL_256)(acc, zp_comp, vl);
+  acc = RVVI(__riscv_vnmsac_vx_i32, LMUL_256)(acc, qzeros_a[m], comp, vl);
 
   // Scale: convert int32 accumulators to fp32 and apply activation/weight scales.
   fixed_fp32x8_t acc_f = RVVI(__riscv_vfcvt_f_x_v_f32, LMUL_256)(acc, vl);
   acc_f = RVVI(__riscv_vfmul_vf_f32, LMUL_256)(acc_f, scales_a[m], vl);
   fixed_fp32x8_t scale_b = RVVI(__riscv_vle32_v_f32, LMUL_256)(scales_b + n, vl);
-  acc_f = RVVI(__riscv_vfmul_vv_f32, LMUL_256)(acc_f, scale_b, vl);
 
-  // Store: accumulate into the float scratch buffer that already holds bias/zero.
+  // Store: c += acc_f * scale_b, fused into the accumulate.
   float* c_ptr = C + m * ldc + n;
   fixed_fp32x8_t c_old = RVVI(__riscv_vle32_v_f32, LMUL_256)(c_ptr, vl);
-  fixed_fp32x8_t c_new = RVVI(__riscv_vfadd_vv_f32, LMUL_256)(c_old, acc_f, vl);
+  fixed_fp32x8_t c_new =
+      RVVI(__riscv_vfmacc_vv_f32, LMUL_256)(c_old, acc_f, scale_b, vl);
   RVVI(__riscv_vse32_v_f32, LMUL_256)(c_ptr, c_new, vl);
 }
 
@@ -385,21 +391,28 @@ void _dequant_gemm_accum_rvv(
     fixed_i32x8_t acc1 = RVVI(__riscv_vmv_v_x_i32, LMUL_256)(0, vl);
     fixed_i32x8_t acc2 = RVVI(__riscv_vmv_v_x_i32, LMUL_256)(0, vl);
     fixed_i32x8_t acc3 = RVVI(__riscv_vmv_v_x_i32, LMUL_256)(0, vl);
+    // sum_k a_k, used by the epilogue to apply the weight zero-point.
+    int32_t asum = 0;
     // A[m][k] @ B[k][0:32] -> acc[m][0:32]
     for (int64_t k = 0; k < K; ++k) {
       // GEMM K step: one scalar activation updates four 8-column RVV tiles.
       const uint8_t a = A[m * lda + k];
-      acc0 = gemm_accum_uint4_rvv<N, ldb, 0>(acc0, B, qzeros_b, a, k);
-      acc1 = gemm_accum_uint4_rvv<N, ldb, 1>(acc1, B, qzeros_b, a, k);
-      acc2 = gemm_accum_uint4_rvv<N, ldb, 2>(acc2, B, qzeros_b, a, k);
-      acc3 = gemm_accum_uint4_rvv<N, ldb, 3>(acc3, B, qzeros_b, a, k);
+      asum += a;
+      acc0 = gemm_accum_uint4_rvv<N, ldb, 0>(acc0, B, a, k);
+      acc1 = gemm_accum_uint4_rvv<N, ldb, 1>(acc1, B, a, k);
+      acc2 = gemm_accum_uint4_rvv<N, ldb, 2>(acc2, B, a, k);
+      acc3 = gemm_accum_uint4_rvv<N, ldb, 3>(acc3, B, a, k);
     }
 
     // Dequant/scale/store each 8-column group back into C.
-    _dequant_and_store_rvv<0>(C, acc0, scales_a, qzeros_a, scales_b, compensation, m, ldc);
-    _dequant_and_store_rvv<1>(C, acc1, scales_a, qzeros_a, scales_b, compensation, m, ldc);
-    _dequant_and_store_rvv<2>(C, acc2, scales_a, qzeros_a, scales_b, compensation, m, ldc);
-    _dequant_and_store_rvv<3>(C, acc3, scales_a, qzeros_a, scales_b, compensation, m, ldc);
+    _dequant_and_store_rvv<0>(
+        C, acc0, scales_a, qzeros_a, scales_b, qzeros_b, compensation, asum, m, ldc);
+    _dequant_and_store_rvv<1>(
+        C, acc1, scales_a, qzeros_a, scales_b, qzeros_b, compensation, asum, m, ldc);
+    _dequant_and_store_rvv<2>(
+        C, acc2, scales_a, qzeros_a, scales_b, qzeros_b, compensation, asum, m, ldc);
+    _dequant_and_store_rvv<3>(
+        C, acc3, scales_a, qzeros_a, scales_b, qzeros_b, compensation, asum, m, ldc);
   }
 }
 #endif
