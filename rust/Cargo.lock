@@ -5662,6 +5662,7 @@ dependencies = [
  "uuid",
  "vllm-engine-core-client",
  "vllm-llm",
+ "vllm-metrics",
  "vllm-parser",
  "vllm-text",
  "vllm-tokenizer",
@@ -5936,6 +5937,7 @@ dependencies = [
  "trait-set",
  "vllm-engine-core-client",
  "vllm-llm",
+ "vllm-metrics",
  "vllm-tokenizer",
 ]
 
