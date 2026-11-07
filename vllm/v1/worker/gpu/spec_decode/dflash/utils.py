@@ -6,9 +6,9 @@ from vllm.config import VllmConfig, replace
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
-    _should_share,
     get_target_lm_head,
     maybe_share_target_embed,
+    share_target_lm_head,
 )
 from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
@@ -59,17 +59,11 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     maybe_share_target_embed(dflash_model, draft_inner, target_inner)
 
-    target_lm_head = get_target_lm_head(target_model, target_language_model)
-    draft_lm_head = getattr(dflash_model, "lm_head", None)
-    if (
-        target_lm_head is not None
-        and not getattr(dflash_model.config, "has_own_lm_head", False)
-        and _should_share(
-            dflash_model, "has_own_lm_head", draft_lm_head, target_lm_head
-        )
-    ):
-        if draft_lm_head is not None:
-            del dflash_model.lm_head
-        dflash_model.lm_head = target_lm_head
+    share_target_lm_head(
+        dflash_model,
+        get_target_lm_head(target_model, target_language_model),
+        speculative_config.draft_lm_head_quantization,
+        can_share=not getattr(dflash_model.config, "has_own_lm_head", False),
+    )
 
     return dflash_model
