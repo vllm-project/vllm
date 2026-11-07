@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import copy
 import json
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .content_parsers import STREAMABLE_PARSERS, process_field
@@ -57,7 +58,11 @@ def _coerce(raw: str, types: tuple[str, ...]) -> Any:
                     number = float(raw)
                     if not number.is_integer():
                         continue
-                    return int(number)
+                    # Preserve decimal precision when converting to an integer.
+                    decimal_number = Decimal(raw)
+                    if decimal_number != decimal_number.to_integral_value():
+                        continue
+                    return int(decimal_number)
             if type_name == "number":
                 number = float(raw)
                 if number != number or number in (float("inf"), float("-inf")):
@@ -72,7 +77,7 @@ def _coerce(raw: str, types: tuple[str, ...]) -> Any:
                 decoded = json.loads(raw)
                 if isinstance(decoded, dict if type_name == "object" else list):
                     return decoded
-        except ValueError:
+        except (ValueError, InvalidOperation):
             continue
     return raw  # `string` params, unknown types and failed casts all keep the original text
 
