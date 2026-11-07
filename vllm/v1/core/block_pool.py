@@ -366,6 +366,7 @@ class BlockPool:
             parent_block_hash=parent_block_hash,
             token_ids=request.all_token_ids[start_token_idx:end_token_idx],
             block_size=block_size,
+            chunk_size=block_size,
             lora_id=request.lora_request.adapter_id if request.lora_request else None,
             medium=self.medium,
             lora_name=request.lora_request.name if request.lora_request else None,
@@ -558,6 +559,7 @@ class BlockPool:
                     parent_block_hash=parent_block_hash,
                     token_ids=request.all_token_ids[block_start:block_end],
                     block_size=block_end - block_start,
+                    chunk_size=block_end - block_start,
                     lora_id=request.lora_request.adapter_id
                     if request.lora_request
                     else None,

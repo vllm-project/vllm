@@ -96,6 +96,10 @@ class BlockStored(KVCacheEvent):
     None when lookahead hashing is disabled.
     """
     lookahead_token_ids: list[list[int]] | None = None
+    """Token span of one retrievable unit. Equals block_size for independent
+    blocks; an offloaded chunk may span multiple blocks. None means unspecified.
+    """
+    chunk_size: int | None = None
 
     def __hash__(self) -> int:
         return hash(
@@ -104,6 +108,7 @@ class BlockStored(KVCacheEvent):
                 self.parent_block_hash,
                 tuple(self.token_ids),
                 self.block_size,
+                self.chunk_size,
                 self.lora_id,
                 self.medium,
                 tuple(self.extra_keys) if self.extra_keys else None,

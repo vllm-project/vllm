@@ -3986,6 +3986,7 @@ def test_block_stored_event_group_idx(group_id: int):
     assert len(events) == 1
     assert isinstance(events[0], BlockStored)
     assert events[0].group_idx == group_id
+    assert events[0].chunk_size == block_size
     assert (
         events[0].kv_cache_spec_kind
         == [
@@ -4298,6 +4299,7 @@ def test_emit_cached_block_events():
     assert event.token_ids == list(req.all_token_ids[: num_cached_blocks * block_size])
     assert event.group_idx == kv_cache_group_id
     assert event.block_size == block_size
+    assert event.chunk_size == block_size
     assert event.medium == MEDIUM_GPU
     assert event.lora_id is None
     assert event.lora_name is None
