@@ -622,7 +622,16 @@ mooncake_stats = {
             "status": "ok",
             "num_failed_keys": 0,
         }
-    ]
+    ],
+    "save_remove": [
+        {
+            "duration_seconds": 0.001,
+            "num_keys": 3,
+            "num_bytes": 0,
+            "status": "partial_failure",
+            "num_failed_keys": 1,
+        }
+    ],
 }
 mooncake_transfer_stats = {
     "transfer_duration": [0.01, 0.02],
