@@ -1431,6 +1431,24 @@ def _rocm_aiter_per_token_quant_fake(
     )
 
 
+def _rocm_aiter_per_token_quant_inplace_impl(
+    out: torch.Tensor,
+    x: torch.Tensor,
+    scale: torch.Tensor,
+) -> None:
+    from aiter.ops.quant import dynamic_per_token_scaled_quant
+
+    dynamic_per_token_scaled_quant(
+        out,
+        x,
+        scale,
+        scale_ub=None,
+        shuffle_scale=False,
+        num_rows=None,
+        num_rows_factor=1,
+    )
+
+
 def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
     x: torch.Tensor,
     residual: torch.Tensor,
@@ -3277,6 +3295,13 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_per_token_quant_inplace",
+                op_func=_rocm_aiter_per_token_quant_inplace_impl,
+                mutates_args=["out", "scale"],
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_sparse_attn_indexer",
                 op_func=rocm_aiter_sparse_attn_indexer,
                 mutates_args=["topk_indices_buffer", "candidate_blocks"],
@@ -3972,6 +3997,14 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_per_token_quant(x, quant_dtype, scale)
 
     @staticmethod
+    def per_token_quant_inplace(
+        out: torch.Tensor,
+        x: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> None:
+        torch.ops.vllm.rocm_aiter_per_token_quant_inplace(out, x, scale)
+
+    @staticmethod
     def gemm_a8wfp4(
         x: torch.Tensor,
         w: torch.Tensor,
@@ -4410,6 +4443,7 @@ class rocm_aiter_ops:
         YQ: torch.Tensor | None = None,
         transpose_bm: bool | None = False,
         config: dict | None = None,
+        y_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # ruff: noqa: E501 # isort: skip
         from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (
@@ -4427,6 +4461,7 @@ class rocm_aiter_ops:
             YQ=YQ,
             transpose_bm=transpose_bm,
             config=config,
+            y_scale_out=y_scale,
         )
 
     @staticmethod
