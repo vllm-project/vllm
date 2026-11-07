@@ -489,6 +489,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
         unregister_vllm_metrics()
         self.vllm_config = vllm_config
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        self.kv_role = (
+            getattr(kv_transfer_config, "kv_role", None)
+            if kv_transfer_config is not None
+            else None
+        )
         # Use this flag to hide metrics that were deprecated in
         # a previous release and which will be removed future
         self.show_hidden_metrics = vllm_config.observability_config.show_hidden_metrics
@@ -977,6 +983,32 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_queue_time_request, per_engine_labelvalues
         )
 
+        histogram_kv_wait_time_request = self._histogram_cls(
+            name="vllm:request_kv_wait_time_seconds",
+            documentation=(
+                "Histogram of time spent waiting for remote KV load"
+                " (PD disaggregation, decode instance)."
+            ),
+            buckets=request_latency_buckets,
+            labelnames=labelnames,
+        )
+        self.histogram_kv_wait_time_request = create_metric_per_engine(
+            histogram_kv_wait_time_request, per_engine_labelvalues
+        )
+
+        histogram_pure_queue_time_request = self._histogram_cls(
+            name="vllm:request_pure_queue_time_seconds",
+            documentation=(
+                "Histogram of time spent in WAITING phase excluding"
+                " remote KV load wait."
+            ),
+            buckets=request_latency_buckets,
+            labelnames=labelnames,
+        )
+        self.histogram_pure_queue_time_request = create_metric_per_engine(
+            histogram_pure_queue_time_request, per_engine_labelvalues
+        )
+
         histogram_inference_time_request = self._histogram_cls(
             name="vllm:request_inference_time_seconds",
             documentation="Histogram of time spent in RUNNING phase for request.",
@@ -1305,6 +1337,31 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_decode_time_request[engine_idx].observe(
                 finished_request.decode_time
             )
+            self.histogram_kv_wait_time_request[engine_idx].observe(
+                finished_request.kv_wait_time
+            )
+            self.histogram_pure_queue_time_request[engine_idx].observe(
+                finished_request.pure_queue_time
+            )
+            if self.kv_role == "kv_producer":
+                logger.info(
+                    "REQ_STAGE_METRIC request_id=%s p_waiting_s=%.3f "
+                    "p_running_s=%.3f ts_ms=%.3f",
+                    finished_request.request_id,
+                    finished_request.queued_time,
+                    finished_request.prefill_time,
+                    time.time() * 1000,
+                )
+            elif self.kv_role == "kv_consumer":
+                logger.info(
+                    "REQ_STAGE_METRIC request_id=%s kv_transfer_s=%.3f "
+                    "d_waiting_s=%.3f d_running_s=%.3f ts_ms=%.3f",
+                    finished_request.request_id,
+                    finished_request.kv_wait_time,
+                    finished_request.pure_queue_time,
+                    finished_request.inference_time,
+                    time.time() * 1000,
+                )
             self.histogram_request_num_preemptions[engine_idx].observe(
                 finished_request.num_preemptions
             )
