@@ -240,6 +240,180 @@ def test_b12x_block_fp8_requires_aligned_features() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "enabled,shape,name,sm_count,expected",
+    [
+        (True, (3392, 4096), "NVIDIA RTX 6000D", 156, True),
+        (False, (3392, 4096), "NVIDIA RTX 6000D", 156, False),
+        (True, (3392, 2048), "NVIDIA RTX 6000D", 156, False),
+        (True, (3712, 4096), "NVIDIA RTX 6000D", 156, False),
+        (True, (3392, 4096), "NVIDIA RTX PRO 6000 Blackwell", 188, False),
+        (True, (3392, 4096), "NVIDIA RTX 6000D", 155, False),
+    ],
+)
+def test_rtx6000d_tail_device_and_shape_gate(
+    monkeypatch,
+    enabled,
+    shape,
+    name,
+    sm_count,
+    expected,
+):
+    import vllm.model_executor.kernels.linear.scaled_mm.b12x as mod
+
+    monkeypatch.setattr(
+        mod,
+        "get_current_vllm_config_or_none",
+        lambda: types.SimpleNamespace(
+            kernel_config=types.SimpleNamespace(enable_rtx6000d_fp8_tail=enabled)
+        ),
+    )
+    monkeypatch.setattr(
+        mod, "current_platform", types.SimpleNamespace(is_cuda=lambda: True)
+    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda _: types.SimpleNamespace(
+            name=name, major=12, minor=0, multi_processor_count=sm_count
+        ),
+    )
+    config = types.SimpleNamespace(weight_shape=shape, input_dtype=torch.bfloat16)
+    assert mod._use_rtx6000d_tail(config) == expected
+
+
+def test_rtx6000d_tail_preserves_logical_weight_and_reload_storage():
+    from vllm.model_executor.kernels.linear.scaled_mm.b12x import _prepare_tail_weight
+
+    layer = torch.nn.Linear(16, 192, bias=False)
+    layer.weight.requires_grad_(False)
+    original = layer.weight.detach().clone()
+    loader = object()
+    layer.weight.weight_loader = loader
+    _prepare_tail_weight(layer)
+    storage = layer._b12x_tail_weight.data_ptr()
+    assert layer.weight.shape == (192, 16)
+    assert layer.weight.data_ptr() == storage
+    assert layer.weight.weight_loader is loader
+    assert layer._b12x_tail_weight.shape == (256, 16)
+    torch.testing.assert_close(layer.weight, original)
+    assert not torch.count_nonzero(layer._b12x_tail_weight[192:])
+    assert "_b12x_tail_weight" not in layer.state_dict()
+    # Model post-load processing may replace the logical tensor on reload.
+    replacement = torch.randn_like(original)
+    layer.weight = torch.nn.Parameter(replacement.clone(), requires_grad=False)
+    _prepare_tail_weight(layer)
+    assert layer.weight.data_ptr() == layer._b12x_tail_weight.data_ptr() == storage
+    torch.testing.assert_close(layer.weight, replacement)
+    assert not torch.count_nonzero(layer._b12x_tail_weight[192:])
+
+
+def test_rtx6000d_tail_scale_reload_preserves_graph_storage():
+    from vllm.model_executor.kernels.linear.scaled_mm.b12x import _prepare_tail_scale
+
+    layer = torch.nn.Module()
+    layer.weight_scale_inv = torch.nn.Parameter(torch.ones(27, 32), requires_grad=False)
+    _prepare_tail_scale(layer, "weight_scale_inv")
+    pointer = layer.weight_scale_inv.data_ptr()
+    layer.weight_scale_inv = torch.nn.Parameter(
+        torch.full((27, 32), 2.0), requires_grad=False
+    )
+    _prepare_tail_scale(layer, "weight_scale_inv")
+    assert layer.weight_scale_inv.data_ptr() == pointer
+    torch.testing.assert_close(layer._b12x_tail_scale, torch.full((27, 32), 2.0))
+    assert "_b12x_tail_scale" not in layer.state_dict()
+
+
+@pytest.mark.parametrize("shape", [(3, 16), (2, 3, 16)])
+@pytest.mark.parametrize("with_bias", [True, False])
+def test_rtx6000d_tail_apply_restores_logical_shape(shape, with_bias):
+    from vllm.model_executor.kernels.linear.scaled_mm.b12x import _prepare_tail_weight
+
+    layer = torch.nn.Linear(16, 192, bias=False)
+    layer.weight.requires_grad_(False)
+    _prepare_tail_weight(layer)
+    kernel = object.__new__(B12xFp8BlockScaledMMKernel)
+    kernel.config = types.SimpleNamespace(
+        weight_shape=(192, 16), out_dtype=torch.float32
+    )
+    kernel.use_triton = False
+    kernel._get_layer_params = lambda _: types.SimpleNamespace(
+        input_scale=None, input_scale_ub=None, block_scale=torch.ones(1)
+    )
+    # Isolate pad/slice/bias/reshape from GPU quantization and GEMM.
+    kernel.quant_fp8 = lambda x, *args, **kwargs: (x, torch.ones(1))
+    kernel.apply_block_scaled_mm = lambda A, B, As, Bs: A @ B.T
+    x = torch.randn(shape)
+    bias = torch.randn(192) if with_bias else None
+    torch.testing.assert_close(
+        kernel.apply_weights(layer, x, bias),
+        torch.nn.functional.linear(x, layer.weight, bias),
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_rtx6000d_tail_cuda_graph_and_reload(default_vllm_config):
+    props = torch.cuda.get_device_properties(torch.accelerator.current_device_index())
+    if props.name != "NVIDIA RTX 6000D" or props.multi_processor_count != 156:
+        pytest.skip("Requires the measured RTX 6000D SKU")
+    default_vllm_config.kernel_config.enable_rtx6000d_fp8_tail = True
+    supported, reason = B12xFp8BlockScaledMMKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    for n in (3392, 3712):
+        config = FP8ScaledMMLinearLayerConfig(
+            activation_quant_key=kFp8Dynamic128Sym,
+            weight_quant_key=kFp8Static128BlockSym,
+            weight_shape=(n, 4096),
+            input_dtype=torch.bfloat16,
+            out_dtype=torch.bfloat16,
+        )
+        assert B12xFp8BlockScaledMMKernel.can_implement(config)[0]
+        kernel = B12xFp8BlockScaledMMKernel(config)
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(
+            torch.randn(n, 4096, device="cuda").to(torch.float8_e4m3fn),
+            requires_grad=False,
+        )
+        layer.weight_scale_inv = torch.nn.Parameter(
+            torch.rand((n + 127) // 128, 32, device="cuda") + 0.5,
+            requires_grad=False,
+        )
+        kernel.process_weights_after_loading(layer)
+        kernel.get_b12x_warmup_unit(layer, (1, 3, 4, 128), torch.bfloat16).compile()
+        for m in (1, 3, 4, 128):
+            x = torch.randn(m, 4096, device="cuda", dtype=torch.bfloat16)
+            bias = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+            y = kernel.apply_weights(layer, x, bias)
+            q, scale = kernel.quant_fp8(x, None, None, use_triton=kernel.use_triton)
+            w_ref = layer.weight.float() * layer.weight_scale_inv.repeat_interleave(
+                128, 0
+            )[:n].repeat_interleave(128, 1)
+            ref = ((q[:m].float() * scale[:m].repeat_interleave(128, 1)) @ w_ref.T).to(
+                torch.bfloat16
+            ) + bias
+            assert (y.float() - ref.float()).norm() / ref.float().norm() < 0.005
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = kernel.apply_weights(layer, x, bias)
+            x.copy_(torch.randn_like(x))
+            layer.weight.copy_(
+                torch.randn_like(layer.weight.float()).to(layer.weight.dtype)
+            )
+            if n == 3392:
+                layer.weight_scale_inv = torch.nn.Parameter(
+                    layer.weight_scale_inv * 0.75, requires_grad=False
+                )
+            else:
+                layer.weight_scale_inv.mul_(0.75)
+            kernel.process_weights_after_loading(layer)
+            graph.replay()
+            torch.testing.assert_close(
+                captured, kernel.apply_weights(layer, x, bias), rtol=0, atol=0
+            )
+
+
 def test_b12x_tensor_fp8_process_weights_packs_modelopt_layout(
     monkeypatch,
 ) -> None:
