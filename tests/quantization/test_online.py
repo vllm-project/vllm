@@ -2958,8 +2958,9 @@ def test_online_int8_moe_w2_scale_matches_unsharded(monkeypatch) -> None:
         layer.w13_weight = torch.nn.Parameter(w13.clone(), requires_grad=False)
         layer.w2_weight = torch.nn.Parameter(w2_in.clone(), requires_grad=False)
         layer.num_experts = layer.local_num_experts = w13.shape[0]
-        method = SimpleNamespace(moe=SimpleNamespace(tp_size=moe_tp_size))
-        Int8OnlineMoEMethod._quantize_weights(method, layer)
+        method = object.__new__(Int8OnlineMoEMethod)
+        method.moe = SimpleNamespace(tp_size=moe_tp_size)
+        method._quantize_weights(layer)
         return layer.w2_weight, layer.w2_scale
 
     full_weight, full_scale = quantize(w2, 1)

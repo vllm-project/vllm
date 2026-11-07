@@ -445,7 +445,7 @@ class TestOnlineStaging:
 
     @staticmethod
     def _online_experts(cls, has_bias):
-        """An online MoE layer: 2 local experts of 3, round-up padded, TP rank
+        """An online MoE layer: 2 local experts of 4, round-up padded, TP rank
         0 of 2; its process_weights_after_loading only records the call."""
 
         class _MoE(OnlineMoEMethodBase):
@@ -463,7 +463,7 @@ class TestOnlineStaging:
             has_bias=has_bias,
             tp_rank=0,
             tp_shard_with_padding=False,
-            num_experts=3,
+            num_experts=4,
             moe_parallel_config=SimpleNamespace(tp_size=2),
         )
         method = object.__new__(_MoE)
@@ -496,15 +496,16 @@ class TestOnlineStaging:
         layer = self._online_experts(RoutedExperts, has_bias)
         shapes = {"w1": (6, 4), "w3": (6, 4), "w2": (4, 6)}  # both TP ranks
         kinds = ["weight", "bias"] if has_bias else ["weight"]
-        loads = [(e, s, k) for e in (2, 0, 1) for k in kinds for s in shapes]
+        loads = [(e, s, k) for e in (2, 0, 3, 1) for k in kinds for s in shapes]
         info = get_layerwise_info(layer)
         for i, (expert, shard, kind) in enumerate(loads):
             name = ("w2" if shard == "w2" else "w13") + f"_{kind}"
             shape = shapes[shard] if kind == "weight" else shapes[shard][:1]
             param = getattr(layer, name)
+            buffered = len(info.loaded_weights)
             param.weight_loader(param, torch.ones(shape), name, shard, expert)
-            if expert == 2:
-                assert info.loaded_weights == []
+            if expert >= 2:  # another rank's
+                assert len(info.loaded_weights) == buffered
             assert layer.quant_method.processed == (i == len(loads) - 1)
 
     def test_own_expert_loader_counts_padding(self):
@@ -513,12 +514,16 @@ class TestOnlineStaging:
         from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
         class _OwnLoader(RoutedExperts):
-            def weight_loader(self, *args, **kwargs):
-                return super().weight_loader(*args, **kwargs)
+            def weight_loader(self, param, loaded_weight, *args, expert_id):
+                if expert_id < 2:  # the whole padded expert, as gpt-oss
+                    param.data[expert_id].copy_(loaded_weight)
 
         layer = self._online_experts(_OwnLoader, has_bias=False)
-        assert not hasattr(layer.w13_weight, "weight_loader_numel")
-        assert not hasattr(layer.w2_weight, "weight_loader_numel")
+        loads = [(e, n) for e in (0, 1) for n in ("w13_weight", "w2_weight")]
+        for i, (expert, name) in enumerate(loads):
+            param = getattr(layer, name)
+            param.weight_loader(param, torch.ones(param.shape[1:]), expert_id=expert)
+            assert layer.quant_method.processed == (i == len(loads) - 1)
 
     @pytest.mark.parametrize("group,on_arrival", [(1, True), (2, True), (4, False)])
     def test_row_local_scheme_quantizes_shards_on_arrival(
@@ -547,11 +552,11 @@ class TestOnlineStaging:
         online = model.deq.online
         info = get_layerwise_info(online)
         begin_direct_reload(model)
-        received = new["deq.online.weight"][:2].clone()
+        received = new["deq.online.weight"][:2].to(_DEVICE, copy=True)
         alive = weakref.ref(received)
         online.weight.weight_loader(online.weight, received, slice(0, 2))
         del received
-        assert alive() is None
+        assert alive() is None or not on_arrival and _DEVICE.type == "cpu"
         assert bool(info.loaded_weights) is not on_arrival
         assert ("weight" in info.arrival) is on_arrival
         online.weight.weight_loader(online.weight, new["deq.online.weight"][2:], slice(2, 4))
@@ -576,13 +581,16 @@ class TestOnlineStaging:
         monkeypatch.setattr(_ToyModel, "__init__", with_shard_loader)
         model = _cold_start(_checkpoint())
         new = _checkpoint(1.01)
-        received = torch.cat([new["deq.online.weight"], torch.zeros_like(new["deq.online.weight"])])
+        shard = new["deq.online.weight"]
+        received = torch.cat([shard, torch.zeros_like(shard)]).to(_DEVICE)
         alive = weakref.ref(received)
         begin_direct_reload(model)
         model.load_weights([("deq.online.weight", received)])
         del received
-        assert alive() is None
-        assert get_layerwise_info(model.deq.online).loaded_weights  # bias pending
+        if _DEVICE.type != "cpu":  # host sources may stay (file-backed) views
+            assert alive() is None
+        (name, copies), = get_layerwise_info(model.deq.online).loaded_weights
+        assert sum(source.numel() for *_, source in copies) == shard.numel()
         model.load_weights((n, t) for n, t in new.items() if n != "deq.online.weight")
         finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
         _assert_same(_state(model), _state(_cold_start(new)))
@@ -656,6 +664,13 @@ def test_row_local_scheme_quantizes_on_arrival_as_whole(scheme):
     # each real scheme with row-local scales: quantizing the arriving shards
     # into the outputs (no high-precision buffer) gives the bytes quantizing
     # the whole weight gives; rows that never arrive (padding) included
+    method = _schemes()[scheme]
+    moe = scheme.endswith("moe")
+    for name in ("w13_weight", "w2_weight") if moe else ("weight",):
+        _check_arrival_equals_whole(method, moe, name)
+
+
+def _check_arrival_equals_whole(method, moe, name):
     from vllm.model_executor.model_loader.reload.layerwise import (
         _quantize_on_arrival,
     )
@@ -664,15 +679,13 @@ def test_row_local_scheme_quantizes_on_arrival_as_whole(scheme):
         RecordedCopies,
     )
 
-    method = _schemes()[scheme]
-    moe = scheme.endswith("moe")
-    name = "w13_weight" if moe else "weight"
     shape = (2, 256, 256) if moe else (256, 256)
     layer = torch.nn.Module()
     layer.quant_method = method
     layer.tp_size, layer.logical_widths = 1, [128, 128]
-    for param_name in (name, "w2_weight") if moe else (name,):
-        param = torch.nn.Parameter(torch.empty(shape, device="meta"), False)
+    for param_name in ("w13_weight", "w2_weight") if moe else (name,):
+        meta = torch.empty(shape, device="meta", dtype=torch.bfloat16)
+        param = torch.nn.Parameter(meta, False)
         param.weight_loader_numel = param.numel()
         layer.register_parameter(param_name, param)
     param = getattr(layer, name)
@@ -681,11 +694,14 @@ def test_row_local_scheme_quantizes_on_arrival_as_whole(scheme):
 
     weight = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
     weight[..., 128:, :] = 0  # never arrives
+    cols = slice(0, 192) if moe else slice(None)  # MoE: padded columns
+    if moe:
+        weight[..., 192:] = 0
     pieces = [(0, 64), (64, 128)] if group == 1 else [(0, 128)]
     copies = RecordedCopies()
     for expert in range(shape[0]) if moe else [None]:
         for first, end in pieces:
-            index = (expert, slice(first, end)) if moe else slice(first, end)
+            index = (expert, slice(first, end), cols) if moe else slice(first, end)
             view = param.data[index]
             copies.append(
                 (view.size(), view.stride(), view.storage_offset(), weight[index].clone())

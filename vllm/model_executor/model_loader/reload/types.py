@@ -19,6 +19,8 @@ class RecordedCopies(list[tuple[torch.Size, tuple[int, ...], int, torch.Tensor]]
         for size, stride, offset, source in self:
             view = param.data.as_strided(size, stride, param.storage_offset() + offset)
             view.copy_(source)
+            if source.is_cuda:  # it may come from another stream
+                source.record_stream(torch.cuda.current_stream(source.device))
 
 
 @dataclass
@@ -51,6 +53,9 @@ class LayerReloadingInfo:
     loaded_weights: list[tuple[str, BoundArguments | RecordedCopies]] = field(
         default_factory=list
     )
+
+    # the last staged work queued by a load (staged online modules)
+    staged_event: "torch.cuda.Event | None" = None
 
     # parameters quantized as their shards arrived (staged online modules)
     arrival: dict[str, "ArrivalState"] = field(default_factory=dict)

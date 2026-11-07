@@ -150,13 +150,14 @@ class OnlineMoEMethodBase(
             or not hasattr(param, "weight_loader_numel")
         ):
             return None
-        moe = self.moe
-        for unpadded, padded in (
-            (moe.intermediate_size_per_partition_unpadded, layer.w2_weight.shape[-1]),
-            (moe.hidden_dim_unpadded, layer.w2_weight.shape[-2]),
-        ):
-            if unpadded % group and unpadded != padded:
-                return None
+        # w13 rows are the (2 shards of the) intermediate dim, w2 rows hidden
+        if name == "w13_weight":
+            unpadded = self.moe.intermediate_size_per_partition_unpadded
+            padded = layer.w2_weight.shape[-1]
+        else:
+            unpadded, padded = self.moe.hidden_dim_unpadded, layer.w2_weight.shape[-2]
+        if unpadded % group and unpadded != padded:
+            return None
         return group
 
     def get_weights_for_quantization(
