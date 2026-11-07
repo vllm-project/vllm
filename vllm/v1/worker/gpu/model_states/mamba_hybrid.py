@@ -38,7 +38,7 @@ from vllm.v1.worker.mamba_utils import (
     preprocess_mamba_align_fused_kernel,
     validate_mamba_state_copy_funcs,
 )
-from vllm.v1.worker.replayssm_utils import initialize_replayssm_ring_trackers
+from vllm.v1.worker.replayssm_utils import assign_replayssm_decode_planners
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -156,7 +156,7 @@ class MambaHybridModelState(DefaultModelState):
         self, kv_cache_config: KVCacheConfig, block_tables: BlockTables
     ) -> None:
         if self.cache_config.use_replayssm:
-            initialize_replayssm_ring_trackers(
+            assign_replayssm_decode_planners(
                 kv_cache_config,
                 self.vllm_config.compilation_config.static_forward_context,
             )
@@ -235,13 +235,6 @@ class MambaHybridModelState(DefaultModelState):
             MAMBA_BLOCK_SIZE=mamba_spec.block_size,
         )
 
-        if replayssm is not None:
-            replayssm.reset_new_slots(
-                idx_mapping=input_batch.idx_mapping,
-                src_cols=self._mamba_src_col_gpu,
-                dst_cols=self._mamba_state_idx_gpu,
-                num_reqs=num_reqs,
-            )
         ctx.run_fused_precopy(
             num_reqs,
             self._mamba_state_idx_gpu,
@@ -249,6 +242,15 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_src_off_gpu,
             input_batch.idx_mapping,
         )
+        if replayssm is not None:
+            # After the pre-copy, which also reads the null block for a missing
+            # source: resetting fresh slots last wins.
+            replayssm.reset_new_slots(
+                idx_mapping=input_batch.idx_mapping,
+                src_cols=self._mamba_src_col_gpu,
+                dst_cols=self._mamba_state_idx_gpu,
+                num_reqs=num_reqs,
+            )
 
     def prepare_attn(
         self,

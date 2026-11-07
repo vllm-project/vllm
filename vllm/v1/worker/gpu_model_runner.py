@@ -213,10 +213,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.replayssm_utils import (
-    get_replayssm_block_copy_tensors,
-    initialize_replayssm_ring_trackers,
-)
+from vllm.v1.worker.replayssm_utils import assign_replayssm_decode_planners
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
@@ -587,7 +584,6 @@ class GPUModelRunner(
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
-        self.replayssm_block_copy_tensors: list[torch.Tensor] = []
         # indexes: [kv_cache_group_id][attn_group]
         self.attn_groups: list[list[AttentionGroup]] = []
         # self.kv_cache_config: KVCacheConfig
@@ -1231,7 +1227,7 @@ class GPUModelRunner(
             self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
         if scheduler_output.kv_cache_block_copies:
             copy_kv_cache_blocks_inplace(
-                [*self.kv_caches, *self.replayssm_block_copy_tensors],
+                self.kv_caches,
                 self.kv_cache_config.num_blocks,
                 scheduler_output.kv_cache_block_copies,
             )
@@ -6300,8 +6296,6 @@ class GPUModelRunner(
             for i in range(len(self.kv_caches)):
                 self.kv_caches[i] = None  # type: ignore
             self.kv_caches.clear()
-        if hasattr(self, "replayssm_block_copy_tensors"):
-            self.replayssm_block_copy_tensors.clear()
         if hasattr(self, "attn_groups"):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):
@@ -7126,11 +7120,8 @@ class GPUModelRunner(
                 kernel_block_sizes,
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
-        initialize_replayssm_ring_trackers(
+        assign_replayssm_decode_planners(
             kv_cache_config, self.compilation_config.static_forward_context
-        )
-        self.replayssm_block_copy_tensors = get_replayssm_block_copy_tensors(
-            self.compilation_config.static_forward_context
         )
 
         if (
