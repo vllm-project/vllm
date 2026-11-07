@@ -4,7 +4,6 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:8
 #SBATCH --exclusive
-#SBATCH --time=02:00:00
 #SBATCH --chdir=/tmp
 #SBATCH --output=/tmp/spur-%j.out
 #SBATCH --error=/tmp/spur-%j.err
@@ -24,6 +23,7 @@ LOG_ROOT="${LOG_ROOT:-/data/${USER:-$(id -un)}/disagg_logs}"
 RUN_AFTER_HEALTH="${RUN_AFTER_HEALTH:-accuracy}"   # bench | accuracy
 DRY_RUN="${DRY_RUN:-0}"
 MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"   # 0 -> prefill writes (default); 1 -> decode reads KV (read_mode)
+KV_CONNECTOR="${KV_CONNECTOR:-MoRIIOConnector}"   # MoRIIOConnector | NixlConnector | NixlPushConnector
 
 # ---- router / gateway (host-side; also forwarded into the container) --------
 # vllm-router -> external `vllm/vllm-router` container started on the rank-0 node (default)
@@ -66,7 +66,7 @@ CLUSTER_ENV_IN="${CLUSTER_ENV_IN:-${CONTAINER_SCRIPTS}/cluster.sh}"
 # Health endpoints (TP-mode ports from cluster.sh defaults).
 PREFILL_PORT="${PREFILL_PORT:-8100}"
 DECODE_PORT="${DECODE_PORT:-8200}"
-HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-3600}"
+HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-5400}"
 
 # EP-mode ports, mirrored from cluster.sh purely so the preflight below can test
 # them host-side; the in-container values still come from cluster.sh.
@@ -96,10 +96,10 @@ echo "SLURM_JOB_NODELIST: $SLURM_JOB_NODELIST"
 echo "SLURM_NNODES: $SLURM_NNODES"
 echo "SLURM_NTASKS: $SLURM_NTASKS"
 
-# scontrol is available on classic Slurm but not in the Spur job body. Use it to
-# expand compressed ranges when present, else split the (already comma-separated,
-# full-hostname) SLURM_JOB_NODELIST on commas.
-if command -v scontrol >/dev/null 2>&1; then
+# Only a compressed classic-Slurm list ("node[1-4]") needs scontrol to expand it.
+# Spur hands the job a plain comma-separated list of full hostnames, and its
+# scontrol (on PATH in the job body since 0.14) has no `show hostnames`.
+if [[ "$SLURM_JOB_NODELIST" == *"["* ]]; then
     FULL_NODELIST=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
 else
     FULL_NODELIST=$(echo "$SLURM_JOB_NODELIST" | tr ',' '\n')
@@ -233,7 +233,7 @@ echo "[disagg-pd] LOG_PATH=$LOG_PATH"
 #   rank xP .. end   -> decode
 export IPADDRS
 
-export WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH_TIMEOUT_S DRY_RUN MORIIO_READ_MODE
+export WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH_TIMEOUT_S DRY_RUN MORIIO_READ_MODE KV_CONNECTOR
 export IMAGE SHARED_MOUNT CONTAINER_SCRIPTS DISAGG_SCRIPTS_DIR
 export CLUSTER_ENV="${CLUSTER_ENV_IN}"
 export DOCKER_CONT_NAME="vllm_disagg_${MODEL_NAME:-model}_${SLURM_JOB_ID}"
@@ -247,6 +247,21 @@ export ROUTER_CONT_NAME="vllm_router_${SLURM_JOB_ID}"
 export PREFILL_PORT DECODE_PORT PROXY_PORT ROUTER_METRICS_PORT
 export SERVE_PORT RPC_PORT KV_PORT LOCAL_PING_PORT
 export PREFLIGHT PREFLIGHT_MAX_VRAM_PCT PREFLIGHT_GPU_SETTLE_S
+
+# NIXL has no discovery service, so pass the worker URLs.
+ROUTER_KV_ARGS="--kv-connector moriio --vllm-discovery-address 0.0.0.0:${PROXY_PING_PORT}"
+if [[ "${KV_CONNECTOR}" == Nixl* ]]; then
+    nixl_startup_timeout=1800
+    [[ "${WIDE_EP_MODE}" == "1" && "${xP}" -gt 1 ]] && nixl_startup_timeout=7200
+    ROUTER_KV_ARGS="--kv-connector nixl --worker-startup-timeout-secs ${nixl_startup_timeout}"
+    if [[ "${WIDE_EP_MODE}" == "1" ]]; then
+        ROUTER_KV_ARGS+=" --prefill http://${IPS[0]}:${SERVE_PORT} --decode http://${IPS[$xP]}:${SERVE_PORT}"
+    else
+        for ((i = 0; i < xP; i++)); do ROUTER_KV_ARGS+=" --prefill http://${IPS[$i]}:${PREFILL_PORT}"; done
+        for ((i = xP; i < xP + yD; i++)); do ROUTER_KV_ARGS+=" --decode http://${IPS[$i]}:${DECODE_PORT}"; done
+    fi
+fi
+export ROUTER_KV_ARGS
 
 echo "[disagg-pd] IPADDRS=${IPADDRS}"
 echo "[disagg-pd] launching ${NUM_NODES} containers (1/node) -> vllm_disagg.sh node"
@@ -386,15 +401,28 @@ run_node_container() {
     # container IF present: the image ships an ABI-incompatible copy and the NICs
     # are invisible without the host libs. Each entry is added only when the host
     # file exists, so this is a no-op on non-ionic (e.g. mlx5) clusters.
+    #
+    # SKIP_IONIC_MOUNTS=1 leaves the image's own ionic userspace in place. Images
+    # built from AINIC >= 1.117.5 ship libionic on the 1.1 soname line, while these
+    # hosts are on 1.0; the mount then swaps a 1.0 library under a 1.1 filename for
+    # every rank. Set this to test an image against its own matched provider.
+    #
+    # These compose with AINIC_SWAP_CHANNEL: the swap is baked into the image by a
+    # container that deliberately gets no ionic mounts (so apt can write these
+    # paths), and the mounts are layered at serve time on top of that result.
     local IONIC_MOUNTS=()
     local host_ionic
-    host_ionic=$(readlink -f /usr/lib/x86_64-linux-gnu/libionic.so.1 2>/dev/null || true)
-    [ -n "$host_ionic" ] && IONIC_MOUNTS+=(-v "$host_ionic:/usr/lib/x86_64-linux-gnu/libionic.so.1:ro")
-    [ -f /usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so ] && \
-        IONIC_MOUNTS+=(-v "/usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so:/usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so:ro")
-    [ -f /etc/libibverbs.d/ionic.driver ] && \
-        IONIC_MOUNTS+=(-v "/etc/libibverbs.d/ionic.driver:/etc/libibverbs.d/ionic.driver:ro")
-    echo "Rank $rank ionic mounts: ${IONIC_MOUNTS[*]:-<none>}"
+    if [ "${SKIP_IONIC_MOUNTS:-0}" = "1" ]; then
+        echo "Rank $rank ionic mounts: <skipped: SKIP_IONIC_MOUNTS=1>"
+    else
+        host_ionic=$(readlink -f /usr/lib/x86_64-linux-gnu/libionic.so.1 2>/dev/null || true)
+        [ -n "$host_ionic" ] && IONIC_MOUNTS+=(-v "$host_ionic:/usr/lib/x86_64-linux-gnu/libionic.so.1:ro")
+        [ -f /usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so ] && \
+            IONIC_MOUNTS+=(-v "/usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so:/usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so:ro")
+        [ -f /etc/libibverbs.d/ionic.driver ] && \
+            IONIC_MOUNTS+=(-v "/etc/libibverbs.d/ionic.driver:/etc/libibverbs.d/ionic.driver:ro")
+        echo "Rank $rank ionic mounts: ${IONIC_MOUNTS[*]:-<none>}"
+    fi
 
     # Pull latest container.
     if [ "$DRY_RUN" != "1" ]; then
@@ -404,6 +432,49 @@ run_node_container() {
             echo "Rank $rank pulling router image on $(hostname): $VLLM_ROUTER_IMAGE"
             docker pull "$VLLM_ROUTER_IMAGE" || echo "WARN: docker pull failed on $(hostname) for $VLLM_ROUTER_IMAGE (using local copy if present)"
         fi
+    fi
+
+    # Replace the image's ionic RoCE userspace with another repo.radeon.com
+    # channel. The image's provider is rejected by libibverbs against this
+    # cluster's kernel module ("Driver ionic does not support the kernel ABI of
+    # 4"), so MoRI enumerates zero devices and every worker aborts on
+    # `availDevices.size() > 0' in RdmaManager. The swap needs apt as root, but
+    # the serving container runs as the calling user, so bake a committed image
+    # here and serve from that instead.
+    RUN_IMAGE="$IMAGE"
+    if [ -n "${AINIC_SWAP_CHANNEL:-}" ] && [ "$DRY_RUN" != "1" ]; then
+        local src_id ainic_tag build_cont swap_rc
+        src_id=$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null | cut -d: -f2 | cut -c1-12)
+        # Key the tag on the source image id so a moving :nightly cannot silently
+        # serve a swap baked on top of an older pull.
+        ainic_tag="vllm-disagg-ainic:${AINIC_SWAP_CHANNEL}-${src_id:-unknown}"
+        if docker image inspect "$ainic_tag" >/dev/null 2>&1; then
+            echo "Rank $rank ainic swap: reusing $ainic_tag"
+        else
+            echo "Rank $rank ainic swap: building $ainic_tag from $IMAGE"
+            build_cont="ainic-swap-${SLURM_JOB_ID:-0}-${rank}"
+            docker stop -t 30 "$build_cont" >/dev/null 2>&1 || true
+            docker rm "$build_cont" >/dev/null 2>&1 || true
+            if docker run --name "$build_cont" --user 0:0 --network host \
+                    -v "$DISAGG_SCRIPTS_DIR":"$CONTAINER_SCRIPTS":ro \
+                    --entrypoint /bin/bash "$IMAGE" \
+                    -c "bash $CONTAINER_SCRIPTS/swap_ainic_userspace.sh $AINIC_SWAP_CHANNEL" \
+               && docker commit "$build_cont" "$ainic_tag" >/dev/null; then
+                echo "Rank $rank ainic swap: committed $ainic_tag"
+                swap_rc=0
+            else
+                echo "ERROR: rank $rank ainic swap to $AINIC_SWAP_CHANNEL failed on $(hostname)" >&2
+                swap_rc=1
+            fi
+            # Reached on both paths so a failed bake cannot leave the name behind
+            # and block the next attempt. The container has already exited by now,
+            # so the stop is a no-op that keeps teardown uniform with the rest of
+            # the script.
+            docker stop -t 30 "$build_cont" >/dev/null 2>&1 || true
+            docker rm "$build_cont" >/dev/null 2>&1 || true
+            [ "$swap_rc" = "0" ] || return 1
+        fi
+        RUN_IMAGE="$ainic_tag"
     fi
 
     # Start the external vLLM router as a SEPARATE container on the rank-0 node.
@@ -424,7 +495,7 @@ run_node_container() {
                 -e USER="$(id -un)" \
                 -e LOGNAME="$(id -un)" \
                 "$VLLM_ROUTER_IMAGE" \
-                bash -lc "exec vllm-router --vllm-pd-disaggregation --kv-connector moriio --vllm-discovery-address 0.0.0.0:$PROXY_PING_PORT --port $ROUTER_PORT --host 0.0.0.0 --intra-node-data-parallel-size $ROUTER_DP_LOCAL --policy $ROUTER_POLICY --prefill-policy $ROUTER_POLICY --decode-policy $ROUTER_POLICY --log-level info >> $LOG_PATH/vllm_router.log 2>&1" \
+                bash -lc "exec vllm-router --vllm-pd-disaggregation $ROUTER_KV_ARGS --port $ROUTER_PORT --host 0.0.0.0 --intra-node-data-parallel-size $ROUTER_DP_LOCAL --policy $ROUTER_POLICY --prefill-policy $ROUTER_POLICY --decode-policy $ROUTER_POLICY --log-level info >> $LOG_PATH/vllm_router.log 2>&1" \
               && echo "vllm-router container started ok" \
               || echo "WARN: failed to start vllm-router container on $(hostname)"
         } 2>&1 | tee -a "$LOG_PATH/vllm_router_start.log"
@@ -473,13 +544,14 @@ run_node_container() {
         -e HEALTH_TIMEOUT_S="$HEALTH_TIMEOUT_S" \
         -e DRY_RUN="$DRY_RUN" \
         -e MORIIO_READ_MODE="$MORIIO_READ_MODE" \
+        -e KV_CONNECTOR="$KV_CONNECTOR" \
         -e ROUTER_TYPE="$ROUTER_TYPE" \
         -e ROUTER_PORT="$ROUTER_PORT" \
         -e ROUTER_POLICY="$ROUTER_POLICY" \
         -e GATEWAY_PORT="$GATEWAY_PORT" \
         --name "$DOCKER_CONT_NAME" \
         --entrypoint /bin/bash \
-        "$IMAGE" -c "bash $CONTAINER_SCRIPTS/vllm_disagg.sh node" \
+        "$RUN_IMAGE" -c "bash $CONTAINER_SCRIPTS/vllm_disagg.sh node" \
       2>&1 | tee "$LOG_PATH/main_NODE${rank}.log"
     local node_rc=${PIPESTATUS[0]}   # docker run exit code (not tee), for rank-0 pass/fail
     # Stop the external router (rank-0 node) once the main container returns.
@@ -518,8 +590,9 @@ trap 'echo "[disagg-pd] signal received, tearing down containers"; teardown_cont
 
 RC=0
 if command -v srun >/dev/null 2>&1; then
-    # classic Slurm: fan out one task/node; ship the fn and call it with the
-    # srun-supplied per-task SLURM_PROCID (escaped so the remote shell expands it).
+    # classic Slurm / Spur >= 0.14: fan out one task/node; ship the fns and call
+    # them with the srun-supplied per-task SLURM_PROCID (escaped so the remote
+    # shell expands it).
     srun --label \
          --nodelist="$SELECTED_NODELIST_STR" \
          --nodes="$NUM_NODES" --ntasks="$NUM_NODES" --ntasks-per-node=1 \

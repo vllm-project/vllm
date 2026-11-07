@@ -37,6 +37,7 @@ MIN_DECODE_SCORE_GFX950_HIGH_BATCH_REQUESTS = 20
 MAX_DECODE_SCORE_GFX950_HIGH_BATCH_REQUESTS = 64
 MAX_DECODE_SCORE_KV_CHUNKS = 256
 DECODE_TOPK_BLOCKS_PER_CHUNK = 512
+DECODE_TOPK_SHORT_BLOCKS_PER_CHUNK = 128
 MAX_DECODE_TOPK_FAST_CHUNKS = 16
 DECODE_TOPK_TARGET_GRID = 64
 
@@ -103,14 +104,23 @@ def _decode_topk_launch_policy(
     topk: int,
     *,
     is_gfx950: bool,
-) -> tuple[int, bool, bool]:
-    """Choose the graph grid and bounded-context selector specialization."""
+) -> tuple[int, int, int, int, bool, bool]:
+    """Choose the selector grid and compile-time launch configuration."""
     if (
         is_gfx950
         and topk == 16
         and 0 < max_block <= MAX_DECODE_TOPK_FAST_CHUNKS * DECODE_TOPK_BLOCKS_PER_CHUNK
     ):
-        return MAX_DECODE_TOPK_FAST_CHUNKS, True, True
+        if max_block <= DECODE_TOPK_SHORT_BLOCKS_PER_CHUNK:
+            return 1, DECODE_TOPK_SHORT_BLOCKS_PER_CHUNK, 2, 1, True, True
+        return (
+            MAX_DECODE_TOPK_FAST_CHUNKS,
+            DECODE_TOPK_BLOCKS_PER_CHUNK,
+            4,
+            2,
+            True,
+            True,
+        )
 
     target = max(
         1,
@@ -119,7 +129,14 @@ def _decode_topk_launch_policy(
             DECODE_TOPK_TARGET_GRID // max(1, total_q * num_idx_heads),
         ),
     )
-    return 1 << (target.bit_length() - 1), False, False
+    return (
+        1 << (target.bit_length() - 1),
+        DECODE_TOPK_BLOCKS_PER_CHUNK,
+        8,
+        2,
+        False,
+        False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -212,15 +229,16 @@ def _index_block_score_kernel(
     if BLOCK_SIZE_Q * pid_q >= q_len:
         return
 
-    q_ptrs = tl.make_block_ptr(
+    q_desc = tl.make_tensor_descriptor(
         base=q_ptr + seq_start * stride_q_n + pid_h * stride_q_h,
-        shape=(q_len, head_dim),
-        strides=(stride_q_n, stride_q_d),
-        offsets=(pid_q * BLOCK_SIZE_Q, 0),
-        block_shape=(BLOCK_SIZE_Q, head_dim),
-        order=(1, 0),
+        shape=[q_len, head_dim],
+        strides=[stride_q_n, stride_q_d],
+        block_shape=[BLOCK_SIZE_Q, head_dim],
+        padding_option="zero",
     )
-    q = tl.load(q_ptrs, boundary_check=(0,), padding_option="zero")
+
+    # 2. Perform the load by providing the multi-dimensional offset directly
+    q = q_desc.load([pid_q * BLOCK_SIZE_Q, 0])
     q_start = prefix_len + pid_q * BLOCK_SIZE_Q
 
     off_q = tl.arange(0, BLOCK_SIZE_Q) + pid_q * BLOCK_SIZE_Q + prefix_len
@@ -1525,6 +1543,9 @@ def minimax_m3_index_decode(
     # only the number of chunks needed for its live context.
     (
         num_topk_chunks,
+        topk_block_size,
+        selector_num_warps,
+        selector_num_stages,
         single_tile_guaranteed,
         adaptive_final_merge,
     ) = _decode_topk_launch_policy(
@@ -1608,12 +1629,12 @@ def minimax_m3_index_decode(
         pages_per_sparse_block=PAGES_PER_SPARSE_BLOCK,
         block_page_stride=selector_block_page_stride,
         NUM_TOPK_CHUNKS=num_topk_chunks,
-        BLOCK_SIZE_K=512,
+        BLOCK_SIZE_K=topk_block_size,
         BLOCK_SIZE_T=block_size_t,
         EMIT_SPARSE_TABLE=emit_sparse_table,
         SINGLE_TILE_GUARANTEED=single_tile_guaranteed,
         ADAPTIVE_FINAL_MERGE=adaptive_final_merge,
-        num_warps=4 if adaptive_final_merge else 8,
-        num_stages=2,
+        num_warps=selector_num_warps,
+        num_stages=selector_num_stages,
     )
     return topk_idx

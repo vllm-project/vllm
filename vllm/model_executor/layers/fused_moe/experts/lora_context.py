@@ -10,8 +10,7 @@ from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 @dataclass
 class MoELoRAContext:
-    """
-    Carries all LoRA state for one MoE forward pass.
+    """Carries all LoRA state for one MoE forward pass.
 
     Built by FusedMoEWithLoRA.forward() and propagated explicitly through the
     modular kernel path (FusedMoEKernel -> FusedMoEExpertsModular.apply) so

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-AsyncLookupManager: per-tier async lookup manager for secondary tier
+"""AsyncLookupManager: per-tier async lookup manager for secondary tier
 existence checks.
 
 Each secondary tier that wants non-blocking lookups composes its own
@@ -12,8 +11,12 @@ Locking design
 --------------
 There is no explicit lock.  Thread safety is achieved by ownership:
 
-* _lookup_state and _lookup_batch are owned exclusively by the scheduler
-  thread.  lookup(), flush(), and cleanup() read and write them directly.
+* _lookup_state and _lookup_batch are owned by whichever thread holds the
+  OffloadingManager lock.  lookup(), flush(), and cleanup() read and write
+  them directly.  That is usually the scheduler thread, but a tier reached
+  through ParentManager -- a peer lookup fanning out from another tier, say --
+  can arrive on the tiering manager's tier-poll thread instead.  Both hold
+  the manager lock, so the accesses stay serialized.
 
 * _lookup_queue is written by the scheduler (flush → put_nowait, one item
   per step) and read by the background thread (get).  queue.Queue is
@@ -27,8 +30,11 @@ lookup() accumulates new keys in _lookup_batch without touching the queue.
 flush() is called once per step from the tier's on_schedule_end(), posting
 the entire batch as a single queue item so the background thread sees one
 batch per step.
-drain_results() is called before any lookup() calls in the same step, so
-lookup() is a pure OrderedDict operation.
+Results are drained on the first lookup after each flush, at flush(), and
+after worker shutdown. In-flight lookups with no remaining request references
+are retained until their results are drained, allowing new requests to share
+the same probe; a successful store drops such an orphan instead (see
+mark_present()).
 """
 
 import queue
@@ -36,6 +42,7 @@ import threading
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
+from enum import Enum, auto
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
@@ -43,16 +50,27 @@ from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 logger = init_logger(__name__)
 
 
+class LookupPhase(Enum):
+    """Lifecycle phase of a lookup probe."""
+
+    PENDING = auto()  # Accumulated in _lookup_batch, but not yet submitted.
+    IN_FLIGHT = auto()  # Submitted to the worker, but not yet resolved.
+    RESOLVED = auto()  # A final verdict has been applied to the state.
+
+
 @dataclass(slots=True)
 class LookupState:
     generation: int
-    result: bool | None = None  # True (found), False (not found), None
+    phase: LookupPhase = LookupPhase.PENDING
+    # None while pending/in flight; True if the key is known to exist (a probe
+    # found it, or this instance stored it); False if absent or explicitly
+    # marked missing after a failed load.
+    result: bool | None = None
     request_ids: set[str] = field(default_factory=set)  # requests asking for the lookup
 
 
 class AsyncLookupManager(ABC):
-    """
-    Per-tier async lookup manager for secondary tier existence checks.
+    """Per-tier async lookup manager for secondary tier existence checks.
 
     Each secondary tier that wants non-blocking lookups composes its own
     AsyncLookupManager instance internally. The manager maintains lookup
@@ -93,7 +111,7 @@ class AsyncLookupManager(ABC):
             list[tuple[OffloadKey, ReqContext, int]] | None
         ] = queue.SimpleQueue()
 
-        # Worker → scheduler: completed result batches.
+        # Worker → scheduler: completed request-group result batches.
         # Each item is a list of (key, generation, found) triples.
         # SimpleQueue is explicitly thread-safe for one writer / one reader.
         self._pending_results: queue.SimpleQueue[list[tuple[OffloadKey, int, bool]]] = (
@@ -112,8 +130,7 @@ class AsyncLookupManager(ABC):
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
     ) -> Iterable[bool]:
-        """
-        Check whether a batch of blocks exist in this tier.
+        """Check whether a batch of blocks exist in this tier.
 
         Called from the worker thread — must be synchronous and must not
         touch the primary tier or scheduler state.
@@ -127,13 +144,13 @@ class AsyncLookupManager(ABC):
     # ------------------------------------------------------------------
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        """
-        Non-blocking lookup called from the scheduler thread.
+        """Non-blocking lookup called from the scheduler thread.
 
         Returns:
             True  — block is present in this tier.
             False — block is not present in this tier.
             None  — result not yet available; retry next step.
+
         """
         if self._need_to_drain:
             self.drain_results()
@@ -155,17 +172,28 @@ class AsyncLookupManager(ABC):
         Called once per step from on_schedule_end() after all lookup() calls
         are done. The worker receives the full batch and processes it during
         the model-execution window, maximising time available before the next
-        step's drain_results().  Safe to call with an empty batch (no-op).
+        step's drain_results(). Also drains completed lookups when there
+        are no new keys to submit.
         """
+        self.drain_results()
         self._need_to_drain = True
-        if self._lookup_batch:
-            self._lookup_queue.put(self._lookup_batch)
-            self._lookup_batch = []
+        batch = self._lookup_batch
+        self._lookup_batch = []
+        in_flight_batch = []
+        for key, req_context, generation in batch:
+            state = self._lookup_state.get(key)
+            if state is None or state.generation != generation:
+                continue
+            assert state.phase is LookupPhase.PENDING
+            state.phase = LookupPhase.IN_FLIGHT
+            in_flight_batch.append((key, req_context, generation))
+        if in_flight_batch:
+            self._lookup_queue.put(in_flight_batch)
 
     def drain_results(self) -> None:
         """Apply pending worker results to _lookup_state.
 
-        Called from lookup() before checking state.
+        Called from lookup(), flush(), and shutdown() on the scheduler thread.
         """
         while True:
             try:
@@ -176,6 +204,10 @@ class AsyncLookupManager(ABC):
                 state = self._lookup_state.get(key)
                 if state is None or state.generation != generation:
                     continue
+                if not state.request_ids:
+                    del self._lookup_state[key]
+                    continue
+                assert state.phase is LookupPhase.IN_FLIGHT
                 # Each lookup generation is enqueued exactly once. A matching
                 # generation must not receive a second result; stale
                 # generations were discarded above.
@@ -185,18 +217,50 @@ class AsyncLookupManager(ABC):
                     "failed-load livelock"
                 )
                 state.result = result
+                state.phase = LookupPhase.RESOLVED
 
     def mark_miss(self, keys: Collection[OffloadKey]) -> None:
         """Force the cached verdict for ``keys`` to False after a failed load, so
         the scheduler stops re-issuing the doomed promotion (livelock, #49176).
-        Keys with no cached entry are skipped."""
+        Keys with no cached entry are skipped, and so are keys whose entry is
+        a newer probe still PENDING or IN_FLIGHT: its own result will land,
+        and forcing it to RESOLVED here would trip the phase asserts in
+        flush() / drain_results() on the scheduler thread."""
         for key in keys:
             state = self._lookup_state.get(key)
-            if state is not None:
+            if state is not None and state.phase is LookupPhase.RESOLVED:
                 state.result = False
 
+    def mark_present(self, keys: Collection[OffloadKey]) -> None:
+        """Record that keys were successfully stored to this tier.
+
+        Unlike mark_miss(), which leaves a newer probe alone (#59096), a store
+        completion is newer information than any probe started before it, so
+        this supersedes them: advancing the generation makes a stale pending
+        batch entry fail flush()'s generation check and a stale in-flight
+        result fail drain_results()'s, before either phase assert is reached.
+
+        Keys with no cached entry are skipped, since a verdict with no owning
+        request could never be reclaimed. An in-flight entry whose requests all
+        finished is dropped; cleanup() already removed the reverse-index
+        entries, so its late result is simply ignored.
+        """
+        for key in keys:
+            state = self._lookup_state.get(key)
+            if state is None or state.result is True:
+                continue
+            if not state.request_ids:
+                del self._lookup_state[key]
+                continue
+            # Generations are opaque identity tokens compared for equality
+            # only, so bumping one key cannot affect another key's results.
+            state.generation = self._next_generation
+            self._next_generation += 1
+            state.result = True
+            state.phase = LookupPhase.RESOLVED
+
     def cleanup(self, req_id: str) -> None:
-        """Remove entries no longer needed by any active request.
+        """Release request references, retaining in-flight lookups.
 
         Called from the tier's on_request_finished(). Uses the reverse
         index to visit only keys associated with this request.
@@ -204,13 +268,14 @@ class AsyncLookupManager(ABC):
         for key in self._req_keys.pop(req_id, ()):
             state = self._lookup_state[key]
             state.request_ids.discard(req_id)
-            if not state.request_ids:
+            if not state.request_ids and state.phase is not LookupPhase.IN_FLIGHT:
                 del self._lookup_state[key]
 
     def shutdown(self) -> None:
-        """Stop the worker thread."""
+        """Stop the worker thread and drain completed lookups."""
         self._lookup_queue.put(None)  # unblock _worker from _lookup_queue.get()
         self._thread.join()
+        self.drain_results()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -233,11 +298,10 @@ class AsyncLookupManager(ABC):
             if not batches:
                 continue
 
-            results: list[tuple[OffloadKey, int, bool]] = []
             for req_context, entries in batches.values():
                 keys = [key for key, _ in entries]
                 try:
-                    hits = self.batch_lookup(keys, req_context)
+                    hits: Iterable[bool] = list(self.batch_lookup(keys, req_context))
                 except Exception as exc:
                     logger.warning(
                         "batch_lookup failed on tier %s for %d keys: %s",
@@ -247,9 +311,11 @@ class AsyncLookupManager(ABC):
                     )
                     hits = (False for _ in keys)
 
+                group_results: list[tuple[OffloadKey, int, bool]] = []
                 for (key, generation), hit in zip(entries, hits):
-                    results.append((key, generation, hit))
+                    group_results.append((key, generation, hit))
 
-            # Post the entire batch as one item — no lock needed.
-            if results:
-                self._pending_results.put(results)
+                # Post each completed request group before processing the next
+                # group. The list is not modified after it is enqueued.
+                if group_results:
+                    self._pending_results.put(group_results)

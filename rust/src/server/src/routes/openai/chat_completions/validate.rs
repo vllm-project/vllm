@@ -3,35 +3,36 @@
 
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
+use crate::model_names::ServedModelNames;
 use crate::routes::openai::utils::types::{ChatMessage, Tool};
 use crate::routes::openai::utils::validate_generation_prompt_truncation;
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
     request: &ChatCompletionRequest,
-    served_model_names: &[String],
+    served_model_names: &ServedModelNames,
 ) -> Result<(), ApiError> {
-    if let Some(model) = request.model.as_ref().filter(|model| !model.is_empty())
-        && !served_model_names.iter().any(|name| name == model)
-    {
-        return Err(ApiError::model_not_found(model.clone()));
-    }
+    served_model_names.check(request.model.as_deref())?;
 
-    if request.stream_options.is_some() && !request.stream {
+    if request.stream_options.as_ref().is_some_and(|options| !options.is_empty()) && !request.stream
+    {
         bail_invalid_request!(
             param = "stream_options",
             "stream_options are only supported when stream=true."
         );
     }
 
-    if request.n.unwrap_or(1) > 1 {
-        bail_invalid_request!(param = "n", "Only n=1 is supported.");
-    }
-
-    if request.top_logprobs.is_some() && !request.logprobs {
+    if request.top_logprobs.is_some_and(|n| n != 0) && !request.logprobs {
         bail_invalid_request!(
             param = "top_logprobs",
             "top_logprobs can only be used when logprobs=true."
+        );
+    }
+
+    if request.logprob_token_ids.as_ref().is_some_and(|ids| !ids.is_empty()) && !request.logprobs {
+        bail_invalid_request!(
+            param = "logprob_token_ids",
+            "when using `logprob_token_ids`, `logprobs` must be set to true."
         );
     }
 
@@ -74,8 +75,9 @@ pub(super) fn validate_request_compat(
     // ---- Reject parameters that are accepted for deserialization but not yet
     // implemented ----
 
+    // Python's default is 1.0, which SDKs may send explicitly.
     reject_non_default(
-        request.length_penalty.as_ref(),
+        request.length_penalty.filter(|penalty| *penalty != 1.0).as_ref(),
         "length_penalty",
         "length_penalty is not supported.",
     )?;
@@ -85,7 +87,7 @@ pub(super) fn validate_request_compat(
             "spaces_between_special_tokens is not supported."
         );
     }
-    validate_generation_prompt_truncation(request.truncate_prompt_tokens, request.echo)?;
+    validate_generation_prompt_truncation(request.truncate_prompt_tokens)?;
     reject_non_default(
         request.media_io_kwargs.as_ref(),
         "media_io_kwargs",
@@ -125,18 +127,30 @@ fn validate_function_tools(tools: &[Tool], param: &'static str) -> Result<(), Ap
 mod tests {
     use std::collections::HashMap;
 
+    use crate::routes::openai::utils::types::ReasoningEffort;
     use serde_json::json;
-    use vllm_chat::ReasoningEffort;
+    use validator::Validate as _;
 
     use super::validate_request_compat;
+    use crate::model_names::ServedModelNames;
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
     use crate::routes::openai::utils::structured_outputs::ResponseFormat;
     use crate::routes::openai::utils::types::{
         ChatMessage, Function, MessageContent, StringOrArray, Tool, ToolChoice, ToolChoiceValue,
     };
 
-    fn served(names: &[&str]) -> Vec<String> {
-        names.iter().map(|s| s.to_string()).collect()
+    fn served(names: &[&str]) -> ServedModelNames {
+        ServedModelNames::new(names.iter().map(|s| s.to_string()).collect())
+    }
+
+    fn non_streaming_request(stream_options: serde_json::Value) -> ChatCompletionRequest {
+        serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": false,
+            "stream_options": stream_options,
+        }))
+        .expect("parse request")
     }
 
     fn base_request() -> ChatCompletionRequest {
@@ -148,6 +162,30 @@ mod tests {
             }],
             stream: true,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_empty_stream_options_without_streaming() {
+        let request = non_streaming_request(json!({}));
+        request.validate().expect("schema validation accepts empty stream_options");
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("empty stream_options sets nothing");
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_stream_options_without_streaming() {
+        let cases = [
+            json!({"include_usage": false}),
+            json!({"continuous_usage_stats": true}),
+        ];
+        for stream_options in cases {
+            let request = non_streaming_request(stream_options.clone());
+            assert!(request.validate().is_err(), "{stream_options}");
+            assert!(
+                validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err(),
+                "{stream_options}"
+            );
         }
     }
 
@@ -195,7 +233,9 @@ mod tests {
                     description: None,
                     parameters: json!({}),
                     strict: None,
+                    defer_loading: None,
                 },
+                defer_loading: None,
             }]),
             ..base_request()
         };
@@ -212,7 +252,9 @@ mod tests {
                         description: None,
                         parameters: json!({}),
                         strict: None,
+                        defer_loading: None,
                     },
+                    defer_loading: None,
                 }]),
                 name: None,
             }],
@@ -234,13 +276,31 @@ mod tests {
                         description: None,
                         parameters: json!({}),
                         strict: None,
+                        defer_loading: None,
                     },
+                    defer_loading: None,
                 }]),
                 name: None,
             }],
             ..base_request()
         };
 
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_only_non_default_length_penalty() {
+        let request = ChatCompletionRequest {
+            length_penalty: Some(1.0),
+            ..base_request()
+        };
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("the default length_penalty should be accepted");
+
+        let request = ChatCompletionRequest {
+            length_penalty: Some(2.0),
+            ..base_request()
+        };
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
     }
 
@@ -282,11 +342,28 @@ mod tests {
 
     #[test]
     fn validate_request_compat_rejects_top_logprobs_without_logprobs() {
+        for top_logprobs in [-1, 1] {
+            let request = ChatCompletionRequest {
+                top_logprobs: Some(top_logprobs),
+                ..base_request()
+            };
+            assert!(request.validate().is_err(), "{top_logprobs}");
+            assert!(
+                validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err(),
+                "{top_logprobs}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_zero_top_logprobs_without_logprobs() {
         let request = ChatCompletionRequest {
             top_logprobs: Some(0),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+        request.validate().expect("schema validation accepts top_logprobs=0");
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("top_logprobs=0 does not request alternatives");
     }
 
     #[test]

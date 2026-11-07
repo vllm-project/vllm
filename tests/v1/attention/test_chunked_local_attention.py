@@ -181,7 +181,8 @@ def test_local_attention_virtual_batches(test_data: LocalAttentionTestData):
 
     # Convert to numpy for easier comparison
     actual_q_seqlens = np.diff(result.query_start_loc_cpu.numpy())
-    actual_k_seqlens = result.seq_lens_cpu.numpy()
+    assert result.seq_lens_cpu_upper_bound is not None
+    actual_k_seqlens = result.seq_lens_cpu_upper_bound.numpy()
 
     # Check that all query lengths are less than or equal to attn_chunk_size
     assert all(q_len <= attn_chunk_size for q_len in actual_q_seqlens)

@@ -14,8 +14,8 @@ The supported capabilities carry separate measured tables:
 :data:`KIMI_K3_PROJECTIONS_SM90` on H200 (SM90). The per-(shape, M) winners
 genuinely differ between the parts, so the tables must not be merged. SM107
 (Rubin) reuses the SM103 table: the plan was validated end-to-end on SM107
-hardware, but the per-M crossovers have not been re-measured there and may
-deserve their own table once retuned.
+hardware, but apart from 3584x7168 the per-M crossovers have not been
+re-measured there and may deserve their own table once retuned.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 import vllm.envs as envs
@@ -63,6 +64,20 @@ _KDA_QKVG_SIZE = 4 * 1536
 _KDA_FAB_SIZE = 128 + 12
 _KDA_PACKED_SIZE = 6288
 _KDA_TP_SIZE = 8
+
+
+def _kda_qkvg_flashinfer_backend() -> Literal["cute-dsl"] | None:
+    """Return the tested FlashInfer backend for the low-M QKVG branch.
+
+    FlashInfer's ``cute-dsl`` BF16 GEMM supports SM100 and SM103, but rejects
+    SM90 during backend validation. Other capabilities use ``torch.mm`` for
+    QKVG while retaining the concurrent F_A/beta and F_B branch.
+    """
+    if current_platform.is_device_capability(
+        (10, 0)
+    ) or current_platform.is_device_capability((10, 3)):
+        return "cute-dsl"
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,11 +141,15 @@ KIMI_K3_PROJECTIONS: dict[tuple[int, int], ProjectionSpec] = {
     (2112, 7168): ProjectionSpec(2112, 7168, _M1_TO_16, name="fused_qkv_a_proj"),
     (2304, 1536): ProjectionSpec(2304, 1536, _M1_TO_16, name="q_b_proj"),
     (4608, 1536): ProjectionSpec(4608, 1536, _M1_TO_16, name="q_b_proj"),
+    # 3584x7168 (latent-MoE routed_expert_down_proj): CuTe at M1 only. M2..8 go
+    # to the linear backend, where FlashInfer cute-dsl beats dsv3_fused_a_gemm
+    # (cold L2): ~11.3 vs ~15.0-15.6 us at M=2..8 on B300, 7.1 vs 10.4 us at M=8
+    # on SM107. cuBLAS loses to dsv3 at M>=4 on B300 (it wins on SM107), so the
+    # B300 gain needs --linear-backend flashinfer_cutedsl.
     (3584, 7168): ProjectionSpec(
         3584,
         7168,
-        frozenset(range(2, 9)),
-        ((1, _cute(1, 224, 2, 4)),),
+        cute_configs=((1, _cute(1, 224, 2, 4)),),
         name="routed_expert_down_proj",
     ),
     (6288, 7168): ProjectionSpec(
@@ -312,6 +331,27 @@ KIMI_K3_PROJECTIONS: dict[tuple[int, int], ProjectionSpec] = {
         ),
         name="lm_head",
     ),
+    # Kimi K3.1 DSA packed projections: [q_a | kv_a | wk | weights_proj] at any
+    # TP, and [q_b | wq_index] at TP1 / TP8. Packed cuBLAS already beats the
+    # separate GEMMs at M1..16; CuTe wins >=5% over it only where listed.
+    (2272, 7168): ProjectionSpec(
+        2272,
+        7168,
+        cute_configs=(
+            (1, _cute(1, 224, 4, 2)),
+            (2, _cute(2, 224, 4, 2)),
+            (3, _cute(3, 128, 2, 2)),
+            (4, _cute(4, 224, 4, 1)),
+            (5, _cute(5, 128, 2, 1)),
+        ),
+        name="dsa_qkv_a_wkv_proj",
+    ),
+    (22528, 1536): ProjectionSpec(
+        22528, 1536, cute_configs=((1, _cute(1, 32, 8, 2)),), name="dsa_q_b_wq_proj"
+    ),
+    (6400, 1536): ProjectionSpec(
+        6400, 1536, cute_configs=((1, _cute(1, 64, 4, 2)),), name="dsa_q_b_wq_proj"
+    ),
     # 7168x2112 (TP16 dense down_proj) has no entry on purpose: K=2112 divides
     # none of the fused-A tile_k values, and the CuTe kernel is left with
     # vector_width=2, which measured slower than cuBLAS.
@@ -463,8 +503,8 @@ KIMI_K3_PROJECTIONS_SM100: dict[tuple[int, int], ProjectionSpec] = {
         ),
         name="lm_head",
     ),
-    # Latent-MoE replicated projections. dsv3 measured M2..8 wins on B300 for
-    # 3584x7168 but loses to cuBLAS there on B200; only CuTe wins land here.
+    # Latent-MoE replicated projections. dsv3 loses to cuBLAS on B200 for
+    # 3584x7168 (and is no longer used for it on B300); only CuTe wins land here.
     (3584, 7168): ProjectionSpec(
         3584,
         7168,
@@ -711,6 +751,8 @@ def _run_plan(
         return shape_dynamic_skinny_gemm(x, weight, config, None)
     if not hasattr(torch.ops._C, "dsv3_fused_a_gemm"):
         return None
+    if x.shape[0] != 1 and not _is_packed_row_major(x):
+        return None
     output = torch.empty((x.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device)
     ops.dsv3_fused_a_gemm(output, x, weight.t(), enable_pdl=True)
     return output
@@ -735,6 +777,7 @@ def run_kda_projection_overlap(
 
     Returns:
         The Q/K/V/G projection, F_B output, and beta projection.
+
     """
     num_tokens = hidden_states.shape[0]
     qkvg_weight = packed_weight[:_KDA_QKVG_SIZE]
@@ -747,14 +790,16 @@ def run_kda_projection_overlap(
                 config,
                 None,
             )
-        if num_tokens <= KDA_PROJECTION_OVERLAP_MAX_TOKENS:
+        if num_tokens <= KDA_PROJECTION_OVERLAP_MAX_TOKENS and (
+            backend := _kda_qkvg_flashinfer_backend()
+        ):
             from flashinfer.gemm import mm_bf16
 
             return mm_bf16(
                 hidden_states,
                 qkvg_weight.t(),
                 pdl=True,
-                backend="cute-dsl",
+                backend=backend,
             )
         return torch.mm(hidden_states, qkvg_weight.t())
 
@@ -805,11 +850,10 @@ def run_kda_projection_overlap(
 
 
 def autotune_kda_qkvg(model: nn.Module) -> None:
-    """Autotune the FlashInfer QKVG GEMM before CUDA graph capture."""
-    from flashinfer.gemm import mm_bf16
-
+    """Autotune the supported QKVG GEMM before CUDA graph capture."""
     from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 
+    backend = _kda_qkvg_flashinfer_backend()
     children: list[KimiK3DeltaAttention] = []
     weights_by_shape: dict[
         tuple[int, int, int, torch.dtype, torch.device], torch.Tensor
@@ -820,29 +864,33 @@ def autotune_kda_qkvg(model: nn.Module) -> None:
         if child._projection_overlap_max_tokens <= 0:
             continue
         children.append(child)
-        qkvg_weight = child.in_proj_qkvgfab.weight[:_KDA_QKVG_SIZE]
-        shape = (
-            KDA_PROJECTION_OVERLAP_MAX_TOKENS,
-            qkvg_weight.shape[0],
-            qkvg_weight.shape[1],
-            qkvg_weight.dtype,
-            qkvg_weight.device,
-        )
-        weights_by_shape.setdefault(shape, qkvg_weight)
+        if backend is not None:
+            qkvg_weight = child.in_proj_qkvgfab.weight[:_KDA_QKVG_SIZE]
+            shape = (
+                KDA_PROJECTION_OVERLAP_MAX_TOKENS,
+                qkvg_weight.shape[0],
+                qkvg_weight.shape[1],
+                qkvg_weight.dtype,
+                qkvg_weight.device,
+            )
+            weights_by_shape.setdefault(shape, qkvg_weight)
 
-    for shape, qkvg_weight in weights_by_shape.items():
-        num_tokens = shape[0]
-        hidden_states = torch.empty(
-            (num_tokens, qkvg_weight.shape[1]),
-            dtype=qkvg_weight.dtype,
-            device=qkvg_weight.device,
-        )
-        mm_bf16(
-            hidden_states,
-            qkvg_weight.t(),
-            pdl=True,
-            backend="cute-dsl",
-        )
+    if backend is not None:
+        from flashinfer.gemm import mm_bf16
+
+        for shape, qkvg_weight in weights_by_shape.items():
+            num_tokens = shape[0]
+            hidden_states = torch.empty(
+                (num_tokens, qkvg_weight.shape[1]),
+                dtype=qkvg_weight.dtype,
+                device=qkvg_weight.device,
+            )
+            mm_bf16(
+                hidden_states,
+                qkvg_weight.t(),
+                pdl=True,
+                backend=backend,
+            )
     for child in children:
         child._projection_overlap_max_tokens = KDA_PROJECTION_OVERLAP_MAX_TOKENS
 
@@ -883,6 +931,22 @@ def try_low_latency_gemm(
     if not _residual_ok(x, weight, residual):
         return None
     return _run_residual_plan(_build_residual_plan(spec), x, weight, residual)
+
+
+def low_latency_linear(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    out = try_low_latency_gemm(x, weight)
+    return out if out is not None else F.linear(x, weight)
+
+
+def request_low_latency_warmup(weight: torch.Tensor) -> None:
+    """Warm up the measured CuTe configs for a weight that no linear module owns
+    (``enable_kimi_k3_low_latency_gemm`` only covers modules)."""
+    table = _low_latency_table()
+    spec = table.get(tuple(weight.shape)) if table is not None else None
+    if spec is not None and shape_dynamic_skinny_gemm.is_available():
+        shape_dynamic_skinny_gemm.request_warmup_configs(
+            weight.dtype, (config for _, config in spec.cute_configs)
+        )
 
 
 class _KimiK3LowLatencyApply:
@@ -983,8 +1047,9 @@ def enable_kimi_k3_low_latency_gemm(
 
     Modules are matched purely by type, an exactly-unquantized method, and a
     local ``(N, K)`` present in the current device's measured table
-    (:data:`KIMI_K3_PROJECTIONS` on SM103, :data:`KIMI_K3_PROJECTIONS_SM100`
-    on SM100, :data:`KIMI_K3_PROJECTIONS_SM90` on SM90).
+    (:data:`KIMI_K3_PROJECTIONS` on SM103 and SM107,
+    :data:`KIMI_K3_PROJECTIONS_SM100` on SM100, :data:`KIMI_K3_PROJECTIONS_SM90`
+    on SM90).
     """
     if dtype != torch.bfloat16:
         return

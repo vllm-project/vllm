@@ -8,10 +8,12 @@ when ``include_reasoning=False``, for both streaming and non-streaming
 Chat Completions, while reasoning tokens remain represented in usage.
 """
 
+import httpx
 import openai
 import pytest
 import pytest_asyncio
 
+import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -45,7 +47,8 @@ async def test_include_reasoning_true_non_streaming(client: openai.AsyncOpenAI):
     response = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
-        max_tokens=200,
+        max_tokens=512,
+        temperature=0,
         extra_body={"include_reasoning": True},
     )
 
@@ -63,7 +66,8 @@ async def test_include_reasoning_false_non_streaming(client: openai.AsyncOpenAI)
     response = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
-        max_tokens=200,
+        max_tokens=512,
+        temperature=0,
         extra_body={"include_reasoning": False},
     )
 
@@ -94,12 +98,40 @@ async def test_reasoning_tokens_in_usage(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not serve /v1/chat/completions/batch",
+)
+async def test_batch_reasoning_tokens_in_usage(server: RemoteOpenAIServer):
+    """The batch endpoint reports hidden reasoning in usage like single chats."""
+    async with httpx.AsyncClient() as http_client:
+        response = await http_client.post(
+            server.url_for("v1/chat/completions/batch"),
+            json={
+                "model": MODEL_NAME,
+                "messages": [MESSAGES, MESSAGES],
+                "max_tokens": 64,
+                "temperature": 0,
+                "include_reasoning": False,
+            },
+            timeout=120,
+        )
+
+    assert response.status_code == 200, response.text
+    usage = response.json()["usage"]
+    details = usage["completion_tokens_details"]
+    assert details is not None
+    assert 0 < details["reasoning_tokens"] <= usage["completion_tokens"]
+
+
+@pytest.mark.asyncio
 async def test_include_reasoning_true_streaming(client: openai.AsyncOpenAI):
     """Default: reasoning deltas appear in streaming response."""
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
-        max_tokens=200,
+        max_tokens=512,
+        temperature=0,
         stream=True,
         extra_body={"include_reasoning": True},
     )
@@ -130,7 +162,8 @@ async def test_include_reasoning_false_streaming(client: openai.AsyncOpenAI):
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
-        max_tokens=200,
+        max_tokens=512,
+        temperature=0,
         stream=True,
         extra_body={"include_reasoning": False},
     )

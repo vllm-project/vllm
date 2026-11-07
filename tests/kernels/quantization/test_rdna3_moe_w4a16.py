@@ -18,6 +18,7 @@ Run `pytest tests/kernels/quantization/test_rdna3_moe_w4a16.py`.
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from vllm.platforms import current_platform
 
@@ -31,6 +32,9 @@ from vllm.model_executor.layers.fused_moe.activation import (  # noqa: E402
 )
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (  # noqa: E402
     moe_align_block_size,
+)
+from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (  # noqa: E402
+    _process_weights_rdna3,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa: E402
     pack_quantized_values_into_int32,
@@ -69,10 +73,9 @@ def _make_packed_weights(E, K, N):
     packed = torch.zeros(E, K // 8, N, dtype=torch.int32, device=device)
     for i in range(8):
         packed |= (w[:, i::8, :] & 0xF) << (i * 4)
-    g_idx = torch.empty(0, dtype=torch.int32, device=device)
     for e in range(E):
         we = packed[e].contiguous()
-        ops.gptq_shuffle(we, g_idx, 4)
+        ops.gptq_shuffle(we, 4)
         packed[e] = we
     return packed
 
@@ -96,6 +99,16 @@ def _make_qzeros(E, groups, N):
     return qz.unsqueeze(0).expand(E, -1, -1).contiguous()
 
 
+def _make_ct_weights(E, N, K, group_size, dtype):
+    """Compressed-tensors canonical N-first layout: packed ``[E, N, K // 8]``
+    and scales ``[E, N, K // group_size]``, plus the dequantized weights."""
+    q = torch.randint(0, 16, (E, N, K), dtype=torch.int32, device=device)
+    s = torch.rand(E, N, K // group_size, dtype=dtype, device=device) * 0.1 + 0.01
+    packed = pack_quantized_values_into_int32(q, scalar_types.uint4b8, packed_dim=2)
+    w = (q - 8).float() * s.float().repeat_interleave(group_size, dim=2)
+    return packed.contiguous(), s, w
+
+
 @gfx1100_only
 @pytest.mark.parametrize("E, K, N_inter, top_k, group_size", MODEL_CONFIGS)
 @pytest.mark.parametrize("M", NUM_TOKENS)
@@ -113,7 +126,6 @@ def test_fused_moe_w1_matches_dense(
     w13 = _make_packed_weights(E, K, N_gate_up)
     w13_s = _make_scales(E, groups, N_gate_up, dtype)
     w13_z = _make_qzeros(E, groups, N_gate_up)
-    g_idx = torch.empty(0, dtype=torch.int32, device=device)
 
     topk_ids = torch.randint(0, E, (M, top_k), device=device, dtype=torch.int32)
     si, ei, ntp = moe_align_block_size(topk_ids, block_size_m, E)
@@ -147,7 +159,6 @@ def test_fused_moe_w1_matches_dense(
                 w13[e],
                 w13_z[e],
                 w13_s[e],
-                g_idx,
                 False,
             )
             ref_out[flat] = ref.squeeze()
@@ -243,7 +254,6 @@ def test_full_moe_e2e(E, K, N_inter, top_k, group_size, M, dtype):
     w2 = _make_packed_weights(E, N_inter, hidden)
     w2_s = _make_scales(E, N_inter // group_size, hidden, dtype)
     w2_z = _make_qzeros(E, N_inter // group_size, hidden)
-    g_idx = torch.empty(0, dtype=torch.int32, device=device)
 
     topk_ids = torch.randint(0, E, (M, top_k), device=device, dtype=torch.int32)
     topk_w = torch.softmax(
@@ -300,7 +310,6 @@ def test_full_moe_e2e(E, K, N_inter, top_k, group_size, M, dtype):
                 w13[e],
                 w13_z[e],
                 w13_s[e],
-                g_idx,
                 False,
             )
             a = torch.empty(1, N_inter, dtype=dtype, device=device)
@@ -310,7 +319,6 @@ def test_full_moe_e2e(E, K, N_inter, top_k, group_size, M, dtype):
                 w2[e],
                 w2_z[e],
                 w2_s[e],
-                g_idx,
                 False,
             )
             ref[m_idx] += r2.squeeze() * w
@@ -365,3 +373,70 @@ def test_expert_id_minus_one():
 
     # Output should remain zero (expert skipped)
     assert torch.equal(out, torch.zeros_like(out))
+
+
+@gfx1100_only
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_process_weights_from_compressed_tensors_layout(dtype):
+    """Weights in the layout compressed-tensors hands to the oracle go through
+    the RDNA3 post-processing and a full MoE forward, against a dequantized
+    reference. The tests above build the kernel layout directly, so they do
+    not notice when the layout upstream of the kernel changes (#52798)."""
+    E, K, N_inter, top_k, group_size, M = 8, 512, 256, 2, 32, 16
+    torch.manual_seed(5)
+    w13, w13_s, w13_ref = _make_ct_weights(E, 2 * N_inter, K, group_size, dtype)
+    w2, w2_s, w2_ref = _make_ct_weights(E, K, N_inter, group_size, dtype)
+    w13, w2, w13_s, w2_s, w13_z, w2_z, *_ = _process_weights_rdna3(
+        w13, w2, w13_s, w2_s, group_size
+    )
+    assert w13_z is not None and w2_z is not None
+
+    x = torch.randn(M, K, dtype=dtype, device=device)
+    topk_ids = torch.randint(0, E, (M, top_k), device=device, dtype=torch.int32)
+    topk_w = torch.softmax(torch.randn(M, top_k, device=device), dim=-1).float()
+    si, ei, ntp = moe_align_block_size(topk_ids, 1, E)
+
+    w1_out = torch.zeros(M * top_k, 2 * N_inter, dtype=dtype, device=device)
+    ops.moe_gptq_gemm_rdna3(
+        x,
+        w1_out,
+        w13,
+        w13_s,
+        w13_z,
+        torch.empty(0, device=device),
+        si,
+        ei,
+        ntp,
+        top_k,
+        1,
+        False,
+        0,
+    )
+    act_out = torch.empty(M * top_k, N_inter, dtype=dtype, device=device)
+    apply_moe_activation(MoEActivation.SILU, act_out, w1_out)
+    out = torch.zeros(M, K, dtype=dtype, device=device)
+    ops.moe_gptq_gemm_rdna3(
+        act_out,
+        out,
+        w2,
+        w2_s,
+        w2_z,
+        topk_w.view(-1),
+        si,
+        ei,
+        ntp,
+        1,
+        1,
+        True,
+        top_k,
+    )
+
+    ref = torch.zeros(M, K, device=device)
+    for m in range(M):
+        for k in range(top_k):
+            e = int(topk_ids[m, k])
+            h = w13_ref[e] @ x[m].float()
+            a = F.silu(h[:N_inter]) * h[N_inter:]
+            ref[m] += (w2_ref[e] @ a) * topk_w[m, k]
+    rel_l2 = (torch.norm(out.float() - ref) / torch.norm(ref)).item()
+    assert rel_l2 < (0.02 if dtype == torch.float16 else 0.05), rel_l2

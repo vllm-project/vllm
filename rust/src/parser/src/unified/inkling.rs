@@ -10,7 +10,7 @@ use winnow::token::literal;
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 
-use super::{Result, UnifiedParser, UnifiedParserOutput, token_id};
+use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput, token_id};
 use crate::tool::json::{
     JsonToolCallConfig, JsonToolCallEvent, JsonToolCallWhitespace, JsonToolInput,
     tool_call_header_event,
@@ -45,6 +45,7 @@ const BLOCK_END_MARKERS: &[&str] = &[END_MESSAGE, CONTENT_MODEL_END_SAMPLING];
 const INKLING_TOOL_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     parser_name: "Inkling",
     start_marker: CONTENT_INVOKE_TOOL_JSON,
+    framed_start_marker: None,
     end_marker: END_MESSAGE,
     marker_whitespace: JsonToolCallWhitespace::Optional,
     delimiter: None,
@@ -260,7 +261,7 @@ impl UnifiedParser for InklingUnifiedParser {
             InklingMode::ToolJsonHeader
             | InklingMode::ToolJsonArgs { .. }
             | InklingMode::ToolJsonClose => {
-                return Err(parsing_failed!("incomplete Inkling tool call"));
+                return Err(UnifiedParserError::IncompleteToolCall { parser: "Inkling" });
             }
         }
 
@@ -556,6 +557,7 @@ mod tests {
                 },
             }),
             strict: None,
+            defer_loading: None,
         }]
     }
 

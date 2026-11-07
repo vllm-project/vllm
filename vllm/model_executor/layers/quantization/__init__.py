@@ -4,7 +4,10 @@
 from typing import Literal, get_args
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
+    resolve_quant_method,
+)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -13,8 +16,8 @@ QuantizationMethods = Literal[
     "awq",
     "auto_awq",
     "fp8",
+    "w4afp8",
     "fbgemm_fp8",
-    "fp_quant",
     "modelopt",
     "modelopt_fp4",
     "modelopt_mxfp8",
@@ -43,12 +46,13 @@ QuantizationMethods = Literal[
     "int8_per_channel_weight_only",
     "nvfp4_per_token",
     "mxfp8",
+    "lut_b_moe",
+    "mxfp4_hadamard32",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
 DEPRECATED_QUANTIZATION_METHODS = [
     "fbgemm_fp8",
-    "fp_quant",
 ]
 
 # The customized quantization methods which will be added to this dict.
@@ -79,6 +83,7 @@ def register_quantization_config(quantization: str):
         >>>
         >>> get_quantization_config("my_quant")
         <class 'MyQuantConfig'>
+
     """  # noqa: E501
 
     def _wrapper(quant_config_cls):
@@ -112,7 +117,20 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     # lazy import to avoid triggering `torch.compile` too early
     from vllm.config.quantization import _ONLINE_SHORTHANDS
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
-    from vllm.models.deepseek_v4 import DeepseekV4FP8Config
+
+    if current_platform.is_cuda() or current_platform.is_rocm():
+        # The v4.1 class is the v4 one extended to accept model_type
+        # "deepseek_v41" and its 32x32 MXFP8 linear layout. V4.1 has
+        # platform-specific implementations for both CUDA and ROCm.
+        from vllm.models.deepseek_v41 import (
+            DeepseekV4FP8Config as DeepseekV41FP8Config,
+        )
+
+        deepseek_config: type[QuantizationConfig] = DeepseekV41FP8Config
+    else:
+        from vllm.models.deepseek_v4 import DeepseekV4FP8Config
+
+        deepseek_config = DeepseekV4FP8Config
 
     from .auto_awq import AutoAWQConfig
     from .auto_gptq import AutoGPTQConfig
@@ -122,7 +140,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config
     from .fp8 import Fp8Config
-    from .fp_quant import FPQuantConfig
     from .humming import HummingConfig
     from .inc import INCConfig
     from .modelopt import (
@@ -135,14 +152,15 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .mxfp4 import GptOssMxfp4Config, Mxfp4Config
     from .online.base import OnlineQuantizationConfig
     from .torchao import TorchAOConfig
+    from .w4afp8 import W4AFP8Config
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
         "awq": AutoAWQConfig,
         "awq_marlin": AutoAWQConfig,
         "auto_awq": AutoAWQConfig,
         "fp8": Fp8Config,
+        "w4afp8": W4AFP8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
-        "fp_quant": FPQuantConfig,
         "modelopt": ModelOptFp8Config,
         "modelopt_fp4": ModelOptNvFp4Config,
         "modelopt_mxfp8": ModelOptMxFp8Config,
@@ -158,7 +176,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
         "gpt_oss_mxfp4": GptOssMxfp4Config,
-        "deepseek_v4_fp8": DeepseekV4FP8Config,
+        "deepseek_v4_fp8": deepseek_config,
         "humming": HummingConfig,
         "online": OnlineQuantizationConfig,
         # MiniMax-style checkpoints tag `quant_method: "mxfp8"`; load with the
@@ -182,6 +200,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
 
 __all__ = [
     "QuantizationConfig",
+    "resolve_quant_method",
     "QuantizationMethods",
     "get_quantization_config",
     "register_quantization_config",

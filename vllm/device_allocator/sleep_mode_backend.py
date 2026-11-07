@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import importlib
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING, Literal
 
 from vllm.logger import init_logger
@@ -50,12 +50,14 @@ class SleepModeBackend(ABC):
         self._state: SleepModeState = "RUNNING"
 
     @abstractmethod
-    def suspend(self, level: int = 1) -> None:
-        """Free GPU state.
+    def suspend(self, discardable: Collection[int] = ()) -> None:
+        """Free GPU state, so that ``resume`` restores it at the same addresses.
 
-        ``level`` follows existing sleep-mode semantics: level 1 offloads
-        weights to host RAM (restorable in-process); level 2 discards weights
-        (reloaded from the model source on resume).
+        ``discardable`` holds the storage addresses of the tensors the caller
+        rewrites after ``resume``, so they need no backup: the parameters not
+        selected for preservation at level 2, nothing at level 1. A backend
+        doesn't need to know the level. KV cache and workspace scratch are never
+        restored.
         """
         raise NotImplementedError
 
@@ -72,6 +74,13 @@ class SleepModeBackend(ABC):
         """Current lifecycle state. Lets ``/health`` distinguish a healthy-idle
         (suspended) engine from a healthy-serving one (see RFC #34303)."""
         return self._state
+
+    def discard(self, tags: tuple[str, ...]) -> None:
+        """Discard selected tagged allocations without preserving contents."""
+        raise RuntimeError(
+            f"Sleep-mode backend {type(self).__name__!r} does not support "
+            "selective discard."
+        )
 
     # -- Capability introspection (no instance required) --
 
@@ -109,20 +118,18 @@ class SleepModeBackend(ABC):
 class CuMemBackend(SleepModeBackend):
     """Default backend.
 
-    Wraps the platform sleep-mode allocator exactly as the GPU worker did
-    before this abstraction existed, so behavior is identical to vLLM's current
-    sleep/wake-up. ``get_mem_allocator_instance()`` resolves to
-    ``CuMemAllocator`` on CUDA and ``XpuMemAllocator`` on XPU; suspend offloads
-    per-allocation between GPU and host, with NCCL buffers left untouched (they
-    are allocated outside the allocator pool).
+    Wraps the platform sleep-mode allocator, ``CuMemAllocator`` on CUDA and
+    ``XpuMemAllocator`` on XPU. Suspend offloads per allocation between GPU and
+    host, with NCCL buffers left untouched (they are outside the allocator pool).
     """
 
-    def suspend(self, level: int = 1) -> None:
+    def suspend(self, discardable: Collection[int] = ()) -> None:
         from vllm.device_allocator import get_mem_allocator_instance
 
         self._state = "SUSPENDED"
-        allocator = get_mem_allocator_instance()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        get_mem_allocator_instance().sleep(
+            ("weights", "runtime", "cudagraph"), discardable
+        )
 
     def resume(self, tags: list[str] | None = None) -> None:
         from vllm.device_allocator import get_mem_allocator_instance
@@ -131,6 +138,13 @@ class CuMemBackend(SleepModeBackend):
         allocator = get_mem_allocator_instance()
         allocator.wake_up(tags)
         self._state = "RUNNING"
+
+    def discard(self, tags: tuple[str, ...]) -> None:
+        from vllm.device_allocator import get_mem_allocator_instance
+
+        allocator = get_mem_allocator_instance()
+        allocator.discard(tags)
+        self._state = "SUSPENDED"
 
     @classmethod
     def preserves_communicators(cls) -> bool:

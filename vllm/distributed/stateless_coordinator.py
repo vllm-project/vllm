@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import socket
-import struct
 from typing import Any, Optional
 
 import torch
@@ -17,6 +15,10 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.distributed.utils import (
     StatelessProcessGroup,
+    allocate_group_ports,
+    fetch_group_ports,
+    get_cpu_distributed_timeout_or_none,
+    get_distributed_timeout_or_none,
     stateless_destroy_torch_distributed_process_group,
     stateless_init_torch_distributed_process_group,
 )
@@ -25,42 +27,12 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
-_PORTS_FMT = "!3I"
-
-
-def _allocate_group_ports(
-    key: str,
-    host: str,
-    coord_store: Store,
-) -> tuple[list[int], list[socket.socket]]:
-    """Bind 3 sockets and publish the ports to *coord_store*.
-
-    Called by rank 0 only.  Returns ``(ports, sockets)`` with the
-    sockets still open.
-    """
-    socks: list[socket.socket] = []
-    ports: list[int] = []
-    for _ in range(3):
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind((host, 0))
-        s.listen()
-        socks.append(s)
-        ports.append(s.getsockname()[1])
-    coord_store.set(key, struct.pack(_PORTS_FMT, *ports))
-    return ports, socks
-
-
-def _fetch_group_ports(key: str, coord_store: Store) -> list[int]:
-    """Read 3 ports published by rank 0 from *coord_store*.
-
-    Blocks until the key is available.
-    """
-    return list(struct.unpack(_PORTS_FMT, coord_store.get(key)))
+# device, cpu and tcp-store groups each get one port
+_NUM_GROUP_PORTS = 3
 
 
 class StatelessGroupCoordinator(GroupCoordinator):
-    """
-    A stateless version of the GroupCoordinator class in parallel_state,
+    """A stateless version of the GroupCoordinator class in parallel_state,
     It will create CPU, device and TCPStore based communication groups
     that are independent of PyTorch's WORLD group. Hence,
     communication groups with a different set of participants GPUs
@@ -105,6 +77,10 @@ class StatelessGroupCoordinator(GroupCoordinator):
 
         backend = str(torch_distributed_backend)
         self.backend = backend
+        self.cpu_timeout = get_cpu_distributed_timeout_or_none()
+        device_timeout = (
+            self.cpu_timeout if backend == "gloo" else get_distributed_timeout_or_none()
+        )
         for idx, ranks in enumerate(group_ranks):
             if self.rank in ranks:
                 self.ranks = ranks
@@ -113,13 +89,11 @@ class StatelessGroupCoordinator(GroupCoordinator):
 
                 key = f"{group_name}_{idx}"
                 if self.rank_in_group == 0:
-                    ports, socks = _allocate_group_ports(
-                        key,
-                        host,
-                        coord_store,
+                    ports, socks = allocate_group_ports(
+                        coord_store, key, host, _NUM_GROUP_PORTS
                     )
                 else:
-                    ports = _fetch_group_ports(key, coord_store)
+                    ports = fetch_group_ports(coord_store, key, _NUM_GROUP_PORTS)
                     socks = []
                 device_port, cpu_port, tcp_store_port = ports
 
@@ -131,6 +105,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
                     backend=backend,
                     group_name=f"{self.unique_name}_device",
                     listen_socket=socks[0] if socks else None,
+                    timeout=device_timeout,
                 )
                 cpu_group = stateless_init_torch_distributed_process_group(
                     host=host,
@@ -140,6 +115,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
                     backend="gloo",
                     group_name=f"{self.unique_name}_cpu",
                     listen_socket=socks[1] if socks else None,
+                    timeout=self.cpu_timeout,
                 )
                 tcp_store_group = StatelessProcessGroup.create(
                     host=host,

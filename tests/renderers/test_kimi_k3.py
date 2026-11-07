@@ -40,6 +40,7 @@ class MockHFConfig:
 class MockModelConfig:
     runner_type: str = "generate"
     is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     multimodal_config: Any = None
     hf_config: MockHFConfig = field(default_factory=MockHFConfig)
     allowed_local_media_path: str = ""
@@ -59,8 +60,11 @@ class MockVllmConfig:
     parallel_config: MockParallelConfig
 
 
-def _make_renderer(tokenizer: StubTokenizer) -> KimiK3Renderer:
-    config = MockVllmConfig(MockModelConfig(), MockParallelConfig())
+def _make_renderer(
+    tokenizer: StubTokenizer, model_type: str = "kimi_k3"
+) -> KimiK3Renderer:
+    model_config = MockModelConfig(hf_config=MockHFConfig(model_type=model_type))
+    config = MockVllmConfig(model_config, MockParallelConfig())
     return KimiK3Renderer(config, tokenizer)
 
 
@@ -155,6 +159,33 @@ def test_apply_chat_template_rejects_unsupported_reasoning_effort(
 
     assert exc_info.value.parameter == "thinking_effort"
     assert exc_info.value.value == reasoning_effort
+    assert tokenizer.calls == []
+
+
+@pytest.mark.parametrize("effort_key", ["reasoning_effort", "thinking_effort"])
+def test_apply_chat_template_accepts_medium_effort_for_k31(effort_key: str):
+    # K3.1's encoder accepts `medium`, which K3's rejects.
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer, model_type="kimi_k31")
+    params = ChatParams(chat_template_kwargs={effort_key: "medium"})
+
+    renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
+
+    assert tokenizer.calls[-1]["thinking_effort"] == "medium"
+
+
+@pytest.mark.parametrize("thinking_effort", ["none", "minimal", "xhigh"])
+def test_apply_chat_template_rejects_unsupported_k31_thinking_effort(
+    thinking_effort: str,
+):
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer, model_type="kimi_k31")
+    params = ChatParams(chat_template_kwargs={"thinking_effort": thinking_effort})
+
+    with pytest.raises(VLLMValidationError, match="thinking_effort") as exc_info:
+        renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
+
+    assert exc_info.value.value == thinking_effort
     assert tokenizer.calls == []
 
 
@@ -302,10 +333,12 @@ def test_render_messages_derives_private_xtml_tool_attrs():
         "first",
         "second",
     ]
-    assert conversation[1]["tool"] == "lookup"
-    assert conversation[1]["index"] == 1
-    assert conversation[2]["tool"] == "lookup"
-    assert conversation[2]["index"] == 2
+    # ``tool`` and ``index`` are Kimi-K3 XTML attributes the renderer adds to
+    # resolved tool messages; ``ConversationMessage`` does not declare them.
+    assert conversation[1].get("tool") == "lookup"
+    assert conversation[1].get("index") == 1
+    assert conversation[2].get("tool") == "lookup"
+    assert conversation[2].get("index") == 2
     assert tokenizer.conversations[-1] == conversation
 
 

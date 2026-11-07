@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_prefills_and_extends
@@ -19,16 +18,20 @@ else:
 logger = init_logger(__name__)
 
 
-def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
+def check_attention_cp_compatibility(
+    vllm_config: VllmConfig,
+    target_layer_names: set[str] | None = None,
+) -> None:
     pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
     dcp_size = vllm_config.parallel_config.decode_context_parallel_size
     interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
     if pcp_size * dcp_size > 1:
         layer_type = cast(type[Any], AttentionLayerBase)
         layers = get_layers_from_vllm_config(vllm_config, layer_type)
-        for layer in layers.values():
+        for layer_name, layer in layers.items():
+            check_pcp = target_layer_names is None or layer_name in target_layer_names
             get_attn_backend = getattr(layer, "get_attn_backend", None)
-            if pcp_size > 1 and get_attn_backend is not None:
+            if pcp_size > 1 and check_pcp and get_attn_backend is not None:
                 backend = get_attn_backend()
                 assert backend.supports_pcp(), (
                     "PCP requires attention backend support, "
@@ -36,6 +39,8 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                 )
             layer_impl = getattr(layer, "impl", None)
             if layer_impl is None:
+                continue
+            if not check_pcp and layer_impl.dcp_world_size == 1:
                 continue
             if vllm_config.speculative_config is not None and interleave_size > 1:
                 assert layer_impl.supports_mtp_with_cp_non_trivial_interleave_size, (
@@ -50,15 +55,6 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     "Try a different backend by setting "
                     "--attention-backend or disable DCP."
                 )
-
-
-def get_kv_cache_shard_count() -> int:
-    try:
-        dcp_world_size = get_dcp_group().world_size
-    except AssertionError:
-        # DCP might not be initialized in testing
-        dcp_world_size = 1
-    return dcp_world_size
 
 
 def get_dcp_dummy_context_len(
@@ -99,11 +95,9 @@ def prepare_dcp_dummy_context_metadata(
     max_valid_block_id = kv_cache_config.num_blocks - 1
     assert max_valid_block_id > 0
     for blk_table in input_batch.block_table.block_tables:
-        max_row_blocks = (
-            blk_table.max_num_blocks_per_req // blk_table.blocks_per_kv_block
-        )
         block_ids = [
-            (block_idx % max_valid_block_id) + 1 for block_idx in range(max_row_blocks)
+            (block_idx % max_valid_block_id) + 1
+            for block_idx in range(blk_table.max_num_blocks_per_req)
         ]
         for req_idx in range(num_reqs):
             blk_table.add_row(block_ids, req_idx)
