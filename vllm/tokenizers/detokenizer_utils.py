@@ -164,6 +164,10 @@ def convert_ids_list_to_tokens(
     if marker is None:
         return [tokenizer.decode([tid]) or "" for tid in token_ids]
     raw_tokens = tokenizer.convert_ids_to_tokens(token_ids)
+    # This is required to guard against out-of-vocab token ids, which
+    # convert_ids_to_tokens returns as None. The marker-is-None branch
+    # above is already protected by `or ""`; this one was not.
+    _replace_none_with_empty(raw_tokens)  # type: ignore[arg-type]
     return [
         _restore_leading_spaces(raw, tokenizer.decode([tid]) or "", marker)
         for tid, raw in zip(token_ids, raw_tokens)
