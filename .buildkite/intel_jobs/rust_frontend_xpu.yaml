@@ -149,6 +149,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -180,10 +181,11 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2
+  - pytest -v -s tool_use --ignore=tool_use/mistral --models=llama3.2
   - pytest -v -s entrypoints/openai/chat_completion/test_completion_with_function_calling.py -k "not test_no_args_tool_call"
   - pytest -v -s entrypoints/tool_parsers/test_granite4_tool_parser.py
   - pytest -v -s entrypoints/tool_parsers/test_hermes_tool_parser.py -k granite4
@@ -202,7 +204,7 @@ steps:
     'export VLLM_USE_RUST_FRONTEND=1 || true &&
     export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest --continue-on-collection-errors -v -s tool_use --ignore=tool_use/mistral --models llama3.2 || true &&
+    pytest --continue-on-collection-errors -v -s tool_use --ignore=tool_use/mistral --models=llama3.2 || true &&
     pytest --continue-on-collection-errors -v -s entrypoints/openai/chat_completion/test_completion_with_function_calling.py -k not test_no_args_tool_call || true &&
     pytest --continue-on-collection-errors -v -s entrypoints/tool_parsers/test_granite4_tool_parser.py || true &&
     pytest --continue-on-collection-errors -v -s entrypoints/tool_parsers/test_hermes_tool_parser.py -k granite4 || true'
@@ -222,6 +224,7 @@ steps:
     label: production
     gpu: 4+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn

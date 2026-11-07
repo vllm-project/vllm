@@ -28,7 +28,7 @@ steps:
   commands:
   - >-
     VLLM_TEST_COMMANDS="$$(printf %s Y2QgdGVzdHMgJiYgcHl0ZXN0IC0tY29udGludWUtb24tY29sbGVjdGlvbi1lcnJvcnMgLXYgLXMgbW9kZWxzL2xhbmd1YWdlIC1tIGNvcmVfbW9kZWwgLWsgJ25vdCBzbG93X3Rlc3QnIHx8IHRydWU= | base64 --decode)" bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-- label: ':nvidia: (H200 MIG 35GB) Language Models (Extra Standard) Shard %N'
+- label: ':nvidia: (H200 MIG 35GB) Language Models (Extra Standard)'
   key: language-models-tests-extra-standard
   device: intel_gpu
   timeout_in_minutes: 40
@@ -116,7 +116,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest --continue-on-collection-errors -v -s models/language/generation -m hybrid_model -k granite-4.0-tiny-preview || true'
-- label: ':nvidia: (H200 MIG 35GB) Language Models (Extended Generation) %N'
+- label: ':nvidia: (H200 MIG 35GB) [Nightly] Language Models (Extended Generation)'
   key: language-models-test-extended-generation
   device: intel_gpu
   timeout_in_minutes: 80
@@ -164,6 +164,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s models/language/generation_ppl_test
   source_file_dependencies:
@@ -175,7 +176,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest --continue-on-collection-errors -v -s models/language/generation_ppl_test || true'
-- label: ':nvidia: (H200 MIG 35GB) Language Models (Extended Pooling) %N'
+- label: ':nvidia: (H200 MIG 35GB) [Nightly] Language Models (Extended Pooling)'
   key: language-models-test-extended-pooling
   device: intel_gpu
   timeout_in_minutes: 120
@@ -203,7 +204,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest --continue-on-collection-errors -v -s models/language/pooling -m not core_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
-- label: ':nvidia: (H200 MIG 35GB) Language Models (MTEB) %N'
+- label: ':nvidia: (H200 MIG 35GB) [Nightly] Language Models (MTEB)'
   key: language-models-test-mteb
   device: intel_gpu
   timeout_in_minutes: 68

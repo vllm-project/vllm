@@ -179,7 +179,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/mtp/gemma4/ || true'
-- label: ':nvidia: (H200 MIG 35GB) Spec Decode MTP DeepSeek + MiMo'
+- label: ':nvidia: (H200 MIG 35GB) Spec Decode MTP DeepSeek + MiMo + GLM'
   key: spec-decode-mtp-deepseek-mimo
   device: intel_gpu
   timeout_in_minutes: 30
@@ -198,18 +198,23 @@ steps:
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/mtp/deepseek/
   - pytest -v -s v1/e2e/spec_decode/mtp/mimo/
+  - pytest -v -s v1/e2e/spec_decode/mtp/glm/
   source_file_dependencies:
   - vllm/v1/spec_decode/
   - vllm/v1/worker/gpu/spec_decode/
   - vllm/v1/attention/backends/
   - vllm/transformers_utils/configs/speculators/
+  - vllm/model_executor/models/glm4_moe_mtp.py
+  - vllm/model_executor/models/glm4_moe_lite_mtp.py
+  - vllm/model_executor/models/glm_ocr_mtp.py
   - tests/v1/e2e/spec_decode/
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/mtp/deepseek/ || true &&
-    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/mtp/mimo/ || true'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/mtp/mimo/ || true &&
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/mtp/glm/ || true'
 - label: ':nvidia: (H200 MIG 35GB) Spec Decode MTP Qwen3.5'
   key: spec-decode-mtp-qwen3-5
   device: intel_gpu
@@ -233,6 +238,10 @@ steps:
   - vllm/v1/worker/gpu/spec_decode/
   - vllm/v1/attention/backends/
   - vllm/transformers_utils/configs/speculators/
+  - vllm/model_executor/models/qwen3_5_mtp.py
+  - vllm/models/qwen3_5/nvidia/mtp.py
+  - vllm/model_executor/models/qwen3_next_mtp.py
+  - vllm/config/speculative.py
   - tests/v1/e2e/spec_decode/
   commands:
   - >-
@@ -298,7 +307,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/ngram_suffix/ || true'
-- label: ':nvidia: (H200 MIG 18GB) Spec Decode Draft Model Shard %N'
+- label: ':nvidia: (H200 MIG 18GB) Spec Decode Draft Model'
   key: spec-decode-draft-model
   device: intel_gpu
   timeout_in_minutes: 60
@@ -350,6 +359,8 @@ steps:
   - vllm/v1/worker/gpu/spec_decode/
   - tests/v1/e2e/spec_decode/
   - vllm/model_executor/models/qwen3_dflash.py
+  - vllm/model_executor/model_loader/reload/
+  - vllm/model_executor/utils.py
   - tests/models/test_qwen3_dflash_mxfp8_context_kv.py
   commands:
   - >-
@@ -529,6 +540,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dspark/
   source_file_dependencies:
@@ -558,6 +570,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]" --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"; fi

@@ -17,10 +17,10 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s entrypoints/rl/weight_transfer
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/rl --ignore=entrypoints/rl/weight_transfer
+  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s entrypoints/rl --ignore=entrypoints/rl/weight_transfer
   source_file_dependencies:
   - vllm/
   - '!vllm/distributed/kv_transfer/'
@@ -30,5 +30,4 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest --continue-on-collection-errors -v -s entrypoints/rl/weight_transfer || true &&
-    export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
-    pytest --continue-on-collection-errors -v -s entrypoints/rl --ignore=entrypoints/rl/weight_transfer || true'
+    VLLM_WORKER_MULTIPROC_METHOD=spawn pytest --continue-on-collection-errors -v -s entrypoints/rl --ignore=entrypoints/rl/weight_transfer || true'
