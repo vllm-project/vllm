@@ -36,6 +36,29 @@ def is_flashinfer_autotuning() -> bool:
     return AutoTuner.get().is_tuning_mode
 
 
+# M values (CUDA graph capture sizes) at which FlashInfer's bf16 GEMM autotuner
+# profiles and looks up tactics. None means FlashInfer's default buckets.
+_bf16_gemm_tuning_buckets: tuple[int, ...] | None = None
+
+
+def init_flashinfer_bf16_tuning_buckets() -> None:
+    """Remember the CUDA graph capture sizes as bf16 GEMM tuning buckets.
+
+    Called while the vLLM config is set (dispatch at model init), because the
+    config is not guaranteed to be available when the GEMM runs.
+    """
+    global _bf16_gemm_tuning_buckets
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    sizes = (
+        vllm_config.compilation_config.cudagraph_capture_sizes
+        if vllm_config is not None
+        else None
+    )
+    _bf16_gemm_tuning_buckets = tuple(sorted(set(sizes))) if sizes else None
+
+
 def flashinfer_bf16_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -45,14 +68,30 @@ def flashinfer_bf16_mm(
 ) -> torch.Tensor:
     from flashinfer import mm_bf16
 
-    return mm_bf16(
-        a,
-        b,
-        bias=bias,
-        pdl=pdl,
-        out_dtype=torch.bfloat16,
-        backend=backend,
-    )
+    def _mm() -> torch.Tensor:
+        return mm_bf16(
+            a,
+            b,
+            bias=bias,
+            pdl=pdl,
+            out_dtype=torch.bfloat16,
+            backend=backend,
+        )
+
+    if _bf16_gemm_tuning_buckets is None:
+        return _mm()
+    # autotune()'s bucket override is global to its context, so scope it to
+    # this call to keep other FlashInfer ops (MoE, fp4, ...) on their own
+    # buckets. tune_mode=False does not end an enclosing autotune(True): tuning
+    # mode is reference-counted. The same override applies at serving time, so
+    # cache lookups hit the capture-size buckets. round_up=True matches the
+    # warmup in kernel_warmup.py for an M that is not a capture size.
+    with autotune(
+        tune_mode=False,
+        tuning_buckets=_bf16_gemm_tuning_buckets,
+        round_up=True,
+    ):
+        return _mm()
 
 
 # This is the storage path for the cubins, it can be replaced
@@ -220,6 +259,30 @@ def is_flashinfer_cutedsl_bf16_gemm_supported() -> bool:
     try:
         return is_cute_dsl_available() and is_sm100a_supported(torch.device("cuda"))
     except (RuntimeError, TypeError, ValueError):
+        return False
+
+
+@functools.cache
+def is_flashinfer_auto_bf16_gemm_supported() -> bool:
+    """Return whether FlashInfer mm_bf16(backend="auto") is available.
+
+    mm_bf16.is_backend_supported() only knows concrete backends, so require one
+    of them to support the device. "auto" runs FlashInfer's SM100 dispatcher.
+    """
+    if not (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and has_flashinfer_bf16_gemm()
+    ):
+        return False
+    capability = current_platform.get_device_capability()
+    if capability is None:
+        return False
+    from flashinfer import mm_bf16
+
+    try:
+        return bool(mm_bf16.is_compute_capability_supported(capability.to_int()))
+    except (AttributeError, RuntimeError, TypeError, ValueError):
         return False
 
 
@@ -1171,7 +1234,7 @@ def flashinfer_scaled_fp4_mm(
     if alpha is None:
         alpha = torch.ones(1, dtype=torch.float32, device=a.device)
 
-    if backend in ("cutlass", "cudnn"):
+    if backend in ("cutlass", "cudnn", "auto"):
         block_scale_a = block_scale_a.view(torch.uint8)
         block_scale_b = block_scale_b.view(torch.uint8)
 
@@ -1348,6 +1411,7 @@ __all__ = [
     "flashinfer_recurrent_kda",
     "flashinfer_fused_kda_decode",
     "autotune",
+    "init_flashinfer_bf16_tuning_buckets",
     "has_flashinfer_moe",
     "has_flashinfer_autotune_v2",
     "has_flashinfer_comm",

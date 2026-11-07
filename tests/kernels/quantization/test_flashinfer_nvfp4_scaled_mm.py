@@ -135,7 +135,9 @@ def get_ref_results(
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("backend", ["cute-dsl", "cutlass", "cudnn", "trtllm", "b12x"])
+@pytest.mark.parametrize(
+    "backend", ["cute-dsl", "cutlass", "cudnn", "trtllm", "b12x", "auto"]
+)
 @pytest.mark.parametrize("autotune", [False, True])
 @torch.inference_mode()
 def test_flashinfer_nvfp4_gemm(
