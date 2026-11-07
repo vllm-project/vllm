@@ -1108,15 +1108,17 @@ def test_breakable_cudagraph_platform_default(
         default_breakable_cudagraph_architectures.cache_clear()
 
 
-@pytest.mark.parametrize("on_gfx950", [True, False])
-def test_qwen3_5_breakable_cudagraph_rocm_default(monkeypatch, on_gfx950):
+@pytest.mark.parametrize(
+    "capability,breakable", [(95, True), (125, True), (94, False), (120, False)]
+)
+def test_qwen3_5_breakable_cudagraph_rocm_default(monkeypatch, capability, breakable):
     from vllm.platforms import current_platform
 
     monkeypatch.setattr(
-        current_platform, "is_device_capability", lambda cap: on_gfx950 and cap == 95
+        current_platform, "is_device_capability", lambda cap: cap == capability
     )
     test_breakable_cudagraph_platform_default(
-        monkeypatch, "Qwen3_5ForConditionalGeneration", True, on_gfx950
+        monkeypatch, "Qwen3_5ForConditionalGeneration", True, breakable
     )
 
 

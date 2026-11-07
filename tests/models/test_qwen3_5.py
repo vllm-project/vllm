@@ -10,13 +10,16 @@ def test_qwen3_5_models_use_platform_specific_implementation():
     from vllm.models.qwen3_5 import Qwen3_5ForCausalLM, Qwen3_5MTP
     from vllm.platforms import current_platform
 
-    # The NVIDIA and ROCm gfx950 variants drop torch.compile; other platforms
+    # The NVIDIA and ROCm CDNA4+ variants drop torch.compile; other platforms
     # keep the previous torch.compile implementation in
     # vllm/model_executor/models/qwen3_5{,_mtp}.py.
     if current_platform.is_cuda():
         model_module = "vllm.models.qwen3_5.nvidia.model"
         mtp_module = "vllm.models.qwen3_5.nvidia.mtp"
-    elif current_platform.is_rocm() and current_platform.is_device_capability(95):
+    elif current_platform.is_rocm() and (
+        current_platform.is_device_capability(95)
+        or current_platform.is_device_capability(125)
+    ):
         model_module = "vllm.models.qwen3_5.amd.model"
         mtp_module = "vllm.models.qwen3_5.amd.mtp"
     else:

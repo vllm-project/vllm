@@ -26,8 +26,11 @@ def test_models(
     tp_size: int,
     use_aiter: str,
 ) -> None:
-    if not current_platform.is_device_capability(95):
-        pytest.skip("The AMD Qwen3.5 model is only used on gfx950")
+    if not (
+        current_platform.is_device_capability(95)
+        or current_platform.is_device_capability(125)
+    ):
+        pytest.skip("The AMD Qwen3.5 model is only used on CDNA4+")
     if current_platform.device_count() < tp_size:
         pytest.skip(f"Need >= {tp_size} GPUs")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_aiter)

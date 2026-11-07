@@ -120,10 +120,16 @@ def test_fused_gated_rms_norm_strided_z_bitwise(
 @pytest.mark.skipif(
     not (
         (current_platform.is_cuda() and current_platform.has_device_capability(89))
-        or (current_platform.is_rocm() and current_platform.is_device_capability(95))
+        or (
+            current_platform.is_rocm()
+            and (
+                current_platform.is_device_capability(95)
+                or current_platform.is_device_capability(125)
+            )
+        )
     ),
     reason="the FP8 (e4m3fn) output of the fused gated RMS norm requires SM89+ "
-    "or gfx950",
+    "or CDNA4+ (gfx950, gfx1250)",
 )
 @torch.inference_mode()
 def test_fused_gated_rms_norm_fp8_matches_chain(
