@@ -9,7 +9,9 @@ use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
-use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
+use vllm_engine_core_client::protocol::structured_outputs::{
+    StructuredOutputConstraint, StructuredOutputsParams,
+};
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, PromptTruncation,
     PromptTruncationLimit, SamplingParams, TextDecodeOptions, TextRequest, TruncationSide,
@@ -208,7 +210,7 @@ fn build_sampling_params(
             params.bad_words_token_ids =
                 Some(d.bad_words_token_ids.iter().map(|sequence| sequence.ids.clone()).collect());
         }
-        params.structured_outputs = convert_structured_output(d)?;
+        params.structured_outputs = structured_output_from_proto(d.structured_output.as_ref())?;
     }
 
     // StoppingCriteria
@@ -276,32 +278,51 @@ fn candidate_logprob_spec(
     }
 }
 
-fn convert_structured_output(
-    d: &pb::DecodingParameters,
+/// Convert a proto structured-output constraint; `None` and
+/// `json_object = false` mean unconstrained.
+pub(super) fn structured_output_from_proto(
+    structured_output: Option<&pb::StructuredOutput>,
 ) -> Result<Option<StructuredOutputsParams>, Status> {
-    let so = match d.structured_output.as_ref() {
-        None => return Ok(None),
-        Some(so) => so,
+    use pb::structured_output::Kind;
+
+    let Some(kind) = structured_output.and_then(|output| output.kind.as_ref()) else {
+        return Ok(None);
     };
-    use pb::decoding_parameters::StructuredOutput;
-    let params = match so {
-        StructuredOutput::Json(schema) => {
+    let params = match kind {
+        Kind::Json(schema) => {
             let json: serde_json::Value = serde_json::from_str(schema)
                 .map_err(|e| Status::invalid_argument(format!("invalid json schema: {e}")))?;
             StructuredOutputsParams::json(json)
         }
-        StructuredOutput::Regex(regex) => StructuredOutputsParams::regex(regex.clone()),
-        StructuredOutput::Choice(choices) => {
-            StructuredOutputsParams::choice(choices.choices.clone())
-        }
-        StructuredOutput::Grammar(grammar) => StructuredOutputsParams::grammar(grammar.clone()),
-        StructuredOutput::JsonObject(true) => StructuredOutputsParams::json_object(),
-        StructuredOutput::JsonObject(false) => return Ok(None),
-        StructuredOutput::StructuralTag(tag) => {
-            StructuredOutputsParams::structural_tag(tag.clone())
-        }
+        Kind::Regex(regex) => StructuredOutputsParams::regex(regex.clone()),
+        Kind::Choice(choices) => StructuredOutputsParams::choice(choices.choices.clone()),
+        Kind::Grammar(grammar) => StructuredOutputsParams::grammar(grammar.clone()),
+        Kind::JsonObject(true) => StructuredOutputsParams::json_object(),
+        Kind::JsonObject(false) => return Ok(None),
+        Kind::StructuralTag(tag) => StructuredOutputsParams::structural_tag(tag.clone()),
     };
     Ok(Some(params))
+}
+
+/// The inverse of [`structured_output_from_proto`]. Constraint options are
+/// not carried: the engine reads them from its own config.
+pub(super) fn structured_output_to_proto(params: &StructuredOutputsParams) -> pb::StructuredOutput {
+    use pb::structured_output::{Kind, StringChoices};
+
+    let kind = match &params.constraint {
+        StructuredOutputConstraint::Json(serde_json::Value::String(schema)) => {
+            Kind::Json(schema.clone())
+        }
+        StructuredOutputConstraint::Json(schema) => Kind::Json(schema.to_string()),
+        StructuredOutputConstraint::Regex(regex) => Kind::Regex(regex.clone()),
+        StructuredOutputConstraint::Choice(choices) => Kind::Choice(StringChoices {
+            choices: choices.clone(),
+        }),
+        StructuredOutputConstraint::Grammar(grammar) => Kind::Grammar(grammar.clone()),
+        StructuredOutputConstraint::JsonObject => Kind::JsonObject(true),
+        StructuredOutputConstraint::StructuralTag(tag) => Kind::StructuralTag(tag.clone()),
+    };
+    pb::StructuredOutput { kind: Some(kind) }
 }
 
 // ========================================================================================
@@ -485,7 +506,7 @@ fn positions_to_proto(
 /// expecting ints (e.g. `image_grid_thw`) don't see `16.0`.
 const MAX_SAFE_INTEGER_F64: f64 = ((1u64 << 53) - 1) as f64;
 
-fn proto_struct_to_json(s: &prost_types::Struct) -> serde_json::Value {
+pub(super) fn proto_struct_to_json(s: &prost_types::Struct) -> serde_json::Value {
     serde_json::Value::Object(
         s.fields.iter().map(|(k, v)| (k.clone(), proto_value_to_json(v))).collect(),
     )

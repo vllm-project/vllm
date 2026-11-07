@@ -108,22 +108,31 @@ message DecodingParameters {
   map<uint32, float> logit_bias = 4;
   repeated uint32 allowed_token_ids = 5;
 
+  // Structured-output constraint. Omitted means unconstrained.
+  StructuredOutput structured_output = 13;
+
+  // Token sequences that must not be generated. Each sequence must be nonempty.
+  repeated TokenIds bad_words_token_ids = 12;
+
+  // The former inline `structured_output` oneof.
+  reserved 6 to 11;
+  reserved "json", "regex", "choice", "grammar", "json_object", "structural_tag";
+}
+
+// One structured-output constraint.
+message StructuredOutput {
   message StringChoices {
     repeated string choices = 1;
   }
 
-  // Control structured outputs
-  oneof structured_output {
-    string json = 6;
-    string regex = 7;
-    StringChoices choice = 8;
-    string grammar = 9;
-    bool json_object = 10;
-    string structural_tag = 11;
+  oneof kind {
+    string json = 1;
+    string regex = 2;
+    StringChoices choice = 3;
+    string grammar = 4;
+    bool json_object = 5;
+    string structural_tag = 6;
   }
-
-  // Token sequences that must not be generated. Each sequence must be nonempty.
-  repeated TokenIds bad_words_token_ids = 12;
 }
 
 message StoppingCriteria {

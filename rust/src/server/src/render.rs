@@ -1,23 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
+use tonic::server::NamedService;
+use tonic::transport::Server as TonicServer;
+use tonic_health::server::health_reporter;
 use tracing::info;
+use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_chat::{
     ChatRequestProcessor, ChatTemplateContentFormatOption, LoadModelBackendsOptions,
     ParserSelection, RendererSelection, ToolStrictLevel, load_model_backends,
 };
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_text::TextRequestProcessor;
 use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
 use crate::model_names::ServedModelNames;
 use crate::{
-    HttpListenerMode, ReasoningEffort, TlsConfig,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, GRPC_KEEPALIVE_INTERVAL, GRPC_KEEPALIVE_TIMEOUT,
+    HttpListenerMode, LoraModulePath, ReasoningEffort, TlsConfig, grpc,
     listener::{Listener, MaybeTlsListener},
     tls,
 };
@@ -41,6 +48,8 @@ pub struct RenderConfig {
     pub max_n_sequences: i64,
     pub host: String,
     pub port: u16,
+    /// Port for the gRPC Render service on `host`; `None` disables gRPC.
+    pub grpc_port: Option<u16>,
     pub tool_call_parser: ParserSelection,
     pub reasoning_parser: ParserSelection,
     pub tool_strict_level: Option<ToolStrictLevel>,
@@ -53,6 +62,15 @@ pub struct RenderConfig {
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     pub max_model_len: Option<u32>,
     pub max_logprobs: Option<i32>,
+    /// LoRA adapters whose names are accepted as the request model. Rendering
+    /// does not depend on adapter weights, so they are not loaded.
+    pub lora_modules: Vec<LoraModulePath>,
+    /// Disable multimodal preprocessing and treat the model as language-only.
+    pub language_model_only: bool,
+    /// Dtype multimodal tensors are produced in; must match the engine's.
+    pub dtype: RenderDtype,
+    /// Maximum multimodal items per prompt for each modality.
+    pub limit_mm_per_prompt: MmLimitPerPrompt,
     pub tls: Option<TlsConfig>,
 }
 
@@ -71,6 +89,51 @@ impl RenderConfig {
     }
 }
 
+/// Model dtype selection for the render server, which has no engine to report
+/// it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RenderDtype {
+    /// Follow the model config, like vLLM's `--dtype auto`.
+    #[default]
+    Auto,
+    Fixed(ModelDtype),
+}
+
+impl FromStr for RenderDtype {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(match value {
+            "auto" => Self::Auto,
+            "half" | "float16" => Self::Fixed(ModelDtype::Float16),
+            "bfloat16" => Self::Fixed(ModelDtype::BFloat16),
+            "float" | "float32" => Self::Fixed(ModelDtype::Float32),
+            _ => {
+                return Err(format!(
+                    "unsupported dtype `{value}`; expected auto, half, float16, bfloat16, float, or float32"
+                ));
+            }
+        })
+    }
+}
+
+impl RenderDtype {
+    /// Resolve the dtype from the checkpoint's config dtype the way vLLM's
+    /// `auto` does: float32 or missing dtypes run in bfloat16.
+    fn resolve(self, config_dtype: Option<&str>) -> Result<ModelDtype> {
+        match self {
+            Self::Fixed(dtype) => Ok(dtype),
+            Self::Auto => match config_dtype.unwrap_or("float32") {
+                "float16" => Ok(ModelDtype::Float16),
+                "bfloat16" | "float32" => Ok(ModelDtype::BFloat16),
+                other => {
+                    bail!("cannot infer the model dtype from config dtype `{other}`; pass --dtype")
+                }
+            },
+        }
+    }
+}
+
 pub(crate) struct RenderState {
     pub(crate) model: String,
     pub(crate) served_model_names: ServedModelNames,
@@ -81,6 +144,30 @@ pub(crate) struct RenderState {
     pub(crate) max_n_sequences: i64,
     pub(crate) text: TextRequestProcessor,
     pub(crate) chat: ChatRequestProcessor,
+    pub(crate) lora_modules: Vec<LoraModulePath>,
+    /// Served model names followed by LoRA adapter names.
+    pub(crate) model_names: ServedModelNames,
+}
+
+/// Check `--lora-modules` the way `vllm-rs serve` does when it loads them.
+fn validate_lora_modules(
+    served_model_names: &ServedModelNames,
+    lora_modules: &[LoraModulePath],
+) -> Result<()> {
+    let mut seen = HashSet::new();
+    for module in lora_modules {
+        let name = &module.name;
+        if name.trim().is_empty() || module.path.trim().is_empty() {
+            bail!("--lora-modules entries need a non-empty name and path");
+        }
+        if served_model_names.names().contains(name) {
+            bail!("LoRA adapter name `{name}` is also a served model name");
+        }
+        if !seen.insert(name) {
+            bail!("LoRA adapter `{name}` is given more than once");
+        }
+    }
+    Ok(())
 }
 
 async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
@@ -94,12 +181,12 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             hf_overrides: config.hf_overrides.clone(),
             generation_config: Default::default(),
             renderer: config.renderer,
-            language_model_only: true,
+            language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
             trust_request_chat_template: config.trust_request_chat_template,
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config.default_chat_template_kwargs.clone(),
-            limit_mm_per_prompt: Default::default(),
+            limit_mm_per_prompt: config.limit_mm_per_prompt.clone(),
         },
     )
     .await
@@ -109,10 +196,23 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         &config.served_model_name,
     ))
     .with_accept_any(config.skip_model_name_validation);
+    validate_lora_modules(&served_model_names, &config.lora_modules)?;
+    let model_names = served_model_names
+        .clone()
+        .with_names(config.lora_modules.iter().map(|module| module.name.clone()));
+    // Only multimodal preprocessing reads the dtype, so text-only models never
+    // fail on an unusual config dtype.
+    let model_dtype = loaded
+        .chat_backend
+        .multimodal_model_info()
+        .is_some()
+        .then(|| config.dtype.resolve(loaded.text_backend.config_dtype()))
+        .transpose()?;
     let max_model_len = config.max_model_len.unwrap_or(u32::MAX);
     let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
         .with_max_logprobs(config.max_logprobs);
-    let chat = ChatRequestProcessor::render_only(loaded.chat_backend)
+    let mut chat = ChatRequestProcessor::render_only(loaded.chat_backend)
+        .with_max_model_len(config.max_model_len)
         .with_parser_selections(
             config.tool_call_parser.clone(),
             config.reasoning_parser.clone(),
@@ -126,6 +226,13 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
                 .collect(),
         )
         .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
+    if let Some(model_dtype) = model_dtype {
+        info!(
+            dtype = model_dtype.as_str(),
+            "multimodal preprocessing enabled"
+        );
+        chat = chat.with_model_dtype(model_dtype);
+    }
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,
@@ -133,6 +240,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         max_n_sequences: config.max_n_sequences,
         text,
         chat,
+        lora_modules: config.lora_modules.clone(),
+        model_names,
     }))
 }
 
@@ -146,6 +255,13 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
         .map(tls::build_server_config)
         .transpose()
         .context("invalid TLS configuration")?;
+    // gRPC reuses the HTTP TLS config plus ALPN h2.
+    let grpc_tls_config = match (config.grpc_port, &config.tls) {
+        (Some(_), Some(tls)) => {
+            Some(tls::build_grpc_server_config(tls).context("invalid gRPC TLS configuration")?)
+        }
+        _ => None,
+    };
     let state = tokio::select! {
         result = build_state(&config) => result?,
         _ = shutdown.cancelled() => return Ok(()),
@@ -167,21 +283,113 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
         Some(context) => MaybeTlsListener::tls(listener, context),
         None => MaybeTlsListener::plain(listener),
     };
+    let grpc_listener = match config.grpc_port {
+        Some(port) => {
+            let mode = HttpListenerMode::BindTcp {
+                host: config.host.clone(),
+                port,
+            };
+            let listener = Listener::bind(&mode)
+                .await
+                .with_context(|| format!("failed to bind gRPC {}:{port}", config.host))?;
+            let address = listener.local_addr_display()?;
+            let listener = match grpc_tls_config {
+                Some(context) => MaybeTlsListener::tls(listener, context),
+                None => MaybeTlsListener::plain(listener),
+            };
+            Some((address, listener))
+        }
+        None => None,
+    };
     info!(
         %address,
         scheme,
         model = %config.model,
         "starting engine-free Rust render server"
     );
-    axum::serve(listener, crate::routes::render::build_router(state))
-        .with_graceful_shutdown(shutdown.cancelled_owned())
-        .await
-        .context("render server failed")
+
+    // If either protocol exits first, cancel the other one too.
+    let server_shutdown = shutdown.child_token();
+    let http_fut = async {
+        let result = axum::serve(listener, crate::routes::render::build_router(state.clone()))
+            .with_graceful_shutdown(server_shutdown.clone().cancelled_owned())
+            .await
+            .context("render server failed");
+        server_shutdown.cancel();
+        result
+    };
+    let grpc_fut = async {
+        let Some((address, grpc_listener)) = grpc_listener else {
+            return Ok(());
+        };
+        let (mut health_reporter, health_service) = health_reporter();
+        health_reporter.set_serving::<grpc::RenderGrpcService<RenderState>>().await;
+        let render_service =
+            grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state.clone()))
+                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+        // Publish NOT_SERVING before the listener stops, then remove the
+        // service so open health watches end and the drain can finish.
+        let stop = {
+            let server_shutdown = server_shutdown.clone();
+            async move {
+                server_shutdown.cancelled().await;
+                health_reporter.set_not_serving::<grpc::RenderGrpcService<RenderState>>().await;
+                health_reporter
+                    .clear_service_status(
+                        <grpc::RenderGrpcService<RenderState> as NamedService>::NAME,
+                    )
+                    .await;
+            }
+        };
+        info!(%address, "starting engine-free Rust render gRPC server");
+        let result = TonicServer::builder()
+            .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
+            .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
+            .add_service(health_service)
+            .add_service(render_service)
+            .serve_with_incoming_shutdown(grpc_listener, stop)
+            .await
+            .context("render gRPC server failed");
+        server_shutdown.cancel();
+        result
+    };
+    let (http_result, grpc_result) = tokio::join!(http_fut, grpc_fut);
+    http_result.and(grpc_result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lora_modules_are_checked_like_serve() {
+        let served = ServedModelNames::new(vec!["qwen".to_string()]);
+        let modules = |specs: &[&str]| -> Vec<LoraModulePath> {
+            specs.iter().map(|spec| spec.parse().unwrap()).collect()
+        };
+        assert!(validate_lora_modules(&served, &modules(&["a=org/a", "b=org/b"])).is_ok());
+        assert!(validate_lora_modules(&served, &modules(&["qwen=org/a"])).is_err());
+        assert!(validate_lora_modules(&served, &modules(&["a=org/a", "a=org/b"])).is_err());
+    }
+
+    #[test]
+    fn render_dtype_auto_follows_config_like_vllm() {
+        let auto = RenderDtype::Auto;
+        assert_eq!(auto.resolve(Some("float16")).unwrap(), ModelDtype::Float16);
+        assert_eq!(
+            auto.resolve(Some("bfloat16")).unwrap(),
+            ModelDtype::BFloat16
+        );
+        assert_eq!(auto.resolve(Some("float32")).unwrap(), ModelDtype::BFloat16);
+        assert_eq!(auto.resolve(None).unwrap(), ModelDtype::BFloat16);
+        assert!(auto.resolve(Some("float8_e4m3fn")).is_err());
+
+        let fixed: RenderDtype = "half".parse().unwrap();
+        assert_eq!(
+            fixed.resolve(Some("bfloat16")).unwrap(),
+            ModelDtype::Float16
+        );
+    }
 
     #[tokio::test]
     async fn serve_render_rejects_unknown_parser_before_startup() {
@@ -201,6 +409,7 @@ mod tests {
                 max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
                 host: "127.0.0.1".to_string(),
                 port: 8000,
+                grpc_port: None,
                 tool_call_parser: ParserSelection::Auto,
                 reasoning_parser: ParserSelection::Explicit("typo".to_string()),
                 renderer: RendererSelection::Auto,
@@ -212,6 +421,10 @@ mod tests {
                 chat_template_content_format: ChatTemplateContentFormatOption::Auto,
                 max_model_len: Some(128),
                 max_logprobs: None,
+                lora_modules: Vec::new(),
+                language_model_only: false,
+                dtype: RenderDtype::Auto,
+                limit_mm_per_prompt: Default::default(),
                 tls: None,
             },
             shutdown,
