@@ -18,6 +18,7 @@ only to reduce them; fusing the add into the reduction never writes them.
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -228,8 +229,9 @@ def xpress_latent_pass(
         # 3 stages, measured: one pass at bs=1 drops 76.7us -> 61.0us, because the
         # weight loads (wlat, wg, wu, wd: ~940KB per program) then overlap with the
         # dots instead of each one exposing its full latency. 4+ stages do not
-        # compile -- the tiles already use most of the shared memory.
-        num_stages=3,
+        # compile -- the tiles already use most of the shared memory. gfx950's 160KB
+        # LDS fits only one stage.
+        num_stages=1 if current_platform.is_rocm() else 3,
     )
 
 
