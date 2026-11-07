@@ -76,7 +76,8 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # scales being passed to the kernel), convert to the per-channel case.
         is_fused_module = len(layer.logical_widths) > 1
         weight_scale = getattr(layer, w_s_name)
-        if is_fused_module and not self.config.is_channelwise:
+        weight_group_shape = self.config.weight_quant_key.scale.group_shape
+        if is_fused_module and not weight_group_shape.is_per_channel():
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
         replace_parameter(
             layer,
@@ -85,7 +86,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         )
 
         # INPUT SCALE
-        if self.config.is_static_input_scheme:
+        if self.config.activation_quant_key.scale.static:
             input_scale = getattr(layer, i_s_name)
 
             if self.config.input_symmetric:
@@ -121,7 +122,8 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # s_a * s_b * [(A - zp_a)B] + bias =
         # s_a * (s_b * AB) - s_a * s_b * zp_a * B + bias =
         # s_a * GEMM_output - s_a * zp_a * adj + bias
-        if not (self.config.input_symmetric and self.config.is_static_input_scheme):
+        is_static = self.config.activation_quant_key.scale.static
+        if not (self.config.input_symmetric and is_static):
             weight = getattr(layer, w_q_name)
             weight_scale = getattr(layer, w_s_name)
             azp_adj = weight.sum(dim=0, keepdim=True, dtype=torch.float32)
@@ -165,7 +167,8 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # CPU SGL kernels only support per-channel.
         # For per-tensor quant, convert to the per-channel case.
         weight_scale = getattr(layer, w_s_name)
-        if not self.config.is_channelwise:
+        weight_group_shape = self.config.weight_quant_key.scale.group_shape
+        if not weight_group_shape.is_per_channel():
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
         replace_parameter(
             layer,

@@ -23,9 +23,8 @@ from ..base import MMLinearLayerConfig
 
 @dataclass
 class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
-    # TODO: Change to QuantKey like FP8ScaledMMLinearLayerConfig
-    is_static_input_scheme: bool
-    is_channelwise: bool
+    weight_quant_key: QuantKey
+    activation_quant_key: QuantKey
     input_symmetric: bool
     # More than one logical output partition (e.g. QKV). Per-tensor weight
     # scales of such layers hold one scale per partition and are expanded to
