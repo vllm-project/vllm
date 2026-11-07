@@ -23,6 +23,7 @@ import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     apply_candidate_mask,
 )
@@ -42,7 +43,10 @@ if TYPE_CHECKING:
         RocmMxfp4IndexerMetadata,
         RocmMxfp4NativeDecode,
         RocmMxfp4PrefillPlan,
+        RocmMxfp4VarlenDecode,
     )
+
+logger = init_logger(__name__)
 
 MXFP4_BLOCK_SIZE = 32
 
@@ -211,11 +215,25 @@ def build_rocm_mxfp4_decode_schedule(
     out: torch.Tensor,
     logits_width: int,
     native: "RocmMxfp4NativeDecode | None" = None,
+    varlen: "RocmMxfp4VarlenDecode | None" = None,
 ) -> torch.Tensor | None:
     """Work descriptors that even out a decode step, or None where the static
     grid already fills the machine. Depends only on the rows' lengths, the
     cache geometry and the logits width, so one serves every layer of a group.
     The width sizes the slices, capped the way the static grid caps them."""
+    if varlen is not None:
+        return _aiter().build_schedule(
+            varlen.context_lens,
+            varlen.next_n,
+            num_heads,
+            head_dim,
+            page_entries,
+            out=out,
+            row_ends=row_lens,
+            query_start_loc=varlen.query_start_loc,
+            total_rows=row_lens.shape[0],
+            max_model_len=logits_width,
+        )
     if native is None:
         return _aiter().build_schedule(
             row_lens,
@@ -526,7 +544,8 @@ def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> No
     if candidate_write:
         specs.append(((rows, triton.cdiv(logits_width, layer.block)), torch.float32))
     logits, *scores = current_workspace_manager().get_simultaneous(*specs)
-    native = metadata.decode_native
+    native, varlen = metadata.decode_native, metadata.decode_varlen
+    packed = {}
     if native is not None:
         # A request's next_n rows go in as one sequence, so a workgroup walks
         # each KV tile once for all of them.
@@ -536,6 +555,20 @@ def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> No
             native.block_table,
             lengths,
         )
+    elif varlen is not None:
+        # The same for requests of 1 to next_n rows, as varlen sequences.
+        logger.info_once(
+            "DeepSeek V4.1 indexer: dense decode launches take the requests as "
+            "varlen sequences (%d rows a request at most)",
+            varlen.next_n,
+        )
+        q, q_scale, weights = layer.q[:rows], layer.q_scale[:rows], layer.weights[:rows]
+        context_lens, block_table, row_ends = (
+            varlen.context_lens,
+            varlen.block_table,
+            lengths,
+        )
+        packed = dict(query_start_loc=varlen.query_start_loc, next_n=varlen.next_n)
     else:
         q, q_scale, weights = layer.decode_rows(rows)
         context_lens, block_table, row_ends = lengths, metadata.decode.block_table, None
@@ -552,6 +585,7 @@ def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> No
         clean_logits=False,
         row_ends=row_ends,
         schedule=metadata.decode_schedule,
+        **packed,
         **_block_scores(layer, scores[0] if scores else None),
     )
     candidates = None if layer.candidates is None else layer.candidates[:rows]
