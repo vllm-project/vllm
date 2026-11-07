@@ -109,6 +109,7 @@ _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 # See `SpeculatorConfig.supported_options`.
 _METHOD_SPECIFIC_OPTIONS = (
     "dspark_draft_topk",
+    "dspark_tp_markov_sampling",
     "draft_lm_head_quantization",
     "index_share_for_mtp_iteration",
     "xpress_topc",
@@ -707,6 +708,25 @@ class SpeculativeConfig:
     dspark_draft_topk: int | None = Field(default=None, ge=1)
     """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
     top-k base-logit candidates. Requires draft tensor parallel size 1."""
+
+    dspark_tp_markov_sampling: bool | None = None
+    """Experimental. For DSpark drafting with tensor parallelism, run the
+    sequential Markov sampling loop vocab-parallel: each TP rank computes the
+    Markov bias and the Gumbel sample for its share of the vocabulary, and the
+    ranks exchange per-block maxima over symmetric memory. The drafted tokens
+    and cached draft logits are the same as the replicated loop's. Needs CUDA
+    symmetric memory between the TP ranks and probabilistic drafting over the
+    full vocabulary; otherwise the replicated loop runs."""
+
+    vocab_sharded_verification: bool = False
+    """With tensor parallelism, verify drafts without gathering the target
+    logits: each TP rank keeps its share of the vocabulary (whole 8192-column
+    blocks) and runs temperature, top-p and rejection sampling on it, and the
+    ranks exchange small per-block partials over symmetric memory. Top-p is
+    exact. Steps with requests that need the full vocabulary (logprobs, top-k,
+    min_p, logits processors, structured output) are verified as usual.
+    Needs CUDA symmetric memory, probabilistic drafting and a target model that
+    implements `compute_logits_local`."""
 
     xpress_topc: int | None = Field(default=None, ge=0)
     """For XPress drafting, score each Jacobi pass only on the drafter's top-C

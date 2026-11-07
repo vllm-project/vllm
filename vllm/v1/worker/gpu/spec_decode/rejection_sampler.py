@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
+from vllm.v1.worker.gpu.spec_decode.vocab_shard import VocabShard, warmup_num_logits
 
 # Cap on the FP32 target-logits buffer materialized by apply_sampling_params.
 # TODO(mgoin): Chunking is a workaround. The rejection kernels already upcast
@@ -420,6 +421,158 @@ class RejectionSampler:
             else None
         )
         return sampled, num_sampled, logprobs_tensors, sampling_mask_tensors
+
+    def vocab_sharding_unsupported_reason(
+        self, draft_logits: DraftLogitsCache | None
+    ) -> str | None:
+        """Why no step can be verified vocab-sharded, or None."""
+        sampler = self.sampler
+        if draft_logits is None:
+            return "drafting is greedy (there are no draft logits)"
+        if draft_logits.row_mapping is not None:
+            return "the draft logits are batch-sharded"
+        if self.watermark_key is not None:
+            return "watermarking is enabled"
+        if self.fly_window_size > 0:
+            return "FLy verification is enabled"
+        if self.enable_adaptive_verification:
+            return "adaptive verification is enabled"
+        if sampler.compute_nans:
+            return "VLLM_COMPUTE_NANS_IN_LOGITS is set"
+        if sampler.return_sampling_mask:
+            return "sampling masks are returned"
+        if sampler.trace_replay_state is not None:
+            return "trace replay is enabled"
+        return None
+
+    def supports_vocab_sharding(
+        self, input_batch: InputBatch, draft_logits: DraftLogitsCache | None
+    ) -> bool:
+        """Whether this step can be verified vocab-sharded (`verify_vocab_sharded`):
+        probabilistic drafts in a replicated cache, and requests that need only
+        temperature and top-p."""
+        if self.vocab_sharding_unsupported_reason(draft_logits) is not None:
+            return False
+        needs_full_vocab = self.sampler.needs_full_vocab[input_batch.idx_mapping_np]
+        return not np.any(needs_full_vocab)
+
+    @torch.inference_mode()
+    def warmup_vocab_sharded(
+        self, vocab_shard: VocabShard, draft_logits: DraftLogitsCache
+    ) -> None:
+        """Compile the vocab-sharded verification kernels on every rank at load
+        time, so that no rank compiles them while its peers wait on an exchange.
+        Collective: one step of dummy requests, with top-p, per size of
+        `warmup_num_logits`."""
+        dev = draft_logits.values.device
+        n = self.num_speculative_steps + 1
+        states = self.sampler.sampling_states
+        for num_logits in warmup_num_logits(vocab_shard.max_num_logits):
+            # Requests of n logits (the last one may be shorter), all mapped
+            # to request state 0.
+            cu_num_logits = torch.tensor(
+                [*range(0, num_logits, n), num_logits], dtype=torch.int32, device=dev
+            )
+            num_reqs = cu_num_logits.shape[0] - 1
+            zeros = torch.zeros(num_logits, dtype=torch.int64, device=dev)
+            local_pos = torch.arange(num_logits, dtype=torch.int32, device=dev) % n
+            local_logits = torch.zeros(
+                num_logits,
+                vocab_shard.local_vocab_size,
+                dtype=vocab_shard.logits_dtype,
+                device=dev,
+            )
+            vocab_shard.begin_step()
+            logits = vocab_shard.owned_logits(local_logits)
+            vocab_shard.top_p(logits, torch.full((num_logits,), 0.5, device=dev))
+            rejection_sample(
+                logits,
+                draft_logits,
+                zeros.int(),  # draft_sampled
+                cu_num_logits,
+                zeros,  # pos
+                zeros[:num_reqs],  # idx_mapping
+                zeros,  # expanded_idx_mapping
+                local_pos,  # expanded_local_pos
+                states.temperature.gpu,
+                states.seeds.gpu,
+                self.num_speculative_steps,
+                self.synthetic_conditional_rates,
+                use_fp64=self.sampler.use_fp64_gumbel,
+                use_block_verification=self.use_block_verification,
+                vocab_shard=vocab_shard,
+            )
+            vocab_shard.end_step()
+        torch.accelerator.synchronize()
+
+    def verify_vocab_sharded(
+        self,
+        local_logits: torch.Tensor,
+        input_batch: InputBatch,
+        draft_logits: DraftLogitsCache,
+        vocab_shard: VocabShard,
+    ) -> SamplerOutput:
+        """Verify from this TP rank's lm_head shard ``local_logits`` without
+        gathering the full logits: temperature, top-p and rejection sampling
+        run on this rank's owned vocabulary blocks (see vocab_shard.py)."""
+        draft_sampled, pos = gather_draft_sampled(
+            input_batch.input_ids,
+            input_batch.positions,
+            input_batch.logits_indices,
+            input_batch.expanded_idx_mapping,
+            input_batch.expanded_local_pos,
+            self.sampler.req_states.prefill_len.gpu,
+        )
+
+        states = self.sampler.sampling_states
+        vocab_shard.begin_step()
+        logits = vocab_shard.owned_logits(local_logits)
+        states.apply_temperature(
+            logits, input_batch.expanded_idx_mapping, input_batch.idx_mapping_np
+        )
+        # Top-p cannot change a greedy row's argmax: only sampled rows count.
+        idx_np = input_batch.idx_mapping_np
+        greedy_np = states.temperature.np[idx_np] == 0.0
+        if np.any(~greedy_np & (states.top_p.np[idx_np] != 1.0)):
+            top_p = states.top_p.gpu[input_batch.expanded_idx_mapping]
+            if np.any(greedy_np):
+                greedy = states.temperature.gpu[input_batch.expanded_idx_mapping] == 0
+                top_p = top_p.masked_fill(greedy, 1.0)
+            vocab_shard.top_p(logits, top_p)
+        sampled, num_sampled = rejection_sample(
+            logits,
+            draft_logits,
+            draft_sampled,
+            input_batch.cu_num_logits,
+            pos,
+            input_batch.idx_mapping,
+            input_batch.expanded_idx_mapping,
+            input_batch.expanded_local_pos,
+            states.temperature.gpu,
+            states.seeds.gpu,
+            self.num_speculative_steps,
+            self.synthetic_conditional_rates,
+            use_fp64=self.sampler.use_fp64_gumbel,
+            use_block_verification=self.use_block_verification,
+            vocab_shard=vocab_shard,
+        )
+        vocab_shard.end_step()
+
+        num_sampled, num_rejected = get_num_sampled_and_rejected(
+            num_sampled,
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.sampler.req_states.prefill_len.gpu,
+        )
+        return SamplerOutput(
+            sampled_token_ids=sampled,
+            logprobs_tensors=None,
+            num_nans=None,
+            num_sampled=num_sampled,
+            num_rejected=num_rejected,
+            sampling_mask_tensors=None,
+        )
 
     def __call__(
         self,
