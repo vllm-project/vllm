@@ -1257,19 +1257,22 @@ def _prefix_replay_attention_cls():
     [
         (False, 0, True, True),
         (True, 4, True, True),
-        (True, 3, True, False),
+        (True, 3, True, True),
+        (True, 2, True, False),
         (True, 4, False, False),
     ],
 )
 def test_prefix_cache_replays_the_swa_window(
     monkeypatch, is_rocm, cdna, flag, replays_window
 ):
-    """Prefix caching stays on, and the window is replayed only on CDNA4.
+    """Prefix caching stays on, and the window is replayed on a compatible
+    CDNA version.
 
     tests/v1/core/test_prefix_replay.py already checks that a
     bounded-replay SWA spec makes a prefix hit recompute the window.
     This is the spec the attention layer actually publishes. Forcing
-    the window back into the prefix cache, on CDNA4 or off it, fails here.
+    the window back into the prefix cache, on a compatible CDNA version
+    or off it, fails here.
     The replay_start clamp used by the gather kernels is covered by
     test_builder_replay_start_bounds_prefill_window_and_gather.
     """
@@ -1280,6 +1283,7 @@ def test_prefix_cache_replays_the_swa_window(
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setattr(attn, "MergedColumnParallelLinear", _StubLinear)
     monkeypatch.setattr(attn, "ColumnParallelLinear", _StubLinear)
+    monkeypatch.setattr(attn, "DeepseekV4GroupedWoA", _StubLinear)
     monkeypatch.setattr(attn, "RowParallelLinear", _StubLinear)
     monkeypatch.setattr(attn, "RMSNorm", _StubLinear)
     monkeypatch.setattr(attn, "build_deepseek_v4_rope", lambda *a, **k: None)
@@ -1683,7 +1687,9 @@ def _assert_ds41_flashmla_bi_schedule(monkeypatch, length, compress_ratio):
             )
             row_ends = row_starts + (positions.int() + 1) // 2
             valid_ends = row_ends - row_starts
-            query_scales, native_weights = mqa_logits_mx_inputs(index_q, None, weights)
+            query_scales, native_weights = mqa_logits_mx_inputs(
+                index_q, None, weights, torch.bfloat16
+            )
         context = ForwardContext({}, all_metadata, {})
         output = torch.empty_like(q)
 
@@ -1696,6 +1702,7 @@ def _assert_ds41_flashmla_bi_schedule(monkeypatch, length, compress_ratio):
                     row_starts,
                     row_ends,
                     max(key_lengths),
+                    logits_dtype=torch.bfloat16,
                 )
                 assert scores.dtype == torch.bfloat16
                 logits = as_fp32_logits(scores, valid_ends)
@@ -1985,7 +1992,9 @@ def _assert_ds41_bi_decode_graph(fixture, lengths, compress_ratio, expected, que
 
     def forward(context):
         if compress_ratio:
-            query_scales, native_weights = mqa_logits_mx_inputs(index_q, None, weights)
+            query_scales, native_weights = mqa_logits_mx_inputs(
+                index_q, None, weights, torch.bfloat16
+            )
             valid_ends = row_ends - row_starts
             logits = as_fp32_logits(
                 fp8_fp4_mqa_logits(
@@ -1995,6 +2004,7 @@ def _assert_ds41_bi_decode_graph(fixture, lengths, compress_ratio, expected, que
                     row_starts,
                     row_ends,
                     max(key_lengths),
+                    logits_dtype=torch.bfloat16,
                 ),
                 valid_ends,
             )
@@ -2275,6 +2285,7 @@ def test_ds41_bi_indexer_decode_rows_match_prefill_rows(
                 candidate_block_size=8 if candidates else 0,
                 candidate_write=write,
                 topk_backend="deep_select",
+                logits_dtype=torch.bfloat16,
             )
 
     def run(schedule, padded=None):

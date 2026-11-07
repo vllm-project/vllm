@@ -97,6 +97,13 @@ impl UnifiedParserState {
 
         match self.parser.finish() {
             Ok(output) => self.process_parser_output(output, &mut events)?,
+            // The output stopped inside a tool call (`max_tokens`, a stop
+            // string): drop the unfinished markup like Python's parser engine
+            // instead of returning it as text. Earlier events stand.
+            Err(error) if error.is_incomplete_tool_call() => {
+                self.open_call_index = None;
+                let _ = self.parser.reset();
+            }
             Err(error) => {
                 warn!(
                     error = %error.as_report(),
@@ -892,11 +899,10 @@ mod tests {
         );
     }
 
+    /// The output stopped inside a tool call (`max_tokens`, a stop string): the
+    /// unfinished markup is dropped and earlier text, if any, is kept.
     #[tokio::test]
-    async fn unified_stream_recovers_incomplete_gemma4_tool_call_at_eos() {
-        let tokenizer = TestTokenizer::new()
-            .with_special_token("<|channel>", 256)
-            .with_special_token("<channel|>", 257);
+    async fn unified_stream_drops_incomplete_gemma4_tool_call_at_eos() {
         let tools = vec![Tool {
             name: "write_file".to_string(),
             description: None,
@@ -904,40 +910,85 @@ mod tests {
             strict: None,
             defer_loading: None,
         }];
-        let parser = Gemma4UnifiedParser::new(&tools, Arc::new(tokenizer)).unwrap();
-        let events = vec![
-            decoded_delta("<|tool_call>"),
-            decoded_delta("call:write_file{"),
-            decoded_delta("content:<|\"|>hello "),
-            finished_delta("world<|\"|>"),
-        ];
-        let stream = stream::iter(events.into_iter().map(Ok));
-        let events = unified_event_stream(stream, Box::new(parser))
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<crate::Result<Vec<_>>>()
-            .unwrap();
+        for prefix in ["", "Writing it. "] {
+            let tokenizer = TestTokenizer::new()
+                .with_special_token("<|channel>", 256)
+                .with_special_token("<channel|>", 257);
+            let parser = Gemma4UnifiedParser::new(&tools, Arc::new(tokenizer)).unwrap();
+            let events = vec![
+                decoded_delta(prefix),
+                decoded_delta("<|tool_call>"),
+                decoded_delta("call:write_file{"),
+                decoded_delta("content:<|\"|>hello "),
+                finished_delta("world<|\"|>"),
+            ];
+            let stream = stream::iter(events.into_iter().map(Ok));
+            let events = unified_event_stream(stream, Box::new(parser))
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<crate::Result<Vec<_>>>()
+                .unwrap();
 
-        assert_eq!(
-            events,
-            vec![
-                AssistantEvent::TextDelta {
-                    kind: AssistantBlockKind::Text,
-                    delta: "<|tool_call>call:write_file{content:<|\"|>hello world<|\"|>"
-                        .to_string(),
-                    token_count: None,
-                },
-                AssistantEvent::Done {
-                    usage: done_usage(0),
-                    timestamps: Default::default(),
-                    spec_decode_metrics: None,
-                    finish_reason: crate::FinishReason::Stop(None),
-                    kv_transfer_params: None,
-                    ec_transfer_params: None,
-                    weight_versions: None,
-                },
-            ]
-        );
+            let text = (!prefix.is_empty()).then(|| AssistantEvent::TextDelta {
+                kind: AssistantBlockKind::Text,
+                delta: prefix.to_string(),
+                token_count: None,
+            });
+            let done = AssistantEvent::Done {
+                usage: done_usage(0),
+                timestamps: Default::default(),
+                spec_decode_metrics: None,
+                finish_reason: crate::FinishReason::Stop(None),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+                weight_versions: None,
+            };
+            assert_eq!(
+                events,
+                text.into_iter().chain([done]).collect::<Vec<_>>(),
+                "{prefix:?}"
+            );
+        }
+    }
+
+    /// The same through a tool parser: an opener cut short drops whether the
+    /// output arrives in pieces or in one delta, and only the preceding text
+    /// remains.
+    #[tokio::test]
+    async fn unified_stream_drops_incomplete_tool_parser_call_at_eos() {
+        use vllm_parser::tool::{Qwen3CoderToolParser, ToolParser as _};
+
+        let chunks = ["Checking the weather. ", "<tool_call>", "\n", "<function"];
+        let whole = chunks.concat();
+        for deltas in [chunks.to_vec(), vec![whole.as_str()]] {
+            let qwen = Qwen3CoderToolParser::create(&[], Arc::new(TestTokenizer::new())).unwrap();
+            let parser = vllm_parser::unified::CombinedParser::new(None, Some(qwen));
+            let (last, rest) = deltas.split_last().unwrap();
+            let events: Vec<_> = rest
+                .iter()
+                .map(|delta| Ok(decoded_delta(delta)))
+                .chain([Ok(finished_delta(last))])
+                .collect();
+            let events = unified_event_stream(stream::iter(events), Box::new(parser))
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<crate::Result<Vec<_>>>()
+                .unwrap();
+
+            let text: String = events
+                .iter()
+                .filter_map(|event| match event {
+                    AssistantEvent::TextDelta { delta, .. } => Some(delta.as_str()),
+                    AssistantEvent::ToolCallStart { .. }
+                    | AssistantEvent::ToolCallArgumentsDelta { .. } => {
+                        panic!("unexpected tool call event: {event:?}")
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(text, "Checking the weather. ", "deltas: {deltas:?}");
+        }
     }
 }
