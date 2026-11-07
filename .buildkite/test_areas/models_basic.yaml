@@ -483,6 +483,7 @@ steps:
   - tests/models/deepseek_v32/test_sequence_parallel.py
   - tests/models/deepseek_v32/test_pp_topk.py
   - tests/models/test_deepseek_v4_fi_moe_ep.py
+  - tests/models/test_deepseek_dspark_packed_mapping.py
   - tests/models/test_dspark_mla.py
   - tests/models/transformers/test_layer_registry.py
   - tests/models/test_cohere2_moe_parallel_block.py
@@ -502,6 +503,7 @@ steps:
       models/deepseek_v32/test_sequence_parallel.py
       models/deepseek_v32/test_pp_topk.py
       models/test_deepseek_v4_fi_moe_ep.py
+      models/test_deepseek_dspark_packed_mapping.py
       models/test_dspark_mla.py
       models/transformers/test_layer_registry.py
       models/test_dory.py

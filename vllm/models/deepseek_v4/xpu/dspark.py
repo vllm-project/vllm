@@ -33,6 +33,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 
 from .model import (
     DeepseekV4DecoderLayer,
+    DeepseekV4ForCausalLM,
     make_deepseek_v4_expert_params_mapping,
 )
 
@@ -223,10 +224,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     has_own_embed_tokens = False
     has_own_lm_head = False
 
-    packed_modules_mapping = {
-        "gate_up_proj": ["w1", "w3"],
-        "fused_wqa_wkv": ["wq_a", "wkv"],
-    }
+    packed_modules_mapping = DeepseekV4ForCausalLM.packed_modules_mapping
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
