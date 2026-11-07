@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from array import array
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Sequence
-from concurrent.futures import Future
+from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass
 from multiprocessing.queues import Queue
 from threading import Thread
@@ -958,7 +958,10 @@ def _process_utility_output(
     output: UtilityOutput, utility_results: dict[int, AnyFuture]
 ):
     """Set the result from a utility method in the waiting future."""
-    future = utility_results.pop(output.call_id)
+    future = utility_results.pop(output.call_id, None)
+    if future is None or future.done():
+        # The caller may have cancelled or failed while the reply was in flight.
+        return
     failure_message = output.failure_message
     try:
         if failure_message is not None:
@@ -966,7 +969,7 @@ def _process_utility_output(
         else:
             assert output.result is not None
             future.set_result(output.result.result)
-    except asyncio.InvalidStateError:
+    except (asyncio.InvalidStateError, InvalidStateError):
         # This can happen if the future is cancelled due to the
         # original calling task being cancelled.
         if failure_message is not None:
@@ -974,6 +977,16 @@ def _process_utility_output(
                 "Cancelled call to utility method failed with error: %s",
                 failure_message,
             )
+
+
+def _fail_utility_calls(utility_results: dict[int, AnyFuture]) -> None:
+    """Run on the output receiver's thread/event loop after marking it dead."""
+    for call_id in list(utility_results):
+        future = utility_results.pop(call_id, None)
+        if future is not None and not future.done():
+            # Synchronous callers can cancel from another thread.
+            with contextlib.suppress(asyncio.InvalidStateError, InvalidStateError):
+                future.set_exception(EngineDeadError())
 
 
 class SyncMPClient(MPClient):
@@ -1036,6 +1049,8 @@ class SyncMPClient(MPClient):
             except Exception as e:
                 outputs_queue.put_nowait(e)
             finally:
+                resources.engine_dead = True
+                _fail_utility_calls(utility_results)
                 # Close sockets.
                 shutdown_socket.close(linger=0)
                 out_socket.close(linger=0)
@@ -1076,9 +1091,11 @@ class SyncMPClient(MPClient):
         call_id = uuid.uuid1().int >> 64
         future: Future[Any] = Future()
         self.utility_results[call_id] = future
-        self._send_input(EngineCoreRequestType.UTILITY, (0, call_id, method, args))
-
-        return future.result()
+        try:
+            self._send_input(EngineCoreRequestType.UTILITY, (0, call_id, method, args))
+            return future.result()
+        finally:
+            self.utility_results.pop(call_id, None)
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.call_utility("get_supported_tasks")
@@ -1286,6 +1303,9 @@ class AsyncMPClient(MPClient):
                 outputs_queue.put_nowait(e)
             except asyncio.CancelledError:
                 outputs_queue.put_nowait(EngineDeadError())
+            finally:
+                resources.engine_dead = True
+                _fail_utility_calls(utility_results)
 
         resources.output_queue_task = asyncio.create_task(
             process_outputs_socket(), name="EngineCoreOutputQueueTask"
@@ -1349,13 +1369,22 @@ class AsyncMPClient(MPClient):
         call_id = uuid.uuid1().int >> 64
         future = asyncio.get_running_loop().create_future()
         self.utility_results[call_id] = future
-        message = (
-            EngineCoreRequestType.UTILITY.value,
-            *self.encoder.encode((self.client_index, call_id, method, args)),
-        )
-        await self._send_input_message(message, engine)
-        self._ensure_output_queue_task()
-        return await future
+        try:
+            message = (
+                EngineCoreRequestType.UTILITY.value,
+                *self.encoder.encode((self.client_index, call_id, method, args)),
+            )
+            await self._send_input_message(message, engine)
+            self._ensure_output_queue_task()
+            return await future
+        finally:
+            self.utility_results.pop(call_id, None)
+            if not future.done():
+                future.cancel()
+            elif not future.cancelled():
+                # A receiver failure can precede a send failure/cancellation.
+                # Consume its error even if execution never reached await future.
+                future.exception()
 
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         return await self.call_utility_async("get_supported_tasks")
