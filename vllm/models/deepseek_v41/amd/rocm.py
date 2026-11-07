@@ -3,11 +3,12 @@
 
 import functools
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import torch
 
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.cache import CacheDType
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -19,6 +20,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dyna
 from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
     RocmSparseAttnIndexer,
     RocmSparseMQAIndexer,
+)
+from vllm.models.deepseek_v4.amd.rocm import (
+    _plain_fp8_sparse_mla,
+    _register_plain_fp8_kv_scales,
 )
 from vllm.models.deepseek_v41.amd.ops.sparse_indexer import Gfx942SparseAttnIndexer
 from vllm.models.deepseek_v41.attention import (
@@ -176,32 +181,33 @@ def _pack_global_topk_ragged_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
-    block_idx = tl.program_id(1)
-    offset = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-
     out_start = tl.load(topk_indptr_ptr + token_idx)
     out_end = tl.load(topk_indptr_ptr + token_idx + 1)
     out_len = out_end - out_start
-    if block_idx * BLOCK_SIZE >= out_len:
+    if out_len == 0:
         return
 
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
-    mask = (offset < out_len) & (offset < topk)
-    local_idx = tl.load(
-        topk_indices_ptr + token_idx * topk_indices_stride + offset,
-        mask=mask,
-        other=-1,
-    )
-    valid = mask & (local_idx >= 0)
-    block_indices = local_idx // block_size
-    block_numbers = tl.load(
-        block_table_ptr + req_idx * block_table_stride + block_indices,
-        mask=valid,
-        other=0,
-    )
-    block_offsets = local_idx % block_size
-    slot_ids = tl.where(valid, block_numbers * block_size + block_offsets, -1)
-    tl.store(global_topk_ragged_ptr + out_start + offset, slot_ids, mask=mask)
+    written = 0
+    for start in range(0, topk, BLOCK_SIZE):
+        offset = start + tl.arange(0, BLOCK_SIZE)
+        local_idx = tl.load(
+            topk_indices_ptr + token_idx * topk_indices_stride + offset,
+            mask=offset < topk,
+            other=-1,
+        )
+        valid = (offset < topk) & (local_idx >= 0)
+        block_numbers = tl.load(
+            block_table_ptr + req_idx * block_table_stride + local_idx // block_size,
+            mask=valid,
+            other=0,
+        )
+        slot_ids = block_numbers * block_size + local_idx % block_size
+        rank = tl.cumsum(valid.to(tl.int32), axis=0) - 1
+        tl.store(
+            global_topk_ragged_ptr + out_start + written + rank, slot_ids, mask=valid
+        )
+        written += tl.sum(valid.to(tl.int32), axis=0)
 
 
 def compute_global_topk_ragged_indices_and_indptr(
@@ -262,8 +268,8 @@ def _compute_global_topk_ragged_indices_and_indptr_old(
         device=topk_indices.device,
     )
     if global_topk_ragged.numel() > 0:
-        block = 128
-        _pack_global_topk_ragged_kernel[(num_tokens, triton.cdiv(topk, block))](
+        block = min(triton.next_power_of_2(topk), 1024)
+        _pack_global_topk_ragged_kernel[(num_tokens,)](
             global_topk_ragged,
             topk_indptr,
             topk_indices,
@@ -524,6 +530,13 @@ def _gfx942_monokernel() -> bool:
 
 
 class DeepseekV41ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
+    # fp8_e4m3 selects plain per-tensor fp8 KV rows (GLM-5's format) instead
+    # of the UE8M0 block-scaled fp8_ds_mla record; aiter sparse MLA only.
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        *DeepseekV4SparseMLABackend.supported_kv_cache_dtypes,
+        "fp8_e4m3",
+    ]
+
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASHMLA_SPARSE_DSV41"
@@ -594,6 +607,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                     "are not supported."
                 )
         self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(self._has_kv_transfer)
+        self._plain_fp8_kv = self.kv_cache_torch_dtype == torch.float8_e4m3fn
+        if self._plain_fp8_kv:
+            _register_plain_fp8_kv_scales(self, self._use_aiter_sparse_mla)
         if self.compressor is None and self.indexer is None:
             # Dense layers have nothing to overlap; keep the base serial path.
             self.aux_stream_list = None
@@ -601,6 +617,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
+
+    def _uses_fp8_ds_mla_layout(self) -> bool:
+        return get_current_vllm_config().cache_config.cache_dtype != "fp8_e4m3"
 
     def prepare_attn_preshuffle(self) -> None:
         from vllm._aiter_ops import rocm_aiter_ops
@@ -973,8 +992,13 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             assert output.shape == q.shape, (
                 f"output buffer shape {output.shape} must match q shape {q.shape}"
             )
-            assert output.dtype == q.dtype, (
-                f"output buffer dtype {output.dtype} must match q dtype {q.dtype}"
+            # A per-tensor fp8 cache comes with an fp8 q; the output stays bf16.
+            expected_dtype = (
+                torch.bfloat16 if q.dtype == torch.float8_e4m3fn else q.dtype
+            )
+            assert output.dtype == expected_dtype, (
+                f"output buffer dtype {output.dtype} must be {expected_dtype} "
+                f"for q dtype {q.dtype}"
             )
 
         forward_context = get_forward_context()
@@ -1482,6 +1506,21 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         from vllm._aiter_ops import rocm_aiter_ops
 
         assert (output is None) != (output_mxfp8 is None)
+        if self._plain_fp8_kv:
+            _plain_fp8_sparse_mla(
+                self,
+                q,
+                output,
+                swa_k_cache,
+                swa_indices,
+                swa_indptr,
+                compressed_k_cache,
+                topk_indices,
+                topk_indptr,
+                positions=positions,
+                output_mxfp8=output_mxfp8,
+            )
+            return
         # Both fp8 caches are read in place: the SWA window as the main segment,
         # the top-k compressed tokens as the extra one. With positions the
         # store applies the inverse RoPE; output_mxfp8 replaces output.

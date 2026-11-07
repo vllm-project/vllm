@@ -70,17 +70,16 @@ def _topk_pack_kernel(
     tl.store(indptr_ptr, 0)
     tl.store(indptr_ptr + 1 + rows, ends, mask=in_batch)
 
-    # As in _pack_global_topk_ragged_kernel, row t writes its first lens[t]
-    # entries in place, and a negative entry among them becomes -1.
-    take = in_batch[:, None] & (cols[None, :] < lens[:, None]) & in_row[None, :]
-    ok = take & (local >= 0)
+    # Compact holes so every slot inside a live indptr range is valid.
+    take = in_batch[:, None] & token_ok[:, None] & in_row[None, :] & (local >= 0)
+    rank = tl.cumsum(take.to(tl.int32), axis=1) - 1
     blk = tl.load(
         block_table_ptr + req[:, None] * block_table_stride + local // block_size,
-        mask=ok,
+        mask=take,
         other=0,
     )
-    slots = tl.where(ok, blk * block_size + local % block_size, -1)
-    tl.store(ragged_ptr + (ends - lens)[:, None] + cols[None, :], slots, mask=take)
+    slots = blk * block_size + local % block_size
+    tl.store(ragged_ptr + (ends - lens)[:, None] + rank, slots, mask=take)
 
 
 def launch(
