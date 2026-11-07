@@ -99,7 +99,16 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
             layer.weight_block_size,
             weight_loader,
         )
-        layer.register_parameter("weight_scale", weight_scale)
+        # Block-FP8 checkpoints store this tensor as "weight_scale_inv" (the name the
+        # plain fp8 path registers, and the name process_weights_after_loading renames
+        # it to anyway).  Register it under that name for the block strategy so the
+        # loader can match the checkpoint; other strategies keep "weight_scale".
+        scale_name = (
+            "weight_scale_inv"
+            if self.strategy == QuantizationStrategy.BLOCK
+            else "weight_scale"
+        )
+        layer.register_parameter(scale_name, weight_scale)
 
         # INPUT SCALE (to deal with converted checkpoints)
         if self.is_static_input_scheme:
@@ -120,10 +129,14 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.strategy == QuantizationStrategy.BLOCK:
             assert self.is_static_input_scheme is False
-            # MarlinFP8ScaledMMLinearKernel uses "weight_scale_inv" for block
-            # quant, while CT registers the scale as "weight_scale". Alias the
-            # loaded parameter (same object) under both names.
-            layer.weight_scale_inv = layer.weight_scale
+            # Block-quant kernels (e.g. MarlinFP8ScaledMMLinearKernel) read the
+            # scale as "weight_scale_inv", which the block strategy now registers
+            # directly (see create_weights).  Parameters created by the earlier
+            # path — a checkpoint loaded before this change, or any parameter
+            # registered as "weight_scale" — still get the alias, so both names
+            # keep pointing at the same tensor.
+            if "weight_scale" in layer._parameters:
+                layer.weight_scale_inv = layer.weight_scale
         else:
             if self.strategy == QuantizationStrategy.TENSOR:
                 # For fused modules with per-tensor scales, expand each scale
