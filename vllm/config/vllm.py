@@ -519,6 +519,7 @@ class VllmConfig:
             "offload": get_factors(self.offload_config),
             "attention": get_factors(self.attention_config),
             "engram": get_factors(self.engram_config),
+            "mamba": get_factors(self.mamba_config),
             "lora": get_factors(self.lora_config),
             "speculative": get_factors(self.speculative_config),
             "structured_outputs": get_factors(self.structured_outputs_config),
