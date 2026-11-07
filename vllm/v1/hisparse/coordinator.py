@@ -285,6 +285,15 @@ class HiSparseCoordinator:
                     if host_idx < state.synced_pages:
                         state.stale_pages.add(host_idx)
 
+    def _adopt_pending_copies(
+        self, request_id: str, state: _HiSparseRequestState
+    ) -> None:
+        if state.pages_to_adopt:
+            assert self.host_manager is not None
+            host_blocks = self.host_manager.req_to_blocks.get(request_id, ())
+            self._adopt_copies(request_id, state, host_blocks[: state.pages_to_adopt])
+            state.pages_to_adopt = 0
+
     def _record_copies(self, request_id: str, num_computed_tokens: int) -> None:
         """Index the GPU copies of just-published host blocks for later hits."""
         if not self.resident_managers:
@@ -427,11 +436,7 @@ class HiSparseCoordinator:
         if not self.resident_managers:
             return
         state = self._get_request_state(request_id)
-        if state.pages_to_adopt:
-            assert self.host_manager is not None
-            host_blocks = self.host_manager.req_to_blocks.get(request_id, ())
-            self._adopt_copies(request_id, state, host_blocks[: state.pages_to_adopt])
-            state.pages_to_adopt = 0
+        self._adopt_pending_copies(request_id, state)
         if not self._can_read_from_host(request_id):
             assert self.gpu_pool is not None
             if (
@@ -597,12 +602,61 @@ class HiSparseCoordinator:
         state.valid_pages = set(range(num_pages))
         state.ready_prefix_pages = num_pages
         if num_computed_tokens:
-            self._plan_page_transfer(
-                request_id,
-                (num_computed_tokens - 1) // block_size,
-                restore=True,
-            )
+            # A local prefix hit's surviving GPU copies cost no copy, so adopt
+            # them before promoting the rest.
+            self._adopt_pending_copies(request_id, state)
+            tail_page = (num_computed_tokens - 1) // block_size
+            for page_idx in (
+                tail_page,
+                *self._promote_imported_pages(request_id, tail_page),
+            ):
+                self._plan_page_transfer(request_id, page_idx, restore=True)
         self._publish_host_blocks_if_ready(request_id)
+
+    def _promote_imported_pages(self, request_id: str, num_pages: int) -> list[int]:
+        """Back an import's first ``num_pages`` host pages with new GPU pages.
+
+        Imports land in the host tier. While the GPU pool has room above the
+        transition watermark, the imported pages are restored into resident
+        pages too, so decode reads them like a locally computed prefix. They are
+        clean copies of durable host pages: the residency policy unpins them,
+        and the pool reclaims them only after every other free block.
+        """
+        assert self.gpu_pool is not None and self.host_manager is not None
+        num_managers = len(self.resident_managers)
+        spare = self.gpu_pool.get_num_free_blocks() - self.transition_watermark
+        host_blocks = self.host_manager.req_to_blocks[request_id]
+        num_pages = min(
+            num_pages,
+            len(host_blocks),
+            *(
+                len(manager.req_to_blocks.get(request_id, ()))
+                for manager in self.resident_managers
+            ),
+        )
+        state = self._get_request_state(request_id)
+        pages = [
+            page_idx
+            for page_idx in range(num_pages)
+            if not host_blocks[page_idx].is_null
+            and page_idx not in state.pending_pages
+            and all(
+                manager.get_resident_page(request_id, page_idx) is None
+                for manager in self.resident_managers
+            )
+        ][: max(spare, 0) // num_managers]
+        if not pages:
+            return []
+        blocks = self.gpu_pool.get_new_blocks(len(pages) * num_managers)
+        for i, page_idx in enumerate(pages):
+            for slot, manager in enumerate(self.resident_managers):
+                adopted = manager.adopt_resident_page(
+                    request_id, page_idx, blocks[i * num_managers + slot]
+                )
+                assert adopted, f"Cannot promote page {page_idx} of {request_id}"
+            if page_idx < state.synced_pages:
+                state.stale_pages.add(page_idx)
+        return pages
 
     def _plan_page_transfer(
         self,
