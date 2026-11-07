@@ -199,6 +199,10 @@ class SpecRound:
         if has_prefill or scheduler_output.has_structured_output_requests:
             return True
         assert sampler is not None
+        trace = sampler.trace_replay_state
+        if trace is not None and trace.has_trace(idx_mapping_np):
+            # Only the chain rejection sampler applies the trace.
+            return True
         return sampler.reads_row_prefix(idx_mapping_np)
 
     def _check_plan(self, plan: VerifyPlan, rows: np.ndarray) -> None:

@@ -4,6 +4,7 @@
 under ``TRITON_INTERPRET=1``. ``parent[i]`` is the row that row ``i`` extends."""
 
 import os
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -26,6 +27,7 @@ from vllm.v1.worker.gpu.mm.rope import RopeState
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
+from vllm.v1.worker.gpu.sample.trace_replay import TraceReplayState
 from vllm.v1.worker.gpu.spec_decode.capabilities import SpecLayerKind
 from vllm.v1.worker.gpu.spec_decode.commit import accepted_rows
 from vllm.v1.worker.gpu.spec_decode.kernels import (
@@ -138,6 +140,25 @@ def test_spec_round_checks_a_plans_shape(max_rows, rows, match):
     plan = _plan(_PARENT, [4])
     with pytest.raises(AssertionError, match=match):
         spec_round._check_plan(plan, np.array(rows))
+
+
+def test_trace_replay_requests_verify_chains():
+    """Only the chain rejection sampler replays a trace, so a batch holding a
+    replaying request must not be planned as a tree."""
+    spec_round = object.__new__(SpecRound)
+    spec_round.resources = SpecResources(capture_rows=(4,), max_branching=2)
+    trace = object.__new__(TraceReplayState)
+    trace.trace_len = SimpleNamespace(np=np.array([0, 3, 0], dtype=np.int32))
+    sampler = SimpleNamespace(
+        trace_replay_state=trace, reads_row_prefix=lambda idx_mapping_np: False
+    )
+    output = SimpleNamespace(has_structured_output_requests=False)
+
+    def chain_only(slots):
+        return spec_round._chain_only(output, sampler, np.array(slots), False)
+
+    assert chain_only([0, 2]) is False
+    assert chain_only([0, 1]) is True
 
 
 def _random_batch(gen, max_rows):

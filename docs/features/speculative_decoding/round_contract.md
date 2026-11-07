@@ -122,7 +122,8 @@ every scheduled draft as a chain.
 scheduler reserved for request `r`. `chain_only` is set when the runner can only
 verify chains this step: when a prefill is in the batch, when a logits processor
 reads each row's prefix (penalties, bad words, a thinking budget, a custom
-processor), with structured output, and in the modes listed under [Limits](#limits).
+processor), with structured output, when a request replays a trace, and in the
+modes listed under [Limits](#limits).
 
 A `VerifyPlan` holds device tensors per scheduled request, with `R` requests and
 `C` rows:

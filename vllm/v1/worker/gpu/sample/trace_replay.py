@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import numpy as np
 import torch
 
 from vllm.sampling_params import SamplingParams
@@ -38,6 +39,10 @@ class TraceReplayState:
             self.trace_token_ids.stage_write(req_idx, 0, trace)
         else:
             self.trace_len.np[req_idx] = 0
+
+    def has_trace(self, idx_mapping_np: np.ndarray) -> bool:
+        """Whether a request of the batch replays a trace."""
+        return bool(np.any(self.trace_len.np[idx_mapping_np] > 0))
 
     def apply_staged_writes(self) -> None:
         self.trace_len.copy_to_uva()
