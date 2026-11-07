@@ -133,9 +133,9 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
             logger.info_once("Using fp8 kv-cache for GlmMoeDsaForCausalLM on SM10x")
 
         # For Glm-Moe-DSA, qrep + a2a is better than the default all-gather + ag-rs
-        # in most cases.
+        # in most cases. The ROCm path does not use replicated query weights.
         vllm_config.parallel_config.set_dcp_defaults(
-            comm_backend="a2a", q_replicate=True
+            comm_backend="a2a", q_replicate=not current_platform.is_rocm()
         )
 
 
