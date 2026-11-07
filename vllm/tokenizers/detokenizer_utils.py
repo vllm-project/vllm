@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from vllm.tokenizers import TokenizerLike
 
@@ -266,12 +267,43 @@ def detokenize_incrementally(
             spaces_between_special_tokens=spaces_between_special_tokens,
         )
 
-    if len(new_text) <= len(prefix_text) or new_text.endswith("�"):
+    # A prefix ending mid-character (e.g. a token-id prompt) decodes to a
+    # trailing U+FFFD run that new_text replaces with the completed character.
+    straddles = prefix_text.endswith("�") and not new_text.startswith(prefix_text)
+    prefix_len = (
+        _straddled_prefix_len(prefix_text, new_text) if straddles else len(prefix_text)
+    )
+
+    if len(new_text) <= prefix_len or new_text.endswith("�"):
         # utf-8 char at the end means it's a potential unfinished byte sequence
         # from byte fallback tokenization.
         # If it's in the middle, it's probably a real invalid id generated
         # by the model
         return new_tokens, "", prefix_offset, read_offset
 
-    new_text = new_text[len(prefix_text) :]
-    return new_tokens, new_text, read_offset, output_token_count
+    new_text = new_text[prefix_len:]
+    # read_offset is mid-character, so keep the next window starting before it.
+    next_prefix_offset = prefix_offset if straddles else read_offset
+    return new_tokens, new_text, next_prefix_offset, output_token_count
+
+
+def _straddled_prefix_len(prefix_text: str, new_text: str) -> int:
+    """Return the length of the part of `new_text` that `prefix_text` covers
+    when `prefix_text` ends in the bytes of an incomplete character.
+
+    Byte-level BPE renders an incomplete sequence as a single U+FFFD, but
+    byte-fallback decoders (SentencePiece `<0xNN>` tokens) render every byte
+    of a run that fails to decode as its own U+FFFD. Counting the trailing
+    U+FFFD run as bytes handles both. The character those bytes start is
+    skipped, as when it straddles a byte-level token boundary.
+    """
+    start = min(
+        len(os.path.commonprefix((prefix_text, new_text))),
+        len(prefix_text.rstrip("�")),
+    )
+    dangling_bytes = len(prefix_text) - start
+    for end, char in enumerate(new_text[start:], start + 1):
+        dangling_bytes -= 1 if char == "�" else len(char.encode())
+        if dangling_bytes <= 0:
+            return end
+    return len(new_text)
