@@ -13,6 +13,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+from vllm.platforms import current_platform
 
 # Ordered by priority.
 _SUPPORTED_BACKENDS = (
@@ -38,6 +39,20 @@ _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "triton": Fp8MoeBackend.TRITON_MXFP8,
     "humming": Fp8MoeBackend.HUMMING,
 }
+
+
+def _get_priority_backends() -> list[Fp8MoeBackend]:
+    """Supported backends in priority order for the current device."""
+    backends = prioritize_humming(list(_SUPPORTED_BACKENDS))
+    if current_platform.is_cuda() and current_platform.is_device_capability_family(120):
+        # SM12x (RTX PRO 6000 Blackwell, RTX 50xx, GB10): with only 99 KB of
+        # shared memory per block, the 8-bit Marlin MoE kernel has no fitting
+        # tile for expert shapes whose intermediate size is not a multiple of
+        # 128 and fails at warm-up with "Invalid thread config". Humming has no
+        # such limit, so it outranks Marlin here.
+        backends.remove(Fp8MoeBackend.HUMMING)
+        backends.insert(backends.index(Fp8MoeBackend.MARLIN), Fp8MoeBackend.HUMMING)
+    return backends
 
 
 def _mxfp8_backend_to_kernel_cls(
@@ -119,7 +134,7 @@ def select_mxfp8_moe_backend(
         return backend, _select_kernel_cls(backend, config)
 
     # Auto-select: pick the first supported backend.
-    backends = prioritize_humming(list(_SUPPORTED_BACKENDS))
+    backends = _get_priority_backends()
     for backend in backends:
         try:
             experts_cls = _select_kernel_cls(backend, config)
