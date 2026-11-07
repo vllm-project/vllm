@@ -3322,11 +3322,10 @@ class VllmConfig:
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
             # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle).
-            # DFlash and DSpark use parallel drafting natively in V2 via their
-            # own speculators.
-            if (
-                speculative_config.parallel_drafting
-                and speculative_config.method not in ("dflash", "dspark")
+            # DFlash, DSpark and PARD-2 use parallel drafting natively in V2 via
+            # their own speculators.
+            if speculative_config.parallel_drafting and (
+                speculative_config.method not in ("dflash", "dspark", "pard2")
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
 
@@ -3473,7 +3472,7 @@ class VllmConfig:
         ):
             unsupported.append("pipeline parallelism with async scheduling")
 
-        # DSpark is implemented only by the V2 GPU model runner.
+        # DSpark and PARD-2 are implemented only by the V2 GPU model runner.
         if self.speculative_config:
             # Imported here since it imports vllm.config.
             from vllm.v1.worker.gpu.spec_decode.xpress.config import (
@@ -3487,6 +3486,8 @@ class VllmConfig:
                 )
             if self.speculative_config.method == "dspark":
                 unsupported.append("dspark speculative decoding")
+            elif self.speculative_config.method == "pard2":
+                unsupported.append("pard2 speculative decoding")
             elif isinstance(
                 self.speculative_config.speculator_config, XPressSpeculatorConfig
             ):
