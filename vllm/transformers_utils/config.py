@@ -792,6 +792,14 @@ def mrope_num_dims(config: PreTrainedConfig) -> int:
     return 3
 
 
+def get_thinker_config(config: PreTrainedConfig) -> PreTrainedConfig | None:
+    """Get the "thinker" config that Transformers can serve for omni models."""
+    thinker_config = getattr(config, "thinker_config", None)
+    if thinker_config is None or thinker_config.model_type not in MODEL_MAPPING_NAMES:
+        return None
+    return thinker_config
+
+
 def is_encoder_decoder(config: PreTrainedConfig) -> bool:
     """Detect if the model with this config is used as an encoder/decoder."""
 
