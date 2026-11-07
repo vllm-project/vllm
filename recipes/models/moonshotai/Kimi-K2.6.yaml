@@ -165,6 +165,8 @@ guide: |
   - **Hardware (B300 / NVFP4):** 4× B300 (verified); use `vllm/vllm-openai:latest`
   - **AMD support:** 8x MI300X / MI325X / MI355X with ROCm 7.2.1 and Python 3.12
 
+  <!-- overlay:vllm-ascend:huawei_prerequisites -->
+
   ### NVIDIA B300: NVFP4 with Eagle3
 
   ```bash
@@ -256,6 +258,8 @@ guide: |
   - Keep vLLM's default block size unless you are tuning long-context
     throughput; `--block-size 64` is safe to try.
 
+  <!-- overlay:vllm-ascend:ascend -->
+
   ## Client Usage
 
   Once the vLLM server is running, consume it via the OpenAI-compatible API:
@@ -290,7 +294,7 @@ guide: |
 
   start = time.time()
   response = client.chat.completions.create(
-      model="moonshotai/Kimi-K2.6",
+      model={{client_model}},
       messages=messages,
       max_tokens=2048
   )
@@ -318,3 +322,5 @@ guide: |
   - [vLLM multimodal inputs guide](https://docs.vllm.ai/en/latest/features/multimodal_inputs.html)
   - [vLLM Expert Parallelism docs](https://docs.vllm.ai/en/latest/serving/expert_parallel_deployment.html)
   - [vLLM NixlConnector usage guide](https://docs.vllm.ai/en/latest/features/nixl_connector_usage.html)
+
+  <!-- overlay:vllm-ascend:ascend_references -->
