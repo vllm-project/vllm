@@ -35,6 +35,7 @@ from vllm.entrypoints.openai.responses.harmony import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.utils import (
+    construct_builtin_and_mcp_tool_dicts,
     construct_input_messages,
     construct_tool_dicts,
     extract_tool_types,
@@ -375,6 +376,9 @@ class OnlineRenderer:
                 self.exclude_tools_when_tool_choice_none
             ),
         )
+        builtin_dicts = construct_builtin_and_mcp_tool_dicts(request.tools, tool_server)
+        if builtin_dicts:
+            tool_dicts = (tool_dicts or []) + builtin_dicts
         messages = construct_input_messages(
             request_instructions=request.instructions,
             request_input=request.input,

@@ -747,6 +747,76 @@ async def test_online_renderer_returns_typed_error_for_bad_harmony_call_referenc
     assert "No call message found for missing" in result.error.message
 
 
+@pytest.mark.parametrize(
+    "tools, has_tool, expected_names",
+    [
+        (
+            [
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+                {"type": "code_interpreter", "container": {"type": "auto"}},
+                {"type": "web_search_preview"},
+            ],
+            True,
+            ["get_weather", "code_interpreter", "web_search_preview"],
+        ),
+        ([{"type": "web_search_preview"}], False, []),
+        (
+            [
+                Mcp(
+                    type="mcp",
+                    server_label="deepwiki",
+                    server_url="https://example.com/mcp",
+                    allowed_tools=["search", "read_page"],
+                )
+            ],
+            True,
+            ["search", "read_page"],
+        ),
+        ([{"type": "code_interpreter", "container": {"type": "auto"}}], None, []),
+    ],
+)
+@pytest.mark.asyncio
+async def test_online_renderer_renders_builtin_and_mcp_tools_for_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    tools,
+    has_tool,
+    expected_names,
+):
+    """render_responses merges builtin/MCP tools into the tool_dicts passed to
+    preprocess_chat, so they reach the prompt now that rendering lives in the
+    online renderer instead of the context.
+
+    ``has_tool`` is None when no tool server is supplied at all: builtin tools
+    must be skipped then, while MCP tools only need an explicit allow-list.
+    """
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.chat_template = None
+    renderer.chat_template_content_format = "string"
+    renderer.default_chat_template_kwargs = {}
+    preprocess_chat = AsyncMock(
+        return_value=([], [tokens_input([11, 12, 13])]),
+    )
+    monkeypatch.setattr(renderer, "preprocess_chat", preprocess_chat)
+
+    tool_server = None
+    if has_tool is not None:
+        tool_server = MagicMock(spec=ToolServer)
+        tool_server.has_tool.return_value = has_tool
+    request = ResponsesRequest(input="hi", tools=tools)
+
+    result = await renderer.render_responses(request, tool_server=tool_server)
+
+    assert not isinstance(result, ErrorResponse)
+    tool_dicts = preprocess_chat.call_args.kwargs["tool_dicts"] or []
+    names = [d["function"]["name"] for d in tool_dicts]
+    assert names == expected_names
+
+
 @pytest.mark.asyncio
 async def test_online_renderer_preserves_missing_harmony_builtin_tool_behavior(
     monkeypatch: pytest.MonkeyPatch,
