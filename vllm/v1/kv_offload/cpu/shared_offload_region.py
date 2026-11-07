@@ -6,6 +6,7 @@ import errno
 import functools
 import mmap
 import os
+import tempfile
 import time
 from collections.abc import Callable, Iterator
 from ctypes import c_int, c_long, c_size_t, c_void_p
@@ -196,17 +197,15 @@ class SharedOffloadRegion:
                     prot=mmap.PROT_READ | mmap.PROT_WRITE,
                 )
             else:
-                reservation = os.memfd_create("vllm_offload_reservation")
-                try:
-                    os.ftruncate(reservation, self.total_size_bytes)
+                # Use the backing tmpfs's THP policy to align the reservation.
+                with tempfile.TemporaryFile(dir=os.path.dirname(self.mmap_path)) as f:
+                    os.ftruncate(f.fileno(), self.total_size_bytes)
                     self.mmap_obj = mmap.mmap(
-                        reservation,
+                        f.fileno(),
                         self.total_size_bytes,
                         flags=mmap.MAP_SHARED,
                         prot=mmap.PROT_READ | mmap.PROT_WRITE,
                     )
-                finally:
-                    os.close(reservation)
                 self._map_segments()
             if barrier is not None:
                 barriers_remaining -= 1
