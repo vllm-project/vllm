@@ -1564,6 +1564,31 @@ class TestInitInvariantValidation:
         with pytest.raises(ValueError, match="must be positive"):
             CompilationConfig(encoder_cudagraph_token_budgets=[-1, 64])
 
+    @pytest.mark.parametrize("max_token_budget", [0, -1])
+    def test_invalid_max_token_budget_rejected_before_model_load(
+        self, max_token_budget, tmp_path
+    ):
+        """Reject invalid caps before inspecting the empty model directory."""
+        from vllm import LLM
+
+        with pytest.raises(
+            ValueError, match="encoder_cudagraph_max_token_budget must be positive"
+        ):
+            LLM(
+                model=str(tmp_path),
+                compilation_config={
+                    "cudagraph_mm_encoder": True,
+                    "encoder_cudagraph_max_token_budget": max_token_budget,
+                },
+            )
+
+    @pytest.mark.parametrize("max_token_budget", [None, 1, 5120])
+    def test_valid_max_token_budget_preserved(self, max_token_budget):
+        from vllm.config.compilation import CompilationConfig
+
+        config = CompilationConfig(encoder_cudagraph_max_token_budget=max_token_budget)
+        assert config.encoder_cudagraph_max_token_budget == max_token_budget
+
 
 # ---------------------------------------------------------------------------
 # FlashInfer cu_seqlens replay padding (no GPU required)

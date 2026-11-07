@@ -622,9 +622,10 @@ class CompilationConfig:
     Example: [2048, 4096, 8192, 13824]"""
 
     encoder_cudagraph_max_token_budget: int | None = 5120
-    """Largest auto-generated encoder CUDA graph token budget. A batch with
-    more tokens runs eagerly, where the encoder is usually GPU-bound and a
-    graph saves little. None captures up to the model's largest budget.
+    """Largest auto-generated encoder CUDA graph token budget; must be positive
+    or None. A batch with more tokens runs eagerly. The default balances graph
+    memory against replay coverage; performance depends on the model, batch
+    shape, and hardware. None captures up to the model's largest budget.
     Ignored when encoder_cudagraph_token_budgets is set."""
 
     encoder_cudagraph_max_vision_items_per_batch: int = 0
