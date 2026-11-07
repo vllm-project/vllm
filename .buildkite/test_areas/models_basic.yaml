@@ -394,6 +394,8 @@ steps:
       models/qwen4_exp/test_hc_ops.py
       models/qwen4_exp/test_qsa_prepare.py
       models/qwen4_exp/test_qsa_reference.py
+      models/qwen4_exp/test_qsa_indexer_compact.py
+      models/qwen4_exp/test_qsa_indexer_launch_config.py
     - pytest -v -s models/qwen4_exp/test_ple.py
   mirror:
     amd:
