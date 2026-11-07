@@ -108,6 +108,18 @@ def test_triton_placeholder_language():
     assert lang.int32 is None
     assert lang.tensor is None
 
+    @lang.core.builtin
+    def builtin_identity(x):
+        return x
+
+    assert builtin_identity(1) == 1
+
+    @lang.core.extern
+    def identity(x):
+        return x
+
+    assert identity(1) == 1
+
 
 def test_triton_placeholder_language_from_parent():
     triton = TritonPlaceholder()
@@ -153,6 +165,7 @@ def test_no_triton_fallback():
             "triton.language",
             "vllm.triton_utils",
             "vllm.triton_utils.importing",
+            "vllm.v1.attention.ops.fp8e4nv",
         )
     }
     for name in saved_modules:
@@ -168,6 +181,9 @@ def test_no_triton_fallback():
             assert triton.language.__class__.__name__ == "TritonLanguagePlaceholder"
             assert tl.__class__.__name__ == "TritonLanguagePlaceholder"
             assert tl.constexpr(2**31 - 1) == 2**31 - 1
+            helpers = importlib.import_module("vllm.v1.attention.ops.fp8e4nv")
+            assert callable(helpers.convert_to_fp8e4m3)
+            assert callable(helpers.convert_from_fp8e4m3)
     finally:
         # The pops above are outside mock.patch.dict's scope, so exiting the
         # `with` restores "triton" to absent, not to the real module - unlike
