@@ -60,6 +60,20 @@ def test_extract_tool_calls_no_tools(ernie45_tool_parser):
     assert extracted_tool_calls.content == model_output
 
 
+def test_extract_tool_calls_truncated_keeps_content(ernie45_tool_parser):
+    # Output cut off (e.g. by max_tokens) before </tool_call> has no complete call,
+    # so it must be returned as content instead of being dropped.
+    model_output = (
+        'Sure.\n<tool_call>\n{"name": "get_weather", "arguments": {"city": "Par'
+    )
+    extracted_tool_calls = ernie45_tool_parser.extract_tool_calls(
+        model_output, request=None
+    )
+    assert not extracted_tool_calls.tools_called
+    assert extracted_tool_calls.tool_calls == []
+    assert extracted_tool_calls.content == model_output
+
+
 @pytest.mark.parametrize(
     ids=[
         "single_tool_call",
