@@ -104,8 +104,8 @@ class MonoBuild:
     @property
     def tuned(self) -> bool:
         """A target layer of compress ratio 2 at TP2 on gfx950: its tuned paths
-        are on (bit-exact against the generic ones), every other build compiles
-        the generic code. Its scratch layout is its own (``scratch_layout``)."""
+        are on (bit-exact against the generic ones). Its scratch layout is its
+        own (``scratch_layout``)."""
         return (
             not GFX942
             and not self.generic
@@ -115,6 +115,14 @@ class MonoBuild:
             == (EXPERTS, TOPK, 2, WINDOW)
             # the shared offload needs that many CTAs (``moe.DSH_RANKS``)
             and moe.DSH_RANKS <= BLOCKS
+        )
+
+    @property
+    def tuned_front(self) -> bool:
+        from vllm.platforms.rocm import get_cdna_version
+
+        return self.tuned or (
+            get_cdna_version() == 4 and not self.generic and self.tp in (4, 8)
         )
 
 
@@ -141,7 +149,7 @@ def _ffn_symbol_params(key: MonoBuild) -> dict:
 
 def _front_key(key: MonoBuild):
     return mb_front.FrontBuild(
-        key.tokens, key.tp, key.ratio, key.timeline, key.swa_width, key.tuned
+        key.tokens, key.tp, key.ratio, key.timeline, key.swa_width, key.tuned_front
     )
 
 
@@ -170,6 +178,7 @@ def scratch_layout(
     topk: int = TOPK,
     ug_groups: int = 2,
     tuned: bool = False,
+    front: bool = False,
 ) -> dict:
     """Every region of step width s's launches -> (byte offset, bytes), disjoint:
     K1's front and seam, K2's back, the MoE's regions, the normed rows and their
@@ -194,7 +203,7 @@ def scratch_layout(
         off = max(off, base + max(o + n for o, n in regions.values()))
         off = -(-off // 256) * 256
 
-    place(front_scratch(s, d, tuned))
+    place(front_scratch(s, d, tuned or front))
     place(seam.scratch_layout(s))
     place(back_scratch(s, d, start=0, tuned=tuned))
     mkey = MoeBuild(
@@ -216,8 +225,9 @@ def scratch_bytes(
     topk: int = TOPK,
     ug_groups: int = 2,
     tuned: bool = False,
+    front: bool = False,
 ) -> int:
-    layout = scratch_layout(s, tp, experts, topk, ug_groups, tuned)
+    layout = scratch_layout(s, tp, experts, topk, ug_groups, tuned, front)
     return max(o + n for o, n in layout.values())
 
 
@@ -276,13 +286,15 @@ def publish_x8(c, t):
 def build_mono_k1(key: MonoBuild):
     s, tp = key.tokens, key.tp
     assert 1 <= s <= MAX_TOKENS
-    layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups, key.tuned)
+    layout = scratch_layout(
+        s, tp, key.experts, key.topk, key.ug_groups, key.tuned, key.tuned_front
+    )
     fkey = _front_key(key)
     FrontLds = mb_front.front_lds(s, Dims(tp))
     NORM0 = SLICES  # the norms on the CTAs past the slices: the wqkv waits on them
     GATE0 = SLICES + s
     n_wqkv = mb_front.WQKV_TASKS * mb_front.WQKV_KPARTS
-    if key.tuned and n_wqkv + 2 * s <= BLOCKS:
+    if key.tuned_front and n_wqkv + 2 * s <= BLOCKS:
         # the gates on CTAs without a wqkv part (past the front's key-table /
         # qkv CTAs) while they fit: on a wqkv CTA a gate holds up its partials
         GATE0 = n_wqkv + s
@@ -290,7 +302,7 @@ def build_mono_k1(key: MonoBuild):
 
     @fx.struct
     class SeamLds:
-        red: fx.Array[fx.Float32, seam.red_words(s, key.tuned), 16]
+        red: fx.Array[fx.Float32, seam.red_words(s, key.tuned_front), 16]
         rl: fx.Array[fx.Float32, s * seam.KT, 16]
         fl: fx.Array[fx.Float32, seam.MIX * seam.KT, 16]
 
@@ -387,7 +399,7 @@ def build_mono_k1(key: MonoBuild):
             "klen": klen,
             "qr_out": qr_out,
         }
-        flayout = {n: layout[n] for n in front_scratch(s, Dims(tp), key.tuned)}
+        flayout = {n: layout[n] for n in front_scratch(s, Dims(tp), key.tuned_front)}
         c = mb_front.front_context(fkey, lds.front.peek(), fargs, scratch, tag, flayout)
         c["index"] = key.index
         amb = Mailbox(tag)
@@ -422,7 +434,7 @@ def build_mono_k1(key: MonoBuild):
             },
             "d": StageDims(tp),
             "fold": key.fold,
-            "tuned": key.tuned,
+            "tuned": key.tuned_front,
         }
         for region in ("lin", "pmix"):
             ca[region] = sreg(scratch, layout[region][0], region)
@@ -431,7 +443,7 @@ def build_mono_k1(key: MonoBuild):
 
         def seam_slice():
             for task in range(first_task(bid, 0), SLICES, BLOCKS):
-                if const_expr(key.tuned and key.fold):
+                if const_expr(key.tuned_front and key.fold):
                     # the fold and the slice fused, a thread's columns in
                     # registers throughout
                     seam.stage_reduce_slice(ca, task, reduce=False)
@@ -442,7 +454,7 @@ def build_mono_k1(key: MonoBuild):
         def store(*v):
             store_x8(c, *v)
             if const_expr(key.index):
-                store_normed(normed_out, *v, wide=key.tuned)
+                store_normed(normed_out, *v, wide=key.tuned_front)
 
         def seam_rest():
             for t in range(first_task(bid, NORM0), s, BLOCKS):
@@ -604,7 +616,9 @@ def run_ffn(
     # the target's runner, also for a gfx942 draft layer, so it reads the
     # target's layout.
     if const_expr(part is None):
-        layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups, key.tuned)
+        layout = scratch_layout(
+            s, tp, key.experts, key.topk, key.ug_groups, key.tuned, key.tuned_front
+        )
     else:
         layout = scratch_layout(s, tp)
     mkey = _moe_key(key)
@@ -763,7 +777,9 @@ def run_ffn(
 def build_mono_k2(key: MonoBuild):
     s, tp = key.tokens, key.tp
     assert 1 <= s <= MAX_TOKENS
-    layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups, key.tuned)
+    layout = scratch_layout(
+        s, tp, key.experts, key.topk, key.ug_groups, key.tuned, key.tuned_front
+    )
     bkey = _back_key(key)
     mkey = _moe_key(key)
     rs = route_shape(mkey)
