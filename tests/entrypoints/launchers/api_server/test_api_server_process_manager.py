@@ -513,6 +513,75 @@ def test_rust_frontend_uses_config_model_as_model_tag(monkeypatch, caplog, tmp_p
     assert '"model_tag": "org/model"' in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("extra_args", "expected_served_model_name"),
+    [
+        ([], ["s3://bucket/model"]),
+        (["--served-model-name", "my-model"], ["my-model"]),
+    ],
+)
+def test_rust_frontend_uses_pulled_object_storage_model(
+    monkeypatch, tmp_path, extra_args, expected_served_model_name
+):
+    """The Rust frontend can't read object storage, so it gets the local
+    directory the config and tokenizer were pulled into."""
+    import json
+    import subprocess as subprocess_mod
+
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import RustFrontendProcessManager
+
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--model", "s3://bucket/model", *extra_args]
+    )
+    model_config = SimpleNamespace(
+        model=str(tmp_path),
+        model_weights="s3://bucket/model",
+        served_model_name=expected_served_model_name[0],
+    )
+
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    popen_calls = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        return _FakeProc()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
+    try:
+        monkeypatch.setattr(subprocess_mod, "Popen", fake_popen)
+        RustFrontendProcessManager(
+            binary_path="/nonexistent/vllm-rs",
+            sock=sock,
+            args=args,
+            input_listener=input_listener,
+            output_listener=output_listener,
+            engine_start_index=0,
+            engine_count=1,
+            data_parallel_size=1,
+            model_config=model_config,
+        )
+    finally:
+        sock.close()
+
+    [cmd] = popen_calls
+    args_json = json.loads(cmd[cmd.index("--args-json") + 1])
+    assert args_json["model_tag"] == str(tmp_path)
+    assert args_json["served_model_name"] == expected_served_model_name
+
+
 def test_rust_frontend_inherits_grpc_listener(monkeypatch):
     """The Python-bound gRPC socket is passed to Rust like the HTTP one."""
     import subprocess as subprocess_mod
