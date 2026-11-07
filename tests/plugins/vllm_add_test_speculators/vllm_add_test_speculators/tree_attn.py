@@ -7,6 +7,7 @@ the batch layout on the host, so it runs eager only."""
 
 import torch
 
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionBackend,
     TritonAttentionImpl,
@@ -69,8 +70,10 @@ def tree_attention(
 ) -> None:
     """Overwrite the output of each branching request: query row ``i`` attends
     to the context and the query rows ``j`` with ``ancestors[i, j]`` set."""
-    query_start_loc = metadata.query_start_loc.tolist()
-    seq_lens = metadata.seq_lens.tolist()
+    # A readable reference, not a fast path: it reads the layout on the host.
+    with gpu_sync_allowed():
+        query_start_loc = metadata.query_start_loc.tolist()
+        seq_lens = metadata.seq_lens.tolist()
     ancestors = metadata.tree_ancestors
     block_size = key_cache.shape[2]
     for b in range(len(query_start_loc) - 1):

@@ -8,6 +8,7 @@ from collections.abc import Sequence
 
 import torch
 
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.worker.gpu.spec_decode.kernels import (
     PAGED_KV_COMMIT,
     CommitStep,
@@ -62,10 +63,12 @@ def tree_ancestors(
     row ``j`` when ``j`` is ``i`` or an ancestor along ``parents`` (rows of the
     query, -1 for the first). None for a request whose rows form a chain, which
     attends causally."""
-    bounds = query_start_loc.tolist()
+    # A readable reference, not a fast path: it walks the tree on the host.
+    with gpu_sync_allowed():
+        bounds, host_parents = query_start_loc.tolist(), parents.tolist()
     masks: list[torch.Tensor | None] = []
     for start, end in zip(bounds[:-1], bounds[1:]):
-        local = parents[start:end].tolist()
+        local = host_parents[start:end]
         if local == list(range(-1, end - start - 1)):
             masks.append(None)
             continue
@@ -110,8 +113,11 @@ class ReferenceKVCompactor(SpecKernel):
         moved = (cols >= 1) & (cols < result.path_len[:n, None]) & (path != cols)
         # The verify rows are the query's last rows, so row r sits at context + r.
         context = (step.seq_lens[:n] - step.rows[:n]).long()[:, None]
-        req = torch.arange(n, device=path.device)[:, None].expand_as(path)[moved]
-        src, dst = (context + path)[moved], (context + cols).expand_as(path)[moved]
+        # Boolean-mask indexing reads the count of moved rows on the host.
+        with gpu_sync_allowed():
+            req = torch.arange(n, device=path.device)[:, None].expand_as(path)[moved]
+            src = (context + path)[moved]
+            dst = (context + cols).expand_as(path)[moved]
         # path[j] >= j: no source is an earlier destination, so read all first.
         for layout in self.layouts:
             src_at, dst_at = (
