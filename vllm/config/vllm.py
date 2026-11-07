@@ -133,6 +133,28 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     }
 )
 
+# SupportsReplaySSM advertises support for some ReplaySSM implementation. This
+# allowlist defines the current FlashInfer GDN integration scope. Sharing a
+# layer or inheriting the marker does not opt another model into this integration.
+_GDN_REPLAYSSM_ARCHITECTURES = frozenset(
+    {
+        "Qwen3_5ForCausalLM",
+        "Qwen3_5MoeForCausalLM",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+    }
+)
+
+
+def _uses_gdn_replayssm(
+    cache_config: CacheConfig, model_config: "ModelConfig | None"
+) -> bool:
+    return bool(
+        cache_config.use_replayssm
+        and model_config is not None
+        and model_config.architecture in _GDN_REPLAYSSM_ARCHITECTURES
+    )
+
 
 @lru_cache
 def default_breakable_cudagraph_architectures() -> frozenset[str]:
@@ -585,9 +607,10 @@ class VllmConfig:
 
     @property
     def use_flashinfer_replayssm(self) -> bool:
-        return (
-            self.cache_config.use_replayssm
-            and self.mamba_config.backend == MambaBackendEnum.FLASHINFER
+        """Whether a FlashInfer ReplaySSM kernel runs Mamba2 or GDN decode."""
+        return self.cache_config.use_replayssm and (
+            _uses_gdn_replayssm(self.cache_config, self.model_config)
+            or self.mamba_config.backend == MambaBackendEnum.FLASHINFER
         )
 
     @property
@@ -3881,9 +3904,95 @@ class VllmConfig:
         return self
 
     @model_validator(mode="after")
+    def validate_gdn_replayssm(self) -> "VllmConfig":
+        if not _uses_gdn_replayssm(self.cache_config, self.model_config):
+            return self
+        cache_config = self.cache_config
+        if not 0 <= self.num_speculative_tokens <= 7:
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM supports at most 7 speculative tokens"
+            )
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.enable_adaptive_verification
+        ):
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM does not support adaptive verification; "
+                "set enable_adaptive_verification=False"
+            )
+        if cache_config.replayssm_buffer_len != 16:
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM requires --replayssm-buffer-len=16"
+            )
+        if cache_config.mamba_cache_mode not in ("none", "align"):
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM supports only the none and align "
+                "Mamba cache modes"
+            )
+        if (
+            cache_config.enable_prefix_caching
+            and cache_config.mamba_cache_mode != "align"
+        ):
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM prefix caching requires "
+                "--mamba-cache-mode=align"
+            )
+        if self.model_config.dtype != torch.bfloat16:
+            raise ValueError("FlashInfer GDN ReplaySSM requires bfloat16 model dtype")
+        hf_config = self.model_config.hf_text_config
+        if (
+            getattr(hf_config, "linear_key_head_dim", None) != 128
+            or getattr(hf_config, "linear_value_head_dim", None) != 128
+        ):
+            raise ValueError("FlashInfer GDN ReplaySSM requires GDN K=V=128")
+        if cache_config.mamba_cache_dtype not in ("auto", "bfloat16"):
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM requires a bfloat16 convolution cache"
+            )
+        if cache_config.mamba_ssm_cache_dtype != "float16":
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM requires --mamba-ssm-cache-dtype float16"
+            )
+        if self.mamba_config.enable_stochastic_rounding:
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM does not support "
+                "--enable-mamba-cache-stochastic-rounding"
+            )
+        # Replay rings and cursors are not part of the pipeline, microbatch, or
+        # KV-connector state handoff.
+        if self.parallel_config.pipeline_parallel_size > 1:
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM currently requires pipeline_parallel_size=1"
+            )
+        if self.parallel_config.use_ubatching:
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM does not support overlapping "
+                "microbatch execution"
+            )
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.is_kv_transfer_instance
+        ):
+            raise ValueError(
+                "--use-replayssm is incompatible with KV connectors "
+                "(P/D disaggregation, KV cache offload)"
+            )
+        if cache_config.mamba_cache_mode == "align":
+            from vllm.model_executor.layers.mamba.mamba_utils import (
+                configure_flashinfer_gdn_env,
+            )
+
+            configure_flashinfer_gdn_env()
+        cache_config.use_kda_recoverssm = False
+        return self
+
+    @model_validator(mode="after")
     def validate_mamba_cached_kernel(self) -> "VllmConfig":
         if not self.cache_config.use_replayssm:
             self.cache_config.use_kda_recoverssm = False
+            return self
+        # validate_gdn_replayssm owns the GDN checks.
+        if _uses_gdn_replayssm(self.cache_config, self.model_config):
             return self
 
         kda_architectures = (
@@ -3981,6 +4090,10 @@ class VllmConfig:
                 "(P/D disaggregation, KV cache offload)"
             )
         return self
+
+    def is_gdn_replayssm_enabled(self) -> bool:
+        """Whether --use-replayssm selects FlashInfer GDN ReplaySSM."""
+        return _uses_gdn_replayssm(self.cache_config, self.model_config)
 
 
 _current_vllm_config: VllmConfig | None = None

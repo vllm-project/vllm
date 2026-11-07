@@ -448,6 +448,11 @@ class CommonAttentionMetadata:
     (num_computed_tokens < num_prompt_tokens). Used by some backends to
     distinguish actual decodes from short extends."""
 
+    is_last_prefill: torch.Tensor | None = None
+    """(batch_size,) bool tensor: True if this scheduled chunk reaches the end
+    of a request's prompt. GDN ReplaySSM replays such a chunk as a decode row
+    when it is decode-shaped; earlier chunks must update the canonical state."""
+
     seq_lens_cpu_upper_bound: torch.Tensor | None = None
     """(batch_size,) CPU upper bound on seq_lens. Precise for prefill rows
     and for all rows outside async spec decode; optimistic for async-spec
@@ -553,6 +558,7 @@ class CommonAttentionMetadata:
             seq_lens_cpu_upper_bound=maybe_slice_reqs(self.seq_lens_cpu_upper_bound),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
             req_idx=maybe_slice_reqs(self.req_idx),
+            is_last_prefill=maybe_slice_reqs(self.is_last_prefill),
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
         )
 

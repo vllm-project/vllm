@@ -85,7 +85,14 @@ The output embeddings must be one of the following formats:
 """
 
 MambaStateShapes: TypeAlias = (
-    tuple[tuple[int, int]]
+    tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int],
+    ]
+    | tuple[tuple[int, int]]
     | tuple[tuple[int, int, int]]
     | tuple[tuple[int, int], tuple[int, int]]
     | tuple[tuple[int, int], tuple[int, int, int]]

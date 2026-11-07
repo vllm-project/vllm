@@ -128,7 +128,11 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.gdn_attn import (
+    GDNAttentionMetadata,
+    GDNAttentionMetadataBuilder,
+    gdn_replayssm_prefill_rows,
+)
 from vllm.v1.attention.backends.linear_attn import (
     BailingLinearAttentionMetadataBuilder,
 )
@@ -2427,9 +2431,13 @@ class GPUModelRunner(
         # Used by mamba backends to distinguish actual decodes from
         # short extends.
         is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
+        is_last_prefill = is_prefilling & (
+            seq_lens_cpu_upper_bound >= num_prompt_tokens_cpu
+        )
         # Zero out padded rows so stale data from condense() doesn't
         # misclassify padding as prefill in CUDA graph mode.
         is_prefilling[num_reqs:] = False
+        is_last_prefill[num_reqs:] = False
 
         # Compute mm_prefix bidirectional ranges before building
         # attention metadata so builders handle them during build().
@@ -2469,6 +2477,7 @@ class GPUModelRunner(
             slot_mapping=slot_mapping_gid_0,
             causal=True,
             is_prefilling=is_prefilling,
+            is_last_prefill=is_last_prefill,
             positions=self.positions[:num_tokens_padded],
             mm_req_doc_ranges=req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
@@ -3712,6 +3721,22 @@ class GPUModelRunner(
         )
 
     @staticmethod
+    def _gdn_has_prefill(
+        computed: np.ndarray,
+        prompt: np.ndarray,
+        query: np.ndarray,
+        draft: np.ndarray | None,
+    ) -> bool:
+        prefill_rows = gdn_replayssm_prefill_rows(
+            is_prefilling=computed < prompt,
+            is_last_prefill=computed + query >= prompt,
+            has_prior_state=computed > 0,
+            query_lens=query,
+            num_draft_tokens=draft,
+        )
+        return bool(prefill_rows.any())
+
+    @staticmethod
     def _is_uniform_decode(
         max_num_scheduled_tokens: int,
         uniform_decode_query_len: int,
@@ -3806,6 +3831,18 @@ class GPUModelRunner(
             num_reqs=num_reqs,
             force_uniform_decode=force_uniform_decode,
         )
+        gdn_prefill = (
+            force_uniform_decode is None
+            and self.vllm_config.is_gdn_replayssm_enabled()
+            and self._gdn_has_prefill(
+                self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                self.input_batch.num_prompt_tokens[:num_reqs],
+                num_scheduled_tokens_np[:num_reqs],
+                self.num_decode_draft_tokens.np[:num_reqs]
+                if self.speculative_config is not None
+                else None,
+            )
+        )
         # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
         # is present). Also, chunked-prefill is disabled, so batch are uniform.
         has_encoder_output = (
@@ -3827,7 +3864,9 @@ class GPUModelRunner(
                 uniform_decode=uniform_decode,
                 num_active_loras=num_active_loras,
                 valid_modes={CUDAGraphMode.NONE} if force_eager else valid_modes,
-                invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
+                invalid_modes={CUDAGraphMode.FULL}
+                if disable_full or gdn_prefill
+                else None,
             )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
@@ -4198,6 +4237,7 @@ class GPUModelRunner(
             if mamba_bufs is not None and mamba_bufs.postprocess_align is not None:
                 mamba_ctx = mamba_bufs.postprocess_align
                 num_mamba_decodes = None
+                gdn_prefilling = None
                 if self._use_flashinfer_replayssm:
                     assert isinstance(attn_metadata, dict)
                     mamba_group = self.kv_cache_config.kv_cache_groups[
@@ -4205,8 +4245,20 @@ class GPUModelRunner(
                     ]
                     # Cache groups share the request split, but own distinct slots.
                     mamba_metadata = attn_metadata[mamba_group.layer_names[0]]
-                    assert isinstance(mamba_metadata, Mamba2AttentionMetadata)
-                    num_mamba_decodes = mamba_metadata.num_decodes
+                    replay_rows = (
+                        mamba_metadata.spec_sequence_masks_cpu
+                        if isinstance(mamba_metadata, GDNAttentionMetadata)
+                        else None
+                    )
+                    if replay_rows is not None:
+                        # GDN replay rows are the spec rows; all others prefilled.
+                        gdn_prefilling = ~replay_rows[:num_reqs]
+                    else:
+                        assert isinstance(
+                            mamba_metadata,
+                            (GDNAttentionMetadata, Mamba2AttentionMetadata),
+                        )
+                        num_mamba_decodes = mamba_metadata.num_decodes
                 mamba_utils.stage_postprocess_inputs_to_gpu(
                     mamba_ctx,
                     scheduler_output,
@@ -4214,6 +4266,7 @@ class GPUModelRunner(
                     num_reqs,
                     self.requests,
                     num_decodes=num_mamba_decodes,
+                    is_prefilling=gdn_prefilling,
                 )
 
             (

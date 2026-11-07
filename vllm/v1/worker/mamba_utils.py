@@ -34,6 +34,7 @@ from vllm.v1.worker.replayssm_utils import (
     ReplaySSMModelContext,
     _reinterpret_u64_as_i64,
     mamba_state_copy_boundary,
+    may_cross_mamba_block_boundary,
 )
 
 logger = init_logger(__name__)
@@ -798,13 +799,17 @@ def _get_mamba_gpu_state_copy_funcs(
     state_copy_funcs = copy_funcs[spec.mamba_type]
     if isinstance(layer, MambaBase) and layer.use_flashinfer_replayssm:
         if (
-            spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
+            spec.mamba_type
+            not in (
+                MambaAttentionBackendEnum.MAMBA2,
+                MambaAttentionBackendEnum.GDN_ATTN,
+            )
             or len(spec.shapes) != 5
             or len(spec.dtypes) != 5
             or state_copy_funcs != (get_conv_copy_spec, get_temporal_copy_spec)
         ):
             raise ValueError(
-                "FlashInfer ReplaySSM requires two canonical Mamba2 "
+                "FlashInfer ReplaySSM requires two canonical Mamba2 or GDN "
                 "states and three ring states"
             )
         state_copy_funcs += (get_temporal_copy_spec,) * 3
@@ -1064,7 +1069,7 @@ class MambaSpecDecodeGPUContext:
                 if is_flashinfer_replayssm:
                     if len(kv_caches) != len(state_copy_funcs):
                         raise ValueError(
-                            "FlashInfer ReplaySSM requires five bound Mamba2 states"
+                            "FlashInfer ReplaySSM requires five bound recurrent states"
                         )
                     mixers.append(attention)
                 if len(kv_caches) < len(state_copy_funcs):
@@ -1755,6 +1760,18 @@ def postprocess_mamba_gpu(
             is_prefilling=ctx.is_prefilling_buf.gpu,
             live_cols=live_cols,
             num_reqs=num_reqs,
+            # GDN materializes one layer per launch, so skip steps where no
+            # request can reach a block boundary. The kernel places boundaries
+            # from these same pre-step counts.
+            may_materialize=(
+                not ctx.replayssm.materialize_prefixes
+                or ctx.replayssm.mamba_type != MambaAttentionBackendEnum.GDN_ATTN
+                or may_cross_mamba_block_boundary(
+                    ctx.num_computed_tokens_buf.np[:num_reqs],
+                    ctx.num_scheduled_tokens_buf.np[:num_reqs],
+                    ctx.replayssm.mamba_block_size,
+                )
+            ),
         )
 
     if num_accepted_tokens_cpu_tensor is not None and ctx.replayssm is None:
@@ -1773,12 +1790,16 @@ def stage_postprocess_inputs_to_gpu(
     requests: dict[str, CachedRequestState],
     *,
     num_decodes: int | None = None,
+    is_prefilling: torch.Tensor | None = None,
 ) -> None:
     """Stage the per-request decisions consumed after token acceptance.
 
     Generic Mamba uses scheduled, computed, and draft counts. ReplaySSM also
-    uses the final Mamba attention split to reset trackers after prefill.
+    uses the final Mamba attention split to reset trackers after prefill:
+    either ``num_decodes`` leading decode rows or an explicit ``is_prefilling``
+    mask (GDN, whose replay rows need not lead the batch).
     """
+    assert num_decodes is None or is_prefilling is None
     assert ctx.num_scheduled_tokens_buf is not None
     assert ctx.num_computed_tokens_buf is not None
     assert ctx.num_draft_tokens_buf is not None
@@ -1801,7 +1822,10 @@ def stage_postprocess_inputs_to_gpu(
     ctx.num_scheduled_tokens_buf.copy_to_gpu(num_reqs)
     ctx.num_computed_tokens_buf.copy_to_gpu(num_reqs)
     ctx.num_draft_tokens_buf.copy_to_gpu(num_reqs)
-    if num_decodes is not None:
+    if is_prefilling is not None:
+        ctx.is_prefilling_buf.np[:num_reqs] = is_prefilling.numpy()
+        ctx.is_prefilling_buf.copy_to_gpu(num_reqs)
+    elif num_decodes is not None:
         # Full decode graphs can include padded rows after the real requests.
         num_decodes = min(num_decodes, num_reqs)
         ctx.is_prefilling_buf.np[:num_decodes] = False

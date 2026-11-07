@@ -1424,6 +1424,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if num_draft_tokens_np is not None:
                 num_new_tokens = num_new_tokens - num_draft_tokens_np
             one_token_ext = (num_new_tokens == 1) & (num_computed_prefill_tokens_np > 0)
+            if self.vllm_config.is_gdn_replayssm_enabled():
+                # Intermediate GDN chunks must update the canonical state before
+                # a later multi-token prefill reads it.
+                one_token_ext &= (
+                    num_computed_prefill_tokens_np + num_new_tokens >= prefill_len_np
+                )
             prefill_runs_as_decode_np = is_prefilling_np & one_token_ext
             decode_graph_eligible = bool(
                 (prefill_runs_as_decode_np | ~is_prefilling_np).all()

@@ -57,6 +57,16 @@ class TestDefaultExtraVars:
         result = get_env_vars_to_copy()
         assert "PYTHONHASHSEED" in result
 
+    def test_gdn_materializer_state_reaches_engine_actor(self, monkeypatch):
+        monkeypatch.setenv("GDN_UCACHE_STATE_DTYPE", "fp16")
+        monkeypatch.delenv("VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", raising=False)
+        monkeypatch.delenv("VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY", raising=False)
+        names = get_env_vars_to_copy(
+            destination="EngineCoreActor", exclude_vars=WORKER_SPECIFIC_ENV_VARS
+        )
+        actor_env = {name: os.environ[name] for name in names if name in os.environ}
+        assert actor_env.get("GDN_UCACHE_STATE_DTYPE") == "fp16"
+
 
 # ---------------------------------------------------------------------------
 # User-supplied extensions

@@ -44,6 +44,7 @@ from vllm.config import (
     WatermarkConfig,
     update_config,
 )
+from vllm.config.cache import MambaCacheMode, MambaDType
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
@@ -156,6 +157,73 @@ def test_flashinfer_replayssm_validates_config(
             VllmConfig.validate_mamba_cached_kernel(config)
     else:
         VllmConfig.validate_mamba_cached_kernel(config)
+
+
+def _gdn_replayssm_config(
+    model_path: Path,
+    mode: MambaCacheMode,
+    ssm_dtype: MambaDType = "float16",
+) -> VllmConfig:
+    from transformers import Qwen3_5TextConfig
+
+    Qwen3_5TextConfig(
+        architectures=["Qwen3_5ForCausalLM"],
+        hidden_size=256,
+        intermediate_size=512,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=128,
+        linear_num_key_heads=1,
+        linear_num_value_heads=2,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
+        layer_types=["linear_attention", "full_attention"],
+        vocab_size=128,
+        max_position_embeddings=128,
+    ).save_pretrained(model_path)
+    return VllmConfig(
+        model_config=ModelConfig(
+            model=str(model_path),
+            tokenizer_mode="skip",
+            dtype="bfloat16",
+            max_model_len=128,
+            enforce_eager=True,
+        ),
+        cache_config=CacheConfig(
+            use_replayssm=True,
+            replayssm_buffer_len=16,
+            mamba_cache_mode=mode,
+            enable_prefix_caching=mode == "align",
+            mamba_cache_dtype="auto",
+            mamba_ssm_cache_dtype=ssm_dtype,
+        ),
+        scheduler_config=SchedulerConfig(max_model_len=128, is_encoder_decoder=False),
+        parallel_config=ParallelConfig(distributed_executor_backend="uni"),
+        device_config=DeviceConfig(device="cpu"),
+    )
+
+
+def test_gdn_replayssm_requires_fp16_state(tmp_path):
+    with pytest.raises(ValueError, match="--mamba-ssm-cache-dtype float16"):
+        _gdn_replayssm_config(tmp_path, "none", "bfloat16")
+
+
+def test_gdn_replayssm_align_configures_flashinfer_materializer(tmp_path, monkeypatch):
+    """--use-replayssm selects FlashInfer's FP16 materializer before import."""
+    # Register the variable so monkeypatch removes what the validator sets.
+    monkeypatch.setenv("GDN_UCACHE_STATE_DTYPE", "")
+    monkeypatch.delenv("GDN_UCACHE_STATE_DTYPE")
+    config = _gdn_replayssm_config(tmp_path, "none")
+    assert config.is_gdn_replayssm_enabled()
+    assert config.use_flashinfer_replayssm
+    assert "GDN_UCACHE_STATE_DTYPE" not in os.environ
+    config = _gdn_replayssm_config(tmp_path, "align")
+    assert config.is_gdn_replayssm_enabled()
+    assert os.environ["GDN_UCACHE_STATE_DTYPE"] == "fp16"
+    monkeypatch.setenv("GDN_UCACHE_STATE_DTYPE", "bf16")
+    with pytest.raises(ValueError, match="GDN_UCACHE_STATE_DTYPE='bf16'"):
+        _gdn_replayssm_config(tmp_path, "align")
 
 
 def _write_json(path: Path, value: object) -> None:
