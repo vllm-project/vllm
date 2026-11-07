@@ -156,6 +156,38 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     assert rel_diff < 0.001
 
 
+@pytest.mark.parametrize(
+    "K,N",
+    [
+        (256, 34816),  # M * N passes 2**31: output offsets
+        (17408, 256),  # M * K passes 2**31: activation offsets
+    ],
+)
+@torch.inference_mode()
+def test_w8a8_block_fp8_matmul_rows_past_int32_offsets(K, N):
+    """Rows whose element offset in A or C does not fit in int32."""
+    M = 2**31 // max(K, N) + 128
+    block_size = [128, 128]
+    fp8_dtype = current_platform.fp8_dtype()
+
+    torch.manual_seed(0)
+    A_fp8 = torch.randn(M, K, dtype=torch.bfloat16).to(fp8_dtype)
+    B_fp8 = torch.randn(N, K, dtype=torch.bfloat16).to(fp8_dtype)
+    As = torch.rand(M, K // 128, dtype=torch.float32) * 1e-2
+    Bs = torch.rand(N // 128, K // 128, dtype=torch.float32) * 1e-2
+
+    out = w8a8_triton_block_scaled_mm(A_fp8, B_fp8, As, Bs, block_size, torch.bfloat16)
+    # The reference sees only the last rows, so its own offsets stay small.
+    ref = native_w8a8_block_matmul(
+        A_fp8[-64:], B_fp8, As[-64:], Bs, block_size, torch.bfloat16
+    )
+
+    rel_diff = torch.mean(
+        torch.abs(out[-64:].to(torch.float32) - ref.to(torch.float32))
+    ) / torch.mean(torch.abs(ref.to(torch.float32)))
+    assert rel_diff < 0.001
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="CUTLASS only supported on CUDA platform."
 )
