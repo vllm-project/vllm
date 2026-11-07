@@ -328,6 +328,7 @@ if TYPE_CHECKING:
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_RELOAD_MODE: Literal["layerwise", "direct"] = "layerwise"
     VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS: int = 0
+    VLLM_KV_OFFLOAD_MAX_LOAD_SUBMIT_DESCRIPTORS: int = 8192
     VLLM_WSL2_ENABLE_PIN_MEMORY: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
@@ -2293,6 +2294,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # rocm 7.14/7.15 when batch copy is optimized; CUDA uncapped). Set >0 to override.
     "VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS": lambda: int(
         os.getenv("VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS", "0")
+    ),
+    # Max copy descriptors an async CPU-KV-offload load submits per engine step;
+    # the rest go out on later steps. One batch-memcpy call with more
+    # descriptors than the GPU command queue holds blocks the worker thread
+    # until the copy engine drains it, stalling the next model step. 0 = submit
+    # each load in one call.
+    "VLLM_KV_OFFLOAD_MAX_LOAD_SUBMIT_DESCRIPTORS": lambda: int(
+        os.getenv("VLLM_KV_OFFLOAD_MAX_LOAD_SUBMIT_DESCRIPTORS", "8192")
     ),
     # On WSL2 with a compatible kernel (>= 4.19.121), pinned memory is
     # supported but disabled by default due to a small performance regression.
