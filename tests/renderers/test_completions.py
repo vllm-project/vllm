@@ -136,7 +136,7 @@ class TestValidatePrompt:
     def test_empty_input(self):
         renderer = _build_renderer(MockModelConfig())
 
-        with pytest.raises(ValueError, match="at least one prompt"):
+        with pytest.raises(VLLMValidationError, match="at least one prompt"):
             renderer.render_prompts(_preprocess_prompt(renderer.model_config, []))
 
     def test_invalid_type(self):

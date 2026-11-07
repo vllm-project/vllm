@@ -14,6 +14,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
     AutoModelForTextToWaveform,
+    AutoProcessor,
 )
 
 from vllm.platforms import current_platform
@@ -290,6 +291,9 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
+        # The checkpoint's stale `auto_map` points at remote code that no longer exists
+        vllm_runner_kwargs={"trust_remote_code": False},
+        hf_processor=AutoProcessor.from_pretrained,
         single_image_prompts=IMAGE_ASSETS.prompts(
             {
                 "stop_sign": "<vlm_image>Please describe the image shortly.",
@@ -300,15 +304,7 @@ VLM_TEST_SETTINGS = {
         stop_str=["<|im_end|>"],
         image_size_factors=[(0.10, 0.15)],
         max_tokens=64,
-        marks=[
-            pytest.mark.skip(
-                reason="Aria needs to update for latest transformers, "
-                "must have a vision_processor.py."
-                "An issue has been filed:"
-                "https://huggingface.co/rhymes-ai/Aria/discussions/23"
-            ),
-            large_gpu_mark(min_gb=64),
-        ],
+        marks=[large_gpu_mark(min_gb=64)],
     ),
     "blip2": VLMTestInfo(
         models=["Salesforce/blip2-opt-2.7b"],
@@ -345,7 +341,7 @@ VLM_TEST_SETTINGS = {
         ],
     ),
     "deepseek_vl_v2": VLMTestInfo(
-        models=["Isotr0py/deepseek-vl2-tiny"],  # model repo using dynamic module
+        models=["vllm-project/deepseek-vl2-tiny"],  # model repo using dynamic module
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|User|>: {img_prompt}\n\n<|Assistant|>: ",  # noqa: E501
         max_model_len=4096,
@@ -697,7 +693,7 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
         max_model_len=4096,
         max_num_seqs=2,
-        get_stop_token_ids=lambda tok: [tok.eos_id, tok.eot_id],
+        get_stop_token_ids=lambda tok: [getattr(tok, "eos_id"), getattr(tok, "eot_id")],  # noqa: B009
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmv_25_patch_hf_runner,
     ),
@@ -927,7 +923,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
         marks=multi_gpu_marks(num_gpus=2),
-        **COMMON_BROADCAST_SETTINGS,  # type: ignore
+        **COMMON_BROADCAST_SETTINGS,
     ),
     "llava_next-broadcast": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],
@@ -936,7 +932,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
         marks=multi_gpu_marks(num_gpus=2),
-        **COMMON_BROADCAST_SETTINGS,  # type: ignore
+        **COMMON_BROADCAST_SETTINGS,
     ),
     ### Custom input edge-cases for specific models
     "intern_vl-diff-patches": VLMTestInfo(

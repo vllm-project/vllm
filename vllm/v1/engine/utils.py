@@ -54,16 +54,21 @@ def get_engine_process_shutdown_timeout(
     drain. A value of zero therefore tells EngineCore to abort requests as soon
     as it receives SIGTERM. The parent process manager still needs a separate
     window in which the EngineCore can release device resources before it is
-    force-killed. ROCm teardown can take longer than the generic best-effort
-    window, and force-killing during teardown can leave VRAM resident.
+    force-killed. An explicitly set ``VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS``
+    sets that window on every platform. Otherwise ROCm gets a fixed window:
+    its teardown can take longer than the generic best-effort window, and
+    force-killing during teardown can leave VRAM resident.
 
     ``process_timeout`` may be a remaining budget computed by an outer process
     manager. Keep it unchanged unless both values are zero: a zero remaining
     budget for a positive request timeout must not receive a fresh grace period
     because EngineCore relies on that deadline to enforce request draining.
     """
-    if request_timeout == 0 and process_timeout == 0 and current_platform.is_rocm():
-        return ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S
+    if request_timeout == 0 and process_timeout == 0:
+        if envs.is_set("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS"):
+            return float(envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS)
+        if current_platform.is_rocm():
+            return ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S
     return process_timeout
 
 
@@ -342,7 +347,7 @@ class CoreEngineProcManager:
             )
             if process_timeout != timeout:
                 logger.info(
-                    "[shutdown] EngineCore process manager: using %ss ROCm "
+                    "[shutdown] EngineCore process manager: using %ss "
                     "cleanup grace after immediate request abort",
                     process_timeout,
                 )
@@ -1416,6 +1421,10 @@ def wait_for_engine_startup(
         and not parallel_config.data_parallel_external_lb
     )
 
+    # (engine index, parallel config hash) of the first READY engine, which
+    # the other engines' hashes are compared with.
+    reference_config_hash: tuple[int, str | None] | None = None
+
     # 1. Engine processes
     if isinstance(launch.engine_manager, CoreEngineProcManager):
         for sentinel in launch.engine_manager.sentinels():
@@ -1558,10 +1567,13 @@ def wait_for_engine_startup(
                 parallel_config.elastic_ep_max_dp_size = elastic_ep_max_dp_size
 
             # Validate config hash consistency across DP workers for MoE models.
+            # Compare possibly-updated engine config hashes with each other.
             if coordinated_dp:
                 worker_config_hash = msg.get("parallel_config_hash")
-                expected_hash = parallel_config.compute_hash()
-                if worker_config_hash != expected_hash:
+                if reference_config_hash is None:
+                    reference_config_hash = (eng_index, worker_config_hash)
+                elif worker_config_hash != reference_config_hash[1]:
+                    reference_index, reference_hash = reference_config_hash
                     raise RuntimeError(
                         f"Configuration mismatch detected for engine "
                         f"{eng_index}. All DP workers must have identical "
@@ -1569,7 +1581,8 @@ def wait_for_engine_startup(
                         f"communication (e.g., enable_eplb, "
                         f"eplb_config.log_balancedness). "
                         f"Worker hash: {worker_config_hash}, "
-                        f"Expected hash: {expected_hash}. "
+                        f"Expected hash: {reference_hash} (engine "
+                        f"{reference_index}). "
                         f"Please ensure all workers are started with the same "
                         f"command-line arguments."
                     )

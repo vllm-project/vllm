@@ -205,6 +205,22 @@ def test_flashinfer_sampler_fallback_when_jit_cannot_target_gpu(monkeypatch):
         flashinfer_sampler_supported()
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_flashinfer_sampler_fallback_when_flashinfer_disabled(monkeypatch):
+    """Without flashinfer-cubin, nvcc or ninja, FlashInfer cannot build its
+    sampling kernels, so the sampler must fall back to native sampling."""
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    monkeypatch.setattr(topk_topp_sampler, "has_flashinfer", lambda: False)
+
+    monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)
+    assert topk_topp_sampler.flashinfer_sampler_supported() is False
+
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "1")
+    with pytest.raises(RuntimeError, match="FlashInfer kernels are disabled"):
+        topk_topp_sampler.flashinfer_sampler_supported()
+
+
 # =============================================================================
 # Triton kernel tests
 # =============================================================================
@@ -420,7 +436,7 @@ class TestTritonTopkTopp:
         """
         from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
-        if not current_platform.is_cuda():
+        if not current_platform.is_cuda_alike():
             pytest.skip("int32 row-offset overflow is a CUDA kernel issue")
         vocab_size = 131072
         batch_size = 2**31 // vocab_size + 64  # batch_size * vocab_size > 2**31

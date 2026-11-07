@@ -151,6 +151,99 @@ def test_gpt_oss_attention_quantization(
     )
 
 
+def _random_mxfp4_moe_layer(
+    num_experts: int, hidden_size: int, intermediate_size: int, device: torch.device
+) -> torch.nn.Module:
+    layer = torch.nn.Module()
+    layer.w13_weight = torch.randint(
+        0,
+        256,
+        (num_experts, 2 * intermediate_size, hidden_size // 2),
+        dtype=torch.uint8,
+        device=device,
+    )
+    layer.w2_weight = torch.randint(
+        0,
+        256,
+        (num_experts, hidden_size, intermediate_size // 2),
+        dtype=torch.uint8,
+        device=device,
+    )
+
+    # Keep the exponents near 127 (2**0) so the dequantized weights stay in a sane
+    # range and 255 (e8m0 NaN) is never hit.
+    layer.w13_weight_scale = torch.randint(
+        124,
+        131,
+        (num_experts, 2 * intermediate_size, hidden_size // 32),
+        dtype=torch.uint8,
+        device=device,
+    )
+    layer.w2_weight_scale = torch.randint(
+        124,
+        131,
+        (num_experts, hidden_size, intermediate_size // 32),
+        dtype=torch.uint8,
+        device=device,
+    )
+    layer.w13_bias = torch.randn(
+        (num_experts, 2 * intermediate_size), dtype=torch.float32, device=device
+    )
+    layer.w2_bias = torch.randn(
+        (num_experts, hidden_size), dtype=torch.float32, device=device
+    )
+    # Read off `layer`, not off the arguments, by the AITER_MXFP4_FP8 branch.
+    layer.w13_input_scale = torch.full(
+        (num_experts,), 0.1, dtype=torch.float32, device=device
+    )
+    layer.w2_input_scale = torch.full(
+        (num_experts,), 0.1, dtype=torch.float32, device=device
+    )
+    return layer
+
+
+def _mxfp4_moe_kernel_weights(
+    weight_backend: Mxfp4MoeBackend,
+    is_w4a8: bool,
+    layer: torch.nn.Module,
+    experts: slice | None = None,
+):
+    # The converter consumes the parameters it is given, so convert a copy.
+    experts = experts or slice(None)
+    sub = torch.nn.Module()
+    for name, value in vars(layer).items():
+        if isinstance(value, torch.Tensor):
+            setattr(sub, name, value[experts])
+    (
+        w13_weight,
+        w2_weight,
+        w13_scale,
+        w2_scale,
+        w13_bias,
+        w2_bias,
+    ) = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+        weight_backend,
+        sub,
+        sub.w13_weight,
+        sub.w2_weight,
+        sub.w13_weight_scale,
+        sub.w2_weight_scale,
+        w13_bias=sub.w13_bias,
+        w2_bias=sub.w2_bias,
+    )
+
+    quant_config_factory = (
+        mxfp4_w4a8_moe_quant_config if is_w4a8 else mxfp4_w4a16_moe_quant_config
+    )
+    quant_config = quant_config_factory(
+        w1_scale=w13_scale,
+        w2_scale=w2_scale,
+        w1_bias=w13_bias,
+        w2_bias=w2_bias,
+    )
+    return w13_weight, w2_weight, quant_config
+
+
 @pytest.mark.skipif(
     not (on_gfx950() or on_gfx1250()),
     reason="AITER MXFP4 MoE requires gfx950 or gfx1250",
@@ -201,78 +294,9 @@ def test_aiter_mxfp4_moe_ignores_padded_rows(
         Mxfp4MoeBackend.AITER_MXFP4_FP8 if is_w4a8 else Mxfp4MoeBackend.TRITON
     )
 
-    layer = torch.nn.Module()
-    layer.w13_weight = torch.randint(
-        0,
-        256,
-        (num_experts, 2 * intermediate_size, hidden_size // 2),
-        dtype=torch.uint8,
-        device=device,
-    )
-    layer.w2_weight = torch.randint(
-        0,
-        256,
-        (num_experts, hidden_size, intermediate_size // 2),
-        dtype=torch.uint8,
-        device=device,
-    )
-
-    # Keep the exponents near 127 (2**0) so the dequantized weights stay in a sane
-    # range and 255 (e8m0 NaN) is never hit.
-    layer.w13_weight_scale = torch.randint(
-        124,
-        131,
-        (num_experts, 2 * intermediate_size, hidden_size // 32),
-        dtype=torch.uint8,
-        device=device,
-    )
-    layer.w2_weight_scale = torch.randint(
-        124,
-        131,
-        (num_experts, hidden_size, intermediate_size // 32),
-        dtype=torch.uint8,
-        device=device,
-    )
-    layer.w13_bias = torch.randn(
-        (num_experts, 2 * intermediate_size), dtype=torch.float32, device=device
-    )
-    layer.w2_bias = torch.randn(
-        (num_experts, hidden_size), dtype=torch.float32, device=device
-    )
-    # Read off `layer`, not off the arguments, by the AITER_MXFP4_FP8 branch.
-    layer.w13_input_scale = torch.full(
-        (num_experts,), 0.1, dtype=torch.float32, device=device
-    )
-    layer.w2_input_scale = torch.full(
-        (num_experts,), 0.1, dtype=torch.float32, device=device
-    )
-
-    (
-        w13_weight,
-        w2_weight,
-        w13_scale,
-        w2_scale,
-        w13_bias,
-        w2_bias,
-    ) = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
-        weight_backend,
-        layer,
-        layer.w13_weight,
-        layer.w2_weight,
-        layer.w13_weight_scale,
-        layer.w2_weight_scale,
-        w13_bias=layer.w13_bias,
-        w2_bias=layer.w2_bias,
-    )
-
-    quant_config_factory = (
-        mxfp4_w4a8_moe_quant_config if is_w4a8 else mxfp4_w4a16_moe_quant_config
-    )
-    quant_config = quant_config_factory(
-        w1_scale=w13_scale,
-        w2_scale=w2_scale,
-        w1_bias=w13_bias,
-        w2_bias=w2_bias,
+    layer = _random_mxfp4_moe_layer(num_experts, hidden_size, intermediate_size, device)
+    w13_weight, w2_weight, quant_config = _mxfp4_moe_kernel_weights(
+        weight_backend, is_w4a8, layer
     )
 
     hidden_states = torch.randn(
@@ -339,3 +363,72 @@ def test_aiter_mxfp4_moe_ignores_padded_rows(
             )
 
     assert torch.isfinite(output[:TOKENS_UNPADDED]).all()
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="AITER is ROCm-only")
+@pytest.mark.skipif(not is_aiter_found_and_supported(), reason="aiter is not installed")
+@pytest.mark.skipif(torch.accelerator.device_count() == 0, reason="no gpu available")
+@pytest.mark.parametrize("ep_size", [2, 4])
+def test_aiter_w4a16_moe_expert_parallel_matches_full(
+    ep_size: int,
+    monkeypatch: pytest.MonkeyPatch,
+    dist_init,
+) -> None:
+    """Summing per-rank expert-parallel outputs must reproduce the full MoE.
+
+    Each rank holds a contiguous slice of experts and an `expert_map`; gates
+    routed to other ranks must contribute nothing (no bias, no stale rows).
+    """
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    rocm_aiter_ops.refresh_env_variables()
+
+    set_random_seed(0)
+    device = torch.device("cuda")
+    num_tokens, hidden_size, intermediate_size = 64, 2048, 512
+    num_experts, topk = 32, 4
+    local_experts = num_experts // ep_size
+
+    layer = _random_mxfp4_moe_layer(num_experts, hidden_size, intermediate_size, device)
+    hidden_states = torch.randn(
+        (num_tokens, hidden_size), dtype=torch.bfloat16, device=device
+    )
+    gating_output = torch.randn(
+        (num_tokens, num_experts), dtype=torch.bfloat16, device=device
+    )
+
+    def forward(experts: slice | None, expert_map: torch.Tensor | None) -> torch.Tensor:
+        w13, w2, quant_config = _mxfp4_moe_kernel_weights(
+            Mxfp4MoeBackend.TRITON, False, layer, experts
+        )
+        return aiter_triton_kernel_w4a16_moe_forward(
+            hidden_states=hidden_states,
+            w1=w13,
+            w2=w2,
+            gating_output=gating_output,
+            topk=topk,
+            renormalize=True,
+            quant_config=quant_config,
+            global_num_experts=num_experts,
+            expert_map=expert_map,
+            unpadded_N_w1=2 * intermediate_size,
+            unpadded_K_w1=hidden_size,
+            unpadded_N_w2=hidden_size,
+            unpadded_K_w2=intermediate_size,
+        )
+
+    is_padding = torch.zeros(num_tokens, dtype=torch.bool, device=device)
+    with set_forward_context(None, get_current_vllm_config(), is_padding=is_padding):
+        full = forward(None, None).float()
+        summed = torch.zeros_like(full)
+        for rank in range(ep_size):
+            start = rank * local_experts
+            expert_map = torch.full(
+                (num_experts,), -1, dtype=torch.int32, device=device
+            )
+            expert_map[start : start + local_experts] = torch.arange(
+                local_experts, dtype=torch.int32, device=device
+            )
+            summed += forward(slice(start, start + local_experts), expert_map).float()
+
+    # Per-rank partials are rounded to bf16 before the sum.
+    torch.testing.assert_close(summed, full, atol=2e-2 * full.abs().max(), rtol=0)
