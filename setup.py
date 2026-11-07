@@ -1628,6 +1628,7 @@ package_data = {
         # the wheel and forces fallback to default launch configs.
         "model_executor/layers/mamba/ops/configs/selective_state_update/*.json",
         "kernels/helion/configs/*/*.json",
+        "distributed/device_communicators/hip_custom_communicator.json",
         "model_executor/layers/quantization/utils/configs/*.json",
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
