@@ -37,6 +37,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_fp8_blockscale_gemm,
 )
 from vllm.utils.import_utils import has_deep_gemm
+from vllm.utils.torch_utils import set_random_seed
 
 capability = current_platform.get_device_capability()
 if capability is None or capability < (9, 0):
@@ -386,7 +387,7 @@ def test_w8a8_block_fp8_flashinfer_matmul(M, N, K, block_size, out_dtype, seed):
 def test_w8a8_block_fp8_aiter_matmul(
     M, N, K, block_size, out_dtype, seed, gemm, max_rel_diff
 ):
-    torch.manual_seed(seed)
+    set_random_seed(seed)
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
 
     A_bf16 = (torch.rand(M, K, dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
