@@ -1040,7 +1040,6 @@ class CompilationConfig:
         return value
 
     @field_validator(
-        "level",
         "mode",
         "cudagraph_mode",
         "max_cudagraph_capture_size",
@@ -1246,7 +1245,7 @@ class CompilationConfig:
         if self.mode is None:
             raise ValueError(
                 "No compilation mode is set. This method should only be "
-                "called via vllm config where the level is set if none is "
+                "called via vllm config where the mode is set if none is "
                 "provided."
             )
         if self.mode == CompilationMode.NONE:
