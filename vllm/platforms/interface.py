@@ -1252,6 +1252,17 @@ class Platform:
         return False
 
     @classmethod
+    def prepare_ubatch_streams(
+        cls,
+        device: torch.device,
+        streams: tuple[torch.cuda.Stream, ...],
+        num_threads: int,
+    ) -> None:
+        """Set up per-stream library state before dual batch overlap runs its
+        microbatches on ``streams`` from ``num_threads`` new threads."""
+        return
+
+    @classmethod
     def supports_mx(cls) -> bool:
         """Returns whether the current platform supports MX types."""
         return False

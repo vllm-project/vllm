@@ -315,6 +315,22 @@ def dispatch_cg_and_sync_dp(
         )
 
     if dp_size == 1:
+        # Pure-TP DBO: the split is a local decision; a split step runs eager.
+        if (
+            allow_ubatching
+            and parallel_config is not None
+            and parallel_config.dbo_tp_only
+            and check_ubatch_thresholds(
+                parallel_config, num_tokens, uniform_decode=uniform_decode
+            )
+        ):
+            batch_desc = BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=num_tokens,
+                num_reqs=num_reqs,
+                num_active_loras=num_active_loras,
+                num_ubatches=get_num_ubatches(parallel_config),
+            )
         return batch_desc, None
 
     if dp_sync_state is not None:

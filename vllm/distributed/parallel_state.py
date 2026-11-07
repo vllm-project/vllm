@@ -451,6 +451,8 @@ class GroupCoordinator:
     # device communicator (if use_device_communicator=True)
     device_communicator: DeviceCommunicatorBase | None
     mq_broadcaster: Any | None  # shared memory broadcaster
+    # microbatch all-reduces run on the DBO comm stream; set by enable_dbo_tp_overlap
+    dbo_overlap: bool = False
 
     def __init__(
         self,
@@ -753,7 +755,19 @@ class GroupCoordinator:
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
-        return self.device_communicator.all_reduce(input_)
+        if not self.dbo_overlap:
+            return self.device_communicator.all_reduce(input_)
+        # DBO hand-off, on the comm stream. Under the vllm.all_reduce custom op,
+        # so compiled graphs reach it too; no-ops outside a microbatch.
+        from vllm.v1.worker.ubatching import (
+            dbo_switch_to_compute_sync,
+            dbo_yield_and_switch_from_compute_to_comm,
+        )
+
+        dbo_yield_and_switch_from_compute_to_comm()
+        out = self.device_communicator.all_reduce(input_)
+        dbo_switch_to_compute_sync()
+        return out
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size

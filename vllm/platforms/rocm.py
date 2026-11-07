@@ -4,6 +4,7 @@
 import importlib.metadata
 import os
 import platform
+import threading
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING
@@ -1337,6 +1338,35 @@ class RocmPlatform(Platform):
             torch.cuda.is_current_stream_capturing()
             or not isinstance(attn_metadata, dict)
         )
+
+    @classmethod
+    def prepare_ubatch_streams(
+        cls,
+        device: torch.device,
+        streams: tuple[torch.cuda.Stream, ...],
+        num_threads: int,
+    ) -> None:
+        """Fill torch's hipBLASLt handle pool for the microbatch threads.
+
+        hipblasLtCreate clears a new handle's Stream-K flags with a null-stream
+        hipMemset that can land after a GEMM on the comm stream has started, and
+        the GEMM then never finishes. Microbatch threads are new every step and
+        take their per-stream handles from the pool."""
+        # TODO: remove once hipblasLtCreate no longer issues a null-stream memset.
+        a = torch.zeros((64, 64), dtype=torch.bfloat16, device=device)
+
+        def touch() -> None:
+            torch.accelerator.set_device_index(device.index)
+            for stream in streams:
+                with torch.cuda.stream(stream):
+                    torch.mm(a, a, out_dtype=torch.float32)
+
+        threads = [threading.Thread(target=touch) for _ in range(num_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        torch.accelerator.synchronize(device)
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:

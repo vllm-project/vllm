@@ -5,6 +5,7 @@ import threading
 import torch
 
 from vllm import forward_context
+from vllm.distributed import parallel_state
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import current_stream
@@ -252,3 +253,24 @@ def make_ubatch_contexts(
         ctxs.append(ctx)
 
     return ctxs
+
+
+# DBO under pure TP: each TP all-reduce is a hand-off point and runs on the comm
+# stream while the other microbatch computes.
+def enable_dbo_tp_overlap(parallel_config, comm_stream: torch.cuda.Stream) -> None:
+    """Collective: every rank calls it in the same order."""
+    if not parallel_config.dbo_tp_only:
+        return
+    tp = parallel_state.get_tp_group()
+    pynccl_comm = getattr(tp.device_communicator, "pynccl_comm", None)
+    if pynccl_comm is not None:
+        pynccl_comm.bind_stream(comm_stream)
+    tp.dbo_overlap = True
+
+
+def dbo_comm_stream_priority() -> int:
+    """High on ROCm: at the default priority comm and compute can share one
+    hardware queue and serialize."""
+    from vllm.platforms import current_platform
+
+    return -1 if current_platform.is_rocm() else 0
