@@ -90,7 +90,7 @@ Source replica:
 ```bash
 vllm preload --model /path/to/model --tensor-parallel-size 4 \
     --seed-listen-host 0.0.0.0 --seed-listen-port 29600 \
-    --seed-token "$TOKEN"
+    --seed-token "$TOKEN" --seed-mooncake-protocol tcp
 ```
 
 Mirror replica (possibly on another node):
@@ -98,12 +98,16 @@ Mirror replica (possibly on another node):
 ```bash
 vllm preload --model /path/to/model --tensor-parallel-size 4 \
     --seed-source-host <source-host> --seed-source-port 29600 \
-    --seed-token "$TOKEN"
+    --seed-token "$TOKEN" --seed-mooncake-protocol tcp
 ```
 
 Each rank binds and dials `base_port + group offset + its global rank`, so one
 `host:base_port` pair covers a whole replica, including the draft daemon group
 when speculative decoding is configured.
+
+When D2D seeding is configured, compiler outputs are transferred through the
+same Mooncake data plane and installed before model loading. An unavailable or
+incompatible bundle falls back to local compilation.
 
 The exchange is keyed by the on-disk cache layout: a request names the cache
 by kind, configuration hash, DP rank and world rank, and the source resolves

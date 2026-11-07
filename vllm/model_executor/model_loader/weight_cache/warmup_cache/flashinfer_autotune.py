@@ -1,28 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Daemon warmup caches, seeded daemon-to-daemon over the shared transport.
-
-Each warmup-cache object (currently only :class:`FlashInferWarmupCache`)
-drives its own warmup pass on the daemon; the seeding flow itself
-(:class:`seed.SeedTransport`) is shared with future kinds such as weight
-shards. A target daemon installs its rank-matched cache before tuning, so
-both the daemon's own warmup and the later engine start skip re-tuning. The
-disk layout is the index: a request names the cache by the same key the
-layout uses (kind, config hash, dp rank, world rank) and the source resolves
-it to files under the cache root. There is no separate artifact store or
-registry.
-
-The FlashInfer payload is a ``{filename: parsed JSON}`` map rather than a
-single document because upcoming kinds (Triton tuned configs) consist of
-several JSON files per cache.
-
-TODO: install valid files individually instead of falling back to local
-warmup when any file of a multi-file kind fails validation.
-"""
+"""FlashInfer autotune warmup cache."""
 
 import gc
 import json
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
@@ -37,31 +19,15 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
 if TYPE_CHECKING:
-    from vllm.model_executor.model_loader.weight_cache.daemon import (
-        WeightCacheDaemon,
-    )
-    from vllm.model_executor.model_loader.weight_cache.seed import (
-        SeedTransport,
-    )
+    from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
+    from vllm.model_executor.model_loader.weight_cache.seed import SeedTransport
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
-
 _CONFIG_HASH_RE = re.compile(r"[0-9a-f]{64}")
 
 
-class WarmupCache(Seedable, Protocol):
-    """One daemon warmup cache: its warmup pass and its cache's semantics.
-
-    The warmup layer; the D2D exchange lives in seed.py (SeedTransport).
-    """
-
-    def warmup(self, daemon: "WeightCacheDaemon", transport: "SeedTransport") -> None:
-        """Run this rank's warmup pass against the cached model."""
-        ...
-
-
-class FlashInferWarmupCache(WarmupCache):
+class FlashInferWarmupCache(Seedable):
     """FlashInfer's per-rank autotune table (a single JSON file)."""
 
     kind = "flashinfer_autotune"
