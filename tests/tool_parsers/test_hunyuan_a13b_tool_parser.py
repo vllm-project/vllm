@@ -82,6 +82,15 @@ def make_tool_call(name, arguments):
             ],
             None,
         ),
+        # Non-object arguments must not drop the other calls
+        (
+            '<tool_calls>[{"name": "get_time", "arguments": null}, {"name": "get_weather", "arguments": {"city": "Boston"}}]</tool_calls>',
+            [
+                make_tool_call("get_time", {}),
+                make_tool_call("get_weather", {"city": "Boston"}),
+            ],
+            None,
+        ),
     ],
 )
 def test_hunyuan_a13b_tool_parser_extract(

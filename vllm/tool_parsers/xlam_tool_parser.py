@@ -159,16 +159,18 @@ class xLAMToolParser(ToolParser):
                     logger.debug("Invalid tool call format at index %d", idx)
                     continue
 
+                arguments = call["arguments"]
+                if not isinstance(arguments, str):
+                    arguments = json.dumps(
+                        {} if arguments is None else arguments, ensure_ascii=False
+                    )
+
                 tool_call = ToolCall(
                     id=f"call_{idx}_{random_uuid()}",
                     type="function",
                     function=FunctionCall(
                         name=call["name"],
-                        arguments=(
-                            json.dumps(call["arguments"], ensure_ascii=False)
-                            if isinstance(call["arguments"], dict)
-                            else call["arguments"]
-                        ),
+                        arguments=arguments,
                     ),
                 )
                 tool_calls.append(tool_call)
