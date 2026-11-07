@@ -6,6 +6,7 @@ from typing import cast
 
 from starlette.datastructures import State
 
+from vllm.config.model import get_served_model_name
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.common.cli_args import resolve_default_chat_template_kwargs
 from vllm.entrypoints.mcp.tool_server import init_tool_server
@@ -49,7 +50,7 @@ async def init_app_state(
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
     else:
-        served_model_names = [args.model]
+        served_model_names = [get_served_model_name(args.model, None)]
 
     if args.enable_log_requests:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
