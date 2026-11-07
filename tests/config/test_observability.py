@@ -17,11 +17,13 @@ def test_custom_histogram_buckets_valid():
         custom_histogram_buckets={
             "request_latency": [0.01, 0.05, 0.1, 0.5],
             "time_to_first_token": [1, 2, 5],
+            "request_num_preemptions": [0, 1, 2, 5],
         }
     )
     assert config.custom_histogram_buckets == {
         "request_latency": [0.01, 0.05, 0.1, 0.5],
         "time_to_first_token": [1.0, 2.0, 5.0],
+        "request_num_preemptions": [0.0, 1.0, 2.0, 5.0],
     }
 
 
@@ -30,13 +32,12 @@ def test_custom_histogram_buckets_valid():
     [
         ({"bogus": [1.0, 2.0]}, "unknown bucket family 'bogus'"),
         ({"request_latency": []}, "must not be empty"),
-        ({"request_latency": [0.0, 1.0]}, "must be finite and greater than 0"),
-        ({"request_latency": [-1.0, 1.0]}, "must be finite and greater than 0"),
+        ({"request_latency": [-1.0, 1.0]}, "must be finite and non-negative"),
         (
             {"request_latency": [1.0, float("inf")]},
-            "must be finite and greater than 0",
+            "must be finite and non-negative",
         ),
-        ({"request_latency": [float("nan")]}, "must be finite and greater than 0"),
+        ({"request_latency": [float("nan")]}, "must be finite and non-negative"),
         ({"request_latency": [1.0, 1.0]}, "must be strictly increasing"),
         ({"request_latency": [2.0, 1.0]}, "must be strictly increasing"),
         ({"request_latency": [True, 2.0]}, "must be a number, not a boolean"),
