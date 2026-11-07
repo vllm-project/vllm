@@ -779,6 +779,7 @@ def reference_mla_sparse_prefill(
 class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
     supports_dcp = False
     use_aiter_sparse_mla = False
+    uses_index_group: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -868,11 +869,6 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         if self.dcp_world_size > 1 or self.pcp_world_size > 1:
             return "context parallelism is not supported"
         return None
-
-    def record_logical_topk_ready(self) -> None:
-        # This impl shares the top-k indices buffer via SharedTopkIndicesBuffer
-        # but does not participate in sparse-MLA index groups.
-        pass
 
     def _forward_mla(
         self,

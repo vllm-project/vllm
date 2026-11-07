@@ -49,7 +49,10 @@ def test_glm_mtp_defers_lm_head(default_vllm_config):
     )
     vllm_config = mock.MagicMock()
     vllm_config.speculative_config.draft_model_config.hf_text_config = config
+    vllm_config.speculative_config.num_speculative_tokens = 1
+    vllm_config.speculative_config.parallel_drafting = False
     vllm_config.scheduler_config.max_num_batched_tokens = 4
+    vllm_config.scheduler_config.max_num_seqs = 2
 
     with (
         mock.patch.object(mtp, "Glm5NextDecoderLayer", return_value=nn.Identity()),

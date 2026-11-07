@@ -70,7 +70,9 @@ def _patch_init_deps(monkeypatch, *, speculative: bool = False):
         scheduler_config=SimpleNamespace(max_num_batched_tokens=NUM_TOKENS),
         model_config=SimpleNamespace(dtype=torch.bfloat16),
         speculative_config=SimpleNamespace() if speculative else None,
-        attention_config=SimpleNamespace(hisparse_config=None),
+        attention_config=SimpleNamespace(
+            hisparse_config=None, sparse_mla_masked_mha_quantized_kv=False
+        ),
         parallel_config=SimpleNamespace(tensor_parallel_size=1),
         compilation_config=SimpleNamespace(cudagraph_mode=None),
     )

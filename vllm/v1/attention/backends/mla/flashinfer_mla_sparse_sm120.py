@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """SM120 implementation variant for ``FLASHINFER_MLA_SPARSE_SM120``."""
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
@@ -36,6 +36,7 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
 
     is_sparse = True
     supports_dense_mha_prefill = False
+    uses_index_group: ClassVar[bool] = False
 
     def get_fp8_ds_mla_row_bytes(self) -> int:
         if self.kv_lora_rank == 512 and self.qk_rope_head_dim == 0:
