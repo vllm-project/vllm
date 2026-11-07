@@ -938,6 +938,7 @@ class PushReqMeta:
     block_ids: tuple[tuple[int, ...], ...]
     scheduled_end_tokens: int
     num_prompt_tokens: int
+    num_computed_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -1853,6 +1854,7 @@ class MooncakeConnectorScheduler:
                     ),
                     computed + scheduled,
                     request.num_prompt_tokens,
+                    num_computed_tokens=computed,
                 )
             )
         meta.requests = tuple(snapshots)
@@ -4043,6 +4045,7 @@ class MooncakeConnectorWorker:
         assert not self._pending_sends
         self.process_decode_ready_requests()
         ids = tuple(request.transfer_id for request in metadata.requests)
+        cached_prefix_available = False
         # Reset preempted progress before applying this step's prefill metadata.
         for existing_state in self.requests_to_send.values():
             if existing_state.req_id in metadata.preempted_req_ids:
@@ -4053,6 +4056,13 @@ class MooncakeConnectorWorker:
                 state = RequestState(request.transfer_id)
                 self.requests_to_send[request.transfer_id] = state
             state.update_from_metadata(request)
+            if request.num_computed_tokens:
+                for layer_index in self._prefix_layer_indices:
+                    state.available_tokens[layer_index] = max(
+                        state.available_tokens.get(layer_index, 0),
+                        request.num_computed_tokens,
+                    )
+                cached_prefix_available |= bool(self._prefix_layer_indices)
         for transfer_id, blocks in metadata.reqs_to_send.values():
             if not any(blocks):
                 continue
@@ -4079,6 +4089,9 @@ class MooncakeConnectorWorker:
             # Retire worker state; KV block release belongs to the scheduler.
             self._retire_request(transfer_id)
         self.prefilling_transfer_ids = ids
+        if cached_prefix_available:
+            self._ready_event = self._record_event()
+            self._process_pending_transfers()
         # No-forward steps skip wait_for_save; drain transfers here instead.
         if not ids:
             self._process_pending_transfers(wait=True)
@@ -4181,6 +4194,16 @@ class MooncakeConnectorWorker:
         self._layer_index_by_name = dict(
             zip(self.registered_layer_names, self.registered_layer_indices)
         )
+        self._prefix_layer_indices = {
+            index
+            for index in self._layer_index_by_name.values()
+            if all(
+                isinstance(self._layer_specs[name], FullAttentionSpec)
+                and self._layer_specs[name].tokens_per_state == 1
+                for name, layer_index in self._layer_index_by_name.items()
+                if layer_index == index
+            )
+        }
         if self._layer_index_by_name.keys() != self._layer_specs.keys():
             raise ValueError("Registration collapsed cache writer identities")
         self._cache_specs = {
