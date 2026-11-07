@@ -504,3 +504,130 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         return gemm_a8w8_blockscale_op(
             A, B, As, Bs, list(self.weight_group_shape), output_dtype=out_dtype
         )
+
+
+class AiterPreshuffledBlockScaleFp8ScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    """Block-scaled FP8 GEMM through AITER ``gemm_a8w8_blockscale_bpreshuffle``.
+
+    AITER #5141 (head ``c03cf003``) dispatches ck, cktile, asm, opus, or FlyDSL
+    from the tuned row. A gfx942 FlyDSL row is selected by a kernel name starting
+    with ``flydsl_blockscale_bpreshuffle_``. Split-K is encoded in that name;
+    the CSV ``splitK`` column stays 0. This class prepares the shared contract:
+    weights shuffled with ``layout=(16, 16)`` and fp32 activation scales in the
+    layout that head accepts. It is selected when any probed M for this ``(N, K)``
+    has a row, because one shuffled weight serves prefill and decode.
+    """
+
+    def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
+        super().__init__(config)
+        act_scale_descriptor = config.activation_quant_key.scale
+        # The FlyDSL kernel indexes x_scale as kb * M + row. ROCm
+        # group_fp8_quant does not read column_major_scales, so
+        # apply_block_scaled_mm builds the stride the kernel accepts.
+        self.quant_fp8 = QuantFP8(
+            static=act_scale_descriptor.static,
+            group_shape=act_scale_descriptor.group_shape,
+            num_token_padding=self.get_output_padding(),
+            use_ue8m0=False,
+            column_major_scales=True,
+        )
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_rocm():
+            return False, "requires ROCm."
+        if not rocm_aiter_ops.is_linear_enabled():
+            return (
+                False,
+                "requires setting `VLLM_ROCM_USE_AITER=1` "
+                "and `VLLM_ROCM_USE_AITER_LINEAR=1`.",
+            )
+        try:
+            import aiter  # noqa: F401
+        except Exception:
+            return False, "requires aiter library to be installed."
+        return True, None
+
+    @classmethod
+    def can_implement(
+        cls, config: FP8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
+        can_implement_base, reason = super().can_implement(config)
+        if not can_implement_base:
+            return can_implement_base, reason
+
+        act_quant_desc = config.activation_quant_key.scale
+        if act_quant_desc.group_shape != GroupShape(1, 128):
+            return (
+                False,
+                "Supports only dynamic per token group activation "
+                "quantization with group_shape=(1,128).",
+            )
+
+        if config.weight_shape is None:
+            return False, "weight_shape is required."
+        n, k = config.weight_shape
+
+        weight_group_shape = config.weight_quant_key.scale.group_shape
+        if weight_group_shape != GroupShape(128, 128):
+            return (
+                False,
+                f"requires weight_group_shape (128,128), "
+                f"got {weight_group_shape}.",
+            )
+
+        if not rocm_aiter_ops.is_blockscale_bpreshuffle_tuned(n, k):
+            return False, f"requires a tuned configuration for N={n}, K={k}."
+
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        params = FP8BlockParams.from_layer(layer)
+        if params.weight_scale_inv is not None:
+            ws, attr = params.weight_scale_inv, params.WEIGHT_SCALE_INV
+        else:
+            ws, attr = params.weight_scale, params.WEIGHT_SCALE
+        # gfx942 block-scale rows consume fp32 scales. e8m0 is widened once
+        # here; the GEMM entry point also widens, but the stored scale should
+        # already match the tuned kernels.
+        if ws is not None and ws.dtype == torch.float8_e8m0fnu:
+            replace_parameter(layer, attr, _upcast_e8m0_to_fp32(ws).contiguous())
+
+        w = FP8BlockParams.from_layer(layer).weight
+        replace_parameter(
+            layer,
+            FP8BlockParams.WEIGHT,
+            rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+        )
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        if As.dtype != Bs.dtype:
+            if As.dtype == torch.float8_e8m0fnu:
+                As = _upcast_e8m0_to_fp32(As).contiguous()
+            else:
+                As = As.to(torch.float32)
+            Bs = Bs.to(torch.float32)
+
+        # c03cf003 raises unless x_scale is contiguous K-major or an
+        # (M, K/128) view with stride (1, M). group_fp8_quant emits row-major
+        # (M, K/128); this view is the one the kernel transposes without a copy.
+        if (
+            As.dim() == 2
+            and As.size(0) > 0
+            and As.size(1) > 1
+            and As.stride() != (1, As.size(0))
+        ):
+            As = As.t().contiguous().t()
+
+        return rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+            A, B, As, Bs, output_dtype=self.config.out_dtype
+        )
