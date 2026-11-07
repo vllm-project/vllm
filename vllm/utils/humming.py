@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from humming.transform import (
         prepare_and_transform_humming_tensors as prepare_and_transform_humming_tensors,
     )
+    from humming.transform import prepare_layer_config as prepare_layer_config
     from humming.tune import get_heuristics_config as get_heuristics_config
     from humming.utils.weight import quantize_weight as quantize_weight
 
@@ -76,6 +77,7 @@ _EXPORTS: dict[str, str] = {
     "prepare_and_transform_humming_tensors": (
         "humming.transform:prepare_and_transform_humming_tensors"
     ),
+    "prepare_layer_config": "humming.transform:prepare_layer_config",
     "get_heuristics_config": "humming.tune:get_heuristics_config",
     "BaseInputSchema": "humming.schema:BaseInputSchema",
     "BaseWeightSchema": "humming.schema:BaseWeightSchema",
