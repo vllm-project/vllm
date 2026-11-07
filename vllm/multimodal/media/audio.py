@@ -14,6 +14,7 @@ import vllm.envs as envs
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.multimodal.audio import resample_audio_pyav
+from vllm.multimodal.media_utils import validate_media_source
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_constants import MiB_bytes
@@ -112,6 +113,7 @@ def load_audio_pyav(
         NumPy array and *sample_rate* is the native sample rate in Hz.
 
     """
+    validate_media_source(path)
     try:
         container = av.open(path)
     except av.error.FFmpegError as e:
@@ -287,6 +289,7 @@ def load_audio_torchcodec(
         sample rate in Hz.
 
     """
+    validate_media_source(path)
     if AudioDecoder is None:
         # Unify "torchcodec not installed" and "system ffmpeg missing" into
         # ImportError so `load_audio(backend="auto")` falls back cleanly.
@@ -446,6 +449,7 @@ def load_audio(
             backend with no fallback.
 
     """
+    validate_media_source(path)
     backend = backend or "auto"
     if backend not in AUDIO_BACKENDS:
         raise ValueError(
