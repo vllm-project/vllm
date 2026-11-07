@@ -30,9 +30,10 @@ QUANT_DTYPES = [torch.int8, current_platform.fp8_dtype()]
 VEC_HIDDEN_SIZES = [1024, 1025, 1027, 1029]
 # Avoid combinatorial explosion with full Cartesian product
 NUM_TOKENS_HIDDEN_SIZES = [
-    *[(1, i) for i in [1, 64, 128, *VEC_HIDDEN_SIZES, 5120, 5137]],
-    *[(2048, i) for i in [1, 64, *VEC_HIDDEN_SIZES, 5137]],
-    *[(4096, i) for i in [1, 64, 5137]],
+    *[(1, i) for i in [1, 64, 128, *VEC_HIDDEN_SIZES, 4096, 5120, 5137, 8192]],
+    *[(7, i) for i in [128, 4096, 8192]],
+    *[(2048, i) for i in [1, 64, *VEC_HIDDEN_SIZES, 4096, 5137]],
+    *[(4096, i) for i in [1, 64, 4096, 5137]],
 ]
 
 ADD_RESIDUAL = [False, True]
@@ -48,6 +49,7 @@ EPS = 1e-6
 
 
 def _is_valid_config(
+    num_tokens: int,
     hidden_size: int,
     has_scale_ub: bool,
     quant_dtype: torch.dtype,
@@ -65,7 +67,7 @@ def _is_valid_config(
     if (
         group_size is not None
         and tma_alignment != 0
-        and hidden_size // group_size[1] % tma_alignment == 0
+        and num_tokens % tma_alignment == 0
     ):
         return False
     return not (has_scale_ub and quant_dtype != current_platform.fp8_dtype())
@@ -118,6 +120,7 @@ RMS_NORM_CONFIGS = [
         [(None, 0), *itertools.product(GROUP_SIZES, TMA_ALIGNMENTS)],
     )
     if _is_valid_config(
+        num_tokens,
         hidden_size,
         has_scale_ub,
         quant_dtype,
