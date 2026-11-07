@@ -2121,30 +2121,49 @@ guide: |
 
   ## AMD MI355X: disaggregated prefill and decode with Mooncake
 
-  This example runs one prefill worker and one decode worker on separate 8-GPU MI355X nodes. `MooncakeConnector` moves the KV cache from prefill to decode over RDMA. From concurrency 16 up, the prefill worker also keeps a host-memory KV tier with `MooncakeStoreConnector` (embedded Mooncake store). The settings per concurrency were tuned on the InferenceX agentic multi-turn trace.
+  This example runs one prefill worker and one decode worker on separate 8-GPU MI355X nodes. `MooncakeConnector` moves the KV cache from prefill to decode over RDMA. From concurrency 16 up, the prefill worker also keeps a host-memory KV tier with `MooncakeStoreConnector`, whose memory belongs to standalone Mooncake store processes started before the worker. The settings per concurrency were tuned on the InferenceX agentic multi-turn trace.
 
   ### Prerequisites
 
   - Model paths, container devices, host networking and locked memory as in the [MoRIIO example](#amd-mi355x-disaggregated-prefill-and-decode) above.
   - `WORKER_IMAGE` and `ROUTER_IMAGE` as in the MoRIIO example, with a worker nightly from 2026-11-05 or later; no source patches are needed. Its `mooncake-transfer-engine-rocm` must be 0.3.14 or newer (check with `pip show`): older wheels can run out of HSA memory or crash after registering HIP memory on amdgpu-dkms older than 6.19.14 (kvcache-ai/Mooncake#4657).
-  - Store configurations (concurrency 16 and up) register about 1.8 TB of host memory per prefill node, which must be backed by transparent huge pages when the Store mounts: on the tested ionic NICs, registration fails with `EINVAL` once a memory region contains a 4 KiB page. The Store mounts after the weights load, and fastsafetensors reads the checkpoint through the page cache, so preparing memory before `vllm serve` is not enough; the load refills the cache and the end of the segment falls back to 4 KiB pages. vLLM has no step between the load and the mount for this. The tested runs used a worker hook right before the mount that drops the page cache of the model files and then compacts each NUMA node's free memory into huge pages, as [compact_huge_pages.py](https://github.com/ROCm/ATOM/blob/d27ac0b9a8a7b131774380444057c780f968bc85/.github/scripts/atomesh/compact_huge_pages.py) does.
+  - Store configurations (concurrency 16 and up) register about 1.8 TB of host memory per prefill node, which must be backed by transparent huge pages: on the tested ionic NICs, registration fails with `EINVAL` once a memory region contains a 4 KiB page. A rank in the default `embedded` mode allocates its segment after the weights load, when fastsafetensors has refilled the page cache, and the end of the segment falls back to 4 KiB pages. This guide therefore starts eight `mooncake_client` processes that hold the Store memory, right after the page cache is dropped and before `vllm serve`, and runs the ranks in `standalone-store` mode. They bind to NUMA nodes with `set_mempolicy`, so the prefill container also needs `--cap-add=SYS_NICE` under Docker's default seccomp profile.
   - `MC_GID_INDEX` and `MC_IB_TC` below are site values for RoCE; set yours. Allow router port 8000, worker port 6100, the Mooncake bootstrap port 8998 on the prefill node, and RDMA traffic.
 
-  ### Start the Mooncake master (Store configurations only)
+  ### Start the Mooncake Store (Store configurations only)
 
-  Inside the prefill worker container, before starting the prefill worker:
+  Run these inside the prefill worker container before starting the prefill worker. Start the master, then drop the page cache of the model files and compact each NUMA node's free memory into huge pages, with the scripts the tested runs used. This takes a few minutes (about four in the tested runs).
 
   ```bash
-  mooncake_master --rpc_port 50051 &
+  cd /tmp
+  setsid mooncake_master --rpc_port 50051 --metrics_port 9003 > mooncake-master.log 2>&1 &
+  ATOM=https://raw.githubusercontent.com/ROCm/ATOM/6e2142d30e5589ee56caebd784b9e246cd31ecfc/.github/scripts/atomesh
+  for f in store_memory_prep.py drop_page_cache.py compact_huge_pages.py numa_exec.py; do curl -fsSLO "$ATOM/$f"; done
+  python3 store_memory_prep.py 1798987317248 /models/Kimi-K3 /models/Inferact-Kimi-K3-DSpark
+  ```
+
+  Then, from the same directory, start one store process per NIC on the NIC's NUMA node, each holding 209 GiB, and wait until the master counts all 1.8 TB:
+
+  ```bash
+  PREFILL_IP=192.0.2.11
+  MOONCAKE_CLIENT=$(python3 -c 'import mooncake, os; print(os.path.dirname(mooncake.__file__))')/mooncake_client
+  for i in 0 1 2 3 4 5 6 7; do
+    HIP_VISIBLE_DEVICES=-1 MC_GID_INDEX=1 MC_IB_TC=104 MC_MAX_CONCURRENT_REG_MR=1 MC_MAX_MR_SIZE=68719476736 \
+    GLIBC_TUNABLES=glibc.malloc.hugetlb=1 setsid python3 numa_exec.py "$(cat /sys/class/infiniband/rdma$i/device/numa_node)" \
+      "$MOONCAKE_CLIENT" --host="$PREFILL_IP" --port=$((19250 + i)) --master_server_address=127.0.0.1:50051 \
+      --metadata_server=P2PHANDSHAKE --protocol=rdma --device_names=rdma$i \
+      --global_segment_size=224873414656 --local_buffer_size=0 --threads=4 > "mooncake-store-rdma$i.log" 2>&1 &
+  done
+  until [ "$(curl -s 127.0.0.1:9003/metrics | awk '$1 == "master_total_capacity_bytes" {printf "%.0f", $2}')" -ge 1798987317248 ] 2>/dev/null; do sleep 2; done
   cat > /tmp/mooncake-store.json <<'EOF'
-  {"mode": "embedded", "metadata_server": "P2PHANDSHAKE", "master_server_address": "127.0.0.1:50051",
-   "global_segment_size": 224873414656, "local_buffer_size": 67108864, "protocol": "rdma",
+  {"mode": "standalone-store", "metadata_server": "P2PHANDSHAKE", "master_server_address": "127.0.0.1:50051",
+   "global_segment_size": 0, "local_buffer_size": 67108864, "protocol": "rdma",
    "device_name_per_gpu": ["rdma0", "rdma1", "rdma2", "rdma3", "rdma4", "rdma5", "rdma6", "rdma7"],
    "enable_offload": false}
   EOF
   ```
 
-  `global_segment_size` is per rank (209 GiB, eight ranks per node). `device_name_per_gpu` (vllm-project/vllm#65076) lists the NIC next to each physical GPU, in GPU order; set your site's names. With the default, every rank registers its segment on all eight NICs, and on the tested nodes registration fails with `EINVAL`.
+  The ranks mount nothing (`global_segment_size` 0) and read and write the store processes' memory over RDMA, so keep those processes running as long as the prefill worker. If the wait does not end within a few minutes, check that the store processes are still running and look in `/tmp/mooncake-store-rdma*.log` for `Failed to`, `Check failed` or `numa_exec:`. `HIP_VISIBLE_DEVICES=-1` keeps them off the GPUs, and `MC_MAX_MR_SIZE` registers each 209 GiB as four regions. `device_name_per_gpu` (vllm-project/vllm#65076) lists the NIC next to each physical GPU, in GPU order. Set your site's NIC names here and in the loop, and `PREFILL_IP`, `MC_GID_INDEX` and `MC_IB_TC` in the loop as in the worker script.
 
   ### Start the router
 
@@ -2255,7 +2274,7 @@ guide: |
     --kv-transfer-config "$KV_CONFIG"
   ```
 
-  `MooncakeConnector` advertises `VLLM_HOST_IP`, or the default-route address when it is unset, so set it to the address the router uses. On the prefill worker, after the master for Store configurations:
+  `MooncakeConnector` advertises `VLLM_HOST_IP`, or the default-route address when it is unset, so set it to the address the router uses. On the prefill worker, after starting the Mooncake Store (Store configurations only):
 
   ```bash
   export SOCKET_IFNAME=eth0 RDMA_DEVICES=rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7 VLLM_HOST_IP=192.0.2.11
@@ -2277,9 +2296,9 @@ guide: |
   | ---: | --- | ---: | --- | ---: | --- | --- | --- | --- |
   | 1 | 32 / 32 | 8,192 | None | 7 | FP32 | None | FP8 | 8, 16, ..., 40 |
   | 2, 4 | 32 / 32 | 8,192 | None | 7 | FP32 | None | FP8 | 8, 16, ..., 64 |
-  | 16 | 32 / 32 | 8,192 | 8 | 4 | BF16 | 209 GiB per rank | FP8 | 1-80, then every 5 to 510 |
-  | 32, 48, 56 | 2 x C | 8,192 | 8 | 4 | BF16 | 209 GiB per rank | FP8 | 1-128, then every 5 to 510 |
-  | 72, 88 | 2 x C | 12,288 | 8 | 4 | BF16 | 209 GiB per rank | BF16 | 1-128, then every 5 to 510 |
+  | 16 | 32 / 32 | 8,192 | 8 | 4 | BF16 | 8 processes x 209 GiB | FP8 | 1-80, then every 5 to 510 |
+  | 32, 48, 56 | 2 x C | 8,192 | 8 | 4 | BF16 | 8 processes x 209 GiB | FP8 | 1-128, then every 5 to 510 |
+  | 72, 88 | 2 x C | 12,288 | 8 | 4 | BF16 | 8 processes x 209 GiB | BF16 | 1-128, then every 5 to 510 |
 
   - Both roles quantize online. Prefill puts the attention projections, shared experts and dense MLPs in FP8 per channel; decode puts all linear layers but the experts in FP8 per channel.
   - From concurrency 16 the decode worker sets `AITER_MLA_USE_OPUS=1`, AITER's opt-in FP8 MLA decode kernel on gfx950.
