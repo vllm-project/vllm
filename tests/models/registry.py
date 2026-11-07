@@ -265,6 +265,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "DeepseekV4ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Flash", is_available_online=False
     ),
+    "DhirForCausalLM": _HfExamplesInfo("zenteiq-ai/Dhir2b"),
+    "DhirMoeForCausalLM": _HfExamplesInfo("zenteiq-ai/Dhir5b-MoE-A1.7B"),
     "DomynEdgeForCausalLM": _HfExamplesInfo(
         "domyn/Domyn-Edge-Base",
         trust_remote_code=True,
