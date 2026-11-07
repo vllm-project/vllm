@@ -66,6 +66,16 @@ class UVAOffloadConfig:
     pipeline stage (tensor-parallel rank 0); stages merge their layers into the
     same file."""
 
+    cpu_offload_expert_swap: bool = False
+    """Let the hot experts follow the traffic (XPU, int4 GPTQ experts, with
+    per-expert placement, which this also selects). Every few seconds each layer
+    exchanges up to 16 of its least-routed hot experts with its most-routed cold
+    ones, copying on a side stream through 16 spare cold rows per layer (pinned
+    host memory on top of `cpu_offload_gb`) and rewriting the expert maps in
+    place between steps, so captured graphs are kept and no step waits on a
+    copy. A swap changes the order of the hot and cold sum, so temperature-0
+    outputs can differ between runs."""
+
 
 @config
 class PrefetchOffloadConfig:

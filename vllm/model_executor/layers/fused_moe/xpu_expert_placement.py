@@ -20,6 +20,11 @@ too), the worker folds the counts into a long-term score per expert between
 steps, and the order is written to the state file, in the rankings format,
 every few minutes and at shutdown. The next boot places by the state file ahead
 of the rankings file.
+
+With ``--cpu-offload-expert-swap`` the hot set follows the traffic while serving:
+the same counters drive an asynchronous exchange of hot and cold experts through
+spare cold rows, with the device maps rewritten in place between steps (see
+``_Swapper``).
 """
 
 import fcntl
@@ -51,6 +56,12 @@ _STATE_SAVE_S = 300.0
 _STATE_DECAY = 0.999  # per active fold
 _STATE_PRIOR = 0.05  # weight of the boot order in the saved order
 _STATE_MIN_FOLDS = 12  # a boot with less traffic does not overwrite the state
+# The swap (--cpu-offload-expert-swap): checked at every fold.
+_SWAP_SPARE = 16  # spare cold rows per layer: the most exchanges per fold
+_SWAP_DECAY = 0.85  # short-term score, per fold
+_SWAP_MARGIN = 1.1  # a cold expert must beat the hot one it replaces by this
+_SWAP_PRIOR = 0.01  # weight of the boot order in the swap score
+_SWAP_STEP_BYTES = 256 << 20  # the most a runner step copies, per copy phase
 
 # Decoder layers only: other MoE layers (e.g. MTP) keep their experts in VRAM, so
 # the budget below is exact.
@@ -88,6 +99,7 @@ def places_experts(offload_config: "OffloadConfig") -> bool:
         (
             uva.cpu_offload_expert_rankings is not None
             or uva.cpu_offload_expert_state is not None
+            or uva.cpu_offload_expert_swap
         )
         and current_platform.is_xpu()
         and offload_config.offload_backend in ("auto", "uva")
@@ -96,8 +108,9 @@ def places_experts(offload_config: "OffloadConfig") -> bool:
     )
     if selected and not _uva_enabled():
         raise ValueError(
-            "--cpu-offload-expert-rankings / --cpu-offload-expert-state read cold "
-            "experts from pinned host memory through UVA, which is disabled "
+            "--cpu-offload-expert-rankings / --cpu-offload-expert-state / "
+            "--cpu-offload-expert-swap read cold experts from pinned host "
+            "memory through UVA, which is disabled "
             "(VLLM_WEIGHT_OFFLOADING_DISABLE_UVA) or unavailable on this "
             "platform. Drop them to offload parameters in module order."
         )
@@ -468,6 +481,257 @@ class _Recorder:
 _RECORDER = _Recorder()
 
 
+def _side_stream(device: torch.device) -> Any:
+    return torch.xpu.Stream(device)
+
+
+def _stream_ctx(stream: Any) -> Any:
+    return torch.xpu.stream(stream)
+
+
+def _side_copy(dst: torch.Tensor, src: torch.Tensor) -> None:
+    """One copy on the swap's side stream (the caller holds its context)."""
+    dst.copy_(src, non_blocking=True)
+
+
+class _Swapper:
+    """The hot set follows the traffic, without a host wait on the forward path.
+
+    Each fold of the route counters also feeds a short-term score per expert
+    (decay ``_SWAP_DECAY``). From it each layer pairs its coldest hot experts
+    with its hottest cold ones, at most ``_SWAP_SPARE`` pairs, and exchanges a
+    pair when the cold one scores ``_SWAP_MARGIN`` times the hot one. The pairs
+    of all layers are cut into chunks of at most ``_SWAP_STEP_BYTES``, and one
+    chunk runs as three phases, at most one per runner step:
+
+    copy1: side stream, after the previous chunk's flip2: hot ``a`` in row ``i``
+        -> spare cold row ``s``.
+    flip1: forward stream, once copy1's event is complete: the maps send ``a`` to
+        cold row ``s``. Hot row ``i`` is referenced by no map from here on,
+        though forwards issued before the flip may still read it.
+    copy2: side stream, after flip1: cold ``b`` in row ``j`` -> hot row ``i``.
+    flip2: forward stream, once copy2 is complete: the maps send ``b`` to hot row
+        ``i``; cold row ``j`` becomes spare after every forward issued so far.
+
+    Invariant: a row is written only while no map references it and after
+    every forward that referenced it; a map points at a row only after the
+    write into it is complete. So every forward reads each routed expert from
+    complete bytes, every expert stays routable, and each copy phase moves at
+    most ``_SWAP_STEP_BYTES``. The maps and weights change in place, so captured
+    graphs read them through the same pointers and nothing is recaptured; maps
+    change only between steps (``step`` runs before a forward is issued and
+    never while a graph is being captured).
+
+    Staging (``--cpu-offload-stage-min-tokens``) copies whole cold blocks on the
+    forward stream inside a step. It may copy a spare row while the side stream
+    writes it, but no map of that step references the row, so the half-written
+    bytes are never read. That is the ordering rule between the two: the maps
+    move on the forward stream at step boundaries, the side stream writes only
+    unreferenced rows.
+    """
+
+    def __init__(self) -> None:
+        self.ready = False
+        self.disabled = False
+        self.placements: list[ExpertPlacement] = []
+        self.ema: np.ndarray | None = None  # [layers, num_global]
+        self.prior: np.ndarray | None = None
+        self.queue: list[list[tuple[int, int, int]]] = []  # chunks of (k, a, b)
+        # (layer k, a, b, hot row i, cold row j, spare row s) of the chunk
+        self.pending: list[tuple[int, int, int, int, int, int]] = []
+        self.phase = "idle"
+        self.event: Any = None
+        self.ev_spare: Any = None
+        self.stream: Any = None
+        self.total = 0
+        self.step_bytes = 0  # issued by the last step, for the budget check
+
+    def _setup(self) -> bool:
+        placements = [_PLACEMENTS[k] for k in sorted(_PLACEMENTS)]
+        if not placements or not all(p.swap for p in placements):
+            self.disabled = True
+            return False
+        if any(p._impls is None for p in placements):
+            return False  # the kernels are built by the first forward
+        for p in placements:
+            hot, _ = p._impls  # type: ignore[misc]
+            p.hot_tensors = {
+                "w13": hot.w13.view(torch.uint8),
+                "w2": hot.w2.view(torch.uint8),
+                "w13_scales": hot.gemm1_wei_scales,
+                "w2_scales": hot.gemm2_wei_scales,
+            }
+            for key, cold in p.cold.items():
+                h = p.hot_tensors[key]
+                if h.shape[1:] != cold.shape[1:] or h.element_size() != (
+                    cold.element_size()
+                ):
+                    logger.warning(
+                        "Per-expert offload swap off: %s %s hot %s %s vs cold %s %s",
+                        p.layer_name,
+                        key,
+                        tuple(h.shape),
+                        h.dtype,
+                        tuple(cold.shape),
+                        cold.dtype,
+                    )
+                    self.disabled = True
+                    return False
+        self.placements = placements
+        assert _RECORDER.prior is not None
+        self.prior = _RECORDER.prior
+        self.ema = np.zeros_like(self.prior)
+        self.stream = _side_stream(placements[0].hot_tensors["w13"].device)
+        self.ready = True
+        return True
+
+    def _row_bytes(self, p: "ExpertPlacement") -> int:
+        return sum(t[0].numel() * t.element_size() for t in p.cold.values())
+
+    def _fold(self, delta: np.ndarray) -> None:
+        assert self.ema is not None
+        for k in range(delta.shape[0]):
+            pre, dec = delta[k, 0].astype(np.float64), delta[k, 1].astype(np.float64)
+            mass = np.zeros_like(dec)
+            if dec.sum() > 0:
+                mass += dec / dec.sum()
+            if pre.sum() > 0:
+                mass += _PREFILL_WEIGHT * pre / pre.sum()
+            if mass.sum() > 0:  # idle time doesn't decay the score
+                self.ema[k] = _SWAP_DECAY * self.ema[k] + mass
+
+    def _plan(self) -> list[list[tuple[int, int, int]]]:
+        """The exchanges worth making, best first, in chunks within the budget."""
+        assert self.ema is not None and self.prior is not None
+        top = float(self.ema.max()) or 1.0
+        pairs: list[tuple[float, int, int, int]] = []
+        for k, p in enumerate(self.placements):
+            assert p.hot_owner is not None and p.cold_owner is not None
+            score = self.ema[k] / top + _SWAP_PRIOR * self.prior[k]
+            cold_g = p.cold_owner[p.cold_owner >= 0]
+            cold_best = cold_g[np.argsort(-score[cold_g], kind="stable")]
+            hot_worst = p.hot_owner[np.argsort(score[p.hot_owner], kind="stable")]
+            for a, b in list(zip(hot_worst, cold_best))[:_SWAP_SPARE]:
+                if score[b] > _SWAP_MARGIN * score[a]:
+                    pairs.append((float(score[b] - score[a]), k, int(a), int(b)))
+        pairs.sort(key=lambda x: -x[0])
+        chunks: list[list[tuple[int, int, int]]] = []
+        size = 0
+        for _, k, a, b in pairs:
+            nbytes = self._row_bytes(self.placements[k])
+            if not chunks or size + nbytes > _SWAP_STEP_BYTES:
+                chunks.append([])
+                size = 0
+            chunks[-1].append((k, a, b))
+            size += nbytes
+        return chunks
+
+    def _push_maps(self, p: "ExpertPlacement") -> None:
+        """Host mirrors -> device maps, in place, on the forward stream.
+
+        The pinned stage is rewritten only at the next flip, which comes after
+        an event that follows this copy on the forward stream (copy2 waits for
+        flip1, the next copy1 for flip2), so the copy has read it by then.
+        """
+        assert p.map_stage is not None and p.hot_map is not None
+        assert p.hot_map_np is not None and p.cold_map_np is not None
+        assert p.cold_map is not None
+        p.map_stage[0].copy_(torch.from_numpy(p.hot_map_np))
+        p.map_stage[1].copy_(torch.from_numpy(p.cold_map_np))
+        p.hot_map.copy_(p.map_stage[0], non_blocking=True)
+        p.cold_map.copy_(p.map_stage[1], non_blocking=True)
+
+    def _copy1(self, chunk: list[tuple[int, int, int]]) -> bool:
+        if self.ev_spare is not None:
+            self.stream.wait_event(self.ev_spare)
+        with _stream_ctx(self.stream):
+            for k, a, b in chunk:
+                p = self.placements[k]
+                assert p.hot_map_np is not None and p.cold_map_np is not None
+                i, j = int(p.hot_map_np[a]), int(p.cold_map_np[b])
+                if i < 0 or j < 0 or not p.spare_free:
+                    continue  # moved by an earlier chunk, or no spare row left
+                s = p.spare_free.pop(0)
+                for key, cold in p.cold.items():
+                    h = p.hot_tensors[key]
+                    _side_copy(cold[s].view(h.dtype), h[i])
+                self.step_bytes += self._row_bytes(p)
+                self.pending.append((k, a, b, i, j, s))
+            self.event = _record_event(self.stream)
+        return bool(self.pending)
+
+    def _flip1_copy2(self, fwd: Any) -> None:
+        fwd.wait_event(self.event)  # complete already: orders the flip after it
+        touched = set()
+        for k, a, _b, _i, _j, s in self.pending:
+            p = self.placements[k]
+            assert p.hot_map_np is not None and p.cold_map_np is not None
+            p.hot_map_np[a], p.cold_map_np[a] = -1, s
+            touched.add(k)
+        for k in touched:
+            self._push_maps(self.placements[k])
+        self.stream.wait_event(_record_event(fwd))
+        with _stream_ctx(self.stream):
+            for k, _a, _b, i, j, _s in self.pending:
+                p = self.placements[k]
+                for key, cold in p.cold.items():
+                    h = p.hot_tensors[key]
+                    _side_copy(h[i], cold[j].view(h.dtype))
+                self.step_bytes += self._row_bytes(p)
+            self.event = _record_event(self.stream)
+
+    def _flip2(self, fwd: Any) -> int:
+        fwd.wait_event(self.event)
+        touched = set()
+        for k, a, b, i, j, s in self.pending:
+            p = self.placements[k]
+            assert p.hot_map_np is not None and p.cold_map_np is not None
+            assert p.hot_owner is not None and p.cold_owner is not None
+            p.hot_map_np[b], p.cold_map_np[b] = i, -1
+            p.hot_owner[i], p.cold_owner[s], p.cold_owner[j] = b, a, -1
+            p.spare_free.append(j)
+            touched.add(k)
+        for k in touched:
+            self._push_maps(self.placements[k])
+        self.ev_spare = _record_event(fwd)
+        n = len(self.pending)
+        self.pending = []
+        return n
+
+    def step(self, delta: np.ndarray | None) -> None:
+        """One runner step, on the host, before the forward is issued."""
+        self.step_bytes = 0
+        if self.disabled or (not self.ready and not self._setup()):
+            return
+        if delta is not None:
+            self._fold(delta)
+        fwd = _current_stream()
+        if self.phase == "idle":
+            if not self.queue and delta is not None:
+                self.queue = self._plan()
+            while self.queue:
+                if self._copy1(self.queue.pop(0)):
+                    self.phase = "copy1"
+                    break
+        elif not self.event.query():
+            return  # copies in flight: the forward goes on with the current maps
+        elif self.phase == "copy1":
+            self._flip1_copy2(fwd)
+            self.phase = "copy2"
+        else:
+            n = self._flip2(fwd)
+            self.phase = "idle"
+            if not self.total:
+                logger.info("Per-expert offload placement: first experts swapped")
+            self.total += n
+            logger.debug(
+                "Per-expert offload swap: %d experts, %d since start", n, self.total
+            )
+
+
+_SWAPPER = _Swapper()
+
+
 @contextmanager
 def warmup() -> Iterator[None]:
     """Around the worker's compile and warm-up, whose dummy batches reach
@@ -511,22 +775,28 @@ def step() -> None:
     if delta is not None:
         _RECORDER.fold(delta)
         _RECORDER.maybe_save(now)
+    if _RECORDER.ready:
+        _SWAPPER.step(delta)
 
 
 @torch.inference_mode()
 def shutdown() -> None:
     """Save the learned state and forget the placements of this process."""
-    global _RECORDER
+    global _RECORDER, _SWAPPER
     try:
         _RECORDER.flush()
     finally:
         _PLACEMENTS.clear()
         _LIVE[0] = False
         _RECORDER = _Recorder()
+        _SWAPPER = _Swapper()
 
 
-def _repack_int4_pinned(qweight: torch.Tensor, device: torch.device) -> torch.Tensor:
-    """GPTQ int32 ``[E, in/8, out]`` (CPU) -> signed-int4 bytes ``[E, out, in/2]``.
+def _repack_int4_pinned(
+    qweight: torch.Tensor, device: torch.device, extra: int = 0
+) -> torch.Tensor:
+    """GPTQ int32 ``[E, in/8, out]`` (CPU) -> signed-int4 bytes ``[E, out, in/2]``,
+    plus ``extra`` zeroed rows.
 
     The layout transform of the method's post-load step plus ``implement_zp``,
     run on ``device`` a few experts at a time into pinned host memory, so device
@@ -535,18 +805,23 @@ def _repack_int4_pinned(qweight: torch.Tensor, device: torch.device) -> torch.Te
     from vllm_xpu_kernels.fused_moe_interface import implement_zp
 
     e, k8, n = qweight.shape
-    out = _ARENA.empty((e, n, k8 * 4), torch.uint8)
+    out = _ARENA.empty((e + extra, n, k8 * 4), torch.uint8)
     step = 16
     for i in range(0, e, step):
         chunk = qweight[i : i + step].to(device)
         packed = chunk.transpose(1, 2).contiguous().view(torch.uint8)
         out[i : i + chunk.shape[0]].copy_(implement_zp(packed))
+    if extra:
+        out[e:].zero_()
     return out
 
 
-def _pin(t: torch.Tensor) -> torch.Tensor:
-    pinned = _ARENA.empty(tuple(t.shape), t.dtype)
-    pinned.copy_(t)
+def _pin(t: torch.Tensor, extra: int = 0) -> torch.Tensor:
+    """A pinned copy of ``t`` with ``extra`` zeroed rows appended."""
+    pinned = _ARENA.empty((t.shape[0] + extra, *t.shape[1:]), t.dtype)
+    pinned[: t.shape[0]].copy_(t)
+    if extra:
+        pinned[t.shape[0] :].zero_()
     return pinned
 
 
@@ -590,6 +865,41 @@ class ExpertPlacement:
         # [2, num_global + 1] on the device: row 0 large steps, row 1 small
         # ones; the last bucket takes negative (unrouted) ids.
         self.route_counts: torch.Tensor | None = None
+        # The swap (set by maybe_place): spare cold rows, host mirrors of the
+        # maps and who owns which row, written only by the swapper.
+        self.swap = False
+        self.spare = 0
+        self.hot_map_np: np.ndarray | None = None
+        self.cold_map_np: np.ndarray | None = None
+        self.hot_owner: np.ndarray | None = None  # hot row -> global id
+        self.cold_owner: np.ndarray | None = None  # cold row -> global id or -1
+        self.spare_free: list[int] = []
+        self.map_stage: torch.Tensor | None = None
+        self.hot_tensors: dict[str, torch.Tensor] = {}
+
+    @property
+    def cold_rows(self) -> int:
+        """Rows of the cold tensors: the cold experts plus the spare rows."""
+        return self.num_cold + self.spare
+
+    def set_maps(
+        self, hot_map: torch.Tensor, cold_map: torch.Tensor, device: torch.device
+    ) -> None:
+        """Device maps from CPU ones, with the host mirrors the swap keeps."""
+        self.hot_map = hot_map.to(device)
+        self.cold_map = cold_map.to(device)
+        if not self.swap:
+            return
+        self.hot_map_np = hot_map.numpy().copy()
+        self.cold_map_np = cold_map.numpy().copy()
+        self.hot_owner = np.full(self.num_hot, -1, dtype=np.int64)
+        self.cold_owner = np.full(self.cold_rows, -1, dtype=np.int64)
+        for g in np.nonzero(self.hot_map_np >= 0)[0]:
+            self.hot_owner[self.hot_map_np[g]] = g
+        for g in np.nonzero(self.cold_map_np >= 0)[0]:
+            self.cold_owner[self.cold_map_np[g]] = g
+        self.spare_free = [r for r in range(self.cold_rows) if self.cold_owner[r] < 0]
+        self.map_stage = _pinned_empty((2, self.num_global), hot_map.dtype)
 
     @property
     def num_hot(self) -> int:
@@ -652,13 +962,14 @@ class ExpertPlacement:
             )
         twins, self.twins, self._param_names = self.twins, {}, {}
         device = layer.w13_weight.device
+        self.spare = _SWAP_SPARE if self.swap else 0
         for key in ("w13", "w2"):
             self.cold[key] = _repack_int4_pinned(
-                twins.pop(f"{key}_qweight").data, device
+                twins.pop(f"{key}_qweight").data, device, self.spare
             )
             scales = twins.pop(f"{key}_scales").data.transpose(1, 2).contiguous()
             self.cold[f"{key}_scales"] = _pin(
-                scales.to(getattr(layer, f"{key}_scales").dtype)
+                scales.to(getattr(layer, f"{key}_scales").dtype), self.spare
             )
         del twins  # qzeros: symmetric int4 has none on XPU
         for key, tensor in self.cold.items():
@@ -668,8 +979,7 @@ class ExpertPlacement:
         cold_map = torch.full((self.num_global,), -1, dtype=torch.int32)
         for local_id, (is_cold, row) in self.slot.items():
             (cold_map if is_cold else hot_map)[self.local_to_global[local_id]] = row
-        self.hot_map = hot_map.to(device)
-        self.cold_map = cold_map.to(device)
+        self.set_maps(hot_map, cold_map, device)
         experts.placement = self
         if self.count:
             self.route_counts = torch.zeros(
@@ -733,7 +1043,7 @@ class ExpertPlacement:
                 w2=cw2,
                 w2_scales=self.cold_views["w2_scales"],
                 w2_bias=None,
-                num_experts=self.num_cold,
+                num_experts=self.cold_rows,
                 expert_map=self.cold_map,
                 **common,
             )
@@ -830,5 +1140,17 @@ def maybe_place(
     )
     placement.boot_order = ranked
     placement.state_path = config.uva.cpu_offload_expert_state
-    placement.count = placement.state_path is not None
+    placement.swap = config.uva.cpu_offload_expert_swap
+    placement.count = placement.state_path is not None or placement.swap
+    if placement.swap:
+        logger.info_once(
+            "Per-expert offload placement: swap on, up to %d experts per layer "
+            "every %.0f s through %d spare cold rows per layer (%.2f GiB pinned "
+            "per rank on top of --cpu-offload-gb), at most %d MiB copied per step",
+            _SWAP_SPARE,
+            _FOLD_S,
+            _SWAP_SPARE,
+            _SWAP_SPARE * bytes_each * num_layers / 2**30,
+            _SWAP_STEP_BYTES >> 20,
+        )
     return placement

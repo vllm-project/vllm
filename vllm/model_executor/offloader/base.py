@@ -180,18 +180,19 @@ def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
             max_gb = 0
             if uva.cpu_offload_params - {"experts"}:
                 logger.warning(
-                    "Per-expert placement (--cpu-offload-expert-rankings or "
-                    "--cpu-offload-expert-state) spends --cpu-offload-gb on "
-                    "routed experts only; --cpu-offload-params %s is ignored",
+                    "Per-expert placement (--cpu-offload-expert-rankings, -state "
+                    "or -swap) spends --cpu-offload-gb on routed experts only; "
+                    "--cpu-offload-params %s is ignored",
                     sorted(uva.cpu_offload_params),
                 )
         elif (
             uva.cpu_offload_expert_rankings is not None
             or uva.cpu_offload_expert_state is not None
+            or uva.cpu_offload_expert_swap
         ):
             logger.warning(
-                "--cpu-offload-expert-rankings and --cpu-offload-expert-state are "
-                "supported on XPU only; offloading parameters in module order"
+                "--cpu-offload-expert-rankings, -state and -swap are supported on "
+                "XPU only; offloading parameters in module order"
             )
         return UVAOffloader(
             cpu_offload_max_bytes=int(max_gb * 1024**3),
