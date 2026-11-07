@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from .aiter import *
 from .cpu import *
+from .flashinfer_mega import *
 from .tilelang import *
 from .torch import *
 from .triton import *
@@ -20,6 +21,8 @@ __all__ = [
     "mhc_pre_cpu",
     "mhc_post_cpu",
     "hc_head_fused_cpu",
+    "mhc_fused_post_pre_flashinfer_mega",
+    "use_flashinfer_mega_mhc",
     "mhc_pre_tilelang",
     "mhc_post_tilelang",
     "mhc_fused_post_pre_tilelang",
