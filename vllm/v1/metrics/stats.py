@@ -228,6 +228,8 @@ class SchedulerStats:
     num_waiting_reqs: int = 0  # waiting requests not deferred
     # waiting requests deferred by transient constraints or a blocked status
     num_skipped_waiting_reqs: int = 0
+    # requests preempted since the previous stats, counted at preemption time
+    num_preempted_reqs: int = 0
 
     num_kv_fetch_reqs_by_stage: dict[str, int] = field(default_factory=dict)
 

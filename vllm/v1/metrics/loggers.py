@@ -164,7 +164,6 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_prompt_tokens += iteration_stats.prompt_token_stats.computed
         self.num_generation_tokens += iteration_stats.num_generation_tokens
         self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
-        self.num_preemptions += iteration_stats.num_preempted_reqs
 
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
         # Compute summary metrics for tracked stats
@@ -226,6 +225,7 @@ class LoggingStatLogger(StatLoggerBase):
             self._track_iteration_stats(iteration_stats)
 
         if scheduler_stats is not None:
+            self.num_preemptions += scheduler_stats.num_preempted_reqs
             self._log_iteration_details(scheduler_stats, engine_idx)
             self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
 
@@ -1144,6 +1144,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     ):
         """Log to prometheus."""
         if scheduler_stats is not None:
+            self.counter_num_preempted_reqs[engine_idx].inc(
+                scheduler_stats.num_preempted_reqs
+            )
             self.gauge_scheduler_running[engine_idx].set(
                 scheduler_stats.num_running_reqs
             )
@@ -1256,9 +1259,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_watermark["not_watermarked"][engine_idx].inc(
                 iteration_stats.num_not_watermarked_reqs
             )
-        self.counter_num_preempted_reqs[engine_idx].inc(
-            iteration_stats.num_preempted_reqs
-        )
         self.counter_prompt_tokens[engine_idx].inc(iteration_stats.num_prompt_tokens)
         # Labeled prompt token counters by source
         pts = iteration_stats.prompt_token_stats
