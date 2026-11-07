@@ -151,6 +151,9 @@ class MooncakeStoreScheduler:
         # Skips lookup CPU cost on instances that never load KV from the store.
         self.enable_lookup = kvc_extra_config.get("enable_lookup", True)
         self.save_decode_cache = kvc_extra_config.get("save_decode_cache", False)
+        self.remove_superseded_checkpoints = kvc_extra_config.get(
+            "remove_superseded_checkpoints", False
+        )
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = bool(
             kv_event_config and kv_event_config.enable_kv_cache_events
@@ -385,6 +388,7 @@ class MooncakeStoreScheduler:
                     else None
                 ),
                 prefill_end_tokens=len(prefill_tokens),
+                admitted_tokens=request.num_computed_tokens,
             )
             self._request_trackers[request.req_id] = request_tracker
 
@@ -440,6 +444,7 @@ class MooncakeStoreScheduler:
                             else None
                         ),
                         prefill_end_tokens=len(prefill_tokens),
+                        admitted_tokens=request_real.num_computed_tokens,
                     )
                     self._request_trackers[req_id] = request_tracker
 
@@ -722,6 +727,7 @@ class MooncakeStoreScheduler:
             prefill_end_tokens=tracker.prefill_end_tokens,
             boundary_puts=mamba_puts,
             completed_token_len=request.num_computed_tokens,
+            superseded_boundary=self._superseded_boundary(tracker, boundary_tokens),
         )
         coord = self._store_coord
         assert coord is not None
@@ -752,6 +758,27 @@ class MooncakeStoreScheduler:
         tracker.has_pending_offload = True
         # The store job owns exact block refs, so request cleanup need not wait.
         return False
+
+    def _superseded_boundary(
+        self, tracker: RequestTracker, boundary_tokens: int
+    ) -> int | None:
+        """The prompt-end checkpoint a request was admitted at, if storing its
+        own prompt-end checkpoint at ``boundary_tokens`` supersedes it.
+
+        Only a prompt-end checkpoint supersedes: it is stored with the attention
+        tail that lets the next turn resume from it. Block-aligned states are
+        never removed, since other prompts branch from them.
+        """
+        admitted = tracker.admitted_tokens
+        if (
+            not self.remove_superseded_checkpoints
+            or boundary_tokens > tracker.prefill_end_tokens
+            or boundary_tokens % self._block_size == 0
+            or admitted % self._block_size == 0
+            or admitted >= boundary_tokens
+        ):
+            return None
+        return admitted
 
     def _handle_boundary_state_offloads(
         self,
@@ -791,8 +818,19 @@ class MooncakeStoreScheduler:
             if not accepted:
                 continue
             tracker.has_pending_offload = True
+            superseded = next(
+                filter(
+                    None,
+                    (
+                        self._superseded_boundary(tracker, put.num_tokens)
+                        for put in accepted
+                    ),
+                ),
+                None,
+            )
             if (req_meta := save_metas.get(req_id)) is not None:
                 req_meta.boundary_puts = accepted
+                req_meta.superseded_boundary = superseded
                 continue
             meta.add_request(
                 ReqMeta(
@@ -805,6 +843,7 @@ class MooncakeStoreScheduler:
                     prefill_end_tokens=tracker.prefill_end_tokens,
                     boundary_puts=accepted,
                     completed_token_len=tracker.token_len,
+                    superseded_boundary=superseded,
                 )
             )
 

@@ -334,6 +334,7 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
   incompatible with sleep mode and the CuMem allocator.
 - `cache_prefix` (str): Namespace prepended to every store key. Different prefixes isolate cached blocks, even for identical prompts. Set to `"auto"` to derive a deployment fingerprint automatically (see below). Other strings remain literal custom prefixes. Default: `""` (no prefix; existing key format).
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
+- `remove_superseded_checkpoints` (bool): For hybrid models with Mamba prefix caching in `align` mode. When a request stores its prompt-end Mamba checkpoint, remove the prompt-end checkpoint it was admitted at, such as the previous turn's in a multi-turn conversation. The next turn resumes from the newer checkpoint; only a prompt that branches at the older one would read it again. Block-aligned states are kept. The removal is issued one Mooncake read lease (10 s, the master's default `default_kv_lease_ttl`) after the newer checkpoint is stored, and a key still leased then is left to eviction. Default: `false`.
 - `store_tp_size` (int): Common Store TP for divisible heterogeneous-TP
   sharing. See [Sharing one Store across multiple Prefill TP sizes](#sharing-one-store-across-multiple-prefill-tp-sizes).
 

@@ -18,6 +18,7 @@ import queue
 import socket
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
@@ -104,6 +105,9 @@ from .metrics import MooncakeStoreConnectorStats
 logger = init_logger(__name__)
 
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
+# The master's default_kv_lease_ttl. A read leases the object, and the master
+# refuses to remove a leased object.
+MOONCAKE_KV_LEASE_TTL_S = 10.0
 _T = TypeVar("_T")
 
 
@@ -583,6 +587,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # Retained only after a failed store so retry events can recover the
         # token suffix without full snapshots on the normal path.
         self._retry_token_ids: dict[str, tuple[int, list[int]]] = {}
+        # (due time, keys) of superseded checkpoints. Each is removed one lease
+        # after its successor is stored, once the load that admitted the
+        # request no longer leases it.
+        self._superseded_keys: deque[tuple[float, list[str]]] = deque()
 
     def add_request(self, request: ReqMeta) -> None:
         # Register before enqueueing so a job is never picked up unledgered.
@@ -694,6 +702,21 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self._skip_store_requests.clear()
         return True
 
+    def _boundary_chunks(self, group_id: int, num_tokens: int) -> list[tuple[int, int]]:
+        """This rank's ``(start, end)`` chunks of the group's block ending at
+        ``num_tokens``, distributed across ranks by the same rule as normal
+        chunks. Each chunk is keyed by the hash at its end."""
+        db = self.token_databases[group_id]
+        put_step = self.group_put_steps[group_id]
+        put_step_rank = (self.tp_rank + group_id) % put_step
+        block_size = db.store_layout.block_size
+        block_start = (cdiv(num_tokens, block_size) - 1) * block_size
+        return [
+            (start, min(start + db.chunk_size, num_tokens))
+            for start in range(block_start, num_tokens, db.chunk_size)
+            if start // db.chunk_size % put_step == put_step_rank
+        ]
+
     def _boundary_puts(
         self, req_meta: ReqMeta
     ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
@@ -719,19 +742,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if hash_idx >= len(req_meta.block_hashes):
                 continue
             db = self.token_databases[group_id]
-            # Distribute across ranks by the same rule as normal chunks.
-            put_step = self.group_put_steps[group_id]
-            put_step_rank = (self.tp_rank + group_id) % put_step
             shard_ids = db.store_layout.local_shard_ids
             block_size = db.store_layout.block_size
-            block_start = (cdiv(num_tokens, block_size) - 1) * block_size
-            for start in range(block_start, num_tokens, db.chunk_size):
-                if start // db.chunk_size % put_step != put_step_rank:
-                    continue
-                end = min(start + db.chunk_size, num_tokens)
+            for start, end in self._boundary_chunks(group_id, num_tokens):
                 key_hash = req_meta.block_hashes[end // hash_block_size - 1]
+                offset = start % block_size
                 addrs, sizes, _ = db.store_layout.prepare_values(
-                    [(start - block_start, end - block_start)] * len(shard_ids),
+                    [(offset, offset + end - start)] * len(shard_ids),
                     [block_id],
                     shard_ids,
                 )
@@ -858,7 +875,39 @@ class KVCacheStoreSendingThread(KVTransferThread):
             )
         return True
 
+    def _remove_superseded_checkpoints(self) -> None:
+        """Remove the superseded checkpoints that are due. A key still refused
+        is being read by another request and is left to eviction."""
+        keys: list[str] = []
+        now = time.monotonic()
+        while self._superseded_keys and self._superseded_keys[0][0] <= now:
+            keys += self._superseded_keys.popleft()[1]
+        if not keys:
+            return
+        start = time.perf_counter()
+        try:
+            res = self.store.batch_remove(keys)
+        except Exception as e:
+            self._record_operation(
+                "save_remove",
+                start,
+                len(keys),
+                status="error",
+                num_failed_keys=len(keys),
+            )
+            logger.warning("Failed to remove superseded checkpoints: %s", e)
+            return
+        num_failed = sum(code != 0 for code in res)
+        self._record_operation(
+            "save_remove",
+            start,
+            len(keys),
+            status="partial_failure" if num_failed else "ok",
+            num_failed_keys=num_failed,
+        )
+
     def _handle_request(self, req_meta: ReqMeta):
+        self._remove_superseded_checkpoints()
         # The single `finally` is the only way out, so the scheduler releases
         # this job's GPU block references however the job ends.
         save_completed = False
@@ -899,6 +948,23 @@ class KVCacheStoreSendingThread(KVTransferThread):
             # normal positional save, which may be skipped this step).
             if not self._maybe_offload_boundary_states(req_meta):
                 return
+            if (superseded := req_meta.superseded_boundary) is not None:
+                superseded_keys: list[str] = []
+                for group_id in self.coord.mamba_group_ids:
+                    if not self.group_participates[group_id]:
+                        continue
+                    layout = self.token_databases[group_id].store_layout
+                    for _, end in self._boundary_chunks(group_id, superseded):
+                        key_hash = req_meta.block_hashes[
+                            end // self.coord.hash_block_size - 1
+                        ]
+                        superseded_keys.extend(
+                            layout.key_for(shard_id, key_hash)
+                            for shard_id in layout.local_shard_ids
+                        )
+                self._superseded_keys.append(
+                    (time.monotonic() + MOONCAKE_KV_LEASE_TTL_S, superseded_keys)
+                )
 
             save_start = self._saved_offset.get(req_id, 0)
             if checkpoint_len <= save_start:

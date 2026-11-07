@@ -272,6 +272,7 @@ pub mod kv_connector {
     pub enum MooncakeOperation {
         SaveExists,
         SavePut,
+        SaveRemove,
         LoadGet,
         LookupExists,
     }
@@ -281,6 +282,7 @@ pub mod kv_connector {
             match self {
                 Self::SaveExists => "save_exists",
                 Self::SavePut => "save_put",
+                Self::SaveRemove => "save_remove",
                 Self::LoadGet => "load_get",
                 Self::LookupExists => "lookup_exists",
             }
