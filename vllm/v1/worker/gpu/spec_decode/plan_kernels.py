@@ -196,7 +196,7 @@ def _check_path_kernel(
         req_ok = (path_len >= 1) & (path_len <= rows)
         req_ok = req_ok & (tl.min(step_ok.to(tl.int32), axis=1) == 1)
         num_bad += tl.sum((live & ~req_ok).to(tl.int32))
-    tl.store(ok_ptr, (num_bad == 0).to(tl.int32))
+    tl.store(ok_ptr, tl.where(num_bad == 0, 1, 0))
 
 
 def check_accept_result(
