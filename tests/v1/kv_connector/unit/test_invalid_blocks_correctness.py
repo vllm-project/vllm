@@ -283,6 +283,9 @@ def test_sync_fail_invalid_blocks_evicted(fail_scheduler: Scheduler):
     # - hits = num_external_computed_tokens (tokens loaded externally)
     assert engine_outputs.scheduler_stats is not None
     stats = engine_outputs.scheduler_stats
+    assert stats.num_kv_load_failed_tokens == (
+        num_external_computed_tokens - invalid_block_idx * fail_scheduler.block_size
+    )
     assert stats.connector_prefix_cache_stats is not None
     conn_stats = stats.connector_prefix_cache_stats
     assert conn_stats.requests == 1
@@ -403,6 +406,10 @@ def test_async_recompute_blocks_not_cached_when_invalid(
     engine_outputs = next(iter(outputs.values()))
     assert engine_outputs.scheduler_stats is not None
     stats = engine_outputs.scheduler_stats
+    assert stats.num_kv_load_failed_tokens == (
+        num_external_computed_tokens
+        - invalid_block_idx * recompute_scheduler.block_size
+    )
     assert stats.connector_prefix_cache_stats is not None
     conn_stats = stats.connector_prefix_cache_stats
     assert conn_stats.requests == 1

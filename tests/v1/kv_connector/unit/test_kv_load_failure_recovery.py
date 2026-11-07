@@ -17,6 +17,8 @@ from .utils import (
     make_kv_cache_config,
 )
 
+pytestmark = pytest.mark.cpu_test
+
 
 def _make_get_num_new_matched_tokens(
     req_num_new_matched_tokens: dict[str, int],
@@ -29,14 +31,26 @@ def _make_get_num_new_matched_tokens(
     return get_num_new_matched_tokens
 
 
+def _kv_load_failed_tokens(engine_core_outputs) -> int:
+    """Failed-load tokens in the scheduler stats of an update_from_output."""
+    return sum(
+        outputs.scheduler_stats.num_kv_load_failed_tokens
+        for outputs in engine_core_outputs.values()
+        if outputs.scheduler_stats is not None
+    )
+
+
 @pytest.fixture
 def scheduler():
     vllm_config = create_vllm_config(kv_load_failure_policy="recompute")
     return create_scheduler(vllm_config)
 
 
+@pytest.mark.parametrize("report_invalid_blocks", [False, True])
 @pytest.mark.parametrize("policy", ["fail", "recompute"])
-def test_failed_receive_completion_honors_failure_policy(policy):
+def test_failed_receive_completion_honors_failure_policy(
+    policy, report_invalid_blocks, caplog_vllm
+):
     """Failed receives still need completion to free blocks or resume computation."""
     scheduler = create_scheduler(create_vllm_config(kv_load_failure_policy=policy))
     request = create_request(num_tokens=3 * scheduler.block_size)
@@ -54,10 +68,30 @@ def test_failed_receive_completion_honors_failure_policy(policy):
     scheduler_output = scheduler.schedule()
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
-    output = create_model_runner_output([], finished_recving={request.request_id})
+    (req_block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    invalid_block_ids = set(req_block_ids) if report_invalid_blocks else None
+    output = create_model_runner_output(
+        [],
+        finished_recving={request.request_id},
+        invalid_block_ids=invalid_block_ids,
+    )
     assert output.kv_connector_output is not None
     output.kv_connector_output.failed_recving = {request.request_id}
-    scheduler.update_from_output(scheduler_output, output)
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, output)
+    # Every claimed token is lost, counted once under both policies even
+    # when both failed_recving and invalid_block_ids are reported.
+    assert _kv_load_failed_tokens(engine_core_outputs) == 2 * scheduler.block_size
+    next_stats = scheduler.make_stats()
+    assert next_stats is not None and next_stats.num_kv_load_failed_tokens == 0
+    # The failure is logged exactly once, also when the connector reports
+    # both failed_recving and invalid_block_ids (as NIXL does).
+    expected_log = (
+        "Failing 1 request(s) due to KV load failure"
+        if policy == "fail"
+        else "Recovered from KV load failure: 1 request(s) rescheduled"
+    )
+    messages = [record.getMessage() for record in caplog_vllm.records]
+    assert sum(expected_log in message for message in messages) == 1
 
     if policy == "fail":
         assert request.status == RequestStatus.FINISHED_ERROR
@@ -129,9 +163,15 @@ def test_async_load_failure(
         use_eos=True,
     )
 
-    scheduler.update_from_output(scheduler_output, model_runner_output)
+    engine_core_outputs = scheduler.update_from_output(
+        scheduler_output, model_runner_output
+    )
 
     min_invalid_block_idx = min(invalid_block_idxs)
+    # request2's tokens from its first invalid block on are lost.
+    assert _kv_load_failed_tokens(engine_core_outputs) == (
+        num_external_computed_tokens - min_invalid_block_idx * scheduler.block_size
+    )
 
     assert len(scheduler.waiting) == 0
     assert len(scheduler.kv_holding_waiting) == 3
@@ -212,13 +252,21 @@ def test_sync_load_failure(
         use_eos=True,
     )
 
-    scheduler.update_from_output(scheduler_output, model_runner_output)
+    engine_core_outputs = scheduler.update_from_output(
+        scheduler_output, model_runner_output
+    )
 
     assert len(scheduler.running) == 1
     assert scheduler.running[0].request_id == request2.request_id
     assert scheduler.running[0].num_computed_tokens == (
         min(invalid_block_idxs) * scheduler.block_size
     )
+    assert _kv_load_failed_tokens(engine_core_outputs) == (
+        num_external_computed_tokens - min(invalid_block_idxs) * scheduler.block_size
+    )
+    # The count is reported once.
+    stats = scheduler.make_stats()
+    assert stats is not None and stats.num_kv_load_failed_tokens == 0
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 3
     assert scheduler.connector.request_finished.call_count == 2
 
@@ -289,7 +337,14 @@ def test_sync_load_failure_with_shared_blocks(
         [request1, request2], invalid_block_ids=invalid_block_ids, use_eos=True
     )
 
-    scheduler.update_from_output(scheduler_output, model_runner_output)
+    engine_core_outputs = scheduler.update_from_output(
+        scheduler_output, model_runner_output
+    )
+    assert _kv_load_failed_tokens(engine_core_outputs) == (
+        num_external_computed_tokens
+        - min(invalid_block_idxs) * scheduler.block_size
+        + scheduler_output.num_scheduled_tokens[request2.request_id]
+    )
 
     # req_id -> num_computed_tokens
     # all the common prefix blocks will be computed by request1
@@ -362,7 +417,13 @@ def test_async_progressive_load_failure(
             use_eos=True,
         )
 
-        scheduler.update_from_output(scheduler_output, model_runner_output)
+        prev_computed_tokens = request.num_computed_tokens
+        engine_core_outputs = scheduler.update_from_output(
+            scheduler_output, model_runner_output
+        )
+        assert _kv_load_failed_tokens(engine_core_outputs) == (
+            prev_computed_tokens - request.num_computed_tokens
+        )
 
         min_invalid_block_idx = min(min_invalid_block_idx, invalid_block_idx)
 

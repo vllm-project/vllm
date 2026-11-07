@@ -243,6 +243,9 @@ class SchedulerStats:
 
     kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(default_factory=list)
 
+    # Computed tokens rolled back or failed because their KV load failed.
+    num_kv_load_failed_tokens: int = 0
+
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
     ec_connector_stats: dict[str, Any] | None = None
