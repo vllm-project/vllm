@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import pytest
 import torch
 
@@ -8,6 +7,7 @@ from tests.v1.attention.test_attention_backends import BATCH_SPECS
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
+    split_decodes_prefills_and_extends,
 )
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
@@ -310,6 +310,51 @@ def test_split_decodes_and_prefills_uniform_padded_batch_all_same():
     assert num_prefills == 0
     assert num_decode_tokens == padded_num_tokens
     assert num_prefill_tokens == 0
+
+
+def _split_three_way(seq_lens, query_lens, decode_threshold, max_query_len=None):
+    common_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    if max_query_len is not None:
+        common_metadata.max_query_len = max_query_len
+    return split_decodes_prefills_and_extends(common_metadata, decode_threshold)
+
+
+# expected is (num_decodes, num_extends, num_prefills,
+#              num_decode_tokens, num_extend_tokens, num_prefill_tokens)
+@pytest.mark.parametrize(
+    "seq_lens,query_lens,decode_threshold,max_query_len,expected",
+    [
+        # A context-free prompt may sort first; rows with context must still extend.
+        pytest.param(
+            [24, 96],
+            [24, 40],
+            1,
+            None,
+            (0, 2, 0, 0, 64, 0),
+            id="fresh_prompt_sorts_before_extend",
+        ),
+        # Draft tokens inflate max_query_len while every row is still a decode.
+        pytest.param(
+            [100, 200, 300],
+            [4, 4, 2],
+            4,
+            64,
+            (3, 0, 0, 10, 0, 0),
+            id="all_decode_with_draft_tokens",
+        ),
+    ],
+)
+def test_split_decodes_prefills_and_extends(
+    seq_lens, query_lens, decode_threshold, max_query_len, expected
+):
+    assert (
+        _split_three_way(seq_lens, query_lens, decode_threshold, max_query_len)
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
