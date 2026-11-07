@@ -18,6 +18,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backends.flex_attention import (
     BlockSparsityHint,
     FlexAttentionMetadataBuilder,
+    create_block_mask_compiled,
     physical_to_logical_mapping,
 )
 
@@ -62,6 +63,36 @@ def test_flex_attention_explicit_block_sizes_override_encoder_defaults():
         uses_paged_kv=False,
     )
     assert block_sizes == (64, 32)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or TORCH_VERSION < MINIMUM_TORCH_VERSION,
+    reason="CUDA not available or PyTorch version < 2.7",
+)
+@torch.inference_mode()
+def test_compiled_block_masks_survive_subsequent_builds():
+    """Retained masks must keep their contents when another mask is built."""
+    from torch.nn.attention.flex_attention import create_block_mask
+
+    cutoff = torch.tensor(128, device="cuda")
+
+    def mask_mod(b, h, q_idx, kv_idx):
+        return kv_idx < cutoff
+
+    masks = []
+    references = []
+    for length in (128, 256, 128, 256):
+        cutoff.fill_(length)
+        masks.append(
+            create_block_mask_compiled(mask_mod, None, None, 256, 256, device="cuda")
+        )
+        references.append(
+            create_block_mask(mask_mod, None, None, 256, 256, device="cuda")
+        )
+        for mask, reference in zip(masks, references):
+            for actual, expected in zip(mask.as_tuple(), reference.as_tuple()):
+                if isinstance(expected, torch.Tensor):
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(
@@ -243,19 +274,30 @@ def test_flex_attention_vs_default_backend(vllm_runner):
     not torch.cuda.is_available() or TORCH_VERSION < MINIMUM_TORCH_VERSION,
     reason="CUDA not available or PyTorch version < 2.7",
 )
-def test_encoder_flex_attention_vs_default_backend(vllm_runner):
+@pytest.mark.parametrize("enforce_eager", [True, False])
+@pytest.mark.parametrize(
+    "model_name", ["BAAI/bge-base-en-v1.5", "google/embeddinggemma-2"]
+)
+def test_encoder_flex_attention_vs_default_backend(
+    vllm_runner, enforce_eager, model_name
+):
     """Test that FlexAttention produces the same outputs as the default backend.
 
     This test compares the outputs from the FlexAttention backend with
     the default backend for encoder models.
     """
-    model_name = "BAAI/bge-base-en-v1.5"
+    is_embedding_gemma2 = model_name == "google/embeddinggemma-2"
+    model_kwargs = (
+        {"limit_mm_per_prompt": {"image": 0, "audio": 0, "video": 0}}
+        if is_embedding_gemma2
+        else {}
+    )
     # Exercise packed sequence boundaries inside 128-token FlexAttention
     # blocks, including sequences that span more than one block.
     prompts = [
         "hello " * 120,
         "world " * 130,
-        "attention " * 254,
+        "attention " * (600 if is_embedding_gemma2 else 254),
     ]
 
     # Run with flex attention
@@ -264,11 +306,13 @@ def test_encoder_flex_attention_vs_default_backend(vllm_runner):
         runner="pooling",
         dtype=torch.bfloat16,
         tensor_parallel_size=1,
-        max_model_len=384,
-        enforce_eager=True,
+        max_model_len=1024 if is_embedding_gemma2 else 384,
+        gpu_memory_utilization=0.7,
+        **model_kwargs,
+        enforce_eager=enforce_eager,
         attention_config={"backend": "FLEX_ATTENTION"},
     ) as llm_flex:
-        flex_outputs = llm_flex.embed(prompts)
+        flex_outputs = [llm_flex.embed(prompts) for _ in range(3)]
 
     # Run with default backend
     with vllm_runner(
@@ -276,18 +320,21 @@ def test_encoder_flex_attention_vs_default_backend(vllm_runner):
         runner="pooling",
         dtype=torch.bfloat16,
         tensor_parallel_size=1,
-        max_model_len=384,
+        max_model_len=1024 if is_embedding_gemma2 else 384,
+        gpu_memory_utilization=0.7,
+        **model_kwargs,
         enforce_eager=True,
     ) as llm_default:
         default_outputs = llm_default.embed(prompts)
 
-    check_embeddings_close(
-        embeddings_0_lst=flex_outputs,
-        embeddings_1_lst=default_outputs,
-        name_0="flex",
-        name_1="default",
-        tol=1e-2,
-    )
+    for outputs in flex_outputs:
+        check_embeddings_close(
+            embeddings_0_lst=outputs,
+            embeddings_1_lst=default_outputs,
+            name_0="flex",
+            name_1="default",
+            tol=1e-2,
+        )
 
 
 @pytest.mark.skipif(
