@@ -14,7 +14,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 @pytest.fixture(scope="module")
-def server():
+def server(request):
     args = [
         "--max-model-len",
         "2048",
@@ -27,7 +27,9 @@ def server():
         "claude-3-7-sonnet-latest",
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(
+        MODEL_NAME, args, env_dict=getattr(request, "param", None)
+    ) as remote_server:
         yield remote_server
 
 
@@ -48,6 +50,132 @@ async def test_simple_messages(client: anthropic.AsyncAnthropic):
     assert resp.role == "assistant"
 
     print(f"Anthropic response: {resp.model_dump_json()}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api", ["messages", "responses"])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_repetition_detection_stops_repeating_output(server, api, stream):
+    """A constrained repetition stops early through either HTTP API."""
+    schema = {
+        "type": "object",
+        "properties": {"text": {"type": "string", "enum": ["a " * 128]}},
+        "required": ["text"],
+        "additionalProperties": False,
+    }
+    extra_body = {
+        "chat_template_kwargs": {"enable_thinking": False},
+        "repetition_detection": {"max_pattern_size": 4, "min_count": 4},
+        "temperature": 0,
+    }
+    if api == "messages":
+        async with server.get_async_client_anthropic() as client:
+            response = await client.messages.create(
+                model="claude-3-7-sonnet-latest",
+                messages=[{"role": "user", "content": "Fill the required JSON."}],
+                max_tokens=64,
+                output_config={"format": {"type": "json_schema", "schema": schema}},
+                extra_body=extra_body,
+                stream=stream,
+            )
+            if stream:
+                events = [event async for event in response]
+                assert events[-1].type == "message_stop"
+                deltas = [event for event in events if event.type == "message_delta"]
+                assert len(deltas) == 1
+                stop_reason = deltas[0].delta.stop_reason
+                stop_sequence = deltas[0].delta.stop_sequence
+                output_tokens = deltas[0].usage.output_tokens
+            else:
+                stop_reason = response.stop_reason
+                stop_sequence = response.stop_sequence
+                output_tokens = response.usage.output_tokens
+        assert stop_reason == "repetition"
+        assert stop_sequence is None
+    else:
+        async with server.get_async_client() as client:
+            response = await client.responses.create(
+                model="claude-3-7-sonnet-latest",
+                input="Fill the required JSON.",
+                max_output_tokens=64,
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": "repeated_text",
+                        "schema": schema,
+                        "strict": True,
+                    }
+                },
+                extra_body=extra_body,
+                stream=stream,
+            )
+            if stream:
+                events = [event async for event in response]
+                assert events[-1].type == "response.completed"
+                response = events[-1].response
+        assert response.status == "completed"
+        assert response.incomplete_details is None
+        output_tokens = response.usage.output_tokens
+
+    assert 0 < output_tokens < 64
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server", [{"VLLM_ENFORCE_STRICT_TOOL_CALLING": "0"}], indirect=True
+)
+@pytest.mark.parametrize("detect_repetition", [False, True])
+async def test_repetition_detection_truncates_tool_input(server, detect_repetition):
+    """Preserve truncated named tool arguments as text with a repetition stop."""
+    repeated_text = "a " * 128
+    extra_body = {
+        "chat_template_kwargs": {"enable_thinking": False},
+        "temperature": 0,
+    }
+    if detect_repetition:
+        extra_body["repetition_detection"] = {
+            "max_pattern_size": 4,
+            "min_count": 4,
+        }
+    async with server.get_async_client_anthropic() as client:
+        response = await client.messages.create(
+            model="claude-3-7-sonnet-latest",
+            messages=[{"role": "user", "content": "Call emit with the required text."}],
+            max_tokens=512,
+            tools=[
+                {
+                    "name": "emit",
+                    "description": "Return text",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string", "enum": [repeated_text]}
+                        },
+                        "required": ["text"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+            tool_choice={"type": "tool", "name": "emit"},
+            extra_body=extra_body,
+        )
+
+    assert response.stop_sequence is None
+    assert len(response.content) == 1
+    block = response.content[0]
+    if detect_repetition:
+        assert response.stop_reason == "repetition"
+        assert block.type == "text"
+        assert '"text"' in block.text
+        assert "a a a a" in block.text
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(block.text)
+        assert 0 < response.usage.output_tokens < 64
+    else:
+        assert response.stop_reason == "tool_use"
+        assert block.type == "tool_use"
+        assert block.name == "emit"
+        assert block.input == {"text": repeated_text}
 
 
 @pytest.mark.asyncio

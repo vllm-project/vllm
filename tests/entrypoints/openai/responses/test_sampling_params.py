@@ -15,7 +15,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseTextConfig,
 )
 from vllm.exceptions import VLLMValidationError
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.sampling_params import RepetitionDetectionParams, StructuredOutputsParams
 
 
 class TestResponsesRequestSamplingParams:
@@ -58,6 +58,7 @@ class TestResponsesRequestSamplingParams:
             model="test-model",
             input="test input",
             repetition_penalty=1.2,
+            repetition_detection={"max_pattern_size": 32, "min_count": 16},
             seed=42,
             stop=["END", "STOP"],
             stop_token_ids=[42, 43],
@@ -70,6 +71,9 @@ class TestResponsesRequestSamplingParams:
         sampling_params = request.to_sampling_params(default_max_tokens=1000)
 
         assert sampling_params.repetition_penalty == 1.2
+        assert sampling_params.repetition_detection == RepetitionDetectionParams(
+            max_pattern_size=32, min_count=16
+        )
         assert sampling_params.seed == 42
         assert sampling_params.stop == ["END", "STOP"]
         assert sampling_params.stop_token_ids == [42, 43]
