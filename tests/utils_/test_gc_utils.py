@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import weakref
 from array import array
 from dataclasses import dataclass
 from typing import Any
+
+import pytest
 
 from vllm.utils.gc_utils import (
     GCDebugConfig,
     _compute_detailed_type,
     _compute_top_gc_collected_objects,
+    freeze_gc_for_cudagraph_capture,
     gc_untrack,
     untracked_list,
 )
@@ -101,3 +105,22 @@ def test_untracked_list_stays_untracked():
 def test_gc_untrack_ignores_untracked_objects():
     ids = array("i", range(4))
     assert gc_untrack(ids) is ids and gc_untrack(None) is None
+
+
+class _CyclicProgram:
+    def __init__(self) -> None:
+        self.cycle = self
+
+
+def test_cudagraph_capture_keeps_b12x_programs_alive():
+    compile_plan = pytest.importorskip("b12x._lib.compile_plan")
+
+    with freeze_gc_for_cudagraph_capture():
+        program = _CyclicProgram()
+        # What a B12X program records when it is launched.
+        compile_plan.record_program(compile_plan.ProgramKey("cute", "test"), program)
+        program_ref = weakref.ref(program)
+        del program
+    gc.collect()
+
+    assert program_ref() is not None

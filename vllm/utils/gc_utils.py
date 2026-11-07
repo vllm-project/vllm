@@ -97,8 +97,11 @@ def freeze_gc_for_cudagraph_capture():
 
     A gc cycle during stream capture can invalidate the captured graph, e.g.
     a finalized Triton kernel unloads its module. Opt out with
-    VLLM_ENABLE_CUDAGRAPH_GC=1.
+    VLLM_ENABLE_CUDAGRAPH_GC=1. The B12X programs launched during capture stay
+    loaded regardless, since the graphs outlive the objects that own them.
     """
+    from vllm.utils.b12x import retain_b12x_programs_for_cudagraphs
+
     gc_was_enabled = gc.isenabled()
     gc.collect()
     should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
@@ -106,7 +109,8 @@ def freeze_gc_for_cudagraph_capture():
         gc.freeze()
         gc.disable()
     try:
-        yield
+        with retain_b12x_programs_for_cudagraphs():
+            yield
     finally:
         if should_freeze:
             try:

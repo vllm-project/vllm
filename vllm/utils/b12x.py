@@ -4,7 +4,8 @@
 
 import importlib
 import importlib.util
-from collections.abc import Callable, Hashable, Iterable
+from collections.abc import Callable, Hashable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, fields, is_dataclass
 from types import ModuleType
 from typing import Any
@@ -41,6 +42,8 @@ _B12X_SUBMODULES = {
         "b12x.gemm.blockscaled",
         # TODO: Remove once B12X exposes the scale-swizzle API publicly.
         "b12x._lib.intrinsics",
+        # TODO: Remove once B12X exposes program retention publicly.
+        "b12x._lib.compile_plan",
         "b12x.gemm.mxfp8_linear",
         "b12x.gemm.tensor_fp8_linear",
         "b12x.moe.fused_moe",
@@ -79,6 +82,27 @@ def get_b12x_fused_moe() -> ModuleType | None:
 
 def get_b12x_paged_attention() -> ModuleType | None:
     return _get_submodule("b12x.attention.paged")
+
+
+# Retention scopes of the B12X programs launched during CUDA graph capture.
+_CUDAGRAPH_PROGRAMS: list[object] = []
+
+
+@contextmanager
+def retain_b12x_programs_for_cudagraphs() -> Iterator[None]:
+    """Keep the B12X programs launched in this scope loaded for the process.
+
+    B12X holds compiled programs weakly and their CUDA libraries are unloaded
+    once a program is garbage collected, while captured CUDA graphs keep
+    launching the kernels.
+    """
+    compile_plan = _get_submodule("b12x._lib.compile_plan")
+    if compile_plan is None:
+        yield
+        return
+    with compile_plan.retain_compiled_programs() as retained:
+        yield
+    _CUDAGRAPH_PROGRAMS.append(retained)
 
 
 def b12x_warmup_token_counts(
