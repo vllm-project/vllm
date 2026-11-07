@@ -20,7 +20,11 @@ from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
+    CutlassFP8ScaledMMLinearKernel,
     MarlinFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.humming import (
     HummingFP8ScaledMMLinearKernel,
@@ -65,7 +69,7 @@ from vllm.model_executor.model_loader.reload.layerwise import (
     initialize_online_processing,
 )
 from vllm.model_executor.parameter import ModelWeightParameter
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.utils.math_utils import round_up
@@ -204,8 +208,13 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
         self.block_quant = False
         self.use_deep_gemm = False
         self.use_marlin = False
-        self.marlin_input_dtype = None
         self.weight_quant_key = kFp8StaticTensorSym
+
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        return self.requantization_source is None and isinstance(
+            getattr(self, "fp8_linear", None), CutlassFP8ScaledMMLinearKernel
+        )
 
     def create_weights(
         self,
@@ -240,6 +249,15 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    "Online FP8 backend cannot use pre-processed weights"
+                )
+            layer.input_scale = None
+            layer._already_called_process_weights_after_loading = True
+            return
+
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
@@ -256,8 +274,6 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
         layer.processed_weight_dims = (0, 1)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
-        if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
-            self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
         self.fp8_linear.process_weights_after_loading(layer)
         self.release_requantization_source_weights(layer)
 
@@ -309,6 +325,12 @@ class Fp8PerBlockOnlineLinearMethod(OnlineLinearBase):
             static=True, group_shape=GroupShape(*self.weight_block_size)
         )
 
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        return self.requantization_source is None and isinstance(
+            getattr(self, "fp8_linear", None), CutlassFp8BlockScaledMMKernel
+        )
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -342,6 +364,15 @@ class Fp8PerBlockOnlineLinearMethod(OnlineLinearBase):
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    "Online FP8 backend cannot use pre-processed weights"
+                )
+            layer.input_scale = None
+            layer._already_called_process_weights_after_loading = True
+            return
+
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
@@ -392,6 +423,12 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
     weight_quant_key = kFp8StaticChannelSym
     activation_quant_key = kFp8DynamicTokenSym
 
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        return self.requantization_source is None and isinstance(
+            getattr(self, "fp8_linear", None), CutlassFP8ScaledMMLinearKernel
+        )
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -435,6 +472,16 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
             )
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    "Online FP8 backend cannot use pre-processed weights"
+                )
+            layer.input_scale = None
+            expose_input_quant_key(layer, self.fp8_linear)
+            layer._already_called_process_weights_after_loading = True
+            return
+
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 

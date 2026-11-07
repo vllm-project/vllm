@@ -13,7 +13,7 @@ from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+from vllm.models.deepseek_v4.compressor import DeepseekV4CompressorKVScoreLinear
 from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
     fused_save_compress_norm,
     rope_quant_insert,
@@ -337,7 +337,7 @@ class DeepseekCompressor(nn.Module):
         wkv_wgate_sizes = (
             [self.head_dim, self.head_dim] if self.has_gate else [self.head_dim]
         )
-        self.fused_wkv_wgate = MergedColumnParallelLinear(
+        self.fused_wkv_wgate = DeepseekV4CompressorKVScoreLinear(
             self.hidden_size,
             wkv_wgate_sizes,
             bias=False,
