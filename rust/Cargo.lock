@@ -5917,6 +5917,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "asynk-strim-attr",
+ "axum",
  "easy-ext",
  "enum-as-inner",
  "expect-test",
