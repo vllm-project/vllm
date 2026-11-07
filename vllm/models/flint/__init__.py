@@ -2,18 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Flint model entry point."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .model import FlintForCausalLM
+    from .nvidia.model import FlintForCausalLM
 
 __all__ = ["FlintForCausalLM"]
 
 
-def __getattr__(name: str):
-    # Lazy so that resolving FlintConfig does not import CUDA kernels.
-    if name in __all__:
-        from . import model
+def __getattr__(name: str) -> Any:
+    if name not in __all__:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-        return getattr(model, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        from .amd.model import FlintForCausalLM
+    else:
+        from .nvidia.model import FlintForCausalLM
+
+    return FlintForCausalLM

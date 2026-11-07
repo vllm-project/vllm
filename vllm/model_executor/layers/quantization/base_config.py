@@ -36,6 +36,8 @@ class QuantizeMethodBase(ABC):
     in process_weights_after_loading, reducing peak memory during loading.
     """
 
+    is_requantization_source: bool = False
+
     supports_pre_processed_weights: bool = False
     """
     Whether ``process_weights_after_loading`` supports running under

@@ -2745,6 +2745,7 @@ class ModelOptLinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = sum(output_partition_sizes)
+        layer.orig_dtype = params_dtype
         shapes = Shapes(output_partition_sizes, input_size_per_partition, params_dtype)
 
         self.wkey.create_weights(layer, WEIGHT, self.ctx, shapes, weight_loader)
@@ -2753,6 +2754,11 @@ class ModelOptLinearMethod(LinearMethodBase):
         self.fmt.extra_weights(layer, shapes, self.ctx, weight_loader)
 
         rt = RuntimeDtypes(self.input_dtype, self.out_dtype)
+        if getattr(self, "is_requantization_source", False):
+            # This method only allocates serialized checkpoint parameters for
+            # one-time online conversion; no source inference kernel is needed.
+            self.kernel = None
+            return
         self.kernel = select_linear_kernel(
             self.spec,
             layer,
@@ -2806,15 +2812,53 @@ class ModelOptLinearMethod(LinearMethodBase):
         self.kernel.process_weights_after_loading(layer)
 
     def dequantize_weight(self, layer: torch.nn.Module) -> torch.Tensor:
-        """Reconstruct serialized weights for online requantization."""
+        """Reconstruct serialized weights for online requantization.
+
+        This is intentionally a layer-scoped transient. Online quantization
+        consumes the returned high-precision tensor immediately and replaces it
+        with the target resident format, so a full high-precision model is never
+        materialized.
+        """
         if self.wkey.key is kMxfp8Static:
             return dequant_mxfp8_to_bf16(
                 layer.weight.contiguous(), layer.weight_scale.contiguous()
             )
-        else:
-            raise NotImplementedError(
-                "ModelOpt weight dequantization is only supported for MXFP8."
+        if self.wkey.key is kNvfp4Static:
+            from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
+                dequantize_to_dtype,
             )
+
+            # Fused linears can carry one global decode scale per logical
+            # projection. Decode each output partition with its own scale rather
+            # than collapsing scales as the direct NVFP4 kernel path does.
+            weights = layer.weight.split(layer.logical_widths, dim=0)
+            scales = layer.weight_scale.split(layer.logical_widths, dim=0)
+            global_scales = layer.weight_scale_2.flatten()
+            if global_scales.numel() != len(weights):
+                raise ValueError(
+                    "NVFP4 requantization expected one global scale per logical "
+                    f"projection, got {global_scales.numel()} scales for "
+                    f"{len(weights)} projections."
+                )
+            return torch.cat(
+                [
+                    dequantize_to_dtype(
+                        weight.contiguous(),
+                        scale.contiguous(),
+                        global_scale.reshape(()),
+                        layer.orig_dtype,
+                        block_size=self.ctx.group_size or 16,
+                        swizzle=False,
+                    )
+                    for weight, scale, global_scale in zip(
+                        weights, scales, global_scales, strict=True
+                    )
+                ],
+                dim=0,
+            )
+        raise NotImplementedError(
+            "ModelOpt weight dequantization is supported only for MXFP8 and NVFP4."
+        )
 
     def apply(self, layer, x, bias=None):
         return self.fmt.apply(

@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.models.flint import gguf_nvfp4
-from vllm.models.flint.gguf_nvfp4 import (
+from vllm.models.flint.common import gguf_nvfp4
+from vllm.models.flint.common.gguf_nvfp4 import (
     _repack_nvfp4,
     dequantize_nvfp4,
     find_gguf_file,

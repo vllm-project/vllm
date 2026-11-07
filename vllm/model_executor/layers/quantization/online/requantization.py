@@ -67,6 +67,7 @@ class OnlineRequantizationMixin:
     def set_requantization_source(self, source_method: QuantizeMethodBase) -> None:
         """Configure serialized-weight conversion before online quantization."""
         self.requantization_source = source_method
+        source_method.is_requantization_source = True
         self.uses_meta_device = False
 
     def create_requantization_source_weights(

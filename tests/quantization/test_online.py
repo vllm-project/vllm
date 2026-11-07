@@ -690,6 +690,15 @@ def _write_minimal_llama_config(
             id="modelopt_mxfp8",
         ),
         pytest.param(
+            lambda: ModelOptNvFp4Config(
+                quant_method="W4A16_NVFP4",
+                is_checkpoint_nvfp4_serialized=True,
+                group_size=16,
+            ),
+            False,
+            id="modelopt_nvfp4",
+        ),
+        pytest.param(
             _moe_only_compressed_tensors_config,
             False,
             id="compressed_tensors",
@@ -745,7 +754,7 @@ def test_online_prequantized_compatibility(
     else:
         layer.quant_method.process_weights_after_loading(layer)
 
-    if isinstance(checkpoint_config, ModelOptMxFp8Config):
+    if isinstance(checkpoint_config, (ModelOptMxFp8Config, ModelOptNvFp4Config)):
         assert isinstance(layer.quant_method, Mxfp8OnlineLinearMethod)
         assert not layer.quant_method.uses_meta_device
         assert isinstance(
@@ -875,6 +884,43 @@ def _serialize_nvfp4_experts(
         torch.stack(block_scales),
         torch.stack(reconstructed_weights),
     )
+
+
+def test_modelopt_nvfp4_merged_linear_uses_per_projection_scales():
+    method = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
+    method.wkey = SimpleNamespace(key=kNvfp4Static)
+    method.ctx = SimpleNamespace(group_size=16)
+
+    weights = torch.tensor([[[0.5] * 16], [[1.0] * 16]], dtype=torch.bfloat16)
+    global_scales = torch.tensor([2.0, 8.0], dtype=torch.float32)
+    packed, block_scales, reference = _serialize_nvfp4_experts(weights, global_scales)
+    layer = SimpleNamespace(
+        weight=packed.reshape(2, -1),
+        weight_scale=block_scales.reshape(2, -1),
+        weight_scale_2=1.0 / global_scales,
+        logical_widths=[1, 1],
+        orig_dtype=torch.bfloat16,
+    )
+
+    actual = method.dequantize_weight(layer)
+
+    torch.testing.assert_close(actual, reference.reshape(2, -1), rtol=0, atol=0)
+
+
+def test_modelopt_nvfp4_merged_linear_rejects_scale_count_mismatch():
+    method = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
+    method.wkey = SimpleNamespace(key=kNvfp4Static)
+    method.ctx = SimpleNamespace(group_size=16)
+    layer = SimpleNamespace(
+        weight=torch.zeros((2, 8), dtype=torch.uint8),
+        weight_scale=torch.ones((2, 1), dtype=torch.float8_e4m3fn),
+        weight_scale_2=torch.ones(1),
+        logical_widths=[1, 1],
+        orig_dtype=torch.bfloat16,
+    )
+
+    with pytest.raises(ValueError, match="one global scale per logical projection"):
+        method.dequantize_weight(layer)
 
 
 def _make_nvfp4_moe_source(source_format: str, moe, monkeypatch):
