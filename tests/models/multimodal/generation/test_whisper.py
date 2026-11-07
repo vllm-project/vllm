@@ -44,6 +44,7 @@ def run_test(
     distributed_executor_backend: str | None = None,
     enforce_eager: bool = True,
     gpu_memory_utilization: float = 0.9,
+    compilation_config: dict[str, Any] | None = None,
 ) -> None:
     """Inference result should be the same between hf and vllm.
 
@@ -62,6 +63,7 @@ def run_test(
         enforce_eager=enforce_eager,
         gpu_memory_utilization=gpu_memory_utilization,
         disable_custom_all_reduce=True,
+        compilation_config=compilation_config,
     ) as vllm_model:
         vllm_outputs_per_case = [
             vllm_model.generate_greedy_logprobs(
@@ -381,6 +383,45 @@ def test_models(
         num_logprobs=num_logprobs,
         tensor_parallel_size=1,
         enforce_eager=enforce_eager,
+    )
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_models_compile_mm_encoder(
+    hf_runner,
+    vllm_runner,
+    model: str,
+    dtype: str,
+    num_logprobs: int,
+    input_audios,
+) -> None:
+    """HF parity with the encoder layer stack compiled (`compile_mm_encoder`).
+
+    The extra two-audio case runs the compiled encoder with a different batch
+    size than the single-audio cases.
+    """
+    check_model_available(model)
+    batched_case = (
+        [p for vllm_prompts, _, _ in input_audios for p in vllm_prompts],
+        [p for _, hf_prompts, _ in input_audios for p in hf_prompts],
+        [a for _, _, audios in input_audios for a in audios],
+    )
+    run_test(
+        hf_runner,
+        vllm_runner,
+        [*input_audios, batched_case],
+        model,
+        dtype=dtype,
+        max_model_len=448,
+        max_tokens=200,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=1,
+        enforce_eager=False,
+        compilation_config={"compile_mm_encoder": True},
     )
 
 
