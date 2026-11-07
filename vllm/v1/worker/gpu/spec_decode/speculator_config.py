@@ -186,9 +186,14 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
             return
 
         target = spec.target_model_config
-        # Callable target hf_overrides also apply to the draft; dict ones don't.
+        # Callable target hf_overrides also apply to the draft; dict ones only
+        # when the draft shares the target's config source (e.g. an MTP head
+        # inside the target checkpoint). An independent draft loaded from its
+        # own checkpoint keeps its trained context limit and rope settings.
         draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
-            target.hf_overrides, cls.transformers_backend_hf_overrides(spec)
+            target.hf_overrides,
+            cls.transformers_backend_hf_overrides(spec),
+            apply_dict_overrides=SpeculativeConfig._draft_shares_target_config(spec),
         )
         spec.draft_model_config = ModelConfig(
             model=spec.model,
