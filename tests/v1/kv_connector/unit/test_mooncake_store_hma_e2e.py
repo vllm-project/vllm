@@ -469,8 +469,8 @@ def _span_mask(spans, nbytes: int) -> torch.Tensor:
 def test_store_values_round_trip_every_layout(request, model, layout):
     """Through the planner's real layout, each group's value for a block holds
     every byte of its layers' views of that block, reads and writes only that
-    block, and restores it exactly. Without padding the value is the group's
-    whole block, as before; with Mamba padding it is exactly the states."""
+    block, and restores it exactly. Values contain exactly the group's tensor
+    bytes, even when block strides span other layers or padding."""
     if (
         current_platform.is_rocm()
         and model == "mla"
@@ -539,13 +539,9 @@ def test_store_values_round_trip_every_layout(request, model, layout):
         assert not (owned & ~value).any(), "value misses bytes of the group"
         # Each piece ends at the last byte the group uses in it.
         assert all(owned[a - base + n - 1] for a, n in zip(addrs, sizes))
-        if len(groups) == 1 and layout != KVCacheLayout.BHLNC:
-            # A single group stores whole blocks, as before. (A BHLNC head's
-            # block stride spans every head, so only the head's block is.)
-            assert store_layout.block_len == store_layout.block_stride
-        if not layout.is_block_outermost:
-            # Exactly the group's bytes: no padding, no other group's slots.
-            assert torch.equal(value, owned) and sum(sizes) == owned.sum()
+        # Separate strides and lengths must exclude padding and other groups
+        # for block-outermost layouts too, without duplicating any owned bytes.
+        assert torch.equal(value, owned) and sum(sizes) == owned.sum()
 
         # Clobber everything but the other blocks, then load the saved value.
         saved = [ctypes.string_at(a, n) for a, n in zip(addrs, sizes)]

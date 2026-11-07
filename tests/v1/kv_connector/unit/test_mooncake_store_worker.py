@@ -4444,7 +4444,7 @@ def _make_bare_worker(
     spec = FullAttentionSpec(
         block_size=block_size, num_kv_heads=8, head_size=64, dtype=None
     )
-    group = KVCacheGroupSpec(["layer0", "__cross_layer__"], spec)
+    group = KVCacheGroupSpec(["layer0"], spec)
     worker._kv_cache_config = KVCacheConfig(
         num_blocks=num_gpu_blocks,
         kv_cache_tensors=[
@@ -5516,7 +5516,7 @@ def test_putting_consumer_queues_decode_save():
     meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), set())
     meta.add_request(req)
 
-    with patch.object(torch.cuda, "Event") as event_cls:
+    with patch.object(torch, "Event") as event_cls:
         event = event_cls.return_value
         w.wait_for_save(meta)
 
@@ -5530,6 +5530,7 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
     num_blocks = 10
     num_layers = 2
     worker = _make_bare_worker(num_gpu_blocks=num_blocks)
+    worker._kv_cache_groups[0].layer_names.append("__cross_layer__")
     spec = FullAttentionSpec(
         block_size=16,
         num_kv_heads=2,
@@ -5556,6 +5557,9 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
             for cache in caches
             for head_idx in range(cache.shape[1])
         ]
+        assert db.store_layout.block_len == [
+            head_cache[0].numel() * head_cache.element_size()
+        ] * (num_layers * caches[0].shape[1])
         assert db.store_layout.block_stride == [
             head_cache.stride(0) * head_cache.element_size()
         ] * (num_layers * caches[0].shape[1])
@@ -5563,9 +5567,13 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
         assert db.store_layout.kv_caches_base_addr == [
             cache.data_ptr() for cache in caches
         ]
-        assert db.store_layout.block_stride == [spec.page_size_bytes] * num_layers
+        assert db.store_layout.block_len == [spec.page_size_bytes] * num_layers
+        assert db.store_layout.block_stride == [
+            cache.stride(0) * cache.element_size() for cache in caches
+        ]
     else:
         assert db.store_layout.kv_caches_base_addr == [raw.data_ptr()]
+        assert db.store_layout.block_len == [num_layers * spec.page_size_bytes]
         assert db.store_layout.block_stride == [num_layers * spec.page_size_bytes]
     worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
 
@@ -5772,6 +5780,7 @@ def _registered_worker(kind: str = "dense"):
     and host regions it registered."""
     worker = _make_bare_worker(num_gpu_blocks=2)
     if kind == "dense":  # two device regions
+        worker._kv_cache_groups[0].layer_names.append("__cross_layer__")
         worker.token_dbs[0].store_layout = MagicMock()
         caches = {n: torch.zeros(2, 4) for n in ("layer0", "__cross_layer__")}
     else:  # one host region and one device region
@@ -5884,12 +5893,31 @@ def test_config_defaults_to_embedded():
     assert cfg.tenant_id == mooncake_store.DEFAULT_TENANT_ID
 
 
-def test_config_pr40900_unchanged(tmp_path):
-    """A literal PR-40900 config (no mode, no enable_offload, no preferred_segment)
-    parses without raising and resolves to embedded mode."""
+@pytest.mark.parametrize(
+    "master_env,segment_env,mode,expected_size",
+    [
+        (None, None, "embedded", 4 * 1024**3),
+        ("10.0.0.8:50051", "53687091200", "embedded", 50 * 1024**3),
+        (None, "50GB", "embedded", 50 * 1024**3),
+        (None, "0", "standalone-store", 0),
+    ],
+)
+def test_config_from_file_environment_precedence(
+    tmp_path, monkeypatch, master_env, segment_env, mode, expected_size
+):
+    """Environment overrides JSON; absent overrides preserve file values."""
+    for name, value in (
+        ("MOONCAKE_MASTER", master_env),
+        ("MOONCAKE_GLOBAL_SEGMENT_SIZE", segment_env),
+    ):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
     config_path = _write_mooncake_config(
         tmp_path,
         {
+            "mode": mode,
             "metadata_server": "http://metadata/endpoint",
             "global_segment_size": "4GB",
             "local_buffer_size": "4GB",
@@ -5899,11 +5927,25 @@ def test_config_pr40900_unchanged(tmp_path):
         },
     )
     cfg = worker.MooncakeStoreConfig.from_file(config_path)
-    assert cfg.mode == "embedded"
-    assert cfg.global_segment_size == 4 * 1024**3
+    assert cfg.mode == mode
+    assert cfg.master_server_address == (master_env or "10.0.0.7:50051")
+    assert cfg.global_segment_size == expected_size
     assert cfg.local_buffer_size == 4 * 1024**3
     assert cfg.enable_offload is False
     assert cfg.tenant_id == mooncake_store.DEFAULT_TENANT_ID
+
+
+@pytest.mark.parametrize("segment_env", ["invalid", "0"])
+def test_config_rejects_invalid_environment_segment_size(
+    tmp_path, monkeypatch, segment_env
+):
+    """Invalid overrides must not fall back to the valid embedded JSON size."""
+    config_path = _write_mooncake_config(
+        tmp_path, {"mode": "embedded", "global_segment_size": "4GB"}
+    )
+    monkeypatch.setenv("MOONCAKE_GLOBAL_SEGMENT_SIZE", segment_env)
+    with pytest.raises(ValueError):
+        worker.MooncakeStoreConfig.from_file(config_path)
 
 
 def test_config_from_file_normalizes_tenant_id(tmp_path):
@@ -5979,6 +6021,46 @@ def test_config_unknown_mode():
 def test_config_zero_local_buffer():
     with pytest.raises(ValueError, match=r"local_buffer_size must be > 0"):
         _make_config(local_buffer_size=0)
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+def test_component_registration_uses_all_views_in_their_cache_group(container):
+    w = _make_bare_worker(num_gpu_blocks=4)
+    w.cache_config.num_gpu_blocks = None
+    spec = w._kv_cache_groups[0].kv_cache_spec
+    w._kv_cache_groups.append(KVCacheGroupSpec(["indexer"], spec))
+    w.token_dbs.append(
+        ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0, group_id=1), 16)
+    )
+    raw = torch.zeros(4, 32, dtype=torch.uint8)
+    _register_with_mocked_threads(
+        w,
+        {
+            "layer0": container((raw[:, :8], raw[:, 8:16])),
+            "indexer": raw[:, 16:],
+        },
+    )
+    assert w.num_blocks == 4
+    assert w.token_dbs[0].store_layout.prepare_values([(0, 16)], [3], [0]) == (
+        [[raw[3].data_ptr()]],
+        [[16]],
+        [3],
+    )
+    assert w.token_dbs[1].store_layout.prepare_values([(0, 16)], [3], [0]) == (
+        [[raw[3].data_ptr() + 16]],
+        [[16]],
+        [3],
+    )
+    w.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
+
+
+def test_registration_buffer_failure_stops_startup():
+    w = _make_bare_worker(num_gpu_blocks=4)
+    w.store.register_buffer.return_value = -1
+    with pytest.raises(RuntimeError, match="register_buffer failed"):
+        _register_with_mocked_threads(w, {"layer0": torch.zeros(4, 32)})
+    assert w.kv_send_thread is None
+    assert w.kv_recv_threads == []
 
 
 # ---------------------------------------------------------------------------

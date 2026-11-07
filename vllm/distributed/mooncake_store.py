@@ -62,18 +62,23 @@ class MooncakeStoreConfig:
         if self.mode == "standalone-store" and self.global_segment_size != 0:
             raise ValueError("standalone-store mode requires global_segment_size == 0")
 
-    @staticmethod
-    def from_file(file_path: str) -> "MooncakeStoreConfig":
+    @classmethod
+    def from_file(cls, file_path: str) -> "MooncakeStoreConfig":
         with open(file_path) as file:
             config = json.load(file)
-        return MooncakeStoreConfig(
+        return cls(
             metadata_server=config.get("metadata_server", ""),
-            master_server_address=config.get("master_server_address", ""),
+            master_server_address=os.getenv(
+                "MOONCAKE_MASTER", config.get("master_server_address", "")
+            ),
             protocol=config.get("protocol", "rdma"),
             device_name=config.get("device_name", ""),
             mode=config.get("mode", "embedded"),
             global_segment_size=_parse_size(
-                config.get("global_segment_size", DEFAULT_GLOBAL_SEGMENT_SIZE)
+                os.getenv(
+                    "MOONCAKE_GLOBAL_SEGMENT_SIZE",
+                    config.get("global_segment_size", DEFAULT_GLOBAL_SEGMENT_SIZE),
+                )
             ),
             local_buffer_size=_parse_size(
                 config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)
@@ -83,14 +88,14 @@ class MooncakeStoreConfig:
             device_name_per_gpu=config.get("device_name_per_gpu"),
         )
 
-    @staticmethod
-    def load_from_config() -> "MooncakeStoreConfig":
+    @classmethod
+    def load_from_config(cls) -> "MooncakeStoreConfig":
         config_path = os.getenv("MOONCAKE_CONFIG_PATH")
         if not config_path:
             raise ValueError(
                 "The environment variable 'MOONCAKE_CONFIG_PATH' is not set."
             )
-        return MooncakeStoreConfig.from_file(config_path)
+        return cls.from_file(config_path)
 
 
 def _normalize_tenant_id(value: Any) -> str:
