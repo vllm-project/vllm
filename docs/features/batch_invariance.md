@@ -14,6 +14,7 @@ Batch invariance is crucial for several use cases:
 - **Model debugging**: Helps identify issues in model implementations by ensuring consistent behavior across different batch configurations.
 - **Reinforcement Learning (RL)**: RL training often requires deterministic rollouts for reproducibility and stable training.
 - **Large-scale inference systems**: Systems that use vLLM as a component benefit from deterministic behavior for testing, validation, and consistency guarantees.
+- **Prefix caching**: outside of batch invariance, a prefix-cache hit and a cold prefill are not guaranteed to produce bitwise-identical outputs (see [Automatic Prefix Caching § Determinism](automatic_prefix_caching.md#determinism)). Enabling batch invariance also makes outputs consistent across cache states.
 
 ## Hardware Requirements
 
