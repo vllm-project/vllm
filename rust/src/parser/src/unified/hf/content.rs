@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use regex_automata::meta::Regex;
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use thiserror_ext::AsReport as _;
@@ -368,21 +368,7 @@ fn quote_bare_keys(text: &str) -> String {
     static BARE_KEY: std::sync::LazyLock<Regex> =
         std::sync::LazyLock::new(|| Regex::new(r"([{,])(\w+):").expect("valid regex"));
 
-    let mut out = String::with_capacity(text.len());
-    let mut last = 0;
-    for captures in BARE_KEY.captures_iter(text) {
-        let whole = captures.get_match().expect("match");
-        let separator = captures.get_group(1).expect("group 1");
-        let key = captures.get_group(2).expect("group 2");
-        out.push_str(&text[last..whole.start()]);
-        out.push_str(&text[separator.range()]);
-        out.push('"');
-        out.push_str(&text[key.range()]);
-        out.push_str("\":");
-        last = whole.end();
-    }
-    out.push_str(&text[last..]);
-    out
+    BARE_KEY.replace_all(text, r#"$1"$2":"#).into_owned()
 }
 
 fn default_strip() -> bool {
