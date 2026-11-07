@@ -167,6 +167,8 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def on_new_request(self, request: "Request") -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.on_new_request(request)
+        if self._kv_cache_manager is not None:
+            self.connector_scheduler.prefetch_lookup(request, self._kv_cache_manager)
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int

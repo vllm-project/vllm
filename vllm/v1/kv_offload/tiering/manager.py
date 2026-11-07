@@ -275,6 +275,20 @@ class TieringOffloadingManager(OffloadingManager):
       - job_id_counter: monotonically increasing counter for job IDs
     """
 
+    @override
+    def prefetch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
+        """Probe eligible secondary tiers for primary-tier misses."""
+        candidates = [
+            key
+            for key in keys
+            if self.primary_tier.lookup(key, req_context) is LookupResult.MISS
+        ]
+        if not candidates:
+            return
+        for tier in self.secondary_tiers:
+            if req_context.load_tier_filter.allows(tier.medium, tier.locality):
+                tier.prefetch(candidates, req_context)
+
     def __init__(
         self,
         primary_tier: CPUPrimaryTierOffloadingManager,

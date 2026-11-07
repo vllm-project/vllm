@@ -233,6 +233,10 @@ class SecondaryTierManager(ABC):
         """
         pass
 
+    def prefetch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
+        """Start metadata probes without reserving primary slots."""
+        return
+
     @abstractmethod
     def submit_store(self, job_metadata: TransferJob) -> None:
         """Submit an async job to store chunks from the primary tier to this
