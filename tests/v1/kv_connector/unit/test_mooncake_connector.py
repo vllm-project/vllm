@@ -10,12 +10,12 @@ import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import msgspec
 import numpy as np
 import pytest
 import torch
 import zmq.asyncio
+from huggingface_hub.utils import httpx
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import envs
@@ -40,6 +40,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     TransferRegion,
     _align_transfer_regions,
     _block_ids_for_region,
+    _build_pending_block_slice,
     _coalesce_contiguous_transfer_regions,
     _compute_sender_transfer_plan,
     _contiguous_runs,
@@ -593,10 +594,13 @@ def test_basic_interface():
         assert block_id == block.block_id
 
 
-def test_prompt_less_than_block_size():
+@pytest.mark.parametrize("transfer_mode", ["request", "layerwise"])
+def test_prompt_less_than_block_size(transfer_mode):
     """Test that we can handle case where prompt is < block."""
     vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+        kv_connector_extra_config={"transfer_mode": transfer_mode},
     )
     scheduler = create_scheduler(vllm_config)
 
@@ -627,6 +631,8 @@ def test_prompt_less_than_block_size():
     assert kv_connector_metadata is not None
     assert isinstance(kv_connector_metadata, MooncakeConnectorMetadata)
     assert len(kv_connector_metadata.reqs_to_recv["my-engine-id"]) == 1
+    pull_meta = kv_connector_metadata.reqs_to_recv["my-engine-id"][request.request_id]
+    assert pull_meta.num_external_tokens == NUM_TOKENS
     assert len(scheduler_output.scheduled_new_reqs) == 0
 
 
@@ -1167,7 +1173,7 @@ def patch_worker_dependencies():
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.make_zmq_socket"
         ) as mock_make_zmq,
-        patch("httpx.AsyncClient") as mock_async_client,
+        patch.object(mooncake_connector.httpx, "AsyncClient") as mock_async_client,
     ):
         # Mock PP group
         mock_pp_group = MagicMock()
@@ -2014,10 +2020,19 @@ def test_decode_renews_lease_until_pull_settles(settled_by):
 
 
 @pytest.mark.asyncio
-async def test_decode_heartbeat_reaches_every_paired_prefill_worker():
+@pytest.mark.parametrize(
+    ("mode", "role"),
+    [
+        ("request", "kv_consumer"),
+        ("request", "kv_both"),
+        ("layerwise", "kv_consumer"),
+    ],
+)
+async def test_decode_heartbeat_reaches_every_paired_prefill_worker(mode, role):
     """A renewal for a request still queued on D queries P's bootstrap first."""
     vllm_config = _make_worker_vllm_config(
-        "kv_consumer", kv_connector_extra_config={"kv_lease_duration": 30}
+        role,
+        kv_connector_extra_config={"kv_lease_duration": 30, "transfer_mode": mode},
     )
     # P TP=2 serves this D TP=1 worker from both of its ranks.
     workers = {
@@ -2830,6 +2845,113 @@ def test_prepare_transfer_regions_reuses_success_and_error():
     assert worker._prepared_transfer_regions == {}
     worker._prepare_transfer_regions(meta)
     assert calls == 6
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("token_end", "destination", "expected_source", "expected_end"),
+    [
+        (79, (100,), (14,), 80),
+        (80, (100,), (14,), 80),
+        (81, (100, 101), (14, 15), 96),
+        (159, (100, 101, 102, 103, 104, 105), (14, 15, 16, 17, 18, 19), 160),
+    ],
+)
+def test_layerwise_explicit_start_preserves_final_tail(
+    token_end, destination, expected_source, expected_end
+):
+    mapping = _build_pending_block_slice(
+        tuple(range(10, 20)),
+        destination,
+        token_start=64,
+        token_end=token_end,
+        available=token_end,
+        sent=None,
+        block_size=16,
+        final=True,
+    )
+    assert mapping is not None
+    assert mapping.source == expected_source
+    assert mapping.destination == destination
+    assert mapping.end_tokens == expected_end
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("token_start", [None, 64])
+def test_layerwise_suffix_progress_waits_for_complete_blocks(token_start):
+    kwargs = dict(
+        source=tuple(range(10, 20)),
+        destination=(100, 101, 102, 103, 104, 105),
+        token_start=token_start,
+        token_end=159,
+        block_size=16,
+        final=False,
+    )
+    assert _build_pending_block_slice(**kwargs, available=79, sent=None) is None
+    first = _build_pending_block_slice(**kwargs, available=80, sent=None)
+    assert first is not None
+    assert first.source == (14,)
+    assert first.destination == (100,)
+    second = _build_pending_block_slice(**kwargs, available=100, sent=first.end_tokens)
+    assert second is not None
+    assert second.source == (15,)
+    assert second.destination == (101,)
+    assert second.end_tokens == 96
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("token_start", "error"),
+    [
+        (-16, "outside the P handoff range"),
+        (176, "outside the P handoff range"),
+        (65, "must align"),
+        (48, "disagrees with destination blocks"),
+        (80, "disagrees with destination blocks"),
+    ],
+)
+def test_layerwise_rejects_inconsistent_destination_start(token_start, error):
+    # A different start must fail even before any new source block is ready.
+    with pytest.raises(ValueError, match=error):
+        _build_pending_block_slice(
+            tuple(range(10, 20)),
+            (100, 101, 102, 103, 104, 105),
+            token_start=token_start,
+            token_end=159,
+            available=0,
+            sent=None,
+            block_size=16,
+            final=False,
+        )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("include_layout", [False, True])
+def test_external_token_counts_survive_wire_roundtrip(include_layout):
+    """Token ranges remain request-specific even when D omits cached layouts."""
+    meta = MooncakeXferMetadata(
+        remote_hostname="decoder",
+        remote_port=9,
+        remote_tp_size=1,
+        remote_tp_rank=0,
+        req_blocks={"load": ("t1", [[1, 2]]), "release": ("t2", [])},
+        kv_caches_base_addr=[4096] if include_layout else [],
+        block_lens=[1024] if include_layout else [],
+        kv_block_lens=[1024] if include_layout else [],
+        req_num_external_tokens={"load": 95, "release": 0},
+    )
+    payload = msgspec.msgpack.encode(meta)
+    decoded = msgspec.msgpack.decode(payload, type=MooncakeXferMetadata)
+    assert decoded.req_num_external_tokens == {"load": 95, "release": 0}
+    assert decoded.req_blocks == meta.req_blocks
+
+    # A peer that omits the new field leaves its counts unknown, not zero.
+    legacy_payload = msgspec.msgpack.decode(payload)
+    del legacy_payload["req_num_external_tokens"]
+    legacy = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(legacy_payload), type=MooncakeXferMetadata
+    )
+    assert legacy.req_num_external_tokens == {}
 
 
 def _short_xfer_meta(worker, layout_id: int, req_blocks: dict) -> MooncakeXferMetadata:
