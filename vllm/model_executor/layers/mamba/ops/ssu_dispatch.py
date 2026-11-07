@@ -25,221 +25,6 @@ logger = init_logger(__name__)
 
 
 @triton.jit(
-    do_not_specialize=["n_slots", "state_batch_indices_stride"],
-    do_not_specialize_on_alignment=["state_batch_indices"],
-)
-def _update_replayssm_ring_trackers_kernel(
-    ring_start,
-    prev_num_accepted,
-    prev_query_len,
-    state_batch_indices,
-    state_batch_indices_stride,
-    n_slots,
-    num_states,
-    logical_window: tl.constexpr,
-    ring_buffer_len: tl.constexpr,
-    pad_slot_id: tl.constexpr,
-    RESET: tl.constexpr,
-    BLOCK: tl.constexpr,
-) -> None:
-    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    mask = offsets < n_slots
-    slots = tl.load(
-        state_batch_indices + offsets * state_batch_indices_stride,
-        mask=mask,
-        other=pad_slot_id,
-    )
-    valid = mask & (slots != pad_slot_id) & (slots >= 0) & (slots < num_states)
-    if RESET:
-        tl.store(ring_start + slots, 0, mask=valid)
-        tl.store(prev_num_accepted + slots, 0, mask=valid)
-        # MTP alone reads prev_query_len. Standard decode deliberately leaves
-        # it unchanged; reset clears the pending MTP window after prefill.
-        tl.store(prev_query_len + slots, 0, mask=valid)
-    else:
-        prev = tl.load(prev_num_accepted + slots, mask=valid, other=0)
-        start = tl.load(ring_start + slots, mask=valid, other=0)
-        must_checkpoint = prev + 1 > logical_window
-        next_start = tl.where(
-            must_checkpoint,
-            (start + prev) % ring_buffer_len,
-            start,
-        )
-        next_prev = tl.where(must_checkpoint, 1, prev + 1)
-        tl.store(ring_start + slots, next_start, mask=valid)
-        tl.store(prev_num_accepted + slots, next_prev, mask=valid)
-
-
-@triton.jit(
-    do_not_specialize=["n_slots", "state_batch_indices_stride"],
-    do_not_specialize_on_alignment=["state_batch_indices"],
-)
-def _commit_replayssm_ring_trackers_kernel(
-    ring_start,
-    prev_num_accepted,
-    prev_query_len,
-    state_batch_indices,
-    num_accepted_tokens,
-    query_start_loc,
-    state_batch_indices_stride,
-    n_slots,
-    num_states,
-    logical_window: tl.constexpr,
-    ring_buffer_len: tl.constexpr,
-    pad_slot_id: tl.constexpr,
-    BLOCK: tl.constexpr,
-) -> None:
-    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    mask = offsets < n_slots
-    slots = tl.load(
-        state_batch_indices + offsets * state_batch_indices_stride,
-        mask=mask,
-        other=pad_slot_id,
-    )
-    valid = mask & (slots != pad_slot_id) & (slots >= 0) & (slots < num_states)
-    accepted_since_checkpoint = tl.load(prev_num_accepted + slots, mask=valid, other=0)
-    current_ring_start = tl.load(ring_start + slots, mask=valid, other=0)
-    previous_speculative_query_len = tl.load(
-        prev_query_len + slots, mask=valid, other=0
-    )
-    accepted_from_previous_query = tl.load(
-        num_accepted_tokens + offsets, mask=mask, other=0
-    )
-    must_checkpoint = (previous_speculative_query_len > 0) & (
-        accepted_since_checkpoint + previous_speculative_query_len > logical_window
-    )
-    next_start = tl.where(
-        must_checkpoint,
-        (current_ring_start + accepted_since_checkpoint) % ring_buffer_len,
-        current_ring_start,
-    )
-    next_prev = tl.where(
-        previous_speculative_query_len == 0,
-        0,
-        tl.where(
-            must_checkpoint,
-            accepted_from_previous_query,
-            accepted_since_checkpoint + accepted_from_previous_query,
-        ),
-    )
-    current_speculative_query_len = tl.load(
-        query_start_loc + offsets + 1, mask=mask, other=0
-    ) - tl.load(query_start_loc + offsets, mask=mask, other=0)
-    tl.store(ring_start + slots, next_start, mask=valid)
-    tl.store(prev_num_accepted + slots, next_prev, mask=valid)
-    tl.store(prev_query_len + slots, current_speculative_query_len, mask=valid)
-
-
-def update_replayssm_ring_trackers(
-    ring_start: torch.Tensor,
-    prev_num_accepted: torch.Tensor,
-    prev_query_len: torch.Tensor,
-    state_batch_indices: torch.Tensor,
-    logical_window: int | None = None,
-    ring_buffer_len: int | None = None,
-    pad_slot_id: int = NULL_BLOCK_ID,
-) -> None:
-    """Reset selected trackers, or advance them when a window is provided."""
-    if state_batch_indices.dim() > 1:
-        state_batch_indices = state_batch_indices[:, 0]
-    n_slots = state_batch_indices.numel()
-    if n_slots == 0:
-        return
-    reset = logical_window is None
-    if reset:
-        logical_window = 0
-        ring_buffer_len = 1
-    else:
-        assert ring_buffer_len is not None
-    block = 128
-    _update_replayssm_ring_trackers_kernel[(triton.cdiv(n_slots, block),)](
-        ring_start,
-        prev_num_accepted,
-        prev_query_len,
-        state_batch_indices,
-        state_batch_indices.stride(0),
-        n_slots,
-        min(
-            ring_start.numel(),
-            prev_num_accepted.numel(),
-            prev_query_len.numel(),
-        ),
-        logical_window,
-        ring_buffer_len,
-        pad_slot_id,
-        RESET=reset,
-        BLOCK=block,
-    )
-
-
-def reset_replayssm_ring_trackers(
-    ring_start: torch.Tensor,
-    prev_num_accepted: torch.Tensor,
-    prev_query_len: torch.Tensor,
-    state_batch_indices: torch.Tensor,
-    pad_slot_id: int = NULL_BLOCK_ID,
-) -> None:
-    """Reset selected ReplaySSM ring trackers."""
-    update_replayssm_ring_trackers(
-        ring_start,
-        prev_num_accepted,
-        prev_query_len,
-        state_batch_indices,
-        pad_slot_id=pad_slot_id,
-    )
-
-
-def commit_replayssm_ring_trackers(
-    ring_start: torch.Tensor,
-    prev_num_accepted: torch.Tensor,
-    prev_query_len: torch.Tensor,
-    state_batch_indices: torch.Tensor,
-    num_accepted_tokens: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    logical_window: int,
-    ring_buffer_len: int,
-    pad_slot_id: int = NULL_BLOCK_ID,
-) -> None:
-    """Commit the preceding speculative window and record the current one.
-
-    MTP evaluates a target token and its draft tokens together, but the number
-    accepted from that query is available only on the next forward pass. This
-    function then advances the per-request ring by the accepted prefix and
-    records the current query length for the following pass. A zero
-    `prev_query_len` means that reset/prefill left no prior MTP query to
-    commit; slot validity is handled independently by the kernel mask.
-
-    Standard single-token decode needs no delayed commit: its ReplaySSM kernel
-    advances the shared ring trackers directly after every token.
-    """
-    if state_batch_indices.dim() > 1:
-        state_batch_indices = state_batch_indices[:, 0]
-    n_slots = state_batch_indices.numel()
-    if n_slots == 0:
-        return
-    block = 128
-    _commit_replayssm_ring_trackers_kernel[(triton.cdiv(n_slots, block),)](
-        ring_start,
-        prev_num_accepted,
-        prev_query_len,
-        state_batch_indices,
-        num_accepted_tokens,
-        query_start_loc,
-        state_batch_indices.stride(0),
-        n_slots,
-        min(
-            ring_start.numel(),
-            prev_num_accepted.numel(),
-            prev_query_len.numel(),
-        ),
-        logical_window,
-        ring_buffer_len,
-        pad_slot_id,
-        BLOCK=block,
-    )
-
-
-@triton.jit(
     do_not_specialize=["n_rows", "num_states", "state_batch_indices_stride"],
     do_not_specialize_on_alignment=["state_batch_indices", "seq_lens"],
 )
@@ -294,10 +79,11 @@ def plan_replayssm_decode(
 ) -> None:
     """Plan one Triton ReplaySSM standard-decode step on the GPU.
 
-    `ring_pos[slot]` counts the tokens buffered since the slot's last full-state write.
-    For each decode row this writes the step's `write_pos`/`is_flush` (read by every
-    layer of the cache group) and advances the slot's counter, so the runner supplies no
-    ring metadata. Prefill resets the counters via `reset_replayssm_ring_trackers`.
+    ``ring_pos[slot]`` counts the tokens buffered since the slot's last
+    full-state write. For each decode row this writes the step's
+    ``write_pos``/``is_flush`` (read by every layer of the cache group) and
+    advances the slot's counter, so the runner supplies no ring metadata.
+    Prefill resets the counters in the same layer.
 
     With `align_block_size` > 0 (mamba `align` prefix caching), the ring
     restarts at each block's first step and flushes on the step completing a
@@ -596,22 +382,19 @@ def selective_state_update_replayssm_flashinfer(
     dt_cache: torch.Tensor,
     ring_start: torch.Tensor,
     prev_num_accepted_tokens: torch.Tensor,
-    prev_query_len: torch.Tensor,
-    logical_window: int,
     D: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     dt_softplus: bool = False,
     state_batch_indices: torch.Tensor | None = None,
     null_block_id: int = NULL_BLOCK_ID,
     scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    update_trackers: bool = True,
     enable_stochastic_rounding: bool = False,
     stochastic_rounding_philox_rounds: int = 0,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: int | None = None,
     enable_pdl: bool = False,
 ) -> torch.Tensor:
-    """Run FlashInfer checkpointing SSU and optionally advance shared trackers."""
+    """Run FlashInfer checkpointing SSU with model-owned tracker metadata."""
     if _flashinfer_replayssm_kernel is None:
         raise RuntimeError(
             "FlashInfer ReplaySSM has not been initialized. "
@@ -639,7 +422,7 @@ def selective_state_update_replayssm_flashinfer(
         if enable_stochastic_rounding
         else None
     )
-    result = _flashinfer_replayssm_kernel(
+    return _flashinfer_replayssm_kernel(
         state,
         x_cache,
         B_cache,
@@ -666,17 +449,6 @@ def selective_state_update_replayssm_flashinfer(
         cumAdt_vec=cumAdt_vec,
         cb_old=cb_old,
     )
-    if update_trackers and indices is not None:
-        update_replayssm_ring_trackers(
-            ring_start,
-            prev_num_accepted_tokens,
-            prev_query_len,
-            indices,
-            logical_window=logical_window,
-            ring_buffer_len=x_cache.size(2),
-            pad_slot_id=null_block_id,
-        )
-    return result
 
 
 def initialize_mamba_ssu_backend(

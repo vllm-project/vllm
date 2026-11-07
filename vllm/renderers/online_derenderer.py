@@ -11,6 +11,7 @@ from vllm.entrypoints.generate.base.serving import (
     chat_top_logprobs_limit,
     completion_top_logprobs_limit,
     decode_token_ids,
+    format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.chat_completion.message_assembly import (
     assemble_chat_message_fields,
@@ -55,11 +56,13 @@ from vllm.renderers import BaseRenderer
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import (
+    INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET,
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
     get_leading_space_marker,
 )
 from vllm.utils.async_utils import make_async
+from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.engine.detokenizer import check_stop_strings, uses_fast_detokenizer
 
 logger = init_logger(__name__)
@@ -83,10 +86,12 @@ class OnlineDerenderer:
         default_chat_template_kwargs: dict[str, Any] | None = None,
         reasoning_effort_map: dict[str, str] | None = None,
         log_error_stack: bool = False,
+        return_tokens_as_token_ids: bool = False,
     ) -> None:
         self.model_config = model_config
         self.renderer = renderer
         self.request_logger = request_logger
+        self.return_tokens_as_token_ids = return_tokens_as_token_ids
 
         # EOS ids the engine stops on, loaded once like InputProcessor does.
         self._eos_token_id = renderer.get_eos_token_id()
@@ -198,6 +203,13 @@ class OnlineDerenderer:
             return token_ids, stop_reason
         return token_ids[:-1], stop_reason
 
+    def _return_tokens_as_token_ids(
+        self, request: ChatCompletionRequest | CompletionRequest | None
+    ) -> bool:
+        if request is not None and request.return_tokens_as_token_ids is not None:
+            return request.return_tokens_as_token_ids
+        return self.return_tokens_as_token_ids
+
     def _decode_output(
         self,
         tokenizer: TokenizerLike,
@@ -301,6 +313,7 @@ class OnlineDerenderer:
             and not hide_metadata
         )
         top_limit = _chat_top_logprobs_limit(chat_request)
+        return_tokens_as_token_ids = self._return_tokens_as_token_ids(chat_request)
 
         for choice in generate_response.choices:
             if not choice.token_ids:
@@ -311,6 +324,7 @@ class OnlineDerenderer:
                     choice.logprobs,
                     tokenizer,
                     top_limit=top_limit,
+                    return_tokens_as_token_ids=return_tokens_as_token_ids,
                 )
                 if choice.logprobs is not None and not hide_metadata
                 else None
@@ -544,14 +558,15 @@ class OnlineDerenderer:
     ) -> tuple[str, DerenderStreamState]:
         """Incrementally detokenize `delta_token_ids` from prior stream state.
 
-        Resumes decoding from the offsets carried in `state` rather than
-        replaying token history. `state.prev_tokens` holds the trailing decode
-        window (from `prefix_offset` onward) that `detokenize_incrementally`
-        still needs to reproduce any partially read multi-byte character
-        (tracked by `read_offset`). The delta tokens are fed straight onto it.
+        Resumes decoding from the offsets carried in ``state`` rather than
+        replaying token history. ``state.prev_token_ids`` holds the trailing
+        decode window (from ``prefix_offset`` onward) that
+        ``detokenize_incrementally`` still needs to reproduce any partially read
+        multi-byte character (tracked by ``read_offset``). The delta tokens are
+        fed straight onto it.
 
-        The window is bounded. `detokenize_incrementally` never reads before
-        `prefix_offset`, so after each token we trim `prev_tokens` to that
+        The window is bounded. ``detokenize_incrementally`` never reads before
+        ``prefix_offset``, so after each token we trim the window to that
         tail and rebase the offsets to it. State transport therefore stays
         O(window) per chunk instead of re-sending the full token history.
 
@@ -567,12 +582,22 @@ class OnlineDerenderer:
             state to pass to the next call.
 
         """
-        prev_tokens = list(state.prev_tokens)
+        vocab_size = len(tokenizer)
+        prev_token_ids = state.prev_token_ids
+        prev_tokens = [
+            token or ""
+            for token in tokenizer.convert_ids_to_tokens(
+                prev_token_ids, skip_special_tokens=skip_special_tokens
+            )
+        ]
         prefix_offset = state.prefix_offset
         read_offset = state.read_offset
 
         text_parts: list[str] = []
         for tok_id in delta_token_ids:
+            # Decodes to nothing, and could not be reconverted from the window.
+            if not 0 <= tok_id < vocab_size:
+                continue
             # prev_tokens is a (possibly empty) list, never None, so this
             # always takes the non first iter path and only consumes
             # all_input_ids[-1].
@@ -589,6 +614,9 @@ class OnlineDerenderer:
             # (everything before prefix_offset is dead) and rebase the
             # offsets, so the window stays bounded within a long batch
             # decode as well as across chunks.
+            # A skipped special token yields no piece, so it leaves the window.
+            new_ids = [tok_id] if new_toks else []
+            prev_token_ids = (prev_token_ids + new_ids)[prefix_offset:]
             prev_tokens = (prev_tokens + new_toks)[prefix_offset:]
             read_offset -= prefix_offset
             prefix_offset = 0
@@ -596,7 +624,7 @@ class OnlineDerenderer:
 
         updated_state = state.model_copy(
             update={
-                "prev_tokens": prev_tokens,
+                "prev_token_ids": prev_token_ids,
                 "prefix_offset": prefix_offset,
                 "read_offset": read_offset,
             }
@@ -685,6 +713,7 @@ class OnlineDerenderer:
 
         return_token_ids = chat_request is not None and chat_request.return_token_ids
         top_limit = _chat_top_logprobs_limit(chat_request)
+        return_tokens_as_token_ids = self._return_tokens_as_token_ids(chat_request)
         for choice in generate_chunk.choices:
             delta_tids = choice.token_ids or []
             text_tids, stop_reason = self._drop_stop_token(
@@ -705,6 +734,7 @@ class OnlineDerenderer:
                     tokenizer,
                     initial_context_token_ids=state.logprob_context_token_ids,
                     top_limit=top_limit,
+                    return_tokens_as_token_ids=return_tokens_as_token_ids,
                 )
 
             include_role = not updated_state.role_sent
@@ -735,7 +765,7 @@ class OnlineDerenderer:
         usage: UsageInfo | None = None
         if generate_chunk.usage is not None:
             u = generate_chunk.usage
-            pt = prompt_tokens if prompt_tokens is not None else (u.prompt_tokens or 0)
+            pt = resolve_prompt_tokens(prompt_tokens, u)
             ct = u.completion_tokens or 0
             usage = UsageInfo(
                 prompt_tokens=pt,
@@ -770,13 +800,14 @@ class OnlineDerenderer:
         `parse_delta` (discarding the result) before processing this
         chunk's tokens for real.
 
-        Every chunk, replayed or live, goes through one `parse_delta` call with the
-        tokens it arrived with (more than one under e.g. speculative decoding). Replay
-        recovers those boundaries from `state.output_chunk_lens`, so the rebuilt parser
-        state matches standard serving, which calls `parse_delta` once per engine step.
-        Text comes from a fresh incremental detokenizer with special tokens preserved
-        (`skip_special_tokens=False`), seeded from the prompt tail on every call since
-        replay starts from scratch.
+        Every chunk, replayed or live, goes through one `parse_delta` call
+        with the tokens it arrived with (more than one under e.g.
+        speculative decoding). Replay recovers those boundaries from
+        `state.output_chunk_lens`, so the rebuilt parser state matches
+        standard serving, which calls `parse_delta` once per engine step.
+        Text comes from a fresh incremental detokenizer with special tokens
+        preserved (see ``_decode_params``), seeded from the prompt tail on
+        every call since replay starts from scratch.
 
         Logprobs need no replay: a generate chunk's `logprobs` cover exactly
         that chunk's tokens, so they are resolved once and attached to
@@ -787,6 +818,7 @@ class OnlineDerenderer:
         """
         tokenizer = self.renderer.get_tokenizer()
         top_limit = _chat_top_logprobs_limit(chat_request)
+        return_tokens_as_token_ids = self._return_tokens_as_token_ids(chat_request)
 
         processor = ChatStreamProcessor(
             chat_request,
@@ -891,6 +923,7 @@ class OnlineDerenderer:
                     tokenizer,
                     initial_context_token_ids=state.logprob_context_token_ids,
                     top_limit=top_limit,
+                    return_tokens_as_token_ids=return_tokens_as_token_ids,
                 )
             logprob_context = _logprob_context_tail(
                 state.logprob_context_token_ids, delta_tids
@@ -939,7 +972,7 @@ class OnlineDerenderer:
         usage: UsageInfo | None = None
         if generate_chunk.usage is not None:
             u = generate_chunk.usage
-            pt = prompt_tokens if prompt_tokens is not None else (u.prompt_tokens or 0)
+            pt = resolve_prompt_tokens(prompt_tokens, u)
             ct = u.completion_tokens or 0
             usage = UsageInfo(
                 prompt_tokens=pt,
@@ -976,7 +1009,9 @@ class OnlineDerenderer:
     ) -> tuple[list[CompletionResponseChoice], int, int]:
         n = len(generate_responses)
         prompt_tokens_list: list[int] = (
-            prompt_tokens if prompt_tokens is not None else [0] * n
+            prompt_tokens
+            if prompt_tokens is not None
+            else [resolve_prompt_tokens(None, gen.usage) for gen in generate_responses]
         )
         prompt_token_ids_list: list[list[int] | None] = (
             prompt_token_ids if prompt_token_ids is not None else [None] * n
@@ -989,6 +1024,9 @@ class OnlineDerenderer:
         total_completion_tokens = 0
         index = 0
         top_limit = _completion_top_logprobs_limit(completion_request)
+        return_tokens_as_token_ids = self._return_tokens_as_token_ids(
+            completion_request
+        )
         return_token_ids = (
             completion_request is not None and completion_request.return_token_ids
         )
@@ -1028,6 +1066,7 @@ class OnlineDerenderer:
                         choice.logprobs,
                         tokenizer,
                         top_limit=top_limit,
+                        return_tokens_as_token_ids=return_tokens_as_token_ids,
                     )
                     completion_logprobs = _convert_chat_logprobs_to_completion_logprobs(
                         resolved, choice.logprobs
@@ -1109,6 +1148,9 @@ class OnlineDerenderer:
         updated_state = state
 
         top_limit = _completion_top_logprobs_limit(completion_request)
+        return_tokens_as_token_ids = self._return_tokens_as_token_ids(
+            completion_request
+        )
         return_token_ids = (
             completion_request is not None and completion_request.return_token_ids
         )
@@ -1132,6 +1174,7 @@ class OnlineDerenderer:
                     tokenizer,
                     initial_context_token_ids=state.logprob_context_token_ids,
                     top_limit=top_limit,
+                    return_tokens_as_token_ids=return_tokens_as_token_ids,
                 )
                 completion_logprobs = _convert_chat_logprobs_to_completion_logprobs(
                     resolved,
@@ -1170,7 +1213,7 @@ class OnlineDerenderer:
         usage: UsageInfo | None = None
         if generate_chunk.usage is not None:
             u = generate_chunk.usage
-            pt = prompt_tokens if prompt_tokens is not None else (u.prompt_tokens or 0)
+            pt = resolve_prompt_tokens(prompt_tokens, u)
             ct = u.completion_tokens or 0
             usage = UsageInfo(
                 prompt_tokens=pt,
@@ -1222,12 +1265,13 @@ def _decode_params(
         tokenizer: Picks the engine's fast or slow detokenizer rules.
         request: The original request, if the caller supplied one.
         preserve_special: Keep special tokens so a parser can see markers.
-            The serving side does this via `adjust_request`.
+            The serving side does this via `adjust_request`, except for
+            `MistralTokenizer`, which keeps the parser's markers when skipping.
 
     """
     skip_special = (
         False
-        if preserve_special
+        if preserve_special and not is_mistral_tokenizer(tokenizer)
         else (request is None or request.skip_special_tokens is not False)
     )
     spaces_between = (
@@ -1259,11 +1303,18 @@ def _seed_stream_state(
             )
         return DerenderStreamState()
 
-    prev_tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
+    _, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
         tokenizer, prompt_token_ids, skip_special_tokens=skip_special_tokens
     )
+    prompt_tail = prompt_token_ids[-INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET - 2 :]
     return DerenderStreamState(
-        prev_tokens=prev_tokens,
+        prev_token_ids=[
+            token_id
+            for token_id in prompt_tail
+            if tokenizer.convert_ids_to_tokens(
+                [token_id], skip_special_tokens=skip_special_tokens
+            )
+        ],
         prefix_offset=prefix_offset,
         read_offset=read_offset,
     )
@@ -1334,6 +1385,14 @@ def _completion_top_logprobs_limit(
     )
 
 
+def resolve_prompt_tokens(prompt_tokens: int | None, usage: UsageInfo | None) -> int:
+    """The request's `prompt_tokens` if set (0 included), else the generate
+    `usage.prompt_tokens`, else 0 when the generate response has no usage."""
+    if prompt_tokens is not None:
+        return prompt_tokens
+    return usage.prompt_tokens if usage is not None else 0
+
+
 def _resolve_prompt_logprobs(
     prompt_logprobs: PromptLogprobs | None, tokenizer: TokenizerLike
 ) -> PromptLogprobs | None:
@@ -1389,6 +1448,7 @@ def _resolve_logprobs(
     tokenizer: TokenizerLike,
     initial_context_token_ids: Sequence[int] = (),
     top_limit: int | None = None,
+    return_tokens_as_token_ids: bool = False,
 ) -> ChatCompletionLogProbs:
     """Convert generate's integer-id logprobs to the OpenAI chat shape.
 
@@ -1415,10 +1475,13 @@ def _resolve_logprobs(
             entry.top_logprobs if top_limit is None else entry.top_logprobs[:top_limit]
         )
         # One batch per position: the sampled id and its kept top-k ids.
-        (token_str, token_bytes), *top_decoded = decode_token_ids(
-            [entry.token_id, *(top.token_id for top in top_entries)],
-            tokenizer,
+        token_ids = [entry.token_id, *(top.token_id for top in top_entries)]
+        decoded = (
+            [(format_token_id_placeholder(tid), None) for tid in token_ids]
+            if return_tokens_as_token_ids
+            else decode_token_ids(token_ids, tokenizer)
         )
+        (token_str, token_bytes), *top_decoded = decoded
 
         if token_str.endswith("\ufffd"):
             token_str = _correct_decoded_token(

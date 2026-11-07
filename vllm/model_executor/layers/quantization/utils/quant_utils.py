@@ -311,6 +311,10 @@ kInt8DynamicTensorAsym = QuantKey(torch.int8, kDynamicTensorScale, symmetric=Fal
 kDynamic32Scale = ScaleDesc(torch.float32, False, GroupShape(1, 32))
 kInt8Dynamic32Sym = QuantKey(torch.int8, kDynamic32Scale, symmetric=True)
 
+# LUT-B: 3-bit indices into an E4M3 codebook per 8x64 weight tile (Rubin).
+kLutBStaticCodebook = ScaleDesc(torch.float8_e4m3fn, True, GroupShape(8, 64))
+kLutBStatic = QuantKey(torch.uint8, kLutBStaticCodebook, symmetric=True)
+
 # INT4 W4A8 quantization keys
 
 # For group-wise quantization (e.g., group_size=128)
@@ -886,9 +890,7 @@ def unpack_cols(
     pack_factor = get_pack_factor(num_bits)
     assert size_n % pack_factor == 0
     assert packed_q_w.shape == (size_k, size_n // pack_factor), (
-        "packed_q_w.shape = {} size_k = {}, size_n = {} pack_Factor = {}".format(
-            packed_q_w.shape, size_k, size_n, pack_factor
-        )
+        f"{packed_q_w.shape = } {size_k = }, {size_n = } {pack_factor = }"
     )
 
     orig_device = packed_q_w.device
@@ -931,7 +933,7 @@ def awq_pack(
     elif num_bits == 8:
         interleave = numpy.array([0, 2, 1, 3])
     else:
-        raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
+        raise Exception(f"num_bits must be 4 or 8, got {num_bits}")
 
     q_w = q_w.reshape((-1, len(interleave)))[:, interleave].ravel()
     q_w = q_w.reshape((-1, size_n)).contiguous()

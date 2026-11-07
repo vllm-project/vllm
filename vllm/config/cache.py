@@ -9,7 +9,7 @@ from typing import Any, ClassVar, Literal, Protocol, get_args, runtime_checkable
 import torch
 from pydantic import Field, field_validator, model_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
@@ -179,7 +179,7 @@ KVOffloadingBackend = Literal["native", "lmcache"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
+    DEFAULT_BLOCK_SIZE: ClassVar[int] = 64
     DEFAULT_GPU_MEMORY_UTILIZATION: ClassVar[float] = 0.92
 
     block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
@@ -322,9 +322,11 @@ class CacheConfig:
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
-    Requires the Triton or FlashInfer mamba backend; FlashInfer does not support
-    prefix caching yet. Mamba2 speculative decode requires FlashInfer. With
-    prefix caching, flushes are most efficient when mamba_block_size is a
+    Triton supports 'none' and 'align' on Model Runner V1. FlashInfer supports
+    'none' and 'align' on Model Runner V1 and V2. Mamba2 speculative
+    decoding requires FlashInfer. With prefix caching enabled, Triton supports
+    'align'; FlashInfer supports 'align'. Pipeline parallelism is not
+    supported. Flushes are most efficient when mamba_block_size is a
     multiple of replayssm_buffer_len, but this is not required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
@@ -402,10 +404,9 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache'.
     KV offloading is only activated when kv_offloading_size is set."""
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def compile_factors(self) -> CompileFactors:
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
 
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
@@ -446,10 +447,7 @@ class CacheConfig:
             "enable_extensible_kv_cache",
         }
 
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, ignored_factors)
-        return hash_factors(factors)
+        return get_compile_factors(self, ignored_factors)
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus

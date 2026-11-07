@@ -14,7 +14,7 @@ from torch.distributed import ProcessGroup, ReduceOp, Store
 
 import vllm.envs as envs
 from vllm.config.fault_tolerance import FaultToleranceConfig
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.distributed.utils import cpu_all_reduce_
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -208,9 +208,10 @@ class ParallelConfig:
     """Skip non-local expert weights during model loading when expert
     parallelism is active.  Each rank only reads its own expert shard from
     disk, which can drastically reduce storage I/O for MoE models with
-    per-expert weight tensors (e.g. DeepSeek, Mixtral, Kimi-K2.5).  Has no
-    effect on 3D fused-expert checkpoints (e.g. GPT-OSS) or non-MoE
-    models."""
+    per-expert weight tensors (e.g. DeepSeek, Mixtral, Kimi-K2.5).  With EPLB,
+    each rank also reads the experts its redundant slots replicate in the
+    initial placement; elastic EP loads every expert.  Has no effect on 3D
+    fused-expert checkpoints (e.g. GPT-OSS) or non-MoE models."""
     enable_eplb: bool = False
     """Enable expert parallelism load balancing for MoE layers."""
     eplb_config: EPLBConfig = Field(default_factory=EPLBConfig)
@@ -993,7 +994,7 @@ class ParallelConfig:
         torch.distributed.all_reduce(tensor, op=ReduceOp.MIN, group=dp_group)
         return tensor.item()
 
-    def compute_hash(self):
+    def compile_factors(self) -> CompileFactors:
         """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -1002,6 +1003,9 @@ class ParallelConfig:
 
         This hash is also used for DP worker configuration validation
         to prevent hangs from mismatched collective communication patterns.
+
+        WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
         """
         ignored_factors = {
             # Derived/runtime topology, networking, or launch details
@@ -1045,10 +1049,7 @@ class ParallelConfig:
             "assigned_physical_gpu_ids",
         }
 
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, ignored_factors)
-        return hash_factors(factors)
+        return get_compile_factors(self, ignored_factors)
 
     def __post_init__(self) -> None:
         # Continue with the rest of the initialization

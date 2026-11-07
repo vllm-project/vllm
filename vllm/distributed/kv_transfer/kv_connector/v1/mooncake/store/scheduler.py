@@ -218,6 +218,28 @@ class MooncakeStoreScheduler:
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
 
+    def _lookup_align(self) -> int:
+        # Fine-grained hits may land on a hash boundary inside a block; without
+        # partial hits, prefixes shorter than one physical block are skipped.
+        return (
+            self._hash_block_size if self.enable_partial_hash_hits else self._block_size
+        )
+
+    def start_lookup_prefetch(self, request: Request) -> None:
+        """Start an async lookup as soon as the request is added, so it can
+        complete while the request waits to be scheduled."""
+        if (
+            not self.enable_lookup
+            or not self.lookup_async
+            or request.skip_reading_external_kv
+            or request.num_tokens < self._lookup_align()
+            or not request.block_hashes
+        ):
+            return
+        self.client.prefetch(
+            request.request_id, request.num_tokens, request.block_hashes
+        )
+
     def get_num_new_matched_tokens(
         self,
         request: Request,
@@ -231,12 +253,7 @@ class MooncakeStoreScheduler:
         if not self.enable_lookup:
             return 0, False
 
-        # Fine-grained hits may land on a hash boundary inside a block; without
-        # partial hits, prefixes shorter than one physical block are skipped.
-        align = (
-            self._hash_block_size if self.enable_partial_hash_hits else self._block_size
-        )
-        if request.num_tokens < align:
+        if request.num_tokens < self._lookup_align():
             return 0, False
 
         lookup_result = self.client.lookup(
@@ -282,6 +299,9 @@ class MooncakeStoreScheduler:
         num_external_tokens: int,
     ):
         """Update state after block allocation."""
+        # The lookup is consumed; a reschedule (e.g. after a failed load) must
+        # not reuse its hit.
+        self.client.discard(request.request_id)
         local_block_ids: tuple[list[int], ...] = ()
         if num_external_tokens > 0:
             local_block_ids = blocks.get_block_ids(
@@ -320,7 +340,6 @@ class MooncakeStoreScheduler:
         can_process_cached = not is_consumer or self.save_decode_cache
 
         for finished_req_id in scheduler_output.finished_req_ids:
-            self.client.discard(finished_req_id)
             self.load_specs.pop(finished_req_id, None)
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
@@ -328,6 +347,7 @@ class MooncakeStoreScheduler:
 
         preempted_ids = scheduler_output.preempted_req_ids or set()
         for req_id in preempted_ids:
+            self.client.discard(req_id)
             self.load_specs.pop(req_id, None)
             self._request_trackers.pop(req_id, None)
             self._unfinished_requests.pop(req_id, None)

@@ -818,9 +818,19 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
     decode_max_query_len = common_attn_metadata.max_logits_per_req
     assert decode_max_query_len is not None
 
+    if decode_max_query_len == 1 and total_num_decode_tokens == num_reqs:
+        # One logit per request: the offsets are [0, 1, ..., num_reqs].
+        decode_query_start_loc_cpu = torch.arange(
+            num_reqs + 1, dtype=decode_query_start_loc.dtype, device="cpu"
+        )
+    else:
+        # TODO fix this sync
+        with gpu_sync_allowed():
+            decode_query_start_loc_cpu = decode_query_start_loc.cpu()
+
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=decode_query_start_loc,
-        query_start_loc_cpu=decode_query_start_loc.to("cpu", non_blocking=True),
+        query_start_loc_cpu=decode_query_start_loc_cpu,
         seq_lens=common_attn_metadata.seq_lens,
         num_reqs=num_reqs,
         num_actual_tokens=total_num_decode_tokens,
@@ -1206,7 +1216,7 @@ def compute_causal_conv1d_metadata(
         nums_dict[BLOCK_M]["mlist_len"] = mlist_len
         MAX_NUM_PROGRAMS = max(1024, mlist_len) * 2
         offsetlist = []  # type: ignore
-        for idx, num in enumerate(nums):
+        for num in nums:
             offsetlist.extend(range(num))
         offsetlist = torch.tensor(offsetlist, dtype=torch.int32, pin_memory=PIN_MEMORY)
         nums_dict[BLOCK_M]["offsetlist"] = offsetlist

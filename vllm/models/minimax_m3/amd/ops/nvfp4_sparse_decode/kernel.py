@@ -14,6 +14,13 @@ and widened to bf16; scores and softmax are fp32, P is bf16. Wave w owns keys
 The waves combine through LDS. With `splits` > 1 every split stores its
 unnormalized partial and the last split of a row to arrive combines them in
 split order, so the result does not depend on arrival order.
+
+With ``fp8_out`` the final O (after the split merge) is not stored as bf16 but
+as MXFP8 for the o_proj GEMM that follows: E4M3 values and row-major E8M0
+scales, one scale per 32 output dims. A lane of the final store owns exactly one
+such 32-dim block (head ``n``, dims ``32 g .. 32 g + 31``), so the quantization
+needs no cross-lane exchange. It quantizes the same bf16-rounded values the
+bf16 store would write, with the arithmetic of ``mxfp8_e4m3_quantize``.
 """
 
 import flydsl.compiler as flyc
@@ -124,6 +131,28 @@ def _v_bf16x8(codes, scale_pairs):
     return out
 
 
+def _fp8_pack4(a, b, c, d):
+    """Four f32 (already in range) -> one dword of four E4M3 bytes, RNE."""
+    lo = fx.Int32(
+        fx.rocdl.cvt_pk_fp8_f32(
+            T.i32,
+            fx.as_ir_value(a),
+            fx.as_ir_value(b),
+            fx.as_ir_value(fx.Int32(0)),
+            False,
+        )
+    )
+    return fx.Int32(
+        fx.rocdl.cvt_pk_fp8_f32(
+            T.i32,
+            fx.as_ir_value(c),
+            fx.as_ir_value(d),
+            fx.as_ir_value(lo),
+            True,
+        )
+    )
+
+
 def _global_atomic_add(addr_i64, value):
     """Relaxed agent-scope atomic add on a global i32; returns the old value."""
     return fx.Int32(
@@ -138,7 +167,9 @@ def _global_atomic_add(addr_i64, value):
     )
 
 
-def compile_nvfp4_sparse_decode(splits: int = 1, topk: int = 16, xcds: int = 0):
+def compile_nvfp4_sparse_decode(
+    splits: int = 1, topk: int = 16, xcds: int = 0, fp8_out: bool = False
+):
     """Build the decode kernel.
 
     Args:
@@ -147,13 +178,19 @@ def compile_nvfp4_sparse_decode(splits: int = 1, topk: int = 16, xcds: int = 0):
         topk: top-k width (one lane per slot).
         xcds: if > 0, workgroup w runs on XCD w % xcds and a request's rows and
             a row's splits are placed on one XCD.
+        fp8_out: store the output as MXFP8 values + E8M0 scales (``arg_oq``,
+            ``arg_os``) instead of bf16 (``arg_out``, unused then).
 
     """
     assert 1 <= topk <= 64 and splits >= 1
-    SPLITS, TOPK, XCDS = splits, topk, xcds
+    SPLITS, TOPK, XCDS, FP8_OUT = splits, topk, xcds, fp8_out
     # Split partials need sc1 unless all splits of a row run on one XCD.
     PART_SCOPE = 0 if XCDS else SC1
-    name = f"m3_nvfp4_sparse_decode_k{TOPK}_s{SPLITS}" + (f"_x{XCDS}" if XCDS else "")
+    name = (
+        f"m3_nvfp4_sparse_decode_k{TOPK}_s{SPLITS}"
+        + (f"_x{XCDS}" if XCDS else "")
+        + ("_q8" if fp8_out else "")
+    )
 
     @fx.struct
     class Shared:
@@ -179,6 +216,8 @@ def compile_nvfp4_sparse_decode(splits: int = 1, topk: int = 16, xcds: int = 0):
         arg_ks: fx.Int64,  # fp32 global K scale
         arg_vs: fx.Int64,  # fp32 global V scale
         arg_out: fx.Int64,  # [rows, H, 128] bf16
+        arg_oq: fx.Int64,  # fp8_out: [rows, H * 128] e4m3
+        arg_os: fx.Int64,  # fp8_out: [rows, H * 4] e8m0 (uint8)
         arg_part: fx.Int64,  # [grid rows * Hkv, S, 64, PART_F] fp32
         arg_cnt: fx.Int64,  # [grid rows * Hkv] int32 tickets, zero
         i64_part_bytes: fx.Int64,
@@ -350,7 +389,7 @@ def compile_nvfp4_sparse_decode(splits: int = 1, topk: int = 16, xcds: int = 0):
         init += load_block(page_of(slot_at(vmask)))
         n_st = 3 + NDT
         results = init
-        for u, st_ in range(  # type: ignore[call-overload]
+        for _, st_ in range(  # type: ignore[call-overload]
             fx.Index(0),
             fx.Index((n_v + 1) // 2),
             fx.Index(1),
@@ -382,7 +421,71 @@ def compile_nvfp4_sparse_decode(splits: int = 1, topk: int = 16, xcds: int = 0):
             state = [rem_n, m_t, l_t] + o_t + raw_n
             results = yield [fx.as_ir_value(x) for x in state]
 
+        def store_out_mxfp8(acc, inv):
+            """O as E4M3 + E8M0, bit-identical to ``mxfp8_e4m3_quantize`` of the
+            bf16 ``store_out`` writes. Lane (n, g) holds dims 32 g.. of head n."""
+            # 16 dwords of bf16 pairs; element t = 8 e + 2 j (+ 1) of the block.
+            words = [
+                pk_bf16(acc[2 * j][e] * inv, acc[2 * j + 1][e] * inv)
+                for e in range_constexpr(4)
+                for j in range_constexpr(4)
+            ]
+            # Block amax over |bf16| as integer bits (non-negative floats order
+            # like their bits), clamped at the smallest normal as the reference.
+            amax = fx.Int32(0x00800000)
+            for wd in words:
+                lo = (wd << 16) & fx.Int32(0x7FFFFFFF)
+                hi = wd & fx.Int32(0x7FFF0000)
+                amax = (lo > amax).select(lo, amax)
+                amax = (hi > amax).select(hi, amax)
+            # E8M0 byte = clamp(ceil(log2(amax / 448)) + 127, 0, 254), exactly:
+            # 448 = 1.75 * 2^8, so it is the exponent field - 8, plus one when
+            # the mantissa of amax exceeds 1.75.
+            sb = (
+                amax.shrui(fx.Int32(23))
+                - fx.Int32(8)
+                + ((amax & fx.Int32(0x7FFFFF)) > fx.Int32(0x600000)).select(
+                    fx.Int32(1), fx.Int32(0)
+                )
+            )
+            sb = (sb > fx.Int32(0)).select(sb, fx.Int32(0))
+            sb = (sb < fx.Int32(254)).select(sb, fx.Int32(254))
+            rescale = ((fx.Int32(254) - sb) << 23).bitcast(fx.Float32)  # 2^(127-sb)
+            vals = []
+            for wd in words:
+                vals.append((wd << 16).bitcast(fx.Float32) * rescale)
+                vals.append((wd & fx.Int32(-65536)).bitcast(fx.Float32) * rescale)
+            dwords = [
+                _fp8_pack4(
+                    vals[4 * k], vals[4 * k + 1], vals[4 * k + 2], vals[4 * k + 3]
+                )
+                for k in range_constexpr(8)
+            ]
+            head = row * i32_H + kvh * HG + n
+            qr = buffer_ops.create_buffer_resource_from_addr(
+                arg_oq,
+                num_records_bytes=fx.Int64(i32_rows) * fx.Int64(i32_H) * D,
+            )
+            q_row = head * (D // 4) + g * 8
+            for h in range_constexpr(2):
+                buffer_ops.buffer_store(
+                    Vec.from_elements(dwords[4 * h : 4 * h + 4], fx.Int32),
+                    qr,
+                    q_row + h * 4,
+                    mask=row < i32_rows,
+                )
+            sr = buffer_ops.create_buffer_resource_from_addr(
+                arg_os,
+                num_records_bytes=fx.Int64(i32_rows) * fx.Int64(i32_H) * (D // 32),
+            )
+            buffer_ops.buffer_store(
+                sb.to(fx.Int8), sr, head * (D // 32) + g, mask=row < i32_rows
+            )
+
         def store_out(acc, inv):
+            if const_expr(FP8_OUT):
+                store_out_mxfp8(acc, inv)
+                return
             outr = buffer_ops.create_buffer_resource_from_addr(
                 arg_out,
                 num_records_bytes=fx.Int64(i32_rows) * fx.Int64(i32_H) * (D * 2),
@@ -527,6 +630,8 @@ def compile_nvfp4_sparse_decode(splits: int = 1, topk: int = 16, xcds: int = 0):
         arg_bt: fx.Int64,
         arg_seq: fx.Int64,
         arg_out: fx.Int64,
+        arg_oq: fx.Int64,
+        arg_os: fx.Int64,
         arg_ks: fx.Int64,
         arg_vs: fx.Int64,
         arg_lut: fx.Int64,
@@ -560,6 +665,8 @@ def compile_nvfp4_sparse_decode(splits: int = 1, topk: int = 16, xcds: int = 0):
             arg_ks,
             arg_vs,
             arg_out,
+            arg_oq,
+            arg_os,
             arg_part,
             arg_cnt,
             i64_part_bytes,

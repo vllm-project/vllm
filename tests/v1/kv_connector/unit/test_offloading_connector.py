@@ -31,7 +31,9 @@ elif current_platform.is_rocm():
     # and the 16-token default.
     CPU_BLOCK_SIZES = 192
 else:
-    CPU_BLOCK_SIZES = 48
+    # A multiple of the 64-token default (and of any smaller backend-preferred
+    # size such as 16 or 32).
+    CPU_BLOCK_SIZES = 192
 
 _ATTN_BACKENDS: list[str] = []
 if current_platform.is_cuda():
@@ -58,8 +60,7 @@ MODEL_PARAMS: list[tuple[str, str | None, int | None, bool]] = [
     ("meta-llama/Llama-3.2-1B-Instruct", backend, CPU_BLOCK_SIZES, False)
     for backend in _ATTN_BACKENDS
 ]
-# HMA / Mamba models are only tested on CUDA (not ROCm).
-if current_platform.is_cuda():
+if current_platform.is_cuda_alike():
     MODEL_PARAMS += [
         ("google/gemma-3-1b-it", None, CPU_BLOCK_SIZES, True),
         ("state-spaces/mamba-130m-hf", None, CPU_BLOCK_SIZES, True),
@@ -399,7 +400,9 @@ def test_cpu_offloading_sliding_window_partial_chunk() -> None:
         del llm
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
 def test_cpu_offloading_metrics() -> None:
     """Verify that offloading Prometheus metrics (new flat and deprecated
     labeled) are emitted after stores and loads."""
@@ -636,15 +639,17 @@ def test_fs_tiering_offloading(tmp_path) -> None:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="HMA mamba-align CPU offload test is CUDA-only",
+    not current_platform.is_cuda_alike(),
+    reason="HMA mamba-align CPU offload test requires CUDA or ROCm",
 )
 @pytest.mark.parametrize(
     "model,block_size,tp_size",
     [
         # ("Qwen/Qwen3.6-35B-A3B", 1056, 2),
         # ("tiiuae/falcon-mamba-7b", 16, 1),
-        ("state-spaces/mamba-1.4b-hf", 16, 1),
+        # The chunk size must be a multiple of the GPU block size, which
+        # defaults to 64 tokens.
+        ("state-spaces/mamba-1.4b-hf", 64, 1),
     ],
 )
 def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
@@ -855,6 +860,7 @@ def test_p2p_cache_reset_with_absent_decoder(monkeypatch):
         max_num_batched_tokens=256,
         gpu_memory_utilization=0.2,
         attention_config={"backend": "TRITON_ATTN"},
+        block_size=16,
         enforce_eager=True,
         async_scheduling=False,
         disable_log_stats=False,

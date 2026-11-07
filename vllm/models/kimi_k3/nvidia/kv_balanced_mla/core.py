@@ -4,7 +4,8 @@
 
 The kernel is TokenSpeed's FP8 MLA decode (vendored in `kernel.py`): query rows
 packed into 128-row tiles (heads x q tokens), one 2-CTA cluster per (query tile,
-request, KV split), FP16 partials merged by its reduction kernel. A planner kernel
+request, KV split), FP16 (or, as TokenSpeed's own decode, FP32) partials merged by its
+reduction kernel. A planner kernel
 picks each request's split count from its KV length and lists exactly the planned
 clusters; one wave of persistent clusters walks the list. Nothing is read on the
 host, so a plan can be captured in a CUDA graph.
@@ -28,8 +29,6 @@ KV_TILE = 128  # KV tokens per MMA tile
 ROWS = 128  # query rows per tile (the 2-CTA M128 kernel)
 # Most splits of one request; sizes the partial-output workspace.
 CAPACITY = 8
-# The kernel addresses the partials in Int32 bytes: rows x splits x LATENT x 2 B.
-MAX_TILES = (1 << 31) // (ROWS * CAPACITY * LATENT * 2)
 # Registers per thread of the softmax, correction and MMA / load warpgroups. The
 # kernel's default (208, 256, 40) spills in the MMA warp, whose descriptor arithmetic
 # then throttles the tensor core; the correction warps mostly wait and give some up.
@@ -40,6 +39,9 @@ REG_SPLIT = (200, 240, 64)
 # cast instead of flushing to zero as a split streams more keys. The largest scaled
 # P, 2^(threshold + prescale), must stay within E4M3 (448).
 P_SCALE = (2.0, 6.0)
+# TokenSpeed 2.0.3's own FP8 decode (tokenspeed_mla_decode): the row max lags by at
+# most 2^8 and P is stored unscaled (its largest value 256 < 448).
+TOKENSPEED_P_SCALE = (8.0, 0.0)
 MAX_WAVES = 8
 MIN_SPLIT_TOKENS = 1024
 OVERHEAD_TILES = 6
@@ -50,14 +52,27 @@ def query_tiles(heads: int, q: int) -> int:
     return -(-heads * q // ROWS)
 
 
-def max_planned_requests(heads: int, q: int) -> int:
-    """Most requests whose partials the kernel can address."""
-    return MAX_TILES // query_tiles(heads, q)
+def max_planned_requests(
+    heads: int, q: int, capacity: int = CAPACITY, partial_fp16: bool = True
+) -> int:
+    """Most requests whose partials the kernel can address (at most ``capacity``
+    splits each): the kernel addresses the partials in Int32 bytes, rows x splits x
+    LATENT x (2 B FP16 or 4 B FP32 ``partial_fp16`` off)."""
+    tiles = (1 << 31) // (ROWS * capacity * LATENT * (2 if partial_fp16 else 4))
+    return tiles // query_tiles(heads, q)
 
 
-def workspace_bytes(heads: int, q: int, requests: int) -> int:
-    """Split-KV scratch of `requests`: FP16 partials and FP32 partial LSEs."""
-    return requests * query_tiles(heads, q) * ROWS * CAPACITY * (LATENT * 2 + 4)
+def workspace_bytes(
+    heads: int,
+    q: int,
+    requests: int,
+    capacity: int = CAPACITY,
+    partial_fp16: bool = True,
+) -> int:
+    """Split-KV scratch of ``requests``: FP16 (FP32 with ``partial_fp16`` off)
+    partials and FP32 partial LSEs."""
+    partial = LATENT * (2 if partial_fp16 else 4)
+    return requests * query_tiles(heads, q) * ROWS * capacity * (partial + 4)
 
 
 def work_list_len(heads: int, q: int, requests: int, clusters: int) -> int:
@@ -157,12 +172,21 @@ def _compile(
     causal: bool,
     lse: bool,
     cp: tuple[int, int, int],
+    pdl: bool = False,
+    capacity: int = CAPACITY,
+    partial_fp16: bool = True,
+    p_scale: tuple[float, float] = P_SCALE,
+    reducer_d_tiles: int = 1,
 ):
     """The KV-balanced FP8 MLA decode for one shape: packed query rows, causal among a
-    request's q rows unless `causal` is off, FP16 partials, BF16 latent output,
-    and each row's log2 LSE with `lse`. `cp` is (DCP world, rank, interleave):
+    request's q rows unless ``causal`` is off, FP16 partials (FP32 with
+    ``partial_fp16`` off), ``p_scale`` (see P_SCALE), ``reducer_d_tiles`` D512 bands
+    per reduced row, BF16 latent output,
+    and each row's log2 LSE with ``lse``. ``cp`` is (DCP world, rank, interleave):
     with a world above 1 the cache holds this rank's shard and the causal mask maps
-    each row's global bound onto it."""
+    each row's global bound onto it. ``pdl``: launched as a programmatic dependent
+    of the previous kernel (and its dependents launch early). ``capacity``: the most
+    splits of one request."""
     qk_tiler, pv_tiler = select_mla_decode_tilers(
         heads, q, is_fp8=True, compute_capability=arch
     )
@@ -175,8 +199,8 @@ def _compile(
         mma_pv_tiler_mn=pv_tiler,
         max_active_clusters=clusters,
         page_size=page_size,
-        skip_correction_threshold=P_SCALE[0],
-        p_prescale_log2=P_SCALE[1],
+        skip_correction_threshold=p_scale[0],
+        p_prescale_log2=p_scale[1],
         is_persistent=False,
         is_var_seq=True,
         is_var_split_kv=True,
@@ -188,10 +212,10 @@ def _compile(
         cp_world=cp[0],
         cp_rank=cp[1],
         cp_interleave_size=cp[2],
-        reducer_d_tiles=1,
+        reducer_d_tiles=reducer_d_tiles,
         pack_q=True,
-        reducer_max_splits=max(4, 1 << (CAPACITY - 1).bit_length()),
-        partial_fp16=True,
+        reducer_max_splits=max(4, 1 << (capacity - 1).bit_length()),
+        partial_fp16=partial_fp16,
         work_list=True,
         reg_split=REG_SPLIT,
     )
@@ -234,14 +258,14 @@ def _compile(
         if lse
         else None,
         compact(cutlass.Int8, (sym(),), assumed_align=32),  # workspace
-        Int32(CAPACITY),
+        Int32(capacity),
         lengths,  # cache lengths
         compact(Int32, (batch,), assumed_align=4),  # causal bound (global under DCP)
         compact(Int32, (batch,), assumed_align=4),  # split counts
         Float32(1.0),  # softmax scale
         Float32(1.0),  # output scale
         cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
-        False,  # PDL
+        pdl,
         None,  # local visible lengths
         compact(Int32, (sym(),), assumed_align=4),  # work list
     )
@@ -260,7 +284,13 @@ def supports(heads: int, q: int, device: torch.device) -> bool:
 
 class KvBalancedMla:
     """The KV-balanced MLA decode of one (heads, q, causal) shape for up to
-    `max_requests` requests: `plan` once per forward, then `decode` per layer.
+    ``max_requests`` requests: ``plan`` once per forward, then ``decode`` per layer.
+    ``capacity`` bounds the splits of one request (and sizes the workspace);
+    ``min_split_tokens`` is the shortest split the plan makes. ``partial_fp16`` and
+    ``p_scale`` set the split-KV partial dtype and the P scaling (the defaults are
+    this backend's; FP32 partials and TOKENSPEED_P_SCALE are tokenspeed_mla_decode's).
+    ``reducer_d_tiles``: the split-KV reduction's D512 bands per row (1, 2 or 4;
+    the same per-element sums, more reduction CTAs for few rows).
 
     The caller owns the plan buffers (`counts` [max_requests], `work`
     [list_len]) and the split-KV `workspace` [workspace_bytes]."""
@@ -272,17 +302,27 @@ class KvBalancedMla:
         max_requests: int,
         causal: bool,
         device: torch.device,
+        capacity: int = CAPACITY,
+        min_split_tokens: int = MIN_SPLIT_TOKENS,
+        partial_fp16: bool = True,
+        p_scale: tuple[float, float] = P_SCALE,
+        reducer_d_tiles: int = 1,
     ):
         assert supports(heads, q, device)
-        assert max_requests <= max_planned_requests(heads, q)
+        assert max_requests <= max_planned_requests(heads, q, capacity, partial_fp16)
         self.heads, self.q, self.causal = heads, q, causal
+        self.capacity, self.min_split_tokens = capacity, min_split_tokens
+        self.partial_fp16, self.p_scale = partial_fp16, tuple(p_scale)
+        self.reducer_d_tiles = reducer_d_tiles
         self.max_requests = max_requests
         self.arch = torch.cuda.get_device_capability(device)
         self.q_tiles = query_tiles(heads, q)
         self.clusters = max_active_clusters(device)
         self.list_len = work_list_len(heads, q, max_requests, self.clusters)
         self.max_waves = self.list_len // self.clusters - 1
-        self.workspace_bytes = workspace_bytes(heads, q, max_requests)
+        self.workspace_bytes = workspace_bytes(
+            heads, q, max_requests, capacity, partial_fp16
+        )
         self.block_b = triton.next_power_of_2(max(16, max_requests))
 
     def plan(
@@ -301,14 +341,14 @@ class KvBalancedMla:
             self.q_tiles,
             self.clusters,
             self.max_waves,
-            CAPACITY,
-            MIN_SPLIT_TOKENS // KV_TILE,
+            self.capacity,
+            self.min_split_tokens // KV_TILE,
             OVERHEAD_TILES,
             self.list_len,
             KV_TILE=KV_TILE,
             BLOCK_W=triton.next_power_of_2(self.max_waves),
             BLOCK_B=self.block_b,
-            BLOCK_R=triton.next_power_of_2(CAPACITY * self.q_tiles),
+            BLOCK_R=triton.next_power_of_2(self.capacity * self.q_tiles),
             BLOCK_T=1024,
             SEARCH_STEPS=20,
         )
@@ -327,13 +367,17 @@ class KvBalancedMla:
         lse: torch.Tensor | None = None,
         causal_lens: torch.Tensor | None = None,
         cp: tuple[int, int, int] = (1, 0, 1),
+        out: torch.Tensor | None = None,
+        pdl: bool = False,
     ) -> torch.Tensor:
-        """BF16 latent [T, H, 512] of the FP8 `query` [T, H, 576] (`q` rows per
-        request) over the FP8 `cache` [blocks, page, 576] with the plan in
-        `counts` and `work`. With `lse` [requests, q, H] FP32 it also writes
-        each row's log2 LSE. Under DCP (`cp` = world, rank, interleave),
-        `seq_lens` are this rank's shard lengths and `causal_lens` the global
-        ones. An empty request gets a zero output and an LSE of -inf."""
+        """BF16 latent [T, H, 512] of the FP8 ``query`` [T, H, 576] (``q`` rows per
+        request) over the FP8 ``cache`` [blocks, page, 576] with the plan in
+        ``counts`` and ``work``. With ``lse`` [requests, q, H] FP32 it also writes
+        each row's log2 LSE. Under DCP (``cp`` = world, rank, interleave),
+        ``seq_lens`` are this rank's shard lengths and ``causal_lens`` the global
+        ones. An empty request gets a zero output and an LSE of -inf. ``out``: a
+        caller-owned BF16 [T, H, 512] output; ``pdl``: PDL chained (see
+        ``_compile``)."""
         requests = seq_lens.numel()
         assert cache.shape[-1] == LATENT + ROPE, cache.shape
         assert workspace.numel() >= self.workspace_bytes
@@ -341,9 +385,10 @@ class KvBalancedMla:
         # shared workspace.
         workspace = workspace[: self.workspace_bytes]
         query = query.view(requests, self.q, self.heads, LATENT + ROPE)
-        out = query.new_empty(
-            (requests, self.q, self.heads, LATENT), dtype=torch.bfloat16
-        )
+        shape = (requests, self.q, self.heads, LATENT)
+        if out is None:
+            out = query.new_empty(shape, dtype=torch.bfloat16)
+        out = out.view(shape)
         cache = cache.view(torch.float8_e4m3fn)
         kernel = _compile(
             self.heads,
@@ -354,6 +399,11 @@ class KvBalancedMla:
             self.causal,
             lse is not None,
             cp,
+            pdl,
+            self.capacity,
+            self.partial_fp16,
+            self.p_scale,
+            self.reducer_d_tiles,
         )
         with tvm_ffi.use_torch_stream():
             kernel(
@@ -365,7 +415,7 @@ class KvBalancedMla:
                 out,
                 lse,
                 workspace,
-                Int32(CAPACITY),
+                Int32(self.capacity),
                 seq_lens,
                 seq_lens if causal_lens is None else causal_lens,
                 counts[:requests],

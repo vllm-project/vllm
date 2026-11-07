@@ -63,7 +63,7 @@ class ParserEngineReasoningAdapter(ReasoningParser):
             self._parser_engine.skip_tool_parsing = saved
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        return self._parser_engine.is_reasoning_end(list(input_ids))
+        return self._parser_engine.is_reasoning_end(input_ids)
 
     def find_reasoning_end(self, token_ids: Sequence[int]) -> ReasoningEnd | None:
         return self._parser_engine.find_reasoning_end(token_ids)
@@ -132,6 +132,14 @@ class ParserEngineReasoningAdapter(ReasoningParser):
 
     def has_engine_confirmed_reasoning_end(self) -> bool:
         return self._parser_engine.reasoning_ended
+
+    @property
+    def opens_reasoning_in_content(self) -> bool:
+        """Whether the grammar can open reasoning after content has started."""
+        start = self._parser_engine.parser_engine_config.transitions.get(
+            (ParserState.CONTENT, "THINK_START")
+        )
+        return start is not None and start.next_state is ParserState.REASONING
 
     def finish_streaming(self) -> DeltaMessage | None:
         with self._skip_tool_parsing():

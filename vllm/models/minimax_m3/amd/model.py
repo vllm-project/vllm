@@ -30,6 +30,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     CacheConfig,
+    CUDAGraphMode,
     VllmConfig,
     get_current_vllm_config,
 )
@@ -37,12 +38,15 @@ from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+    _FUSED_QUANT_MAX_M,
     RocmDotScaledMxfp8LinearKernel,
+    _select_fused_quant_cfg,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import set_default_quant_scales
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
+    allreduce_gemma_rms_norm_mxfp8,
     fused_allreduce_gemma_rms_norm,
 )
 from vllm.model_executor.layers.fused_moe import (
@@ -67,6 +71,11 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_BLOCK_SIZE,
+    MXFP8_SCALE_DTYPE,
+    MXFP8_VALUE_DTYPE,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -114,6 +123,7 @@ from vllm.models.minimax_m3.amd.ops import (
     gemma_fused_add_rmsnorm,
     gemma_fused_add_rmsnorm_mxfp8,
     gemma_rmsnorm,
+    swiglu_oai_quantize_mxfp8,
     swiglu_oai_split,
 )
 from vllm.models.minimax_m3.amd.ops.sparse_pa import (
@@ -292,6 +302,11 @@ class MiniMAXGemmaRMSNorm(nn.Module):
         return gemma_fused_add_rmsnorm(x, residual, self.weight, self.variance_epsilon)
 
 
+# Rows per program of the fused swiglu + MXFP8 quant: at decode-sized M (8-192)
+# 16 is ~0.1 us faster than the MoE path's 64. Tuned on gfx950 (MI355X) only.
+_SWIGLU_QUANT_BLOCK_M = 16
+
+
 class MiniMaxM3MLP(nn.Module):
     """Dense SwiGLU-OAI MLP (used by the leading dense layers)."""
 
@@ -332,15 +347,70 @@ class MiniMaxM3MLP(nn.Module):
         self.swiglu_alpha = config.swiglu_alpha
         self.swiglu_beta = config.swiglu_beta
         self.swiglu_limit = config.swiglu_limit
+        # Set by the decoder layer: whether down_proj takes MXFP8 input, so the
+        # swiglu kernel can quantize its output (no bf16 round trip, one launch
+        # fewer than swiglu + the linear's own quant).
+        self.fuse_act_quant_mxfp8 = False
+        # (source tensor, its MXFP8 quantization) handed over by the decoder
+        # layer's post-attention norm; consumed by the next forward.
+        self._prequant: tuple[torch.Tensor, QuantizedActivation] | None = None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up, _ = self.gate_up_proj(x)
-        x = swiglu_oai_split(
-            gate_up,
-            alpha=self.swiglu_alpha,
-            beta=self.swiglu_beta,
-            limit=self.swiglu_limit,
+    def set_prequant(self, src: torch.Tensor, qa: QuantizedActivation) -> None:
+        """Hand over ``src`` already quantized, for the next forward only.
+
+        The MoE runner calls the shared expert with the layer's own input
+        tensor, so ``src`` is checked against it and ignored if it differs.
+        """
+        self._prequant = (src, qa)
+
+    def _down_proj_quantizes_in_gemm(self, num_tokens: int) -> bool:
+        """Whether down_proj's kernel quantizes its input inside the GEMM at
+        this token count; that is already a single launch, so keep it."""
+        n, k = self.down_proj.weight.shape
+        return (
+            0 < num_tokens <= _FUSED_QUANT_MAX_M
+            and _select_fused_quant_cfg(num_tokens, n, k) is not None
         )
+
+    def forward(self, x: torch.Tensor | QuantizedActivation) -> torch.Tensor:
+        pre, self._prequant = self._prequant, None
+        if (
+            pre is not None
+            and isinstance(x, torch.Tensor)
+            and pre[0].data_ptr() == x.data_ptr()
+            and pre[0].shape == x.shape
+        ):
+            x = pre[1]
+        gate_up, _ = self.gate_up_proj(x)
+        if self.fuse_act_quant_mxfp8 and not self._down_proj_quantizes_in_gemm(
+            gate_up.shape[0]
+        ):
+            # Not bit-identical to the unfused chain, by design: this quantizes
+            # the fp32 swiglu result directly and skips the bf16 rounding the
+            # unfused path applies before the quant (about 2% of the E4M3
+            # bytes differ; the result is at least as close to the fp32
+            # activation).
+            act_q, act_scale = swiglu_oai_quantize_mxfp8(
+                gate_up,
+                alpha=self.swiglu_alpha,
+                beta=self.swiglu_beta,
+                limit=self.swiglu_limit,
+                block_m=_SWIGLU_QUANT_BLOCK_M,
+            )
+            x = QuantizedActivation(
+                act_q,
+                act_scale,
+                gate_up.dtype,
+                torch.Size((gate_up.shape[0], act_q.shape[1])),
+                kMxfp8Dynamic,
+            )
+        else:
+            x = swiglu_oai_split(
+                gate_up,
+                alpha=self.swiglu_alpha,
+                beta=self.swiglu_beta,
+                limit=self.swiglu_limit,
+            )
         x, _ = self.down_proj(x)
         return x
 
@@ -508,9 +578,18 @@ class MiniMaxM3MoE(nn.Module):
         assert param.size() == loaded_weight.size()
         param.data.copy_(loaded_weight.to(torch.float32))
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        shared_prequant: QuantizedActivation | None = None,
+    ) -> torch.Tensor:
+        """``shared_prequant``: ``hidden_states`` already MXFP8-quantized, for
+        the shared expert's gate_up_proj (the routed path needs the bf16 rows)."""
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        if shared_prequant is not None:
+            assert self.shared_experts is not None
+            self.shared_experts.set_prequant(hidden_states, shared_prequant)
 
         # router_logits: (num_tokens, n_experts); GateLinear casts to fp32.
         router_logits, _ = self.gate(hidden_states)
@@ -785,6 +864,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # One fused kernel inserts both caches, so NVFP4 K/V needs an NVFP4
         # index cache.
         self.use_nvfp4_kv = get_kv_quant_mode(self.kv_cache_dtype).is_nvfp4
+        # Whether the attention can emit MXFP8 for o_proj; resolved on first use.
+        self._o_proj_mxfp8: bool | None = None
         # Indexer and main attention are separate impls. This indexer is
         # ROCm-only, so the model selects it rather than the neutral
         # MiniMaxM3Indexer, which knows nothing about it and would pick its own.
@@ -1166,8 +1247,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 qkv, positions, fwd_slot_mapping
             )
             output = torch.empty_like(q)
-            attn_output = self._run_attention(q, index_q, output)
-            output, _ = self.o_proj(attn_output)
+            gfx942_attn = self._run_attention(q, index_q, output)
+            output, _ = self.o_proj(gfx942_attn)
             return output
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
@@ -1178,10 +1259,24 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 main_slot_mapping,
                 fwd_slot_mapping[self.indexer.index_cache.prefix],
             )
-            output = torch.empty_like(q)
-            attn_output = self._run_attention(
-                q, None if self.skip_index_topk else index_q, output
-            )
+            index_arg = None if self.skip_index_topk else index_q
+            attn_output: torch.Tensor | QuantizedActivation
+            if self._emits_o_proj_mxfp8():
+                # Decode-only: the attention kernel writes MXFP8 for o_proj.
+                out_q = q.new_empty((q.shape[0], self.q_size), dtype=MXFP8_VALUE_DTYPE)
+                out_scale = q.new_empty(
+                    (q.shape[0], self.q_size // MXFP8_BLOCK_SIZE),
+                    dtype=MXFP8_SCALE_DTYPE,
+                )
+                self._run_attention(
+                    q, index_arg, None, out_q=out_q, out_scale=out_scale
+                )
+                attn_output = QuantizedActivation(
+                    out_q, out_scale, q.dtype, out_q.shape, kMxfp8Dynamic
+                )
+            else:
+                output = torch.empty_like(q)
+                attn_output = self._run_attention(q, index_arg, output)
             output, _ = self.o_proj(attn_output)
             return output
         q = qkv.new_empty((num_tokens, self.q_size))
@@ -1383,13 +1478,37 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         output, _ = self.o_proj(attn_output)
         return output
 
+    def _emits_o_proj_mxfp8(self) -> bool:
+        """Whether this step's attention writes MXFP8 for ``o_proj`` itself:
+        the NVFP4 decode kernel can, ``o_proj`` takes MXFP8 input, and the
+        batch is decode-only (a captured piecewise graph or a mixed batch keeps
+        the bf16 output)."""
+        if self._o_proj_mxfp8 is None:
+            self._o_proj_mxfp8 = hasattr(
+                self.impl, "forward_decode_mxfp8"
+            ) and _can_fuse_input_norm_mxfp8(self.o_proj)
+        if not self._o_proj_mxfp8:
+            return False
+        ctx = get_forward_context()
+        if ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
+            return False
+        all_md = ctx.attn_metadata
+        md = all_md.get(self.layer_name) if isinstance(all_md, dict) else None
+        return (
+            isinstance(md, MiniMaxM3SparseMetadata)
+            and md.num_prefills == 0
+            and md.num_decodes > 0
+        )
+
     @eager_break_during_capture
     def _run_attention(
         self,
         query: torch.Tensor,
         index_query: torch.Tensor | None,
-        output: torch.Tensor,
-    ) -> torch.Tensor:
+        output: torch.Tensor | None,
+        out_q: torch.Tensor | None = None,
+        out_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
         # Single eager break around both: their split-K kernels read per-request
         # metadata and can't be captured into a cudagraph. The indexer writes its
         # top-k into the shared ``topk_indices_buffer``; the attend reads it back.
@@ -1448,6 +1567,13 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                         self.indexer(index_query)
                 else:
                     self.indexer(index_query)
+        if out_q is not None:
+            assert out_scale is not None
+            self.impl.forward_decode_mxfp8(  # type: ignore[attr-defined]
+                self, query, self.kv_cache, out_q, out_scale
+            )
+            return None
+        assert output is not None
         if self.use_aiter_sparse_pa:
             assert isinstance(self.impl, MiniMaxM3SparseAiterPAImpl)
             return self.impl.forward(
@@ -1554,6 +1680,21 @@ class MiniMaxM3DecoderLayer(nn.Module):
         self.fuse_input_norm_mxfp8 = _can_fuse_input_norm_mxfp8(self.self_attn.qkv_proj)
         if self.fuse_input_norm_mxfp8:
             logger.info_once("Fusing input_layernorm with qkv_proj's MXFP8 input quant")
+        # The FFN's first projection: the dense MLP's, or the MoE shared
+        # expert's (the routed experts take bf16).
+        ffn_mlp = (
+            self.block_sparse_moe.shared_experts if self.is_moe_layer else self.mlp
+        )
+        self.fuse_post_norm_mxfp8 = ffn_mlp is not None and _can_fuse_input_norm_mxfp8(
+            ffn_mlp.gate_up_proj
+        )
+        if ffn_mlp is not None:
+            ffn_mlp.fuse_act_quant_mxfp8 = _can_fuse_input_norm_mxfp8(ffn_mlp.down_proj)
+        if self.fuse_post_norm_mxfp8:
+            logger.info_once(
+                "Fusing post_attention_layernorm with the FFN gate_up_proj's "
+                "MXFP8 input quant"
+            )
 
     def forward(
         self,
@@ -1583,10 +1724,29 @@ class MiniMaxM3DecoderLayer(nn.Module):
             hidden_states=attn_input,
         )
 
+        ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
+        if self.fuse_post_norm_mxfp8:
+            # None when a fused all-reduce + norm kernel applies (no quant
+            # epilogue there): that path keeps the linear's own quant.
+            fused = allreduce_gemma_rms_norm_mxfp8(
+                hidden_states,
+                residual,
+                self.post_attention_layernorm,
+                # MoE: the router and routed experts need the bf16 normed rows.
+                return_normed=self.is_moe_layer,
+            )
+            if fused is not None:
+                x_q, x_scale, normed, residual = fused
+                qa = QuantizedActivation(
+                    x_q, x_scale, hidden_states.dtype, x_q.shape, kMxfp8Dynamic
+                )
+                if self.is_moe_layer:
+                    assert normed is not None
+                    return ffn(normed, shared_prequant=qa), residual
+                return ffn(qa), residual
         hidden_states, residual = fused_allreduce_gemma_rms_norm(
             hidden_states, residual, self.post_attention_layernorm
         )
-        ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
         hidden_states = ffn(hidden_states)
         return hidden_states, residual
 

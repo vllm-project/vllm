@@ -544,12 +544,14 @@ def _rocm_aiter_topk_gating_impl(
     renormalize: bool,
     num_shared_experts: int = 0,
     shared_expert_scoring_func: str = "",
+    score_func: str = "softmax",
 ) -> None:
     # Callers pick this op only for launches AITER's topk_gating supports (see
-    # dispatch_topk_softmax_func); everything else goes to topk_softmax.
+    # dispatch_topk_softmax_func/dispatch_topk_sigmoid_func); everything else
+    # goes to topk_softmax (softmax) or vllm_topk_sigmoid (sigmoid).
     from aiter.ops.topk import topk_gating
 
-    # AITER renormalizes the selected softmax mass inside this launch,
+    # AITER renormalizes the selected softmax/sigmoid mass inside this launch,
     # preserving vLLM's `renormalize=True` semantics without a second
     # pointwise kernel, and sigmoids the trailing shared-expert columns.
     topk_gating(
@@ -559,7 +561,7 @@ def _rocm_aiter_topk_gating_impl(
         correction_bias=None,
         need_renorm=renormalize,
         routed_scaling_factor=1.0,
-        score_func="softmax",
+        score_func=score_func,
         num_shared_experts=num_shared_experts,
     )
 
@@ -572,18 +574,9 @@ def _rocm_aiter_topk_gating_fake(
     renormalize: bool,
     num_shared_experts: int = 0,
     shared_expert_scoring_func: str = "",
+    score_func: str = "softmax",
 ) -> None:
     pass
-
-
-def _rocm_aiter_topk_sigmoid_impl(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-) -> None:
-    from aiter import topk_sigmoid
-
-    topk_sigmoid(topk_weights, topk_indices, gating_output)
 
 
 def _rocm_aiter_biased_grouped_topk_impl(
@@ -2368,10 +2361,11 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_topk_gating_enabled(cls) -> bool:
-        """Use AITER `topk_gating` for softmax routing.
+        """Use AITER ``topk_gating`` for softmax and sigmoid routing.
 
         CDNA3 and CDNA4 only (gfx942, gfx950): those are the targets it was
-        measured on. Other AITER targets keep the legacy `topk_softmax` launcher.
+        measured on. Other AITER targets keep the legacy ``topk_softmax``
+        launcher (softmax) or the native ``vllm_topk_sigmoid`` (sigmoid).
         """
         from vllm.platforms.rocm import get_cdna_version
 
@@ -3121,13 +3115,6 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
-                op_name="rocm_aiter_topk_sigmoid",
-                op_func=_rocm_aiter_topk_sigmoid_impl,
-                mutates_args=["topk_weights", "topk_indices"],
-                dispatch_key=current_platform.dispatch_key,
-            )
-
-            direct_register_custom_op(
                 op_name="rocm_aiter_biased_grouped_topk",
                 op_func=_rocm_aiter_biased_grouped_topk_impl,
                 mutates_args=["topk_weights", "topk_ids"],
@@ -3705,6 +3692,7 @@ class rocm_aiter_ops:
         renormalize: bool,
         num_shared_experts: int = 0,
         shared_expert_scoring_func: str = "",
+        score_func: str = "softmax",
     ) -> tuple[torch.Tensor, ...]:
         torch.ops.vllm.rocm_aiter_topk_gating(
             topk_weights,
@@ -3714,21 +3702,26 @@ class rocm_aiter_ops:
             renormalize,
             num_shared_experts,
             shared_expert_scoring_func,
+            score_func,
         )
         return topk_weights, topk_indices
 
     @staticmethod
-    def topk_sigmoid(
+    def topk_sigmoid_gating(
         topk_weights: torch.Tensor,
         topk_indices: torch.Tensor,
         token_expert_indices: torch.Tensor,
         gating_output: torch.Tensor,
         renormalize: bool,
     ) -> tuple[torch.Tensor, ...]:
-        torch.ops.vllm.rocm_aiter_topk_sigmoid(
-            topk_weights, topk_indices, gating_output
+        return rocm_aiter_ops.topk_gating(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            score_func="sigmoid",
         )
-        return topk_weights, topk_indices
 
     @staticmethod
     def biased_grouped_topk(

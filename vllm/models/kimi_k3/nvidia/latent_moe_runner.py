@@ -98,10 +98,6 @@ class LatentMoERunner(MoERunner):
                 raise ValueError(
                     "K3 latent-MoE tail fusion does not support DBO or ubatching."
                 )
-            if vllm_config.model_config.enable_sleep_mode:
-                raise ValueError(
-                    "K3 latent-MoE tail fusion does not support sleep mode."
-                )
             transform = self.routed_output_transform
             assert transform is not None
             norm = transform.norm

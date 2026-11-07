@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from functools import lru_cache
 from typing import Literal
 
@@ -51,7 +51,7 @@ def get_audio_duration(*, y: npt.NDArray[np.floating], sr: float = 22050) -> flo
     return float(n_samples) / sr
 
 
-class ChannelReduction(str, Enum):
+class ChannelReduction(StrEnum):
     """Method to reduce multi-channel audio to target channels."""
 
     MEAN = "mean"  # Average across channels (default, preserves energy balance)

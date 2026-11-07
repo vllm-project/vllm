@@ -239,6 +239,9 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
       * `get_mm_mapping` — no tower entries.
     """
 
+    # The encoder-free path consumes rescaled pixels from the processor.
+    supports_mm_device_do_normalize = False
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.embed_audio.": "embed_audio.",

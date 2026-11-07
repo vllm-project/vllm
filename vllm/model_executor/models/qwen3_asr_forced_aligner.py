@@ -65,7 +65,6 @@ class Qwen3ASRForcedAlignerForTokenClassification(
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         config = vllm_config.model_config.hf_config
-        thinker_config = config.thinker_config
 
         # Remove the unused generation head created by the base class;
         # the forced aligner uses a classifier head instead.
@@ -73,13 +72,13 @@ class Qwen3ASRForcedAlignerForTokenClassification(
         language_model.lm_head = None
         language_model.logits_processor = None
 
-        self.classify_num = thinker_config.classify_num
+        self.classify_num = config.num_labels
 
         # Classification head replaces lm_head for time-bin prediction.
         # Use model dtype (not head_dtype which defaults to float32 for
         # pooling models) to match the hidden state dtype.
         self.classifier = nn.Linear(
-            thinker_config.text_config.hidden_size,
+            config.text_config.hidden_size,
             self.classify_num,
             bias=False,
             dtype=vllm_config.model_config.dtype,

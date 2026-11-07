@@ -47,6 +47,7 @@ def _scatter_states_warmup_inputs(
     state_dtype: torch.dtype,
     indices_dtype: torch.dtype,
     max_num_tokens: int,
+    src_dtype: torch.dtype | None = None,
 ) -> dict[str, object]:
     num_tokens: Any = WarmupIntRange(1, max_num_tokens + 1)
     return dict(
@@ -55,7 +56,7 @@ def _scatter_states_warmup_inputs(
             shape=(1,) + state_shape,
         ),
         src=TritonWarmupTensor(
-            state_dtype,
+            src_dtype or state_dtype,
             shape=(num_tokens,) + state_shape,
         ),
         indices=TritonWarmupTensor(
@@ -81,7 +82,7 @@ def scatter_states(
     is the read-side counterpart.
     """
     assert state.ndim >= 2
-    assert state.is_cuda
+    assert state.is_cuda or state.is_xpu
     assert src.ndim == state.ndim
     assert indices.ndim == 1
     assert indices.device == state.device

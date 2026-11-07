@@ -156,7 +156,7 @@ class _LookupBlockPool(BlockPool):
         if block is None:
             block = KVCacheBlock(
                 block_id=len(self.hit_blocks) + 1,
-                _block_hash=make_block_hash_with_group_id(
+                block_hash=make_block_hash_with_group_id(
                     BlockHash(block_hash), kv_cache_group_ids[0]
                 ),
             )

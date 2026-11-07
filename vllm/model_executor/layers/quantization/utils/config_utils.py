@@ -84,9 +84,10 @@ def _get_effective_quant_keys(
         _, _, _, quant_spec, method_cls = target
         if method_cls in (None, UnquantizedLinearMethod):
             return None, None
-        # NOTE: The online shorthands' `QuantSpec` (`_ONLINE_SHORTHANDS` in
-        # quantization.py) do not define the activation key: use the method's.
-        return quant_spec.weight, getattr(method_cls, "activation_quant_key", None)
+        # `resolve_quant_method_cls` returns the spec with its resolved
+        # activation key: the user override when explicit, else the method's
+        # default.
+        return quant_spec.weight, quant_spec.activation
     return get_checkpoint_quant_keys(quant_config, prefix, layer_type)
 
 
@@ -216,18 +217,22 @@ def is_shared_expert_quant_fse_compatible(
             if shared_keys != {routed_keys}:
                 return (
                     False,
-                    f"shared expert (weight, activation) keys {shared_keys} at "
-                    f"{shared_expert_prefix} do not match the routed expert keys "
-                    f"{routed_keys}",
+                    (
+                        f"shared expert (weight, activation) keys {shared_keys} at "
+                        f"{shared_expert_prefix} do not match the routed expert keys "
+                        f"{routed_keys}"
+                    ),
                 )
             return True, None
 
     if moe_backend == "aiter_mega_moe":
         return (
             False,
-            "AITER MegaMoE fuses the shared experts only when they are "
-            "requantized to MXFP4, e.g. with --quantization-config.targets "
-            '\'{"*shared_experts*": "mxfp4"}\'',
+            (
+                "AITER MegaMoE fuses the shared experts only when they are "
+                "requantized to MXFP4, e.g. with --quantization-config.targets "
+                '\'{"*shared_experts*": "mxfp4"}\''
+            ),
         )
 
     if (
@@ -350,17 +355,21 @@ def is_shared_expert_quant_fse_compatible(
             return True, None
         return (
             False,
-            "Quark uses different quantization configurations for routed and "
-            f"shared experts at {shared_expert_prefix}",
+            (
+                "Quark uses different quantization configurations for routed and "
+                f"shared experts at {shared_expert_prefix}"
+            ),
         )
 
     if isinstance(quant_config, Fp8Config):
         if quant_config.store_dtype is not None:
             return (
                 False,
-                f"FP8 stores routed experts as {quant_config.store_dtype}, which "
-                f"is not supported for fused shared experts at "
-                f"{shared_expert_prefix}",
+                (
+                    f"FP8 stores routed experts as {quant_config.store_dtype}, which "
+                    f"is not supported for fused shared experts at "
+                    f"{shared_expert_prefix}"
+                ),
             )
 
         # Serialized per-tensor checkpoints store 0-D or size-1 scales, which
@@ -369,8 +378,10 @@ def is_shared_expert_quant_fse_compatible(
         if quant_config.weight_block_size is None:
             return (
                 False,
-                "FP8 shared-expert FSE is only implemented for block-quantized "
-                "checkpoints",
+                (
+                    "FP8 shared-expert FSE is only implemented for block-quantized "
+                    "checkpoints"
+                ),
             )
 
         def is_ignored(layer_name: str) -> bool:
@@ -388,8 +399,10 @@ def is_shared_expert_quant_fse_compatible(
         ):
             return (
                 False,
-                "FP8 ignores routed and shared experts inconsistently at "
-                f"{shared_expert_prefix}",
+                (
+                    "FP8 ignores routed and shared experts inconsistently at "
+                    f"{shared_expert_prefix}"
+                ),
             )
 
         return True, None
@@ -403,8 +416,10 @@ def is_shared_expert_quant_fse_compatible(
         ):
             return (
                 False,
-                "MXFP8 excludes routed and shared experts inconsistently at "
-                f"{shared_expert_prefix}",
+                (
+                    "MXFP8 excludes routed and shared experts inconsistently at "
+                    f"{shared_expert_prefix}"
+                ),
             )
         # The shared expert is stored as MXFP8, so it can take an expert slot
         # only when the routed experts are MXFP8 too (not NVFP4-routed hybrids).
@@ -414,8 +429,10 @@ def is_shared_expert_quant_fse_compatible(
         ):
             return (
                 False,
-                "routed experts do not run as MXFP8 like the shared expert at "
-                f"{shared_expert_prefix}",
+                (
+                    "routed experts do not run as MXFP8 like the shared expert at "
+                    f"{shared_expert_prefix}"
+                ),
             )
 
         return True, None
@@ -426,8 +443,10 @@ def is_shared_expert_quant_fse_compatible(
 
     return (
         False,
-        "shared-expert FSE quantization compatibility is not implemented for "
-        f"{type(quant_config).__name__}",
+        (
+            "shared-expert FSE quantization compatibility is not implemented for "
+            f"{type(quant_config).__name__}"
+        ),
     )
 
 

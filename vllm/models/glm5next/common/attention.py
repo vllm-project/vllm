@@ -312,8 +312,6 @@ class Indexer(nn.Module):
         # rankings on long-context tasks. Built after weights are loaded.
         kw, _ = self.wk_weights_proj(hidden_states)
         k = kw[:, : self.head_dim]
-        if self._wp_fp32 is None:  # only when post-load processing never ran
-            self.process_weights_after_loading()
         weights = torch.mm(hidden_states.float(), self._wp_fp32)
 
         k = _fused_indexer_k_norm(
@@ -404,6 +402,7 @@ class Glm5NextMLAAttention(nn.Module):
         topk_indices_buffer: torch.Tensor | None = None,
         input_size: int | None = None,
         skip_rope: bool | None = False,
+        shardq_eligible: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -569,6 +568,7 @@ class Glm5NextMLAAttention(nn.Module):
             prefix,
             skip_topk=False,
             fuse_qkv_rmsnorm=True,
+            shardq_eligible=shardq_eligible,
         )
 
     def forward(

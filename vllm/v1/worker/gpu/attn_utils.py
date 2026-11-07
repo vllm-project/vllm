@@ -142,7 +142,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     layer_type = cast(type[Any], AttentionLayerBase)
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
     for layer_name, attn_module in attn_layers.items():
-        if getattr(attn_module, "kv_sharing_target_layer_name", None):
+        if attn_module.kv_sharing_target_layer_name:
             # This layer will use KV cache of the sharing target layer.
             continue
         # Skip modules that don't need KV cache (eg encoder-only attention)
@@ -157,8 +157,9 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     return kv_cache_spec
 
 
-def get_shared_kv_cache_layers(vllm_config: VllmConfig):
-    attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
+def get_shared_kv_cache_layers(vllm_config: VllmConfig) -> dict[str, str]:
+    layer_type = cast(type[Any], AttentionLayerBase)
+    attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
     return {
         layer_name: kv_tgt_layer
         for layer_name, attn_module in attn_layers.items()
@@ -208,8 +209,9 @@ def init_attn_backend(
 
     # Add KV-sharing layers to their target's kv cache group so they are
     # discovered alongside the target layer in Phase 1 below.
+    shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
     add_kv_sharing_layers_to_kv_cache_groups(
-        get_shared_kv_cache_layers(vllm_config), kv_cache_config.kv_cache_groups
+        shared_kv_cache_layers, kv_cache_config.kv_cache_groups
     )
     fast_prefill_eligible_layers = get_kv_sharing_fast_prefill_eligible_layers(
         vllm_config, draft_layer_names
@@ -249,7 +251,11 @@ def init_attn_backend(
 
             layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                # KV-sharing layers have no spec of their own; use the target's.
+                spec_layer_name = shared_kv_cache_layers.get(layer_name, layer_name)
+                layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[
+                    spec_layer_name
+                ]
 
             # Split on per-rank num_heads_q so layers with different Q-head
             # counts (e.g. a spec-decode draft head and its target) get separate
@@ -419,6 +425,7 @@ def init_kv_cache(
                 vllm_config,
                 forward_context,
                 block_tables,
+                allocate=allocate,
             )
         else:
             kv_caches = allocate_kv_cache(
@@ -443,21 +450,11 @@ def bind_kv_caches(
     """Bind per-layer KV cache views to the attention layers."""
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
-    # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
-    # decoder layer, so a layer name carries two integers (layer + module index).
-    num_attn_module = (
-        2 if vllm_config.model_config.hf_config.model_type == "longcat_flash" else 1
-    )
     bindable_caches = map_kv_caches_to_kernel_blocks(
         {name: cache for name, cache in kv_caches.items() if name in forward_context},
         attn_groups,
     )
-    bind_kv_cache_to_layers(
-        bindable_caches,
-        forward_context,
-        num_attn_module,
-        kv_cache_groups=kv_cache_config.kv_cache_groups,
-    )
+    bind_kv_cache_to_layers(bindable_caches, forward_context)
     return kv_caches
 
 
@@ -499,6 +496,12 @@ def build_attn_metadata(
     req_idx: np.ndarray | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
+    if rswa_prefix_lens is not None and rswa_prefix_lens.shape[0] < num_reqs:
+        # FULL graphs include inactive padded requests. Their prompt lengths
+        # must be zero, just like the padded sequence lengths and slot mapping.
+        rswa_prefix_lens = torch.nn.functional.pad(
+            rswa_prefix_lens, (0, num_reqs - rswa_prefix_lens.shape[0])
+        )
     if dcp_local_seq_lens is not None:
         dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]
     if dcp_local_seq_lens_cpu_upper_bound is not None:

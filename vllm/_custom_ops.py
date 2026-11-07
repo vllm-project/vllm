@@ -3,7 +3,7 @@
 
 from enum import IntEnum
 from functools import cache
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -14,7 +14,6 @@ from vllm.scalar_type import ScalarType
 from vllm.utils.flashinfer import (
     flashinfer_quant_nvfp4_8x4_sf_layout,
 )
-from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
@@ -764,11 +763,14 @@ def cutlass_scaled_fp4_mm(
     block_scale_b: torch.Tensor,
     alpha: torch.Tensor,
     out_dtype: torch.dtype,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert a.ndim == 2 and b.ndim == 2
     m, n = a.shape[0], b.shape[0]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
-    torch.ops._C.cutlass_scaled_fp4_mm(out, a, b, block_scale_a, block_scale_b, alpha)
+    torch.ops._C.cutlass_scaled_fp4_mm(
+        out, a, b, block_scale_a, block_scale_b, alpha, bias
+    )
     return out
 
 
@@ -1109,11 +1111,8 @@ def gptq_marlin_repack(
     size_k: int,
     size_n: int,
     num_bits: int,
-    is_a_8bit: bool = False,
 ) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_repack(
-        b_q_weight, size_k, size_n, num_bits, is_a_8bit
-    )
+    return torch.ops._C.gptq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
 
 
 if hasattr(torch.ops._C, "gptq_marlin_repack"):
@@ -1124,7 +1123,6 @@ if hasattr(torch.ops._C, "gptq_marlin_repack"):
         size_k: torch.SymInt,
         size_n: torch.SymInt,
         num_bits: int,
-        is_a_8bit: bool = False,
     ) -> torch.Tensor:
         pack_factor = 32 // num_bits
         marlin_tile_size = 16
@@ -1141,11 +1139,8 @@ def awq_marlin_repack(
     size_k: int,
     size_n: int,
     num_bits: int,
-    is_a_8bit: bool = False,
 ) -> torch.Tensor:
-    return torch.ops._C.awq_marlin_repack(
-        b_q_weight, size_k, size_n, num_bits, is_a_8bit
-    )
+    return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
 
 
 if hasattr(torch.ops._C, "awq_marlin_repack"):
@@ -1156,7 +1151,6 @@ if hasattr(torch.ops._C, "awq_marlin_repack"):
         size_k: torch.SymInt,
         size_n: torch.SymInt,
         num_bits: int,
-        is_a_8bit: bool = False,
     ) -> torch.Tensor:
         pack_factor = 32 // num_bits
         marlin_tile_size = 16
@@ -1172,7 +1166,6 @@ def gptq_marlin_moe_repack(
     size_k: int,
     size_n: int,
     num_bits: int,
-    is_a_8bit: bool = False,
 ) -> torch.Tensor:
     num_experts = b_q_weight.shape[0]
     assert size_k % 16 == 0
@@ -1183,7 +1176,7 @@ def gptq_marlin_moe_repack(
     )
     for e in range(num_experts):
         output[e] = torch.ops._C.gptq_marlin_repack(
-            b_q_weight[e], size_k, size_n, num_bits, is_a_8bit
+            b_q_weight[e], size_k, size_n, num_bits
         )
     return output
 
@@ -1193,7 +1186,6 @@ def awq_marlin_moe_repack(
     size_k: int,
     size_n: int,
     num_bits: int,
-    is_a_8bit: bool = False,
 ) -> torch.Tensor:
     num_experts = b_q_weight.shape[0]
     assert size_k % 16 == 0
@@ -1204,17 +1196,9 @@ def awq_marlin_moe_repack(
     )
     for e in range(num_experts):
         output[e] = torch.ops._C.awq_marlin_repack(
-            b_q_weight[e], size_k, size_n, num_bits, is_a_8bit
+            b_q_weight[e], size_k, size_n, num_bits
         )
     return output
-
-
-def marlin_int4_fp8_preprocess(
-    qweight: torch.Tensor,
-    qzeros_or_none: torch.Tensor | None = None,
-    inplace: bool = False,
-):
-    return torch.ops._C.marlin_int4_fp8_preprocess(qweight, qzeros_or_none, inplace)
 
 
 def marlin_gemm(
@@ -1223,7 +1207,6 @@ def marlin_gemm(
     b_q_weight: torch.Tensor,
     b_bias: torch.Tensor | None,
     b_scales: torch.Tensor,
-    a_scales: torch.Tensor | None,
     global_scale: torch.Tensor | None,
     b_zeros: torch.Tensor | None,
     workspace: torch.Tensor,
@@ -1241,7 +1224,6 @@ def marlin_gemm(
         b_q_weight,
         b_bias,
         b_scales,
-        a_scales,
         global_scale,
         b_zeros,
         workspace,
@@ -1264,7 +1246,6 @@ if hasattr(torch.ops._C, "marlin_gemm"):
         b_q_weight: torch.Tensor,
         b_bias: torch.Tensor | None,
         b_scales: torch.Tensor,
-        a_scales: torch.Tensor | None,
         global_scale: torch.Tensor | None,
         b_zeros: torch.Tensor | None,
         workspace: torch.Tensor,
@@ -1276,10 +1257,7 @@ if hasattr(torch.ops._C, "marlin_gemm"):
         use_fp32_reduce: bool = False,
         is_zp_float: bool = False,
     ) -> torch.Tensor:
-        dtype = a.dtype
-        if dtype not in [torch.half, torch.bfloat16]:
-            dtype = b_scales.dtype
-        return torch.empty((size_m, size_n), device=a.device, dtype=dtype)
+        return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
 
 
 # machete
@@ -2585,6 +2563,42 @@ def moe_wna16_gemm(
     )
 
 
+def lut_b_moe_gemm_supported() -> bool:
+    """Whether the Rubin (SM107) LUT-B MoE GEMM was compiled."""
+    return current_platform.is_cuda() and hasattr(torch.ops._moe_C, "lut_b_moe_gemm")
+
+
+def lut_b_moe_gemm(
+    a: torch.Tensor,
+    a_scales: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    topk_weights: torch.Tensor | None,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+) -> None:
+    """Grouped GEMM of MXFP8 activations with LUT-B expert weights.
+
+    ``c[i] = a[sorted_token_ids[i] // top_k] @ W[expert].T`` for each routed
+    row ``i`` (scaled by ``topk_weights[i]`` when given), using routing
+    aligned to blocks of 128 by ``moe_align_block_size``. ``b`` holds the
+    weights in the kernel tile layout from ``lut_b_to_sm107_tiles``.
+    """
+    torch.ops._moe_C.lut_b_moe_gemm(
+        a,
+        a_scales,
+        b,
+        c,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+    )
+
+
 def fp32_router_gemm(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,
@@ -2781,7 +2795,6 @@ def moe_wna16_marlin_gemm(
     b_qweight: torch.Tensor,
     b_bias: torch.Tensor | None,
     b_scales: torch.Tensor,
-    a_scales: torch.Tensor | None,
     global_scale: torch.Tensor | None,
     b_qzeros: torch.Tensor | None,
     workspace: torch.Tensor,
@@ -2809,7 +2822,6 @@ def moe_wna16_marlin_gemm(
         b_qweight,
         b_bias,
         b_scales,
-        a_scales,
         global_scale,
         b_qzeros,
         workspace,
@@ -2842,7 +2854,6 @@ if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "moe_wna16_marlin_
         b_qweight: torch.Tensor,
         b_bias: torch.Tensor | None,
         b_scales: torch.Tensor,
-        a_scales: torch.Tensor | None,
         global_scale: torch.Tensor | None,
         b_qzeros: torch.Tensor | None,
         workspace: torch.Tensor,
@@ -5054,136 +5065,6 @@ def cpu_fused_moe_int8(
         act,
         isa,
     )
-
-
-if hasattr(torch.ops._qutlass_C, "matmul_mxf4_bf16_tn"):
-
-    @register_fake("_qutlass_C::matmul_mxf4_bf16_tn")
-    def _fake_matmul_mxf4_bf16_tn(
-        a: torch.Tensor,
-        b: torch.Tensor,
-        a_sf: torch.Tensor,
-        b_sf: torch.Tensor,
-        alpha: torch.Tensor,
-    ):
-        return a.new_empty(*a.shape[:-1], b.shape[0], dtype=torch.bfloat16)
-
-
-def matmul_mxf4_bf16_tn(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    a_sf: torch.Tensor,
-    b_sf: torch.Tensor,
-    alpha: torch.Tensor,
-) -> torch.Tensor:
-    return torch.ops._qutlass_C.matmul_mxf4_bf16_tn(a, b, a_sf, b_sf, alpha)
-
-
-if hasattr(torch.ops._qutlass_C, "fusedQuantizeMxQuest"):
-
-    @register_fake("_qutlass_C::fusedQuantizeMxQuest")
-    def _fake_fused_quantize_mx_quest(
-        a: torch.Tensor, b: torch.Tensor, xh_e2m1: torch.Tensor, xh_e8m0: torch.Tensor
-    ):
-        return xh_e2m1, xh_e8m0
-
-
-if hasattr(torch.ops._qutlass_C, "fusedQuantizeMxAbsMax"):
-
-    @register_fake("_qutlass_C::fusedQuantizeMxAbsMax")
-    def _fake_fused_quantize_mx_absmax(
-        a: torch.Tensor, b: torch.Tensor, xh_e2m1: torch.Tensor, xh_e8m0: torch.Tensor
-    ):
-        return xh_e2m1, xh_e8m0
-
-
-def fusedQuantizeMx(
-    a: torch.Tensor, b: torch.Tensor, *, method: Literal["quest", "abs_max"] = "quest"
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if a.dim() == 0:
-        raise ValueError("`a` must have at least 1 dimension.")
-    if a.size(-1) % 32 != 0:
-        raise ValueError(f"last dim of `a` must be divisible by 32, got {a.size(-1)}.")
-    if b.device != a.device:
-        raise ValueError("`a` and `b` must be on the same device.")
-
-    xh_e2m1 = torch.empty(
-        *a.shape[:-1], a.size(-1) // 2, dtype=torch.uint8, device=a.device
-    )
-
-    rows, cols = a.numel() // a.size(-1), a.size(-1) // 32
-    n_row_blocks = cdiv(rows, 128)
-    n_col_blocks = cdiv(cols, 4)
-    padded_rows = n_row_blocks * 128
-    padded_cols = n_col_blocks * 4
-
-    xh_e8m0 = torch.empty(
-        padded_rows, padded_cols, dtype=torch.float8_e8m0fnu, device=a.device
-    )
-
-    if not hasattr(torch.ops, "_qutlass_C"):
-        raise RuntimeError(
-            "The `_qutlass_C` extension is not loaded. "
-            "Make sure your custom op library is imported before calling fusedQuantizeMx."
-        )
-
-    if method == "quest":
-        return torch.ops._qutlass_C.fusedQuantizeMxQuest(a, b, xh_e2m1, xh_e8m0)
-    elif method == "abs_max":
-        return torch.ops._qutlass_C.fusedQuantizeMxAbsMax(a, b, xh_e2m1, xh_e8m0)
-    else:
-        raise ValueError(f"invalid method {method!r}, must be 'quest' or 'abs_max'")
-
-
-if hasattr(torch.ops._qutlass_C, "fusedQuantizeNvAbsMax"):
-
-    @register_fake("_qutlass_C::fusedQuantizeNvAbsMax")
-    def _fake_fused_quantize_nv_absmax(
-        a: torch.Tensor,
-        b: torch.Tensor,
-        xh_e2m1: torch.Tensor,
-        xh_e4m3: torch.Tensor,
-        global_scale: torch.Tensor,
-    ):
-        return xh_e2m1, xh_e4m3
-
-
-def fusedQuantizeNv(
-    a: torch.Tensor, b: torch.Tensor, global_scale: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    xh_e2m1 = torch.empty(
-        *a.shape[:-1], a.size(-1) // 2, dtype=torch.uint8, device=a.device
-    )
-
-    rows, cols = a.numel() // a.size(-1), a.size(-1) // 16
-    n_row_blocks = cdiv(rows, 128)
-    n_col_blocks = cdiv(cols, 4)
-    padded_rows = n_row_blocks * 128
-    padded_cols = n_col_blocks * 4
-    xh_e4m3 = torch.empty(
-        padded_rows, padded_cols, dtype=torch.float8_e4m3fn, device=a.device
-    )
-
-    safeFusedQuantizeNv(a, b, xh_e2m1, xh_e4m3, global_scale)
-    return xh_e2m1, xh_e4m3
-
-
-@torch.library.custom_op(
-    "vllm::safeFusedQuantizeNv", mutates_args=("xh_e2m1", "xh_e4m3")
-)
-def safeFusedQuantizeNv(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    xh_e2m1: torch.Tensor,
-    xh_e4m3: torch.Tensor,
-    global_scale: torch.Tensor,
-) -> None:
-    """Wrapper for QUTLASS fusedQuantizeNv method that operates on tensors in-place
-    rather than returning them, to prevent torch 2.12+ errors that outputs of custom
-    operators may not alias any inputs to the custom operator.
-    """
-    torch.ops._qutlass_C.fusedQuantizeNvAbsMax(a, b, xh_e2m1, xh_e4m3, global_scale)
-    return
 
 
 def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:

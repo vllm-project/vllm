@@ -76,7 +76,7 @@ from __future__ import annotations
 
 import copy
 import json
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from vllm.config import VllmConfig
@@ -102,7 +102,7 @@ _DEFAULT_FORMAT = "cmd4"
 _VALID_FORMATS = ("cmd3", "cmd4")
 
 
-class MelodyContentType(str, Enum):
+class MelodyContentType(StrEnum):
     """Wire-format discriminator for melody content blocks.
 
     These strings are what the cmd3 / cmd4 Jinja templates check against in

@@ -31,6 +31,11 @@ from vllm.assets.image import ImageAsset
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Weight cache IPC sharing requires CUDA or ROCm",
+)
+
 
 class WeightCacheDaemon:
     """Context manager running the real weight cache daemon as a subprocess."""
@@ -346,8 +351,6 @@ def test_ipc_cache_cold_start_and_warm_restart(
     so they never hit the daemon's file by design; reuse is proven against
     the file the earlier in-process engines wrote.
     """
-    if not current_platform.is_cuda_alike():
-        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
     if case is K3_CASE and not current_platform.is_device_capability_family(100):
         pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
     if case.check_flashinfer_cache:
@@ -412,6 +415,41 @@ def _run_online_quantization(
     run_cold_start_and_warm_restart(vllm_runner, case, tmp_path)
 
 
+MODELOPT_FP8_CASE = ModelCase(
+    model="CedricHwang/qwen2.5-0.5b-modelopt-fp8-pc-pt",
+    prompts=["The capital of France is", "Hello, my name is"],
+    llm_kwargs=dict(
+        revision="d9c87375a9b950b1c7965a1110ac6ca455929726",
+        dtype="bfloat16",
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        max_model_len=512,
+        attention_config={"backend": "TRITON_ATTN"},
+        kernel_config={"linear_backend": "cutlass"},
+    ),
+    daemon_args=[
+        "--revision",
+        "d9c87375a9b950b1c7965a1110ac6ca455929726",
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "cutlass"}',
+    ],
+)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(89)),
+    reason="ModelOpt FP8 CUTLASS weight cache requires SM89+",
+)
+def test_ipc_cache_modelopt_fp8(vllm_runner, tmp_path, monkeypatch):
+    """Serialized ModelOpt FP8 tensors survive repeated IPC attachment."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, MODELOPT_FP8_CASE, tmp_path)
+
+
 NVFP4_CASE = ModelCase(
     model="nvidia/Qwen3-30B-A3B-NVFP4",
     prompts=["The capital of France is", "Hello, my name is"],
@@ -444,6 +482,49 @@ def test_ipc_cache_nvfp4_cutlass(vllm_runner, tmp_path, monkeypatch):
     run_cold_start_and_warm_restart(vllm_runner, NVFP4_CASE, tmp_path)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
+def test_ipc_fallback_restores_memory_budget(vllm_runner, enable_pickle):
+    """A reachable but incompatible daemon must not reduce the disk-load budget."""
+    model = "Qwen/Qwen3-0.6B"
+    budgets = []
+    outputs = []
+    with WeightCacheDaemon(
+        model,
+        tp_size=1,
+        extra_args=["--dtype", "bfloat16", "--disable-flashinfer-autotune"],
+    ) as daemon:
+        daemon.wait_until_ready()
+        for load_format in ("auto", "ipc_cache"):
+            extra = (
+                {"socket_dir": daemon.socket_dir, "fallback": True}
+                if load_format == "ipc_cache"
+                else {}
+            )
+            with vllm_runner(
+                model,
+                dtype="float16",
+                load_format=load_format,
+                model_loader_extra_config=extra,
+                enforce_eager=True,
+                gpu_memory_utilization=0.1,
+                max_model_len=1024,
+                max_num_batched_tokens=1024,
+                max_num_seqs=1,
+                kernel_config={"enable_flashinfer_autotune": False},
+            ) as llm:
+                budgets.append(
+                    llm.collective_rpc(lambda worker: worker.requested_memory)[0]
+                )
+                outputs.append(
+                    llm.generate_greedy(["The capital of France is"], max_tokens=8)
+                )
+
+    assert budgets[1] == budgets[0], "Disk fallback retained the external weight charge"
+    assert outputs[1] == outputs[0]
+
+
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
 def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path):
@@ -458,8 +539,6 @@ def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path):
 def test_d2d_warmup_cache_seeding(vllm_runner, tmp_path):
     """A mirror daemon adopts the source's autotune cache over D2D, skips
     re-tuning, and serves outputs identical to the default-loader baseline."""
-    if not current_platform.is_cuda_alike():
-        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
     if not current_platform.is_device_capability_family(100):
         pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
     from vllm.utils.flashinfer import has_flashinfer
@@ -1080,6 +1159,26 @@ def test_daemon_releases_cublas_workspaces():
         "daemon retained BLAS workspaces"
     )
     torch.testing.assert_close(result, torch.full_like(result, 128), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("is_draft,fallback_bytes", [(False, 8), (True, 4)])
+def test_external_weight_fallback_preserves_other_role(is_draft, fallback_bytes):
+    """Only the failed role's charge is reported, at most once."""
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        ExternalWeightCharges,
+        record_external_weight_charge,
+        record_external_weight_fallback,
+    )
+
+    accounting = ExternalWeightCharges()
+    with accounting.track():
+        record_external_weight_charge("target.sock", False, 8)
+        record_external_weight_charge("draft.sock", True, 4)
+        source = "draft.sock" if is_draft else "target.sock"
+        record_external_weight_fallback(source, is_draft)
+        record_external_weight_fallback(source, is_draft)
+        record_external_weight_fallback("uncharged.sock", False)
+    assert accounting.fallback_bytes == fallback_bytes
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")

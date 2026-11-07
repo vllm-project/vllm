@@ -26,6 +26,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.config.utils import hash_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -42,16 +43,17 @@ def compute_plan_fingerprint(
 ) -> str:
     """Hash everything the profiled KV-cache memory value depends on.
 
-    `VllmConfig.compute_hash()` covers the vLLM version and the model, cache, parallel,
-    and compilation configs, but deliberately contains no device identity
-    (`DeviceConfig.compute_hash` is empty), so device name, total memory, compute
-    capability, and the torch/CUDA build are added here. The vLLM version is also pinned
-    as an explicit factor so version invalidation holds no matter how `compute_hash`
-    evolves. Rank is included because per-rank memory use differs under TP/PP.
-    Driver-only changes are not part of the key; the free-memory gate at apply time
-    bounds the residual risk.
+    ``VllmConfig.compile_factors()`` covers the vLLM version and the model,
+    cache, parallel, and compilation configs, but deliberately contains no
+    device identity (``DeviceConfig.compile_factors`` is empty), so device
+    name, total memory, compute capability, and the torch/CUDA build are
+    added here. The vLLM version is also pinned as an explicit factor so
+    version invalidation holds no matter how ``compile_factors`` evolves.
+    Rank is included because per-rank memory use differs under TP/PP.
+    Driver-only changes are not part of the key; the free-memory gate at
+    apply time bounds the residual risk.
     """
-    # Imported here (as VllmConfig.compute_hash does) to avoid a cycle with
+    # Imported here (as VllmConfig.compile_factors does) to avoid a cycle with
     # the top-level vllm package.
     from vllm import __version__ as vllm_version
 
@@ -59,7 +61,7 @@ def compute_plan_fingerprint(
     factors = {
         "schema": PLAN_SCHEMA_VERSION,
         "vllm": vllm_version,
-        "vllm_config": vllm_config.compute_hash(),
+        "vllm_config": hash_config(vllm_config),
         "device_name": current_platform.get_device_name(),
         "device_total_memory": current_platform.get_device_total_memory(),
         "device_capability": str(capability) if capability else "",

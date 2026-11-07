@@ -105,6 +105,14 @@ class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
     packed: bool = False
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
+    use_load_plan: bool = False
+    """Dense backend only: write received tensors of the target model through a
+    load plan built from `metadata` at the first weight update (see
+    `NCCLTrainerInitInfo.use_load_plan`). The server must run with
+    `VLLM_RELOAD_MODE=direct` and without EPLB; init refuses otherwise."""
+    metadata: list[tuple[str, str, list[int]]] | None = None
+    """(name, dtype name, shape) of every tensor the trainer sends; required
+    with `use_load_plan`."""
 
     def __post_init__(self) -> None:
         _ = self.nccl_unique_id_bytes
@@ -133,6 +141,8 @@ def build_worker_init_payload(
     packed: bool = False,
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
+    use_load_plan: bool = False,
+    metadata: list[tuple[str, str, list[int]]] | None = None,
 ) -> dict:
     # Workers sit at rank_offset 1, after the single trainer sender rank 0.
     worker_init_info = NCCLWeightTransferInitInfo(
@@ -143,6 +153,8 @@ def build_worker_init_payload(
         packed=packed,
         packed_buffer_size_bytes=packed_buffer_size_bytes,
         packed_num_buffers=packed_num_buffers,
+        use_load_plan=use_load_plan,
+        metadata=metadata,
     )
     return worker_init_payload(worker_init_info)
 

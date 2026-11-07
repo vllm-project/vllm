@@ -21,7 +21,7 @@ from .column_parallel_linear import (
 )
 
 if TYPE_CHECKING:
-    from vllm.models.deepseek_v41.common.grouped_wo_a import DeepseekV4GroupedWoA
+    from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
 
 
 class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):

@@ -297,7 +297,7 @@ class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
         # torch._scaled_mm DeepSeek-style (1x128, 128x128) block scaling is
         # only implemented for SM90 (Hopper) on NVIDIA CUDA. See PyTorch's
         # _check_deepseek_support():
-        # https://github.com/pytorch/pytorch/blob/33812ece06e2b0d597f73fbe41de03a83f9109f9/aten/src/ATen/native/cuda/ScaledBlas.cpp#L804-L820 # noqa: E501
+        # https://github.com/pytorch/pytorch/blob/33812ece06e2b0d597f73fbe41de03a83f9109f9/aten/src/ATen/native/cuda/ScaledBlas.cpp#L804-L820
         if current_platform.is_cuda():
             is_sm90 = (
                 compute_capability == 90
@@ -307,8 +307,10 @@ class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
             if not is_sm90:
                 return (
                     False,
-                    "DeepSeek-style (1x128, 128x128) block scaling on CUDA "
-                    "requires compute capability 90 (Hopper).",
+                    (
+                        "DeepSeek-style (1x128, 128x128) block scaling on CUDA "
+                        "requires compute capability 90 (Hopper)."
+                    ),
                 )
         return True, None
 
@@ -343,7 +345,7 @@ class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
     ) -> torch.Tensor:
         # torch._scaled_mm implemented by cuBLASLt requires the M dimension to be a
         # multiple of 4; pad A (and its column-major scale) up and slice back.
-        # https://docs.nvidia.com/cuda/cublas/index.html?highlight=128%2520element%25201D%2520and%2520128x128%25202D#scaling-factors-layouts  # noqa: E501
+        # https://docs.nvidia.com/cuda/cublas/index.html?highlight=128%2520element%25201D%2520and%2520128x128%25202D#scaling-factors-layouts
         M = A.shape[0]
         pad = (-M) % 4 if current_platform.is_cuda() else 0
         if pad:

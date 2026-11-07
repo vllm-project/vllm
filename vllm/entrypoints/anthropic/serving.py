@@ -15,6 +15,7 @@ from typing import Any, Literal, get_args
 import jinja2
 from fastapi import Request
 
+from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicContentBlock,
@@ -61,7 +62,7 @@ from vllm.renderers.inputs.preprocess import (
     parse_dec_only_prompt,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.renderers.params import ChatParams
+from vllm.renderers.params import ChatParams, TokenizeParams
 
 logger = init_logger(__name__)
 
@@ -74,6 +75,18 @@ class _StreamError(Exception):
     def __init__(self, error_info: ErrorInfo) -> None:
         super().__init__(error_info.message)
         self.error_info = error_info
+
+
+class _CountTokensChatRequest(ChatCompletionRequest):
+    """Chat request rendered by count_tokens, which counts prompts longer than
+    max_model_len instead of rejecting them, like /tokenize."""
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams(
+            max_total_tokens=None,
+            max_output_tokens=0,
+            add_special_tokens=self.add_special_tokens,
+        )
 
 
 def _build_anthropic_usage(
@@ -174,12 +187,16 @@ class DisabledThinkingEffortResolver:
     async def resolve_for(
         self, request: AnthropicMessagesRequest | AnthropicCountTokensRequest
     ) -> AnthropicDisabledThinkingEffort:
-        if request.thinking is None or request.thinking.type != "disabled":
+        if request.thinking is None or request.thinking.type not in (
+            "disabled",
+            "between_tools",
+        ):
             return "none"
         if self._effort is None:
             self._effort = await self._probe()
             logger.info(
-                "Anthropic thinking.type=disabled maps to reasoning_effort=%r",
+                "Anthropic thinking.type=disabled/between_tools maps to "
+                "reasoning_effort=%r",
                 self._effort,
             )
         return self._effort
@@ -690,7 +707,7 @@ class AnthropicServingMessages(OpenAIServingChat):
     ) -> ChatCompletionRequest:
         """Build base ChatCompletionRequest."""
         if isinstance(anthropic_request, AnthropicCountTokensRequest):
-            return ChatCompletionRequest(
+            return _CountTokensChatRequest(
                 model=anthropic_request.model,
                 messages=openai_messages,
                 chat_template_kwargs=anthropic_request.chat_template_kwargs,
@@ -705,6 +722,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             temperature=anthropic_request.temperature,
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
+            min_tokens=anthropic_request.min_tokens,
             watermarking=anthropic_request.watermarking,
             cache_salt=anthropic_request.cache_salt,
             kv_transfer_params=anthropic_request.kv_transfer_params,
@@ -729,7 +747,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         if thinking is None:
             return
 
-        if thinking.type == "disabled":
+        if thinking.type in ("disabled", "between_tools"):
             # "none" clears enable_thinking for templates that honor it; models
             # that cannot disable thinking are configured with a low effort.
             req.reasoning_effort = disabled_thinking_effort

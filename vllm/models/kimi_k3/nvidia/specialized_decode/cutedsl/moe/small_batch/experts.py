@@ -512,7 +512,7 @@ class ClusterExpertsTP8(_ClusterExperts):
                 if lane == 0:
                     maxima[ew] = amax
                 cute.arch.barrier(barrier_id=1, number_of_threads=128)
-                sb = mx_exponent(max(amax, maxima[ew ^ 1]), True)
+                sb = mx_exponent(max(amax, maxima[ew ^ 1]))
                 if up:
                     byte = fp8_bits(hidden * mx_rescale(sb))
                     sm[self.off_stage + ew * 16 + local] = byte
@@ -522,8 +522,8 @@ class ClusterExpertsTP8(_ClusterExperts):
                     words = load_words(src, count=4, shared=True)
                     kc = 4 * rank + ew
                     offset = self.off_h + (kc // 8) * 1024 + (kc % 8) * 16
-                    sw = Uint32(mx_exponent(max(maxima[0], maxima[1]), True))
-                    sw |= Uint32(mx_exponent(max(maxima[2], maxima[3]), True)) << 8
+                    sw = Uint32(mx_exponent(max(maxima[0], maxima[1])))
+                    sw |= Uint32(mx_exponent(max(maxima[2], maxima[3]))) << 8
                     for peer in range(6):
                         dst = sm.iterator + cute.assume(offset, divby=16)
                         store_async_dsmem(dst, words, hbar, peer)

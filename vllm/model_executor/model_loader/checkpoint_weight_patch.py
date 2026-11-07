@@ -135,6 +135,76 @@ def _load_weight_chunk(
     return set() if loaded_names is None else set(loaded_names)
 
 
+def _sparse_batch_is_invalid(
+    batch: list[CheckpointWeightPatch], validate_unique_indices: bool
+) -> bool:
+    # NaN is reserved to mean "leave this checkpoint position unchanged,"
+    # so it cannot also be supplied as a new sparse value.
+    invalid = torch.isnan(torch.cat([patch.values for patch in batch])).any()
+
+    device = batch[0].values.device
+    patch_indices = []
+    for patch in batch:
+        assert patch.indices is not None
+        patch_indices.append(patch.indices.to(device=device))
+    indices = torch.cat(patch_indices)
+    lengths = torch.tensor([i.numel() for i in patch_indices], device=device)
+    ends = lengths.cumsum(0)
+    not_increasing = indices[1:] <= indices[:-1]
+    # A step from one patch into the next says nothing about either.
+    not_increasing[ends[:-1] - 1] = False
+    if not_increasing.any().item():
+        lowest = torch.stack([i.min() for i in patch_indices])
+        highest = torch.stack([i.max() for i in patch_indices])
+        if validate_unique_indices:
+            for i in patch_indices:
+                sorted_indices = torch.sort(i).values
+                invalid = invalid | (sorted_indices[1:] == sorted_indices[:-1]).any()
+    else:
+        # Strictly increasing indices cannot repeat, and the ends bound the rest.
+        lowest, highest = indices[ends - lengths], indices[ends - 1]
+    # Sparse indices address the flattened full checkpoint tensor.
+    limits = torch.tensor([math.prod(patch.shape) for patch in batch], device=device)
+    invalid = invalid | (lowest < 0).any() | (highest >= limits).any()
+    return bool(invalid.item())
+
+
+def _validate_sparse_patches(
+    patches: list[CheckpointWeightPatch],
+    max_chunk_bytes: int,
+    validate_unique_indices: bool,
+) -> None:
+    """Check whole batches at once, since launching work per patch is slow."""
+    batches: list[list[CheckpointWeightPatch]] = []
+    batch_bytes = 0
+    # A batch gets concatenated, so patches of one device and dtype go together.
+    for patch in sorted(
+        patches, key=lambda p: (str(p.values.device), str(p.values.dtype))
+    ):
+        assert patch.indices is not None
+        if not patch.indices.numel():
+            continue
+        patch_bytes = patch.values.nbytes + patch.indices.nbytes
+        first = batches[-1][0].values if batches else None
+        if (
+            first is None
+            or (first.device, first.dtype) != (patch.values.device, patch.values.dtype)
+            or batch_bytes + patch_bytes > max_chunk_bytes
+        ):
+            batches.append([])
+            batch_bytes = 0
+        batches[-1].append(patch)
+        batch_bytes += patch_bytes
+
+    if any(_sparse_batch_is_invalid(b, validate_unique_indices) for b in batches):
+        invalid_reasons = (
+            "NaN values, out-of-range indices, or duplicate indices"
+            if validate_unique_indices
+            else "NaN values or out-of-range indices"
+        )
+        raise ValueError(f"Sparse checkpoint patches contain {invalid_reasons}")
+
+
 @torch.no_grad()
 def load_checkpoint_weight_patches(
     model: torch.nn.Module,
@@ -168,7 +238,8 @@ def load_checkpoint_weight_patches(
         model: Model whose native `load_weights` method applies the patches.
         patches: Dense replacements or sparse updates in checkpoint coordinates.
         max_chunk_bytes: Target checkpoint tensor bytes per
-            `model.load_weights` call. A single tensor may exceed this target.
+            ``model.load_weights`` call and patch bytes per sparse validation
+            batch. A single tensor may exceed this target.
         validate_unique_indices: Whether to reject duplicate sparse indices within
             each patch. Repeated patches may update the same positions. Disable
             only for a trusted producer that already guarantees unique positions
@@ -189,39 +260,8 @@ def load_checkpoint_weight_patches(
         raise ValueError("Dense and sparse checkpoint patches cannot be mixed")
     sparse = sparse_flags == {True}
 
-    # Keep validation results on their devices and read one combined result per
-    # device, instead of synchronizing the CPU once for every patch.
-    checks_by_device: dict[torch.device, list[torch.Tensor]] = {}
     if sparse:
-        for patch, numel in zip(patch_list, patch_numels, strict=True):
-            assert patch.indices is not None
-
-            # NaN is reserved to mean "leave this checkpoint position unchanged,"
-            # so it cannot also be supplied as a new sparse value.
-            patch_checks = [torch.isnan(patch.values).any()]
-            indices = patch.indices.to(device=patch.values.device)
-            if indices.numel():
-                # Sparse indices address the flattened full checkpoint tensor.
-                patch_checks.append(
-                    torch.logical_or(indices < 0, indices >= numel).any()
-                )
-                if validate_unique_indices:
-                    # Equal neighboring indices after sorting indicate duplicates.
-                    sorted_indices = torch.sort(indices).values
-                    patch_checks.append(
-                        (sorted_indices[1:] == sorted_indices[:-1]).any()
-                    )
-
-            checks_by_device.setdefault(patch.values.device, []).extend(patch_checks)
-
-        for device_checks in checks_by_device.values():
-            if torch.stack(device_checks).any().item():
-                invalid_reasons = (
-                    "NaN values, out-of-range indices, or duplicate indices"
-                    if validate_unique_indices
-                    else "NaN values or out-of-range indices"
-                )
-                raise ValueError(f"Sparse checkpoint patches contain {invalid_reasons}")
+        _validate_sparse_patches(patch_list, max_chunk_bytes, validate_unique_indices)
 
     loaded_names: set[str] = set()
     # Collect checkpoint tensors for one model.load_weights() call.

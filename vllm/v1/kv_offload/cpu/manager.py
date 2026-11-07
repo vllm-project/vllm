@@ -421,6 +421,7 @@ class CPUOffloadingManager(OffloadingManager):
                     keys=stored_keys,
                     medium=self.medium,
                     removed=False,
+                    removal_expected=True,
                     req_context=req_context,
                 )
             )

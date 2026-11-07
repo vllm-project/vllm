@@ -66,7 +66,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_kernel_dispatcher_with_warmup,
 )
 from vllm.models.deepseek_v4.attention import fill_short_context_topk_indices
-from vllm.models.deepseek_v41.common.grouped_wo_a import DeepseekV4GroupedWoA
+from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
 from vllm.models.deepseek_v41.common.ops.fused_layout import Q_CHUNK
 from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v41.compressor import DeepseekCompressor
@@ -607,19 +607,18 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         ):
             logger.warning_once("SWA bounded replay with PCP requires prefix caching.")
             swa_bounded_replay = False
-        # CDNA4 (MI350/MI355, gfx950) is where prefix-cache SWA replay is
-        # validated. The AITER sparse-MLA path and the default Triton gather
-        # path both clamp to replay_start. CDNA3 and other ROCm archs have
-        # not been validated, so the sliding-window cache stays in the prefix
-        # cache there. The CDNA version is imported only on ROCm: loading the
-        # ROCm platform resolves the GPU arch and fails when no GPU is visible.
+        # Replay relies on the AITER sparse-MLA and Triton gather paths
+        # clamping to replay_start, validated on a compatible CDNA version
+        # only. The import is ROCm-only: it resolves the GPU arch and fails
+        # with no GPU visible.
         if swa_bounded_replay and current_platform.is_rocm():
             from vllm.platforms.rocm import get_cdna_version
 
-            if get_cdna_version() != 4:
+            if get_cdna_version() not in (3, 4):
                 logger.warning_once(
-                    "Prefix-cache SWA replay is only enabled on ROCm CDNA4; the "
-                    "sliding-window cache takes part in prefix caching instead."
+                    "Prefix-cache SWA replay is only enabled on a compatible "
+                    "ROCm CDNA version; the sliding-window cache takes part "
+                    "in prefix caching instead."
                 )
                 swa_bounded_replay = False
         self.swa_cache_layer = DeepseekV4SWACache(
