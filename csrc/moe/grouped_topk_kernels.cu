@@ -1169,7 +1169,10 @@ __global__ void __launch_bounds__(WarpTopKLaunchConfig<MaxNumExperts>::BlockDim)
 
     float lane_unbiased = 0.0F;
     if (lane < topk_i32 && lane_expert >= 0 && lane_expert < num_experts_i32) {
-      lane_unbiased = lane_score - cuda_cast<float, BiasT>(bias[lane_expert]);
+      float lane_selection;
+      preprocess_score<T, BiasT, SF>(token_scores[lane_expert],
+                                     bias[lane_expert], lane_unbiased,
+                                     lane_selection);
     }
     write_outputs(warp, lane_score, lane_unbiased, lane_expert, lane, token,
                   topk_i32, topk_values, topk_indices, renormalize,
