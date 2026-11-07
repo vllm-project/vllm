@@ -60,6 +60,8 @@ def _rank_namespace_from_key_prefix(prefix: str) -> tuple[int, int, int, int] | 
 class _LookupClient(Protocol):
     def batch_exists(self, keys: Sequence[str]) -> Sequence[bool]: ...
 
+    def batch_prefetch(self, keys: Sequence[str]) -> int: ...
+
     def clear(self) -> bool: ...
 
 
@@ -147,6 +149,8 @@ class _MoriLookupServer:
                 break
             with connection:
                 connection.settimeout(_LOOKUP_TIMEOUT_S)
+                operation = "lookup"
+                result: bool | int | list[bool]
                 try:
                     request = b""
                     while not request.endswith(b"\n"):
@@ -155,18 +159,28 @@ class _MoriLookupServer:
                             break
                         request += chunk
                     payload = msgspec.json.decode(request)
-                    if isinstance(payload, dict) and payload.get("op") == "clear":
-                        connection.sendall(
-                            msgspec.json.encode(bool(self.client.clear())) + b"\n"
+                    if isinstance(payload, dict):
+                        operation = payload.get("op", "lookup")
+                    if operation == "clear":
+                        result = bool(self.client.clear())
+                    elif operation == "prefetch":
+                        result = int(
+                            self.client.batch_prefetch(payload.get("keys", []))
                         )
-                        continue
-                    result = self.client.batch_exists(payload)
-                    connection.sendall(
-                        msgspec.json.encode([bool(value) for value in result]) + b"\n"
-                    )
-                except Exception:
-                    with contextlib.suppress(OSError):
-                        connection.sendall(b"[]\n")
+                    else:
+                        result = [
+                            bool(value) for value in self.client.batch_exists(payload)
+                        ]
+                except Exception as exc:
+                    result = []
+                    if operation == "prefetch":
+                        logger.warning_once(
+                            "UMBP prefetch failed; skipping prefetch attempt: %s",
+                            str(exc),
+                        )
+                        result = 0
+                with contextlib.suppress(OSError):
+                    connection.sendall(msgspec.json.encode(result) + b"\n")
 
     def close(self) -> None:
         self._stop.set()
@@ -277,6 +291,42 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
         elif missing:
             logger.debug("UMBP lookup missing %d objects", len(missing))
         return result
+
+    def prefetch(self, keys: Sequence[str]) -> int:
+        if not keys:
+            return 0
+        keys_by_rank: dict[tuple[int, int, int, int], list[str]] = {}
+        for key in keys:
+            rank = _rank_namespace_from_key_prefix(key.rpartition(":")[0] + ":")
+            if rank is not None and rank in self._paths:
+                keys_by_rank.setdefault(rank, []).append(key)
+        admitted = 0
+        for rank, rank_keys in keys_by_rank.items():
+            try:
+                count = int(
+                    self._request(
+                        self._paths[rank],
+                        {"op": "prefetch", "keys": rank_keys},
+                    )
+                )
+                if not 0 <= count <= len(rank_keys):
+                    logger.warning_once(
+                        "UMBP prefetch returned invalid admission count %d for "
+                        "%d keys on rank %s; ignoring this batch",
+                        count,
+                        len(rank_keys),
+                        rank,
+                    )
+                    continue
+                admitted += count
+            except (OSError, TypeError, ValueError) as exc:
+                logger.warning_once(
+                    "UMBP embedded prefetch against rank %s failed; skipping "
+                    "prefetch attempt: %s",
+                    rank,
+                    str(exc),
+                )
+        return admitted
 
     def close(self) -> None:
         return
@@ -490,6 +540,9 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
 
     def batch_exists(self, keys: Sequence[str]) -> Sequence[bool]:
         return [bool(value) for value in self.client.batch_exists(keys)]
+
+    def batch_prefetch(self, keys: Sequence[str]) -> int:
+        return int(self.client.batch_prefetch(list(keys)))
 
     def clear(self) -> bool:
         return bool(self.client.clear())
