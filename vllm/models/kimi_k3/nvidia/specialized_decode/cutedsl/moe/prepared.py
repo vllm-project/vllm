@@ -17,6 +17,12 @@ class MoEScratch:
         cap, h = max(batches), 6144 // tp
         with torch.accelerator.device_index(self.device.index):
             self.stream = torch.cuda.Stream(device=self.device)
+            # ``SharedFront.gated`` batches: their tail Lamport-polls the shared rows
+            # instead of joining the side stream, so the shared expert runs at the
+            # greatest priority (its CTAs take freed SMs first) and never trails.
+            top = torch.cuda.Stream.priority_range()[1]
+            self.urgent = torch.cuda.Stream(device=self.device, priority=top)
+            self.pending = False  # ``urgent`` work the main stream has not joined
             self.begin, self.shared_done = torch.cuda.Event(), torch.cuda.Event()
             self.gate_done = torch.cuda.Event()  # the split shared expert's front half
             f32, i32, bf16 = torch.float32, torch.int32, torch.bfloat16
@@ -34,6 +40,12 @@ class MoEScratch:
         for b in batches:
             self.views[b] = (self.latent[:b], self.expanded[: b * 16], self.experts)
 
+    def join(self):
+        """The main stream waits for the urgent side stream (once per step)."""
+        if self.pending:
+            torch.cuda.current_stream(self.device).wait_stream(self.urgent)
+            self.pending = False
+
 
 # TP8 B16: the experts start beside the split gate/up half (+1% E2E).
 JOIN = {8: "9-16:0", 16: ""}
@@ -50,11 +62,18 @@ class PreparedMoE:
         self.sms = torch.cuda.get_device_properties(state.device).multi_processor_count
         for b, sms in front.split.items():  # the split's down CTAs take the SMs left
             experts.grids[b] = min(experts.grid_for(b), self.sms - sms)
+        # Batches whose experts prefetch the next layer's attention weights in-kernel
+        # (runtime.prefetch.EXPERTS_AHEAD): their (address, bytes) table.
+        self.ahead: dict[int, torch.Tensor] = {}
         for b in state.batches:
             _, expanded, buffers = state.views[b]
             publish, planned = tail.publish.get(b, ()), front.planned(b)
             twoshot = b in tail.twoshots
-            experts.prepare(b, buffers, expanded, publish, planned, twoshot, True)
+            table = None if prefetch is None else prefetch.ahead(layer_idx, b)
+            args = (b, buffers, expanded, publish, planned, twoshot, True)
+            experts.prepare(*args, ahead=table is not None)
+            if table is not None and experts.ahead[b]:
+                self.ahead[b] = table
 
     def run(self, x, out, *, consume=None):
         state, b = self.state, x.shape[0]
@@ -78,13 +97,14 @@ class PreparedMoE:
             self.experts.group(ids)
             return self.finish(b, out, latent, ids, weights, shared, consume)
         state.begin.record(main)
-        with torch.cuda.stream(state.stream):
-            state.stream.wait_event(state.begin)
+        side = state.urgent if self.front.gated(b) else state.stream
+        with torch.cuda.stream(side):
+            side.wait_event(state.begin)
             shared, beside = self.front.shared_expert(x, self.tail)
             if beside is not None:
-                state.gate_done.record(state.stream)
+                state.gate_done.record(side)
                 beside()
-            state.shared_done.record(state.stream)
+            state.shared_done.record(side)
         ids, weights, latent = self.front.route(x)
         self.experts.group(ids)  # pregrouped unit table, beside the shared expert
         if before or (beside is not None and self.join.get(b, 1)):
@@ -93,11 +113,19 @@ class PreparedMoE:
 
     def finish(self, b, out, latent, ids, weights, shared, consume, before=False):
         """The routed experts, the next layer's prefetch fork, then the tail once the
-        shared expert's side stream is done."""
+        shared expert's side stream is done. Early-released batches skip that join:
+        their tail Lamport-polls the shared rows the side stream's last kernel pushes,
+        which also orders the side stream's reads of x before the next layer rewrites
+        it, so the tail keeps its single (programmatic) dependency on the experts and
+        launches as their CTAs exit; the step joins the urgent stream at its end
+        (``MoEScratch.join``)."""
         main = torch.cuda.current_stream(self.state.device)
-        expanded = self.experts.run(latent, ids, weights)
-        if self.prefetch is not None:
+        ahead = self.ahead.get(b)
+        expanded = self.experts.run(latent, ids, weights, ahead)
+        if ahead is None and self.prefetch is not None:
             self.prefetch.fork("next_attention", self.layer_idx, b)
-        if not before:
+        if self.front.gated(b):
+            self.state.pending = True
+        elif not before:
             main.wait_event(self.state.shared_done)
         return self.tail.run(expanded, weights, shared, out, consume=consume)
