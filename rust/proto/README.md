@@ -25,6 +25,14 @@ The package includes the canonical `.proto` files and generates bindings during
 compilation using `protox` and `tonic-prost-build`. Consumers do not need Buf
 credentials, the vLLM checkout, or a separately installed `protoc`.
 
+### Request-level prefill progress
+
+`GenerateStream` can report request-level prefill progress. See
+[prefill progress](../../docs/serving/prefill_progress.md) for setup and usage.
+The progress fields require `vllm-proto` 0.7 or newer. If 0.7 is not yet
+available, use the crate from this repository or generate bindings from these
+schemas.
+
 ### Versioning and releases
 
 The crate has its own version in `Cargo.toml`, independent of the vLLM release

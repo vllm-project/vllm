@@ -22,6 +22,55 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 pytestmark = pytest.mark.cpu_test
 
 
+def test_engine_core_request_preserves_block_hash_and_progress_slots():
+    from vllm import SamplingParams
+    from vllm.v1.engine import EngineCoreRequest
+    from vllm.v1.request import Request
+
+    hashes = [bytes([1]) * 32, bytes([2]) * 32]
+    request = EngineCoreRequest(
+        request_id="request-1",
+        prompt_token_ids=np.array([1, 2, 3, 4], dtype=np.int32),
+        mm_features=None,
+        sampling_params=SamplingParams(max_tokens=4),
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        block_hashes=hashes,
+        include_prefill_progress=True,
+    )
+    frames = MsgpackEncoder().encode(request)
+    fields = msgspec.msgpack.decode(frames[0])
+    assert fields[22] == hashes
+    assert fields[23] is True
+
+    decoded = MsgpackDecoder(EngineCoreRequest).decode(frames)
+    scheduler_request = Request.from_engine_core_request(
+        decoded, block_hasher=None, block_hashes=decoded.block_hashes
+    )
+    assert scheduler_request.block_hashes == hashes
+    assert scheduler_request.include_prefill_progress is True
+
+
+def test_engine_core_output_preserves_watermark_and_progress_slots():
+    from vllm.v1.engine import EngineCoreOutput, PrefillProgress
+
+    progress = PrefillProgress("request-1", 1, 3, 10, 8, 4, 4)
+    output = EngineCoreOutput(
+        request_id="request-1",
+        new_token_ids=[],
+        watermarking=True,
+        prefill_progress=progress,
+    )
+    frames = MsgpackEncoder().encode(output)
+    fields = msgspec.msgpack.decode(frames[0])
+    assert fields[19] is True
+    assert fields[20] == msgspec.to_builtins(progress)
+    assert MsgpackDecoder(EngineCoreOutput).decode(frames) == output
+
+
 class UnrecognizedType(UserDict):
     def __init__(self, an_int: int):
         super().__init__()

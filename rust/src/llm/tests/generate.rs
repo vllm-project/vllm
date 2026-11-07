@@ -20,7 +20,7 @@ use vllm_engine_core_client::protocol::logprobs::{
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::output::{
     EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
-    EngineCoreOutputs, RequestBatchOutputs,
+    EngineCoreOutputs, PrefillProgress, RequestBatchOutputs,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
@@ -181,6 +181,7 @@ fn sample_generate_request(request_id: &str, max_tokens: u32) -> GenerateRequest
         reasoning_parser_kwargs: None,
         reasoning_ended: None,
         lora_request: None,
+        include_prefill_progress: false,
     }
 }
 
@@ -251,6 +252,22 @@ async fn generate_streams_outputs() {
                     push,
                     RequestBatchOutputs {
                         outputs: vec![
+                            EngineCoreOutput {
+                                prefill_progress: Some(Box::new(PrefillProgress {
+                                    request_id: request.request_id.clone(),
+                                    sequence: 1,
+                                    phase: 3,
+                                    prompt_tokens: 2,
+                                    total_compute_tokens: 2,
+                                    completed_compute_tokens: 1,
+                                    remaining_compute_tokens: 1,
+                                    local_cached_tokens: 0,
+                                    external_cached_tokens: 0,
+                                    pending_kv_transfer_tokens: 0,
+                                    cache_accounting_final: true,
+                                })),
+                                ..request_output(&request.request_id, vec![], None)
+                            },
                             request_output_with_logprobs(
                                 &request.request_id,
                                 vec![1, 2],
@@ -277,8 +294,15 @@ async fn generate_streams_outputs() {
     );
 
     let llm = connect_async_llm_with_ipc(handshake_address, 7, "test-model", &ipc).await;
-    let mut stream = llm.generate(sample_generate_request("req-delta", 3)).await.unwrap();
+    let mut request = sample_generate_request("req-delta", 3);
+    request.include_prefill_progress = true;
+    let mut stream = llm.generate(request).await.unwrap();
     let internal_id = stream.request_id().to_string();
+
+    let progress = stream.next().await.unwrap().unwrap();
+    assert!(progress.prefill_progress.is_some());
+    assert!(progress.prompt_info.is_none());
+    assert!(progress.token_ids.is_empty());
 
     let first = stream.next().await.unwrap().unwrap();
     assert_eq!(first.request_id, internal_id);
@@ -585,6 +609,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         spec_decode_metrics: None,
         weight_versions: None,
         routed_experts: None,
+        prefill_progress: None,
         timestamps: Default::default(),
     };
 

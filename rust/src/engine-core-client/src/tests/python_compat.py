@@ -106,6 +106,7 @@ class EngineCoreRequest(
     session_id: str | None = None
     kv_hints: KvHintsEnvelope | None = None
     block_hashes: list[bytes] | None = None
+    include_prefill_progress: bool = False
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,7 @@ class EngineCoreOutput(
     prompt_token_id_logprobs: object | None = None
     error: RequestError | None = None
     watermarking: bool | None = None
+    prefill_progress: object | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):
@@ -211,6 +213,7 @@ request = EngineCoreRequest(
         ],
     ),
     block_hashes=[b"\x01" * 32, b"\x02" * 32],
+    include_prefill_progress=True,
 )
 
 # All defaults -> empty map. Regression guard for the sparse-map decode.
@@ -298,6 +301,7 @@ outputs = EngineCoreOutputs(
             finish_reason=FinishReason.ERROR,
             error=RequestError("engine_paused", "Generation is paused.", True),
             watermarking=True,
+            prefill_progress=["req-1", 1, 7, 10, 8, 4, 4, 1, 1, 0, True],
             routed_experts=[
                 np.arange(4, dtype=np.uint8).reshape(2, 1, 2).dtype.str,
                 [2, 1, 2],
