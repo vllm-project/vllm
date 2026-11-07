@@ -449,6 +449,8 @@ For these models, vLLM automatically:
 2. Converts multi-channel audio to mono using channel averaging
 3. Handles both `(channels, time)` format (torchaudio) and `(time, channels)` format (soundfile)
 
+When you provide `(audio, sample_rate)`, either layout is resampled along the time axis to the model's required sample rate before channel averaging.
+
 **Example with stereo audio:**
 
 ```python

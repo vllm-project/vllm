@@ -203,3 +203,30 @@ def test_cached_audio_items_preserve_positions_during_resampling():
     assert items.get(2) is None
     assert len(items.get(1)) == 32
     np.testing.assert_array_equal(items.get(3), waveform)
+
+
+@pytest.mark.parametrize("method", ["scipy", "torchaudio", "pyav", "soxr"])
+@pytest.mark.parametrize("orig_sr", [48000, 8000, 16000])
+@pytest.mark.parametrize("num_channels", [1, 2])
+def test_audio_resampling_preserves_equivalent_channel_layouts(
+    method: str, orig_sr: int, num_channels: int
+):
+    """Changing a supported array layout must not change the audio duration."""
+    samples = np.arange(orig_sr // 10, dtype=np.float32) / orig_sr
+    waveform = np.stack(
+        [
+            np.sin(2 * np.pi * (220 + 110 * channel) * samples)
+            for channel in range(num_channels)
+        ]
+    )
+    parser = MultiModalDataParser(
+        target_sr=16000, target_channels=1, audio_resample_method=method
+    )
+    items = parser.parse_mm_data(
+        {"audio": [(waveform, orig_sr), (waveform.T, orig_sr)]}
+    )["audio"]
+
+    assert isinstance(items, AudioProcessorItems)
+    assert items.get_count() == 2
+    assert items.get_audio_length(0) == items.get_audio_length(1) == 1600
+    np.testing.assert_array_equal(items.get(0), items.get(1))

@@ -4,6 +4,7 @@
 from collections.abc import Sequence
 from typing import Any
 
+import numpy as np
 import pytest
 import torch
 from transformers import AutoModelForSpeechSeq2Seq
@@ -169,6 +170,38 @@ def test_audio_tensor_inputs(vllm_runner: type[VllmRunner]) -> None:
                 name_0="NumPy",
                 name_1=name,
             )
+
+
+@pytest.mark.core_model
+def test_resampled_audio_channel_layouts(vllm_runner: type[VllmRunner]) -> None:
+    """Soundfile and torchaudio layouts must transcribe the same resampled clip."""
+    audio, sample_rate = AudioAsset("mary_had_lamb").audio_and_sample_rate
+    audio = AudioResampler(target_sr=48000).resample(audio, orig_sr=sample_rate)
+    stereo = np.stack([audio, audio * 0.5])
+
+    with vllm_runner(
+        "openai/whisper-tiny",
+        dtype="float32",
+        max_model_len=448,
+        max_num_batched_tokens=2048,
+        max_num_seqs=1,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        mm_processor_cache_gb=0,
+    ) as vllm_model:
+        reference = vllm_model.generate_greedy_logprobs(
+            [VLLM_PROMPT], 16, num_logprobs=5, audios=[(stereo, 48000)]
+        )
+        result = vllm_model.generate_greedy_logprobs(
+            [VLLM_PROMPT], 16, num_logprobs=5, audios=[(stereo.T, 48000)]
+        )
+        assert reference[0][0] and result[0][0]
+        check_logprobs_close(
+            outputs_0_lst=reference,
+            outputs_1_lst=result,
+            name_0="channels first",
+            name_1="samples first",
+        )
 
 
 @pytest.mark.parametrize("dtype", ["half"])

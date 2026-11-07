@@ -736,6 +736,13 @@ class MultiModalDataParser:
                 continue
 
             audio, orig_sr = self._get_audio_with_sr(data_item)
+            if (
+                self.target_channels is not None
+                and audio.ndim == 2
+                and audio.shape[0] > audio.shape[1]
+            ):
+                # Resamplers expect time on the last axis, before channel reduction.
+                audio = audio.T
             if orig_sr is None:
                 new_audio = audio
             else:
