@@ -352,6 +352,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
+        # Set while _dummy_run() runs the every-step dummy batch of a DP rank
+        # that has no requests, so the cudagraph dispatch picks the no-LoRA
+        # case for it.
+        self._idle_dp_dummy_run = False
         self.lora_capture_cases = [0]
         if self.lora_config:
             self.lora_capture_cases = get_lora_capture_cases(
@@ -889,6 +893,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
+        idle_dp_rank: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if skip_attn and not is_profile:
@@ -953,13 +958,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             intermediate_tensors = self.intermediate_tensors[:num_tokens]
 
         max_loras = self.lora_config.max_loras if self.lora_config is not None else 0
-        with self.maybe_dummy_run_with_lora(
-            self.lora_config,
-            num_scheduled_tokens=np.array(num_tokens_per_request, dtype=np.int32),
-            num_sampled_tokens=None,
-            remove_lora=True,
-            num_active_loras=max_loras,
-        ):
+        num_scheduled_tokens = np.array(num_tokens_per_request, dtype=np.int32)
+        if idle_dp_rank:
+            # A DP rank with no requests runs this dummy batch every step while
+            # the other ranks work. Keep the adapters it has loaded - the MoE
+            # layer may still apply them to tokens gathered from the other
+            # ranks - and run the batch without LoRA instead of building and
+            # dropping dummy adapters on every step.
+            lora_ctx = self.maybe_select_dummy_loras(
+                self.lora_config, num_scheduled_tokens, num_active_loras=0
+            )
+        else:
+            lora_ctx = self.maybe_dummy_run_with_lora(
+                self.lora_config,
+                num_scheduled_tokens=num_scheduled_tokens,
+                num_sampled_tokens=None,
+                remove_lora=True,
+                num_active_loras=max_loras,
+            )
+        self._idle_dp_dummy_run = idle_dp_rank
+        with lora_ctx:
             # Execute the model.
             self.execute_model(
                 dummy_scheduler_output,
@@ -971,6 +989,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 valid_dummy_state_slots=valid_dummy_state_slots,
                 randomize_inputs=randomize_inputs,
             )
+        self._idle_dp_dummy_run = False
         self.kv_connector.set_disabled(False)
 
         # Non-last PP ranks don't produce output for sampling.
@@ -1870,7 +1889,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
         num_active_loras = 0
-        if self.lora_config:
+        if self.lora_config and not self._idle_dp_dummy_run:
             req_ids = list(scheduler_output.num_scheduled_tokens.keys())
             num_active_loras = get_num_active_loras_for_dispatch(
                 self.lora_config, self.lora_state, req_ids, dummy_run
