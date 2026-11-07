@@ -48,6 +48,7 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
+from vllm.utils import is_moe_layer
 from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
     LayerName,
@@ -55,6 +56,13 @@ from vllm.utils.torch_utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def reserve_moe_workspaces(model: torch.nn.Module) -> None:
+    """Reserve shared MoE scratch after loading weights and before graph capture."""
+    for module in model.modules():
+        if is_moe_layer(module) and hasattr(module, "maybe_reserve_moe_workspace"):
+            module.maybe_reserve_moe_workspace()
 
 
 def register_layer_for_moe_forward_op(
@@ -943,6 +951,16 @@ class MoERunner(MoERunnerInterface):
     # Old methods from FusedMoE layer. Remove when possible.
     #
     #########################################################
+
+    def maybe_reserve_moe_workspace(self) -> None:
+        """Pre-size the shared MoE workspace to its worst case before lock."""
+        kernel = self._quant_method.moe_kernel
+        if kernel is None:
+            return
+        w13_weight = getattr(self.routed_experts, "w13_weight", None)
+        if w13_weight is None or w13_weight.dim() != 3:
+            return
+        kernel.reserve_workspace(int(w13_weight.shape[1]), self.moe_config.hidden_dim)
 
     #
     # Properties

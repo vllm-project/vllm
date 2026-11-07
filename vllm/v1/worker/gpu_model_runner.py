@@ -60,6 +60,9 @@ from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+    reserve_moe_workspaces,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -5186,7 +5189,12 @@ class GPUModelRunner(
             format_gib(self.model_memory_usage),
             time_after_load - time_before_load,
         )
-
+        if not load_dummy_weights:
+            reserve_moe_workspaces(self.model)
+            if (drafter := getattr(self, "drafter", None)) and (
+                drafter_model := getattr(drafter, "model", None)
+            ):
+                reserve_moe_workspaces(drafter_model)
         mm_config = self.model_config.multimodal_config
         self.is_multimodal_pruning_enabled = (
             supports_multimodal_pruning(self.get_model())

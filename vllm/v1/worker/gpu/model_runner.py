@@ -47,6 +47,9 @@ from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+    reserve_moe_workspaces,
+)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -415,6 +418,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.model, self.vllm_config, self.device
                 )
 
+            if not load_dummy_weights:
+                reserve_moe_workspaces(self.model)
+
             if self.use_aux_hidden_state_outputs:
                 assert self.speculative_config is not None
                 set_eagle3_aux_hidden_state_layers(
@@ -425,6 +431,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if isinstance(self.speculator, DraftModelSpeculator):
                 with use_workspace_lane(self._draft_workspace_lane):
                     self.speculator.load_model(self.model)
+                    if not load_dummy_weights:
+                        reserve_moe_workspaces(self.speculator.model)
                     eplb_models_added = self.eplb.maybe_register_speculator(
                         self.speculator, self.speculative_config, load_dummy_weights
                     )
