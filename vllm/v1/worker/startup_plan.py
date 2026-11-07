@@ -12,10 +12,10 @@ When ``VLLM_ENABLE_STARTUP_PLAN=1``, each worker persists that value under
 the torch.compile cache), keyed by a fingerprint of everything the value
 depends on, and later boots apply it automatically -- skipping the
 memory-profiling measurement and the CUDA-graph memory estimation pass --
-if and only if the fingerprint matches and the device has at least as much
-free memory as when the plan was recorded. On any mismatch the worker
-falls back to full profiling, so a stale plan costs nothing and is never
-trusted.
+if and only if, on every rank, the fingerprint matches and the device has
+at least as much free memory as when the plan was recorded. On any mismatch
+every worker falls back to full profiling. A stale plan costs nothing and is
+never trusted.
 """
 
 import hashlib
@@ -28,6 +28,7 @@ import torch
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.utils import hash_config
+from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -132,6 +133,17 @@ def _applicable_kv_cache_memory_bytes(
     return kv_bytes
 
 
+def _every_rank_applies(applies: bool) -> bool:
+    """Whether every rank in the world group can apply its plan. Applying skips
+    the CUDA-graph estimation pass, whose captures run collectives."""
+    world = get_world_group()
+    if world.world_size == 1:
+        return applies
+    num_applying = torch.tensor([int(applies)], dtype=torch.int32)
+    world.cpu_all_reduce_(num_applying)
+    return int(num_applying.item()) == world.world_size
+
+
 def maybe_apply_startup_plan(worker: "Worker") -> None:
     """If enabled and ``--kv-cache-memory`` was not set explicitly, apply a
     persisted plan by setting ``worker.cache_config.kv_cache_memory_bytes``.
@@ -145,12 +157,20 @@ def maybe_apply_startup_plan(worker: "Worker") -> None:
         worker.vllm_config, worker.rank, worker.parallel_config.world_size
     )
     plan = _load_plan(fingerprint)
-    if plan is None:
-        return
     current_free_memory = worker.init_snapshot.free_memory
-    kv_bytes = _applicable_kv_cache_memory_bytes(plan, current_free_memory)
-    if kv_bytes is None:
+    kv_bytes = (
+        None
+        if plan is None
+        else _applicable_kv_cache_memory_bytes(plan, current_free_memory)
+    )
+    if not _every_rank_applies(kv_bytes is not None):
+        if kv_bytes is not None:
+            logger.info(
+                "Startup plan not applied: another rank has no applicable "
+                "plan; falling back to full memory profiling."
+            )
         return
+    assert plan is not None and kv_bytes is not None
     logger.info(
         "Applying persisted startup plan (fingerprint %s): "
         "kv_cache_memory_bytes=%d (%.2f GiB), recorded free-memory "
