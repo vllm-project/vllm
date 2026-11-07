@@ -1318,19 +1318,24 @@ class Gemma4ForConditionalGeneration(
         cost = patches_per_item * 4 * position_embedding_size * 8
         return max(1, budget // cost) if cost > 0 else 1
 
+    def _normalize_pixel_values(
+        self, pixel_values: torch.Tensor, dtype: torch.dtype
+    ) -> torch.Tensor:
+        # With mm_device_do_normalize the processor skips the rescale, so
+        # pixel_values hold raw uint8 patches. Patches are channel-last, so
+        # normalize per pixel.
+        num_channels = getattr(self.config.vision_config, "num_channels", 3)
+        return self.vision_input_norm(
+            pixel_values.reshape(-1, num_channels), dtype
+        ).view(pixel_values.shape)
+
     def _embed_patches(
         self,
         pixel_values: torch.Tensor,
         pixel_position_ids: torch.Tensor,
         padding_positions: torch.Tensor,
     ) -> torch.Tensor:
-        # With mm_device_do_normalize the processor skips the rescale, so
-        # pixel_values hold raw uint8 patches; the patch embedder expects
-        # [0, 1] floats. Patches are channel-last, so normalize per pixel.
-        num_channels = getattr(self.vision_tower.config, "num_channels", 3)
-        pixel_values = self.vision_input_norm(
-            pixel_values.reshape(-1, num_channels), self.model_dtype
-        ).view(pixel_values.shape)
+        pixel_values = self._normalize_pixel_values(pixel_values, self.model_dtype)
         # Inline `Gemma4VisionPatchEmbedder.forward` with the pixel values in
         # the model dtype. Transformers casts them to `input_proj.weight.dtype`,
         # which is the storage dtype (e.g. FP8) once `input_proj` is quantized.

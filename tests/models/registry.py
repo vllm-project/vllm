@@ -947,7 +947,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Gemma4UnifiedForConditionalGeneration": _HfExamplesInfo(
         "google/gemma-4-12B-it",
-        is_available_online=False,
     ),
     "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmAsrForConditionalGeneration": _HfExamplesInfo(

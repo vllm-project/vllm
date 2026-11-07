@@ -2,13 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from PIL import Image as PILImage
 from transformers.models.gemma4 import Gemma4AudioFeatureExtractor
 
 from vllm.exceptions import VLLMValidationError
+from vllm.model_executor.layers.fusion.mm_input_norm import (
+    IdentityInputNorm,
+    build_mm_input_norm,
+)
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ImagePixelInputs,
     _dummy_audio_num_samples,
@@ -20,6 +26,7 @@ from vllm.model_executor.models.gemma4_unified import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from ....conftest import ImageTestAssets
@@ -218,6 +225,44 @@ def test_limit_mm_per_prompt(
         )
 
 
+@pytest.mark.usefixtures("default_vllm_config")
+def test_mm_device_do_normalize():
+    device = current_platform.device_type
+    ctx = build_model_context(
+        GEMMA4_UNIFIED_MODEL_ID, limit_mm_per_prompt={"image": 2, "video": 1}
+    )
+    assert ctx.model_config.multimodal_config.mm_device_do_normalize
+
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor()
+    rng = np.random.default_rng(0)
+    images = [
+        PILImage.fromarray(rng.integers(0, 256, (470, 310, 3), dtype=np.uint8)),
+        PILImage.fromarray(rng.integers(0, 256, (320, 480, 3), dtype=np.uint8)),
+    ]
+    frames = rng.integers(0, 256, (2, 240, 320, 3), dtype=np.uint8)
+    mm_items = processor.info.parse_mm_data(
+        {"image": images, "video": [(frames, {"fps": 2.0, "frames_indices": [0, 1]})]}
+    )
+    prompt = hf_processor.image_token * len(images) + hf_processor.video_token
+
+    def pixels(mm_device_do_normalize: bool) -> list[torch.Tensor]:
+        ctx.model_config.multimodal_config.mm_device_do_normalize = (
+            mm_device_do_normalize
+        )
+        data = processor(prompt, mm_items=mm_items)["mm_kwargs"].get_data()
+        return [*data["pixel_values"], *data["pixel_values_videos"]]
+
+    normalized = pixels(False)
+    raw = pixels(True)
+
+    input_norm = build_mm_input_norm(ctx.model_config).to(device)
+    for raw_values, normalized_values in zip(raw, normalized, strict=True):
+        assert raw_values.dtype == torch.uint8
+        output = input_norm(raw_values.to(device), normalized_values.dtype)
+        torch.testing.assert_close(output, normalized_values.to(device))
+
+
 def test_dummy_audio_length_falls_back_for_the_unified_extractor():
     """The unified audio feature extractor does not define ``fft_length``.
 
@@ -328,6 +373,8 @@ class _MockUnifiedModel(Gemma4UnifiedForConditionalGeneration):
         device: str = "cpu",
     ):
         torch.nn.Module.__init__(self)
+        self.config = SimpleNamespace(vision_config=SimpleNamespace())
+        self.vision_input_norm = IdentityInputNorm()
         self.vision_embedder = _build_test_embedder(
             embed_dim=embed_dim, max_pos=max_pos, dtype=dtype, device=device
         )
