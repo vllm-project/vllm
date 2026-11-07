@@ -705,6 +705,10 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def input_item_parsing(cls, data):
+        return cls._parse_input_items(data)
+
+    @classmethod
+    def _parse_input_items(cls, data: Any) -> Any:
         """Parse input items that are missing required fields or that Pydantic
         cannot disambiguate in a Union of TypedDict / BaseModel types.
 
@@ -900,6 +904,60 @@ class ResponsesRequest(OpenAIBaseModel):
                 data["tool_choice"] = {**tool_choice, "name": resolved}
 
         return data
+
+
+class ResponsesInputTokensRequest(OpenAIBaseModel):
+    model: str | None = None
+    input: (
+        str
+        | list[
+            Annotated[
+                ResponseInputOutputItem, BeforeValidator(_default_input_image_details)
+            ]
+        ]
+        | None
+    ) = None
+    instructions: str | None = None
+    parallel_tool_calls: bool | None = None
+    previous_response_id: str | None = None
+    reasoning: Reasoning | None = None
+    text: ResponseTextConfig | None = None
+    tool_choice: ToolChoice | None = None
+    tools: list[Tool] | None = None
+    truncation: Literal["auto", "disabled"] = "disabled"
+    # vLLM extensions that change the rendered prompt
+    previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
+    chat_template_kwargs: dict[str, Any] | None = None
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None
+    mm_processor_kwargs: dict[str, Any] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_input(cls, data):
+        if isinstance(data, dict):
+            for parameter in ("conversation", "personality"):
+                if data.get(parameter) is not None:
+                    raise VLLMValidationError(
+                        f"{parameter} is not supported for input token counting.",
+                        parameter=parameter,
+                    )
+        return ResponsesRequest._parse_input_items(data)
+
+    def to_responses_request(self) -> ResponsesRequest:
+        data = self.model_dump(include=set(type(self).model_fields), exclude_none=True)
+        data.update(
+            input=self.input if self.input is not None else [],
+            previous_input_messages=self.previous_input_messages,
+            store=False,
+            stream=False,
+            background=False,
+        )
+        return ResponsesRequest.model_validate(data)
+
+
+class ResponsesInputTokensResponse(OpenAIBaseModel):
+    object: Literal["response.input_tokens"] = "response.input_tokens"
+    input_tokens: int
 
 
 class ResponsesResponse(OpenAIBaseModel):

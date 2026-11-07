@@ -7,7 +7,11 @@ from openai_harmony import (
 )
 from pydantic import ValidationError
 
+from vllm.entrypoints.openai.responses.harmony import (
+    construct_harmony_previous_input_messages,
+)
 from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesInputTokensRequest,
     ResponsesRequest,
     serialize_message,
     serialize_messages,
@@ -15,6 +19,91 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.exceptions import VLLMValidationError
 
 pytestmark = pytest.mark.skip_global_cleanup
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_input"),
+    [({}, []), ({"input": None}, []), ({"input": ""}, "")],
+)
+def test_input_token_count_accepts_omitted_or_null_input(
+    payload, expected_input
+) -> None:
+    request = ResponsesInputTokensRequest.model_validate(payload).to_responses_request()
+    assert request.input == expected_input
+    assert request.max_output_tokens is None
+    assert not request.store
+
+
+def test_input_token_count_forwards_only_declared_fields() -> None:
+    request = ResponsesInputTokensRequest.model_validate(
+        {
+            "input": "Hi",
+            "chat_template_kwargs": {"enable_thinking": False},
+            "include": ["message.output_text.logprobs"],
+            "prompt": {"id": "pmpt_1"},
+        }
+    ).to_responses_request()
+    assert request.chat_template_kwargs == {"enable_thinking": False}
+    assert request.include is None
+
+
+def test_input_token_count_preserves_function_call_items() -> None:
+    request = ResponsesInputTokensRequest.model_validate(
+        {
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "get_weather",
+                    "arguments": '{"city":"Paris"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "Sunny",
+                },
+            ]
+        }
+    ).to_responses_request()
+    assert isinstance(request.input, list)
+    assert request.input[0].type == "function_call"
+    assert request.input[1]["type"] == "function_call_output"
+
+
+@pytest.mark.parametrize("history_format", ["chat", "harmony", "message"])
+def test_input_token_count_preserves_stateless_history(history_format: str) -> None:
+    messages = [
+        Message.from_dict(
+            {
+                "role": role,
+                "content": [{"type": "text", "text": text}],
+            }
+        )
+        for role, text in [
+            ("user", "Remember that my favorite city is Seoul."),
+            ("assistant", "I will remember Seoul."),
+        ]
+    ]
+    if history_format == "chat":
+        history = [
+            {"role": "user", "content": "Remember that my favorite city is Seoul."},
+            {"role": "assistant", "content": "I will remember Seoul."},
+        ]
+    elif history_format == "harmony":
+        history = [message.to_dict() for message in messages]
+    else:
+        history = messages
+    request = ResponsesInputTokensRequest.model_validate(
+        {"input": "What city?", "previous_input_messages": history}
+    ).to_responses_request()
+
+    assert serialize_messages(request.previous_input_messages) == serialize_messages(
+        history
+    )
+    assert [
+        message.to_dict()
+        for message in construct_harmony_previous_input_messages(request)
+    ] == [message.to_dict() for message in messages]
 
 
 def test_serialize_message() -> None:
