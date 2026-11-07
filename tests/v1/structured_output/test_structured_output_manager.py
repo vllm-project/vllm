@@ -135,6 +135,7 @@ def _build_harness(
     reasoning_parser_kwargs: dict | None = None,
     structured_outputs: StructuredOutputsParams | None = None,
     num_spec_tokens: int = NUM_SPEC_TOKENS,
+    request_id: str | None = None,
 ) -> tuple[StructuredOutputManager, Request]:
     vllm_config = VllmConfig(
         model_config=ModelConfig(tokenizer=TOKENIZER),
@@ -163,7 +164,7 @@ def _build_harness(
 
     prompt_ids = tokenizer.encode(prefix) if prefix else []
     request = Request(
-        request_id=f"{backend}-flow",
+        request_id=request_id or f"{backend}-flow",
         prompt_token_ids=prompt_ids,
         sampling_params=sampling_params,
         pooling_params=None,
@@ -562,6 +563,57 @@ def test_parallel_fill_masks_grammar_invalid_implicit_end(
         request.append_output_token_ids([end])
         assert manager.accept_tokens(request, [end])
         assert row_pattern() == "C"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("parallel", [False, True])
+def test_mixed_batch_rows(tokenizer, backend: StructuredOutputsBackend, parallel):
+    """Unconstrained rows are filled in bulk; each lands on its own request."""
+    marker, end = _to_token_ids(tokenizer, (IMPLICIT_THINK_END, THINK_END))
+    kwargs = {"marker": marker, "end_marker": end}
+    # R: reasoning, the implicit end is masked. U: reasoning, the regex accepts
+    # the implicit end. C: reasoning ended, the grammar constrains the row.
+    specs = {
+        "R": (False, None),
+        "U": (False, StructuredOutputsParams(regex="[a-z]+")),
+        "C": (True, None),
+    }
+    pattern = "RUCRCU"
+    manager = None
+    requests = {}
+    for i, kind in enumerate(pattern):
+        reasoning_ended, structured_outputs = specs[kind]
+        harness_manager, request = _build_harness(
+            tokenizer,
+            backend,
+            reasoning_ended=reasoning_ended,
+            reasoning_parser_kwargs=kwargs,
+            structured_outputs=structured_outputs,
+            num_spec_tokens=0,
+            request_id=str(i),
+        )
+        manager = manager or harness_manager
+        requests[request.request_id] = request
+    assert manager is not None
+    manager.reasoner_cls = MockEngineReasoner
+
+    def row_pattern() -> str:
+        bitmask = manager.grammar_bitmask(
+            requests=requests,
+            structured_output_request_ids=list(requests),
+            scheduled_spec_decode_tokens={},
+        )
+        assert bitmask is not None
+        return _row_pattern(bitmask, [marker])
+
+    if not parallel:
+        assert row_pattern() == pattern
+        return
+    manager.fill_bitmask_parallel_threshold = 0
+    manager.fill_bitmask_parallel_batch_size = 2
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        manager.executor_for_fillmask = executor
+        assert row_pattern() == pattern
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
