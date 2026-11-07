@@ -2422,7 +2422,8 @@ class VllmConfig:
                     value,
                 )
         # Log the custom passes that are enabled
-        self.compilation_config.pass_config.log_enabled_passes()
+        if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
+            self.compilation_config.pass_config.log_enabled_passes()
         self.num_hash_lookahead_tokens = self._resolve_num_hash_lookahead_tokens()
 
     def _set_max_num_scheduled_tokens(self):
