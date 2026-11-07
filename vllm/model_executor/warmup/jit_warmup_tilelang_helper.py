@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from abc import abstractmethod
-from collections.abc import Callable, Iterator, Mapping, MutableMapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
@@ -111,11 +111,46 @@ def compile_tilelang(jit_impl: Any, *args: Any, **kwargs: Any) -> None:
     cache[key] = compiled
 
 
+def _compile_tilelang_batch(
+    jit_impl: Any,
+    launches: list[tuple[tuple[Any, ...], dict[str, Any]]],
+) -> None:
+    parse_args = getattr(getattr(jit_impl, "func", None), "parse_args", None)
+    cache = getattr(jit_impl, "_kernel_cache", None)
+    if not callable(getattr(jit_impl, "par_compile", None)) or not (
+        callable(parse_args) and isinstance(cache, MutableMapping)
+    ):
+        for args, kwargs in launches:
+            compile_tilelang(jit_impl, *args, **kwargs)
+        return
+
+    missing: dict[Any, dict[str, Any]] = {}
+    for args, kwargs in launches:
+        call_kwargs = _tilelang_call_kwargs(kwargs)
+        jit_impl.initialize_jit_mode(*args, **call_kwargs)
+        key, _ = parse_args(*args, **call_kwargs)
+        if key not in cache and key not in missing:
+            missing[key] = dict(jit_impl.signature.bind(*args, **call_kwargs).arguments)
+
+    if not missing:
+        return
+    if len(missing) == 1:
+        compile_tilelang(jit_impl, **next(iter(missing.values())))
+        return
+
+    with _quiet_tilelang_warmup_logs():
+        compiled = jit_impl.par_compile(
+            list(missing.values()), num_workers=min(4, len(missing))
+        )
+    cache.update(zip(missing, compiled, strict=True))
+
+
 class VllmTileLangJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
     """TileLang owner whose runtime launch specification is reused for warmup."""
 
     kernel: ClassVar[Any]
     _warming_key: CompileKeyT | None = None
+    _warmup_launches: list[tuple[Any, tuple[Any, ...], dict[str, Any]]] | None = None
 
     @abstractmethod
     def warmup_inputs(self, compile_key: CompileKeyT) -> dict[str, Any]:
@@ -129,6 +164,21 @@ class VllmTileLangJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         finally:
             self._warming_key = None
 
+    def compile_many(self, compile_keys: Iterable[CompileKeyT]) -> None:
+        launches: list[tuple[Any, tuple[Any, ...], dict[str, Any]]] = []
+        self._warmup_launches = launches
+        try:
+            super().compile_many(dict.fromkeys(compile_keys))
+        finally:
+            self._warmup_launches = None
+
+        groups: dict[int, tuple[Any, list[tuple[tuple[Any, ...], dict[str, Any]]]]] = {}
+        for jit_impl, args, kwargs in launches:
+            _, batch = groups.setdefault(id(jit_impl), (jit_impl, []))
+            batch.append((args, kwargs))
+        for jit_impl, batch in groups.values():
+            _compile_tilelang_batch(jit_impl, batch)
+
     def launch(
         self,
         jit_impl: Any,
@@ -137,6 +187,9 @@ class VllmTileLangJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
     ) -> Any:
         call_kwargs = dict(kwargs or {})
         if self._warming_key is not None:
+            if self._warmup_launches is not None:
+                self._warmup_launches.append((jit_impl, args, call_kwargs))
+                return None
             return compile_tilelang(jit_impl, *args, **call_kwargs)
         return jit_impl(*args, **call_kwargs)
 
