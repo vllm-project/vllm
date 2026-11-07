@@ -13,7 +13,7 @@ The MiniMax-M3-preview config selects a single set of branches:
 """
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -130,7 +130,6 @@ from vllm.models.minimax_m3.common.sparse_attention import (
     select_main_backend_and_impl_cls,
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
-from vllm.models.minimax_m3.nvidia.indexer_msa import resolve_index_k_shard
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -144,7 +143,6 @@ from vllm.v1.kv_cache_interface import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
-    from vllm.models.minimax_m3.nvidia.indexer_msa import MiniMaxM3IndexerMSAMetadata
 
 logger = init_logger(__name__)
 
@@ -937,6 +935,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
             "bf16"
         )
+        from vllm.models.minimax_m3.nvidia.indexer_msa import resolve_index_k_shard
+
         index_k_shard = resolve_index_k_shard(
             vllm_config,
             self.total_idx_heads,
@@ -1176,16 +1176,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             return sp_shard(output) if self.use_sequence_parallel else output
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
-        index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
-        if self.indexer.index_cache.tp_shard > 1:
-            attn_metadata = get_forward_context().attn_metadata
-            assert isinstance(attn_metadata, dict)
-            index_md = cast(
-                "MiniMaxM3IndexerMSAMetadata",
-                attn_metadata[self.indexer.index_cache.prefix],
-            )
-            assert index_md.index_slot_mapping is not None
-            index_slot_mapping = index_md.index_slot_mapping
+        index_slot_mapping = self.indexer.get_slot_mapping(
+            fwd_slot_mapping[self.indexer.index_cache.prefix]
+        )
         # FlashInfer autotunes the GEMMs its dummy runs call: take the unfused
         # path there so qkv_proj is tuned for the M < 512 fallback.
         if isinstance(hidden_states, QuantizedActivation):

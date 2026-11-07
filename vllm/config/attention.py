@@ -121,7 +121,7 @@ class AttentionConfig:
 
     indexer_cache_sharding: IndexerCacheSharding = "off"
     """Shard the indexer cache across TP ranks on supported backends.
-    Layout is fixed at startup. MSA supports FP8 index K on single-node
+    Layout is fixed at startup. MSA supports P128 FP8 index K on single-node
     NVLink TP2/TP4; unsupported configurations retain replicated storage."""
 
     indexer_prefill_cp: Literal["local_score", "local_score_unified"] = "local_score"

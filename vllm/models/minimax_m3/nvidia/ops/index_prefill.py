@@ -32,16 +32,12 @@ def _indexer_metadata(
     slot = tl.load(Slots + row, row < num_slots, other=-1)
     tl.store(
         ValidPages + row,
-        tl.where((position >= 0) & (slot >= 0), position // 128 + 1, 0),
+        tl.where((position >= 0) & (slot >= 0), position // PAGE_SIZE + 1, 0),
         row < num_tokens,
     )
     offset = slot % PAGE_SIZE
-    if PAGE_SIZE == 256:
-        owner = offset // (PAGE_SIZE // tp)
-        local = offset % (PAGE_SIZE // tp)
-    else:
-        owner = offset % tp
-        local = offset // tp
+    owner = offset % tp
+    local = offset // tp
     sharded = slot // PAGE_SIZE * (PAGE_SIZE // tp) + local
     tl.store(
         IndexSlots + row,
@@ -63,7 +59,7 @@ def prepare_indexer_metadata(
     page_size: int,
 ) -> None:
     """Write stable index-K slots, causal page counts and prefix lengths on device."""
-    assert page_size in (128, 256) and tp in (2, 4)
+    assert page_size == 128 and tp in (2, 4)
     assert slots.numel() <= index_slots.numel()
     rows = max(seq_lens.numel(), slots.numel(), valid_pages.numel())
     _indexer_metadata[(triton.cdiv(rows, 256),)](

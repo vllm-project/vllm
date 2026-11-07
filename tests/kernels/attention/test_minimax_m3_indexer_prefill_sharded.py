@@ -50,6 +50,7 @@ def _reference(query, cache, table, rank, query_lens, prefixes, like, tp=2):
 @pytest.mark.parametrize("tp", [2, 4])
 @torch.inference_mode()
 def test_indexer_prefill_device_plan_matches_reference(query_lens, prefixes, tp):
+    pytest.importorskip("flashinfer.experimental.cake_msa_icp_indexer.cake_backend")
     from flashinfer.experimental.cake_msa_icp_indexer.cake_backend import (
         index_score_sharded,
         index_score_sharded_plan_device,
@@ -129,15 +130,15 @@ def test_indexer_prefill_device_plan_matches_reference(query_lens, prefixes, tp)
 
 
 @pytest.mark.parametrize("tp", [2, 4])
-@pytest.mark.parametrize("page_size", [128, 256])
 @torch.inference_mode()
-def test_indexer_device_metadata_replay(tp, page_size):
+def test_indexer_device_metadata_replay(tp):
     """Changing prefixes/windows must overwrite reused metadata and padded slots."""
     from vllm.models.minimax_m3.nvidia.ops.index_prefill import (
         prepare_indexer_metadata,
         prepare_prefill_window,
     )
 
+    page_size = 128
     cu_q = torch.tensor([0, 4, 133, 133, 136], dtype=torch.int32, device="cuda")
     seq_lens = torch.tensor([259, 512, 0, 1151], dtype=torch.int32, device="cuda")
     positions = torch.tensor([-1, 0, 127, 128, 511, 0], device="cuda")
@@ -191,8 +192,8 @@ def test_indexer_device_metadata_replay(tp, page_size):
     torch.testing.assert_close(window[4], expected_kv)
     offset = slots % page_size
     rows = page_size // tp
-    owner = offset // rows if page_size == 256 else offset % tp
-    local = offset % rows if page_size == 256 else offset // tp
+    owner = offset % tp
+    local = offset // tp
     expected = slots // page_size * rows + local
     expected[(slots < 0) | (owner != tp - 1)] = -1
     torch.testing.assert_close(output_slots, expected)

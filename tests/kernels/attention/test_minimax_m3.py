@@ -2207,6 +2207,7 @@ def test_decode_index_score_cutedsl_correctness(
 @pytest.mark.parametrize("world", [2, 4])
 def test_sharded_decode_prefetch_waits_for_current_qk(world):
     """An early-triggered producer may still be writing Q and the tail K page."""
+    pytest.importorskip("flashinfer.experimental.cake_msa_icp_indexer.cake_backend")
     from flashinfer.experimental.cake_msa_icp_indexer.cake_backend import (
         MAX_BLOCKS as MAX_K_TILES,
     )
@@ -2305,6 +2306,7 @@ def test_sharded_candidate_merge_deduplicates_and_forces(
     init_blocks, local_blocks, world, prefill
 ):
     pytest.importorskip("cutlass")
+    pytest.importorskip("flashinfer.experimental.cake_msa_icp_indexer.cake_backend")
     from flashinfer.experimental.cake_msa_icp_indexer.cake_backend import (
         merge_candidates,
     )

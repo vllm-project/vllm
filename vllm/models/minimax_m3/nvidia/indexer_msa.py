@@ -27,7 +27,7 @@ import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
@@ -40,6 +40,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerBackend,
+    MiniMaxM3IndexerCache,
     MiniMaxM3IndexerDecodeMetadata,
     MiniMaxM3IndexerImpl,
     MiniMaxM3IndexerMetadata,
@@ -150,8 +151,6 @@ class MiniMaxM3IndexerMSAMetadata(MiniMaxM3IndexerMetadata):
     # Per-token causal page count cdiv(seq_pos+1, PAGE_SIZE), [total_q] int32:
     # drives sparse_topk_select force_end_blocks + -1 out-of-range clamp.
     topk_num_valid_pages: torch.Tensor | None = None
-    # Stable insert slots for this rank's index-K rows; -1 skips other ranks.
-    index_slot_mapping: torch.Tensor | None = None
 
 
 class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
@@ -180,17 +179,32 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         self.index_k_slots: torch.Tensor | None = None
         if self.index_k_tp > 1:
             self.index_k_rank = get_tensor_model_parallel_rank()
-            max_capture = vllm_config.compilation_config.max_cudagraph_capture_size or 0
-            self.index_k_slots = torch.full(
-                (
-                    max(
-                        vllm_config.scheduler_config.max_num_batched_tokens, max_capture
+            caches = [
+                cast(
+                    MiniMaxM3IndexerCache,
+                    vllm_config.compilation_config.static_forward_context[name],
+                )
+                for name in layer_names
+            ]
+            self.index_k_slots = caches[0].index_slot_mapping
+            if self.index_k_slots is None:
+                max_capture = (
+                    vllm_config.compilation_config.max_cudagraph_capture_size or 0
+                )
+                self.index_k_slots = torch.full(
+                    (
+                        max(
+                            vllm_config.scheduler_config.max_num_batched_tokens,
+                            max_capture,
+                        ),
                     ),
-                ),
-                -1,
-                dtype=torch.int64,
-                device=device,
-            )
+                    -1,
+                    dtype=torch.int64,
+                    device=device,
+                )
+            # The writer must capture this same address even without metadata.
+            for cache in caches:
+                cache.index_slot_mapping = self.index_k_slots
         # Persistent unified score buffer [T, H, MAX_K_TILES] shared by all
         # indexer layers and reused across forwards. Stable address (required
         # for the captured decode path) + fixed tile dim so the decode score
@@ -270,7 +284,6 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
 
-        index_slot_mapping = None
         context_lens = self.context_len_buffer[:num_reqs]
         positions = common_attn_metadata.positions
         assert positions is not None
@@ -439,12 +452,11 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             topk_prefix_lens=context_lens,
             topk_max_query_len=common_attn_metadata.max_query_len,
             topk_num_valid_pages=num_valid_pages,
-            index_slot_mapping=index_slot_mapping,
         )
 
 
 class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
-    """Decode: CuteDSL/Triton score. Prefill: fmha_sm100 OnlyScore + top-k."""
+    """Replicated MSA scoring or CAKE context-parallel scoring and exchange."""
 
     indexer_backend_cls: ClassVar[type[AttentionBackend]] = MiniMaxM3IndexerMSABackend
 
@@ -459,8 +471,9 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
             )
             assert comm is not None
             self.index_k_comm = comm
-            self.index_k_ordinal = comm.num_layers
-            comm.num_layers += 1
+            self.index_k_ordinal = comm.layer_ordinals.setdefault(
+                self.index_cache.prefix, comm.num_layers
+            )
 
     def forward(
         self,
@@ -494,8 +507,6 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
         unified_scores = md.unified_scores
         num_valid_pages = md.topk_num_valid_pages
         assert num_valid_pages is not None
-        from vllm.third_party.fmha_sm100.api import sparse_topk_select
-
         unified_prefill = md.prefill_msa is not None and md.prefill_msa.unified
         if md.decode is not None and not unified_prefill:
             d = md.decode
@@ -556,6 +567,9 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                         comm.expected_generations[slot_set] if tagged else None
                     ),
                 )
+                torch._assert_async(
+                    comm.errors == 0, "MiniMax M3 indexer CP exchange timed out"
+                )
             else:
                 from vllm.models.minimax_m3.nvidia.ops import (
                     minimax_m3_index_decode_score_cutedsl,
@@ -615,6 +629,8 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
             )
 
         if not sharded and num_tokens > 0:
+            from vllm.third_party.fmha_sm100.api import sparse_topk_select
+
             assert unified_scores is not None
             sparse_topk_select(
                 unified_scores,
@@ -723,6 +739,8 @@ def _unsupported_reason(
         return f"needs the MSA indexer (topk_blocks=16, got {topk_blocks})"
     if indexer_kv_dtype not in ("fp8", "fp8_e4m3"):
         return f"needs indexer_kv_dtype='fp8' (got {indexer_kv_dtype!r})"
+    if vllm_config.cache_config.block_size != PAGE_SIZE:
+        return f"needs block_size={PAGE_SIZE}"
     if total_index_heads != 4:
         return f"CAKE indexer CP requires 4 index heads (got {total_index_heads})"
     transfer = vllm_config.kv_transfer_config
@@ -740,10 +758,10 @@ def _unsupported_reason(
     if parallel.use_ubatching:
         return "microbatching needs separate indexer scratch and communication state"
     if (
-        getattr(parallel, "decode_context_parallel_size", 1) > 1
-        or getattr(parallel, "prefill_context_parallel_size", 1) > 1
+        parallel.decode_context_parallel_size > 1
+        or parallel.prefill_context_parallel_size > 1
     ):
-        return "context parallelism is not supported"
+        return "cannot combine indexer sharding with prefill/decode context parallelism"
     spec = vllm_config.speculative_config
     method = getattr(spec, "method", None)
     if method not in _SPEC_METHODS:
@@ -868,7 +886,10 @@ class IndexKShardComm:
             if not callable(cake_backend.decode_index_score_sharded) or not callable(
                 MSAIcpIndexerPlan.layer_graphs
             ):
-                raise ImportError("Indexer CP requires FlashInfer CAKE APIs from #8502")
+                raise ImportError(
+                    "Indexer CP requires FlashInfer CAKE decode_index_score_sharded "
+                    "and MSAIcpIndexerPlan.layer_graphs"
+                )
             group = get_tp_group()
             self.group = group
             self.world = group.world_size
@@ -887,16 +908,16 @@ class IndexKShardComm:
                 2 * TOPK + 1,
             )
             rows = NUM_SLOT_SETS * total_index_heads * self.max_decode_tokens
-            legacy_words = rows * (2 * TOPK + 1)
+            ready_words = rows * (2 * TOPK + 1)
             self._recv_storage = symm_mem.empty(
-                (legacy_words + rows * 4 * TOPK,),
+                (ready_words + rows * 4 * TOPK,),
                 dtype=torch.int32,
                 device=self.device,
             )
             self._recv_storage.zero_()
-            self.recv = self._recv_storage[:legacy_words].view(shape)
+            self.recv = self._recv_storage[:ready_words].view(shape)
             self.tagged_recv = (
-                self._recv_storage[legacy_words:]
+                self._recv_storage[ready_words:]
                 .view(torch.int64)
                 .view(*shape[:-1], 2 * TOPK)
             )
@@ -926,8 +947,10 @@ class IndexKShardComm:
             )
             self.tagged_recv_bases = torch.empty_like(self.recv_bases)
             self.errors = torch.zeros(1, dtype=torch.int32, device=self.device)
-            self.num_layers = 0
+            self.layer_ordinals: dict[str, int] = {}
             torch.accelerator.synchronize(self.device)
+        # Rendezvous failures must terminate the worker; peers may already be
+        # inside the collective, so local fallback is no longer safe.
         handle = symm_mem.rendezvous(self._recv_storage, group.device_group.group_name)
         with _local_init():
             assert handle is not None
@@ -937,7 +960,10 @@ class IndexKShardComm:
             self.recv_bases.copy_(torch.tensor(bases, dtype=torch.int64, device="cpu"))
             self.tagged_recv_bases.copy_(
                 torch.tensor(
-                    [base + legacy_words * 4 for base in bases],
+                    [
+                        base + ready_words * self._recv_storage.element_size()
+                        for base in bases
+                    ],
                     dtype=torch.int64,
                     device="cpu",
                 )
@@ -946,9 +972,13 @@ class IndexKShardComm:
         logger.info_once(
             "MiniMax M3 index-K shard exchange: %.1f MiB symmetric receive slots "
             "(max %d decode tokens)",
-            self._recv_storage.numel() * 4 / (1 << 20),
+            self._recv_storage.nbytes / (1 << 20),
             self.max_decode_tokens,
         )
+
+    @property
+    def num_layers(self) -> int:
+        return len(self.layer_ordinals)
 
     def slot_set(self, ordinal: int) -> int:
         """Adjacent layers, including the step boundary, use different slots."""
