@@ -409,7 +409,7 @@ class Worker(WorkerBase):
         points at the session's target model; a failure there is logged, so the
         error that ended the update stays the one the caller sees. The trainer
         has to start again from ``start_weight_update``: chunks already received
-        are not replayed, and after a level-2 sleep they are gone.
+        are not replayed.
 
         Args:
             is_draft: Whether the session targets the draft model. Defaults to
