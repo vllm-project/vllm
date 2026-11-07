@@ -41,11 +41,18 @@ Either can split K. The partials are normally summed in the same launch by
 the last program of each output tile to finish, in split order, so the result
 does not depend on scheduling. Otherwise a second launch reduces them.
 
+On gfx950, BF16 GEMMs with 8192 < M <= 16384 group the tiled kernel's output
+tiles for two shapes and run three tuned tiles on the Gluon kernels in
+``rocm_block32_gemm_gluon`` instead, with bit-identical results (see
+``_gfx950_prefill``).
+
 The packed kernel and the in-launch split-K reduction on one XCD
 (``_split_tile``, ``_sum_splits``, ``_split_counters``, ``_k_partition``) are
 adapted from the group32 GEMM in ROCm/aiter#5750.
 """
 
+import functools
+from collections.abc import Callable
 from typing import NamedTuple
 
 import torch
@@ -54,6 +61,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -67,6 +75,12 @@ BLOCK_ROWS = 32
 _XCD_STRIDE = 8
 # One arrival counter per output tile of an in-launch split-K GEMM.
 _SPLIT_COUNTERS = 1 << 16
+
+_ON_GFX950 = False
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+
+    _ON_GFX950 = on_gfx950()
 
 
 @triton.jit
@@ -123,6 +137,7 @@ def _block32_tiled_kernel(
     N_FIRST: tl.constexpr,
     EVEN_K: tl.constexpr,
     FUSED_SPLITS: tl.constexpr,
+    GROUP_TILES: tl.constexpr,
 ):
     if FUSED_SPLITS > 1:
         pid_m, pid_n, tile, pid_k = _split_tile(N, BLOCK_N, FUSED_SPLITS)
@@ -136,6 +151,32 @@ def _block32_tiled_kernel(
         else:
             pid_m, pid_n = tl.program_id(0), tl.program_id(1)
         pid_k = tl.program_id(2)
+        if GROUP_TILES and N_FIRST and N == 12800 and K == 6144:
+            # Group four activation tiles with eight adjacent weight tiles.
+            # The eight-way column strip keeps a fixed weight tile at the same
+            # position in each strip while the activation tile changes.
+            grid_n: tl.constexpr = (N + BLOCK_N - 1) // BLOCK_N
+            grid_m = tl.num_programs(1)
+            linear = pid_m * grid_n + pid_n
+            first_m = (linear // (4 * grid_n)) * 4
+            group_m = tl.minimum(grid_m - first_m, 4)
+            within = linear % (4 * grid_n)
+            first_n = (within // (group_m * 8)) * 8
+            group_n = tl.minimum(grid_n - first_n, 8)
+            pid_m = first_m + (within % (group_m * 8)) // group_n
+            pid_n = first_n + within % group_n
+        if GROUP_TILES and not N_FIRST and N == 2304 and K == 5120:
+            # Reuse an activation/weight neighborhood without changing ownership.
+            grid_m = tl.num_programs(0)
+            grid_n: tl.constexpr = (N + BLOCK_N - 1) // BLOCK_N
+            linear = pid_n * grid_m + pid_m
+            first_m = (linear // (8 * grid_n)) * 8
+            group_m = tl.minimum(grid_m - first_m, 8)
+            within = linear % (8 * grid_n)
+            first_n = (within // (group_m * 4)) * 4
+            group_n = tl.minimum(grid_n - first_n, 4)
+            pid_m = first_m + (within % (group_m * 4)) // group_n
+            pid_n = first_n + within % group_n
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     m_mask = offs_m < M
@@ -687,6 +728,49 @@ def _config(M: int, N: int, K: int) -> _Config:
     return tiers[-1][1]
 
 
+# Beyond the last tuned tier, up to the largest M the prefill paths were
+# checked at.
+_PREFILL_MIN_M, _PREFILL_MAX_M = 8193, 16384
+
+
+def _gfx950_prefill(M: int, out: torch.Tensor) -> bool:
+    """Whether a GEMM takes the gfx950 prefill paths: grouped output tiles
+    in ``_block32_tiled_kernel`` and the Gluon kernels of ``_gluon_launchers``.
+
+    Both are limited to the M range and BF16 output they were tuned and
+    verified for on MI355X; the Gluon kernels store BF16 only.
+    """
+    return (
+        _ON_GFX950
+        and _PREFILL_MIN_M <= M <= _PREFILL_MAX_M
+        and out.dtype == torch.bfloat16
+    )
+
+
+@functools.cache
+def _gluon_launchers() -> dict[tuple[int, int, _Config], Callable[..., None]]:
+    """(N, K, cfg) -> Gluon launcher for the wq_b, wo_b and engram linears
+    of DeepSeek-V4.1-Flash at TP2, at their large-M tiles."""
+    try:
+        from vllm.model_executor.kernels.linear.mxfp8 import (
+            rocm_block32_gemm_gluon as gluon_gemm,
+        )
+    except (ImportError, AttributeError) as e:
+        logger.warning("Gluon MXFP8 block32 GEMM kernels unavailable: %s", e)
+        return {}
+    return {
+        (16384, 1280, _tiled(128, 256, 128, 1, True, 2, 2, 32, 0)): (
+            gluon_gemm.launch_mixed
+        ),
+        (5120, 4096, _tiled(128, 128, 128, 1, True, 4, 2, 32, 0)): (
+            gluon_gemm.launch_output
+        ),
+        (12800, 6144, _tiled(128, 128, 128, 1, True, 4, 2, 16, 0)): (
+            gluon_gemm.launch_output
+        ),
+    }
+
+
 # Retuned tiling/scheduling for the fused-quant kernel, whose per-CTA
 # quant prologue shifts the best (BLOCK_M, BLOCK_N, num_warps, num_stages,
 # waves_per_eu). Entries override ONLY those five axes of the stock tier
@@ -773,6 +857,13 @@ def _launch(
     x per 32-block in registers (see _block32_packed_quant_kernel)."""
     M, K = x.shape
     N = weight.shape[0]
+    prefill = _gfx950_prefill(M, out)
+    # The Gluon kernels read four weight-scale bytes per dword.
+    if prefill and not quant_in_kernel and weight_scale.data_ptr() % 4 == 0:
+        launch = _gluon_launchers().get((N, K, cfg))
+        if launch is not None:
+            launch(x, x_scale, weight, weight_scale, out, cfg)
+            return
     opts = dict(
         num_warps=cfg.num_warps,
         num_stages=cfg.num_stages,
@@ -860,6 +951,7 @@ def _launch(
             N_FIRST=cfg.n_first,
             EVEN_K=K % k_per_split == 0,
             FUSED_SPLITS=fused,
+            GROUP_TILES=prefill,
             **opts,
         )
     if fused == 1 and splits > 1:
