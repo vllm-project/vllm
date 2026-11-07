@@ -34,7 +34,7 @@ model:
   base_env: {}
 
 dependencies:
-  - command: 'uv pip install "fastokens>=0.3.5"'
+  - command: 'uv pip install "fastokens>=0.3.6"'
     note: "Required by the BF16 variant, which sets VLLM_USE_FASTOKENS=1; vLLM does not bundle it yet (vllm-project/vllm#47859)"
 
 features:

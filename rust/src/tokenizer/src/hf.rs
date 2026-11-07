@@ -641,6 +641,50 @@ mod tests {
         assert_eq!(fastokens.encode_ordinary(&text).unwrap(), expected);
     }
 
+    /// tencent/Hy3's byte-level vocab has no token for `\r` (ByteLevel's `č`). Hugging Face drops
+    /// it, and the bytes on either side may then merge.
+    #[test]
+    fn fastokens_matches_hf_when_a_byte_has_no_token() {
+        for fused in [false, true] {
+            let mut value = ordinary_test_tokenizer_json(fused, false);
+            let vocab = value["model"]["vocab"].as_object_mut().unwrap();
+            vocab.remove("\u{10d}").expect("ByteLevel maps `\\r` to `č`");
+            for (id, token_id) in vocab.values_mut().enumerate() {
+                *token_id = json!(id);
+            }
+            let pair = vocab.len() as u32;
+            vocab.insert("ĠĠ".to_string(), json!(pair));
+            vocab.insert("ĠĠĊ".to_string(), json!(pair + 1));
+            value["model"]["merges"] = json!(["Ġ Ġ", "ĠĠ Ċ"]);
+            let dir = tempdir().expect("create temp dir");
+            let path = write_tokenizer_json(dir.path(), "tokenizer.json", &value);
+            let fastokens =
+                HuggingFaceTokenizer::new_fastokens(&path).expect("load fastokens wrapper");
+            let hf = HuggingFaceTokenizer::new_hf(&path).expect("load hf wrapper");
+
+            if fused {
+                // `\S+|\s+` keeps "  \r\n" in one piece: HF merges across the dropped byte.
+                assert_eq!(hf.encode("  \r\n", false).unwrap(), vec![pair + 1]);
+            }
+            for text in [
+                "\r",
+                "a\rb",
+                "  \r\n",
+                "line one.\r\nline two",
+                "x  \r\n  y",
+                "é\r中",
+            ] {
+                let expected = hf.encode(text, false).unwrap();
+                assert_eq!(fastokens.encode(text, false).unwrap(), expected, "{text:?}");
+                assert_eq!(
+                    fastokens.encode_ordinary(text).unwrap(),
+                    expected,
+                    "{text:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn hf_vocab_size_counts_added_tokens() {
         let mut tokenizer = tiny_bpe_tokenizer();
