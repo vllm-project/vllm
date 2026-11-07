@@ -147,6 +147,42 @@ def test_update_offload_keys_without_scanning_hash_prefix():
                 assert context.get_offload_key_position(key) == chunk_idx * stride * 16
 
 
+def test_streaming_resume_refreshes_recomputed_offload_keys():
+    scheduler = _make_partial_tail_scheduler()
+    scheduler.use_lookahead_block_hashes = True
+    request = _make_partial_tail_request(scheduler, num_tokens=160)
+    request.resumable = True
+    state = scheduler._req_status[request.request_id]
+    state.update_offload_keys()
+    old_keys = [list(group.offload_keys) for group in state.group_states]
+
+    # Core recomputes the hashes after the request loses its resident KV.
+    request.block_hashes[16:] = [
+        BlockHash(f"new{i}".encode()) for i in range(len(request.block_hashes) - 16)
+    ]
+    scheduler._lookup = MagicMock(return_value=0)
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+
+    for config, group, old in zip(
+        scheduler.config.kv_group_configs, state.group_states, old_keys
+    ):
+        expected = [
+            make_offload_key(block_hash, config.group_idx)
+            for block_hash in request.block_hashes[
+                config.hashes_per_chunk - 1 :: config.hashes_per_chunk
+            ]
+        ]
+        unchanged_chunks = 16 // config.hashes_per_chunk
+        assert 0 < unchanged_chunks < len(old)
+        assert group.offload_keys[:unchanged_chunks] == old[:unchanged_chunks]
+        assert group.offload_keys[unchanged_chunks:] != old[unchanged_chunks:]
+        assert group.offload_keys == expected
+        for chunk_idx, key in enumerate(expected, 1):
+            assert state.req_context.get_offload_key_position(key) == (
+                chunk_idx * config.tokens_per_chunk
+            )
+
+
 @pytest.mark.parametrize(
     "window,extra_retained", [(128, 0), (128, 3), (256, 1), (256, 3)]
 )
