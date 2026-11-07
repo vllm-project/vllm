@@ -63,8 +63,8 @@ _runner = None
 def _mono_runner(device: torch.device, max_topk: int):
     """The process's mono runner (one a TP rank, shared by every layer;
     `max_topk`: its widest key table). Its peer-memory handshake is collective
-    over the TP group: every rank builds it at the same layer of the same
-    step."""
+    over the TP group: every rank builds it at load, at the same layer
+    (`MonoDecodeLayer.prepare`)."""
     global _runner
     if _runner is None:
         if torch.cuda.is_current_stream_capturing():
@@ -202,7 +202,7 @@ def _select(layer: "DeepseekV4DecoderLayer", positions, normed, qr) -> None:
 class MonoDecodeLayer:
     """One DeepSeek-V4-Pro decoder layer's mono path (`create`: None when the
     layer is not eligible). Its weights are taken from the layer at the first
-    call, after loading and vLLM's preshuffle."""
+    call or `prepare`, after loading and vLLM's preshuffle."""
 
     def __init__(self, hca_width: int) -> None:
         self.hca_width = hca_width
@@ -251,6 +251,13 @@ class MonoDecodeLayer:
             return None
         logger.info_once("DSv4 mono decode: the whole backbone layers")
         return cls(_hca_width(vllm_config))
+
+    def prepare(self, layer: "DeepseekV4DecoderLayer") -> None:
+        """Build the runner and take the layer's weights after loading rather
+        than at its first decode step, which must not allocate, exchange
+        handles or sync."""
+        _mono_runner(layer.attn_norm.weight.device, self.hca_width)
+        self.weights(layer)
 
     def weights(self, layer: "DeepseekV4DecoderLayer"):
         if self._weights is not None:
