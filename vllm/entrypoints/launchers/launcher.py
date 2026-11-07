@@ -42,6 +42,8 @@ _ACCEPT_DEFER_CHECKS = 5
 # The load of a worker that is not accepting (also the initial value of the
 # shared array), so it is never the least loaded.
 _NOT_ACCEPTING = 2**31 - 1
+# Teardown time EngineCore gets past the drain deadline, as in the gRPC server.
+_ENGINE_TEARDOWN_S = 5.0
 
 
 class NoSignalServer(uvicorn.Server):
@@ -272,8 +274,11 @@ async def serve_http(
                 timeout,
             )
 
+            # EngineCore aborts what is left at the drain deadline; give it time
+            # to deliver those aborts and tear down before it is killed.
+            engine_timeout = timeout + _ENGINE_TEARDOWN_S if timeout > 0 else timeout
             await loop.run_in_executor(
-                None, partial(engine_client.shutdown, timeout=timeout)
+                None, partial(engine_client.shutdown, timeout=engine_timeout)
             )
             logger.info_once("[shutdown] API server: engine client stopped")
 
