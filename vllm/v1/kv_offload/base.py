@@ -746,6 +746,16 @@ class OffloadingWorker(ABC):
     @abstractmethod
     def wait(self, job_ids: set[int]) -> None: ...
 
+    def unregister_kv_caches(self) -> None:
+        """Drop registrations of the GPU KV caches before sleep mode remaps
+        them. Must not return while a transfer can still touch them.
+        Idempotent."""
+        return
+
+    def restore_kv_caches(self) -> None:
+        """Redo `unregister_kv_caches` after wake-up. Idempotent."""
+        return
+
     def shutdown(self) -> None:
         return
 
@@ -771,6 +781,22 @@ class OffloadingSpec(ABC):
 
         """
         return ()
+
+    @classmethod
+    def registers_kv_cache_across_nodes(cls, extra_config: dict[str, Any]) -> bool:
+        """Whether workers register the device KV cache for RDMA when the
+        engine's workers span several nodes. A subclass that replaces
+        create_worker() should override this to match its own worker.
+
+        Args:
+            extra_config: kv_connector_extra_config of this instance.
+
+        Returns:
+            True if the extensible KV cache must prepare the device KV cache
+            for RDMA registration.
+
+        """
+        return False
 
     def __init__(self, config: OffloadingConfig):
         self.config = config

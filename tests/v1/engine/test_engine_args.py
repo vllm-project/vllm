@@ -453,7 +453,9 @@ def test_kv_transfer_registers_kv_cache_memory(
         transfer = KVTransferConfig(
             kv_connector=connector, kv_role="kv_both", kv_buffer_device=buffer_device
         )
-    assert transfer.registers_kv_cache_memory() is registers
+    from vllm.config import ParallelConfig
+
+    assert transfer.registers_kv_cache_memory(ParallelConfig()) is registers
 
 
 @pytest.mark.parametrize("rocm", [False, True])

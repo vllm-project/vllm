@@ -3434,13 +3434,14 @@ class VllmConfig:
         elif (
             self.kv_transfer_config is not None
             and current_platform.is_rocm()
-            and self.kv_transfer_config.registers_kv_cache_memory()
+            and self.kv_transfer_config.registers_kv_cache_memory(self.parallel_config)
         ):
             # TODO: drop once UCX handles HSA_EXT_POINTER_TYPE_HSA_VMEM and
             # hsa_amd_portable_export_dmabuf accepts VMM ranges.
             unsupported = (
                 "on ROCm, UCX and RDMA cannot yet register driver-mapped memory, "
-                "which the NIXL, Mooncake, MoRIIO and UMBP connectors require"
+                "which the NIXL, Mooncake, MoRIIO and UMBP connectors and the "
+                "multi-node offloading mirror require"
             )
         if requested is None:
             cache_config.enable_extensible_kv_cache = unsupported is None

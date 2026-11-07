@@ -745,7 +745,10 @@ def test_extensible_extend_asks_connector_for_its_memory_pool(
         cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: None),
         # A connector that registers the KV cache needs one chunk per segment.
         vllm_config=SimpleNamespace(
-            kv_transfer_config=SimpleNamespace(registers_kv_cache_memory=lambda: True)
+            kv_transfer_config=SimpleNamespace(
+                registers_kv_cache_memory=lambda parallel_config: True
+            ),
+            parallel_config=None,
         ),
     )
     kv_cache_config = SimpleNamespace(num_blocks=16, kv_cache_tensors=[])

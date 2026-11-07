@@ -3,9 +3,12 @@
 
 import uuid
 from dataclasses import field
-from typing import Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from vllm.config.utils import CompileFactors, config
+
+if TYPE_CHECKING:
+    from vllm.config.parallel import ParallelConfig
 
 KVProducer = Literal["kv_producer", "kv_both"]
 KVConsumer = Literal["kv_consumer", "kv_both"]
@@ -56,6 +59,29 @@ _KV_CACHE_REGISTERING_CONNECTORS = frozenset(
         "UMBPStoreConnector",
     }
 )
+
+
+def _offloading_mirrors_kv_cache(
+    extra_config: dict[str, Any], parallel_config: "ParallelConfig"
+) -> bool:
+    """Whether OffloadingConnector registers the device KV cache for RDMA: its
+    spec, resolved as the connector resolves it, says so when the engine's
+    workers span nodes (the tiering spec mirrors CPU region slots onto the head
+    node's region), and they may."""
+    from vllm.v1.kv_offload.config import (
+        places_workers_by_nnodes,
+        workers_may_span_nodes,
+    )
+    from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+
+    if not workers_may_span_nodes(
+        parallel_config.world_size,
+        parallel_config.local_world_size,
+        places_workers_by_nnodes(parallel_config.distributed_executor_backend),
+    ):
+        return False
+    spec_cls = OffloadingSpecFactory.get_spec_cls(extra_config)
+    return spec_cls.registers_kv_cache_across_nodes(extra_config)
 
 
 def kv_buffer_device_default_factory() -> str:
@@ -165,16 +191,27 @@ class KVTransferConfig:
             ]
         return any(config.get("custom_mem_pool") for config in configs)
 
-    def registers_kv_cache_memory(self) -> bool:
+    def registers_kv_cache_memory(self, parallel_config: "ParallelConfig") -> bool:
         """Whether a connector registers the device KV cache itself with UCX or
         RDMA (NIXL, Mooncake, MoRIIO, UMBP), directly or in MultiConnector. NIXL with
-        a CPU kv_buffer_device registers only its host staging buffers."""
-        children = [{"kv_connector": self.kv_connector}]
+        a CPU kv_buffer_device registers only its host staging buffers.
+        OffloadingConnector registers it when it mirrors CPU region slots across
+        the nodes of the engine described by parallel_config."""
+        children: list[dict[str, Any]] = [
+            {
+                "kv_connector": self.kv_connector,
+                "kv_connector_extra_config": self.kv_connector_extra_config,
+            }
+        ]
         if self.kv_connector == "MultiConnector":
             children = self.kv_connector_extra_config.get("connectors", [])
         for child in children:
             name = child.get("kv_connector") or ""
             if name in _KV_CACHE_REGISTERING_CONNECTORS:
+                return True
+            if name == "OffloadingConnector" and _offloading_mirrors_kv_cache(
+                child.get("kv_connector_extra_config") or {}, parallel_config
+            ):
                 return True
             buffer_device = child.get("kv_buffer_device", self.kv_buffer_device)
             if name.startswith("Nixl") and buffer_device != "cpu":

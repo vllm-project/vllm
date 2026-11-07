@@ -39,6 +39,22 @@ class OffloadingCacheConfig:
     blocks_per_chunk: int
 
 
+def places_workers_by_nnodes(distributed_executor_backend: object) -> bool:
+    """Whether the executor places workers by the configured node count, so
+    that local_world_size says which workers share a node."""
+    return distributed_executor_backend in ("mp", "uni")
+
+
+def workers_may_span_nodes(
+    world_size: int, local_world_size: int | None, placement_known: bool
+) -> bool:
+    """Whether an engine's workers may be on several nodes: as the executor
+    reports, or for any engine of several workers whose placement is unknown."""
+    if not placement_known:
+        return world_size > 1
+    return local_world_size is not None and local_world_size < world_size
+
+
 @dataclass(frozen=True)
 class OffloadingParallelConfig:
     # Worker index in [0, world_size). 0 on the scheduler side.
@@ -65,6 +81,19 @@ class OffloadingParallelConfig:
     # under any topology; for the canonical layout, the canonical page itself
     # is topology-free.
     is_parallelism_agnostic: bool
+    # Workers of this engine on each node; world_size when unknown.
+    local_world_size: int | None = None
+    # False when the executor does not place workers by the configured node
+    # count (Ray, external_launcher, executor classes): local_world_size then
+    # says nothing about the nodes.
+    placement_known: bool = True
+
+    @property
+    def spans_nodes(self) -> bool:
+        """Whether workers may be on several nodes."""
+        return workers_may_span_nodes(
+            self.world_size, self.local_world_size, self.placement_known
+        )
 
 
 @dataclass(frozen=True)
@@ -93,3 +122,6 @@ class OffloadingConfig:
     canonical_layout: bool = False
     # Resolved KVCacheLayout name of the worker KV cache.
     kv_cache_layout: str | None = None
+    # Whether the engine may release and remap the GPU KV cache memory: in
+    # sleep mode, or when the extensible KV cache lends it to a weight update.
+    remaps_kv_cache: bool = False

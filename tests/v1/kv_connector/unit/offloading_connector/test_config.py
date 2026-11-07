@@ -1394,3 +1394,208 @@ def test_blocks_per_chunk_must_be_positive():
 
     with pytest.raises(ValueError, match="greater than 0"):
         build_offloading_config(config, _make_kv_cache_config())
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "backend, placement_known",
+    [("mp", True), ("uni", True), ("ray", False), ("external_launcher", False)],
+)
+def test_only_mp_and_uni_report_worker_placement(
+    backend: str, placement_known: bool
+) -> None:
+    """Other executors do not place workers by the configured node count, so
+    the multi-node row namespace cannot rely on it."""
+    config = _make_vllm_config(tensor_parallel_size=2)
+    config.parallel_config.distributed_executor_backend = backend
+    parallel = build_offloading_config(config, _make_kv_cache_config()).parallel
+    assert parallel.placement_known is placement_known
+    assert parallel.spans_nodes is (not placement_known)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "sleep_mode, extensible_kv_cache, remaps_kv_cache",
+    [(False, False, False), (True, False, True), (False, True, True)],
+)
+def test_kv_cache_remapping_reaches_the_offloading_config(
+    sleep_mode: bool, extensible_kv_cache: bool, remaps_kv_cache: bool
+) -> None:
+    """Sleep mode and the extensible KV cache's weight-update lending both
+    release and remap the GPU KV cache memory the mirror registers."""
+    config = _make_vllm_config()
+    config.model_config.enable_sleep_mode = sleep_mode
+    config.cache_config.enable_extensible_kv_cache = extensible_kv_cache
+    offloading = build_offloading_config(config, _make_kv_cache_config())
+    assert offloading.remaps_kv_cache is remaps_kv_cache
+
+
+_MIRRORING_OFFLOAD = {
+    "spec_name": "TieringOffloadingSpec",
+    "secondary_tiers": [{"type": "example"}],
+}
+_TWO_NODES = {"tensor_parallel_size": 2, "nnodes": 2}
+
+
+def _parallel_config(**kwargs: Any) -> ParallelConfig:
+    tensor_parallel_size = kwargs.get("tensor_parallel_size", 1)
+    with patch.object(
+        current_platform, "device_count", return_value=tensor_parallel_size
+    ):
+        return ParallelConfig(**kwargs)
+
+
+def _offloading_transfer_config(
+    extra_config: dict[str, Any], multi: bool = False
+) -> KVTransferConfig:
+    offloading = {
+        "kv_connector": "OffloadingConnector",
+        "kv_role": "kv_both",
+        "kv_buffer_device": "cuda",
+        "kv_connector_extra_config": extra_config,
+    }
+    if not multi:
+        return KVTransferConfig(**offloading)
+    return KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_buffer_device="cuda",
+        kv_connector_extra_config={"connectors": [offloading]},
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "extra_config, parallel_kwargs, registers",
+    [
+        # Workers on two nodes mirror their CPU region slots over NIXL.
+        (
+            _MIRRORING_OFFLOAD,
+            {**_TWO_NODES, "distributed_executor_backend": "mp"},
+            True,
+        ),
+        # external_launcher does not place workers by nnodes: they may span nodes.
+        (
+            _MIRRORING_OFFLOAD,
+            {
+                "tensor_parallel_size": 2,
+                "distributed_executor_backend": "external_launcher",
+            },
+            True,
+        ),
+        # One node, or one worker: no mirror.
+        (
+            _MIRRORING_OFFLOAD,
+            {"tensor_parallel_size": 2, "distributed_executor_backend": "mp"},
+            False,
+        ),
+        (
+            _MIRRORING_OFFLOAD,
+            {
+                "tensor_parallel_size": 1,
+                "distributed_executor_backend": "external_launcher",
+            },
+            False,
+        ),
+        # Only secondary tiers of TieringOffloadingSpec use the mirror.
+        (
+            {"spec_name": "TieringOffloadingSpec"},
+            {**_TWO_NODES, "distributed_executor_backend": "mp"},
+            False,
+        ),
+        (
+            {"secondary_tiers": [{"type": "example"}]},
+            {**_TWO_NODES, "distributed_executor_backend": "mp"},
+            False,
+        ),
+    ],
+)
+@pytest.mark.parametrize("multi", [False, True])
+def test_offloading_mirror_registers_kv_cache_memory(
+    monkeypatch,
+    extra_config: dict[str, Any],
+    parallel_kwargs: dict[str, Any],
+    registers: bool,
+    multi: bool,
+) -> None:
+    """The mirror registers the GPU KV cache of workers off the head node with
+    NIXL, so the extensible KV cache must prepare it as for the NIXL
+    connector, also when OffloadingConnector is inside MultiConnector."""
+    # external_launcher turns off V1 multiprocessing through the environment.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    transfer = _offloading_transfer_config(extra_config, multi)
+    parallel_config = _parallel_config(**parallel_kwargs)
+    assert transfer.registers_kv_cache_memory(parallel_config) is registers
+
+
+class _TieringSpecSubclass(TieringOffloadingSpec):
+    """An out-of-tree spec that inherits the tiering worker, mirror included."""
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "spec_config",
+    [
+        {"spec_name": "TieringAlias"},
+        {"spec_name": "_TieringSpecSubclass", "spec_module_path": __name__},
+    ],
+)
+def test_mirror_registration_follows_the_resolved_spec(
+    monkeypatch, spec_config: dict[str, Any]
+) -> None:
+    """A registered alias of TieringOffloadingSpec, or a subclass loaded through
+    spec_module_path, starts the same mirror, so it registers the KV cache."""
+    from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+
+    # The factory has no public way to unregister: register on a copy of the
+    # registry, which monkeypatch restores at teardown.
+    monkeypatch.setattr(
+        OffloadingSpecFactory, "_registry", dict(OffloadingSpecFactory._registry)
+    )
+    OffloadingSpecFactory.register_spec(
+        "TieringAlias", "vllm.v1.kv_offload.tiering.spec", "TieringOffloadingSpec"
+    )
+    transfer = _offloading_transfer_config(
+        {**spec_config, "secondary_tiers": [{"type": "example"}]}
+    )
+    parallel_config = _parallel_config(**_TWO_NODES, distributed_executor_backend="mp")
+    assert transfer.registers_kv_cache_memory(parallel_config)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("rocm", [False, True])
+@pytest.mark.parametrize("requested", [None, True])
+def test_extensible_kv_cache_follows_rocm_rules_with_the_mirror(
+    monkeypatch, rocm: bool, requested: bool | None
+) -> None:
+    """On ROCm, RDMA cannot yet register driver-mapped memory: with the mirror
+    the extensible KV cache stays off there by default, and an explicit request
+    is an error; CUDA keeps it."""
+    from types import SimpleNamespace
+
+    import vllm.platforms
+    from vllm.config import CacheConfig, DeviceConfig
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    config = VllmConfig(
+        cache_config=CacheConfig(), device_config=DeviceConfig(device="cpu")
+    )
+    config.parallel_config = _parallel_config(
+        **_TWO_NODES, distributed_executor_backend="mp"
+    )
+    config.kv_transfer_config = _offloading_transfer_config(_MIRRORING_OFFLOAD)
+    # Construction resolved the setting for the CI host's platform. Resolve it
+    # again as on a GPU platform, the only hardware the resolution asks about.
+    config.cache_config._extensible_kv_cache_resolved = False
+    config.cache_config.enable_extensible_kv_cache = requested
+    monkeypatch.setattr(
+        vllm.platforms,
+        "current_platform",
+        SimpleNamespace(is_cuda_alike=lambda: True, is_rocm=lambda: rocm),
+    )
+    if rocm and requested:
+        with pytest.raises(ValueError, match="ROCm"):
+            config._resolve_extensible_kv_cache()
+        return
+    config._resolve_extensible_kv_cache()
+    assert config.cache_config.enable_extensible_kv_cache is not rocm

@@ -28,6 +28,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingGroupConfig,
     OffloadingModelConfig,
     OffloadingParallelConfig,
+    places_workers_by_nnodes,
 )
 
 if TYPE_CHECKING:
@@ -316,8 +317,16 @@ def build_offloading_config(
             data_parallel_size=parallel_config.data_parallel_size,
             data_parallel_rank_local=parallel_config.data_parallel_rank_local,
             is_parallelism_agnostic=is_parallelism_agnostic,
+            local_world_size=parallel_config.local_world_size,
+            placement_known=places_workers_by_nnodes(
+                parallel_config.distributed_executor_backend
+            ),
         ),
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
         kv_cache_layout=vllm_config.cache_config.kv_cache_layout,
+        remaps_kv_cache=bool(
+            vllm_config.model_config.enable_sleep_mode
+            or vllm_config.cache_config.enable_extensible_kv_cache
+        ),
     )
