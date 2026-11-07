@@ -176,17 +176,49 @@ class Hermes2ProToolParser(ToolParser):
         """Extract tool arguments from the tool call JSON.
 
         Given {"name": "f", "arguments": {"x": 1}}, returns '{"x": 1}'.
-        When is_complete, strips the trailing '}' that closes the outer
-        object (not the arguments). For partial JSON, returns as-is.
+
+        The arguments value is extracted by brace/bracket matching (ignoring
+        braces inside strings), so exactly the value is returned regardless of
+        whether the surrounding object is complete. This is robust to a trailing
+        outer '}' AND to stray text or extra <tool_call> markers the model may
+        emit around the JSON (e.g. under speculative decoding), which otherwise
+        make an is_complete check on the whole region fail and leak the outer '}'
+        into the arguments -> invalid JSON. A partial (still-unbalanced) value is
+        returned as-is for incremental streaming.
         """
         match = re.search(r'"arguments"\s*:\s*', tc_json)
         if not match:
             return None
         raw = tc_json[match.end() :]
-        if is_complete:
-            raw = raw.rstrip()
-            if raw.endswith("}"):
-                raw = raw[:-1].rstrip()
+        if not raw or raw[0] not in "{[":
+            # Scalar arguments value (rare): fall back to the trailing-'}' strip.
+            if is_complete:
+                raw = raw.rstrip()
+                if raw.endswith("}"):
+                    raw = raw[:-1].rstrip()
+            return raw
+        open_ch = raw[0]
+        close_ch = "}" if open_ch == "{" else "]"
+        depth = 0
+        in_str = False
+        esc = False
+        for i, c in enumerate(raw):
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+                continue
+            if c == '"':
+                in_str = True
+            elif c == open_ch:
+                depth += 1
+            elif c == close_ch:
+                depth -= 1
+                if depth == 0:
+                    return raw[: i + 1]
         return raw
 
     def _compute_args_diff(
