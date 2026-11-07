@@ -218,12 +218,23 @@ def check_hisparse_host_memory(pool_bytes: int) -> None:
 
 def allocate_pinned_host_pool(size: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Allocate and deterministically register an exact-size host KV region."""
-    page = 4096
+    backend = get_hisparse_backend()
+    page = backend.host_pool_alignment
+    if not isinstance(page, int) or page <= 0:
+        raise ValueError("HiSparse host-pool alignment must be positive")
     padded_size = round_up(size, page)
-    backing = torch.empty(padded_size + page, dtype=torch.int8, device="cpu")
+    backing = backend.allocate_host_backing(padded_size + page)
+    if (
+        backing.device.type != "cpu"
+        or backing.dtype != torch.int8
+        or backing.ndim != 1
+        or not backing.is_contiguous()
+        or backing.numel() != padded_size + page
+    ):
+        raise ValueError("HiSparse backend must return contiguous int8 CPU backing")
     aligned_offset = (-backing.data_ptr()) % page
     registered = backing[aligned_offset : aligned_offset + padded_size]
-    pin_tensor(registered)
+    backend.pin_tensor(registered)
     return registered[:size], registered
 
 

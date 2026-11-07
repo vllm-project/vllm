@@ -391,6 +391,22 @@ def test_flashinfer_sparse_mla_attends_tokens_past_grid_limit(
         torch.testing.assert_close(out[t].float(), ref, atol=2e-2, rtol=2e-2)
 
 
+def test_hisparse_private_host_pool_cuda_registration():
+    from vllm.v1.hisparse.backend import get_hisparse_backend
+    from vllm.v1.hisparse.runtime import allocate_pinned_host_pool
+
+    payload, registered = allocate_pinned_host_pool(4097)
+    try:
+        assert registered.data_ptr() % 4096 == 0
+        assert registered.numel() == 8192
+        payload.copy_(torch.arange(payload.numel(), dtype=torch.int8))
+        copied = payload.to("cuda", non_blocking=True)
+        torch.accelerator.synchronize()
+        assert torch.equal(copied.cpu(), payload)
+    finally:
+        get_hisparse_backend().unpin_tensor(registered)
+
+
 def test_hisparse_routes_prefill_to_sparse_mqa():
     layer = SimpleNamespace(hisparse_cache=object())
 
