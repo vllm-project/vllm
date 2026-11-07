@@ -909,11 +909,21 @@ class MoERunner(MoERunnerInterface):
         # so it can run overlapped with the
         # NOTE: in future PR, MoE runner will always hold the gate.
         if self.gate is not None:
+            self.router.set_gate(
+                self.gate
+                if (
+                    not self._fse_fuse_gate
+                    and not self.is_monolithic
+                    and not self.do_naive_dispatch_combine
+                    and self.moe_config.pcp_size == 1
+                )
+                else None
+            )
             if self._fse_fuse_gate:
                 router_logits = dispatch_unquantized_gemm()(
                     self, hidden_states, self._combined_gate_weight, None
                 )
-            else:
+            elif not self.router.can_fuse_gate(hidden_states):
                 router_logits, _ = self.gate(hidden_states)
 
         with self._sequence_parallel_context():

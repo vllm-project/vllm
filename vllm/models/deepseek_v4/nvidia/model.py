@@ -36,8 +36,17 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     DeepGemmMegaMoEExperts,
     MegaMoEActivation,
 )
-from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
-    fused_topk_bias,
+from vllm.model_executor.layers.fused_moe.router.fused_gate import (
+    FusedGateRoutingMetadata as MegaGateRoutingMetadata,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_gate import (
+    default_fused_gate_backends,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_gate import (
+    prepare_fused_gate_routing_metadata as prepare_mega_gate_routing_metadata,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_gate_router import (
+    FusedGateRouter,
 )
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -85,44 +94,12 @@ from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.deep_gemm import bf16_mega_gate
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 
 logger = init_logger(__name__)
-
-
-class MegaGateRoutingMetadata(typing.NamedTuple):
-    safe_hash_input_ids: torch.Tensor | None
-    image_token_mask: torch.Tensor | None
-    hash_token_mask: torch.Tensor | None
-
-
-def prepare_mega_gate_routing_metadata(
-    input_ids: torch.Tensor,
-    *,
-    has_hash_routing: bool,
-    image_sentinel_base_id: int | None,
-) -> MegaGateRoutingMetadata:
-    if image_sentinel_base_id is None:
-        return MegaGateRoutingMetadata(
-            input_ids if has_hash_routing else None,
-            None,
-            torch.ones_like(input_ids, dtype=torch.bool) if has_hash_routing else None,
-        )
-
-    image_token_mask = (input_ids >= image_sentinel_base_id) & (
-        input_ids < image_sentinel_base_id + 5
-    )
-    if not has_hash_routing:
-        return MegaGateRoutingMetadata(None, image_token_mask, None)
-    return MegaGateRoutingMetadata(
-        torch.where(image_token_mask, 0, input_ids),
-        image_token_mask,
-        ~image_token_mask,
-    )
 
 
 class DeepseekV4MLP(nn.Module):
@@ -349,6 +326,21 @@ class DeepseekV4MoE(nn.Module):
         self.ep_group = get_ep_group()
         self.ep_size = self.ep_group.world_size
         self.ep_rank = self.ep_group.rank_in_group
+        self.router = FusedGateRouter(
+            top_k=self.n_activated_experts,
+            global_num_experts=self.n_routed_experts,
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            renormalize=self.renormalize,
+            routed_scaling_factor=self.routed_scaling_factor,
+            scoring_func=self.scoring_func,
+            hash_indices_table=self.gate.tid2eid,
+            bias_vl=self.gate.bias_vl,
+            image_sentinel_lo=self.image_sentinel_lo,
+            fused_gate_backends=default_fused_gate_backends(),
+            ep_rank=self.ep_rank,
+            defer_padding=True,
+        )
+        self.router.set_gate(self.gate)
 
         eplb_config = vllm_config.parallel_config.eplb_config
         self.n_redundant_experts = eplb_config.num_redundant_experts
@@ -465,59 +457,12 @@ class DeepseekV4MoE(nn.Module):
             return self._forward_fused_moe(hidden_states, input_ids)
 
         org_shape = hidden_states.shape
-        # Small local padded batches favor GateLinear; 128-expert gates cross earlier.
-        gate_threshold = 1 if self.gate.weight.shape[0] == 128 else 16
-        if hidden_states.shape[0] <= gate_threshold:
-            router_logits, _ = self.gate(hidden_states)
-            topk_weights, topk_ids = fused_topk_bias(
-                hidden_states=hidden_states,
-                gating_output=router_logits,
-                scoring_func=self.scoring_func,
-                e_score_correction_bias=self.gate.e_score_correction_bias.data
-                if self.gate.e_score_correction_bias is not None
-                else None,
-                topk=self.n_activated_experts,
-                renormalize=self.renormalize,
-                indices_type=self.hash_indices_dtype,
-                input_tokens=input_ids,
-                hash_indices_table=self.gate.tid2eid,
-                routed_scaling_factor=self.routed_scaling_factor,
-                bias_vl=bias_vl.data if bias_vl is not None else None,
-                image_sentinel_lo=self.image_sentinel_lo if bias_vl is not None else 0,
-            )
-        else:
-            if mega_gate_metadata is None:
-                raise RuntimeError(
-                    "MegaMoE routing metadata must be prepared once by the model."
-                )
-
-            unmapped_topk_idx = None
-            fix_routing_mask = None
-            if self.gate.tid2eid is not None:
-                if mega_gate_metadata.safe_hash_input_ids is None:
-                    raise RuntimeError("Hash routing requires prepared input IDs.")
-                if mega_gate_metadata.hash_token_mask is None:
-                    raise RuntimeError("Hash routing requires a prepared routing mask.")
-                unmapped_topk_idx = self.gate.tid2eid[
-                    mega_gate_metadata.safe_hash_input_ids
-                ]
-                fix_routing_mask = mega_gate_metadata.hash_token_mask
-
-            topk_weights, topk_ids = bf16_mega_gate(
-                hidden_states,
-                self.gate.weight,
-                self.n_activated_experts,
-                scoring_func=self.scoring_func,
-                routed_scaling_factor=self.routed_scaling_factor,
-                ep_rank=self.ep_rank,
-                bias=self.gate.e_score_correction_bias.data
-                if self.gate.e_score_correction_bias is not None
-                else None,
-                image_bias=bias_vl.data if bias_vl is not None else None,
-                image_token_mask=mega_gate_metadata.image_token_mask,
-                fix_routing_mask=fix_routing_mask,
-                unmapped_topk_idx=unmapped_topk_idx,
-            )
+        topk_weights, topk_ids = self.router.forward(
+            hidden_states,
+            indices_type=self.hash_indices_dtype,
+            input_ids=input_ids,
+            routing_metadata=mega_gate_metadata,
+        )
         final_hidden_states = self.experts(
             hidden_states, topk_weights, topk_ids, self.shared_experts
         )

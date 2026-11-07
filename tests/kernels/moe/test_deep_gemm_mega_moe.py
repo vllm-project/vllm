@@ -26,12 +26,18 @@ from vllm.model_executor.layers.fused_moe.prepare_megamoe import (
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     bind_routed_experts_capturer,
 )
+from vllm.model_executor.layers.fused_moe.router.fused_gate import (
+    FusedGateConfig,
+    FusedGateMetadata,
+    default_fused_gate_backends,
+    select_fused_gate_backend,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kNvfp4DynamicToken,
 )
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import is_deep_gemm_supported
+from vllm.utils.deep_gemm import bf16_mega_gate, is_deep_gemm_supported
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="DeepGEMM MegaMoE requires CUDA"
@@ -60,6 +66,86 @@ def _make_experts(**kwargs) -> DeepGemmMegaMoEExperts:
     kwargs.setdefault("activation", MegaMoEActivation())
     kwargs.setdefault("weight_format", MEGA_MOE_MXFP4)
     return DeepGemmMegaMoEExperts(vllm_config, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "num_tokens,num_experts,top_k",
+    [(1, 128, 3), (2, 128, 3), (16, 384, 6), (17, 384, 6)],
+)
+@pytest.mark.parametrize("hash_and_vision", [False, True])
+@pytest.mark.parametrize("has_padding", [False, True])
+@torch.inference_mode()
+def test_deep_gemm_gate_backend(
+    num_tokens, num_experts, top_k, hash_and_vision, has_padding
+):
+    """Preserve native SM100 routing; decline padding masks and other devices."""
+    torch.manual_seed(42)
+    x = torch.randn(num_tokens, 256, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(num_experts, 256, dtype=torch.bfloat16, device="cuda")
+    bias = torch.randn(num_experts, device="cuda")
+    config = FusedGateConfig(
+        top_k=top_k,
+        scoring_func="sqrtsoftplus",
+        renormalize=True,
+        routed_scaling_factor=1.5,
+        bias=bias,
+        image_bias=-bias if hash_and_vision else None,
+        has_hash_routing=hash_and_vision,
+    )
+    backend = select_fused_gate_backend(
+        default_fused_gate_backends(), x, weight, config, has_padding=has_padding
+    )
+    gate_threshold = 1 if num_experts == 128 else 16
+    if (
+        has_padding
+        or num_tokens <= gate_threshold
+        or not current_platform.is_device_capability_family(100)
+    ):
+        assert backend is None
+        return
+    assert backend is not None
+
+    token_indices = torch.arange(num_tokens, device="cuda")
+    metadata = FusedGateMetadata(
+        image_token_mask=token_indices == 0 if hash_and_vision else None,
+        fixed_routing_mask=token_indices != 0 if hash_and_vision else None,
+        fixed_expert_ids=(
+            torch.randint(num_experts, (num_tokens, top_k), device="cuda")
+            if hash_and_vision
+            else None
+        ),
+    )
+
+    def reference():
+        return bf16_mega_gate(
+            x,
+            weight,
+            top_k,
+            scoring_func=config.scoring_func,
+            routed_scaling_factor=config.routed_scaling_factor,
+            ep_rank=config.ep_rank,
+            bias=config.bias,
+            image_bias=config.image_bias,
+            image_token_mask=metadata.image_token_mask,
+            fix_routing_mask=metadata.fixed_routing_mask,
+            unmapped_topk_idx=metadata.fixed_expert_ids,
+        )
+
+    expected = reference()
+    plan = backend.prepare(x, weight, config, metadata)
+    torch.testing.assert_close(plan.forward(), expected, rtol=0, atol=0)
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        plan.forward()
+    stream.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = plan.forward()
+    x.normal_()
+    graph.replay()
+    torch.testing.assert_close(captured, reference(), rtol=0, atol=0)
 
 
 def test_deep_gemm_mega_moe_capture_precedes_eplb(monkeypatch):

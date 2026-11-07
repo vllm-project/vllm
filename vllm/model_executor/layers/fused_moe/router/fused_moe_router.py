@@ -22,6 +22,14 @@ class FusedMoERouter(ABC):
         self.bias_vl: torch.Tensor | None = None
         self.image_sentinel_lo: int = 0
 
+    def set_gate(self, gate: torch.nn.Module | None) -> None:
+        """Bind an eligible gate for routers that can fuse its projection."""
+        return None
+
+    def can_fuse_gate(self, hidden_states: torch.Tensor) -> bool:
+        """Whether this router can produce routes without separate gate logits."""
+        return False
+
     @abstractmethod
     def set_capture_fn(
         self,
