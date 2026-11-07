@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import asyncio
+import hmac
 import itertools
 import logging
 import os
@@ -9,8 +11,8 @@ import uuid
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -263,6 +265,69 @@ async def handle_completions(request: Request):
 @app.post("/v1/chat/completions")
 async def handle_chat_completions(request: Request):
     return await _handle_completions("/chat/completions", request)
+
+
+async def reset_prefix_cache(
+    request: Request,
+    reset_running_requests: bool = False,
+    reset_external: bool = False,
+):
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if api_key and not hmac.compare_digest(
+        request.headers.get("Authorization", "").encode(), f"Bearer {api_key}".encode()
+    ):
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    params = {
+        "reset_running_requests": str(reset_running_requests).lower(),
+        "reset_external": str(reset_external).lower(),
+    }
+
+    async def reset(role, info):
+        result = {"role": role, "id": info["id"], "status": None, "success": False}
+        try:
+            async with asyncio.timeout(30):
+                response = await info["client"].post(
+                    f"http://{info['host']}:{info['port']}/reset_prefix_cache",
+                    params=params,
+                    headers=headers,
+                    timeout=30,
+                    follow_redirects=False,
+                )
+            result["status"] = response.status_code
+            if response.status_code != 200:
+                result["error"] = "Upstream returned non-200"
+            else:
+                body = response.json()
+                if not isinstance(body, dict) or type(body.get("success")) is not bool:
+                    result["error"] = "Invalid upstream reset response"
+                else:
+                    result["success"] = body["success"]
+        except (httpx.HTTPError, TimeoutError, ValueError):
+            result["error"] = "Upstream reset response unavailable or invalid"
+        return result
+
+    results = await asyncio.gather(
+        *(
+            reset(role, info)
+            for role, clients in (
+                ("prefill", request.app.state.prefill_clients),
+                ("decode", request.app.state.decode_clients),
+            )
+            for info in list(clients)
+        )
+    )
+    return JSONResponse(
+        content={
+            "success": all(result["success"] for result in results),
+            "results": results,
+        },
+        status_code=502 if any("error" in result for result in results) else 200,
+    )
+
+
+if int(os.environ.get("VLLM_SERVER_DEV_MODE", "0")):
+    app.post("/reset_prefix_cache")(reset_prefix_cache)
 
 
 @app.get("/healthcheck")
