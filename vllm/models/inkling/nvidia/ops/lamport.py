@@ -47,10 +47,12 @@ from __future__ import annotations
 import os
 
 import torch
+import torch.distributed as dist
 
 from vllm.distributed import get_tp_group
-from vllm.distributed.parallel_state import in_the_same_node_as
+from vllm.distributed.parallel_state import GroupCoordinator, in_the_same_node_as
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
 logger = init_logger(__name__)
@@ -763,6 +765,18 @@ _STATE: LamportRSConv | None = None
 _STATE_FAILED = False
 
 
+def _is_pcie_only_group(tp: GroupCoordinator) -> bool:
+    """Lamport polls peer stores, which hangs over PCIe P2P (#51405)."""
+    if tp.world_size < 2 or not all(in_the_same_node_as(tp.cpu_group)):
+        return False
+    physical_device_id = current_platform.visible_device_id_to_physical_device_id(
+        tp.device.index
+    )
+    physical_device_ids = [0] * tp.world_size
+    dist.all_gather_object(physical_device_ids, physical_device_id, group=tp.cpu_group)
+    return not current_platform.is_fully_connected(physical_device_ids)
+
+
 def initialize_lamport_rs_conv(
     hidden_size: int, window_size: int, max_num_batched_tokens: int
 ) -> None:
@@ -773,6 +787,13 @@ def initialize_lamport_rs_conv(
             raise RuntimeError("all Lamport users must share hidden and window sizes")
         return
     if _STATE_FAILED or os.environ.get("LAMPORT_RS_SCONV", "1") == "0":
+        return
+    if _is_pcie_only_group(get_tp_group()):
+        logger.warning_once(
+            "Lamport fused collective is disabled because the TP GPUs are "
+            "not fully NVLink-connected; using the NCCL fallback. To silence "
+            "this warning, set LAMPORT_RS_SCONV=0."
+        )
         return
     try:
         max_tokens = min(_MAX_TOKENS, max_num_batched_tokens)
