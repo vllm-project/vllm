@@ -20,7 +20,7 @@ lm_eval[api]>=0.4.12
 nltk>=3.10.4 # pin transitive rouge-score/lm-eval dep for known GHSAs
 modelscope<1.38
 runai-model-streamer[s3,gcs,azure]>=0.17.1
-tensorizer==2.10.1
+tensorizer==2.12.1
 transformers==5.22.0
 
 # --- Audio Processing ---
