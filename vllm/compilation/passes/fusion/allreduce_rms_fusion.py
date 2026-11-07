@@ -981,66 +981,94 @@ def _fused_ar_workspace_hidden_dim(config: VllmConfig) -> int:
     return hidden_dim
 
 
+def _fused_ar_workspace_kwargs(config: VllmConfig) -> dict[str, Any] | None:
+    """Arguments for the FlashInfer AR+RMSNorm workspaces, None if unsupported.
+
+    Shared by ``AllReduceFusionPass`` and ``preinit_fused_ar_workspaces`` so both
+    size the process-global workspaces identically. Also holds the checks that
+    gate the fusion (tp_size, model_config, FlashInfer, supported world size).
+    """
+    tp_size = get_tensor_model_parallel_world_size()
+    if tp_size <= 1:
+        logger.warning_once("AllReduce fusion pass is disabled for tp_size <= 1.")
+        return None
+    if config.model_config is None:
+        logger.warning_once(
+            "AllReduce fusion pass is disabled for missing model_config."
+        )
+        return None
+    if flashinfer_comm is None:
+        logger.warning_once(
+            "Flashinfer is not installed or comm module not found, "
+            "skipping allreduce fusion pass"
+        )
+        return None
+    max_size = config.compilation_config.pass_config.flashinfer_max_size(tp_size)
+    if max_size is None:
+        # Flashinfer doesn't support current world size
+        logger.warning_once(
+            "Flashinfer allreduce fusion is not supported for world size %s"
+            " or max size is not provided",
+            tp_size,
+        )
+        return None
+    # Size the shared workspace for the widest model that reuses it (the
+    # draft under speculative decoding may be wider than the target).
+    hidden_dim = _fused_ar_workspace_hidden_dim(config)
+    dtype = config.model_config.dtype
+    element_size = torch.tensor([], dtype=dtype).element_size()
+    # take the min to save workspace size and we'll never use more
+    # than max_num_batched_tokens anyways
+    max_token_num = min(
+        max_size // (hidden_dim * element_size),
+        config.scheduler_config.max_num_batched_tokens,
+    )
+    logger.debug_once(
+        f"Flashinfer max size: {max_size // (1024 * 1024)} MB,"
+        "Maximal number of tokens used by "
+        f"Flashinfer Allreduce Fusion: {max_token_num}",
+        scope="global",
+    )
+    return dict(
+        world_size=tp_size,
+        rank=get_tensor_model_parallel_rank(),
+        max_token_num=max_token_num,
+        hidden_dim=hidden_dim,
+        dtype=dtype,
+        group=get_tp_group().cpu_group,
+    )
+
+
+def preinit_fused_ar_workspaces(config: VllmConfig) -> None:
+    """Create the AR+RMSNorm workspaces ahead of ``AllReduceFusionPass``.
+
+    Allocating the symmetric-memory workspace needs a cross-rank exchange. Doing
+    it at backend construction keeps it out of the ``torch.compile`` time; the
+    pass then finds the cached singletons.
+    """
+    if not config.compilation_config.pass_config.fuse_allreduce_rms:
+        return
+    if rocm_aiter_ops.is_enabled():
+        return
+    workspace_kwargs = _fused_ar_workspace_kwargs(config)
+    if workspace_kwargs is None:
+        return
+    if get_fi_ar_workspace(**workspace_kwargs) is not None:
+        get_fi_ar_quant_workspace(**workspace_kwargs)
+
+
 class AllReduceFusionPass(VllmPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
         self.disabled = True
         self.tp_size = get_tensor_model_parallel_world_size()
-        if self.tp_size <= 1:
-            logger.warning_once("AllReduce fusion pass is disabled for tp_size <= 1.")
+        workspace_kwargs = _fused_ar_workspace_kwargs(config)
+        if workspace_kwargs is None:
             return
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="all_reduce_fusion_pass"
         )
-        if config.model_config is None:
-            logger.warning_once(
-                "AllReduce fusion pass is disabled for missing model_config."
-            )
-            return
-        # Size the shared workspace for the widest model that reuses it (the
-        # draft under speculative decoding may be wider than the target).
-        self.workspace_hidden_dim = _fused_ar_workspace_hidden_dim(config)
-        self.group = get_tp_group().cpu_group
-        rank = get_tensor_model_parallel_rank()
-        if flashinfer_comm is None:
-            logger.warning(
-                "Flashinfer is not installed or comm module not found, "
-                "skipping allreduce fusion pass"
-            )
-            return
-        max_size = config.compilation_config.pass_config.flashinfer_max_size(
-            self.tp_size
-        )
-        if max_size is None:
-            # Flashinfer doesn't support current world size
-            logger.warning(
-                "Flashinfer allreduce fusion is not supported for world size %s"
-                " or max size is not provided",
-                self.tp_size,
-            )
-            return
-        element_size = torch.tensor([], dtype=self.model_dtype).element_size()
-        self.max_token_num = max_size // (self.workspace_hidden_dim * element_size)
-        # take the min to save workspace size and we'll never use more
-        # than max_num_batched_tokens anyways
-        self.max_token_num = min(
-            self.max_token_num, config.scheduler_config.max_num_batched_tokens
-        )
-        logger.debug_once(
-            f"Flashinfer max size: {max_size // (1024 * 1024)} MB,"
-            "Maximal number of tokens used by "
-            f"Flashinfer Allreduce Fusion: {self.max_token_num}",
-            scope="global",
-        )
-
-        workspace_kwargs = dict(
-            world_size=self.tp_size,
-            rank=rank,
-            max_token_num=self.max_token_num,
-            hidden_dim=self.workspace_hidden_dim,
-            dtype=self.model_dtype,
-            group=self.group,
-        )
+        self.max_token_num = workspace_kwargs["max_token_num"]
         if get_fi_ar_workspace(**workspace_kwargs) is None:
             logger.warning_once(
                 "Failed to initialize Flashinfer allreduce workspace. "
