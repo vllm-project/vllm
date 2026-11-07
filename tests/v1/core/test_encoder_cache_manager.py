@@ -3,13 +3,61 @@
 import pytest
 import torch
 
+from vllm.config import SchedulerConfig
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
+    compute_mm_encoder_budget,
 )
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_no_mm_chunking_rejects_small_prefill_cap(adaptive: bool):
+    config = SchedulerConfig(
+        is_encoder_decoder=False,
+        max_model_len=4096,
+        max_num_batched_tokens=2048,
+        disable_chunked_mm_input=True,
+        long_prefill_token_threshold=500,
+        long_prefill_token_threshold_adaptive=adaptive,
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"long_prefill_token_threshold \(500\).*max_tokens_per_mm_item \(576\)",
+    ):
+        compute_mm_encoder_budget(config, {"image": 576})
+
+
+@pytest.mark.parametrize(
+    "cap,disable_mm_chunking,mm_tokens,expected_budget",
+    [
+        pytest.param(0, True, {"image": 576}, 2048, id="disabled-cap"),
+        pytest.param(576, True, {"image": 576}, 2048, id="equal-cap"),
+        pytest.param(800, True, {"image": 576}, 2048, id="larger-cap"),
+        pytest.param(500, False, {"image": 576}, 2048, id="chunking-allowed"),
+        pytest.param(500, True, {}, 0, id="modalities-disabled"),
+    ],
+)
+def test_mm_prefill_cap_valid_configurations(
+    cap: int,
+    disable_mm_chunking: bool,
+    mm_tokens: dict[str, int],
+    expected_budget: int,
+):
+    config = SchedulerConfig(
+        is_encoder_decoder=False,
+        max_model_len=4096,
+        max_num_batched_tokens=2048,
+        disable_chunked_mm_input=disable_mm_chunking,
+        long_prefill_token_threshold=cap,
+    )
+    assert compute_mm_encoder_budget(config, mm_tokens) == (
+        expected_budget,
+        expected_budget,
+    )
 
 
 # ------------------ Mock Classes ------------------ #
