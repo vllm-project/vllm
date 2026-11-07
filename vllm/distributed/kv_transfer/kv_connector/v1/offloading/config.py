@@ -52,7 +52,7 @@ def _group_kv_bytes_per_block(group: "KVCacheGroupSpec") -> int:
     configs flatten that wrapper to one representative per-layer spec.  Keep
     the result invariant across those two representations.
     """
-    spec = group.kv_cache_spec
+    spec = group.full_kv_cache_spec or group.kv_cache_spec
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return spec.page_size_bytes
     return spec.page_size_bytes * len(group.layer_names)
@@ -189,7 +189,10 @@ def build_offloading_config(
         )
 
     single_group_spec = (
-        kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        (
+            kv_cache_config.kv_cache_groups[0].full_kv_cache_spec
+            or kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        )
         if len(kv_cache_config.kv_cache_groups) == 1
         else None
     )
@@ -256,7 +259,9 @@ def build_offloading_config(
         layer_specs = [
             spec
             for group in kv_cache_config.kv_cache_groups
-            for spec in iter_layer_specs(group.kv_cache_spec)
+            for spec in iter_layer_specs(
+                group.full_kv_cache_spec or group.kv_cache_spec
+            )
         ]
         is_parallelism_agnostic = (
             len(layer_specs) > 0
@@ -272,7 +277,9 @@ def build_offloading_config(
             and all(
                 type(spec) is MLAAttentionSpec
                 for _, group in selected_groups
-                for spec in iter_layer_specs(group.kv_cache_spec)
+                for spec in iter_layer_specs(
+                    group.full_kv_cache_spec or group.kv_cache_spec
+                )
             )
             and parallel_config.nnodes_within_dp == 1
             and (

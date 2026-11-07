@@ -22,6 +22,20 @@ flowchart LR
     CPU <--> SN["..."]
 ```
 
+## Replicated MLA cache
+
+On a single node using the multiprocessing executor, the native CPU primary
+tier can store one copy of KV that is fully replicated across tensor-parallel
+ranks. This also applies to MLA models with a separate replicated sparse
+attention indexer. The CPU capacity then holds one complete block instead
+of one copy per rank, including every indexer page and its quantization scales.
+
+This requires TP > 1, PP = PCP = DCP = 1, and every layer's cache to be
+declared fully replicated by the model backend. Hybrid models with sharded
+or unknown cache state keep separate copies. The optimization requires a
+shared host region; platform implementations using process-local host
+allocations keep their per-worker layout.
+
 ## Per-request load control
 
 Individual requests can cap how many tokens are loaded from offloaded storage

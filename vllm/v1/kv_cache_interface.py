@@ -1540,6 +1540,9 @@ class KVCacheGroupSpec:
     # source group after a connector load.
     enable_kv_transfer: bool = True
     role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT
+    # Scheduler projection keeps a representative in kv_cache_spec.
+    # Retain the physical per-layer layout for sizing and certification.
+    full_kv_cache_spec: UniformTypeKVCacheSpecs | None = None
 
 
 @dataclass
