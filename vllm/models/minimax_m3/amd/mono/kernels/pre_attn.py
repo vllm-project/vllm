@@ -38,9 +38,13 @@ from vllm.models.minimax_m3.amd.mono.config import (
     LOCAL_Q_HEADS,
     MAX_QKV_ROWS,
     MAX_TOKENS,
+    NVFP4_CODES,
+    NVFP4_INDEX_PAGE_BYTES,
+    NVFP4_PAGE_BYTES,
     ONE_INDEX_HEAD,
     PAGE16,
     ROTARY_DIM,
+    SPARSE_BLOCK,
     THREADS,
     TP,
     WAVES,
@@ -69,6 +73,11 @@ from vllm.models.minimax_m3.amd.mono.kernels.index_score import (
     emit_index_scores,
     index_scale_log2e,
     step_rows,
+)
+from vllm.models.minimax_m3.amd.mono.kernels.nvfp4 import (
+    f16_pair,
+    k_scale_off,
+    quant4,
 )
 
 FP8_MAX = 448.0
@@ -180,6 +189,58 @@ def head_norm_rope(e, lane, gw4, cs, sn, eps):
     return out
 
 
+# NVFP4 V insert (``config.KV_FORMAT == "nvfp4"``): the head CTA's token half
+# waves leave their codes (``red`` word 32 k + l, k: token) and slots (word
+# V_SLOTS + k) in LDS; the octets' dwords are merged from there
+V_SLOTS = MAX_TOKENS * 32
+
+
+def nvfp4_global_scale(addr):
+    return fx.Float32(bo.buffer_load(rsrc(addr), 0, vec_width=1, dtype=T.f32))
+
+
+@traced
+def nvfp4_store_row(codes, sbyte, cache, row_off, scale_off, l32, cm_out):
+    """A token's 128 e2m1 codes (2 B a lane) at byte ``row_off`` of ``cache`` and
+    its 8 group scales (lane 4 g: group g's, at byte ``scale_off``)."""
+    r = rsrc(cache)
+    bo.buffer_store(fx.Int16(codes), r, row_off // 2 + l32, cache_modifier=cm_out)
+    if l32 % 4 == 0:
+        bo.buffer_store(fx.Int8(sbyte), r, scale_off, cache_modifier=cm_out)
+
+
+@traced
+def nvfp4_merge_v(tk, l32, red, tokens, v_cache, cm_out):
+    """Token tk's lane l32 (dims 4 l32 .. + 4): when tk is the step's first token
+    in its V octet, writes the octet's 4 dwords of these dims with every step
+    token of the octet's nibbles, the others kept (one writer a dword)."""
+    slot = fx.ptr_load(red + (V_SLOTS + tk)).bitcast(fx.Int32)
+    octet = slot >> 3
+    n_before = fx.Int32(0)
+    msk = fx.Int32(0)
+    put = [fx.Int32(0)] * ELEMS
+    for k in range_constexpr(tokens):
+        s2 = fx.ptr_load(red + (V_SLOTS + k)).bitcast(fx.Int32)
+        same = (s2 >= 0) & ((s2 >> 3) == octet)
+        n_before = n_before + (same & (tk > k)).select(fx.Int32(1), fx.Int32(0))
+        c2 = fx.ptr_load(red + (k * 32 + l32)).bitcast(fx.Int32)
+        sh = (s2 & 7) * 4
+        msk = msk | same.select(fx.Int32(15) << sh, fx.Int32(0))
+        for i in range_constexpr(ELEMS):
+            put[i] = put[i] | same.select(((c2 >> (4 * i)) & 15) << sh, fx.Int32(0))
+    if (slot >= 0) & (n_before == 0):
+        tp = slot % SPARSE_BLOCK
+        off = (
+            (slot // SPARSE_BLOCK) * NVFP4_PAGE_BYTES + (tp // 8) * 512 + l32 * 16
+        ) // 4
+        r_v = rsrc(v_cache)
+        old = fx.Vector(bo.buffer_load(r_v, off, vec_width=4, dtype=T.i32))
+        new = [put[i] | (old[i] & ~msk) for i in range(ELEMS)]
+        bo.buffer_store(
+            fx.Vector.from_elements(new, fx.Int32), r_v, off, cache_modifier=cm_out
+        )
+
+
 @traced
 def emit_pre_attn(
     tid, bid, lane, wave, x8, red, mb_put, mb_put_words, mb_poll, qkv_mb, x8_mb,
@@ -201,6 +262,9 @@ def emit_pre_attn(
     # stores K4 reads in the same launch (signal): device-coherent like the
     # mailboxes, so the done flags need no L2 writeback
     cm_out = CM_DEV if signal is not None else 0
+    # the ROCm NVFP4 pages (``nvfp4.py``): k_cache / v_cache are a layer's K / V
+    # sides, k_scale / v_scale its fp32 global scales
+    nvfp4 = mono_config.KV_FORMAT == "nvfp4"
 
     def publish_done(mb_addr, idx, who=None):
         """The CTA's stores done, then flag idx of ``mb_addr`` (from thread 0, or
@@ -508,31 +572,52 @@ def emit_pre_attn(
                 got[1][1].bitcast(fx.Float32),
             ]
             if is_v:
-                # raw V: per-token amax over the head, scale = amax / FP8_MAX
-                if const_expr(mono_config.STATIC_KV_SCALE):
-                    vs = fx.Float32(1.0)
-                else:
-                    am = fx.Float32(0.0)
-                    for j in range_constexpr(ELEMS):
-                        am = fx.max(am, fmath.absf(e[j]))
-                    am = butterfly(am, (16, 8, 4, 2, 1), fx.max)
-                    vs = (am > 0.0).select(am / FP8_MAX, fx.Float32(1.0))
-                if slot >= 0:
-                    b = page16_of(slot)
-                    t = slot % PAGE16
+                if const_expr(nvfp4):
+                    # the codes to LDS (nvfp4_merge_v below), the scales straight out
+                    gv = nvfp4_global_scale(v_scale)
+                    v_codes, v_sb = quant4(e, gv, 1.0 / gv)
+                    fx.ptr_store(v_codes.bitcast(fx.Float32), red + (tk * 32 + l32))
                     if l32 == 0:
+                        fx.ptr_store(slot.bitcast(fx.Float32), red + (V_SLOTS + tk))
+                    if (slot >= 0) & (l32 % 4 == 0):
                         bo.buffer_store(
-                            vs, rsrc(v_scale), b * PAGE16 + t, cache_modifier=cm_out
-                        )
-                    r_v = rsrc(v_cache)
-                    for j in range_constexpr(ELEMS):
-                        q8 = fp8_pack4(e[j] / vs, 0.0, 0.0, 0.0) & 0xFF
-                        bo.buffer_store(
-                            fx.Int8(q8),
-                            r_v,
-                            b * PAGE_BYTES + (d0 + j) * PAGE16 + t,
+                            fx.Int8(v_sb),
+                            rsrc(v_cache),
+                            (slot // SPARSE_BLOCK) * NVFP4_PAGE_BYTES
+                            + NVFP4_CODES * SPARSE_BLOCK
+                            + (l32 // 4) * SPARSE_BLOCK
+                            + slot % SPARSE_BLOCK,
                             cache_modifier=cm_out,
                         )
+                else:
+                    # raw V: per-token amax over the head, scale = amax / FP8_MAX
+                    if const_expr(mono_config.STATIC_KV_SCALE):
+                        vs = fx.Float32(1.0)
+                    else:
+                        am = fx.Float32(0.0)
+                        for j in range_constexpr(ELEMS):
+                            am = fx.max(am, fmath.absf(e[j]))
+                        am = butterfly(am, (16, 8, 4, 2, 1), fx.max)
+                        vs = (am > 0.0).select(am / FP8_MAX, fx.Float32(1.0))
+                    if slot >= 0:
+                        b = page16_of(slot)
+                        t = slot % PAGE16
+                        if l32 == 0:
+                            bo.buffer_store(
+                                vs,
+                                rsrc(v_scale),
+                                b * PAGE16 + t,
+                                cache_modifier=cm_out,
+                            )
+                        r_v = rsrc(v_cache)
+                        for j in range_constexpr(ELEMS):
+                            q8 = fp8_pack4(e[j] / vs, 0.0, 0.0, 0.0) & 0xFF
+                            bo.buffer_store(
+                                fx.Int8(q8),
+                                r_v,
+                                b * PAGE_BYTES + (d0 + j) * PAGE16 + t,
+                                cache_modifier=cm_out,
+                            )
             else:
                 out = head_norm_rope(e, lane, gw4, cs, sn, eps)
                 if is_q:
@@ -548,46 +633,90 @@ def emit_pre_attn(
                         rsrc(iq_out),
                         tk * HEAD_DIM + d0,
                     )
-                if is_k:
-                    if const_expr(mono_config.STATIC_KV_SCALE):
-                        ksc = fx.Float32(1.0)
-                    else:
-                        am = fx.Float32(0.0)
-                        for j in range_constexpr(ELEMS):
-                            am = fx.max(am, fmath.absf(out[j]))
-                        am = butterfly(am, (16, 8, 4, 2, 1), fx.max)
-                        ksc = (am > 0.0).select(am / FP8_MAX, fx.Float32(1.0))
-                    if slot >= 0:
-                        b = page16_of(slot)
-                        t = slot % PAGE16
-                        if l32 == 0:
+                if const_expr(nvfp4):
+                    # K under the layer's global scale, index-K under 1
+                    if is_k | (ht == IK_TASK):
+                        k_gs = is_k.select(nvfp4_global_scale(k_scale), fx.Float32(1.0))
+                        k_codes, k_sb = quant4(
+                            [bf16_round(out[j]) for j in range(ELEMS)], k_gs, 1.0 / k_gs
+                        )
+                        k_tp = slot % SPARSE_BLOCK
+                        k_pg = slot // SPARSE_BLOCK
+                        if is_k & (slot >= 0):
+                            nvfp4_store_row(
+                                k_codes,
+                                k_sb,
+                                k_cache,
+                                k_pg * NVFP4_PAGE_BYTES + k_tp * NVFP4_CODES,
+                                k_pg * NVFP4_PAGE_BYTES
+                                + NVFP4_CODES * SPARSE_BLOCK
+                                + k_scale_off(k_tp, l32 // 4),
+                                l32,
+                                cm_out,
+                            )
+                        if (ht == IK_TASK) & (slot >= 0):
+                            nvfp4_store_row(
+                                k_codes,
+                                k_sb,
+                                index_cache,
+                                k_pg * NVFP4_INDEX_PAGE_BYTES + k_tp * NVFP4_CODES,
+                                k_pg * NVFP4_INDEX_PAGE_BYTES
+                                + NVFP4_CODES * SPARSE_BLOCK
+                                + k_tp * 8
+                                + l32 // 4,
+                                l32,
+                                cm_out,
+                            )
+                else:
+                    if is_k:
+                        if const_expr(mono_config.STATIC_KV_SCALE):
+                            ksc = fx.Float32(1.0)
+                        else:
+                            am = fx.Float32(0.0)
+                            for j in range_constexpr(ELEMS):
+                                am = fx.max(am, fmath.absf(out[j]))
+                            am = butterfly(am, (16, 8, 4, 2, 1), fx.max)
+                            ksc = (am > 0.0).select(am / FP8_MAX, fx.Float32(1.0))
+                        if slot >= 0:
+                            b = page16_of(slot)
+                            t = slot % PAGE16
+                            if l32 == 0:
+                                bo.buffer_store(
+                                    ksc,
+                                    rsrc(k_scale),
+                                    b * PAGE16 + t,
+                                    cache_modifier=cm_out,
+                                )
+                            qk = [bf16_round(out[j]) / ksc for j in range(ELEMS)]
                             bo.buffer_store(
-                                ksc,
-                                rsrc(k_scale),
-                                b * PAGE16 + t,
+                                fp8_pack4(qk[0], qk[1], qk[2], qk[3]),
+                                rsrc(k_cache),
+                                (
+                                    b * PAGE_BYTES
+                                    + (d0 // 16) * (PAGE16 * 16)
+                                    + t * 16
+                                    + d0 % 16
+                                )
+                                // 4,
                                 cache_modifier=cm_out,
                             )
-                        qk = [bf16_round(out[j]) / ksc for j in range(ELEMS)]
+                    if (ht == IK_TASK) & (slot >= 0):
+                        qi = [bf16_round(out[j]) for j in range(ELEMS)]
                         bo.buffer_store(
-                            fp8_pack4(qk[0], qk[1], qk[2], qk[3]),
-                            rsrc(k_cache),
-                            (
-                                b * PAGE_BYTES
-                                + (d0 // 16) * (PAGE16 * 16)
-                                + t * 16
-                                + d0 % 16
-                            )
-                            // 4,
+                            fp8_pack4(qi[0], qi[1], qi[2], qi[3]),
+                            rsrc(index_cache),
+                            (slot * HEAD_DIM + d0) // 4,
                             cache_modifier=cm_out,
                         )
-                if (ht == IK_TASK) & (slot >= 0):
-                    qi = [bf16_round(out[j]) for j in range(ELEMS)]
-                    bo.buffer_store(
-                        fp8_pack4(qi[0], qi[1], qi[2], qi[3]),
-                        rsrc(index_cache),
-                        (slot * HEAD_DIM + d0) // 4,
-                        cache_modifier=cm_out,
-                    )
+
+        if const_expr(nvfp4):  # noqa: SIM102
+            # V: every token's codes in LDS, then one writer an octet dword; the
+            # last barrier frees red for the index scorers
+            if is_v:
+                gpu.barrier()
+                if tk < tokens:
+                    nvfp4_merge_v(tk, l32, red, tokens, v_cache, cm_out)
+                gpu.barrier()
 
         if const_expr(signal is not None):
             # every token's flag once the whole CTA's stores are out
@@ -619,6 +748,7 @@ def emit_k1(
         block_table, seq_lens, iscore, scratch,
     ) = ptrs  # fmt: skip
     mbox = Mailbox(scratch, step, layer)
+    nvfp4 = mono_config.KV_FORMAT == "nvfp4"  # index q in fp16 (index_score)
     qkv_mb = mbox.addr(SCRATCH_QKV)
     x8_mb = mbox.addr(SCRATCH_X8)
     x8s_mb = mbox.addr(SCRATCH_X8S)
@@ -639,8 +769,10 @@ def emit_k1(
         e = [got[h][j].bitcast(fx.Float32) for h in range(2) for j in range(2)]
         out = head_norm_rope(e, lane, gw4, cs, sn, eps)
         row = qs + (tk * heads.count + head) * (HEAD_DIM // 2)
-        fx.ptr_store(bf16_pair(out[0], out[1]), row + lane * 2)
-        fx.ptr_store(bf16_pair(out[2], out[3]), row + (lane * 2 + 1))
+        # NVFP4 index cache: fp16 pairs for the scorer's fp16 MFMA
+        pair = f16_pair if nvfp4 else bf16_pair
+        fx.ptr_store(pair(out[0], out[1]), row + lane * 2)
+        fx.ptr_store(pair(out[2], out[3]), row + (lane * 2 + 1))
 
     def make_index_q(first, last):
         """Tokens first..last's index q of this rank's head into qs: wave w makes
@@ -669,7 +801,7 @@ def emit_k1(
                 qs + (row + (32 * s + 8 * (lane // 16)) // 2),
                 result_type=fx.Vector.make_type(4, fx.Float32),
             )
-        ).bitcast(fx.BFloat16)
+        ).bitcast(fx.Float16 if nvfp4 else fx.BFloat16)
 
     def q_frag(tk, s):
         """This lane's MFMA B operand of token tk's index q (this rank's head),
@@ -752,12 +884,15 @@ def build_pre_attn_kernel(
         tl=timeline,
         kps=mono_config.KV_PAGE_STRIDE,
         sks=mono_config.STATIC_KV_SCALE,
+        nv4=mono_config.KV_FORMAT == "nvfp4",
     )
 
     # the JIT cache key holds the kernel's scalar closure values, not objects: the
     # index heads go in as ints (a shared cache otherwise serves one rank's build
     # to every rank)
     ih_count, ih_own = heads.count, heads.own
+    # the cache geometry in the JIT cache key (config.cache_geometry)
+    kv_geometry = mono_config.cache_geometry()
 
     @flyc.kernel(name=kernel_name, known_block_size=[THREADS, 1, 1])
     def pre_attn_kernel(
@@ -791,6 +926,7 @@ def build_pre_attn_kernel(
         layer: Int32,
         tl: Int64,
     ):
+        mono_config.check_cache_geometry(kv_geometry)
         tid = fx.thread_idx.x
         bid = fx.block_idx.x
         lane = tid % 64

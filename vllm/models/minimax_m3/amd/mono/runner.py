@@ -138,11 +138,36 @@ class MonoDecodeRunner:
         # the caches this build viewed: vLLM re-binds them after its cudagraph
         # memory-profiling capture, which must rebuild the runner
         self._cache_ptrs = self.cache_ptrs(model, n_dense)
-        # the K/V page views (V offset to its side of the block) and how many page
-        # ids a block spans; the kernels are compiled for that geometry
-        self.kv_views = [lyr.self_attn.get_aiter_sparse_pa_kv_cache() for lyr in layers]
-        stride = attn0._aiter_sparse_pa_block_page_stride
-        mono_config.configure(kv_page_stride=stride, static_kv_scale=True)
+        # the K/V caches the kernels read and write, per layer (K base, V base, K
+        # scale, V scale addresses), and how many page ids a block spans; the
+        # kernels are compiled for that geometry and cache format
+        self.nvfp4 = bool(getattr(attn0, "use_nvfp4_kv", False))
+        if self.nvfp4:
+            # one NVFP4 page = K side then V side of the rank's kv head; the global
+            # fp32 scales; page ids as page128 * 8 + page16 (stride 8)
+            self.kv_ptrs = [
+                (
+                    lyr.self_attn.kv_cache.data_ptr(),
+                    lyr.self_attn.kv_cache.data_ptr() + mono_config.NVFP4_SIDE,
+                    lyr.self_attn._k_scale.data_ptr(),
+                    lyr.self_attn._v_scale.data_ptr(),
+                )
+                if lyr.is_moe_layer
+                else None
+                for lyr in layers
+            ]
+            mono_config.configure(
+                kv_page_stride=mono_config.SPARSE_BLOCK // PAGE16,
+                static_kv_scale=True,
+                kv_format="nvfp4",
+            )
+        else:
+            # the K/V page views (V offset to its side of the block)
+            self.kv_views = [
+                lyr.self_attn.get_aiter_sparse_pa_kv_cache() for lyr in layers
+            ]
+            stride = attn0._aiter_sparse_pa_block_page_stride
+            mono_config.configure(kv_page_stride=stride, static_kv_scale=True)
         self._build(
             npes, heads, float(config.rms_norm_eps), float(moe0.routed_scaling_factor),
             shared_weight,
@@ -150,9 +175,21 @@ class MonoDecodeRunner:
             sel.init_blocks, sel.local_blocks,
         )  # fmt: skip
         dev = self.h.device
-        n16 = self.kv_views[0][0].shape[0]
-        # the host's unit fp8 scale for every page-16 slot (K1 writes 1.0 back)
-        self.kv_scale = torch.ones(n16, 1, PAGE16, dtype=torch.float32, device=dev)
+        if not self.nvfp4:
+            n16 = self.kv_views[0][0].shape[0]
+            # the host's unit fp8 scale for every page-16 slot (K1 writes 1.0 back)
+            self.kv_scale = torch.ones(n16, 1, PAGE16, dtype=torch.float32, device=dev)
+            self.kv_ptrs = [
+                None
+                if views is None
+                else (
+                    _ptr(views[0]),
+                    _ptr(views[1]),
+                    _ptr(self.kv_scale),
+                    _ptr(self.kv_scale),
+                )
+                for views in self.kv_views
+            ]
         self.res0 = torch.zeros(MAX_TOKENS, HIDDEN, dtype=torch.bfloat16, device=dev)
 
     @staticmethod
@@ -239,10 +276,12 @@ class MonoDecodeRunner:
         returned residual)."""
         n = res.shape[0]
         block_table, seq_lens, slots, q_len = tables
-        k16, v16 = self.kv_views[lw.layer_id]
+        kv = self.kv_ptrs[lw.layer_id]
+        assert kv is not None
+        k_cache, v_cache, k_scale, v_scale = kv
         self.k4[n](
             _ptr(self.h), _ptr(self.q), _ptr(block_table), _ptr(seq_lens),
-            _ptr(k16), _ptr(v16), _ptr(self.kv_scale), _ptr(self.kv_scale),
+            k_cache, v_cache, k_scale, v_scale,
             _ptr(lw.w_o), _ptr(lw.s_o), _ptr(lw.g_post),
             _ptr(lw.gate), _ptr(lw.bias), _ptr(lw.w13), _ptr(lw.s13),
             _ptr(lw.w2), _ptr(lw.s2),

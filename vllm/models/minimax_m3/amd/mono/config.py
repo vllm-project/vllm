@@ -92,16 +92,45 @@ LAYER_SLOTS = 128  # mailbox epochs: step * LAYER_SLOTS + layer + 1
 # page-16 ids one sparse block spans (8: K and V as separate planes; 16: a block
 # interleaves K|V and V is reached from the same id at +8 pages, as vLLM lays
 # it out) and
-# whether fp8 K/V carry the host's fixed unit scale instead of per-token scales
+# whether fp8 K/V carry the host's fixed unit scale instead of per-token scales,
+# and the cache format: "fp8" (AITER sparse PA page-16 K/V, E4M3 index-K) or
+# "nvfp4" (the ROCm NVFP4 pages of sparse_attention_nvfp4 / indexer_nvfp4: a page
+# id is then page128 * 8 + its page-16 within, see NVFP4_* below)
 KV_PAGE_STRIDE = SPARSE_BLOCK // PAGE16
 STATIC_KV_SCALE = False
+KV_FORMAT = "fp8"
+
+# NVFP4 page geometry (128 tokens a page, 72 B a token: 64 B of e2m1 codes for
+# 128 dims + 8 e4m3 scales of 16 dims): K side, then V side, of the one kv head
+NVFP4_ROW = 72
+NVFP4_CODES = HEAD_DIM // 2
+NVFP4_SIDE = SPARSE_BLOCK * NVFP4_ROW
+NVFP4_PAGE_BYTES = 2 * NVFP4_SIDE
+NVFP4_INDEX_PAGE_BYTES = SPARSE_BLOCK * NVFP4_ROW
 
 
-def configure(*, kv_page_stride: int, static_kv_scale: bool) -> None:
-    global KV_PAGE_STRIDE, STATIC_KV_SCALE
+def configure(
+    *, kv_page_stride: int, static_kv_scale: bool, kv_format: str = "fp8"
+) -> None:
+    global KV_PAGE_STRIDE, STATIC_KV_SCALE, KV_FORMAT
     assert kv_page_stride in (SPARSE_BLOCK // PAGE16, 2 * SPARSE_BLOCK // PAGE16)
+    assert kv_format in ("fp8", "nvfp4")
+    assert kv_format == "fp8" or kv_page_stride == SPARSE_BLOCK // PAGE16
     KV_PAGE_STRIDE = kv_page_stride
     STATIC_KV_SCALE = static_kv_scale
+    KV_FORMAT = kv_format
+
+
+def cache_geometry() -> tuple:
+    """The cache geometry the kernels read while tracing. FlyDSL's JIT cache key
+    does not see module values, so each builder captures this in its kernel body
+    (``check_cache_geometry``) to keep one binary per geometry."""
+    return (KV_PAGE_STRIDE, STATIC_KV_SCALE, KV_FORMAT)
+
+
+def check_cache_geometry(geometry: tuple) -> None:
+    """At trace time: the kernel is traced for the geometry it was built for."""
+    assert geometry == cache_geometry(), (geometry, cache_geometry())
 
 
 class MonoUnsupported(Exception):
