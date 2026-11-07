@@ -41,10 +41,10 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    get_block_table_width,
 )
 from vllm.v1.outputs import ECConnectorOutput, ModelRunnerOutput
 from vllm.v1.watermarking import create_watermarker
-from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cpu.attn_utils import (
     FastPrefillHelper,
     build_slot_mappings_by_layer,
@@ -467,7 +467,6 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         # Create a dummy scheduler output.
         num_reqs = min(num_tokens, self.max_num_reqs)
         if uniform_decode:
-            num_tokens = max(num_tokens, self.decode_query_len)
             num_reqs = num_tokens // self.decode_query_len
             assert num_tokens % self.decode_query_len == 0
 
@@ -639,7 +638,6 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
-            assert new_req_data.prefill_token_ids is not None
             req_id = new_req_data.req_id
 
             # Streaming input update: request already exists from a prior
@@ -1136,7 +1134,6 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         )
         batch_descriptor = BatchDescriptor(
             num_tokens=input_batch.num_tokens_after_padding,
-            has_lora=self.lora_config is not None,
             num_active_loras=num_active_loras,
         )
         with set_forward_context(
@@ -1233,7 +1230,6 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
 
         model_runner_output = ModelRunnerOutput(
             req_ids=input_batch.req_ids,
-            req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=sampled_token_ids,
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
@@ -1303,7 +1299,6 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         )
         model_runner_output = ModelRunnerOutput(
             req_ids=input_batch.req_ids,
-            req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             pooler_output=[
                 None if output is None or not is_finished else output
                 for output, is_finished in zip(outputs, finished_mask, strict=True)
