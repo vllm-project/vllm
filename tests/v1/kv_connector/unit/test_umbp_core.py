@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from transformers import PreTrainedConfig
 
 from tests.v1.kv_connector.umbp_test_utils import (
     MemoryRuntime,
@@ -219,6 +220,28 @@ def test_namespace_distinguishes_draft_models():
     assert namespace(draft("drafter-a")) == namespace(draft("drafter-a"))
     assert namespace(draft("drafter-a")) != namespace(draft("drafter-b"))
     assert namespace(draft("drafter-a")) != namespace(draft("drafter-a", "v2"))
+
+
+def test_namespace_distinguishes_effective_model_configs():
+    """Overridden RoPE, quantization or dtype must not reuse the defaults' KV."""
+    config = _kv_cache_config()
+
+    def namespace(rope_theta=1e6, quantization=None, dtype=torch.float16, **hf):
+        vllm_config = _vllm_config({"mode": "standalone"})
+        vllm_config.model_config.hf_config = PreTrainedConfig(
+            rope_parameters={"rope_theta": rope_theta, "rope_type": "default"},
+            **hf,
+        )
+        vllm_config.model_config.quantization = quantization
+        vllm_config.model_config.dtype = dtype
+        return UMBPNamespace.from_vllm_config(vllm_config, config).value
+
+    default = namespace()
+    assert namespace() == default
+    assert namespace(name_or_path="/mnt/another-copy") == default
+    assert namespace(rope_theta=1e4) != default
+    assert namespace(quantization="fp8") != default
+    assert namespace(dtype=torch.bfloat16) != default
 
 
 def test_layout_planner_sizes_uniform_type_layers_independently():
@@ -1147,6 +1170,37 @@ def test_worker_polls_async_load_without_forward_execution(fail_load):
 
     assert worker.get_finished(set()) == (None, {"req"})
     assert worker.get_block_ids_with_load_errors() == ({1} if fail_load else set())
+
+
+@pytest.mark.parametrize("bulk", [False, True])
+@pytest.mark.parametrize("fail_load", [False, True])
+def test_sync_load_finishes_before_forward_without_layer_hooks(
+    bulk, fail_load, monkeypatch
+):
+    """FULL graph replay skips layer hooks, so sync loads must settle on entry."""
+
+    class _SyncLoadHandle(_WaitRecordingDelayedLoadHandle):
+        def wait(self, job):
+            if not fail_load:
+                return super().wait(job)
+            self.waited.append(job)
+            job.fail(job.keys, "injected load failure")
+            return job
+
+    handle = _SyncLoadHandle()
+    if bulk:
+        monkeypatch.setattr(handle, "load_blocks", handle.load, raising=False)
+    worker = UMBPStoreConnectorWorker(handle)
+    batch = BlockLoadBatch(["sync-load"], [7], [0], "req")
+
+    worker.start_load_kv(None, UMBPConnectorMetadata(load_requests={"req": batch}))
+
+    assert handle.waited == [handle.load_job]
+    assert worker.get_finished(set()) == (None, None)
+    assert worker.get_block_ids_with_load_errors() == ({7} if fail_load else set())
+    stats = worker.get_kv_connector_stats().reduce()
+    assert stats["load_completed"] == (0 if fail_load else 1)
+    assert stats["load_failed"] == (1 if fail_load else 0)
 
 
 def test_forward_does_not_wait_for_async_loads():

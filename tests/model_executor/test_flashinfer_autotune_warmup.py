@@ -16,6 +16,7 @@ import torch
 
 import vllm.model_executor.warmup.kernel_warmup as warmup
 import vllm.utils.flashinfer as fi_utils
+from vllm.config.utils import hash_config
 from vllm.model_executor.warmup.kernel_warmup import (
     _flashinfer_autotune_token_counts,
     _run_flashinfer_autotune_dummy_runs,
@@ -176,7 +177,11 @@ def test_flashinfer_autotune_lifecycle(
     model = runner.get_model()
     cache_path = tmp_path / "autotune.json"
     rank_cache_path = cache_path.with_name(f"autotune_dp0_rank{rank}.json")
-    rank_cache_path.write_text(json.dumps({"_metadata": {}, "op": 1}))
+    # A matching cache lets every rank skip the tuning sweep, so the dummy
+    # failure case must run on a cache miss to reach the sweep at all.
+    cache_hit = failure != "dummy"
+    if cache_hit:
+        rank_cache_path.write_text(json.dumps({"_metadata": {}, "op": 1}))
     events = Mock()
     events.tuner.load_configs.return_value = True
     events.tuner._dirty = True
@@ -226,9 +231,9 @@ def test_flashinfer_autotune_lifecycle(
     monkeypatch.setattr(fi_utils, "has_flashinfer_autotune_v2", lambda: has_v2)
     monkeypatch.setattr(fi_utils, "autotune", events.autotune)
     monkeypatch.setattr(warmup.envs, "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS", skip_ops)
-    resolve_file = Mock(return_value=cache_path)
+    resolve_file = Mock(return_value=rank_cache_path)
     resolve_root = Mock(return_value=str(tmp_path))
-    monkeypatch.setattr(warmup, "resolve_flashinfer_autotune_file", resolve_file)
+    monkeypatch.setattr(warmup, "resolve_rank_flashinfer_autotune_file", resolve_file)
     monkeypatch.setattr(warmup, "resolve_flashinfer_autotune_v2_root", resolve_root)
 
     def gather(out, value, *, group):
@@ -257,22 +262,21 @@ def test_flashinfer_autotune_lifecycle(
     else:
         resolve_root.assert_not_called()
         resolve_file.assert_called_once_with(runner)
-        expected.extend(
-            [
-                call.tuner.load_configs(str(rank_cache_path)),
-                call.autotune(tune_mode=True, **kwargs),
-            ]
-        )
+        if cache_hit:
+            expected.append(call.tuner.load_configs(str(rank_cache_path)))
+        expected.append(call.autotune(tune_mode=True, **kwargs))
     expected.extend(
         [call.set_group(world.cpu_group if world_size > 1 else None), call.enter()]
     )
     if hisparse:
         expected.append(call.hisparse(runner))
-    for name, arg, kwargs in [
-        ("dummy", runner, {"skip_attn": hisparse}),
+    warmup_calls: list[tuple[str, object, dict]] = [
         ("replayssm", runner, {}),
         ("kimi", model, {}),
-    ]:
+    ]
+    if use_v2 or not cache_hit:
+        warmup_calls.insert(0, ("dummy", runner, {"skip_attn": hisparse}))
+    for name, arg, kwargs in warmup_calls:
         expected.append(getattr(call, name)(arg, **kwargs))
         if failure == name:
             break
@@ -567,8 +571,8 @@ def autotune_run(monkeypatch, tmp_path):
         )
         monkeypatch.setattr(
             warmup,
-            "resolve_flashinfer_autotune_file",
-            lambda runner: tmp_path / "autotune_configs.json",
+            "resolve_rank_flashinfer_autotune_file",
+            lambda runner: run.cache_path(run.rank),
         )
         monkeypatch.setattr(
             warmup, "_flashinfer_autotune_skip_ops", lambda runner: None
@@ -669,14 +673,11 @@ def test_autotune_cache_key_normalizes_kv_init_fields():
     mutated.kv_cache_layout = "LBHNC"
 
     # Negative control: the write-backs are hashed factors.
-    assert mutated.compute_hash() != fresh.compute_hash()
+    assert hash_config(mutated) != hash_config(fresh)
     normalized = _normalize_cache_config_for_hash(mutated)
-    assert normalized.compute_hash() == fresh.compute_hash()
+    assert hash_config(normalized) == hash_config(fresh)
     # Factory state is returned untouched.
     assert _normalize_cache_config_for_hash(fresh) is fresh
     # block_size stays significant (the daemon keys on the resolved value).
-    resolved = CacheConfig(block_size=64)
-    assert (
-        _normalize_cache_config_for_hash(resolved).compute_hash()
-        != fresh.compute_hash()
-    )
+    resolved = CacheConfig(block_size=32)
+    assert hash_config(_normalize_cache_config_for_hash(resolved)) != hash_config(fresh)

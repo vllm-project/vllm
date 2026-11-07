@@ -13,7 +13,7 @@ from vllm.outputs import PoolingOutput
 from vllm.pooling_params import LateChunkingParams
 from vllm.tasks import PoolingTask
 
-MODEL_NAME = "intfloat/multilingual-e5-small"
+MODEL_NAME = "vllm-project/multilingual-e5-small"
 
 prompt = "The chef prepared a delicious meal."
 prompt_token_ids = [0, 581, 21861, 133888, 10, 8, 150, 60744, 109911, 5, 2]

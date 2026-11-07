@@ -357,6 +357,9 @@ class LLBf16SplitK:
             consumer_group=consumer_group,
         )
 
+        # Peer CTAs must be running before the epilogue's DSMEM stores.
+        cute.arch.cluster_arrive_relaxed()
+
         # Round-robin split-K: split z handles tiles z, z+split_k, ...
         K_total = cute.size(mA, mode=[1])
         k_tile_count = cute.size(gA, mode=[2])
@@ -402,6 +405,7 @@ class LLBf16SplitK:
                 pred=tApA,
             )
             mainloop_pipeline.producer_commit(producer_state)
+            cute.arch.cluster_wait()
             producer_state.advance()
 
             for k_tile in cutlass.range(
@@ -428,6 +432,7 @@ class LLBf16SplitK:
             mainloop_pipeline.producer_tail(producer_state)
 
         else:
+            cute.arch.cluster_wait()
             # MMA warps with k-phase interleaving
             cute.arch.setmaxregister_increase(232)  # large MMA fragments
 
