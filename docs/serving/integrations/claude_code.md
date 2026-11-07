@@ -80,3 +80,11 @@ If the model responds correctly, your setup is working. You can now use Claude C
 **WebSearch fails with `tool type 'web_search_...' is not supported`**: Claude Code's WebSearch tool relies on Anthropic's server-side web search tool, which runs on Anthropic's servers. vLLM does not run server tools and rejects requests that include them with a 400. Use an MCP server that provides web search instead.
 
 **Model not found**: Ensure the `--served-model-name` matches the model names in your environment variables. You cannot use model names with `/` in them, such as `openai/gpt-oss-120b` directly from Huggingface, so beware of that limitation with Claude Code.
+
+### Tool result content
+
+The Messages API accepts strings or lists of `text`, `image`, and `tool_reference`
+blocks in `tool_result.content`. Nested block types that the adapter cannot
+represent, including `document` and `video`, return a bad-request error instead
+of being silently removed. Convert unsupported tool output to supported text or
+image blocks before sending it.
