@@ -1002,11 +1002,22 @@ class Glm5NextVideoBackend(VideoBackend):
         target: VideoTargetMetadata,
         **kwargs,
     ) -> list[int]:
+        # The sampler walks `duration * target_fps` candidates before
+        # deduplicating, so a requested fps above the source rate sizes that
+        # walk from the request instead of from the clip. Sampling faster than
+        # the source cannot yield more frames, so clamping to the source rate
+        # bounds the walk by the frame count without changing which frames come
+        # back. Short-clip padding to `extract_t` is reference behavior and
+        # stays untouched.
+        target_fps = target.fps if target.fps > 0 else None
+        if target_fps is not None and source.original_fps > 0:
+            target_fps = min(target_fps, source.original_fps)
+
         return cls._sample_frame_indices(
             source.total_frames_num,
             source.original_fps,
             source.duration or 0,
-            target_fps=target.fps if target.fps > 0 else None,
+            target_fps=target_fps,
             max_frame_count=kwargs.get("max_frames"),
             temporal_patch_size=kwargs.get("temporal_patch_size", 2),
         )
