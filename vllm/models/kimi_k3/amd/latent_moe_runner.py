@@ -15,6 +15,10 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 logger = init_logger(__name__)
 
+# The Gluon up-projection beats hipBLASLt's addmm_ on gfx1250 up to 4096 rows
+# (2048: 20 vs 24 us, 4096: 34 vs 37 us) and loses at 8192 (69 vs 66 us).
+_AITER_UP_PROJ_MAX_ROWS = 4096
+
 
 class ROCmLatentMoERunner(MoERunner):
     """MoE runner for latent MoE with a replicated routed up-projection.
@@ -111,7 +115,11 @@ class ROCmLatentMoERunner(MoERunner):
             and shared_output.stride(-1) == 1
         ):
             rocm_aiter_ops.gemm_a16w16_accumulate(
-                latent, up_proj_shard, shared_output, shard_start
+                latent,
+                up_proj_shard,
+                shared_output,
+                shard_start,
+                _AITER_UP_PROJ_MAX_ROWS,
             )
         else:
             hidden_shard = shared_output.narrow(-1, shard_start, shard_size)

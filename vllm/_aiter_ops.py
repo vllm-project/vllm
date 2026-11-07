@@ -1760,12 +1760,18 @@ def _rocm_aiter_gemm_a16w16_accumulate_impl(
     weight: torch.Tensor,
     out: torch.Tensor,
     out_col_start: int,
+    max_aiter_rows: int,
 ) -> None:
-    from aiter.ops.triton.gemm.basic.gemm_a16w16 import gemm_a16w16
-
     # The op mutates the whole ``out`` so torch.compile tracks the write; the
     # GEMM adds into its column slice in place.
     y = out.narrow(-1, out_col_start, weight.shape[0])
+    # The row count is only concrete here: above max_aiter_rows the caller's
+    # measurements favour torch's addmm_ (hipBLASLt).
+    if x.shape[0] > max_aiter_rows:
+        y.addmm_(x, weight.t())
+        return
+    from aiter.ops.triton.gemm.basic.gemm_a16w16 import gemm_a16w16
+
     gemm_a16w16(x, weight, dtype=out.dtype, y=y, accumulate=True)
 
 
@@ -1774,6 +1780,7 @@ def _rocm_aiter_gemm_a16w16_accumulate_fake(
     weight: torch.Tensor,
     out: torch.Tensor,
     out_col_start: int,
+    max_aiter_rows: int,
 ) -> None:
     return None
 
@@ -4448,10 +4455,14 @@ class rocm_aiter_ops:
         weight: torch.Tensor,
         out: torch.Tensor,
         out_col_start: int,
+        max_aiter_rows: int,
     ) -> None:
-        """out[..., out_col_start:out_col_start + N] += x @ weight.T in one
-        aiter gemm_a16w16 launch, for weight [N, K]."""
-        torch.ops.vllm.rocm_aiter_gemm_a16w16_accumulate(x, weight, out, out_col_start)
+        """out[..., out_col_start:out_col_start + N] += x @ weight.T for weight
+        [N, K], in one aiter gemm_a16w16 launch for at most max_aiter_rows rows
+        of x and in torch's addmm_ above that."""
+        torch.ops.vllm.rocm_aiter_gemm_a16w16_accumulate(
+            x, weight, out, out_col_start, max_aiter_rows
+        )
 
     @staticmethod
     def batched_gemm_bf16(
