@@ -11,6 +11,7 @@ from flashinfer.utils import (
     get_device_sm_count,
     get_trtllm_gen_multi_ctas_kv_counter_bytes,
 )
+from packaging.version import Version
 
 from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
@@ -128,13 +129,16 @@ _CAKE_BACKEND_NAMES = (
     "query_workspace_bytes",
     "workspace_bytes",
 )
-# The two-CTA route of the first Cake build (more than 48 (token, head) rows
-# per request) zeroed V blocks whose E4M3 scale is below 2^-3.
-_CAKE_UNFIXED_WIDE_PROGRAM = "cake_mla_nvfp4_paged_decode_e7cb458f5e586352cfcb"
 
 
 def _cake_nvfp4_mla_decode_unsupported_reason() -> str | None:
     """Why FlashInfer's Cake NVFP4 MLA decode cannot run here."""
+    import flashinfer
+
+    # Before 0.7.4, Cake's two-CTA route (more than 48 (token, head) query rows
+    # per request) zeroes V blocks whose E4M3 scale is below 2^-3.
+    if Version(flashinfer.__version__) < Version("0.7.4rc1"):
+        return "kv_cache_dtype='nvfp4' needs FlashInfer 0.7.4 or newer"
     try:
         from flashinfer.experimental.cake_mla_nvfp4_paged_decode import (
             cake_backend,
@@ -152,17 +156,10 @@ def _cake_nvfp4_mla_decode_unsupported_reason() -> str | None:
         toolkit_ok = all(
             cake_jit.toolkit_supports(p) for p in cake_jit.KERNELS.values()
         )
-        wide_route_fixed = cake_jit.KERNELS["main_wide"] != _CAKE_UNFIXED_WIDE_PROGRAM
-    except (ImportError, AttributeError, KeyError):
+    except (ImportError, AttributeError):
         return (
             "kv_cache_dtype='nvfp4' needs a FlashInfer build with the Cake "
             "NVFP4 MLA decode"
-        )
-    if not wide_route_fixed:
-        return (
-            "kv_cache_dtype='nvfp4' needs a newer FlashInfer: this build's Cake "
-            "NVFP4 MLA decode is wrong for more than 48 (token, head) query "
-            "rows per request"
         )
     if not toolkit_ok:
         return (
