@@ -20,9 +20,8 @@ def _get_torch_root():
 def _get_torch_version_attr(attr):
     """Read an attribute of torch.version without importing torch.
 
-    PyTorch version must not be determined by importing directly
-    because it will trigger the CUDA initialization, losing the
-    chance to set the LD_LIBRARY_PATH beforehand.
+    Determine the compatibility path before importing PyTorch and pass it
+    through LD_LIBRARY_PATH to newly executed workers.
     """
     try:
         torch_root = _get_torch_root()
@@ -51,9 +50,9 @@ def _get_torch_cuda_version():
 def _maybe_set_cuda_compatibility_path():
     """Set LD_LIBRARY_PATH for CUDA forward compatibility if enabled.
 
-    Must run before 'import torch' since torch loads CUDA shared libraries
-    at import time and the dynamic linker only consults LD_LIBRARY_PATH when
-    a library is first loaded.
+    Updating LD_LIBRARY_PATH only affects newly executed processes.
+    CUDA compatibility therefore requires spawned workers, or setting the
+    path before starting Python for in-process inference.
 
     CUDA forward compatibility is only supported on select professional and
     datacenter NVIDIA GPUs. Consumer GPUs (GeForce, RTX) do not support it

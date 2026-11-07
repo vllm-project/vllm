@@ -137,6 +137,9 @@ def _maybe_force_spawn():
         os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
         reasons.append("In a Ray actor and can only be spawned")
 
+    if envs.VLLM_ENABLE_CUDA_COMPATIBILITY and current_platform.is_cuda():
+        reasons.append("CUDA forward compatibility requires reloading LD_LIBRARY_PATH")
+
     # NUMA binding uses executable hijacking, which requires spawn.
     if any(
         arg.split("=", 1)[0].replace("_", "-")
