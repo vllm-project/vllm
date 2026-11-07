@@ -1331,6 +1331,54 @@ def test_block_verification_accepts_at_least_as_many(num_speculative_steps: int)
     )
 
 
+@pytest.mark.parametrize("use_block_verification", [False, True])
+@pytest.mark.parametrize("draft_gap", [10.0, 14.0, 25.0])
+def test_resample_stays_in_target_support(
+    draft_gap: float, use_block_verification: bool
+):
+    """A resample must come from the target's support.
+
+    Rows 0-1 accept with p_2 == 1. Row 2's target allows only token 3 (grammar
+    plus top-p), and the draft puts all but ~exp(-draft_gap) of its mass there.
+    Draft 2 is token 5: grammar-valid, but outside the target's support, so it
+    is rejected and the residual max(p(x) - q(x), 0) is ~exp(-draft_gap) on
+    token 3 only. fp32 must not round that residual to zero everywhere.
+    """
+    device = "cuda"
+    K = 3
+    num_rows = K + 1
+    vocab_size = 64
+    allowed_token, rejected_draft = 3, 5
+
+    target_logits = torch.full((num_rows, vocab_size), float("-inf"), device=device)
+    target_logits[0, 1] = 0.0
+    target_logits[1, 2] = 0.0
+    target_logits[2, allowed_token] = 0.0
+    target_logits[3, 7] = 0.0
+    draft_logits = torch.full((1, K, vocab_size), -20.0, device=device)
+    draft_logits[0, 0, 1] = 25.0
+    draft_logits[0, 1, 2] = 25.0
+    draft_logits[0, 2, allowed_token] = 25.0
+    draft_logits[0, 2, rejected_draft] = 25.0 - draft_gap
+
+    sampled, num_sampled = _rejection_sample(
+        target_logits=target_logits,
+        draft_logits=draft_logits,
+        draft_sampled=torch.tensor([9, 1, 2, rejected_draft], device=device),
+        cu_num_logits=torch.tensor([0, num_rows], dtype=torch.int32, device=device),
+        pos=torch.arange(num_rows, dtype=torch.int32, device=device),
+        idx_mapping=torch.zeros(1, dtype=torch.int32, device=device),
+        expanded_idx_mapping=torch.zeros(num_rows, dtype=torch.int32, device=device),
+        expanded_local_pos=torch.arange(num_rows, dtype=torch.int32, device=device),
+        temperature=torch.ones(1, dtype=torch.float32, device=device),
+        seed=torch.zeros(1, dtype=torch.int64, device=device),
+        num_speculative_steps=K,
+        use_block_verification=use_block_verification,
+    )
+
+    assert sampled[0, : int(num_sampled[0])].tolist() == [1, 2, allowed_token]
+
+
 @pytest.mark.parametrize("has_draft_logits", [True, False])
 @pytest.mark.parametrize("fly_window_size", [0, 2])
 def test_chunked_requests_match_full_batch(
