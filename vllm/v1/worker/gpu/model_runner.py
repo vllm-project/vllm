@@ -165,6 +165,7 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
     maybe_create_adaptive_verification_manager,
     resolve_adaptive_cudagraph_mode,
+    resolve_default_adaptive_verification,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
@@ -445,6 +446,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.num_speculative_steps
             + self.model_state.num_new_sampled_tokens_per_step
         )
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.enable_adaptive_verification is None
+        ):
+            resolve_default_adaptive_verification(
+                self.vllm_config,
+                self.speculator,
+                self.decode_query_len,
+                self.model_state.get_additional_cg_support(),
+            )
 
         draft_logits = (
             self.speculator.draft_logits
@@ -457,7 +468,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     max_num_reqs=self.max_num_reqs,
                     max_num_logits_per_req=self.decode_query_len,
                     device=self.device,
-                    adaptive_verification_enabled=(
+                    adaptive_verification_enabled=bool(
                         self.speculative_config is not None
                         and self.speculative_config.enable_adaptive_verification
                     ),
@@ -727,10 +738,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
         # The speculator clears the flag at load time when the checkpoint has
         # no confidence head, so it holds the effective value.
+        enable_adaptive_verification = getattr(
+            self.speculator, "enable_adaptive_verification", False
+        )
+        skip_fillers = False
+        if enable_adaptive_verification:
+            assert self.speculative_config is not None
+            speculator_config = self.speculative_config.speculator_config
+            skip_fillers = speculator_config.adaptive_verification_skips_fillers
         self.adaptive_verification = maybe_create_adaptive_verification_manager(
-            enable_adaptive_verification=getattr(
-                self.speculator, "enable_adaptive_verification", False
-            ),
+            enable_adaptive_verification=enable_adaptive_verification,
             attn_groups=self.attn_groups,
             req_states=self.req_states,
             query_start_loc=self.input_buffers.query_start_loc,
@@ -740,6 +757,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             target_layer_names=target_attn_layer_names,
             additional_attn_cg_support=additional_attn_cg_support,
             copy_admitted_drafts_to_host=self.batch_sharder is not None,
+            skip_fillers=skip_fillers,
         )
 
         self.block_tables = BlockTables(
@@ -1536,7 +1554,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 query_start_loc,
                 total_num_draft_tokens,
                 num_admitted_draft_tokens,
-            ) = adaptive_verification.reallocate_drafts(req_ids, idx_mapping)
+            ) = adaptive_verification.reallocate_drafts(
+                req_ids, idx_mapping, cu_num_logits
+            )
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
         if num_draft_tokens_per_req is not None:
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(

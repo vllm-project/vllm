@@ -11,6 +11,7 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.worker.gpu.async_utils import StepTimingSample
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode import adaptive_verification as adaptive_module
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
@@ -18,6 +19,7 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     maybe_create_adaptive_verification_manager,
     resolve_adaptive_cudagraph_mode,
 )
+from vllm.v1.worker.gpu.states import RequestState
 
 
 def make_manager(
@@ -36,7 +38,50 @@ def make_manager(
     manager.cost_tables = (np.zeros(num_reqs + 1), verify_cost_ms)
     manager._max_total_logits = 1 << 30
     manager.num_bonus_tokens = 1
+    manager.skip_fillers = False
     return manager
+
+
+def make_filler_skipping_manager(
+    confidences: np.ndarray,
+    max_total_logits: int = 1 << 30,
+) -> tuple[
+    AdaptiveVerificationManager, InputBatch, dict[str, int], dict[str, list[int]]
+]:
+    """Publish confidence history through the real manager and batch objects."""
+    num_reqs, num_steps = confidences.shape
+    device = torch.device("cuda")
+    buffers = InputBuffers(num_reqs, num_reqs * (num_steps + 1), device)
+    batch = InputBatch.make_dummy(num_reqs, num_reqs, buffers)
+    states = RequestState(
+        max_num_reqs=num_reqs,
+        max_model_len=16,
+        max_num_batched_tokens=num_reqs * (num_steps + 1),
+        num_speculative_steps=num_steps,
+        vocab_size=32,
+        device=device,
+        use_dense_all_token_ids=True,
+    )
+    # RequestState assigns free slots in reverse order.
+    for req_id in reversed(batch.req_ids):
+        states.add_request(req_id, 1, [1], 1, 8)
+    states.apply_staged_writes()
+    manager = AdaptiveVerificationManager(
+        states,
+        buffers.query_start_loc,
+        num_bonus_tokens=1,
+        max_total_logits=max_total_logits,
+        skip_fillers=True,
+    )
+    for req_id in batch.req_ids:
+        manager.add_request(states.req_id_to_index[req_id])
+    confidence_tensor = torch.as_tensor(confidences, device=device)
+    # The second publication makes the first copy available as stale history.
+    manager.record_confidences(confidence_tensor, batch)
+    manager.record_confidences(confidence_tensor, batch)
+    num_tokens = dict.fromkeys(batch.req_ids, 1 + num_steps)
+    drafts = {req_id: [-1] * num_steps for req_id in batch.req_ids}
+    return manager, batch, num_tokens, drafts
 
 
 @pytest.mark.parametrize(
@@ -132,6 +177,7 @@ def test_manager_checks_target_varlen_cudagraph_bound(
             layer_names=[layer_name],
             backend=backend,
             kv_cache_spec=None,
+            metadata_builders=[builder],
             get_metadata_builder=lambda _index: builder,
         )
 
@@ -185,11 +231,69 @@ def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():
     assert num_non_draft_tokens == {"low": 1, "high": 1}
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_skipping_fillers_budgets_the_matched_drafts():
+    # 128 decode requests put the step past the small-step floor. Half of them
+    # matched two drafts last step and the rest only proposed fillers, which the
+    # budget must leave out, with no cost model.
+    confidences = np.zeros((128, 3), dtype=np.float32)
+    confidences[::2, :2] = 0.9
+    manager, batch, num_tokens, drafts = make_filler_skipping_manager(confidences)
+
+    assert manager.get_num_tokens(num_tokens, drafts) == 128 + 128
+    assert manager._batch_budget is not None
+    _, _, draft_budget = manager._batch_budget
+    assert draft_budget == 128
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_skipping_fillers_counts_new_requests_as_matched():
+    # A new request has no previous drafts, so its reset confidences (1.0)
+    # count every slot it is scheduled with, as fixed-width verification would.
+    confidences = np.zeros((128, 3), dtype=np.float32)
+    manager, batch, num_tokens, drafts = make_filler_skipping_manager(confidences)
+    req_id = batch.req_ids[0]
+    manager.add_request(manager.req_states.req_id_to_index[req_id])
+    drafts[req_id] = [-1] * 2
+    num_tokens[req_id] = 3
+
+    manager.get_num_tokens(num_tokens, drafts)
+    assert manager._batch_budget is not None
+    _, _, draft_budget = manager._batch_budget
+    assert draft_budget == 2
+
+
+@pytest.mark.parametrize(("num_reqs", "expected_tokens"), [(4, 16), (40, 128)])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_skipping_fillers_keeps_small_steps_whole(num_reqs, expected_tokens):
+    # The budget counts last step's matches, so a request that only now
+    # matches would lose its drafts. Small steps are memory-bound and filler
+    # slots are free there, so steps are never trimmed below 128 tokens.
+    manager, batch, num_tokens, drafts = make_filler_skipping_manager(
+        np.zeros((num_reqs, 3), dtype=np.float32)
+    )
+
+    assert manager.get_num_tokens(num_tokens, drafts) == expected_tokens
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_skipping_fillers_caps_at_one_rejection_sampler_chunk():
+    manager, batch, num_tokens, drafts = make_filler_skipping_manager(
+        np.full((64, 3), 0.9, dtype=np.float32), max_total_logits=64 + 10
+    )
+
+    manager.get_num_tokens(num_tokens, drafts)
+    assert manager._batch_budget is not None
+    _, _, draft_budget = manager._batch_budget
+    assert draft_budget == 10
+
+
 def test_profiled_batches_seed_cost_curves_via_consumer(monkeypatch):
     manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
     manager.req_states = SimpleNamespace(max_num_batched_tokens=4096, max_num_reqs=64)
     manager.num_speculative_steps = 7
     manager.num_bonus_tokens = 1
+    manager.skip_fillers = False
     curves: dict[str, list[tuple[int, float]]] = {}
     monkeypatch.setattr(
         manager,
@@ -222,6 +326,16 @@ def test_profiled_batches_seed_cost_curves_via_consumer(monkeypatch):
     # count they would land inside the captured range and, once made monotonic,
     # smear that eager cost across every larger request count.
     assert curves["draft"] == [(1, 1.0), (128, 1.0)]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_skipping_fillers_profiles_nothing():
+    # The budget needs no cost model, so startup runs no profiling batches.
+    manager, _, _, _ = make_filler_skipping_manager(np.zeros((1, 3), dtype=np.float32))
+
+    assert list(manager.batches_to_profile([8, 1024])) == []
+    manager.set_initial_cost_curves([])
+    assert manager.cost_tables is None
 
 
 def test_compact_batch_preserves_totals_and_bounds():
@@ -310,6 +424,38 @@ def test_zero_budget_rebuilds_cpu_cu_num_logits():
     assert np.array_equal(compacted, np.array([1, 1, 40], dtype=np.int32))
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("trimmed", [False, True])
+def test_reallocate_drafts_rebuilds_boundaries_only_when_trimmed(trimmed):
+    """Preserve scheduled boundaries unless the admitted budget trims drafts."""
+    confidences = np.full((128, 3), 0.9, dtype=np.float32)
+    if trimmed:
+        confidences.fill(0)
+        confidences[0, :2] = 0.9
+        confidences[2, :1] = 0.9
+    manager, batch, num_tokens, drafts = make_filler_skipping_manager(confidences)
+    total = manager.get_num_tokens(num_tokens, drafts)
+    scheduled = torch.arange(129, dtype=torch.int32, device="cuda") * 4
+    manager.query_start_loc.copy_(scheduled)
+
+    cu_num_logits, boundaries, budget, admitted = manager.reallocate_drafts(
+        batch.req_ids, batch.idx_mapping, scheduled
+    )
+
+    assert total == 128 + budget
+    assert admitted is None
+    if trimmed:
+        expected = [0, 3, 4, 6, *range(7, 132)]
+        assert budget == 3
+        assert cu_num_logits.tolist() == expected
+        assert boundaries.tolist() == expected
+    else:
+        assert budget == 384
+        assert cu_num_logits is scheduled
+        assert boundaries is manager.query_start_loc
+        assert boundaries.tolist() == scheduled.tolist()
+
+
 def global_topk_budget(
     confidence_probs: torch.Tensor,
     idx_mapping: torch.Tensor,
@@ -363,3 +509,21 @@ def test_draft_budget_kernel_admits_exact_budget_on_ties():
     survival = torch.empty(num_reqs * num_steps, dtype=torch.int32, device="cuda")
     assign_draft_token_budget(confidence_probs, idx_mapping, capacities, 800, survival)
     assert capacities.tolist() == [3] * 266 + [2] + [0] * 33
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_draft_budget_kernel_admits_matched_drafts_before_fillers():
+    """N-gram confidences (a constant for matched slots, 0 for fillers): a
+    budget of the matched count admits exactly each request's matched prefix,
+    and a smaller one drops the deepest matched drafts first."""
+    num_matched = torch.tensor([3, 0, 1, 2], device="cuda")
+    steps = torch.arange(3, device="cuda")
+    confidence_probs = (steps < num_matched[:, None]).float() * 0.9
+    idx_mapping = torch.arange(4, device="cuda")
+    survival = torch.empty(4 * 3, dtype=torch.int32, device="cuda")
+    for draft_budget, expected in ((6, [3, 0, 1, 2]), (4, [2, 0, 1, 1])):
+        capacities = torch.full((4,), 3, dtype=torch.int32, device="cuda")
+        assign_draft_token_budget(
+            confidence_probs, idx_mapping, capacities, draft_budget, survival
+        )
+        assert capacities.tolist() == expected

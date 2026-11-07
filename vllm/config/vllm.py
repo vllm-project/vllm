@@ -3528,9 +3528,62 @@ class VllmConfig:
 
         return unsupported
 
+    def _auto_adaptive_verification_blocker(self) -> str | None:
+        """Why default-on adaptive verification (n-gram) is off, or None."""
+        from vllm.platforms import current_platform
+
+        spec_config = self.speculative_config
+        assert spec_config is not None
+        parallel_config = self.parallel_config
+        blockers = (
+            (not self.use_v2_model_runner, "the V1 model runner"),
+            # ROCm backends report support too, but the default has only been
+            # run on CUDA.
+            (not current_platform.is_cuda(), "a non-CUDA platform"),
+            # A request's verified drafts would depend on the rest of its batch.
+            (envs.VLLM_BATCH_INVARIANT, "VLLM_BATCH_INVARIANT"),
+            # Trimming would cap the acceptance length it emulates.
+            (
+                spec_config.rejection_sample_method == "synthetic",
+                "synthetic rejection sampling",
+            ),
+            (self.lora_config is not None, "LoRA"),
+            (
+                not self.compilation_config.cudagraph_mode.has_full_cudagraphs(),
+                "no full CUDA graphs",
+            ),
+            (parallel_config.pipeline_parallel_size > 1, "pipeline parallelism"),
+            (
+                parallel_config.decode_context_parallel_size > 1
+                or parallel_config.prefill_context_parallel_size > 1,
+                "context parallelism",
+            ),
+            (parallel_config.use_ubatching, "DBO"),
+            (
+                bool(parallel_config.enable_batch_sharded_sampling),
+                "batch-sharded sampling",
+            ),
+            (
+                self.model_config is not None
+                and self.model_config.return_sampling_mask,
+                "sampling distribution replay",
+            ),
+            (self.aux_output_config.enabled, "auxiliary outputs"),
+        )
+        return next((reason for blocked, reason in blockers if blocked), None)
+
     def _validate_adaptive_verification(self) -> None:
         spec_config = self.speculative_config
-        if not spec_config or not spec_config.enable_adaptive_verification:
+        if not spec_config:
+            return
+        if spec_config.enable_adaptive_verification is None:
+            # Default-on (n-gram): the worker turns it on if the target's
+            # attention backends allow it, unless the config rules it out.
+            if (blocker := self._auto_adaptive_verification_blocker()) is not None:
+                logger.debug("Adaptive verification is off with %s.", blocker)
+                spec_config.enable_adaptive_verification = False
+            return
+        if not spec_config.enable_adaptive_verification:
             return
 
         if self.lora_config is not None:

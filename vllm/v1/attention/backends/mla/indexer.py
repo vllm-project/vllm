@@ -962,7 +962,7 @@ def _use_flattening(vllm_config: VllmConfig) -> bool:
     next_n = 1 + vllm_config.num_speculative_tokens
     return not _supports_native_decode(next_n) or (
         speculative_config is not None
-        and speculative_config.enable_adaptive_verification
+        and bool(speculative_config.enable_adaptive_verification)
         and (
             _supports_flattened_device_query_lens()
             or _rocm_supports_flattened_device_query_lens(vllm_config)

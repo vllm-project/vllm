@@ -379,6 +379,7 @@ def get_varlen_cudagraph_unsupported_backend(
 
     ALWAYS builders replay any batch; the others need a bound of at least
     max_query_len. See AttentionMetadataBuilder.get_varlen_cudagraph_max_query_len().
+    Groups without metadata builders yet are checked through the builder class.
     """
     for groups in attn_groups:
         for group in groups:
@@ -386,7 +387,11 @@ def get_varlen_cudagraph_unsupported_backend(
                 group.layer_names
             ):
                 continue
-            builder = group.get_metadata_builder(0)
+            builder = (
+                group.get_metadata_builder(0)
+                if group.metadata_builders
+                else group.backend.get_builder_cls()
+            )
             spec = group.kv_cache_spec
             support = builder.get_cudagraph_support(vllm_config, spec)
             if support == AttentionCGSupport.ALWAYS:

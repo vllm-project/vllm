@@ -1,18 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Adaptive verification for DSpark speculative decoding."""
+"""Adaptive verification for speculative decoding."""
 
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
 
 import vllm.envs as envs
+from vllm.config import get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -20,18 +22,25 @@ from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
 from vllm.v1.worker.gpu.attn_utils import (
+    get_kv_cache_spec,
     get_query_lens_mismatch_unsupported_backend,
     get_varlen_cudagraph_unsupported_backend,
 )
+from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
 _PROFILE_REPLAYS = 5
+# Budgets that skip fillers count the previous step's matched drafts, so they
+# miss new matches for a step. Dense forwards stay memory-bound up to a few
+# hundred tokens (about 260 for an 8B model on H100), where filler slots cost
+# almost nothing, so steps are never trimmed below this many tokens.
+_MIN_TRIMMED_STEP_TOKENS = 128
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.worker.gpu.input_batch import InputBatch
+    from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
     from vllm.v1.worker.gpu.states import RequestState
-    from vllm.v1.worker.utils import AttentionGroup
 
 
 def resolve_adaptive_cudagraph_mode(
@@ -232,12 +241,16 @@ class AdaptiveVerificationManager:
         num_bonus_tokens: int,
         max_total_logits: int,
         copy_admitted_drafts_to_host: bool = False,
+        skip_fillers: bool = False,
     ):
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
         device = req_states.device
         self._copy_stream = torch.cuda.Stream(device)
 
+        # Budget from the previous matched count, without a cost model.
+        # The small-step floor can retain fillers; current matches rank first.
+        self.skip_fillers = skip_fillers
         self.num_bonus_tokens = num_bonus_tokens
         # Rejection sampling verifies logits in one contiguous chunk; the
         # chunked path indexes by scheduled (untrimmed) offsets and cannot
@@ -306,7 +319,10 @@ class AdaptiveVerificationManager:
         """Dummy-run kwargs whose step timings seed the cost tables.
 
         Run these inside StepTimingCollector.collect(), then hand the block's
-        timings to set_initial_cost_curves."""
+        timings to set_initial_cost_curves. There are none when fillers are
+        skipped, which needs no cost model."""
+        if self.skip_fillers:
+            return
         max_num_tokens = self.req_states.max_num_batched_tokens
         size = self._cudagraph_limit = capture_sizes[-1] if capture_sizes else 0
         # Also profile beyond the capture limit: real steps run there
@@ -327,6 +343,9 @@ class AdaptiveVerificationManager:
                 }
 
     def set_initial_cost_curves(self, samples: list[StepTimingSample]) -> None:
+        if self.skip_fillers:
+            return
+
         def median_curve(
             points: Iterable[tuple[int, float]],
         ) -> list[tuple[int, float]]:
@@ -406,7 +425,6 @@ class AdaptiveVerificationManager:
         Stashes the chosen budget in ``_batch_budget`` for the compaction and
         reallocation that follow in the same step.
         """
-        assert self.cost_tables is not None
         req_ids = list(num_tokens_per_req)
         num_reqs = len(req_ids)
         scheduled_tokens = np.fromiter(
@@ -427,29 +445,38 @@ class AdaptiveVerificationManager:
         survival_probability = np.cumprod(stale_confidences.astype(np.float64), axis=1)
         steps = np.arange(self.num_speculative_steps)
         valid = steps[None, :] < scheduled_drafts[:, None]
-        scores = np.sort(survival_probability[valid])[::-1]
         num_non_draft_tokens_total = int(num_non_draft_tokens.sum())
         max_draft_budget = min(
             int(scheduled_drafts.sum()),
             max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens),
         )
-        scores = scores[:max_draft_budget]
-        draft_cost_ms, verify_cost_ms = self.cost_tables
-        num_sampling_requests = np.count_nonzero(
-            self.req_states.num_computed_tokens_np[slots] + num_non_draft_tokens
-            >= self.req_states.prefill_len.np[slots]
-        )
-        num_tokens_to_estimated_accepted_tokens = np.concatenate(
-            ([num_sampling_requests], num_sampling_requests + np.cumsum(scores))
-        )
-        costs = (
-            draft_cost_ms[len(req_ids)]
-            + verify_cost_ms[
-                num_non_draft_tokens_total : num_non_draft_tokens_total
-                + max_draft_budget
-                + 1
-            ]
-        )
+        if self.skip_fillers:
+            num_matched = int(np.count_nonzero(survival_probability[valid]))
+            min_budget = _MIN_TRIMMED_STEP_TOKENS - num_non_draft_tokens_total
+            draft_budget = min(max_draft_budget, max(num_matched, min_budget))
+        else:
+            assert self.cost_tables is not None
+            scores = np.sort(survival_probability[valid])[::-1]
+            scores = scores[:max_draft_budget]
+            draft_cost_ms, verify_cost_ms = self.cost_tables
+            num_sampling_requests = np.count_nonzero(
+                self.req_states.num_computed_tokens_np[slots] + num_non_draft_tokens
+                >= self.req_states.prefill_len.np[slots]
+            )
+            num_tokens_to_estimated_accepted_tokens = np.concatenate(
+                ([num_sampling_requests], num_sampling_requests + np.cumsum(scores))
+            )
+            costs = (
+                draft_cost_ms[len(req_ids)]
+                + verify_cost_ms[
+                    num_non_draft_tokens_total : num_non_draft_tokens_total
+                    + max_draft_budget
+                    + 1
+                ]
+            )
+            draft_budget = int(
+                np.argmax(num_tokens_to_estimated_accepted_tokens / costs)
+            )
         num_drafts_per_req = {
             req_id: int(num_drafts)
             for req_id, num_drafts in zip(req_ids, scheduled_drafts, strict=True)
@@ -458,7 +485,6 @@ class AdaptiveVerificationManager:
             req_id: int(num_tokens)
             for req_id, num_tokens in zip(req_ids, num_non_draft_tokens, strict=True)
         }
-        draft_budget = int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
         self._batch_budget = (
             num_drafts_per_req,
             num_non_draft_tokens_per_req,
@@ -507,14 +533,24 @@ class AdaptiveVerificationManager:
         return num_non_draft_tokens + draft_lens_cpu, cu_num_logits_np
 
     def reallocate_drafts(
-        self, req_ids: list[str], idx_mapping: torch.Tensor
+        self,
+        req_ids: list[str],
+        idx_mapping: torch.Tensor,
+        cu_num_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, int, AdmittedDraftCounts | None]:
-        """The admitted draft counts are None unless copy_admitted_drafts_to_host
+        """Rebuild cu_num_logits and query_start_loc on device for the admitted
+        drafts. `cu_num_logits` holds the scheduled layout, already on device
+        like query_start_loc; if every scheduled draft is admitted, both are
+        exact and returned as they are.
+
+        The admitted draft counts are None unless copy_admitted_drafts_to_host
         is set and the budget binds; otherwise the host counts are already exact.
         """
         batch_budget, self._batch_budget = self._batch_budget, None
         assert batch_budget is not None
         num_drafts_per_req, num_non_draft_tokens_per_req, draft_budget = batch_budget
+        if draft_budget == sum(num_drafts_per_req.values()):
+            return cu_num_logits, self.query_start_loc, draft_budget, None
         num_reqs = idx_mapping.shape[0]
         scheduled_drafts = np.fromiter(
             (num_drafts_per_req[req_id] for req_id in req_ids),
@@ -536,14 +572,13 @@ class AdaptiveVerificationManager:
             capacities.zero_()
         else:
             async_tensor_h2d(scheduled_drafts, out=capacities)
-            if draft_budget < int(scheduled_drafts.sum()):
-                assign_draft_token_budget(
-                    self._confidence_probs,
-                    idx_mapping,
-                    capacities,
-                    draft_budget,
-                    self._draft_survival,
-                )
+            assign_draft_token_budget(
+                self._confidence_probs,
+                idx_mapping,
+                capacities,
+                draft_budget,
+                self._draft_survival,
+            )
 
         num_non_draft_tokens_gpu = self._num_non_draft_tokens[:num_reqs]
         async_tensor_h2d(num_non_draft_tokens, out=num_non_draft_tokens_gpu)
@@ -562,9 +597,7 @@ class AdaptiveVerificationManager:
         self.query_start_loc[num_reqs + 1 :].fill_(num_tokens)
 
         admitted_drafts = None
-        if self._copy_admitted_drafts_to_host and (
-            0 < draft_budget < int(scheduled_drafts.sum())
-        ):
+        if self._copy_admitted_drafts_to_host and draft_budget > 0:
             admitted_cpu = self._admitted_drafts_cpu[:num_reqs]
             current_stream = torch.cuda.current_stream(self.req_states.device)
             self._copy_stream.wait_stream(current_stream)
@@ -582,37 +615,27 @@ class AdaptiveVerificationManager:
         )
 
 
-def maybe_create_adaptive_verification_manager(
-    *,
-    enable_adaptive_verification: bool,
-    attn_groups: list[list["AttentionGroup"]],
-    req_states: "RequestState",
-    query_start_loc: torch.Tensor,
-    num_bonus_tokens: int,
-    max_total_logits: int,
+def get_adaptive_verification_unsupported_reason(
+    attn_groups: list[list[AttentionGroup]],
     vllm_config: "VllmConfig",
+    max_query_len: int,
     target_layer_names: set[str] | None = None,
     additional_attn_cg_support: tuple[AttentionCGSupport, str | None] | None = None,
-    copy_admitted_drafts_to_host: bool = False,
-) -> AdaptiveVerificationManager | None:
-    if not enable_adaptive_verification:
-        return None
-
+) -> str | None:
+    """Why the target's attention backends can't verify device-trimmed batches
+    of up to max_query_len tokens per request, or None if they can. Only class
+    level support is read, so the groups need no metadata builders."""
     # The selector rejects unsupported backends, but models that
     # hard-wire theirs (e.g. DeepSeek-V4) never go through it.
     backend = get_query_lens_mismatch_unsupported_backend(
         attn_groups, checked_layer_names=target_layer_names
     )
     if backend is not None:
-        raise ValueError(
+        return (
             "Adaptive verification trims verification requests on device, which"
-            f" the {backend} attention backend does not support. Pass "
-            "enable_adaptive_verification=false in the speculative config, or "
-            "use a backend that does."
+            f" the {backend} attention backend does not support."
         )
 
-    # The runner's decode_query_len, the width varlen decode graphs capture.
-    max_query_len = req_states.num_speculative_steps + num_bonus_tokens
     unsupported: tuple[str | None, int | None] | None = (
         get_varlen_cudagraph_unsupported_backend(
             attn_groups,
@@ -630,10 +653,101 @@ def maybe_create_adaptive_verification_manager(
     if unsupported is not None:
         backend, bound = unsupported
         allowed = "none" if bound is None else f"at most {bound}"
-        raise ValueError(
+        return (
             "Adaptive verification replays decode cudagraphs whose per-request "
             f"query lengths vary up to {max_query_len}, but {backend} allows "
-            f"{allowed}. Pass enable_adaptive_verification=false in the "
+            f"{allowed}."
+        )
+    return None
+
+
+def resolve_default_adaptive_verification(
+    vllm_config: "VllmConfig",
+    speculator: "BaseSpeculator | None",
+    max_query_len: int,
+    additional_attn_cg_support: tuple[AttentionCGSupport, str | None],
+) -> None:
+    """Settle default-on adaptive verification (None) from the target's
+    attention backends and the speculator, before the samplers and metadata
+    builders read it."""
+    spec_config = vllm_config.speculative_config
+    assert spec_config is not None and spec_config.enable_adaptive_verification is None
+    kv_cache_specs = get_kv_cache_spec(vllm_config)
+    layer_type = cast(type[Any], AttentionLayerBase)
+    layers = get_layers_from_vllm_config(vllm_config, layer_type, list(kv_cache_specs))
+    groups = [
+        AttentionGroup(layers[name].get_attn_backend(), [name], kv_spec, 0)
+        for name, kv_spec in kv_cache_specs.items()
+    ]
+    ssm_backend = next((g.backend for g in groups if g.backend.is_ssm()), None)
+    reason: str | None
+    if ssm_backend is not None:
+        # Their varlen decode support is new and its kernels differ by GPU
+        # (FlashInfer GDN prefill on Hopper), so they opt in for now.
+        reason = (
+            f"it is opt-in for models with {ssm_backend.get_name()} layers. Pass "
+            "enable_adaptive_verification=true in the speculative config to try it."
+        )
+    else:
+        reason = get_adaptive_verification_unsupported_reason(
+            [groups],
+            vllm_config,
+            max_query_len,
+            additional_attn_cg_support=additional_attn_cg_support,
+        )
+        if reason is not None:
+            reason += " TRITON_ATTN supports it for standard (non-MLA) attention."
+    if reason is None:
+        spec_config.enable_adaptive_verification = True
+        # The runner builds the manager from the speculator's flag and feeds it
+        # the speculator's confidences, which custom speculators may lack.
+        if not (
+            getattr(speculator, "enable_adaptive_verification", False)
+            and hasattr(speculator, "draft_token_confidence_probs")
+        ):
+            reason = f"{type(speculator).__name__} does not support it."
+    spec_config.enable_adaptive_verification = reason is None
+    if reason is None:
+        logger.info_once(
+            "Adaptive verification is on: only matched drafts are verified. Pass "
+            "enable_adaptive_verification=false in the speculative config to "
+            "verify every draft slot."
+        )
+    else:
+        logger.info_once(
+            "Adaptive verification is off, so every draft slot is verified: %s",
+            reason,
+        )
+
+
+def maybe_create_adaptive_verification_manager(
+    *,
+    enable_adaptive_verification: bool,
+    attn_groups: list[list[AttentionGroup]],
+    req_states: "RequestState",
+    query_start_loc: torch.Tensor,
+    num_bonus_tokens: int,
+    max_total_logits: int,
+    vllm_config: "VllmConfig",
+    target_layer_names: set[str] | None = None,
+    additional_attn_cg_support: tuple[AttentionCGSupport, str | None] | None = None,
+    copy_admitted_drafts_to_host: bool = False,
+    skip_fillers: bool = False,
+) -> AdaptiveVerificationManager | None:
+    if not enable_adaptive_verification:
+        return None
+
+    reason = get_adaptive_verification_unsupported_reason(
+        attn_groups,
+        vllm_config,
+        # The runner's decode_query_len, the width varlen decode graphs capture.
+        req_states.num_speculative_steps + num_bonus_tokens,
+        target_layer_names=target_layer_names,
+        additional_attn_cg_support=additional_attn_cg_support,
+    )
+    if reason is not None:
+        raise ValueError(
+            f"{reason} Pass enable_adaptive_verification=false in the "
             "speculative config, or use a backend that does."
         )
 
@@ -643,4 +757,5 @@ def maybe_create_adaptive_verification_manager(
         num_bonus_tokens,
         max_total_logits=max_total_logits,
         copy_admitted_drafts_to_host=copy_admitted_drafts_to_host,
+        skip_fillers=skip_fillers,
     )

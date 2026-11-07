@@ -12,15 +12,17 @@ The practical effect is that one configuration holds up across the whole load ra
 
 ## Support
 
-Adaptive verification is supported for model-based drafters (EAGLE, MTP, DFlash, DSpark, etc.) and for [suffix decoding](suffix.md#model-runner-v2) on Model Runner V2. The per-position acceptance estimates come from one of three sources:
+Adaptive verification is supported for model-based drafters (EAGLE, MTP, DFlash, DSpark, etc.), for [suffix decoding](suffix.md#model-runner-v2) and for [n-gram](n_gram.md#verifying-only-matched-drafts) on Model Runner V2. The per-position acceptance estimates come from one of three sources:
 
 - **Confidence head**: DSpark checkpoints that ship a trained confidence head use its predictions directly.
 - **Online acceptance estimator**: every other model-based drafter predicts acceptance from its draft logits with a small logistic model, recalibrated during serving against the target's verification results.
 - **Suffix acceptance statistics**: suffix decoding has no draft logits, so it estimates acceptance from the observed acceptance rate of past drafts with the same source (own history or corpus), match length and position.
 
+N-gram drafts have no acceptance estimate. Adaptive verification only skips their filler slots, verifying as many drafts as matched on the previous step, without the cost model.
+
 ## Usage
 
-It is off by default. Enable it in the speculative config with `enable_adaptive_verification`. For example, with DSpark:
+It is off by default, except for n-gram on Model Runner V2 where the [n-gram page](n_gram.md#verifying-only-matched-drafts) lists when it turns on. Enable it in the speculative config with `enable_adaptive_verification`. For example, with DSpark:
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-V4-Flash-DSpark \

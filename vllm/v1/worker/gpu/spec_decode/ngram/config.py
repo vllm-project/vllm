@@ -14,6 +14,8 @@ class NgramSpeculatorConfig(SpeculatorConfig):
         "vllm.v1.worker.gpu.spec_decode.ngram.speculator.NgramGPUSpeculator"
     )
     prefer_dense_token_history = True
+    adaptive_verification_uses_draft_logits = False
+    adaptive_verification_skips_fillers = True
 
     @classmethod
     def configure(cls, spec: "SpeculativeConfig") -> None:

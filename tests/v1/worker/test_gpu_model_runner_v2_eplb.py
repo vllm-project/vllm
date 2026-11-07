@@ -235,6 +235,7 @@ def test_v2_load_model_registers_dspark_speculator_with_eplb(monkeypatch):
         speculative_config=SimpleNamespace(
             method="dspark",
             draft_model_config=draft_model_config,
+            enable_adaptive_verification=False,
         ),
         speculator=speculator,
     )

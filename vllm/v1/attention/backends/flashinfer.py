@@ -1320,7 +1320,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         speculative_config = vllm_config.speculative_config
         return (
             speculative_config is not None
-            and speculative_config.enable_adaptive_verification
+            and bool(speculative_config.enable_adaptive_verification)
             and decode_kernel == FlashInferDecodeKernel.TRTLLM_GEN
             and not use_dcp
         )

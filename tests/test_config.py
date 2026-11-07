@@ -1507,6 +1507,38 @@ def test_adaptive_verification_requires_full_cudagraphs(graph_mode, should_raise
 
 
 @pytest.mark.parametrize(
+    "blocker", [None, "eager", "rocm", "batch_invariant", "synthetic"]
+)
+def test_ngram_adaptive_verification_defaults_on_where_supported(monkeypatch, blocker):
+    """N-gram leaves the default for the worker to settle from the attention
+    backends, unless the config rules it out; other methods keep it off."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    config.compilation_config.cudagraph_mode = (
+        CUDAGraphMode.NONE if blocker == "eager" else CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    synthetic = (
+        {"rejection_sample_method": "synthetic", "synthetic_acceptance_length": 2.0}
+        if blocker == "synthetic"
+        else {}
+    )
+    config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=3, prompt_lookup_max=3, **synthetic
+    )
+    assert config.speculative_config.enable_adaptive_verification is None
+    # ROCm backends report the support too, but the default is CUDA only.
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: blocker != "rocm")
+    monkeypatch.setenv(
+        "VLLM_BATCH_INVARIANT", "1" if blocker == "batch_invariant" else "0"
+    )
+
+    config._validate_adaptive_verification()
+    expected = None if blocker is None else False
+    assert config.speculative_config.enable_adaptive_verification is expected
+    assert SpeculativeConfig(method="suffix").enable_adaptive_verification is False
+
+
+@pytest.mark.parametrize(
     ("model_config", "expected"),
     [
         (

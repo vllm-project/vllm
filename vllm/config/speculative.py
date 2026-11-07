@@ -647,9 +647,12 @@ class SpeculativeConfig:
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
 
-    enable_adaptive_verification: bool = False
+    enable_adaptive_verification: bool | None = None
     """Whether to adaptively size the draft-verification budget from per-request
-    confidence. Currently only supported for method="dspark"."""
+    confidence. With n-gram speculation it verifies only the matched drafts, not
+    the filler slots. By default (None) it is on for n-gram on Model Runner V2
+    with CUDA where the target's attention backends support it, except for
+    hybrid models with Mamba or GDN layers, and off for other methods."""
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
@@ -1428,6 +1431,12 @@ class SpeculativeConfig:
                     f"{self.custom_method or self.method!r}."
                 )
         config_cls.apply_options(self)
+
+        if (
+            self.enable_adaptive_verification is None
+            and not config_cls.adaptive_verification_skips_fillers
+        ):
+            self.enable_adaptive_verification = False
 
         if (
             config_cls.adaptive_verification_uses_draft_logits

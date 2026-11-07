@@ -227,7 +227,7 @@ class DraftModelSpeculator(BaseSpeculator):
         self.draft_token_confidence_probs = torch.empty_like(
             self.draft_tokens, dtype=torch.float32
         )
-        self.enable_adaptive_verification = (
+        self.enable_adaptive_verification = bool(
             self.speculative_config.enable_adaptive_verification
         )
         self.use_acceptance_estimator = self.enable_adaptive_verification

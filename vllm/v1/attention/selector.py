@@ -143,7 +143,7 @@ def get_attn_backend(
     )
 
     speculative_config = vllm_config.speculative_config
-    use_adaptive_verification = (
+    use_adaptive_verification = bool(
         speculative_config is not None
         and speculative_config.enable_adaptive_verification
     )
