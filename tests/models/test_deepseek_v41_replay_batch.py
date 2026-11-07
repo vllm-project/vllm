@@ -249,6 +249,7 @@ def test_replay_context_restores_tp_routing_rows(state):
     assert context.batch_descriptor.num_tokens == count
     capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
     capturer.dp_rank, capturer.tp_size = 0, 2
+    capturer.restore_rows = capturer._restore_local_topk_ids
     capturer.device_buffer = torch.full((401, 1, 2), -1, device=DEVICE)
     expected = torch.tensor(REPLAY_ROWS, device=DEVICE)[:, None].expand(-1, 2)
     gathered = torch.cat((expected, torch.full((1, 2), -1, device=DEVICE)))
