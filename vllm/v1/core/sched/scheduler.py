@@ -3129,6 +3129,9 @@ class Scheduler(SchedulerInterface):
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
+            if self.ec_connector is not None:
+                self.ec_connector.on_new_request(request)
+
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
     ) -> list[Request]:
