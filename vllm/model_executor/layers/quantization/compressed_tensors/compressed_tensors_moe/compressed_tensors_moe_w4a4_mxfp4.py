@@ -5,6 +5,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
@@ -98,6 +99,14 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        # A TP split inside a w2 scale group would pair codes with other
+        # groups' scales.
+        verify_group_size_divides_partition(
+            intermediate_size_per_partition,
+            self.group_size,
+            getattr(layer, "layer_name", None),
+            " or enabling expert parallelism",
+        )
         layer.num_experts = num_experts
         layer.params_dtype = params_dtype
 

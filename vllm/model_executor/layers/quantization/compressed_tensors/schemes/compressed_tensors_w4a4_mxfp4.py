@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 import torch
 
+from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
@@ -49,12 +50,21 @@ class CompressedTensorsW4A4Mxfp4(CompressedTensorsScheme):
     def create_weights(
         self,
         layer: torch.nn.Module,
+        input_size: int,
         output_partition_sizes: list[int],
         input_size_per_partition: int,
         params_dtype: torch.dtype,
         weight_loader: Callable,
         **kwargs,
     ):
+        if input_size_per_partition != input_size:
+            # A TP split inside a scale group would pair codes with other
+            # groups' scales.
+            verify_group_size_divides_partition(
+                input_size_per_partition,
+                self.group_size,
+                getattr(layer, "prefix", None),
+            )
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
