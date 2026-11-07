@@ -4,7 +4,7 @@ meta:
   provider: "OpenAI"
   description: "OpenAI's gpt-oss family (20B / 120B) with MXFP4 MoE, attention-sinks, built-in tools via Responses API"
   date_added: 2025-08-05
-  date_updated: 2026-09-22
+  date_updated: 2026-10-30
   tasks:
     - text
   related_recipes: []
@@ -20,7 +20,7 @@ meta:
 
 model:
   model_id: "openai/gpt-oss-120b"
-  min_vllm_version: "0.10.1"
+  min_vllm_version: "0.19.0"
   architecture: moe
   parameter_count: "120B"
   active_parameters: "5.1B"
@@ -36,10 +36,21 @@ features:
       - "openai"
       - "--enable-auto-tool-choice"
   spec_decoding:
-    description: "EAGLE3 speculative decoding for accelerated inference"
-    args:
-      - "--speculative-config"
-      - '{"model":"nvidia/gpt-oss-120b-Eagle3-v3","num_speculative_tokens":7,"method":"eagle3","draft_tensor_parallel_size":1}'
+    description: "EAGLE3 speculative decoding using the NVIDIA or RedHatAI draft model"
+    default_mode: nvidia
+    modes:
+      nvidia:
+        label: "EAGLE3 (NVIDIA)"
+        description: "Existing NVIDIA EAGLE3 draft with 7 speculative tokens."
+        args:
+          - "--speculative-config"
+          - '{"model":"nvidia/gpt-oss-120b-Eagle3-v3","num_speculative_tokens":7,"method":"eagle3","draft_tensor_parallel_size":1}'
+      redhat:
+        label: "EAGLE3 (RedHatAI)"
+        description: "RedHatAI EAGLE3 draft with 5 speculative tokens; the checkpoint card requires vLLM 0.19.0 or newer."
+        args:
+          - "--speculative-config"
+          - '{"model":"RedHatAI/gpt-oss-120b-speculator.eagle3","num_speculative_tokens":5,"method":"eagle3"}'
 
 opt_in_features:
   - spec_decoding
@@ -292,6 +303,8 @@ guide: |
   - Function calling currently supports only `tool_choice="auto"`.
 
   ## References
+
+  - [RedHatAI EAGLE3 speculator](https://huggingface.co/RedHatAI/gpt-oss-120b-speculator.eagle3)
 
   - [gpt-oss-120b](https://huggingface.co/openai/gpt-oss-120b)
   - [gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b)
