@@ -833,11 +833,13 @@ def test_per_request_limit_rejects_invalid_config(limit):
 
 
 def test_per_request_limit_defaults_to_one():
+    from vllm.config.utils import hash_config
+
     ordinary = LoRAConfig(max_loras=4)
     routed = LoRAConfig(max_loras=4, max_loras_per_request=2)
     assert ordinary.max_loras_per_request == 1
     assert routed.max_loras_per_request == 2
-    assert ordinary.compute_hash() != routed.compute_hash()
+    assert hash_config(ordinary) != hash_config(routed)
 
 
 def test_per_request_limit_cli_plumbing():
@@ -863,6 +865,7 @@ def test_per_request_limit_cli_plumbing():
 def test_routed_request_engine_transport(weights):
     from vllm import SamplingParams
     from vllm.v1.engine import EngineCoreRequest
+    from vllm.v1.engine.core_client import _with_packed_prompt
     from vllm.v1.request import Request
     from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
@@ -879,7 +882,9 @@ def test_routed_request_engine_transport(weights):
         data_parallel_rank=None,
         lora_routing_request=route,
     )
-    decoded = MsgpackDecoder(EngineCoreRequest).decode(MsgpackEncoder().encode(request))
+    decoded = MsgpackDecoder(EngineCoreRequest).decode(
+        MsgpackEncoder().encode(_with_packed_prompt(request))
+    )
     resolved = decoded.resolved_lora_request
     assert isinstance(resolved, LoRARoutingRequest)
     assert resolved.lora_requests == route.lora_requests
@@ -897,6 +902,7 @@ def test_ordinary_engine_transport_accepts_missing_route_field(adapter):
 
     from vllm import SamplingParams
     from vllm.v1.engine import EngineCoreRequest
+    from vllm.v1.engine.core_client import _with_packed_prompt
     from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
     request = EngineCoreRequest(
@@ -911,7 +917,7 @@ def test_ordinary_engine_transport_accepts_missing_route_field(adapter):
         data_parallel_rank=None,
     )
     encoder = MsgpackEncoder()
-    raw = msgspec.msgpack.decode(encoder.encode(request)[0])
+    raw = msgspec.msgpack.decode(encoder.encode(_with_packed_prompt(request))[0])
     assert raw[-1] is None
     old_payload = msgspec.msgpack.encode(raw[:-1])
     decoded = MsgpackDecoder(EngineCoreRequest).decode([old_payload])
