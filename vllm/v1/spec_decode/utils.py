@@ -18,8 +18,48 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
 )
+from vllm.v1.utils import CpuGpuBuffer
 
 PADDING_SLOT_ID = -1
+
+
+class DoubleBufferedCpuGpuBuffer:
+    """Two CpuGpuBuffers used in turn for a per-step host-to-device upload.
+
+    ``CpuGpuBuffer.copy_to_gpu`` is a non-blocking copy from pinned memory that
+    reads the host buffer only when the stream reaches it. With async
+    scheduling the CPU can prepare step N+1 before step N's copy has run, so
+    refilling a single host buffer can overwrite the values step N is about to
+    upload. ``acquire`` hands out the buffers alternately and waits for the copy
+    last issued from the returned buffer (two steps earlier, normally long
+    done) before it may be refilled. On a CPU device the copy is synchronous,
+    so no events are used (``torch.Event`` needs an accelerator).
+    """
+
+    def __init__(self, *size: int, dtype: torch.dtype, device: torch.device):
+        self._bufs = [CpuGpuBuffer(*size, dtype=dtype, device=device) for _ in range(2)]
+        self._events: list[torch.Event | None] = [None, None]
+        self._use_events = device.type != "cpu"
+        self._idx = 0
+
+    def acquire(self) -> CpuGpuBuffer:
+        """Return the next buffer once its previous upload has completed."""
+        self._idx ^= 1
+        event = self._events[self._idx]
+        if event is not None:
+            event.synchronize()
+        return self._bufs[self._idx]
+
+    def copy_to_gpu(self, n: int | None = None) -> torch.Tensor:
+        """Upload the most recently acquired buffer and record its copy."""
+        out = self._bufs[self._idx].copy_to_gpu(n)
+        if not self._use_events:
+            return out
+        event = self._events[self._idx]
+        if event is None:
+            event = self._events[self._idx] = torch.Event()
+        event.record()
+        return out
 
 
 def next_power_of_2(n: int) -> int:
@@ -281,8 +321,15 @@ def eagle_prepare_next_token_padded_kernel(
     # Check if this request is discarded.
     is_discarded = tl.load(discard_request_mask_ptr + req_idx)
 
+    # The backup token comes from the host-side request state. It can be -1
+    # (an async-scheduling output placeholder) and feeds the draft model's
+    # embedding, so keep it inside the vocab.
+    backup_token = tl.load(backup_next_token_ids_ptr + req_idx)
+    backup_token = tl.where(
+        (backup_token >= 0) & (backup_token < vocab_size), backup_token, 0
+    )
+
     if is_discarded:
-        backup_token = tl.load(backup_next_token_ids_ptr + req_idx)
         valid_count = tl.full((), 0, dtype=tl.uint32)
         tl.store(next_token_ids_ptr + req_idx, backup_token)
         tl.store(valid_sampled_tokens_count_ptr + req_idx, valid_count)
@@ -311,7 +358,6 @@ def eagle_prepare_next_token_padded_kernel(
             tl.store(next_token_ids_ptr + req_idx, last_valid_token)
         else:
             # No valid tokens found, use backup token
-            backup_token = tl.load(backup_next_token_ids_ptr + req_idx)
             tl.store(next_token_ids_ptr + req_idx, backup_token)
 
         tl.store(valid_sampled_tokens_count_ptr + req_idx, valid_count)
