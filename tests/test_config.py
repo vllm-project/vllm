@@ -30,6 +30,7 @@ from vllm.config import (
     CompilationConfig,
     DeviceConfig,
     EngramConfig,
+    EPLBConfig,
     HiSparseConfig,
     KernelConfig,
     KVTransferConfig,
@@ -2527,6 +2528,344 @@ def test_draft_inherits_ep_only_for_moe(
     assert target_parallel_config.tensor_parallel_size == tp_size
 
 
+def _write_deepseek_v2_config(path: Path, num_experts: int) -> ModelConfig:
+    from transformers import DeepseekV2Config
+
+    common = dict(
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        vocab_size=128,
+        max_position_embeddings=2048,
+    )
+    hf_config = DeepseekV2Config(
+        architectures=["DeepseekV2ForCausalLM"],
+        n_routed_experts=num_experts,
+        num_experts_per_tok=2,
+        n_shared_experts=1,
+        **common,
+    )
+    _write_json(path / "config.json", hf_config.to_dict())
+    return ModelConfig(model=str(path), tokenizer_mode="skip", max_model_len=2048)
+
+
+def _eplb_parallel_config(
+    num_redundant_experts: int,
+    draft_num_redundant_experts: int | None = None,
+) -> ParallelConfig:
+    return ParallelConfig(
+        tensor_parallel_size=4,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config=EPLBConfig(
+            num_redundant_experts=num_redundant_experts,
+            draft_num_redundant_experts=draft_num_redundant_experts,
+        ),
+        distributed_executor_backend="mp",
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_ngram_eplb_with_automatic_target_redundant_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Ngram validates EPLB before VllmConfig resolves the target count."""
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    target_model_config = _write_deepseek_v2_config(tmp_path / "target", 6)
+    target_parallel_config = ParallelConfig(
+        tensor_parallel_size=4,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config=EPLBConfig(),
+        distributed_executor_backend="mp",
+    )
+
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+        target_model_config=target_model_config,
+        target_parallel_config=target_parallel_config,
+    )
+    assert target_parallel_config.eplb_config.num_redundant_experts is None
+
+    vllm_config = VllmConfig(
+        model_config=target_model_config,
+        parallel_config=target_parallel_config,
+        device_config=DeviceConfig(device="cpu"),
+        speculative_config=speculative_config,
+    )
+
+    assert vllm_config.parallel_config.eplb_config.num_redundant_experts == 2
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    (
+        "target_experts",
+        "draft_experts",
+        "target_redundant",
+        "draft_redundant",
+        "expected_draft_redundant",
+    ),
+    [
+        pytest.param(6, 6, 6, None, 6, id="inherit-target-count-matching-experts"),
+        pytest.param(4, 6, 0, None, 2, id="auto-count-differs-from-target"),
+        pytest.param(4, 6, 0, 6, 6, id="explicit-draft-count"),
+    ],
+)
+def test_draft_eplb_defaults_from_draft_expert_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_experts: int,
+    draft_experts: int,
+    target_redundant: int,
+    draft_redundant: int | None,
+    expected_draft_redundant: int,
+):
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    target_model_config = _write_deepseek_v2_config(tmp_path / "target", target_experts)
+    draft_model_config = _write_deepseek_v2_config(tmp_path / "draft", draft_experts)
+    target_parallel_config = _eplb_parallel_config(target_redundant, draft_redundant)
+    target_model_config.verify_with_parallel_config(target_parallel_config)
+
+    speculative_config = SpeculativeConfig(
+        method="eagle3",
+        model=draft_model_config.model,
+        num_speculative_tokens=1,
+        target_model_config=target_model_config,
+        target_parallel_config=target_parallel_config,
+    )
+
+    base_vllm_config = VllmConfig(
+        model_config=target_model_config,
+        parallel_config=target_parallel_config,
+        device_config=DeviceConfig(device="cpu"),
+        speculative_config=speculative_config,
+    )
+    draft_vllm_config = speculative_config.apply_draft_overrides(base_vllm_config)
+
+    assert isinstance(draft_vllm_config, VllmConfig)
+    assert (
+        draft_vllm_config.parallel_config.eplb_config.num_redundant_experts
+        == expected_draft_redundant
+    )
+    assert target_parallel_config.eplb_config.num_redundant_experts == target_redundant
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("draft_redundant", [None, 1])
+def test_draft_eplb_defaults_to_minimum_for_unset_or_invalid_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    draft_redundant: int | None,
+):
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    target_model_config = _write_deepseek_v2_config(tmp_path / "target", 4)
+    draft_model_config = _write_deepseek_v2_config(tmp_path / "draft", 6)
+    target_parallel_config = _eplb_parallel_config(0, draft_redundant)
+
+    speculative_config = SpeculativeConfig(
+        method="eagle3",
+        model=draft_model_config.model,
+        num_speculative_tokens=1,
+        target_model_config=target_model_config,
+        target_parallel_config=target_parallel_config,
+    )
+    base_vllm_config = VllmConfig(
+        model_config=target_model_config,
+        parallel_config=target_parallel_config,
+        device_config=DeviceConfig(device="cpu"),
+        speculative_config=speculative_config,
+    )
+    draft_vllm_config = speculative_config.apply_draft_eplb_overrides(base_vllm_config)
+    assert draft_vllm_config.parallel_config.eplb_config.num_redundant_experts == 2
+
+
+@pytest.mark.skip_global_cleanup
+def test_target_eplb_validation_suggests_lowest_valid_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    target_model_config = _write_deepseek_v2_config(tmp_path / "target", 6)
+    target_parallel_config = _eplb_parallel_config(num_redundant_experts=0)
+
+    with pytest.raises(
+        ValueError, match=r"Set eplb_config\.num_redundant_experts to 2"
+    ):
+        target_model_config.verify_with_parallel_config(target_parallel_config)
+
+
+def _write_deepseek_v41_config(path: Path) -> ModelConfig:
+    from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
+
+    hf_config = DeepseekV41Config(
+        architectures=["DeepseekV4ForCausalLM"],
+        text_config={
+            "hidden_size": 768,
+            "num_hidden_layers": 2,
+            "n_routed_experts": 384,
+            "num_experts_per_tok": 6,
+            "dspark_n_routed_experts": 128,
+            "dspark_num_experts_per_tok": 3,
+            "n_shared_experts": 1,
+            "moe_intermediate_size": 128,
+            "num_attention_heads": 12,
+            "head_dim": 64,
+            "vocab_size": 256,
+            "max_position_embeddings": 4096,
+        },
+    )
+    hf_config.save_pretrained(path)
+    return ModelConfig(model=str(path), tokenizer_mode="skip", max_model_len=2048)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("draft_redundant", "expected_draft_redundant"),
+    [(None, 0), (0, 0), (1, 0)],
+    ids=["auto-count", "explicit-draft-count", "invalid-explicit-count"],
+)
+def test_dspark_draft_eplb_uses_draft_expert_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    draft_redundant: int | None,
+    expected_draft_redundant: int,
+):
+    """Validate V4.1 DSpark EPLB against its own routed expert count."""
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    target_model_config = _write_deepseek_v41_config(tmp_path / "target")
+    target_parallel_config = ParallelConfig(
+        tensor_parallel_size=4,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config=EPLBConfig(
+            num_redundant_experts=4,
+            draft_num_redundant_experts=draft_redundant,
+        ),
+        distributed_executor_backend="mp",
+    )
+    target_model_config.verify_with_parallel_config(target_parallel_config)
+
+    speculative_config = SpeculativeConfig(
+        method="dspark",
+        num_speculative_tokens=1,
+        target_model_config=target_model_config,
+        target_parallel_config=target_parallel_config,
+    )
+    base_vllm_config = VllmConfig(
+        model_config=target_model_config,
+        parallel_config=target_parallel_config,
+        device_config=DeviceConfig(device="cpu"),
+        speculative_config=speculative_config,
+    )
+    draft_vllm_config = speculative_config.apply_draft_eplb_overrides(base_vllm_config)
+
+    assert isinstance(draft_vllm_config, VllmConfig)
+    assert (
+        draft_vllm_config.parallel_config.eplb_config.num_redundant_experts
+        == expected_draft_redundant
+    )
+    assert target_parallel_config.eplb_config.num_redundant_experts == 4
+
+
+@pytest.mark.skip_global_cleanup
+def test_dspark_eplb_requires_draft_parallelism(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    target_model_config = _write_deepseek_v41_config(tmp_path / "target")
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "EPLB for a DSpark draft requires its tensor parallel size, "
+            "prefill context parallel size, or data parallel size"
+        ),
+    ):
+        SpeculativeConfig(
+            method="dspark",
+            num_speculative_tokens=1,
+            target_model_config=target_model_config,
+            draft_tensor_parallel_size=1,
+            target_parallel_config=ParallelConfig(
+                tensor_parallel_size=4,
+                enable_expert_parallel=True,
+                enable_eplb=True,
+                eplb_config=EPLBConfig(
+                    num_redundant_experts=4,
+                    draft_num_redundant_experts=0,
+                ),
+                distributed_executor_backend="mp",
+            ),
+        )
+
+
+@pytest.mark.skip_global_cleanup
+def test_dspark_draft_eplb_can_be_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    target_model_config = _write_deepseek_v41_config(tmp_path / "target")
+    target_parallel_config = ParallelConfig(
+        tensor_parallel_size=4,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config=EPLBConfig(num_redundant_experts=4),
+        distributed_executor_backend="mp",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "eplb_config.draft_num_redundant_experts requires "
+            "speculative_config.draft_enable_eplb=true"
+        ),
+    ):
+        SpeculativeConfig(
+            method="dspark",
+            num_speculative_tokens=1,
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(
+                tensor_parallel_size=4,
+                enable_expert_parallel=True,
+                enable_eplb=True,
+                eplb_config=EPLBConfig(
+                    num_redundant_experts=4,
+                    draft_num_redundant_experts=0,
+                ),
+                distributed_executor_backend="mp",
+            ),
+            draft_enable_eplb=False,
+        )
+
+    speculative_config = SpeculativeConfig(
+        method="dspark",
+        num_speculative_tokens=1,
+        target_model_config=target_model_config,
+        target_parallel_config=target_parallel_config,
+        draft_tensor_parallel_size=1,
+        draft_enable_eplb=False,
+    )
+    base_vllm_config = VllmConfig(
+        model_config=target_model_config,
+        parallel_config=target_parallel_config,
+        device_config=DeviceConfig(device="cpu"),
+        speculative_config=speculative_config,
+    )
+
+    draft_vllm_config = speculative_config.apply_draft_eplb_overrides(base_vllm_config)
+
+    assert not draft_vllm_config.parallel_config.enable_eplb
+    assert draft_vllm_config.parallel_config.eplb_config.num_redundant_experts == 0
+    assert target_parallel_config.enable_eplb
+    assert target_parallel_config.eplb_config.num_redundant_experts == 4
+
+
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("target_ep", [False, True], ids=["ep-off", "ep-on"])
 @pytest.mark.parametrize("pass_none", [False, True], ids=["omitted", "explicit-none"])
@@ -4754,6 +5093,7 @@ def test_hc_sp_model_support(enabled, supported, cuda_alike, tp_size, pp_size, e
         registry=ModelRegistry,
         model_arch_config=SimpleNamespace(total_num_attention_heads=8),
         multimodal_config=None,
+        verify_eplb_config=lambda parallel_config: None,
     )
     parallel = ParallelConfig(
         enable_hc_sp=enabled,

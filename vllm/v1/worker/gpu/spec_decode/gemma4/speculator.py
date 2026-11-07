@@ -79,7 +79,7 @@ class Gemma4Speculator(TargetDependentARSpeculator):
         """
         draft_model_config = self.speculative_config.draft_model_config
         draft_vllm_config = replace(
-            self.vllm_config,
+            self.speculative_config.apply_draft_eplb_overrides(self.vllm_config),
             model_config=draft_model_config,
         )
         target_backend = self.vllm_config.attention_config.backend

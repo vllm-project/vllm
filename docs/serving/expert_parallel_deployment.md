@@ -200,6 +200,41 @@ Enable EPLB with the `--enable-eplb` flag.
 
 When enabled, vLLM collects load statistics with every forward pass and periodically rebalances expert distribution.
 
+### Multimodel EPLB with speculative decoding
+
+When speculative decoding uses a draft model that implements `MixtureOfExperts`
+(for example Qwen3-Next MTP, EAGLE, or DeepSeek DSpark), vLLM registers the
+draft and target in the same `EplbState`. Each model keeps its own expert load
+windows, communicators, and rearrangement maps, but shares the same rearrangement
+step counter across EP ranks.
+
+Target and draft models may have different expert topologies. This is required
+for DeepSeek V4.1 DSpark, where draft layers use `dspark_n_routed_experts`
+while the target backbone uses the full routed-expert count. Each model is
+load-balanced independently.
+
+For supported MoE drafts, target EPLB also enables draft EPLB by default. Set
+`draft_enable_eplb` to `false` in the speculative config to disable EPLB for
+the draft while keeping it enabled for the target. In that case,
+`eplb_config.draft_num_redundant_experts` cannot be set.
+
+For every registered model, `(num_routed_experts + num_redundant_experts)` must
+be divisible by the EP world size.
+
+Set `draft_num_redundant_experts` in `--eplb-config` to select the redundant
+expert count for an EPLB-backed MoE draft. When unset, vLLM inherits the
+target's count if the target and draft have the same routed-expert counts and
+that count is valid for the draft. Otherwise, vLLM computes the minimum valid
+count from the draft's routed expert counts and the shared EP size. An explicit
+value is used when it is valid for the draft; otherwise, vLLM computes the
+minimum valid count. This applies to Eagle, Eagle3, MTP, DFlash, and supported
+DSpark drafts. A single redundant-expert count must make every draft layer's
+total expert count divisible by the EP size; configuration fails when the
+draft's layers require different padding counts.
+For DSpark drafts, divisibility is checked against the target EP group. If EPLB
+is enabled and `draft_tensor_parallel_size` is `1`, prefill context parallelism
+or data parallelism must also be greater than `1`.
+
 ### EPLB Parameters
 
 Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. The available keys and their descriptions are:
@@ -209,7 +244,8 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `window_size` | Number of engine steps to track for rebalancing decisions | 1000 |
 | `step_interval` | Frequency of rebalancing (every N engine steps) | 3000 |
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
-| `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
+| `num_redundant_experts` | Additional experts needed to make the total divisible by EP size; computed when unset | `auto` |
+| `draft_num_redundant_experts` | Redundant expert count for the speculative MoE draft; inherits the target's valid count for matching routed expert counts, otherwise computed when unset or invalid | `auto` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`, `"symm_mem"`, or `null` (auto) | `null` |
@@ -230,6 +266,7 @@ vllm serve Qwen/Qwen3-30B-A3B \
             --eplb-config.window_size 1000 \
             --eplb-config.step_interval 3000 \
             --eplb-config.num_redundant_experts 2 \
+            --eplb-config.draft_num_redundant_experts 2 \
             --eplb-config.log_balancedness true
     ```
 

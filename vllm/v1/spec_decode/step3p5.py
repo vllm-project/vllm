@@ -161,6 +161,7 @@ class Step3p5MTPProposer(EagleProposer):
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         base = super()._create_draft_vllm_config()
+        base = self.speculative_config.apply_draft_eplb_overrides(base)
         return replace(
             base,
             model_config=self.draft_model_config,
