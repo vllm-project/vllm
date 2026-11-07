@@ -99,6 +99,7 @@ class Scheduler(SchedulerInterface):
         self.scheduler_config = vllm_config.scheduler_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
+        self.admitted_lora_ids: frozenset[int] | None = None
         self.model_uses_mrope = vllm_config.model_config.uses_mrope
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
@@ -1134,6 +1135,13 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 # Check that adding the request still respects the max_loras constraint.
+                if (
+                    request.lora_request is not None
+                    and self.admitted_lora_ids is not None
+                    and request.lora_request.lora_int_id not in self.admitted_lora_ids
+                ):
+                    skip_request(request_queue)
+                    continue
                 if (
                     self.lora_config
                     and request.lora_request

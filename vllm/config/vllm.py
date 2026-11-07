@@ -1668,6 +1668,24 @@ class VllmConfig:
         if self.lora_config is not None:
             self.lora_config.verify_with_kernel_config(self.kernel_config)
             self.lora_config.verify_with_model_config(self.model_config)
+            if self.lora_config.enable_group_admission:
+                parallel = self.parallel_config
+                if (
+                    not self.use_v2_model_runner
+                    or not self.model_config.is_moe
+                    or parallel.data_parallel_size < 2
+                    or parallel.data_parallel_external_lb
+                    or parallel.data_parallel_hybrid_lb
+                    or parallel.pipeline_parallel_size != 1
+                    or parallel.all2all_backend != "allgather_reducescatter"
+                    or parallel.enable_elastic_ep
+                    or parallel.enable_fault_tolerance
+                ):
+                    raise ValueError(
+                        "Group LoRA admission requires MRV2, internal MoE DP>1, "
+                        "PP=1 and allgather_reducescatter; external/hybrid LB, "
+                        "elastic EP and fault tolerance are not supported."
+                    )
 
         if (
             self.mamba_config.enable_stochastic_rounding

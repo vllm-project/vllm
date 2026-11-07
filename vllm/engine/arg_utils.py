@@ -693,6 +693,7 @@ class EngineArgs:
     mm_device_do_normalize: bool | None = MultiModalConfig.mm_device_do_normalize
     # LoRA fields
     enable_lora: bool = False
+    enable_group_lora_admission: bool = LoRAConfig.enable_group_admission
     max_loras: int = LoRAConfig.max_loras
     max_lora_rank: MaxLoRARanks = LoRAConfig.max_lora_rank
     default_mm_loras: dict[str, str] | None = LoRAConfig.default_mm_loras
@@ -1631,6 +1632,9 @@ class EngineArgs:
             help="If True, enable handling of LoRA adapters.",
         )
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
+        lora_group.add_argument(
+            "--enable-group-lora-admission", **lora_kwargs["enable_group_admission"]
+        )
         lora_group.add_argument("--max-lora-rank", **lora_kwargs["max_lora_rank"])
         lora_group.add_argument(
             "--lora-dtype",
@@ -2725,8 +2729,11 @@ class EngineArgs:
                 "non multimodal model"
             )
 
+        if self.enable_group_lora_admission and not self.enable_lora:
+            raise ValueError("--enable-group-lora-admission requires --enable-lora")
         lora_config = (
             LoRAConfig(
+                enable_group_admission=self.enable_group_lora_admission,
                 max_lora_rank=self.max_lora_rank,
                 max_loras=self.max_loras,
                 default_mm_loras=self.default_mm_loras,

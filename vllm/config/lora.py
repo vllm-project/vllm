@@ -34,6 +34,9 @@ class LoRAConfig:
     """Max LoRA rank."""
     max_loras: int = Field(default=1, ge=1)
     """Max number of LoRAs in a single batch."""
+    enable_group_admission: bool = False
+    """Coordinate MoE adapter admission and residency across internal DP
+    engines. Requires MRV2 and the allgather_reducescatter expert backend."""
     fully_sharded_loras: bool = False
     """By default, only half of the LoRA computation is sharded with tensor
     parallelism. Enabling this will use the fully sharded layers. At high

@@ -85,6 +85,7 @@ class LoRAModel:
         self.loras: dict[str, LoRALayerWeights] = loras
         self.modules_to_save = modules_to_save or {}
         self.is_3d_lora_weight = is_3d_lora_weight
+        self.source_fingerprint: str | None = None
 
     def clone(self, lora_model_id: int) -> "LoRAModel":
         """Return a copy of the object with different ids.

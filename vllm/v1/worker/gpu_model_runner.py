@@ -5555,6 +5555,7 @@ class GPUModelRunner(
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         randomize_inputs: bool = False,
+        is_dp_dummy: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run a dummy forward pass to warm up/profile run or capture the
         CUDA graph for the model.
@@ -5586,6 +5587,8 @@ class GPUModelRunner(
             is_graph_capturing: Whether this run is a cudagraph capture.
             randomize_inputs: Whether to fill the dummy inputs with random
                 values rather than zeros.
+            is_dp_dummy: Preserve resident adapters while participating in an
+                idle data-parallel step.
 
         """
         mm_config = self.vllm_config.model_config.multimodal_config
@@ -5806,6 +5809,7 @@ class GPUModelRunner(
             num_sampled_tokens,
             remove_lora,
             num_active_loras,
+            is_dp_dummy=is_dp_dummy,
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens

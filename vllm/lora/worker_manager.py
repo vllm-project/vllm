@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import hashlib
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Literal
 
+import msgspec
 import torch
 
 from vllm.config import VllmConfig
@@ -24,6 +27,11 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 logger = init_logger(__name__)
 
 
+def _checkpoint_stamp(path: Path) -> tuple[int, int, int, int]:
+    stat = path.stat()
+    return stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
 class WorkerLoRAManager:
     """WorkerLoRAManager that manages LoRA models on the worker side.
 
@@ -42,6 +50,7 @@ class WorkerLoRAManager:
         self._lora_model_cls = lora_model_cls
         self.embedding_modules = embedding_modules
         self._cached_dummy_lora: None | Literal[False] | LoRAModel = False
+        self._group_snapshot: LRUCacheLoRAModelManager.Snapshot | None = None
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
@@ -117,6 +126,32 @@ class WorkerLoRAManager:
                     expected_lora_lst.append(module)
             expected_lora_modules = set(expected_lora_lst)
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
+            files = []
+            stamps = []
+            fingerprint = None
+            if self.lora_config.enable_group_admission:
+                directory = Path(lora_path)
+                weights = next(
+                    (
+                        directory / name
+                        for name in (
+                            "adapter_model.safetensors",
+                            "adapter_model.bin",
+                            "adapter_model.pt",
+                        )
+                        if (directory / name).is_file()
+                    ),
+                    None,
+                )
+                if weights is None:
+                    raise FileNotFoundError(f"No adapter weights in {directory}")
+                files = [directory / "adapter_config.json", weights]
+                stamps = [_checkpoint_stamp(path) for path in files]
+                digest = hashlib.sha256()
+                for path in files:
+                    with path.open("rb") as stream:
+                        digest.update(hashlib.file_digest(stream, "sha256").digest())
+                fingerprint = digest.hexdigest()
 
             peft_helper = PEFTHelper.from_local_dir(
                 lora_path, self.max_position_embeddings
@@ -154,6 +189,13 @@ class WorkerLoRAManager:
             # adapter manager can route 3D-format checkpoints through the
             # 3D->2D conversion when running under the universal 2D wrapper.
             lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
+            if fingerprint is not None:
+                if any(
+                    _checkpoint_stamp(path) != stamp
+                    for path, stamp in zip(files, stamps)
+                ):
+                    raise RuntimeError("Adapter checkpoint changed while loading")
+                lora.source_fingerprint = fingerprint
             self._adapter_manager._validate_moe_lora_format(lora)
 
             # Validate classification-head weights.
@@ -240,6 +282,88 @@ class WorkerLoRAManager:
 
     def list_adapters(self) -> set[int]:
         return set(self._adapter_manager.list_adapters())
+
+    def group_update(self, method: str, argument: Any) -> dict:
+        """Apply a retired-epoch mutation and acknowledge actual resident weights."""
+        manager = self._adapter_manager
+        assert isinstance(manager, LRUCacheLoRAModelManager)
+        previous = None
+        try:
+            if method == "commit":
+                self._group_snapshot = None
+                return {"error": None, "fingerprints": {}, "result": True}
+            if method == "rollback":
+                assert self._group_snapshot is not None
+                manager.restore_adapters(self._group_snapshot)
+                return {
+                    "error": None,
+                    "fingerprints": {},
+                    "result": True,
+                    "state": self.group_adapter_state(),
+                }
+            if self._group_snapshot is not None:
+                raise RuntimeError("Previous group adapter transaction is unfinished")
+            self._group_snapshot = manager.snapshot_adapters()
+            previous = self.group_adapter_state()
+            if method == "prepare":
+                requests = [
+                    msgspec.msgpack.decode(item, type=LoRARequest) for item in argument
+                ]
+                desired = {request.lora_int_id for request in requests}
+                if not manager._active_adapters.pinned_items <= desired:
+                    raise RuntimeError(
+                        "A pinned adapter was omitted from the group epoch"
+                    )
+                self.set_active_adapters(set(requests), None)
+                result = True
+            elif method == "add_lora":
+                request = msgspec.msgpack.decode(argument, type=LoRARequest)
+                result = self.add_adapter(request)
+                desired = {request.lora_int_id}
+            elif method == "remove_lora":
+                result = self.remove_adapter(argument)
+                desired = set()
+            elif method == "pin_lora":
+                result = self.pin_adapter(argument)
+                desired = {argument}
+            else:
+                raise ValueError(f"Unknown group LoRA operation: {method}")
+            fingerprints = {}
+            for adapter in desired:
+                model = self._adapter_manager.get_adapter(adapter)
+                if (
+                    model is None
+                    or model.source_fingerprint is None
+                    or adapter not in self._adapter_manager.lora_index_to_id
+                ):
+                    raise RuntimeError(f"Adapter {adapter} is not ready on this worker")
+                fingerprints[adapter] = model.source_fingerprint
+            return {
+                "error": None,
+                "fingerprints": fingerprints,
+                "result": result,
+                "previous": previous,
+            }
+        except Exception as error:
+            return {
+                "error": str(error),
+                "fingerprints": {},
+                "result": False,
+                "previous": previous,
+            }
+
+    def group_adapter_state(self) -> dict:
+        manager = self._adapter_manager
+        assert isinstance(manager, LRUCacheLoRAModelManager)
+        state = manager.snapshot_adapters()
+        return {
+            "models": [
+                (key, model.source_fingerprint) for key, model in state.models.items()
+            ],
+            "active": list(state.active),
+            "cpu_pinned": sorted(state.cpu_pinned),
+            "gpu_pinned": sorted(state.gpu_pinned),
+        }
 
 
 class LRUCacheWorkerLoRAManager(WorkerLoRAManager):

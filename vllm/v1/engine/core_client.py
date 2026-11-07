@@ -1194,6 +1194,9 @@ class AsyncMPClient(MPClient):
         )
 
         self.client_count = client_count
+        self.group_lora_admission_enabled = bool(
+            vllm_config.lora_config and vllm_config.lora_config.enable_group_admission
+        )
         self.client_index = client_index
         self.outputs_queue = asyncio.Queue[EngineCoreOutputs | Exception]()
 
@@ -1873,6 +1876,19 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
+        if self.group_lora_admission_enabled and method in {
+            "add_lora",
+            "remove_lora",
+            "pin_lora",
+        }:
+            result = (
+                await self.call_utility_all_async(
+                    "queue_lora_update", uuid.uuid4().hex, method, args[0]
+                )
+            )[0]
+            if method == "add_lora":
+                args[0].lora_int_id = int(result)
+            return bool(result)
         return (await self.call_utility_all_async(method, *args))[0]
 
     async def checkpoint_state_async(self) -> tuple[CheckpointState, str | None]:
