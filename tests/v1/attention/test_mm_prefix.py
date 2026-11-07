@@ -63,6 +63,43 @@ if _fa4_available():
     from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
     from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
 
+
+def _fa2_available() -> bool:
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(80)
+    ):
+        return False
+    from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
+
+    return is_fa_version_supported(2)
+
+
+requires_fa2 = pytest.mark.skipif(
+    not _fa2_available(),
+    reason="Triton PrefixLM fast path requires FlashAttention-2 on SM 8.x",
+)
+
+if _fa2_available() and not _fa4_available():
+    from types import MethodType
+
+    from tests.v1.attention.test_attention_backends import (
+        MockAttentionLayer,
+        create_and_prepopulate_kv_cache,
+    )
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm.config import set_current_vllm_config
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
+
+if _fa2_available():
+    from vllm.v1.attention.backends.triton_attn import (
+        TritonAttentionImpl,
+        TritonAttentionMetadataBuilder,
+    )
+
 DEVICE = torch.device("cuda:0")
 DTYPE = torch.bfloat16
 HEAD_SIZE = 128
@@ -883,3 +920,124 @@ def test_composite_shared_cache_across_image_and_causal_steps(
                     output.float(), expected, atol=2e-2, rtol=2e-2
                 )
             previous = end
+
+
+# A PrefixLM prompt is two bidirectional blocks, the state and the question.
+# Request 0 prefills one from scratch; request 1 resumes after a cache hit on
+# its state block. Request 2 decodes, which no range covers.
+FA2_SEQ_LENS = [224, 300, 129]
+FA2_QUERY_LENS = [224, 60, 1]
+FA2_MM_RANGES = {
+    0: [(0, 175), (176, 223)],
+    1: [(0, 239), (240, 299)],
+    2: [(0, 63), (64, 127)],
+}
+
+
+@requires_fa2
+@pytest.mark.parametrize("head_size", [128, 256])
+@pytest.mark.parametrize("with_decode", [False, True])
+def test_triton_prefix_lm_matches_dense_reference(head_size: int, with_decode: bool):
+    """A PrefixLM prefill takes the FlashAttention-2 path, anything else Triton.
+
+    The batch is built from real metadata and a real ``TritonAttentionImpl``.
+    The decode row has a query outside every range, so it must leave the fast
+    path off; both paths are checked against the same dense reference.
+    """
+    torch.manual_seed(0)
+    num_reqs = 3 if with_decode else 2
+    seq_lens, query_lens = FA2_SEQ_LENS[:num_reqs], FA2_QUERY_LENS[:num_reqs]
+    mm_ranges = {i: FA2_MM_RANGES[i] for i in range(num_reqs)}
+
+    vllm_config = _enable_mm_prefix(
+        create_vllm_config(
+            model_name=MODEL,
+            max_model_len=max(seq_lens),
+            block_size=BLOCK_SIZE,
+            num_gpu_blocks=512,
+        )
+    )
+    mc = vllm_config.model_config
+    mc.get_head_size = MethodType(lambda self, size=head_size: size, mc)
+    num_heads = mc.get_num_attention_heads(vllm_config.parallel_config)
+    num_kv_heads = mc.get_num_kv_heads(vllm_config.parallel_config)
+    scale = head_size**-0.5
+
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens, name="prefix_lm"),
+        BLOCK_SIZE,
+        DEVICE,
+    )
+    common.mm_req_doc_ranges = mm_ranges
+
+    qs, new_ks, new_vs, k_fulls, v_fulls, k_ctxs, v_ctxs = [], [], [], [], [], [], []
+    for q_len, s_len in zip(query_lens, seq_lens):
+        ctx = s_len - q_len
+        k_full = torch.randn(s_len, num_kv_heads, head_size, dtype=DTYPE, device=DEVICE)
+        v_full = torch.randn_like(k_full)
+        qs.append(torch.randn(q_len, num_heads, head_size, dtype=DTYPE, device=DEVICE))
+        k_fulls.append(k_full)
+        v_fulls.append(v_full)
+        k_ctxs.append(k_full[:ctx])
+        v_ctxs.append(v_full[:ctx])
+        new_ks.append(k_full[ctx:])
+        new_vs.append(v_full[ctx:])
+    query, key, value = torch.cat(qs), torch.cat(new_ks), torch.cat(new_vs)
+
+    kv_cache = create_and_prepopulate_kv_cache(
+        k_contexts=k_ctxs,
+        v_contexts=v_ctxs,
+        block_size=BLOCK_SIZE,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=DTYPE,
+        device=DEVICE,
+        num_blocks=512,
+        common_attn_metadata=common,
+        layout=KVCacheLayout.LBNHC,
+        randomize_blocks=True,
+    )
+
+    kv_cache_spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=mc.dtype,
+        kv_quant_mode=get_kv_quant_mode(vllm_config.cache_config.cache_dtype),
+    )
+    with set_current_vllm_config(vllm_config):
+        builder = TritonAttentionMetadataBuilder(
+            kv_cache_spec, ["model.layers.0.self_attn.attn"], vllm_config, DEVICE
+        )
+        attn_metadata = builder.build(common_prefix_len=0, common_attn_metadata=common)
+        impl = TritonAttentionImpl(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+        )
+        layer = MockAttentionLayer(DEVICE)
+        impl.do_kv_cache_update(layer, key, value, kv_cache, attn_metadata.slot_mapping)
+        actual = impl.forward(
+            layer,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            output=torch.empty_like(query),
+        )
+
+    assert (attn_metadata.fa2_prefix_lm is not None) is (not with_decode)
+
+    ref_args = (query, k_fulls, v_fulls, query_lens, seq_lens)
+    expected = _dense_reference(*ref_args, mm_ranges, None, scale)
+    torch.testing.assert_close(actual.float(), expected, atol=2e-2, rtol=2e-2)
+
+    causal = _dense_reference(*ref_args, {}, None, scale)
+    assert not torch.allclose(expected, causal, atol=2e-2, rtol=2e-2), (
+        "test batch does not exercise the bidirectional ranges"
+    )
