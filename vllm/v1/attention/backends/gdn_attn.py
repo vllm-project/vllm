@@ -476,7 +476,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 spec_token_masks = torch.repeat_interleave(
                     spec_sequence_masks,
                     query_lens,
-                    output_size=query_start_loc_cpu[-1].item(),
+                    # `query_lens` comes from the device-side `query_start_loc`,
+                    # which adaptive verification may trim below the host plan
+                    # (see `supports_device_cpu_query_lens_mismatch`); the host
+                    # total is only a valid output_size when the two agree, so
+                    # pay one sync for the actual device token total.
+                    output_size=int(query_lens.sum().item()),
                 )
                 index = torch.argsort(spec_token_masks, stable=True)
                 num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
