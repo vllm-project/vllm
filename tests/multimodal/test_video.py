@@ -13,7 +13,11 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 import torch
-from transformers import AutoVideoProcessor, Qwen3VLVideoProcessor
+from transformers import (
+    AutoVideoProcessor,
+    Qwen2VLVideoProcessor,
+    Qwen3VLVideoProcessor,
+)
 from transformers.video_utils import VideoMetadata
 
 from vllm.assets.base import get_vllm_public_assets
@@ -1334,6 +1338,74 @@ def test_qwen3_vl_unknown_source_fps_matches_hf(
     assert (
         Qwen3VLVideoBackend.compute_frames_index_to_sample(source, target) == hf_indices
     )
+
+
+@pytest.mark.parametrize(
+    "loader_cls, hf_processor_cls",
+    [
+        (Qwen2VLVideoBackend, Qwen2VLVideoProcessor),
+        (Qwen3VLVideoBackend, Qwen3VLVideoProcessor),
+    ],
+)
+@pytest.mark.parametrize("num_frames", [4, 9, 11, 100])
+def test_qwen_vl_explicit_num_frames_matches_hf(
+    loader_cls: type[VideoLoader], hf_processor_cls: type, num_frames: int
+):
+    """An explicit num_frames takes priority over fps, like HF's sample_frames."""
+    source = VideoSourceMetadata(243, original_fps=25.0, duration=9.72)
+    target = VideoTargetMetadata(num_frames=num_frames, fps=2, max_duration=300)
+
+    hf_metadata = VideoMetadata(total_num_frames=243, fps=25.0)
+    hf_indices = (
+        hf_processor_cls()
+        .sample_frames(hf_metadata, num_frames=num_frames, fps=None)
+        .tolist()
+    )
+    assert loader_cls.compute_frames_index_to_sample(source, target) == hf_indices
+
+
+@pytest.mark.parametrize(
+    "loader_cls, hf_processor_cls",
+    [
+        (Qwen2VLVideoBackend, Qwen2VLVideoProcessor),
+        (Qwen3VLVideoBackend, Qwen3VLVideoProcessor),
+    ],
+)
+def test_qwen_vl_unset_num_frames_samples_by_fps(
+    loader_cls: type[VideoLoader], hf_processor_cls: type
+):
+    source = VideoSourceMetadata(243, original_fps=25.0, duration=9.72)
+    target = VideoTargetMetadata(num_frames=-1, fps=2, max_duration=300)
+
+    hf_metadata = VideoMetadata(total_num_frames=243, fps=25.0)
+    hf_indices = hf_processor_cls().sample_frames(hf_metadata, fps=2).tolist()
+    assert loader_cls.compute_frames_index_to_sample(source, target) == hf_indices
+
+
+@pytest.mark.parametrize(
+    "loader_cls, total_frames, num_frames, expected",
+    [
+        # Qwen2-VL needs whole temporal patches; HF rounds 1 down to 0 and fails.
+        (Qwen2VLVideoBackend, 243, 1, 2),
+        (Qwen3VLVideoBackend, 243, 1, 1),
+        # Capped by the clip length, then floored to the temporal patch size.
+        (Qwen2VLVideoBackend, 243, 1000, 242),
+        (Qwen3VLVideoBackend, 243, 1000, 243),
+        # Capped at the loader's frame limit.
+        (Qwen2VLVideoBackend, 2000, 1000, 768),
+        (Qwen3VLVideoBackend, 2000, 1000, 768),
+    ],
+)
+def test_qwen_vl_explicit_num_frames_is_clamped(
+    loader_cls: type[VideoLoader], total_frames: int, num_frames: int, expected: int
+):
+    source = VideoSourceMetadata(
+        total_frames, original_fps=25.0, duration=total_frames / 25.0
+    )
+    target = VideoTargetMetadata(num_frames=num_frames, fps=2, max_duration=300)
+    indices = loader_cls.compute_frames_index_to_sample(source, target)
+    assert len(indices) == expected
+    assert max(indices) < total_frames
 
 
 @pytest.mark.parametrize(
