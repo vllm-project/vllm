@@ -303,6 +303,9 @@ def subtract(after: dict, before: dict) -> dict:
 
 def main() -> None:
     args = parse_args()
+    # custom_class supports only the V1 model runner. Run every mode on V1
+    # so that the throughput numbers compare the same runner.
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     from vllm import LLM, SamplingParams
     from vllm.inputs import TokensPrompt
 
