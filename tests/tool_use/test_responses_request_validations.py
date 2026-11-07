@@ -187,6 +187,51 @@ def test_responses_request_empty_tools_named_tool_choice():
         )
 
 
+@pytest.mark.parametrize(
+    "name, error",
+    [("lookup", "is ambiguous"), ("nonexistent", "not found in 'tools' parameter")],
+)
+def test_responses_request_allowed_tools_rejects_unresolvable_function(name, error):
+    namespaces = [
+        {
+            "type": "namespace",
+            "name": namespace,
+            "description": "",
+            "tools": [{"type": "function", "name": "lookup", "parameters": {}}],
+        }
+        for namespace in ("crm", "billing")
+    ]
+    with pytest.raises(VLLMValidationError, match=error):
+        ResponsesRequest.model_validate(
+            {
+                "input": "Hello",
+                "model": "test-model",
+                "tools": namespaces,
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "mode": "auto",
+                    "tools": [{"type": "function", "name": name}],
+                },
+            }
+        )
+
+
+def test_responses_request_allowed_tools_rejects_unknown_custom_tool():
+    with pytest.raises(VLLMValidationError, match="not found in 'tools' parameter"):
+        ResponsesRequest.model_validate(
+            {
+                "input": "Hello",
+                "model": "test-model",
+                "tools": [{"type": "custom", "name": "run_sql"}],
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "mode": "auto",
+                    "tools": [{"type": "custom", "name": "missing"}],
+                },
+            }
+        )
+
+
 @pytest.mark.parametrize("detail", [None, "low"], ids=["default", "explicit"])
 def test_input_image_detail_defaults_or_preserves(detail: str | None) -> None:
     image = {
