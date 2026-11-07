@@ -6,8 +6,8 @@ ops that it replaces.
 swa_decode_meta.launch replaces the decode part of the ROCm SWA metadata
 build: torch.ge for is_valid_token, the zero fill of the unused lengths,
 _compute_swa_indices_and_lens_kernel (or the DSpark draft block's
-ComputeDSparkNoncausalSWAIndicesKernel), build_ragged_indices_from_dense and
-_copy_ragged_to_graph_buffers. topk_pack.launch replaces
+ComputeDSparkNoncausalSWAIndicesKernel) and
+build_ragged_into_graph_buffers. topk_pack.launch replaces
 compute_global_topk_ragged_indices_and_indptr. For each random decode batch
 vLLM's ops run first. Then every output buffer is overwritten with -7
 (is_valid_token with its negation), the fused launch runs, and every output
@@ -90,13 +90,12 @@ def _swa_buffers(width, noncausal):
 def _swa_old_ops(c, b):
     """The decode part of vLLM's SWA metadata build and its ROCm ragged
     step."""
-    from vllm.models.deepseek_v41.amd.rocm import _copy_ragged_to_graph_buffers
     from vllm.v1.attention.backends.mla.sparse_swa import (
         _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL,
         _COMPUTE_SWA_INDICES_AND_LENS_KERNEL,
     )
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-        build_ragged_indices_from_dense,
+        build_ragged_into_graph_buffers,
     )
 
     n, width = c["n"], b["width"]
@@ -131,10 +130,14 @@ def _swa_old_ops(c, b):
             num_tokens=n,
             token_offset=0,
         )
-    ragged, indptr = build_ragged_indices_from_dense(
-        b["indices"][:n].reshape(n, width), b["lens"][:n]
+    build_ragged_into_graph_buffers(
+        b["indices"][:n].reshape(n, width),
+        b["lens"][:n],
+        b["ragged"],
+        b["indptr"],
+        n,
+        width,
     )
-    _copy_ragged_to_graph_buffers(ragged, indptr, b["ragged"], b["indptr"], n, width)
 
 
 @pytest.mark.parametrize("noncausal", [False, True])
