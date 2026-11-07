@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The request function for API endpoints."""
 
+import asyncio
 import codecs
 import io
 import json
@@ -105,6 +106,7 @@ class RequestFuncOutput:
     server_ttft: float | None = None
     input_audio_duration: float = 0.0  # in seconds
     num_input_sequences: int = 1
+    cancelled: bool = False
 
 
 def _update_server_metrics(
@@ -132,6 +134,42 @@ class RequestFunc(Protocol):
         session: aiohttp.ClientSession,
         pbar: tqdm | None = None,
     ) -> Awaitable[RequestFuncOutput]: ...
+
+
+async def async_request_with_cancellation(
+    request_func: RequestFunc,
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    cancel_after: float | None,
+    pbar: tqdm | None = None,
+) -> RequestFuncOutput:
+    """Abandon a request after a client-side deadline, awaiting its cleanup.
+
+    The caller acquires any concurrency permit before starting this deadline.
+    Completed requests retain their usual result. Intentional cancellations
+    are separate from failures; partial token counts are not available from
+    an interrupted request function and are excluded from throughput metrics.
+    Cancellation of the benchmark itself still propagates to the caller.
+    """
+    if cancel_after is None:
+        return await request_func(request_func_input, session, pbar)
+
+    start_time = time.perf_counter()
+    deadline = asyncio.timeout(cancel_after)
+    try:
+        async with deadline:
+            return await request_func(request_func_input, session, pbar)
+    except TimeoutError:
+        if not deadline.expired():
+            raise
+        if pbar is not None:
+            pbar.update(1)
+        return RequestFuncOutput(
+            cancelled=True,
+            start_time=start_time,
+            latency=time.perf_counter() - start_time,
+            prompt_len=request_func_input.prompt_len,
+        )
 
 
 def _validate_api_url(
