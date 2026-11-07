@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -55,6 +56,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -299,12 +301,39 @@ class DeepseekV4DecoderLayer(nn.Module):
         # attn_norm / ffn_norm into its collapse, so the separate norms are
         # skipped for the seams it takes.
         self.fuse_seam_norm = HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
+        # Mega-MHC runs those seams in one launch from packed copies of the fn
+        # weights. Its scratch is per stream and must exist before capture,
+        # which DBO's ubatch streams do not guarantee.
+        self.use_mega_mhc = (
+            self.fuse_seam_norm
+            and self.hc_mult == 4
+            and not vllm_config.parallel_config.use_ubatching
+            and bool(rocm_aiter_ops.is_mega_mhc_available())
+        )
+        self.hc_attn_fn_packed: torch.Tensor | None = None
+        self.hc_ffn_fn_packed: torch.Tensor | None = None
         # Decode steps of an eligible layer may run as the mono decode layer.
         self.mono = MonoDecodeLayer.create(self, vllm_config)
         if self.mono is not None and self.mono.ffn_only:
             # A decode step hands wo_b's TP partial to the FFN launch; forward
             # reduces it on the others.
             self.attn.wo_b.reduce_results = False
+
+    def process_weights_after_loading(self) -> None:
+        self.refresh_derived_weights()
+        if self.mhc_overlap is not None and self.hc_ffn_fn_packed is not None:
+            self.mhc_overlap.prepare_mega_mhc(self.hidden_size, self.hc_ffn_fn.device)
+
+    def refresh_derived_weights(self) -> None:
+        if not self.use_mega_mhc or not self.hc_attn_fn.is_cuda:
+            return
+        # Refilled in place, so captured graphs read the reloaded weights.
+        for name in ("hc_attn_fn", "hc_ffn_fn"):
+            refill_derived(
+                self,
+                f"{name}_packed",
+                rocm_aiter_ops.mega_mhc_pack_fn(getattr(self, name)),
+            )
 
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
@@ -402,6 +431,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     pre_mix=pre_mix,
                     norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
                     norm_eps=self.attn_norm.variance_epsilon,
+                    fn_packed=self.hc_attn_fn_packed,
                 )
         else:
             pre_args = (
@@ -432,6 +462,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     pre_mix=pre_mix,
                     norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
                     norm_eps=self.attn_norm.variance_epsilon,
+                    fn_packed=self.hc_attn_fn_packed,
                 )
             else:
                 (
@@ -449,6 +480,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     comb_res_mix=res_mix,
                     norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
                     norm_eps=self.attn_norm.variance_epsilon,
+                    fn_packed=self.hc_attn_fn_packed,
                 )
         if not fuse_attn_norm:
             x = self.attn_norm(x)
@@ -483,6 +515,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             comb_res_mix=res_mix,
             norm_weight=self.ffn_norm.weight if self.fuse_seam_norm else None,
             norm_eps=self.ffn_norm.variance_epsilon,
+            fn_packed=self.hc_ffn_fn_packed,
         )
         if not self.fuse_seam_norm:
             x = self.ffn_norm(x)
@@ -522,6 +555,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             comb_res_mix=res_mix,
             norm_weight=self.attn_norm.weight if fuse_attn_norm else None,
             norm_eps=self.attn_norm.variance_epsilon,
+            fn_packed=self.hc_attn_fn_packed,
         )
         if not fuse_attn_norm:
             x = self.attn_norm(x)

@@ -317,7 +317,9 @@ class MHCPreDelayedOp(CustomOp):
     applies the preceding post block, which lets AITER fold it into the pre
     projection and saves a launch. Returns residual, post_mix, comb_mix,
     layer_input, next_pre_mix; ``residual`` is the caller's own tensor when
-    no post is requested.
+    no post is requested. ``fn_packed``, ``fn`` packed by
+    ``rocm_aiter_ops.mega_mhc_pack_fn``, runs the fused ROCm seam as one
+    Mega-MHC launch; other paths ignore it.
     """
 
     # --8<-- [end:mhc_pre_delayed]
@@ -361,6 +363,7 @@ class MHCPreDelayedOp(CustomOp):
         sublayer_out: torch.Tensor | None = None,
         post_layer_mix: torch.Tensor | None = None,
         comb_res_mix: torch.Tensor | None = None,
+        fn_packed: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         residual = self._maybe_post(
             residual, sublayer_out, post_layer_mix, comb_res_mix
@@ -399,6 +402,7 @@ class MHCPreDelayedOp(CustomOp):
         sublayer_out: torch.Tensor | None = None,
         post_layer_mix: torch.Tensor | None = None,
         comb_res_mix: torch.Tensor | None = None,
+        fn_packed: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         # aiter's fused delayed seam: post-mix, gate projection, and the
         # collapse with the carried pre-mix and its RMSNorm. It always applies
@@ -412,9 +416,19 @@ class MHCPreDelayedOp(CustomOp):
             residual_out = (
                 torch.empty_like(residual) if sublayer_out is not None else None
             )
-            rest = torch.ops.vllm.mhc_fused_post_pre_delayed_rms_norm_aiter(
+            if fn_packed is not None and norm_weight.dtype == torch.bfloat16:
+                seam, weight = (
+                    torch.ops.vllm.mhc_mega_post_pre_delayed_rms_norm_aiter,
+                    fn_packed,
+                )
+            else:
+                seam, weight = (
+                    torch.ops.vllm.mhc_fused_post_pre_delayed_rms_norm_aiter,
+                    fn,
+                )
+            rest = seam(
                 residual,
-                fn,
+                weight,
                 hc_scale,
                 hc_base,
                 rms_eps,
@@ -531,6 +545,7 @@ class MHCPreDelayedOp(CustomOp):
         sublayer_out: torch.Tensor | None = None,
         post_layer_mix: torch.Tensor | None = None,
         comb_res_mix: torch.Tensor | None = None,
+        fn_packed: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         residual = self._maybe_post(
             residual, sublayer_out, post_layer_mix, comb_res_mix
