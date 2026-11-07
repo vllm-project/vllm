@@ -5,18 +5,19 @@ from __future__ import annotations
 
 import contextlib
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.config.kernel import (
     FLASHINFER_MOE_EP_BACKENDS,
     FLASHINFER_MOE_EP_CUTEDSL,
     FLASHINFER_MOE_EP_DEEP_GEMM,
 )
 from vllm.distributed import get_ep_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -29,6 +30,8 @@ from vllm.utils.deep_gemm import _import_deep_gemm
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
+logger = init_logger(__name__)
 
 FlashInferMoeEpKernel = Literal["cutedsl", "deep_gemm"]
 FlashInferMoeEpWeightFormat = Literal["nvfp4", "mxfp4"]
@@ -294,9 +297,42 @@ class FlashInferMoeEp:
         if spec.kernel == "deep_gemm":
             _expose_deep_gemm_to_flashinfer()
         api = _load_flashinfer_moe_ep_api()
+        vllm_config = get_current_vllm_config_or_none()
+        enable_profiles = (
+            vllm_config is not None
+            and vllm_config.kernel_config.enable_flashinfer_autotune
+            and spec.kernel == "cutedsl"
+            and moe.moe_parallel_config.pcp_size == 1
+            and not getattr(vllm_config.model_config, "enable_sleep_mode", False)
+            and not vllm_config.parallel_config.enable_elastic_ep
+        )
+        if enable_profiles:
+            from vllm.model_executor.layers.fused_moe import (
+                flashinfer_moe_ep_profiles,
+            )
+
+            profile_cls = flashinfer_moe_ep_profiles.FlashInferMoeEpProfiles
+            if not profile_cls.is_supported(api.MoEEpMegaLayer):
+                logger.warning_once(
+                    "Installed FlashInfer lacks MegaMoE tuning knob APIs; "
+                    "using the default workspace for %s.",
+                    moe.moe_backend,
+                )
+                enable_profiles = False
         if epilogue is None:
             epilogue = FlashInferMoeEpEpilogue()
         ep_group = get_ep_group()
+        if (
+            enable_profiles
+            and torch.distributed.is_initialized()
+            and ep_group.world_size != torch.distributed.get_world_size()
+        ):
+            logger.warning_once(
+                "MegaMoE startup tuning requires EP to span WORLD; "
+                "using the default workspace for %s.",
+                moe.moe_backend,
+            )
+            enable_profiles = False
         bootstrap = api.BootstrapConfig(
             world_size=ep_group.world_size,
             rank=ep_group.rank_in_group,
@@ -357,6 +393,19 @@ class FlashInferMoeEp:
         self._top_k = moe.experts_per_token
         self._epilogue: FlashInferMoeEpEpilogue | None = epilogue
         self._return_workspace_view = moe.routing_method is RoutingMethodType.DeepseekV4
+        self._profiles = None
+        if enable_profiles:
+            self._profiles = profile_cls(
+                self._mega_layer,
+                bootstrap,
+                fleet_params,
+                backend=replace(
+                    backend,
+                    preprocess_weights=False,
+                    transformed_weights=self._mega_layer._transformed,
+                ),
+                sp_size=moe.sp_size,
+            )
 
     @property
     def can_overlap_shared_experts(self) -> bool:
@@ -404,15 +453,20 @@ class FlashInferMoeEp:
                 f"the workspace supports at most {self._max_num_tokens}"
             )
         tensors = self._tensors(hidden_states, topk_ids, topk_weights)
-        if self._return_workspace_view and getattr(
+        return_workspace_view = self._return_workspace_view and getattr(
             self._mega_layer, "supports_output_view", False
-        ):
+        )
+        if self._profiles is not None:
+            return self._profiles.forward(
+                tensors, return_workspace_view=return_workspace_view
+            )
+        if return_workspace_view:
             return self._mega_layer.forward(tensors, return_workspace_view=True)
         return self._mega_layer(tensors)
 
     @torch.inference_mode()
     def warmup(self) -> None:
-        if self._mega_layer is None:
+        if self._mega_layer is None or self._profiles is not None:
             return
         hidden_states = torch.zeros(
             1,
@@ -458,6 +512,10 @@ class FlashInferMoeEp:
         return (*self.kernel_weights(), *(v for v in vectors if v is not None))
 
     def destroy(self) -> None:
+        profiles = self._profiles
+        if profiles is not None:
+            profiles.destroy()
+            self._profiles = None
         mega_layer = self._mega_layer
         if mega_layer is None:
             return

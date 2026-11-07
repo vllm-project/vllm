@@ -697,15 +697,43 @@ class Worker(WorkerBase):
             by adjusting the `gpu_memory_utilization` parameter.
 
         """
-        maybe_apply_startup_plan(self)
+        from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep_profiles import (
+            flashinfer_moe_ep_profile_context,
+            has_flashinfer_moe_ep_profiles,
+        )
+
+        # Live-token workspaces depend on FlashInfer's runtime tuning data,
+        # which is not part of the persisted startup-plan fingerprint. Reuse
+        # would skip the memory profile that accounts for those workspaces.
+        has_moe_ep_profiles = has_flashinfer_moe_ep_profiles()
+        if not has_moe_ep_profiles:
+            maybe_apply_startup_plan(self)
+
+        def moe_profile_memory_pool() -> AbstractContextManager:
+            if not has_moe_ep_profiles:
+                return nullcontext()
+            return self._maybe_get_memory_pool_context(tag="runtime")
+
+        if has_moe_ep_profiles:
+            # Search can use larger temporary buffers than serving. Finish it
+            # before the measured pass so only fixed workspaces and the real
+            # activation peak reduce the KV-cache budget.
+            with (
+                self._scoped_allocator_max_split(max_split_size_mb=20),
+                set_current_vllm_config(self.vllm_config),
+                moe_profile_memory_pool(),
+                flashinfer_moe_ep_profile_context(self.model_runner),
+            ):
+                self.model_runner.profile_run(randomize_inputs=True)
 
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
-            with set_current_vllm_config(self.vllm_config):
-                self.model_runner.profile_run(
-                    randomize_inputs=self.randomize_dummy_inputs
-                )
+            if not has_moe_ep_profiles:
+                with set_current_vllm_config(self.vllm_config):
+                    self.model_runner.profile_run(
+                        randomize_inputs=self.randomize_dummy_inputs
+                    )
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -742,6 +770,7 @@ class Worker(WorkerBase):
             # memory_profiling measures, restoring the original limit.
             self._scoped_allocator_max_split(max_split_size_mb=20),
             set_current_vllm_config(self.vllm_config),
+            moe_profile_memory_pool(),
         ):
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
 
@@ -1190,7 +1219,12 @@ class Worker(WorkerBase):
 
             logger.info(msg)
 
-            maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
+            from vllm.model_executor.layers.fused_moe import (
+                flashinfer_moe_ep_profiles,
+            )
+
+            if not flashinfer_moe_ep_profiles.has_flashinfer_moe_ep_profiles():
+                maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
 
         if not self.use_v2_model_runner and get_pp_group().is_last_rank:
             # V1: Warm up sampler and preallocate memory buffer for logits and other
