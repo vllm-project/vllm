@@ -1876,6 +1876,36 @@ def _fused_mla_dual_rms_norm_group_quant_fake(
     return q_out, q_scale, kv_normed
 
 
+def _fused_mla_dual_rms_norm_mxfp8_quant_impl(
+    q: torch.Tensor,
+    q_weight: torch.Tensor,
+    kv: torch.Tensor,
+    kv_weight: torch.Tensor,
+    q_epsilon: float,
+    kv_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.quant import fused_dual_rmsnorm_mxfp8_quant
+
+    return fused_dual_rmsnorm_mxfp8_quant(
+        q, kv, q_weight, kv_weight, q_epsilon, kv_epsilon
+    )
+
+
+def _fused_mla_dual_rms_norm_mxfp8_quant_fake(
+    q: torch.Tensor,
+    q_weight: torch.Tensor,
+    kv: torch.Tensor,
+    kv_weight: torch.Tensor,
+    q_epsilon: float,
+    kv_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    mq, nq = q.shape
+    q_out = torch.empty((mq, nq), dtype=torch.float8_e4m3fn, device=q.device)
+    q_scale = torch.empty((mq, nq // 32), dtype=torch.uint8, device=q.device)
+    kv_normed = torch.empty(kv.shape, dtype=kv.dtype, device=kv.device)
+    return q_out, q_scale, kv_normed
+
+
 def _rocm_aiter_gemm_a8wfp4_impl(
     x: torch.Tensor,
     w: torch.Tensor,
@@ -3346,6 +3376,13 @@ class rocm_aiter_ops:
                 fake_impl=_fused_mla_dual_rms_norm_group_quant_fake,
             )
 
+            direct_register_custom_op(
+                op_name="fused_mla_dual_rms_norm_mxfp8_quant",
+                op_func=_fused_mla_dual_rms_norm_mxfp8_quant_impl,
+                mutates_args=[],
+                fake_impl=_fused_mla_dual_rms_norm_mxfp8_quant_fake,
+            )
+
             _OPS_REGISTERED = True
 
     @staticmethod
@@ -3449,6 +3486,22 @@ class rocm_aiter_ops:
     @staticmethod
     def get_fused_mla_dual_rms_norm_group_quant_op() -> OpOverload:
         return torch.ops.vllm.fused_mla_dual_rms_norm_group_quant.default
+
+    @staticmethod
+    def fused_dual_rms_norm_mxfp8_quant(
+        q: torch.Tensor,
+        q_weight: torch.Tensor,
+        kv: torch.Tensor,
+        kv_weight: torch.Tensor,
+        q_epsilon: float,
+        kv_epsilon: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """RMSNorm both ``q`` and ``kv`` in one launch, quantizing ``q`` to
+        MXFP8: e4m3 values and row-major [M, K / 32] E8M0 (uint8) scales.
+        ``kv`` stays in its dtype."""
+        return torch.ops.vllm.fused_mla_dual_rms_norm_mxfp8_quant(
+            q, q_weight, kv, kv_weight, q_epsilon, kv_epsilon
+        )
 
     @staticmethod
     def rms_norm(

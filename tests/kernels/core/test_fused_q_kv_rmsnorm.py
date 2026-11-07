@@ -303,3 +303,195 @@ def test_shared_query_quant_preserves_projection(
         torch.testing.assert_close(reshaped, expected.unsqueeze(0), rtol=0, atol=0)
         with pytest.raises(AssertionError, match="consumer kernel"):
             linear(replace(q, quant_key=kNvfp4Dynamic))
+
+
+def _rocm_aiter_dual_rmsnorm_mxfp8_available() -> bool:
+    if not (current_platform.is_rocm() and current_platform.supports_mx()):
+        return False
+    try:
+        from aiter.ops.triton.quant import (  # noqa: F401
+            fused_dual_rmsnorm_mxfp8_quant,
+        )
+    except ImportError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(
+    not _rocm_aiter_dual_rmsnorm_mxfp8_available(),
+    reason="needs gfx950 and AITER's fused_dual_rmsnorm_mxfp8_quant",
+)
+@pytest.mark.parametrize("num_tokens", [1, 17, 256, 1024])
+@pytest.mark.parametrize("projection", ["attention", "indexer"])
+def test_rocm_shared_query_quant_feeds_projection(num_tokens, projection, monkeypatch):
+    """On ROCm the fused Q/KV RMSNorm quantizes Q once with AITER; both
+    projections read it without requantizing, and match the unfused path to
+    MXFP8 accuracy."""
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import (
+        CompilationConfig,
+        CompilationMode,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.model_executor.kernels.linear.mxfp8 import (
+        Mxfp8LinearLayerConfig,
+        rocm_native,
+    )
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_block32_gemm import (
+        rocm_mxfp8_block32_gemm,
+    )
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        expose_input_quant_key,
+    )
+    from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptLinearMethod,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        dequant_mxfp8_to_bf16,
+    )
+    from vllm.models.deepseek_v41.attention import (
+        DeepseekV4Attention,
+        DeepseekV4Indexer,
+    )
+    from vllm.models.deepseek_v41.common.ops.query_quant import (
+        can_fuse_query_quant,
+        fused_q_kv_rmsnorm_quant,
+    )
+    from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: True)
+    rocm_aiter_ops.register_ops_once()
+    torch.manual_seed(0)
+    with set_current_vllm_config(
+        VllmConfig(compilation_config=CompilationConfig(mode=CompilationMode.NONE))
+    ):
+        if projection == "attention":
+            linear = ColumnParallelLinear.__new__(ColumnParallelLinear)
+            output_size = 8192
+        else:
+            linear = ReplicatedLinear.__new__(ReplicatedLinear)
+            output_size = 4096
+        torch.nn.Module.__init__(linear)
+        linear.bias = None
+        linear.skip_bias_add = False
+        linear.return_bias = projection == "indexer"
+        linear.gather_output = False
+        # DeepSeek V4 checkpoints have 32x32 scale blocks, which the loader
+        # expands to one scale row per weight row.
+        w = (torch.randn(output_size, 1280, device=DEVICE) * 0.05).to(
+            torch.float8_e4m3fn
+        )
+        block_scales = torch.randint(
+            118, 124, (output_size // 32, 1280 // 32), device=DEVICE
+        ).to(torch.uint8)
+        ws = block_scales.repeat_interleave(32, 0)
+        linear.weight = torch.nn.Parameter(w, requires_grad=False)
+        linear.weight_scale = torch.nn.Parameter(ws, requires_grad=False)
+        kernel = rocm_native.RocmDotScaledMxfp8LinearKernel(
+            Mxfp8LinearLayerConfig(weight_shape=w.shape)
+        )
+        quant_config = DeepseekV4FP8Config.from_config(
+            {
+                "quant_method": "fp8",
+                "activation_scheme": "dynamic",
+                "weight_block_size": [32, 32],
+                "scale_fmt": "ue8m0",
+                "expert_dtype": "fp4",
+            }
+        )
+        method = quant_config.get_quant_method(linear, "model.layers.2.attn.wq_b")
+        assert type(method) is ModelOptLinearMethod
+        method.out_dtype = torch.bfloat16
+        method.kernel = kernel
+        linear.quant_method = method
+        kernel.process_weights_after_loading(linear)
+        expose_input_quant_key(linear, kernel)
+        assert can_fuse_query_quant([linear, linear])
+        assert not can_fuse_query_quant(
+            [linear, torch.nn.Linear(1280, 256, bias=False)]
+        )
+        with monkeypatch.context() as m:
+            m.setattr(rocm_aiter_ops, "is_enabled", lambda: False)
+            assert not can_fuse_query_quant([linear, linear])
+
+        x = torch.randn(num_tokens, 1792, device=DEVICE, dtype=torch.bfloat16)
+        qr, kv = x.split([1280, 512], -1)
+        qw = torch.randn(1280, device=DEVICE, dtype=x.dtype) * 0.1 + 1
+        kvw = torch.randn(512, device=DEVICE, dtype=x.dtype) * 0.1 + 1
+        qr_ref, kv_ref = fused_q_kv_rmsnorm(qr, kv, qw, kvw, 1e-6)
+        q, kv_out = fused_q_kv_rmsnorm_quant(qr, kv, qw, kvw, 1e-6)
+        torch.testing.assert_close(kv_out, kv_ref, atol=1e-2, rtol=1e-2)
+        assert q.data.dtype == torch.float8_e4m3fn and q.data.shape == qr.shape
+        assert q.scale.shape == (num_tokens, 1280 // 32)
+        dequant = dequant_mxfp8_to_bf16(q.data, q.scale).float()
+        err = (dequant - qr_ref.float()).norm() / qr_ref.float().norm()
+        assert err < 0.04, err
+
+        owner = cast(Any, SimpleNamespace(wq_b=linear))
+        project = (
+            DeepseekV4Attention._wq_b_proj
+            if projection == "attention"
+            else DeepseekV4Indexer._wq_b_proj
+        )
+        expected = project(owner, qr_ref)
+        if isinstance(expected, tuple):
+            expected = expected[0]
+
+        def reject_requantization(*args, **kwargs):
+            raise AssertionError("pre-quantized input must skip quantization")
+
+        monkeypatch.setattr(rocm_native, "mxfp8_e4m3_quantize", reject_requantization)
+        actual = project(owner, q)
+        if isinstance(actual, tuple):
+            actual = actual[0]
+        # The GEMM reads the AITER-quantized Q as is.
+        direct = rocm_mxfp8_block32_gemm(
+            q.data, q.scale, linear.weight, linear.weight_scale, torch.bfloat16
+        )
+        torch.testing.assert_close(actual, direct, rtol=0, atol=0)
+        # Same function as the unfused path, up to MXFP8 rounding.
+        rel = (actual.float() - expected.float()).norm() / expected.float().norm()
+        assert rel < 0.04, rel
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            replayed = project(owner, q)
+        graph.replay()
+        if isinstance(replayed, tuple):
+            replayed = replayed[0]
+        torch.testing.assert_close(replayed, direct, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not _rocm_aiter_dual_rmsnorm_mxfp8_available(),
+    reason="needs gfx950 and AITER's fused_dual_rmsnorm_mxfp8_quant",
+)
+def test_rocm_query_quant_compiles_with_dynamic_rows(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.deepseek_v41.common.ops.query_quant import (
+        fused_q_kv_rmsnorm_quant,
+    )
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: True)
+    rocm_aiter_ops.register_ops_once()
+
+    def run(q, kv, qw, kvw):
+        quant, kv_out = fused_q_kv_rmsnorm_quant(q, kv, qw, kvw, 1e-6)
+        return quant.data, quant.scale, kv_out
+
+    compiled = torch.compile(run, fullgraph=True, dynamic=True)
+    qw = torch.ones(1280, device=DEVICE, dtype=torch.bfloat16)
+    kvw = torch.ones(512, device=DEVICE, dtype=torch.bfloat16)
+    for num_tokens in (17, 33, 0):
+        packed = torch.randn(num_tokens, 1792, device=DEVICE, dtype=torch.bfloat16)
+        q, kv = packed.split((1280, 512), dim=-1)
+        actual = compiled(q, kv, qw, kvw)
+        expected = run(q, kv, qw, kvw)
+        for a, e in zip(actual, expected):
+            assert a.shape == e.shape and a.dtype == e.dtype
+            assert torch.equal(a.view(torch.uint8), e.view(torch.uint8))

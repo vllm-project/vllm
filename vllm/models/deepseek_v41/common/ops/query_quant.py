@@ -106,11 +106,22 @@ def fused_q_kv_rmsnorm_quant(
     """Normalize Q/KV and quantize Q with FlashInfer's swizzled MXFP8 scales.
     With ``early_trigger``, the kernel triggers its PDL dependents before its
     own grid-dependency wait, for a caller whose query projection loads its
-    weights before its wait."""
+    weights before its wait.
+
+    On ROCm, AITER's fused dual RMSNorm quantizes Q with row-major
+    [tokens, q_size / 32] E8M0 scales, the layout ROCm's MXFP8 linear kernel
+    takes (see ``can_fuse_query_quant``)."""
     assert qr.ndim == kv.ndim == 2 and qr.shape[0] == kv.shape[0]
     assert qr.stride(-1) == kv.stride(-1) == 1
     assert q_weight.is_contiguous() and kv_weight.is_contiguous()
     assert qr.shape[1] % 32 == 0
+    if current_platform.is_rocm():
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        qo, scales, kvo = rocm_aiter_ops.fused_dual_rms_norm_mxfp8_quant(
+            qr, q_weight, kv, kv_weight, eps, eps
+        )
+        return QuantizedActivation(qo, scales, qr.dtype, qr.shape, kMxfp8Dynamic), kvo
     tokens, q_size = qr.shape
     kv_size = kv.shape[1]
     qo = torch.empty(qr.shape, dtype=torch.float8_e4m3fn, device=qr.device)
@@ -147,6 +158,8 @@ def fused_q_kv_rmsnorm_quant(
 
 def can_fuse_query_quant(linears: list[torch.nn.Module]) -> bool:
     """Require both local projections to use the same MXFP8 activation ABI."""
+    if current_platform.is_rocm():
+        return _can_fuse_query_quant_rocm(linears)
     if not current_platform.is_cuda():
         return False
     from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
@@ -169,3 +182,31 @@ def can_fuse_query_quant(linears: list[torch.nn.Module]) -> bool:
         )
         for linear in linears
     )
+
+
+def _can_fuse_query_quant_rocm(linears: list[torch.nn.Module]) -> bool:
+    """ROCm: AITER's fused dual RMSNorm produces the row-major E8M0 scales
+    that RocmDotScaledMxfp8LinearKernel reads without requantizing."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_enabled():
+        return False
+    try:
+        from aiter.ops.triton.quant import (  # noqa: F401
+            fused_dual_rmsnorm_mxfp8_quant,
+        )
+    except ImportError:
+        return False
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        RocmDotScaledMxfp8LinearKernel,
+    )
+
+    for linear in linears:
+        kernel = getattr(getattr(linear, "quant_method", None), "kernel", None)
+        if (
+            get_input_quant_key(linear) != kMxfp8Dynamic
+            or type(kernel) is not RocmDotScaledMxfp8LinearKernel
+            or not kernel.supports_quantized_input(linear)
+        ):
+            return False
+    return True
