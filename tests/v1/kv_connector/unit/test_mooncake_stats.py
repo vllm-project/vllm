@@ -21,6 +21,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
     MooncakePromMetrics,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.backend import (
+    MemoryRegion,
+    RangeRequest,
+    TransferBackend,
+    TransferEngineKind,
+    TransferEvent,
+    TransferOp,
+    TransferState,
+)
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 
 
@@ -208,6 +217,37 @@ def test_build_kv_connector_stats_with_data_round_trips():
     assert rebuilt.reduce()["Num failed transfers"] == 1
 
 
+class _RecordingBackend(TransferBackend):
+    """Backend that answers with the events a test queued and records calls."""
+
+    def __init__(self) -> None:
+        self.events: list[TransferEvent] = []
+        self.calls: list[tuple[str, TransferOp, list[RangeRequest]]] = []
+
+    @property
+    def rpc_port(self) -> int:
+        return 12345
+
+    @property
+    def kind(self) -> TransferEngineKind:
+        return TransferEngineKind.TE
+
+    def register_regions(self, regions: list[MemoryRegion]) -> None:
+        return None
+
+    def unregister_regions(self, regions: list[MemoryRegion]) -> None:
+        return None
+
+    def transfer(
+        self, peer: str, op: TransferOp, ranges: list[RangeRequest]
+    ) -> list[TransferEvent]:
+        self.calls.append((peer, op, list(ranges)))
+        return list(self.events)
+
+    def shutdown(self) -> None:
+        return None
+
+
 def _bare_worker() -> MooncakeConnectorWorker:
     """Construct a MooncakeConnectorWorker skipping __init__ (full init requires
     a live TransferEngine). Only the attributes touched by the methods under
@@ -215,25 +255,34 @@ def _bare_worker() -> MooncakeConnectorWorker:
     path a no-op."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.xfer_stats = MooncakeKVConnectorStats()
-    worker.engine = MagicMock()
+    worker.transfer_backend = _RecordingBackend()
     worker.async_zmq_ctx = MagicMock()
     worker.is_kv_consumer = True
     worker.is_kv_producer = True
+    worker._kv_lease_duration = None
+    worker._expired_transfer_ids = {}
+    worker._transfer_unresolved = False
     return worker
 
 
 def test_send_blocks_records_success():
     worker = _bare_worker()
-    worker.engine.batch_transfer_sync_write.return_value = 0
+    worker.transfer_backend.events = [
+        TransferEvent(state=TransferState.COMPLETED),
+        TransferEvent(state=TransferState.COMPLETED),
+    ]
 
-    ret = worker._send_blocks(
-        "host:1234",
+    failed_reqs, unresolved_reqs, error = worker._send_blocks(
+        remote_session="host:1234",
         src_ptrs=[0x1000, 0x2000],
         dst_ptrs=[0x3000, 0x4000],
         lengths=[1024, 2048],
+        owners=["d-req-1", "d-req-1"],
     )
 
-    assert ret == 0
+    assert failed_reqs == []
+    assert unresolved_reqs == []
+    assert error is None
     assert worker.xfer_stats.num_successful_transfers == 1
     data = worker.xfer_stats.data
     assert data["bytes_transferred"] == [1024 + 2048]
@@ -243,13 +292,104 @@ def test_send_blocks_records_success():
 
 def test_send_blocks_records_failure():
     worker = _bare_worker()
-    worker.engine.batch_transfer_sync_write.return_value = 1  # non-zero = fail
+    worker.transfer_backend.events = [
+        TransferEvent(
+            state=TransferState.FAILED,
+            error="Mooncake transfer engine returned 1",
+        )
+    ]
 
-    ret = worker._send_blocks("host:1234", [0x1000], [0x2000], [4096])
+    failed_reqs, unresolved_reqs, error = worker._send_blocks(
+        "host:1234", [0x1000], [0x2000], [4096], ["d-req-1"]
+    )
 
-    assert ret == 1
+    assert failed_reqs == ["d-req-1"]
+    assert unresolved_reqs == []
+    assert error == "Mooncake transfer engine returned 1"
     assert worker.xfer_stats.num_successful_transfers == 0
     assert worker.xfer_stats.data["num_failed_transfers"] == [1]
+
+
+def test_send_blocks_fails_only_the_requests_owning_a_failed_range():
+    worker = _bare_worker()
+    worker.transfer_backend.events = [
+        TransferEvent(state=TransferState.COMPLETED),
+        TransferEvent(state=TransferState.FAILED, error="peer rejected the write"),
+    ]
+
+    failed_reqs, unresolved_reqs, error = worker._send_blocks(
+        "host:1234",
+        [0x1000, 0x2000],
+        [0x3000, 0x4000],
+        [8, 16],
+        ["d-req-1", "d-req-2"],
+    )
+
+    assert failed_reqs == ["d-req-2"]
+    assert unresolved_reqs == []
+    assert error == "peer rejected the write"
+
+
+def test_send_blocks_treats_a_canceled_range_as_failed():
+    worker = _bare_worker()
+    worker.transfer_backend.events = [TransferEvent(state=TransferState.CANCELED)]
+
+    failed_reqs, unresolved_reqs, error = worker._send_blocks(
+        "host:1234", [0x1000], [0x2000], [8], ["d-req-1"]
+    )
+
+    assert failed_reqs == ["d-req-1"]
+    assert unresolved_reqs == []
+    assert error == "the transfer ended as canceled"
+
+
+def test_send_blocks_reports_a_range_the_engine_may_still_write():
+    worker = _bare_worker()
+    worker.transfer_backend.events = [
+        TransferEvent(
+            state=TransferState.IN_FLIGHT,
+            error="TENT did not settle batch 7 within 60.0s.",
+        )
+    ]
+
+    failed_reqs, unresolved_reqs, error = worker._send_blocks(
+        "host:1234", [0x1000], [0x2000], [8], ["d-req-1"]
+    )
+
+    assert failed_reqs == []
+    assert unresolved_reqs == ["d-req-1"]
+    assert error == "TENT did not settle batch 7 within 60.0s."
+    assert worker._transfer_unresolved
+    assert worker.xfer_stats.num_successful_transfers == 0
+
+
+def test_send_blocks_refuses_to_transfer_after_an_unconfirmed_stop():
+    worker = _bare_worker()
+    worker._transfer_unresolved = True
+
+    with pytest.raises(RuntimeError, match="could not be confirmed stopped"):
+        worker._send_blocks("host:1234", [0x1000], [0x2000], [8], ["d-req-1"])
+
+
+def test_send_blocks_submits_one_range_per_descriptor():
+    worker = _bare_worker()
+    worker.transfer_backend.events = [
+        TransferEvent(state=TransferState.COMPLETED),
+        TransferEvent(state=TransferState.COMPLETED),
+    ]
+
+    worker._send_blocks(
+        "host:1234", [0x1000, 0x2000], [0x3000, 0x4000], [8, 16], ["d-req-1", "d-req-2"]
+    )
+
+    _, op, ranges = worker.transfer_backend.calls[0]
+    assert op is TransferOp.WRITE
+    assert [
+        (request.local_addr, request.remote_addr, request.length) for request in ranges
+    ] == [
+        (0x1000, 0x3000, 8),
+        (0x2000, 0x4000, 16),
+    ]
 
 
 def test_get_kv_connector_stats_returns_none_when_empty():
@@ -260,8 +400,8 @@ def test_get_kv_connector_stats_returns_none_when_empty():
 
 def test_get_kv_connector_stats_returns_and_resets():
     worker = _bare_worker()
-    worker.engine.batch_transfer_sync_write.return_value = 0
-    worker._send_blocks("host:1234", [0x1000], [0x2000], [4096])
+    worker.transfer_backend.events = [TransferEvent(state=TransferState.COMPLETED)]
+    worker._send_blocks("host:1234", [0x1000], [0x2000], [4096], ["d-req-1"])
 
     snapshot = worker.get_kv_connector_stats()
     assert isinstance(snapshot, MooncakeKVConnectorStats)

@@ -81,11 +81,32 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 - **num_workers**: Size of thread pool for one prefiller worker to transfer KV caches by mooncake. (default 10)
 - **mooncake_protocol**: Mooncake connector protocol. (default "rdma")
 - **device_name**: Comma-separated whitelist of RDMA devices (e.g. `"mlx5_0,mlx5_1"`) to restrict topology discovery to. Empty discovers every device. Useful on hosts exposing a mix of InfiniBand and RoCE ports, where both peers must settle on the same link layer.
+- **transfer_engine**: `"te"` (default) or `"tent"`, the Mooncake transfer engine that moves the KV blocks. `"te"` is Mooncake's Transfer Engine; `"tent"` is Transfer Engine NEXT. Left unset, `MC_USE_TENT` or `MC_USE_TEV1` selects `"tent"`; setting `"te"` while either variable is set is an error rather than a silent override. Both sides of a transfer must run the same engine, and a peer that disagrees is rejected when it registers a transfer.
+- **tent_config**: Optional object deep-merged into the TENT configuration vLLM generates. The generated keys cover `metadata_type`, `rpc_server_hostname`, the requested transport, the RDMA device whitelist and the metrics port; overrides replace them.
+- **transfer_timeout_s**: Seconds a `"tent"` transfer waits for the engine before giving up on it. (default 60) `0` waits forever, which leaves a sender pinned when a peer disappears mid-transfer. Ranges that run out of time are failed only when TENT confirms the batch stopped; otherwise their requests are not retried, because the engine may still write to the same memory.
 - **kv_lease_duration**: Seconds the prefiller holds a finished request's KV blocks before the decoder must renew them. (default unset)
     - Unset keeps the fixed `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`.
     - When set, the decoder renews the lease every `kv_lease_duration / 6` seconds from the time the request arrives until its pull settles, and each renewal extends it to at least `kv_lease_duration * 2 / 3` seconds from then, as in [NixlConnector](../design/nixl_kv_cache_lease.md). Blocks of a decoder that crashed are freed within about `kv_lease_duration` seconds, while requests queued on a busy decoder keep their blocks.
     - Set the same value on prefill and decode instances. A decoder without it does not renew, so its requests that wait longer than the lease lose their prefilled KV; a prefiller without it rejects renewals, and the decoder logs a warning. Prefill instances from releases without this option log an error for each renewal they receive, so upgrade them before enabling it on decode instances.
 - **bootstrap_server_address**: Optional `"host:port"` of an already running Mooncake bootstrap server. All prefiller ranks register with this endpoint instead of launching an embedded server. The caller owns the server lifetime and must configure the proxy to use the same endpoint. The example proxy assumes the bootstrap server is on the prefiller API host; a different host requires a proxy that supplies that address in `remote_bootstrap_addr`. Omit this option to use the embedded server and `VLLM_MOONCAKE_BOOTSTRAP_PORT`.
+
+!!! note
+    `transfer_engine: "tent"` needs a `tent` Python module in the Mooncake build (`-DUSE_TENT=ON`), so keep `te` unless the deployment ships TENT. Serving KV blocks that live in GPU memory also needs `-DUSE_CUDA=ON`; without it, registering a CUDA tensor crashes inside TENT instead of reporting an error.
+
+### TENT transfer engine
+
+With `transfer_engine: "tent"`, vLLM submits the KV ranges of one request as TENT tasks and settles each range on its own:
+
+- Ranges that are neighbours on both sides travel as one task, up to 1 MiB, which keeps a request of many small blocks from paying one Python object per block. A single range larger than that limit is left as it is, and every range still gets its own outcome. Ranges contiguous on only one end cannot fold, and that shape stays slower than the Transfer Engine.
+- A batch that fails in part reports only the failed requests to the decoder, which reschedules the blocks behind them; the ranges that completed keep their data.
+- An engine call that fails, a transfer the engine cancels, and a submission refused during shutdown all come back as failed ranges instead of an exception, so the requests and the blocks behind them are released.
+- Whether a range counts as failed depends on TENT confirming it stopped. Cancelled, rejected and completed batches settle every range, so those ranges report `COMPLETED`, `FAILED` or `CANCELED`. When the batch cannot be confirmed stopped — the engine refuses to cancel it, or its status cannot be read — the ranges are reported as still in flight, the request keeps its KV blocks reserved, and the worker refuses further transfers rather than reuse memory the engine may still be writing. The prefill worker passes those requests to the decoder in the reply, and the decoder keeps them reserved as well instead of completing or rescheduling them.
+- `shutdown` stops submitting, cancels what is still queued, waits for the rest, and raises when a batch is still running, because releasing its KV memory would corrupt the transfer; peer segments stay open with it. A batch the engine will not free keeps the state its ranges reported, and the next `shutdown` retries the release.
+- The engine names its segment after the configured `rpc_server_hostname`; that name has to be the address peers reach this worker by, and vLLM refuses to start when the advertised segment does not match.
+- The engine kind and the connector wire version travel in the registration message. A peer that runs the other engine, or speaks another version, is rejected when it registers a transfer instead of failing later inside the engine.
+- `num_workers` still sizes the sender pool that submits batches; TENT moves the data itself on its own threads. Concurrent submissions to one RDMA link compete for the same hardware, so a TENT deployment usually wants `num_workers` between 1 and 4 rather than the default 10.
+- TENT exports its own metrics when Mooncake is built with `TENT_METRICS_ENABLED`; vLLM sets `metrics.http_port` to `9100 + device_index` so that ranks on one host do not collide. Override it through `tent_config`.
+- `mooncake_protocol` and `device_name` keep their meaning: the protocol selects the TENT transport, and the whitelist becomes `topology/rdma_whitelist`. A transport the connector did not advertise is disabled in the generated configuration.
 
 ## Prometheus metrics
 
@@ -110,6 +131,11 @@ The following Prometheus metrics are exported when MooncakeConnector is active, 
     lease duration is too short for your network or workload. Increase
     `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`, or set `kv_lease_duration` on both
     instances so that queued requests keep their blocks.
+
+!!! note
+    These metrics come from the connector. With `transfer_engine: "tent"` the
+    engine exports its own set on a separate HTTP port; see the TENT section
+    above.
 
 ## Example Scripts/Code
 
