@@ -11,6 +11,7 @@ from transformers import LlamaConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.draft_vocab import DraftVocab
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -335,14 +336,10 @@ class Eagle3LlamaForCausalLM(_Eagle3LlamaForCausalLMBase):
         self.logits_processor = LogitsProcessor(
             self.config.draft_vocab_size, scale=logit_scale
         )
-        target_vocab_size = vllm_config.model_config.get_vocab_size()
-        if self.config.draft_vocab_size != target_vocab_size:
-            self.draft_id_to_target_id = nn.Parameter(
-                torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
-                requires_grad=False,
-            )
-        else:
-            self.draft_id_to_target_id = None
+        self.draft_vocab = DraftVocab(
+            self.logits_processor, vllm_config.model_config.get_vocab_size()
+        )
+        self.draft_id_to_target_id = self.draft_vocab.draft_id_to_target_id
 
         self.use_parallel_drafting = speculative_config.parallel_drafting
 
@@ -374,25 +371,7 @@ class Eagle3LlamaForCausalLM(_Eagle3LlamaForCausalLMBase):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states)
-        if self.draft_id_to_target_id is None:
-            assert logits.shape[1] == self.config.vocab_size, (
-                "Expected logits to have shape "
-                f"(*, {self.config.vocab_size}), but got {logits.shape}"
-            )
-            return logits
-
-        base = torch.arange(self.config.draft_vocab_size, device=logits.device)
-        targets = base + self.draft_id_to_target_id
-        logits_new = logits.new_full(
-            (
-                logits.shape[0],
-                self.config.vocab_size,
-            ),
-            float("-inf"),
-        )
-        logits_new[:, targets] = logits
-        return logits_new
+        return self.draft_vocab.compute_logits(self.lm_head, hidden_states)
 
     def combine_hidden_states(
         self,
