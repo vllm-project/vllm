@@ -38,6 +38,7 @@ class _SpeculativeConfig:
     attention_backend: str | None = None
     moe_backend: str | None = None
     kv_cache_dtype: str | None = None
+    batch_invariant: bool | None = None
     draft_model_config: object = None
     draft_load_config: object = None
 

@@ -165,6 +165,10 @@ When batch invariance is enabled, vLLM:
 !!! note
     Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
 
+### Speculative Decoding
+
+With speculative decoding (model runner V2), `"batch_invariant": false` in `--speculative-config` lets the drafter use MoE kernels that are not batch invariant. The batch-invariant target still decides every output token and logprob. With temperature > 0, which token a seeded request samples can then depend on batch composition, so the default (unset) keeps the drafter batch invariant.
+
 ## Future Improvements
 
 The batch invariance feature is under active development. Planned improvements include:
