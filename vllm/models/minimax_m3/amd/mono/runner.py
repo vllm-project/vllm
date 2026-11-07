@@ -83,7 +83,8 @@ def dense_prefix(layers) -> int:
     while n < len(layers) and not layers[n].is_moe_layer:
         n += 1
     if n == len(layers) or not all(
-        lyr.is_moe_layer and hasattr(lyr.self_attn, "indexer") for lyr in layers[n:]
+        lyr.is_moe_layer and getattr(lyr.self_attn, "indexer", None) is not None
+        for lyr in layers[n:]
     ):
         raise MonoUnsupported("layer mix: dense layers must precede the MoE layers")
     return n
