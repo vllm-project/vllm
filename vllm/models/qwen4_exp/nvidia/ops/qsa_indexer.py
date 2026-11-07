@@ -11,9 +11,13 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
+from vllm.utils.platform_utils import num_compute_units
 
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
 _DECODE_BLOCK_N = 64
+# sm_80 prefill scoring takes the wide BLOCK_N 128 tile only when its grid
+# still fills this many CTAs per SM; see _prefill_launch_config.
+_SM80_PREFILL_WIDE_MIN_CTAS_PER_SM = 2
 
 
 @triton.jit
@@ -378,6 +382,45 @@ def warmup_qsa_mqa_paged_decode(
     return profiles
 
 
+def _prefill_launch_config(
+    num_requests: int, query_rows: int, logits_width: int, cache_dtype: torch.dtype
+) -> dict[str, int]:
+    """Launch kwargs of _qsa_mqa_paged_prefill_kernel for one logits chunk."""
+    if cache_dtype == torch.bfloat16 and current_platform.is_device_capability(80):
+        # A100 (BF16 cache): the GB300 config (16 K tiles per CTA) leaves most
+        # of the 108 SMs idle. Two K tiles per CTA were faster at every
+        # measured chunk; BLOCK_N 128 when that grid still gives at least two
+        # CTAs per SM, else BLOCK_N 32.
+        wide_ctas = (
+            num_requests
+            * triton.cdiv(query_rows, 32)
+            * triton.cdiv(logits_width, 128 * 2)
+        )
+        if wide_ctas >= _SM80_PREFILL_WIDE_MIN_CTAS_PER_SM * num_compute_units():
+            block_n, stages = 128, 2
+        else:
+            block_n, stages = 32, 1
+        return {
+            "TILE_R": 32,
+            "BLOCK_N": block_n,
+            "K_TILES": 2,
+            "STAGES": stages,
+            "num_warps": 4,
+        }
+    # tuned on GB300
+    if cache_dtype == torch.float8_e4m3fn:
+        tile_r, num_warps = 32, 8
+    else:
+        tile_r, num_warps = 64, 4
+    return {
+        "TILE_R": tile_r,
+        "BLOCK_N": 64,
+        "K_TILES": 16,
+        "STAGES": 2,
+        "num_warps": num_warps,
+    }
+
+
 def _prefill_logits(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -402,17 +445,16 @@ def _prefill_logits(
         num_queries, logits_width
     )
 
-    # tuned on GB300
-    if k_cache.dtype == torch.float8_e4m3fn:
-        TILE_R, STAGES, num_warps = 32, 2, 8
-    else:
-        TILE_R, STAGES, num_warps = 64, 2, 4
-    BLOCK_N = 64
-    K_TILES = 16
+    query_rows = min(num_queries, max_query_len)
+    launch_config = _prefill_launch_config(
+        page_table.shape[0], query_rows, logits_width, k_cache.dtype
+    )
     grid = (
         page_table.shape[0],
-        triton.cdiv(min(num_queries, max_query_len), TILE_R),
-        triton.cdiv(logits_width, BLOCK_N * K_TILES),
+        triton.cdiv(query_rows, launch_config["TILE_R"]),
+        triton.cdiv(
+            logits_width, launch_config["BLOCK_N"] * launch_config["K_TILES"]
+        ),
     )
     _qsa_mqa_paged_prefill_kernel[grid](
         q,
@@ -431,11 +473,7 @@ def _prefill_logits(
         PAGE_SIZE=k_cache.shape[1],
         NUM_HEADS=q.shape[1],
         HEAD_DIM=q.shape[2],
-        TILE_R=TILE_R,
-        BLOCK_N=BLOCK_N,
-        K_TILES=K_TILES,
-        STAGES=STAGES,
-        num_warps=num_warps,
+        **launch_config,
     )
     return logits
 
