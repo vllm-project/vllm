@@ -414,8 +414,9 @@ class DeepGemmMegaMoEExperts(nn.Module):
         """Register the routed and fused shared-expert parameters.
 
         Routed parameters are indexed by local expert on dim 0, which EPLB moves,
-        except ``w13_weight_scale_2``: ``(2, e)``, so its w1 row is the kernel's
-        contiguous L1 alpha.
+        except ``w13_weight_scale_2``, ``(2, e)`` so its w1 row is the kernel's
+        contiguous L1 alpha, and ``w2_input_scale``, indexed by logical expert on
+        every rank and not moved.
         """
         e, h, i = self.num_local_experts, self.hidden_size, self.intermediate_size
         fmt = self.weight_format
@@ -427,15 +428,15 @@ class DeepGemmMegaMoEExperts(nn.Module):
             # on the L2 activation scale and EPLB can move experts.
             for name, shape, dummy in (
                 ("w13_weight_scale_2", (2, e), 1e-3),
-                ("w2_weight_scale_2", (e,), None),
+                ("w2_weight_scale_2", (e,), 1e-3),
                 ("w2_input_scale", (self.num_logical_experts,), 1.0),
             ):
                 scale = nn.Parameter(
                     torch.zeros(shape, dtype=torch.float32), requires_grad=False
                 )
-                if dummy is not None:
-                    # Dummy loads keep w1 and w3 equal and the L2 scale at 1.
-                    set_weight_attrs(scale, {"dummy_weight_value": dummy})
+                # Dummy loads keep the scales positive, w1 and w3 equal and the
+                # L2 scale at 1.
+                set_weight_attrs(scale, {"dummy_weight_value": dummy})
                 self.register_parameter(name, scale)
             # w2 global weight scale times the L2 activation scale, per launch.
             l2_alpha = torch.zeros(e, dtype=torch.float32)
@@ -591,7 +592,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         if is_scale:
             # Byte views of both sides, (rows, K / 4, 4): a load plan replays a copy
             # between them, not one into an int32 reinterpretation of the scales.
-            src = self._pack_scale(src, rows, dst.shape[1] * 4).unflatten(-1, (-1, 4))
+            src = self._expand_scale(src, rows, dst.shape[1] * 4).unflatten(-1, (-1, 4))
             dst = dst.unsqueeze(-1).view(torch.uint8)
         else:
             src = src.view(dst.dtype)
@@ -604,7 +605,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         dst.copy_(src)
 
     @staticmethod
-    def _pack_scale(sf: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
+    def _expand_scale(sf: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
         """Block scales as bytes at the kernel granularity, ``(rows, cols)``."""
         sf = sf.view(torch.uint8)
         if rows % sf.shape[0] or cols % sf.shape[1]:
@@ -738,19 +739,15 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 f"stride={tuple(t.stride())} dtype={t.dtype}"
             )
 
-        # w2_input_scale holds every logical expert on every rank;
-        # w13_weight_scale_2 has the expert dim second, so it goes by row.
-        skip = ("w2_input_scale", "w13_weight_scale_2")
-        tensors = [
-            (name, param)
-            for name, param in self.named_parameters(recurse=False)
-            if not name.startswith("shared_") and name not in skip
-        ]
-        if self.weight_format.routed.has_global_scale:
-            tensors += [
-                ("w13_weight_scale_2", s) for s in self.w13_weight_scale_2.unbind(0)
-            ]
-        return [_to_eplb_view(name, t) for name, t in tensors]
+        views = []
+        for name, param in self.named_parameters(recurse=False):
+            # w2_input_scale holds every logical expert on every rank.
+            if name.startswith("shared_") or name == "w2_input_scale":
+                continue
+            # w13_weight_scale_2 has the expert dim second, so it goes by row.
+            rows = param.unbind(0) if name == "w13_weight_scale_2" else (param,)
+            views += [_to_eplb_view(name, t) for t in rows]
+        return views
 
     def update_expert_map(self) -> None:
         pass
