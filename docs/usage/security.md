@@ -106,6 +106,10 @@ Setting any of these to `0` disables the corresponding limit. This is **not
 recommended** for deployments exposed to untrusted users, as it removes the
 protection against resource-exhaustion attacks.
 
+Ovis2.5 also applies `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` to the aggregate
+float32 image and video tensors produced by each processor call, including
+minimum-size upscaling and temporal padding, before allocating those tensors.
+
 ## Security and Firewalls: Protecting Exposed vLLM Systems
 
 While vLLM is designed to allow unsafe network services to be isolated to
