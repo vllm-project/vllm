@@ -91,9 +91,10 @@ steps:
   # the reload code and what the test drives directly; the nightly steps
   # cover the quantization, MoE, attention and model files
   source_file_dependencies:
-  - vllm/device_allocator/cumem.py
+  - vllm/device_allocator/
   - vllm/model_executor/model_loader/reload/
   - vllm/model_executor/model_loader/mtp_validation.py
+  - vllm/model_executor/model_loader/utils.py
   - vllm/model_executor/model_loader/weight_checksum.py
   - vllm/model_executor/model_loader/weight_utils.py
   - vllm/distributed/weight_transfer/
