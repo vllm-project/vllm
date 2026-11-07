@@ -27,6 +27,7 @@ import torch
 from torch import nn
 
 from vllm.logger import init_logger
+from vllm.model_executor import hw_agnostic
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
 from vllm.model_executor.layers.layernorm import LayerNorm
 from vllm.model_executor.layers.linear import (
@@ -128,6 +129,9 @@ def replace_linear_class(
     if not isinstance(style, str):
         raise ValueError(f"Unsupported parallel style type {type(style)}, expected str")
 
+    ColumnParallelLinear = hw_agnostic.resolve("linear", "ColumnParallelLinear")
+    RowParallelLinear = hw_agnostic.resolve("linear", "RowParallelLinear")
+    ReplicatedLinear = hw_agnostic.resolve("linear", "ReplicatedLinear")
     vllm_linear_cls, vllm_linear_kwargs = {
         "colwise": (ColumnParallelLinear, {}),
         "rowwise": (RowParallelLinear, {}),

@@ -1422,9 +1422,9 @@ def test_head_counts_come_from_the_module_not_the_model(
     # the fuser derives are under test here.
     captured = {}
     monkeypatch.setattr(
-        fuser_module,
-        "QKVParallelLinear",
-        lambda **kwargs: captured.update(kwargs) or nn.Identity(),
+        fuser_module.hw_agnostic,
+        "resolve",
+        lambda *_: lambda **kwargs: captured.update(kwargs) or nn.Identity(),
     )
     monkeypatch.setattr(
         fuser_module, "replace_linear_class", lambda *a, **kw: nn.Identity()
