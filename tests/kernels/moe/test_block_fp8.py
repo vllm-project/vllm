@@ -310,6 +310,43 @@ def test_w8a8_block_fp8_fused_moe(
     torch.testing.assert_close(m_out, ref_out_m, atol=tol, rtol=tol)
 
 
+@torch.inference_mode()
+def test_block_fp8_scalar_b_scale(workspace_init):
+    """Compile the scalar block-scale path used by small FP8 MoE batches."""
+    M, N, K, E, topk = 1, 128, 128, 2, 1
+    dtype = torch.bfloat16
+    torch.manual_seed(0)
+
+    a = torch.randn((M, K), dtype=dtype) / 10
+    score = torch.randn((M, E), dtype=dtype)
+    w1, w2, quant_config = make_test_quant_config(
+        E,
+        N,
+        K,
+        dtype,
+        quant_dtype=current_platform.fp8_dtype(),
+        per_act_token_quant=False,
+        block_shape=[128, 128],
+    )
+    moe = modular_triton_fused_moe(make_dummy_moe_config(), quant_config)
+    topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+
+    with set_current_vllm_config(vllm_config):
+        out = moe.apply(
+            a,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            activation=MoEActivation.SILU,
+            apply_router_weight_on_input=False,
+            expert_map=None,
+            global_num_experts=E,
+        )
+
+    assert out.shape == (M, K)
+
+
 @pytest.mark.parametrize("M", [24, 1024])
 @pytest.mark.parametrize("modular", [False, True])
 @torch.inference_mode()

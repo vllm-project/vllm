@@ -572,7 +572,12 @@ def fused_moe_kernel(
                     a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
                 )
                 b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
-                if SWAP_AB:
+                if group_n >= BLOCK_SIZE_N and group_n % BLOCK_SIZE_N == 0:
+                    if SWAP_AB:
+                        accumulator += tl.dot(b, a) * b_scale * a_scale[None, :]
+                    else:
+                        accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale
+                elif SWAP_AB:
                     accumulator += tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
                 else:
                     accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
