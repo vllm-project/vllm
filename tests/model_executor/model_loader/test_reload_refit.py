@@ -363,6 +363,9 @@ class RefitCase:
     model_b: str | None = None
     engine: dict = field(default_factory=dict)  # other engine arguments
     marks: tuple = ()
+    # level-2 sleep before each reload, waking weights before and the KV
+    # cache after it, as RL colocated with training does
+    sleep: bool = False
 
     @property
     def num_gpus(self) -> int:
@@ -377,6 +380,7 @@ class RefitCase:
         layout += [f"dp{dp}"] if dp > 1 else []
         layout += ["ep"] if p.get("enable_expert_parallel") else []
         layout += ["eplb"] if p.get("enable_eplb") else []
+        layout += ["sleep"] if self.sleep else []
         return "-".join([self.family, self.quant, *layout])
 
 
@@ -389,11 +393,19 @@ DP2_EP = dict(data_parallel_size=2, enable_expert_parallel=True)
 DEEPSEEK_V3 = "inference-optimization/DeepSeek-V3-debug-empty"
 DEEPSEEK_V3_FP8 = f"{DEEPSEEK_V3}-FP8_DYNAMIC"
 
+NIGHTLY = (pytest.mark.slow_test,)  # CI runs these in the nightly step only
+QWEN3_FP8 = "inference-optimization/Qwen3-0.6B-FP8_BLOCK"
+
 REFIT_CASES = [
     # one GPU
-    RefitCase("qwen3", "bf16", "Qwen/Qwen3-0.6B"),
-    RefitCase("qwen3", "fp8-block", "inference-optimization/Qwen3-0.6B-FP8_BLOCK"),
-    RefitCase("qwen3", "w4a16", "inference-optimization/Qwen3-0.6B-W4A16-G128"),
+    RefitCase("qwen3", "bf16", "Qwen/Qwen3-0.6B", marks=NIGHTLY),
+    RefitCase("qwen3", "fp8-block", QWEN3_FP8),
+    RefitCase(
+        "qwen3", "fp8-block", QWEN3_FP8, engine=dict(enable_sleep_mode=True), sleep=True
+    ),
+    RefitCase(
+        "qwen3", "w4a16", "inference-optimization/Qwen3-0.6B-W4A16-G128", marks=NIGHTLY
+    ),
     # checkpoint k/v scales; no in-scope family has a small one
     RefitCase(
         "llama",
@@ -409,9 +421,9 @@ REFIT_CASES = [
             ),
         ),
     ),
-    RefitCase("deepseek-v3", "bf16", DEEPSEEK_V3),
+    RefitCase("deepseek-v3", "bf16", DEEPSEEK_V3, marks=NIGHTLY),
     RefitCase("deepseek-v3", "fp8", DEEPSEEK_V3_FP8),
-    RefitCase("deepseek-v3", "nvfp4a16", f"{DEEPSEEK_V3}-NVFP4A16"),
+    RefitCase("deepseek-v3", "nvfp4a16", f"{DEEPSEEK_V3}-NVFP4A16", marks=NIGHTLY),
     RefitCase("gpt-oss", "mxfp4", "openai/gpt-oss-20b"),  # padded MoE
     RefitCase("nemotron-h", "bf16", "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"),
     # two GPUs
@@ -477,7 +489,8 @@ async def test_refit_equals_fresh(case: RefitCase, checkpoints, monkeypatch):
         pytest.skip("Requires FP8 support")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     # fresh and refit engines compile separately (their model paths differ):
-    # fixed Inductor reduction configs keep their numerics equal
+    # fixed Inductor reduction configs keep their numerics equal, and a
+    # cached artifact compiled without them must not be loaded
     monkeypatch.setenv("TORCHINDUCTOR_DETERMINISTIC", "1")
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
     folder_a, folder_b, unchanged = checkpoints(case)
@@ -499,7 +512,12 @@ async def test_refit_equals_fresh(case: RefitCase, checkpoints, monkeypatch):
         tokens = {}
         steps = (("b", folder_b, fresh_b), ("a", folder_a, cold_a))
         for name, folder, expected in steps:
+            if case.sleep:
+                await engine.sleep(level=2)
+                await engine.wake_up(tags=["weights"])
             result[f"reload_{name}"] = await _rpc(engine, _stream_reload, folder)
+            if case.sleep:
+                await engine.wake_up(tags=["kv_cache"])
             tokens[name] = await _generate(engine, case)
             got = await _rpc(engine, _inspect)
             result[f"reload_{name}_differs"] = [

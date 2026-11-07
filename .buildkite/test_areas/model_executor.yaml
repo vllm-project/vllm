@@ -88,9 +88,10 @@ steps:
   device: b200-k8s
   key: weight-reload-refit
   timeout_in_minutes: 45
-  # the reload code and what the test drives directly; the 2xB200 step
-  # covers the quantization, MoE, attention and model files nightly
+  # the reload code and what the test drives directly; the nightly steps
+  # cover the quantization, MoE, attention and model files
   source_file_dependencies:
+  - vllm/device_allocator/cumem.py
   - vllm/model_executor/model_loader/reload/
   - vllm/model_executor/model_loader/mtp_validation.py
   - vllm/model_executor/model_loader/weight_checksum.py
@@ -112,15 +113,14 @@ steps:
     model_executor/model_loader/test_load_plan.py
   - >-
     pytest -v -s model_executor/model_loader/test_reload_refit.py
-    -m "not distributed" --timeout=900 --timeout-method=thread
+    -m "not distributed and not slow_test" --timeout=900 --timeout-method=thread
 
-- label: ":nvidia: (2xB200) [Nightly] Weight Reload Refit"
+- label: ":nvidia: (B200) [Nightly] Weight Reload Refit Extra Cases"
   device: b200-k8s
-  num_devices: 2
-  key: weight-reload-refit-2gpu
+  key: weight-reload-refit-nightly
   optional: true
   timeout_in_minutes: 45
-  source_file_dependencies:
+  source_file_dependencies: &weight-reload-refit-nightly-deps
   - vllm/config/vllm.py
   - vllm/envs.py
   - vllm/distributed/eplb/
@@ -148,6 +148,20 @@ steps:
   - vllm/v1/worker/extensible_kv_cache.py
   - vllm/v1/worker/gpu_worker.py
   - tests/model_executor/model_loader/test_reload_refit.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - export PYTHONFAULTHANDLER=1
+  - >-
+    pytest -v -s model_executor/model_loader/test_reload_refit.py
+    -m "slow_test and not distributed" --timeout=900 --timeout-method=thread
+
+- label: ":nvidia: (2xB200) [Nightly] Weight Reload Refit"
+  device: b200-k8s
+  num_devices: 2
+  key: weight-reload-refit-2gpu
+  optional: true
+  timeout_in_minutes: 45
+  source_file_dependencies: *weight-reload-refit-nightly-deps
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - export PYTHONFAULTHANDLER=1
