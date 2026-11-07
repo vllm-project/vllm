@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Static,
 )
+from vllm.model_executor.utils import get_live_param
 
 # The CuteDslFusedMoEW4A16Runner tactic for one GEMM.
 W4A16Tactic = tuple[tuple[int, int, int], tuple[int, int], bool]
@@ -66,7 +67,7 @@ def nemotron_w4a16_support(config: FusedMoEConfig) -> tuple[bool, str | None]:
         return False, "requires Lightning H2688/I1856/E128/top6"
     if parallel.tp_size != 1 or parallel.ep_size not in (1, 4):
         return False, "requires TP1 and EP1 or EP4"
-    if parallel.enable_eplb or parallel.use_batched_activation_format:
+    if parallel.enable_eplb or config.activation_format.is_batched:
         return False, "EPLB and batched-expert layouts are unsupported"
     if config.num_local_experts != 128 // parallel.ep_size:
         return False, "requires contiguous uniform expert ownership"
@@ -151,7 +152,7 @@ class FlashInferCuteDSLW4A16Experts(FlashInferCuteDSLExperts):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if getattr(layer, "w13_input_scale", None) is not None:
+        if get_live_param(layer, "w13_input_scale") is not None:
             raise ValueError("Unexpected activation scale after W4A16 conversion")
         if layer.expert_map is not None:
             expected = torch.full_like(layer.expert_map, -1)
