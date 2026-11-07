@@ -281,6 +281,9 @@ class CPUWorker(Worker):
             else:
                 from vllm.v1.worker.gpu.warmup import warmup_kernels
 
+            # CPU does not run kernel_warmup(), whose GPU-specific autotuning
+            # does not apply, so the registry is driven directly.
+            self.model_runner.jit_warmup_registry.warmup()  # type: ignore[attr-defined]
             warmup_kernels(
                 self.model_runner,
                 self.execute_model,
