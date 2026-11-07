@@ -860,12 +860,13 @@ def create_eplb_communicator(
         group_coordinator: Process-group coordinator that provides the
             device and CPU communication groups.
         backend: Communicator backend name (``"torch_nccl"``,
-            ``"torch_gloo"``, ``"pynccl"``, ``"nixl"``, or ``"symm_mem"``).
+            ``"torch_gloo"``, ``"pynccl"``, ``"torch_xccl"``, ``"nixl"``,
+            or ``"symm_mem"``).
             Falls back to ``"torch_nccl"`` when *None*.
             Stateless (elastic EP) groups support ``"torch_nccl"``,
-            ``"pynccl"``, and ``"nixl"``; ``"torch_nccl"`` is silently
-            promoted to ``"pynccl"``.  When tensors reside on CPU,
-            ``"torch_gloo"`` or
+            ``"pynccl"``, ``"torch_xccl"``, and ``"nixl"``; ``"torch_nccl"``
+            is silently promoted to ``"pynccl"``.  When tensors reside on
+            CPU, ``"torch_gloo"`` or
             ``"torch_nccl"`` are used via the CPU process group.
         expert_weights: Expert weight tensors for *all* MoE layers.
             Shape ``(num_layers)(num_tensors_per_layer)``.
@@ -922,11 +923,13 @@ def create_eplb_communicator(
 
     is_stateless = isinstance(group_coordinator, StatelessGroupCoordinator)
     if is_stateless and backend != "nixl":
-        if backend not in ("torch_nccl", "pynccl"):
+        if backend not in ("torch_nccl", "pynccl", "torch_xccl"):
             raise ValueError(
-                f"Elastic EP requires 'torch_nccl', 'pynccl', or 'nixl' "
-                f"EPLB communicator (got '{backend}')."
+                f"Elastic EP requires 'torch_nccl', 'pynccl', 'torch_xccl', "
+                f"or 'nixl' EPLB communicator (got '{backend}')."
             )
+        if backend == "torch_xccl":
+            return TorchDistXCCLStagedEplbCommunicator(ep_group=torch_group)
         if backend == "torch_nccl":
             logger.warning(
                 "Stateless elastic EP requires PyNCCL backend. "
