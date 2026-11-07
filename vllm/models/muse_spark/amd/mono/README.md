@@ -10,15 +10,21 @@ cover run vLLM's stock path.
 ## Scope
 
 - Deployment (checked at startup; a deployment that cannot run the kernels
-  raises): gfx950 with 256 CUs, tensor parallel size 8 with
-  `--enable-expert-parallel` (linear placement, 32 experts a rank, no EPLB),
+  raises): gfx950 with 256 CUs, tensor parallel size 8 or 4 with
+  `--enable-expert-parallel` (linear placement, 32 or 64 experts a rank, no
+  EPLB),
   no PP / DP / DCP / PCP, Quark OCP-MXFP4 W4A4 experts on `AITER_MXFP4_MXFP4`
   (shuffled weights and scales), the fused QK-norm / RoPE / KV insert,
-  `ROCM_AITER_FA` with a bf16 KV cache in the LBHNC layout (block size 16),
+  `ROCM_AITER_FA` with a bf16 or fp8 (`--kv-cache-dtype fp8` / `fp8_e4m3`)
+  KV cache in the LBHNC layout (block size 16),
   DSpark with 7 draft tokens, no LoRA, sleep mode or weight transfer, no KV
   connector or offloading.
 - Steps (checked every forward; anything else runs stock): uniform decode
-  verify batches of 1-16 requests x 8 tokens, FULL CUDA graph or eager.
+  verify batches of 1-16 requests x 8 tokens, FULL CUDA graph or eager. TP 4
+  has the K3 builds and the 32-row HA + HM + HB build (1-4 requests, no fused
+  attention): stage A and the QKV GEMV split K over KQ = TP CTAs, so each CTA
+  reads twice the K of the TP 8 build and owns two row pairs of every QKV
+  tile; the post-expert projection splits K in two instead of four.
   8 / 16 rows run K3 (S = 8 / 16); 24-128 rows run HA + HM + HB with the rows
   padded up to S = 32 / 64 / 96 / 128 (`nrows` = the real rows).
 
@@ -40,7 +46,7 @@ Fused attention: at 8, 16 and 24-32 rows every layer from layer 2 runs its
 verify attention at the head of K3_i / HA_i (`kernels/attn_frag.py`) instead
 of vLLM's op: split over all 256 CTAs by
 (request, kv head, key range), then merged before o_proj. It reads layer i's
-q from the previous launch, layer i's bf16 KV cache through its KV cache
+q from the previous launch, layer i's KV cache through its KV cache
 group's `block_table` (int32) and `seq_lens` (int32), the softmax scale of the
 layer's attention impl, and for sliding-window layers vLLM's window (2047, 0)
 (only blocks inside the window are read). The builds stage block ids for up
@@ -58,9 +64,14 @@ op. 40-128 rows keep vLLM's op.
 - KV: layer i+1's `kv_cache` `[block][kv head][16 tokens][K 64 | V 64]` bf16
   and its group's `slot_mapping` (`slot < 0` = graph padding, skipped); the
   block stride is a launch argument.
-- Fused attention: one descriptor table a build and step shape (10 words a
+- fp8 KV (e4m3): the insert stores `bf16(x) / k_scale` (or `v_scale`)
+  saturated to +-448 and rounded to nearest even, as vLLM's fused insert. The
+  fused attention widens e4m3 to bf16 (exact), multiplies the softmax scale
+  by `k_scale` and the output by `v_scale`. Both read the layer's
+  `_k_scale` / `_v_scale` (fp32, one element) by address.
+- Fused attention: one descriptor table a build and step shape (12 words a
   layer: q, KV cache and block stride, block table and row stride, seq_lens,
-  output, scratch, request count, scale). Tables are keyed by their contents
+  output, scratch, request count, scale, K / V scale pointers). Tables are keyed by their contents
   and written once (a pinned-buffer copy when first seen during graph capture).
 - q leaves without the QK scale: vLLM's attention applies
   `0.125 * qk_scale_factor` as its softmax scale.

@@ -16,6 +16,7 @@ from vllm.platforms import current_platform
 
 from .decoder import (
     FIRST_LAYER,
+    FP8_KV_DTYPES,
     LAST_LAYER,
     NUM_CUS,
     MonoDims,
@@ -110,17 +111,18 @@ def maybe_attach_mono(lm: nn.Module) -> None:
             + ("; ".join(reasons) or "a peer rank refused the deployment")
         )
     assert kernels is not None
-    buckets = built_buckets(lm.vllm_config.scheduler_config.max_num_seqs)
+    buckets = built_buckets(lm.vllm_config.scheduler_config.max_num_seqs, world_size)
     max_model_len = lm.vllm_config.model_config.max_model_len
     fused = fused_attention_layers(
-        model.layers, max_model_len, kernels.attn_frag.VLLM_MAX_KEYS
+        model.layers, max_model_len, kernels.attn_frag.VLLM_MAX_KEYS, world_size
     )
     if not fused:
         logger.info(
             "Muse Spark monokernel: verify attention unfused (max_model_len %d, "
-            "fused builds cover %d)",
+            "fused builds cover %d at TP 8; TP %d)",
             max_model_len,
             kernels.attn_frag.VLLM_MAX_KEYS,
+            world_size,
         )
     model.mono = MuseSparkMono(
         model,
@@ -131,15 +133,17 @@ def maybe_attach_mono(lm: nn.Module) -> None:
         dims=MonoDims.from_config(text_config, world_size),
         buckets=buckets,
         fused_attention=fused,
+        kv_fp8=lm.vllm_config.cache_config.cache_dtype in FP8_KV_DTYPES,
     )
     logger.info(
         "Muse Spark monokernel attached: layers %d-%d of verify steps with "
         "up to %d rows run as FlyDSL launches (builds S=%s; MoE activations "
-        "in bf16)",
+        "in bf16; %s KV cache)",
         FIRST_LAYER,
         LAST_LAYER,
         buckets[-1],
         ",".join(map(str, buckets)),
+        "fp8 e4m3" if model.mono.kv_fp8 else "bf16",
     )
 
 
