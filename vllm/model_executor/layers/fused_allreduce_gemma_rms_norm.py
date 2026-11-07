@@ -23,6 +23,10 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from vllm.model_executor.layers.linear import (
+    is_fp16_partial_sum,
+    unscale_fp16_partial_sums,
+)
 from vllm.platforms import current_platform
 
 MiB = 1024 * 1024
@@ -63,6 +67,14 @@ def _max_token_num(tp_size: int, hidden_size: int, dtype: torch.dtype) -> int | 
         return None
     element_size = torch.tensor([], dtype=dtype).element_size()
     return int(max_size_mb * MiB) // (hidden_size * element_size)
+
+
+def has_fused_allreduce_norm_budget(tp_size: int) -> bool:
+    """Whether FlashInfer fused all-reduce + RMSNorm has a workspace budget
+    for ``tp_size`` on this GPU (it may still fall back at runtime)."""
+    from vllm.config.compilation import PassConfig
+
+    return bool(PassConfig.default_fi_allreduce_fusion_max_size_mb().get(tp_size))
 
 
 def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool, int]:
@@ -152,6 +164,11 @@ def fused_allreduce_gemma_rms_norm(
     if tp_size == 1:
         # No all-reduce needed; identical to the unfused path.
         return norm(hidden_states, residual)
+
+    if is_fp16_partial_sum(hidden_states, residual):
+        # FP16 partial sums are never fused: all-reduce, unscale, norm.
+        reduced = tensor_model_parallel_all_reduce(hidden_states)
+        return norm(unscale_fp16_partial_sums(reduced, residual.dtype), residual)
 
     ok, max_token_num = _can_use_flashinfer(hidden_states, tp_size)
     if ok:

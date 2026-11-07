@@ -467,6 +467,7 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - vllm/model_executor/layers/linear.py
+  - vllm/model_executor/layers/fused_allreduce_gemma_rms_norm.py
   - vllm/model_executor/layers/mamba/gdn
   - vllm/model_executor/layers/utils.py
   - vllm/models/qwen3_5/

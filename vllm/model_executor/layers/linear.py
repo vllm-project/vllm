@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Literal
 
 import torch
@@ -1699,6 +1701,44 @@ def _fp16_partial_linear(
     return out.to(torch.float16).view(*x.shape[:-1], weight.shape[0])
 
 
+def fp16_partial_sum_unscale() -> float:
+    """2^k, the factor that undoes the 2^-k prescale of FP16 partial sums."""
+    return 2.0**envs.VLLM_TP_FP16_PARTIAL_SUMS_SHIFT
+
+
+def unscale_fp16_partial_sums(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """All-reduced FP16 partial sums times 2^k, rounded once to ``dtype``."""
+    # Exact: BF16 has FP32's exponent range, so rounding commutes with 2^k.
+    return x.to(dtype).mul_(fp16_partial_sum_unscale())
+
+
+_deferred_fp16_partial_sums = ContextVar("deferred_fp16_partial_sums", default=False)
+
+
+@contextmanager
+def deferred_fp16_partial_sums(enable: bool = True) -> Iterator[None]:
+    """Row-parallel layers built here with ``reduce_results=False`` write FP16
+    partial sums when their kernel can. Their callers all-reduce them and must
+    unscale them: see ``is_fp16_partial_sum`` and ``unscale_fp16_partial_sums``.
+    """
+    token = _deferred_fp16_partial_sums.set(enable)
+    try:
+        yield
+    finally:
+        _deferred_fp16_partial_sums.reset(token)
+
+
+def is_fp16_partial_sum(x: torch.Tensor, residual: torch.Tensor | None) -> bool:
+    """Whether ``x``, a deferred row-parallel output, holds FP16 partial sums
+    (its dtype differs from the residual's)."""
+    if residual is None or x.dtype == residual.dtype:
+        return False
+    assert envs.VLLM_TP_FP16_PARTIAL_SUMS and x.dtype == torch.float16, (
+        f"{x.dtype} partial sums with a {residual.dtype} residual"
+    )
+    return True
+
+
 # --8<-- [start:row_parallel_linear]
 @PluggableLayer.register("row_parallel_linear")
 class RowParallelLinear(LinearBase):
@@ -1918,7 +1958,7 @@ class RowParallelLinear(LinearBase):
             and self.params_dtype == torch.bfloat16
         ):
             return None
-        if not self.reduce_results:
+        if not (self.reduce_results or _deferred_fp16_partial_sums.get()):
             logger.warning_once(
                 "VLLM_TP_FP16_PARTIAL_SUMS: row-parallel layers with "
                 "reduce_results=False keep BF16 partial sums because the caller "
@@ -1970,7 +2010,7 @@ class RowParallelLinear(LinearBase):
             scope="global",
         )
         pass_config = get_current_vllm_config().compilation_config.pass_config
-        if pass_config.fuse_allreduce_rms:
+        if self.reduce_results and pass_config.fuse_allreduce_rms:
             logger.warning_once(
                 "VLLM_TP_FP16_PARTIAL_SUMS: fuse_allreduce_rms skips layers with "
                 "FP16 partial sums because their all-reduce does not match its "

@@ -37,6 +37,7 @@ from transformers import (
     Qwen3_5TextConfig,
 )
 
+import vllm.envs as envs
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -48,13 +49,20 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     flashinfer_trtllm_fused_allreduce_norm,
     fused_allreduce_gemma_rms_norm,
+    has_fused_allreduce_norm_budget,
 )
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
 )
-from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.linear import (
+    LinearBase,
+    deferred_fp16_partial_sums,
+    fp16_partial_sum_unscale,
+    is_fp16_partial_sum,
+    unscale_fp16_partial_sums,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
@@ -225,8 +233,10 @@ class Qwen3_5RMSNorm(nn.Module):
         is quantized for it; x is then not modified.
 
         Returns the quantized normed activation (or None), the normed
-        activation in x's dtype (when the quantized one is None, or when
-        ``write_y``; else None) and the residual (x when ``residual`` is None).
+        activation in the residual's dtype (when the quantized one is None,
+        or when ``write_y``; else None) and the residual (x when ``residual``
+        is None). An ``x`` with FP16 partial sums (``is_fp16_partial_sum``)
+        is unscaled before the residual add.
         """
         allreduce = self.reduce_inputs and residual is not None
         key = None if linear is None else _norm_quant_key(linear)
@@ -248,16 +258,26 @@ class Qwen3_5RMSNorm(nn.Module):
             )
             if out is not None:
                 return out
-            # Above the FlashInfer workspace budget: explicit all-reduce, then
-            # the Triton norm-quant.
+            # No fused kernel (above the workspace budget, or FP16 partial
+            # sums): explicit all-reduce, then the Triton norm-quant.
             x = tensor_model_parallel_all_reduce(x)
+        x_unscale = None
+        if is_fp16_partial_sum(x, residual):
+            x_unscale = fp16_partial_sum_unscale()
         q, block_scale, y = gemma_add_rms_norm_quant(
-            x, residual, self.weight, self.variance_epsilon, scale, nvfp4, write_y
+            x,
+            residual,
+            self.weight,
+            self.variance_epsilon,
+            scale,
+            nvfp4,
+            write_y,
+            x_unscale=x_unscale,
         )
         qa = QuantizedActivation(
             data=q,
             scale=block_scale,
-            orig_dtype=x.dtype,
+            orig_dtype=x.dtype if residual is None else residual.dtype,
             orig_shape=x.shape,
             quant_key=key,
         )
@@ -302,32 +322,45 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
             self.use_attn_reduce_scatter_for_moe or self.use_fused_allreduce_norm
         )
 
-        if self.layer_type == "linear_attention":
-            self.linear_attn = QwenGatedDeltaNetAttention(
-                config=config,
-                vllm_config=vllm_config,
-                prefix=f"{prefix}.linear_attn",
-                gqa_interleaved_layout=False,
-                reduce_results=reduce_results,
-                # This path runs outside torch.compile, as the overlap requires.
-                overlap_ba_proj=True,
-                # Recover the inductor gated-norm fusion (z read strided
-                # from packed qkvz), with out_proj's input quant fused in.
-                fused_gdn_gated_rms_norm=_fused_gdn_gated_rms_norm_quant,
+        # The deferred attention and dense MLP outputs carry FP16 partial sums,
+        # which the norms that all-reduce them unscale; MoE outputs keep BF16.
+        # Not where the FlashInfer fused all-reduce + RMSNorm may run: FP16
+        # partial sums are never fused.
+        fp16_deferred = (
+            envs.VLLM_TP_FP16_PARTIAL_SUMS
+            and self.use_fused_allreduce_norm
+            and not getattr(config, "layer_scale", False)
+            and not has_fused_allreduce_norm_budget(
+                get_tensor_model_parallel_world_size()
             )
-        elif self.layer_type == "full_attention":
-            self.self_attn = Qwen3NextAttention(
-                config,
-                model_config=model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.self_attn",
-                reduce_results=reduce_results,
-                mrope_positions_factor=mrope_positions_factor(vllm_config),
-            )
-            self.self_attn.use_fused_output_gate = True
-        else:
-            raise ValueError(f"Invalid layer_type {self.layer_type}")
+        )
+        with deferred_fp16_partial_sums(fp16_deferred):
+            if self.layer_type == "linear_attention":
+                self.linear_attn = QwenGatedDeltaNetAttention(
+                    config=config,
+                    vllm_config=vllm_config,
+                    prefix=f"{prefix}.linear_attn",
+                    gqa_interleaved_layout=False,
+                    reduce_results=reduce_results,
+                    # This path runs outside torch.compile, as the overlap requires.
+                    overlap_ba_proj=True,
+                    # Recover the inductor gated-norm fusion (z read strided
+                    # from packed qkvz), with out_proj's input quant fused in.
+                    fused_gdn_gated_rms_norm=_fused_gdn_gated_rms_norm_quant,
+                )
+            elif self.layer_type == "full_attention":
+                self.self_attn = Qwen3NextAttention(
+                    config,
+                    model_config=model_config,
+                    cache_config=cache_config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.self_attn",
+                    reduce_results=reduce_results,
+                    mrope_positions_factor=mrope_positions_factor(vllm_config),
+                )
+                self.self_attn.use_fused_output_gate = True
+            else:
+                raise ValueError(f"Invalid layer_type {self.layer_type}")
 
         if config.model_type == "qwen3_5_moe_text":
             self.mlp = Qwen3NextSparseMoeBlock(
@@ -354,14 +387,15 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                     moe_config.skip_final_all_reduce = False
                 self.mlp_output_is_partial = moe_partial_ok
         elif config.model_type == "qwen3_5_text":
-            self.mlp = Qwen3NextMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
-                reduce_results=not self.use_fused_allreduce_norm,
-            )
+            with deferred_fp16_partial_sums(fp16_deferred):
+                self.mlp = Qwen3NextMLP(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=config.intermediate_size,
+                    hidden_act=config.hidden_act,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp",
+                    reduce_results=not self.use_fused_allreduce_norm,
+                )
         else:
             raise ValueError(f"Invalid model_type {config.model_type}")
 
@@ -551,6 +585,8 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
             # hidden_states is an un-reduced TP partial; the aux capture needs
             # the complete hidden state.
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+            if is_fp16_partial_sum(hidden_states, residual):
+                hidden_states = unscale_fp16_partial_sums(hidden_states, residual.dtype)
         return super()._maybe_add_hidden_state(
             aux_hidden_states, layer_idx, hidden_states, residual
         )

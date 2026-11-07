@@ -107,3 +107,41 @@ def test_gemma_add_rms_norm_quant_matches_chain(
         dist = (_fp8_codes(q) - _fp8_codes(ref_q)).abs()
     assert dist.max().item() <= 1
     assert (dist > 0).float().mean().item() <= 1e-4
+
+
+@pytest.mark.parametrize("num_tokens", [1, 7, 129])
+@pytest.mark.parametrize("nvfp4", [False, True])
+@torch.inference_mode()
+def test_gemma_add_rms_norm_quant_fp16_partial_sums(num_tokens: int, nvfp4: bool):
+    """All-reduced FP16 partial sums unscaled in the kernel: bit-identical to
+    unscaling them to BF16 first."""
+    from vllm.models.qwen3_5.nvidia.ops.fused_norm_quant import (
+        gemma_add_rms_norm_quant,
+    )
+
+    H, shift = 5120, 2
+    g = torch.Generator(device="cuda").manual_seed(num_tokens)
+    w = (torch.rand(H, generator=g, device="cuda") * 3.5 - 1.0).bfloat16()
+    x16 = (torch.randn(num_tokens, H, generator=g, device="cuda") * 2**-shift).half()
+    # 24576 * 2^k only fits in BF16.
+    x16[::2, 3] = 24576.0
+    residual = (torch.randn(num_tokens, H, generator=g, device="cuda") * 4).bfloat16()
+    scale = torch.tensor([1 / 0.0013 if nvfp4 else 0.11], device="cuda")
+
+    ref_res = residual.clone()
+    ref_q, ref_sf, ref_y = gemma_add_rms_norm_quant(
+        x16.bfloat16() * 2**shift, ref_res, w, 1e-6, scale, nvfp4, write_y=True
+    )
+    res = residual.clone()
+    q, sf, y = gemma_add_rms_norm_quant(
+        x16, res, w, 1e-6, scale, nvfp4, write_y=True, x_unscale=2.0**shift
+    )
+
+    torch.testing.assert_close(res, ref_res, rtol=0, atol=0)
+    torch.testing.assert_close(y, ref_y, rtol=0, atol=0)
+    assert torch.equal(q.view(torch.uint8), ref_q.view(torch.uint8))
+    if nvfp4:
+        assert torch.equal(
+            _swizzled_sf_rows(sf, num_tokens, H),
+            _swizzled_sf_rows(ref_sf, num_tokens, H),
+        )

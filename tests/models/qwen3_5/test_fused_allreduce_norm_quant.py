@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TP2: ``Qwen3_5RMSNorm.forward_fused`` vs the unfused chain it replaces,
 (all-reduce +) Gemma norm, then scaled_fp8_quant / scaled_fp4_quant, for real
-ModelOpt static FP8 and NVFP4 consumers.
+ModelOpt static FP8 and NVFP4 consumers; with FP16 partial sums
+(VLLM_TP_FP16_PARTIAL_SUMS), vs all-reduce + unscale + the no-all-reduce path.
 
 All cases run in one 2-rank spawn; spawning per case re-imports vLLM and
 recreates the FlashInfer workspaces, which costs far more than the kernels.
@@ -39,11 +40,18 @@ def _worker(local_rank, world_size, port):
     from vllm import _custom_ops as ops
     from vllm.config import get_current_vllm_config
     from vllm.config.model import ModelConfig
-    from vllm.distributed import cleanup_dist_env_and_memory
+    from vllm.distributed import (
+        cleanup_dist_env_and_memory,
+        tensor_model_parallel_all_reduce,
+    )
     from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
         fused_allreduce_gemma_rms_norm,
     )
-    from vllm.model_executor.layers.linear import ReplicatedLinear
+    from vllm.model_executor.layers.linear import (
+        ReplicatedLinear,
+        fp16_partial_sum_unscale,
+        unscale_fp16_partial_sums,
+    )
     from vllm.model_executor.layers.quantization.modelopt import (
         ModelOptFp8Config,
         ModelOptNvFp4Config,
@@ -166,6 +174,56 @@ def _worker(local_rank, world_size, port):
             assert (dist > 0).float().mean().item() <= 1e-4
             assert sf_mismatch <= 1e-4
 
+    def run_fp16_partial_sums(nvfp4, num_tokens):
+        """FP16 partial sums (never fused) match all-reduce, unscale to BF16,
+        then the no-all-reduce path, bit for bit on any GPU."""
+        linear = None if nvfp4 is None else linears[nvfp4]
+        set_random_seed(42)
+        norm = Qwen3_5RMSNorm(HIDDEN_SIZE, eps=1e-6, reduce_inputs=True).cuda()
+        with torch.no_grad():
+            norm.weight.normal_(mean=0.0, std=0.1)
+            norm.weight.data = norm.weight.data.to(dtype)
+        torch.manual_seed(42 + 7)
+        residual = torch.randn(num_tokens, HIDDEN_SIZE, dtype=dtype, device=device)
+        torch.manual_seed(42 + 1000 + local_rank)
+        x = torch.randn(num_tokens, HIDDEN_SIZE, device=device)
+        x16 = (x / fp16_partial_sum_unscale()).half()
+        # The all-reduced 24000 * 2^k only fits in BF16.
+        x16[::2, 3] = 12000.0
+
+        reduced = tensor_model_parallel_all_reduce(x16.clone())
+        norm.reduce_inputs = False
+        ref_qa, ref_y, ref_res = norm.forward_fused(
+            unscale_fp16_partial_sums(reduced, dtype),
+            residual.clone(),
+            linear,
+            write_y=True,
+        )
+        norm.reduce_inputs = True
+        qa, y, res = norm.forward_fused(
+            x16.clone(), residual.clone(), linear, write_y=True
+        )
+        torch.accelerator.synchronize()
+
+        torch.testing.assert_close(res, ref_res, atol=0, rtol=0)
+        torch.testing.assert_close(y, ref_y, atol=0, rtol=0)
+        if linear is None:
+            assert qa is None and ref_qa is None
+            return
+        assert qa is not None and ref_qa is not None
+        assert qa.orig_dtype == dtype
+        assert torch.equal(qa.data.view(torch.uint8), ref_qa.data.view(torch.uint8))
+        if nvfp4:
+            assert torch.equal(
+                _swizzled_sf_rows(qa.scale, num_tokens, HIDDEN_SIZE),
+                _swizzled_sf_rows(ref_qa.scale, num_tokens, HIDDEN_SIZE),
+            )
+
+    # The FP16 cases first: unlike some of the cases below, they do not
+    # depend on the FlashInfer fused kernel being available.
+    for nvfp4 in (None, False, True):
+        for num_tokens in (1, 17, 333):
+            run_fp16_partial_sums(nvfp4, num_tokens)
     for nvfp4 in (False, True):
         for num_tokens in (1, 17, 333, FALLBACK_TOKENS):
             run_one(nvfp4, True, num_tokens)
@@ -175,9 +233,11 @@ def _worker(local_rank, world_size, port):
     cleanup_dist_env_and_memory()
 
 
-def test_forward_fused():
+def test_forward_fused(monkeypatch: pytest.MonkeyPatch):
     if current_platform.device_count() < WORLD_SIZE:
         pytest.skip(f"Need >= {WORLD_SIZE} GPUs")
+    # Inherited by the spawned ranks; BF16 inputs are unaffected.
+    monkeypatch.setenv("VLLM_TP_FP16_PARTIAL_SUMS", "1")
     spawn(
         _worker,
         args=(WORLD_SIZE, str(get_open_port())),

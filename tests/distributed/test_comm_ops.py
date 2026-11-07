@@ -794,6 +794,8 @@ def fp16_partial_sums_row_parallel_test_worker(
     - unquantized: bit-exact BF16 rounding of the FP16 sum of FP16 partials;
     - block FP8 ("kernel" mode, Fp8 and compressed-tensors): matches BF16
       partial sums up to rounding;
+    - deferred all-reduce (built in deferred_fp16_partial_sums()): the
+      caller's all-reduce + unscale matches the in-layer output bit for bit;
     - LoRA: falls back to BF16 partial sums.
     """
     from types import SimpleNamespace
@@ -804,6 +806,8 @@ def fp16_partial_sums_row_parallel_test_worker(
     from vllm.model_executor.layers.linear import (
         RowParallelLinear,
         _fp16_partial_linear,
+        deferred_fp16_partial_sums,
+        unscale_fp16_partial_sums,
     )
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
         CompressedTensorsConfig,
@@ -847,6 +851,28 @@ def fp16_partial_sums_row_parallel_test_worker(
     expected = (parts[0] + parts[1]).bfloat16() * layer._partial_sum_unscale
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
     assert errors["1"] < errors["0"], errors
+
+    # deferred all-reduce: the caller all-reduces and unscales, bit for bit
+    # the in-layer output; only layers built in deferred_fp16_partial_sums()
+    with set_current_vllm_config(VllmConfig()), torch.device("cuda"):
+        in_layer = RowParallelLinear(k, n, bias=False, params_dtype=torch.bfloat16)
+        bf16 = RowParallelLinear(
+            k, n, bias=False, params_dtype=torch.bfloat16, reduce_results=False
+        )
+        with deferred_fp16_partial_sums():
+            deferred = RowParallelLinear(
+                k, n, bias=False, params_dtype=torch.bfloat16, reduce_results=False
+            )
+    assert bf16._fp16_partials is None and deferred._fp16_partials == "gemm"
+    in_layer.weight.data.copy_(w[:, shard])
+    deferred.weight.data.copy_(w[:, shard])
+    out, _ = in_layer(x[:, shard])
+    part16, _ = deferred(x[:, shard])
+    assert part16.dtype == torch.float16
+    reduced = tensor_model_parallel_all_reduce(part16)
+    torch.testing.assert_close(
+        unscale_fp16_partial_sums(reduced, torch.bfloat16), out, rtol=0, atol=0
+    )
 
     # block FP8 ("kernel" mode): same output as BF16 partial sums up to rounding
     block = 128

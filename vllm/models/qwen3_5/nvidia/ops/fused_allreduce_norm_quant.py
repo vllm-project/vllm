@@ -24,6 +24,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.linear import is_fp16_partial_sum
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
@@ -108,6 +109,9 @@ def fused_allreduce_gemma_rms_norm_quant(
     ``hidden_states``' dtype, and the new residual (written into the
     ``hidden_states`` buffer), or None when the fused kernel does not apply.
     """
+    if is_fp16_partial_sum(hidden_states, residual):
+        # FP16 partial sums are never fused.
+        return None
     tp_size = get_tensor_model_parallel_world_size()
     workspace = _get_workspace(hidden_states, tp_size)
     if workspace is None:
