@@ -18,10 +18,6 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.mamba.checkpoint import (
-    MambaPrefillCheckpointBuilder,
-    MambaPrefillCheckpointMetadata,
-)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -108,7 +104,7 @@ def _mamba_get_block_table_tensor(
     kv_cache_spec: MambaSpec,
     mamba_cache_mode: str,
 ) -> torch.Tensor:
-    if mamba_cache_mode in ("all", "none"):
+    if mamba_cache_mode == "none":
         return block_table
 
     assert block_table.is_cuda and seq_lens.is_cuda
@@ -271,7 +267,6 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
     recoverssm_context: "KDARecoverSSMCommitContext | None" = field(
         default=None, repr=False, compare=False
     )
-    checkpoint: MambaPrefillCheckpointMetadata | None = None
 
     def commit_recoverssm_state(
         self, num_accepted_tokens: torch.Tensor
@@ -310,6 +305,10 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
     # so one k+1 graph replays any 1..k+1 mix.
     _cudagraph_support = AttentionCGSupport.ALWAYS
     mamba_aligned_state_indices: torch.Tensor | None = None
+    # Set by the specialized decode's deferred RecoverSSM (recoverssm/state.py).
+    recoverssm_pending: torch.Tensor | None
+    recoverssm_request_slots: torch.Tensor | None
+    recoverssm_record_rows: torch.Tensor
 
     def __init__(
         self,
@@ -319,9 +318,6 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.checkpoint_builder = MambaPrefillCheckpointBuilder(
-            vllm_config, kv_cache_spec
-        )
         additional_config = vllm_config.additional_config
         self.use_flashinfer_prefill = (
             isinstance(additional_config, dict)
@@ -359,6 +355,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             layers,
             spec_query_len=1 + self.vllm_config.num_speculative_tokens,
             max_num_reqs=self.vllm_config.scheduler_config.max_num_seqs,
+            backend=layers[0].recoverssm_backend,
         )
         self.recoverssm_context = context
         return context
@@ -411,26 +408,21 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     query_start_loc_cpu.diff() > 0
                 )
                 spec_sequence_masks_cpu |= active_decode_mask_cpu
-                # Adaptive's cost-table profiler probes eager dummy rows longer than
-                # RecoverSSM's num_spec+1 activation capacity; route them out instead
-                # of tripping the capacity check below.
+                # A row wider than RecoverSSM's num_spec+1 activation capacity is
+                # not a verify; route it to the non-spec path instead of tripping
+                # the capacity check below. Real rows never are (V2 marks them
+                # draft -1), but PIECEWISE capture dummies past
+                # max_num_seqs * (num_spec+1) tokens and adaptive's cost-table
+                # profiler rows are, and neither is prefilling.
                 spec_sequence_masks_cpu &= (
                     query_start_loc_cpu.diff() <= self.num_spec + 1
                 )
-            # Native KDA can use its regular decode path when no draft token
-            # was scheduled. RecoverSSM must preserve its extended conv window.
-            if (
-                not self.use_recoverssm
-                and num_decode_draft_tokens_cpu[spec_sequence_masks_cpu].sum().item()
-                == 0
-            ):
+            # A batch whose rows all drafted nothing still has to run the
+            # speculative path: that is the only path that applies each row's
+            # accepted-token offset to the recurrent state.
+            num_spec_decodes = spec_sequence_masks_cpu.sum().item()
+            if num_spec_decodes == 0:
                 spec_sequence_masks_cpu = None
-                num_spec_decodes = 0
-                active_non_spec_mask_cpu = None
-            else:
-                num_spec_decodes = spec_sequence_masks_cpu.sum().item()
-                if num_spec_decodes == 0:
-                    spec_sequence_masks_cpu = None
 
         spec_request_indices = None
         spec_token_start = None

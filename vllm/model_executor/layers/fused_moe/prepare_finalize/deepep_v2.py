@@ -12,7 +12,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
 )
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.fused_moe.utils import (
+    masked_amax_scale,
+    moe_kernel_quantize_input,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     swizzle_mxfp8_scale,
@@ -127,6 +130,11 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.use_cudagraph = use_cudagraph
         self.sp_size = sp_size
 
+        # Set by FusedMoEKernelModularImpl when the experts globalize
+        # recv_topk_idx themselves, letting the decode path skip the standalone
+        # _globalize_recv_topk_idx launch.
+        self.defer_globalize = False
+
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
 
@@ -152,7 +160,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+        return mk.FusedMoEActivationFormat.PaddedStandard
 
     def max_num_tokens_per_rank(self) -> int | None:
         return None
@@ -275,6 +283,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             # during profile_run when CUDA graphs are enabled.
             expert_tokens_meta = None
 
+        globalize_deferred = False
         if recv_topk_idx is None:
             # do_expand=True (prefill mode): build topk_ids from
             # per-expert token counts.
@@ -307,12 +316,15 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             #     be treated as real routed tokens by experts that build routing
             #     over *all* rows (e.g. triton MoE backend's make_routing_data),
             #     polluting the per-expert token lists and corrupting real tokens.
-            recv_topk_idx = _globalize_recv_topk_idx(
-                recv_topk_idx,
-                psum_recv_per_rank,
-                self.rank_expert_offset,
-                self.num_experts,
-            )
+            if self.defer_globalize and self.use_cudagraph:
+                globalize_deferred = True
+            else:
+                recv_topk_idx = _globalize_recv_topk_idx(
+                    recv_topk_idx,
+                    psum_recv_per_rank,
+                    self.rank_expert_offset,
+                    self.num_experts,
+                )
 
         # Reshape recv_topk_weights to match recv_topk_idx shape [N, 1]
         if recv_topk_weights is not None and recv_topk_weights.ndim == 1:
@@ -329,6 +341,9 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                     expert_num_tokens_cpu=None,
                 )
             expert_tokens_meta.psum_recv_per_rank = psum_recv_per_rank
+            if globalize_deferred:
+                # recv_topk_idx still holds LOCAL ids; experts globalize it.
+                expert_tokens_meta.rank_expert_offset = self.rank_expert_offset
 
         if _quantize_before_dispatch(quant_config, defer_input_quant):
             if quant_config.quant_dtype == "mxfp8" and expert_x_scale is not None:
@@ -340,11 +355,23 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         elif not defer_input_quant:
             expert_x_scale = None
             if expert_x.numel() != 0:
+                # Decode dispatches into a worst-case buffer and leaves the tail
+                # past `num_recv` uninitialized. Row-local scales tolerate that;
+                # a per-tensor scale must not reduce over those rows.
+                scale = a1_scale
+                if not recv_expert_num_tokens and quant_config.act_scale_is_tensor_wide(
+                    a1_scale
+                ):
+                    scale = masked_amax_scale(
+                        expert_x,
+                        quant_config.quant_dtype,
+                        num_valid=psum_recv_per_rank[-1:],
+                    )
                 expert_x, expert_x_scale = moe_kernel_quantize_input(
                     expert_x,
-                    a1_scale,
+                    scale,
                     quant_dtype=quant_config.quant_dtype,
-                    per_act_token_quant=False,
+                    per_act_token_quant=quant_config.per_act_token_quant,
                     block_shape=quant_config.block_shape,
                     is_scale_swizzled=quant_config.is_scale_swizzled,
                 )

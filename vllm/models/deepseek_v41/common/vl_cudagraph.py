@@ -25,6 +25,7 @@ from vllm.models.deepseek_v4.common.vision import (
     build_packed_merge_metadata,
     build_packed_vit_metadata,
 )
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphCaptureInputs,
     EncoderCudaGraphConfig,
@@ -93,8 +94,6 @@ class DeepseekV4VLEncoderCudaGraphMixin:
             grid = grid.tolist()
         return [[int(v) for v in row] for row in grid]
 
-    _encoder_cg_pad_totals: dict[int, int] = {}
-
     # -- SupportsEncoderCudaGraph protocol --
 
     def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
@@ -128,24 +127,13 @@ class DeepseekV4VLEncoderCudaGraphMixin:
                 "cudagraph_mm_encoder."
             )
 
-        pad_totals = self._encoder_cg_pad_totals
-
         def pad_cu_seqlens(dst: torch.Tensor, src: torch.Tensor) -> None:
-            # Varlen attention requires cu_seqlens[-1] to equal the number of
-            # rows actually passed in. The captured buffers are sized for the
-            # full token budget, so a smaller real batch is completed with one
-            # trailing padding sequence; declaring fewer rows than the buffer
-            # holds is undefined behaviour and returns NaN on FlashAttn.
-            total = pad_totals.get(dst.data_ptr())
-            if total is None:
-                raise RuntimeError(
-                    "cu_seqlens replay buffer was not registered at capture "
-                    "time; the manager must replay into the capture-time "
-                    "buffers."
-                )
+            # Zero-length padding (same as Qwen): tail slots repeat the last
+            # real offset, so FlashAttn schedules no work for padding rows.
             n = min(src.shape[0], dst.shape[0])
             dst[:n].copy_(src[:n])
-            dst[n:] = total
+            if n < dst.shape[0]:
+                dst[n:] = src[-1] if n else 0
 
         return EncoderCudaGraphConfig(
             modalities=["image"],
@@ -267,8 +255,8 @@ class DeepseekV4VLEncoderCudaGraphMixin:
             max_seqlen_override=total_patches,
             cached=False,
         )
-        # Spare cu_seqlens slots let replay append a padding sequence that
-        # covers the rows a smaller real batch does not fill.
+        # Spare cu_seqlens slots: replay pads smaller real batches with
+        # zero-length sequences (tail slots repeat the last real offset).
         real_cu = metadata.pop("cu_seqlens")
         cu_seqlens = torch.full(
             (max_batch_size + 2,), total_patches, dtype=torch.int32, device=device
@@ -276,8 +264,6 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         cu_seqlens[: real_cu.numel()] = real_cu
 
         merge = build_packed_merge_metadata(grids, r, device=device, dtype=dtype)
-
-        self._encoder_cg_pad_totals[cu_seqlens.data_ptr()] = total_patches
 
         return EncoderCudaGraphCaptureInputs(
             values={
@@ -302,7 +288,7 @@ class DeepseekV4VLEncoderCudaGraphMixin:
             patches = patches.to(dtype)
 
         # Unpadded: the manager zero-pads patches/cos/sin/merge buffers, and
-        # pad_cu_seqlens appends the padding sequence covering the tail rows.
+        # pad_cu_seqlens pads the tail with zero-length sequences.
         metadata = build_packed_vit_metadata(
             vit_grid,
             rope_dim=self.vision.rope_dim,
@@ -370,18 +356,23 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         r = self.config.vision_downsample_ratio
         vit_grid = self._get_grid_list(batch_mm_kwargs, "vit_grid")
         llm_grid = self._get_grid_list(batch_mm_kwargs, "llm_grid")
-        types = batch_mm_kwargs["types"].to(aligner_out.device)
+        types = batch_mm_kwargs["types"]
 
         n_rows = sum(-(-h // r) * (-(-w // r)) for h, w in vit_grid)
         span_lens = [lh * (lw + 1) + 2 for lh, lw in llm_grid]
 
-        # Batched span assembly: one masked fill per role across all items.
-        dtype = aligner_out.dtype
-        span = aligner_out.new_empty(sum(span_lens), self.config.hidden_size)
-        span[types == IMAGE] = aligner_out[:n_rows]
-        span[types == IMAGE_START] = self.image_start.to(dtype)
-        span[types == IMAGE_END] = self.image_end.to(dtype)
-        span[types == IMAGE_NEW_LINE] = self.image_newline.to(dtype)
+        # Batched span assembly: one gather over [aligner rows, START,
+        # NEW_LINE, END] for all items. The index is built from the host-side
+        # ``types`` so that neither the copy nor the gather syncs.
+        is_image = types == IMAGE
+        src_idx = torch.where(
+            is_image,
+            is_image.cumsum(0) - 1,
+            n_rows + (types == IMAGE_NEW_LINE).long() + 2 * (types == IMAGE_END).long(),
+        )
+        delims = torch.stack([self.image_start, self.image_newline, self.image_end])
+        src = torch.cat([aligner_out[:n_rows], delims.to(aligner_out.dtype)])
+        span = src[async_tensor_h2d(src_idx, aligner_out.device)]
 
         # Freshly allocated, so later replays cannot clobber the results.
         offset = 0

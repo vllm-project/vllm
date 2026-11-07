@@ -1,0 +1,320 @@
+meta:
+  title: "Kimi-K2.6"
+  slug: "kimi-k2.6"
+  provider: "Moonshot AI"
+  description: "Open-source native multimodal agentic MoE model with vision-language understanding, tool calling, and thinking modes"
+  date_added: 2026-04-20
+  date_updated: 2026-07-29
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "Multimodal agentic MoE model with DeepSeek-V3 backbone and MLA attention"
+  related_recipes: []
+  hardware:
+    h200: verified
+    b300: verified
+    gb200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "moonshotai/Kimi-K2.6"
+  min_vllm_version: "0.25.0"
+  docker_image:
+    nvidia: "vllm/vllm-openai:latest"
+    amd: "vllm/vllm-openai-rocm:nightly"
+  install:
+    pip:
+      note: "The optimized B300 EAGLE3 and native CPU KV offload path requires vLLM >= 0.25.0."
+  architecture: moe
+  parameter_count: "1T"
+  active_parameters: "32B"
+  context_length: 262144
+  supports_dcp: true
+  base_args:
+    - "--trust-remote-code"
+
+features:
+  tool_calling:
+    description: "Kimi K2 tool-call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "kimi_k2"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "Kimi K2 reasoning parser for extracting chain-of-thought content"
+    args:
+      - "--reasoning-parser"
+      - "kimi_k2"
+  spec_decoding:
+    description: "Eagle3 speculative decoding for accelerated inference"
+    args:
+      - "--speculative-config"
+      - '{"model":"lightseekorg/kimi-k2.6-eagle3-mla","method":"eagle3","num_speculative_tokens":3}'
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+
+# GB200's 4-GPU NVL4 trays keep encoder TP comm cheap — data-parallel encoder
+# isn't the default win it is on 8-GPU nodes.
+hardware_opt_in_features:
+  gb200:
+    - encoder_parallel
+
+variants:
+  default:
+    precision: int4
+    vram_minimum_gb: 714
+    description: "Packed INT4 via compressed-tensors (~595 GB on disk); fits 8×H200"
+  nvfp4:
+    model_id: "nvidia/Kimi-K2.6-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 600
+    description: "NVIDIA NVFP4 quantized weights for Blackwell GPUs (e.g. GB200)"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  fp8:
+    model_id: "RedHatAI/Kimi-K2.6-FP8-BLOCK"
+    precision: fp8
+    vram_minimum_gb: 1200
+    description: "RedHatAI FP8 block quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_nvfp4:
+    model_id: "RedHatAI/Kimi-K2.6-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHat)"
+    vram_minimum_gb: 600
+    description: "RedHatAI NVFP4 quantization"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
+
+hardware_overrides:
+  blackwell:
+    extra_args:
+      - "--attention-config"
+      - '{"use_prefill_query_quantization":true}'
+  amd:
+    # Verified on 8× MI300X / MI355X (MI325X listed as supported but not verified).
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+
+strategy_overrides:
+  pd_cluster:
+    env:
+      VLLM_USE_NCCL_SYMM_MEM: "1"
+      NCCL_CUMEM_ENABLE: "1"
+      NCCL_MNNVL_ENABLE: "1"
+      NCCL_NVLS_ENABLE: "1"
+    prefill:
+      nodes: 1               # 1 GB200 node = 4 GPUs
+      parallelism: dep       # DP + expert-parallel pool
+      vllm_args:
+        - "--max-num-batched-tokens"
+        - "16384"
+        - "--block-size"
+        - "64"
+      env: {}
+    decode:
+      nodes: 1               # 4 GB200 nodes = 16 GPUs
+      parallelism: dep
+      vllm_args:
+        - "--compilation-config"
+        - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        - "--block-size"
+        - "64"
+        - "--all2all-backend"
+        - "flashinfer_nvlink_one_sided"
+      env: {}
+
+guide: |
+  ## Overview
+
+  Kimi K2.6 is an open-source, native multimodal agentic model built through continual
+  pretraining on approximately 15 trillion mixed visual and text tokens atop Kimi-K2-Base.
+  It seamlessly integrates vision and language understanding with advanced agentic
+  capabilities, instant and thinking modes, as well as conversational and agentic paradigms.
+
+  ## Prerequisites
+
+  - **vLLM version:** >= 0.25.0 (required for the B300 EAGLE3 and native CPU KV offload paths below)
+  - **Hardware (INT4):** 8× H200 GPUs (verified), or equivalent aggregate VRAM (~640 GB)
+  - **Hardware (B300 / NVFP4):** 4× B300 (verified); use `vllm/vllm-openai:latest`
+  - **AMD support:** 8x MI300X / MI325X / MI355X with ROCm 7.2.1 and Python 3.12
+
+  ### NVIDIA B300: NVFP4 with Eagle3
+
+  ```bash
+  export VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm
+
+  vllm serve nvidia/Kimi-K2.6-NVFP4 \
+    --tensor-parallel-size 4 \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --block-size 64 \
+    --gpu-memory-utilization 0.90 \
+    --attention-backend TOKENSPEED_MLA \
+    --attention-config '{"use_prefill_query_quantization":true}' \
+    --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}' \
+    --max-cudagraph-capture-size 2048 \
+    --speculative-config '{"method":"eagle3","model":"lightseekorg/kimi-k2.6-eagle3-mla","num_speculative_tokens":4}'
+  ```
+
+  ### Native CPU KV offload
+
+  Select **Simple** in the command builder's **KV Offload** row to extend the prefix cache
+  into host DRAM with `SimpleCPUOffloadConnector`. The shared option uses 220 GiB per rank
+  by default. The verified B300 TP4 run used 1,199 GiB total (299.75 GiB per rank); the
+  equivalent explicit command is:
+
+  ```bash
+  CPU_OFFLOAD_BYTES_PER_RANK=321854111744
+
+  vllm serve nvidia/Kimi-K2.6-NVFP4 \
+    --tensor-parallel-size 4 \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --block-size 64 \
+    --gpu-memory-utilization 0.90 \
+    --attention-backend TOKENSPEED_MLA \
+    --attention-config '{"use_prefill_query_quantization":true}' \
+    --disable-hybrid-kv-cache-manager \
+    --kv-transfer-config "{\"kv_connector\":\"SimpleCPUOffloadConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"cpu_bytes_to_use_per_rank\":${CPU_OFFLOAD_BYTES_PER_RANK},\"lazy_offload\":false}}"
+  ```
+
+  ### Decode context parallelism
+
+  For higher concurrency on the B300 NVFP4 path, add `--decode-context-parallel-size 4`
+  (match TP size). The command builder's **Advanced** row also exposes DCP for this recipe.
+
+  ### AMD MI300X/MI325X
+
+  On 8x MI300X or MI325X (`gfx942`), use the standard W4A16 MoE path with AITER
+  and INT4 QuickReduce.
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+
+  vllm serve moonshotai/Kimi-K2.6 \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --tool-call-parser kimi_k2 \
+    --enable-auto-tool-choice \
+    --reasoning-parser kimi_k2 \
+    --mm-encoder-tp-mode data
+  ```
+
+  ### AMD MI350X/MI355X
+
+  On 8x MI350X or MI355X (`gfx950`), add `--moe-backend flydsl` to use the
+  optimized FlyDSL W4A16 MoE kernel. Keep LoRA disabled for this path.
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+
+  vllm serve moonshotai/Kimi-K2.6 \
+    --tensor-parallel-size 8 \
+    --trust-remote-code \
+    --mm-encoder-tp-mode data \
+    --moe-backend flydsl \
+    --compilation-config '{"pass_config": {"fuse_allreduce_rms": false}}'
+  ```
+
+  Notes:
+  - The FlyDSL INT4 MoE path does not support expert parallelism; do not add
+    `--enable-expert-parallel`.
+  - Keep `--compilation-config '{"pass_config": {"fuse_allreduce_rms": false}}'`;
+    it is required for this FlyDSL path on MI350X / MI355X.
+  - vLLM has tuned MI350X/MI355X FlyDSL configs for this Kimi shape at TP=8 and TP=4.
+  - Keep vLLM's default block size unless you are tuning long-context
+    throughput; `--block-size 64` is safe to try.
+
+  ## Client Usage
+
+  Once the vLLM server is running, consume it via the OpenAI-compatible API:
+
+  ```python
+  import time
+  from openai import OpenAI
+
+  client = OpenAI(
+      api_key="EMPTY",
+      base_url="http://localhost:8000/v1",
+      timeout=3600
+  )
+
+  messages = [
+      {
+          "role": "user",
+          "content": [
+              {
+                  "type": "image_url",
+                  "image_url": {
+                      "url": "https://ofasys-multimodal-wlcb-3-toshanghai.oss-accelerate.aliyuncs.com/wpf272043/keepme/image/receipt.png"
+                  }
+              },
+              {
+                  "type": "text",
+                  "text": "Read all the text in the image."
+              }
+          ]
+      }
+  ]
+
+  start = time.time()
+  response = client.chat.completions.create(
+      model="moonshotai/Kimi-K2.6",
+      messages=messages,
+      max_tokens=2048
+  )
+  print(f"Response costs: {time.time() - start:.2f}s")
+  print(f"Generated text: {response.choices[0].message.content}")
+  ```
+
+  ## Troubleshooting
+
+  - **OOM errors:** Lower `--gpu-memory-utilization` or adjust TP/EP to match your GPU count.
+  - **Vision encoder performance:** Use `--mm-encoder-tp-mode data` to run the vision encoder
+    in data-parallel mode. The encoder is small, so TP adds communication overhead with little gain.
+  - **Unique multimodal inputs:** Pass `--mm-processor-cache-gb 0` to avoid caching overhead.
+    For repeated inputs, `--mm-processor-cache-type shm` uses host shared memory for better
+    performance at high TP settings.
+  - **MoE kernel tuning:** Use the `benchmark_moe` script from vLLM to tune Triton kernels
+    for your specific hardware.
+  - **Async scheduling:** Enabled by default for better throughput. Disable if you encounter
+    issues, and file a bug report to vLLM.
+
+  ## References
+
+  - [Kimi-K2.6 on Hugging Face](https://huggingface.co/moonshotai/Kimi-K2.6)
+  - [NVIDIA Kimi-K2.6-NVFP4 on Hugging Face](https://huggingface.co/nvidia/Kimi-K2.6-NVFP4)
+  - [vLLM multimodal inputs guide](https://docs.vllm.ai/en/latest/features/multimodal_inputs.html)
+  - [vLLM Expert Parallelism docs](https://docs.vllm.ai/en/latest/serving/expert_parallel_deployment.html)
+  - [vLLM NixlConnector usage guide](https://docs.vllm.ai/en/latest/features/nixl_connector_usage.html)

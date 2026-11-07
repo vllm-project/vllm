@@ -42,6 +42,9 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     MoERunner,
 )
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    get_moe_padding_mask,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -59,7 +62,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
 
@@ -134,9 +136,11 @@ def _gemma4_routing_kernel(
     per_expert_scale_ptr,
     topk_weights_ptr,
     topk_ids_ptr,
+    is_padding_ptr,
     E: tl.constexpr,
     K: tl.constexpr,
     BLOCK_E: tl.constexpr,
+    HAS_PADDING: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs_e = tl.arange(0, BLOCK_E)
@@ -188,6 +192,13 @@ def _gemma4_routing_kernel(
     # Final weights: vectorized multiply (only top-K will be stored)
     all_weights = (all_raw_exp * inv_renorm * all_scales).to(tl.float32)
 
+    if HAS_PADDING:
+        # CUDA-graph padding rows hold stale activations; route them to the
+        # -1 skip sentinel so they don't pull real experts' weights.
+        is_pad = tl.load(is_padding_ptr + pid).to(tl.int1)
+        all_ids = tl.where(is_pad, -1, all_ids)
+        all_weights = tl.where(is_pad, 0.0, all_weights)
+
     # Write results with TWO masked stores — replaces K × 2 serial scalar stores
     base_off = pid * K + offs_e
     tl.store(topk_ids_ptr + base_off, all_ids, mask=top_mask)
@@ -199,6 +210,8 @@ def gemma4_fused_routing_kernel_triton(
     topk: int,
     per_expert_scale: torch.Tensor,
     num_warps: int = 1,
+    *,
+    is_padding: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     gating_output = gating_output.contiguous()
     per_expert_scale = per_expert_scale.contiguous()
@@ -211,9 +224,11 @@ def gemma4_fused_routing_kernel_triton(
         per_expert_scale,
         weights,
         ids,
+        is_padding if is_padding is not None else ids,
         E,
         topk,
         BLOCK_E,
+        is_padding is not None,
         num_warps=num_warps,
     )
     return weights, ids
@@ -349,7 +364,10 @@ class Gemma4Router(nn.Module):
         """
         if current_platform.is_cuda_alike() or current_platform.is_xpu():
             return gemma4_fused_routing_kernel_triton(
-                gating_output, topk, self.per_expert_scale
+                gating_output,
+                topk,
+                self.per_expert_scale,
+                is_padding=get_moe_padding_mask(gating_output.shape[0]),
             )
 
         return gemma4_routing_function_torch(gating_output, topk, self.per_expert_scale)
@@ -401,11 +419,14 @@ class Gemma4Attention(nn.Module):
         self.scaling = 1.0
 
         layer_idx = extract_layer_index(prefix)
+        layer_type = config.layer_types[layer_idx]
         num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
+        attention_k_eq_v = getattr(config, "attention_k_eq_v", False)
         first_kv_shared_layer_idx = config.num_hidden_layers - num_kv_shared_layers
         self.is_kv_shared_layer = (
             num_kv_shared_layers > 0 and layer_idx >= first_kv_shared_layer_idx
         )
+        self.is_sliding = layer_type == "sliding_attention"
 
         if self.is_kv_shared_layer:
             # K/V come from the target layer's cache, so like HF this layer
@@ -430,6 +451,9 @@ class Gemma4Attention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.qkv_proj",
             )
+            if attention_k_eq_v and not self.is_sliding:
+                # k_proj LoRA must be applied to the V slice
+                self.qkv_proj.lora_packed_modules = ["q_proj", "k_proj", "k_proj"]
             self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
             # V norm: no learnable scale (pure normalization only)
             self.v_norm = RMSNorm(
@@ -446,9 +470,6 @@ class Gemma4Attention(nn.Module):
         # Q norm: output = norm(x) * weight (learnable per-head scale)
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
-        # Determine layer type and sliding window
-        layer_type = config.layer_types[layer_idx]
-        self.is_sliding = layer_type == "sliding_attention"
         sliding_window = config.sliding_window if self.is_sliding else None
 
         # Initialize RoPE based on layer type.
@@ -576,7 +597,7 @@ class Gemma4DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
 
         # Gemma4 uses different head dimensions for sliding vs full attention
-        layer_config = gemma4_layer_config(config, layer_idx)
+        layer_config = config.per_layer_config[layer_idx]
         head_dim = layer_config.head_dim
         num_kv_heads = layer_config.num_key_value_heads
 
@@ -628,9 +649,7 @@ class Gemma4DecoderLayer(nn.Module):
         )
 
         # MoE (Mixture of Experts) — router + expert block parallel to MLP
-        self.enable_moe_block = getattr(config, "enable_moe_block", False) or getattr(
-            config, "use_second_mlp_block", False
-        )
+        self.enable_moe_block = getattr(config, "num_experts", None) is not None
         self.router: Gemma4Router | None
         self.experts: MoERunner | None
         self.post_feedforward_layernorm_1: RMSNorm | None
@@ -846,13 +865,22 @@ class Gemma4SelfDecoderLayers(nn.Module):
         # Shared references to modules owned by Gemma4Model — must be
         # inside this nn.Module so torch.compile captures them.
         self.embed_tokens = embed_tokens
-        self.normalizer = normalizer
         self.embed_tokens_per_layer = embed_tokens_per_layer
-        self.embed_scale_per_layer = embed_scale_per_layer
         self.per_layer_model_projection = per_layer_model_projection
         self.per_layer_projection_norm = per_layer_projection_norm
-        self.per_layer_input_scale = per_layer_input_scale
-        self.per_layer_projection_scale = per_layer_projection_scale
+
+        # Register the shared scalars as buffers so they follow the model on
+        # .to(device); plain attributes stay on CPU.
+        self.register_buffer("normalizer", normalizer, persistent=False)
+        self.register_buffer(
+            "embed_scale_per_layer", embed_scale_per_layer, persistent=False
+        )
+        self.register_buffer(
+            "per_layer_input_scale", per_layer_input_scale, persistent=False
+        )
+        self.register_buffer(
+            "per_layer_projection_scale", per_layer_projection_scale, persistent=False
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids) * self.normalizer
@@ -1345,7 +1373,7 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-            if per_layer_inputs is not None:
+            if "per_layer_inputs" in intermediate_tensors.tensors:
                 per_layer_inputs = intermediate_tensors["per_layer_inputs"]
         residual = None
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)

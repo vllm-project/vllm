@@ -110,6 +110,11 @@ def test_unrecognized_env(monkeypatch):
     )
     engine_args.create_engine_config()
 
+    # Removed env vars always raise, pointing at their replacement
+    monkeypatch.setenv("VLLM_MARLIN_INPUT_DTYPE", "int8")
+    with pytest.raises(ValueError, match="--quantization humming"):
+        EngineArgs().create_engine_config()
+
 
 def test_get_diff_sampling_param_includes_penalties():
     """``--override-generation-config`` must apply presence_penalty and
@@ -133,7 +138,7 @@ def test_get_diff_sampling_param_includes_penalties():
         },
     )
 
-    diff = ModelConfig.get_diff_sampling_param(fake)  # type: ignore[arg-type]
+    diff = ModelConfig.get_diff_sampling_param(fake)
 
     assert diff["presence_penalty"] == 1.5
     assert diff["frequency_penalty"] == 0.5
@@ -161,7 +166,7 @@ def test_generation_config_penalties_survive_diff_sampling_filter():
         },
     )
 
-    diff = ModelConfig.get_diff_sampling_param(fake)  # type: ignore[arg-type]
+    diff = ModelConfig.get_diff_sampling_param(fake)
 
     assert diff["presence_penalty"] == 1.1
     assert diff["frequency_penalty"] == 0.7

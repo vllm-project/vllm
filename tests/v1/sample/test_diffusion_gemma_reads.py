@@ -20,7 +20,7 @@ from vllm.platforms import current_platform
 from vllm.v1.outputs import LogprobsTensors
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="the sampler state lives on the GPU"
+    not current_platform.is_cuda_alike(), reason="the sampler state lives on the GPU"
 )
 
 CL = 8
@@ -227,6 +227,10 @@ def test_single_step_tile_skips_self_conditioning():
     assert not states.self_conditioning_embeds[0].any()
 
 
+def test_sample_step_is_compiled():
+    assert hasattr(_compiled_sample_step, "_torchdynamo_orig_callable")
+
+
 @pytest.mark.parametrize("stance", ["default", "force_eager"])
 def test_self_conditioning_stores_a_bf16_model_in_the_fp32_buffer(stance):
     # The model's embeddings are bf16 while the buffer is fp32. Compiled code
@@ -341,6 +345,7 @@ def test_batch_allowed_needs_one_shared_set():
     assert states.batch_allowed([]) is None
 
     shared = states.batch_allowed([0])
+    assert shared is not None
     assert shared.tolist() == [1, 2, 3]
     assert shared.dtype == torch.int64
     assert states.batch_allowed([0, 0]) is shared

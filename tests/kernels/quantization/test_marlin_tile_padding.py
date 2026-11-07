@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_TILE,
     apply_gptq_marlin_linear,
@@ -524,7 +525,7 @@ def test_check_marlin_supports_layer_allow_tile_padding():
     )
 
     # Tile-misaligned but group-aligned: rejected strictly, allowed w/ padding
-    layer = _FakeLinear(4640, 512, input_size=2048)
+    layer: LinearBase = _FakeLinear(4640, 512, input_size=2048)
     assert not check_marlin_supports_layer(layer, 128)
     assert check_marlin_supports_layer(layer, 128, allow_tile_padding=True)
     assert check_marlin_supports_layer(layer, -1, allow_tile_padding=True)

@@ -143,7 +143,7 @@ def test_dflash_drafter_window_reserves_bonus_token():
     # window = 4, so 96 fits (96 + 4 == 100) but 97 does not (97 + 4 == 101)
     assert input_fits_in_drafter(dflash_runner, SimpleNamespace(max_seq_len=96))
     assert not input_fits_in_drafter(dflash_runner, SimpleNamespace(max_seq_len=97))
-    assert not input_fits_in_drafter(dflash_runner, None)  # no metadata
+    assert not input_fits_in_drafter(dflash_runner, None)
 
     # Other drafters don't reserve the bonus token, so 97 fits (97 + 3 == 100).
     plain_runner = SimpleNamespace(

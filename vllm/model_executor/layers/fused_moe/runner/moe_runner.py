@@ -46,6 +46,7 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExpertsOrder,
 )
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
+from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
@@ -202,7 +203,7 @@ direct_register_custom_op(
     op_func=_moe_forward,
     mutates_args=["hidden_states"],
     fake_impl=_moe_forward_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
+    tags=(torch.Tag.needs_exact_strides,),
 )
 
 
@@ -210,7 +211,7 @@ direct_register_custom_op(
     op_name="moe_forward_shared",
     op_func=_moe_forward_shared,
     fake_impl=_moe_forward_shared_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
+    tags=(torch.Tag.needs_exact_strides,),
 )
 
 
@@ -301,7 +302,10 @@ class MoERunner(MoERunnerInterface):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
-        return self.routed_experts.load_weights(weights)
+        # routed_experts reports names relative to itself, but callers such as
+        # AutoWeightsLoader qualify what this returns with the runner's prefix.
+        for name in self.routed_experts.load_weights(weights):
+            yield f"routed_experts.{name}"
 
     def _select_forward(self) -> Callable:
         if current_platform.is_tpu():
@@ -338,19 +342,22 @@ class MoERunner(MoERunnerInterface):
         if self._shared_experts is not None:
             self._shared_experts._set_moe_config(new_moe_config)
 
-    def _maybe_fuse_gate_weights(self):
-        """Fuse router and shared expert gate weights on first call.
+    def process_weights_after_loading(self) -> None:
+        """Fuse router and shared expert gate weights.
 
         Cannot be done at __init__ because gate weights are loaded after
-        module construction (via weight_loader). Called once from
-        _forward_impl before the first forward pass.
+        module construction (via weight_loader). The loader runs this after
+        every load or reload, refilling the fused tensor in place so captured
+        CUDA graphs see updated gates.
         """
-        if self._combined_gate_weight is None:
-            assert self.gate is not None and self.shared_expert_gate is not None
-            self._combined_gate_weight = torch.cat(
-                [self.gate.weight, self.shared_expert_gate.weight],
-                dim=0,
-            )
+        if not self._fse_fuse_gate:
+            return
+        assert self.gate is not None and self.shared_expert_gate is not None
+        refill_derived(
+            self,
+            "_combined_gate_weight",
+            torch.cat([self.gate.weight, self.shared_expert_gate.weight], dim=0),
+        )
 
     @property
     def _quant_method(self) -> FusedMoEMethodBase:
@@ -616,6 +623,7 @@ class MoERunner(MoERunnerInterface):
 
         if self.routed_experts.quant_method.is_monolithic:
             # Monolithic kernels: pass router_logits to routed_experts
+            router_logits = self.router.prepare_monolithic_logits(router_logits)
             fused_out = self.routed_experts.forward_monolithic(
                 x=hidden_states,
                 router_logits=router_logits,
@@ -720,7 +728,7 @@ class MoERunner(MoERunnerInterface):
             )
 
         # Record before `_maybe_pad_hidden_states` pads activations to match
-        # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
+        # `moe_config.hidden_dim`, e.g. after `align_fp4_moe_hidden_dim_for_fi`
         # so routed output can be trimmed before
         # shared+routed add / latent up proj if needed.
 
@@ -902,7 +910,6 @@ class MoERunner(MoERunnerInterface):
         # NOTE: in future PR, MoE runner will always hold the gate.
         if self.gate is not None:
             if self._fse_fuse_gate:
-                self._maybe_fuse_gate_weights()
                 router_logits = dispatch_unquantized_gemm()(
                     self, hidden_states, self._combined_gate_weight, None
                 )

@@ -26,13 +26,11 @@ def server():
         "--enforce-eager",
         "--limit-mm-per-prompt",
         json.dumps({"audio": 3, "video": 3}),
+        "--trust-request-mm-kwargs",
         *ROCM_EXTRA_ARGS,
     ]
 
-    with RemoteOpenAIServer(
-        MODEL_NAME,
-        args,
-    ) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
