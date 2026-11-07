@@ -19,17 +19,22 @@ boundaries freely).
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
 from PIL import Image, ImageOps
 from transformers import BatchFeature
 
-from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import (
+    DictEmbeddingItems,
+    ImageSize,
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -246,14 +251,61 @@ class DeepseekV4VLProcessor:
         )
 
 
+def _get_image_fields(
+    inputs: Mapping[str, torch.Tensor],
+) -> Mapping[str, MultiModalFieldConfig]:
+    vit_grid = inputs.get("vit_grid")
+    llm_grid = inputs.get("llm_grid")
+    empty = torch.empty(0, dtype=torch.long)
+    patch_sizes = empty if vit_grid is None else vit_grid.prod(-1)
+    span_sizes = (
+        empty if llm_grid is None else llm_grid[:, 0] * (llm_grid[:, 1] + 1) + 2
+    )
+    return {
+        "patches": MultiModalFieldConfig.flat_from_sizes("image", patch_sizes),
+        "vit_grid": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+        "llm_grid": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+        "types": MultiModalFieldConfig.flat_from_sizes(
+            "image", span_sizes, keep_on_cpu=True
+        ),
+        "image_embeds": MultiModalFieldConfig.flat_from_sizes("image", span_sizes),
+    }
+
+
+class DeepseekV4VLMultiModalDataParser(MultiModalDataParser):
+    embedding_fields = {
+        "image": {"image_embeds": "values", "llm_grid": "metadata"},
+    }
+
+    def _parse_image_data(self, data):
+        if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("image")
+            return DictEmbeddingItems(
+                data,
+                modality="image",
+                required_fields=required,
+                optional_fields=optional,
+                fields_factory=_get_image_fields,
+            )
+        return super()._parse_image_data(data)
+
+
 class DeepseekV4VLProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> DeepseekV41Config:
         return self.ctx.get_hf_config(DeepseekV41Config)
 
-    def get_hf_processor(self, **kwargs: object) -> DeepseekV4VLProcessor:
+    def get_hf_processor(  # type: ignore[override]
+        self, **kwargs: object
+    ) -> DeepseekV4VLProcessor:
         if kwargs:
             raise ValueError(f"Unexpected processor kwargs: {sorted(kwargs)}")
         return DeepseekV4VLProcessor(self.get_hf_config())
+
+    def get_data_parser(self) -> DeepseekV4VLMultiModalDataParser:
+        return DeepseekV4VLMultiModalDataParser(
+            expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
@@ -275,15 +327,28 @@ class DeepseekV4VLProcessingInfo(BaseProcessingInfo):
         hf_config = self.get_hf_config()
         patch_size = hf_config.vision_patch_size
         downsample_ratio = hf_config.vision_downsample_ratio
-        # A square maximizes the ViT patch count (area) within the token
-        # budget; solve the budget-derived size directly to keep the dummy
-        # image small.
         budget = hf_config.vision_max_n_token
-        side = budget * patch_size * downsample_ratio
-        best_h, best_w = solve_resize_ratio(
-            side, side, patch_size, downsample_ratio, budget
-        )
-        return ImageSize(width=best_w, height=best_h)
+        max_wh_ratio = hf_config.vision_max_wh_ratio
+        best_h = best_w = 0
+        # Each LLM row costs an extra newline token. Maximize the ViT grid,
+        # including the patch rounding after the optional aspect-ratio clamp.
+        for n_llm_h in range(1, (budget - 2) // 2 + 1):
+            n_vit_h = n_llm_h * downsample_ratio
+            n_vit_w = ((budget - 2) // n_llm_h - 1) * downsample_ratio
+            if max_wh_ratio is not None:
+                n_vit_w = min(n_vit_w, math.ceil(n_vit_h * max_wh_ratio))
+            if n_vit_h * n_vit_w > best_h * best_w:
+                best_h, best_w = n_vit_h, n_vit_w
+        if best_h == 0:
+            raise ValueError(
+                "Image token budget and aspect ratio allow no image patches"
+            )
+        height, width = best_h * patch_size, best_w * patch_size
+        # Avoid the min-pixels upscaler perturbing the selected aspect ratio.
+        scale = 1
+        while height * width * scale * scale < hf_config.vision_min_pixels:
+            scale *= 2
+        return ImageSize(width=width * scale, height=height * scale)
 
 
 class DeepseekV4VLDummyInputsBuilder(
@@ -296,7 +361,7 @@ class DeepseekV4VLDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         size = self.info.get_image_size_with_most_features()
         return {
@@ -304,7 +369,7 @@ class DeepseekV4VLDummyInputsBuilder(
                 width=size.width,
                 height=size.height,
                 num_images=mm_counts.get("image", 0),
-                overrides=cast(ImageDummyOptions | None, mm_options.get("image")),
+                overrides=mm_options.get("image"),
             ),
         }
 
@@ -317,25 +382,7 @@ class DeepseekV4VLMultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        vit_grid = hf_inputs.get("vit_grid")
-        llm_grid = hf_inputs.get("llm_grid")
-
-        if vit_grid is None or llm_grid is None:
-            empty = torch.empty(0, dtype=torch.long)
-            patch_sizes = types_sizes = empty
-        else:
-            patch_sizes = vit_grid.prod(-1)
-            n_llm_h, n_llm_w = llm_grid[:, 0], llm_grid[:, 1]
-            types_sizes = n_llm_h * (n_llm_w + 1) + 2
-
-        return {
-            "patches": MultiModalFieldConfig.flat_from_sizes("image", patch_sizes),
-            "vit_grid": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
-            "llm_grid": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
-            "types": MultiModalFieldConfig.flat_from_sizes(
-                "image", types_sizes, keep_on_cpu=True
-            ),
-        }
+        return _get_image_fields(hf_inputs)
 
     def _get_prompt_updates(
         self,
@@ -347,11 +394,11 @@ class DeepseekV4VLMultiModalProcessor(
         validate_image_sentinel_ids(self.info.get_tokenizer())
 
         def get_image_replacement(item_idx: int) -> PromptUpdateDetails:
-            types: torch.Tensor = out_mm_kwargs["image"][item_idx]["types"].data
+            grid: torch.Tensor = out_mm_kwargs["image"][item_idx]["llm_grid"].data
             # Every span position carries image_token_id; the roles live in
             # ``types``. All of them are embed positions (delimiters get the
             # learned vectors from embed_multimodal, not the embed table).
-            full = [image_token_id] * types.numel()
+            full = [image_token_id] * num_image_tokens(*grid.tolist())
             return PromptUpdateDetails.select_token_id(full, image_token_id)
 
         return [

@@ -5,7 +5,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-def maybe_prepare_dcp_local_seq_lens(
+def prepare_dcp_local_seq_lens(
     dcp_local_seq_lens: torch.Tensor,
     seq_lens: torch.Tensor,
     num_reqs: int,
@@ -16,8 +16,7 @@ def maybe_prepare_dcp_local_seq_lens(
     num_reqs_padded: int | None = None,
 ) -> torch.Tensor | None:
     """Populate caller-owned storage and return its padded view, or None without DCP."""
-    if dcp_size == 1:
-        return None
+    assert dcp_size > 1
 
     max_num_reqs = dcp_local_seq_lens.shape[0]
     BLOCK_SIZE = 128

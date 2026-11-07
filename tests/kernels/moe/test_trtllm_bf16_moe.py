@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for the FlashInfer TRTLLM BF16 MoE backend
+"""Tests for the FlashInfer TRTLLM BF16 MoE backend
 (`TrtLlmBf16ExpertsModular`).
 
 This mirrors the TRTLLM NvFP4 modular test shape: construct the modular
@@ -13,6 +12,7 @@ import pytest
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from tests.kernels.moe.utils import make_dummy_moe_config
 from tests.kernels.utils import torch_moe
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -27,6 +27,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
     TrtLlmBf16ExpertsModular,
+)
+from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
+    TrtLlmBf16LoRAExperts,
 )
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
@@ -76,6 +79,10 @@ def test_trtllm_bf16_moe_modular_no_graph(
         a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
         w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
         w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
+        # The FlashInfer conversion may rewrite unpadded input storage in place.
+        # Preserve the original layout for the independent torch reference.
+        reference_w1 = w1.clone()
+        reference_w2 = w2.clone()
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         scores = torch.softmax(score, dim=-1, dtype=torch.float32)
         topk_weights, topk_ids = torch.topk(scores, topk)
@@ -134,8 +141,8 @@ def test_trtllm_bf16_moe_modular_no_graph(
 
         torch_output = torch_moe(
             a,
-            w1,
-            w2,
+            reference_w1,
+            reference_w2,
             score,
             topk,
             activation=MoEActivation.SILU,
@@ -144,6 +151,190 @@ def test_trtllm_bf16_moe_modular_no_graph(
         torch.testing.assert_close(
             torch_output,
             trtllm_output,
+            atol=1e-1,
+            rtol=2e-1,
+        )
+
+
+@pytest.mark.parametrize("has_lora_delta", [False, True])
+@torch.inference_mode()
+def test_trtllm_bf16_lora_accepts_checkpoint_shaped_weights(has_lora_delta):
+    """LoRA dispatch accepts both 3D parameters and legacy 4D packed views."""
+    config = make_dummy_moe_config(
+        num_experts=128, hidden_dim=256, intermediate_size=128
+    )
+    experts = TrtLlmBf16LoRAExperts(config, FUSED_MOE_UNQUANTIZED_CONFIG)
+    x = torch.randn(2, 256, device="cuda", dtype=torch.bfloat16) / 10
+    w1, w2 = convert_to_unquantized_kernel_format(
+        UnquantizedMoeBackend.FLASHINFER_TRTLLM,
+        config,
+        torch.randn(128, 256, 256, device="cuda", dtype=torch.bfloat16) / 10,
+        torch.randn(128, 256, 128, device="cuda", dtype=torch.bfloat16) / 10,
+    )
+    assert w1.ndim == w2.ndim == 3
+    topk = (
+        torch.tensor([[0], [1]], device="cuda", dtype=torch.int32),
+        torch.ones(2, 1, device="cuda", dtype=torch.float32),
+    )
+    delta = torch.randn(2, 1, 256, device="cuda", dtype=torch.bfloat16)
+
+    def invoke(w1, w2):
+        result = experts.invoke_routed_moe(
+            hidden_states=x,
+            w1=w1,
+            w2=w2,
+            topk_ids_and_weights=topk,
+            gemm1_lora_delta=delta if has_lora_delta else None,
+            global_num_experts=128,
+            a1q_scale=None,
+            output=torch.empty_like(x),
+        )
+        if has_lora_delta:
+            # Only compare rows belonging to real tokens, excluding padding.
+            indices = result[2].flatten().long()
+            return result[0][indices], result[3][indices]
+        return result
+
+    actual = invoke(w1, w2)
+    expected = invoke(w1.view(128, 4, 256, 64), w2.view(128, 2, 256, 64))
+    for actual_tensor, expected_tensor in zip(actual, expected):
+        torch.testing.assert_close(actual_tensor, expected_tensor)
+
+
+def _run_bf16_padded(experts, a, trtllm_w1, trtllm_w2, topk_weights, topk_ids, e):
+    """Drive TrtLlmBf16ExpertsModular.apply directly on a padded layout.
+
+    ``a`` / ``topk_ids`` already carry the padding tail (rows whose topk_ids
+    are -1). Workspaces are FlashInfer-managed, so we pass the (0,)-shaped
+    stand-ins that workspace_shapes advertises.
+    """
+    output = torch.empty_like(a)
+    empty_ws = torch.empty((0,), device=a.device, dtype=a.dtype)
+    experts.apply(
+        output=output,
+        hidden_states=a,
+        w1=trtllm_w1,
+        w2=trtllm_w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        activation=MoEActivation.SILU,
+        global_num_experts=e,
+        expert_map=None,
+        a1q_scale=None,
+        a2_scale=None,
+        workspace13=empty_ws,
+        workspace2=empty_ws,
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+    return output
+
+
+@pytest.mark.parametrize("m,n,k", [(64, 1024, 1024)])
+@pytest.mark.parametrize("e", [128])
+@pytest.mark.parametrize("topk", [8])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@torch.inference_mode()
+def test_trtllm_bf16_moe_padding_robust(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+    workspace_init,
+):
+    """Padding rows (topk_ids == -1) must be skipped, never fed into results.
+
+    DeepEP v2 hands these experts a PaddedStandard buffer whose tail rows are
+    inactive, marked by topk_ids == -1. This constructs that layout directly,
+    poisons the padding rows with NaN, and checks the valid outputs are finite
+    and bit-identical to a zero-padding run -- garbage in the skipped rows never
+    reaches a valid row.
+
+    Note: this proves robustness/correctness (padding excluded from results),
+    not physical compute-skipping. MoE rows are independent in the token
+    dimension and activation quant is per-row, so skipping and
+    compute-then-discard yield identical valid outputs; the compute-savings of
+    tile-granularity skipping belongs in a kernel microbenchmark.
+    """
+    set_random_seed(7)
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        pad = 64
+        a_valid = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+        w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
+        w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
+        # The FlashInfer conversion may rewrite unpadded input storage in place.
+        # Preserve the original layout for the independent torch reference.
+        reference_w1 = w1.clone()
+        reference_w2 = w2.clone()
+        score = torch.randn((m, e), device="cuda", dtype=dtype)
+        scores = torch.softmax(score, dim=-1, dtype=torch.float32)
+        topk_weights_valid, topk_ids_valid = torch.topk(scores, topk)
+
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=MoEActivation.SILU,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=dtype,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=next_power_of_2(m + pad),
+        )
+        trtllm_w1, trtllm_w2 = convert_to_unquantized_kernel_format(
+            UnquantizedMoeBackend.FLASHINFER_TRTLLM,
+            moe_config,
+            w1,
+            w2,
+        )
+        experts = TrtLlmBf16ExpertsModular(
+            moe_config=moe_config,
+            quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+        )
+
+        # Padded layout: valid rows followed by an inactive tail (topk_ids=-1).
+        topk_ids = torch.full((m + pad, topk), -1, device="cuda", dtype=torch.int32)
+        topk_ids[:m] = topk_ids_valid.to(torch.int32)
+        topk_weights = torch.zeros(
+            (m + pad, topk), device="cuda", dtype=topk_weights_valid.dtype
+        )
+        topk_weights[:m] = topk_weights_valid
+
+        a_clean = torch.zeros((m + pad, k), device="cuda", dtype=dtype)
+        a_clean[:m] = a_valid
+        a_poison = a_clean.clone()
+        a_poison[m:] = float("nan")
+
+        out_clean = _run_bf16_padded(
+            experts, a_clean, trtllm_w1, trtllm_w2, topk_weights, topk_ids, e
+        )
+        out_poison = _run_bf16_padded(
+            experts, a_poison, trtllm_w1, trtllm_w2, topk_weights, topk_ids, e
+        )
+
+        assert torch.isfinite(out_poison[:m]).all(), (
+            "padding garbage leaked into valid outputs"
+        )
+        torch.testing.assert_close(out_poison[:m], out_clean[:m], rtol=0, atol=0)
+
+        torch_output = torch_moe(
+            a_valid,
+            reference_w1,
+            reference_w2,
+            score,
+            topk,
+            activation=MoEActivation.SILU,
+        )
+        torch.testing.assert_close(
+            torch_output,
+            out_clean[:m],
             atol=1e-1,
             rtol=2e-1,
         )

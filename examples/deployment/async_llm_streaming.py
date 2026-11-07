@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Simple example demonstrating streaming offline inference with AsyncLLM (V1 engine).
+"""Simple example demonstrating streaming offline inference with AsyncLLM (V1 engine).
 
 This script shows the core functionality of vLLM's AsyncLLM engine for streaming
 token-by-token output in offline inference scenarios. It demonstrates DELTA mode
@@ -20,8 +19,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 
 async def stream_response(engine: AsyncLLM, prompt: str, request_id: str) -> None:
-    """
-    Stream response from AsyncLLM and display tokens as they arrive.
+    """Stream response from AsyncLLM and display tokens as they arrive.
 
     This function demonstrates the core streaming pattern:
     1. Create SamplingParams with DELTA output kind

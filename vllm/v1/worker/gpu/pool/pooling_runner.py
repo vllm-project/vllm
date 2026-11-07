@@ -10,7 +10,7 @@ from vllm.config import VllmConfig
 from vllm.model_executor.models import VllmModelForPooling, is_pooling_model
 from vllm.pooling_params import PoolingParams
 from vllm.tasks import PoolingTask
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.utils.torch_utils import PIN_MEMORY, token_ids_to_tensor
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
@@ -51,7 +51,11 @@ class PoolingRunner:
         self.pooling_params: dict[int, PoolingParams] = {}
         self.pooling_states: dict[int, PoolingStates] = {}
         self.prompt_token_ids: dict[int, torch.Tensor] = {}
-        self.late_interaction_runner = LateInteractionRunner()
+        pooler_config = self.model_config.pooler_config
+        self.late_interaction_runner = LateInteractionRunner(
+            enable_flash=pooler_config is None
+            or getattr(pooler_config, "enable_flash_late_interaction", True)
+        )
 
     @staticmethod
     def get_supported_tasks(model: nn.Module) -> list[PoolingTask]:
@@ -78,9 +82,7 @@ class PoolingRunner:
         self.pooling_states[req_index] = PoolingStates()
         if pooling_params.requires_token_ids:
             assert prompt_token_ids is not None
-            self.prompt_token_ids[req_index] = torch.tensor(
-                prompt_token_ids, dtype=torch.int64
-            )
+            self.prompt_token_ids[req_index] = token_ids_to_tensor(prompt_token_ids)
 
     def remove_request(self, req_index: int) -> None:
         self.pooling_params.pop(req_index, None)
@@ -93,6 +95,9 @@ class PoolingRunner:
 
     def clear(self) -> None:
         self.late_interaction_runner.clear()
+
+    def release_late_interaction_query_cache(self, query_keys: list[str]) -> None:
+        self.late_interaction_runner.release_queries(query_keys)
 
     def _get_pooling_metadata(
         self,

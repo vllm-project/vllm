@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the rms_norm_dynamic_per_token_quant helion kernel
+"""Tests for the rms_norm_dynamic_per_token_quant helion kernel.
 
 Run `pytest tests/kernels/helion/test_rms_norm_dynamic_per_token_quant.py`.
 """
@@ -89,7 +89,7 @@ class TestRmsNormDynamicPerTokenQuantConfigPicker:
         assert selected_key == CaseKey({"hidden_size": 2048, "num_tokens": 32})
 
     def test_config_picker_no_configs(self):
-        config_keys: list[dict] = []
+        config_keys: list[CaseKey] = []
 
         args = _generate_fake_input(16, 4096)
         selected_key = pick_config(args, config_keys)

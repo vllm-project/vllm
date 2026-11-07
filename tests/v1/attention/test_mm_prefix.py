@@ -640,7 +640,6 @@ def test_mm_prefix_kv_cache_path(head_size: int):
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA backend imports")
 @pytest.mark.parametrize(
     "query_len,seq_len,spans,expected,unclamped_expected",
     [
@@ -727,6 +726,7 @@ def test_composite_shared_cache_across_image_and_causal_steps(
         backend = TritonFlashInferBackend
         causal_metadata_type = FlashInferMetadata
         block_size = backend.get_supported_kernel_block_sizes()[0]
+        assert isinstance(block_size, int)
     else:
         backend = TritonFlashAttentionBackend
         causal_metadata_type = FlashAttentionMetadata
@@ -805,7 +805,6 @@ def test_composite_shared_cache_across_image_and_causal_steps(
             )
             layer.mm_prefix_clamp_sliding_window = True
         builder = backend.get_builder_cls()(spec, ["composite_test"], cfg, DEVICE)
-        builder.set_kernel_block_size(block_size)
         # Match production, where unwritten page tails are zero-initialized.
         cache = torch.zeros(
             num_blocks,

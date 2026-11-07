@@ -94,7 +94,7 @@ def _postprocess_recoverssm_align_kernel(
     tl.store(
         state_idx_ptr + req_state_idx,
         tl.minimum(
-            (num_computed + num_sampled) // MAMBA_BLOCK_SIZE,
+            tl.maximum(num_computed + num_sampled - 1, 0) // MAMBA_BLOCK_SIZE,
             BLOCK_TABLE_WIDTH - 1,
         ),
     )

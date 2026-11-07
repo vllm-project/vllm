@@ -11,7 +11,7 @@ from vllm.platforms import current_platform
 
 
 def check_cuda_context():
-    """Check CUDA driver context status"""
+    """Check CUDA driver context status."""
     try:
         cuda = ctypes.CDLL("libcuda.so")
         device = ctypes.c_int()
@@ -22,7 +22,7 @@ def check_cuda_context():
 
 
 def run_cuda_test_in_thread(device_input, expected_device_id):
-    """Run CUDA context test in separate thread for isolation"""
+    """Run CUDA context test in separate thread for isolation."""
     try:
         # New thread should have no CUDA context initially
         valid_before, device_before = check_cuda_context()
@@ -70,7 +70,9 @@ class TestSetCudaContext:
             success, message = future.result(timeout=30)
         assert success, message
 
-    @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike(), reason="CUDA/ROCm not available"
+    )
     def test_set_cuda_context_invalid_device_type(self):
         """Test error handling for invalid device type."""
         with pytest.raises(ValueError, match="Expected a cuda device"):

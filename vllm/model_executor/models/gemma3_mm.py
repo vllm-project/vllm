@@ -11,7 +11,7 @@ from transformers.models.gemma3.image_processing_gemma3 import Gemma3ImageProces
 from transformers.models.gemma3.processing_gemma3 import Gemma3ProcessorKwargs
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
@@ -39,6 +39,7 @@ from vllm.multimodal.processing.processor import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
+from ..layers.fusion.mm_input_norm import build_mm_input_norm
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEncoderCudaGraph,
@@ -58,14 +59,13 @@ logger = init_logger(__name__)
 
 
 class Gemma3ImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - p: Number of patches total (over each image over each prompt in the
-          batch)
-        - c: Number of channels (3)
-        - h: Height of each patch
-        - w: Width of each patch
-        - bn: Batch size * number of images
+    """Dimensions:
+    - p: Number of patches total (over each image over each prompt in the
+      batch)
+    - c: Number of channels (3)
+    - h: Height of each patch
+    - w: Width of each patch
+    - bn: Batch size * number of images
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -245,26 +245,22 @@ class Gemma3DummyInputsBuilder(BaseDummyInputsBuilder[Gemma3ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
 
 class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _postprocess_hf_mm_data(
@@ -528,6 +524,7 @@ class Gemma3ForConditionalGeneration(
     )
 
     supports_tower_connector_lora = True
+    supports_mm_device_do_normalize = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -559,9 +556,14 @@ class Gemma3ForConditionalGeneration(
                 config.vision_config,
                 quant_config,
                 prefix=maybe_prefix(prefix, "vision_tower"),
+                input_norm=build_mm_input_norm(self.model_config, layout="bchw"),
             )
             self.multi_modal_projector = Gemma3MultiModalProjector(config)
 
+        # https://huggingface.co/blog/gemma3, (image tokens attend to each other)
+        # explicit mention here as text side in gemma3 standalone does not need
+        # prefix_lm but multimodal does
+        config.text_config.is_mm_prefix_lm = True
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
@@ -678,9 +680,7 @@ class Gemma3ForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="multi_modal_projector",
@@ -785,7 +785,8 @@ class Gemma3ForConditionalGeneration(
         )
 
         image_size = self.config.vision_config.image_size
-        dummy_pixel_values = torch.randn(
+        dtype = self.vision_tower.vision_model.input_norm.input_dtype or dtype
+        dummy_pixel_values = torch.zeros(
             num_images,
             3,
             image_size,

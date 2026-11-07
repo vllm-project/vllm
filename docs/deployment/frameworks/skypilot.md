@@ -37,7 +37,7 @@ See the vLLM SkyPilot YAML for serving, [serving.yaml](https://github.com/skypil
       HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
 
     setup: |
-      conda create -n vllm python=3.10 -y
+      conda create -n vllm python=3.12 -y
       conda activate vllm
 
       pip install vllm==0.4.0.post1
@@ -136,7 +136,7 @@ SkyPilot can scale up the service to multiple service replicas with built-in aut
       HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
 
     setup: |
-      conda create -n vllm python=3.10 -y
+      conda create -n vllm python=3.12 -y
       conda activate vllm
 
       pip install vllm==0.4.0.post1
@@ -248,7 +248,7 @@ This will scale the service up to when the QPS exceeds 2 for each replica.
       HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
 
     setup: |
-      conda create -n vllm python=3.10 -y
+      conda create -n vllm python=3.12 -y
       conda activate vllm
 
       pip install vllm==0.4.0.post1
@@ -293,7 +293,7 @@ It is also possible to access the Llama-3 service with a separate GUI frontend, 
       cpus: 2
 
     setup: |
-      conda create -n vllm python=3.10 -y
+      conda create -n vllm python=3.12 -y
       conda activate vllm
 
       # Install Gradio for web UI.

@@ -11,8 +11,7 @@ from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 
 
 def test_fast_inc_detok_invalid_utf8_err_case():
-    """
-    Test edge case where tokenizer can produce non-monotonic,
+    """Test edge case where tokenizer can produce non-monotonic,
     invalid UTF-8 output, which breaks the internal state of
     tokenizers' DecodeStream.
     See https://github.com/vllm-project/vllm/issues/17448.

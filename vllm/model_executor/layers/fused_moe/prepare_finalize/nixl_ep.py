@@ -12,6 +12,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
+    masked_amax_scale,
     moe_kernel_quantize_input,
     normalize_batched_scales_shape,
 )
@@ -33,9 +34,7 @@ assert isinstance(NIXL_EP_TOPK_INDICES_DTYPE, torch.dtype)
 def dequant_fp8(
     expert_x_fp8: torch.Tensor, expert_x_scales: torch.Tensor
 ) -> torch.Tensor:
-    """
-    Return dequantized tensor in fp32
-    """
+    """Return dequantized tensor in fp32."""
     assert expert_x_fp8.is_contiguous()
     expert_x_scales = expert_x_scales.contiguous()
     num_experts = expert_x_fp8.size(0)
@@ -48,9 +47,7 @@ def dequant_fp8(
 
 
 class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
-    """
-    Prepare/Finalize using NIXL EP kernels.
-    """
+    """Prepare/Finalize using NIXL EP kernels."""
 
     # NIXL EP kernels are compiled only for certain specific hidden sizes.
     # NOTE: Keep this list sorted, maybe_roundup_layer_hidden_size depends
@@ -154,6 +151,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         a1_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
+        expert_num_tokens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.use_fp8_dispatch:
             block_k = (
@@ -181,9 +179,21 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             q_dtype = None
             logger.debug_once("Using NIXL EP bfloat16 dispatch for NVFP4 MoE.")
 
+        # The dispatch buffer is worst-case per expert, so rows past
+        # `expert_num_tokens[e]` hold stale tokens and must not contribute to
+        # a per-tensor scale.
+        a1_scale = quant_config.a1_scale
+        if quant_config.act_scale_is_tensor_wide(a1_scale):
+            a1_scale = masked_amax_scale(
+                x,
+                q_dtype,
+                expert_num_tokens=expert_num_tokens,
+                rows_per_expert=max_tokens,
+            )
+
         x, x_scales = moe_kernel_quantize_input(
             x,
-            quant_config.a1_scale,
+            a1_scale,
             q_dtype,
             quant_config.per_act_token_quant,
             quant_config.block_shape,
@@ -285,7 +295,9 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         a1_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        expert_x, expert_x_scale = self._do_quant(expert_x, a1_dtype, quant_config)
+        expert_x, expert_x_scale = self._do_quant(
+            expert_x, a1_dtype, quant_config, expert_num_tokens
+        )
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None

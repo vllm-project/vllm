@@ -1,10 +1,63 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from transformers.configuration_utils import PretrainedConfig
+import inspect
+from dataclasses import asdict, dataclass
+from typing import Any
+
+from transformers.configuration_utils import PreTrainedConfig
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
-class KimiLinearConfig(PretrainedConfig):
+@dataclass
+class KimiLinearDSAConfig:
+    """Configuration class for DSA (DeepSeek Sparse Attention).
+
+    Kimi-K3.1 puts DSA on every full-attention (MLA) layer; KDA layers
+    are unaffected. The converted checkpoint exports this as a nested
+    ``dsa_config`` sub-structure.
+    """
+
+    dsa_layers: list[int]
+    index_topk: int = 2048
+    index_head_dim: int = 64
+    index_num_heads: int = 16
+    # Leading dims of every indexer head that receive RoPE (neox/half-split
+    # after checkpoint conversion; shares the main-attention rotary cache).
+    # 0 = no indexer RoPE (Kimi-K3.1 is NoPE + index_rope_dim 0).
+    index_rope_dim: int = 0
+    # Norm on the indexer shared key: "rmsnorm" or "layernorm" (bias-full
+    # fp32 LayerNorm; the converter detects it from k_index_norm.bias).
+    index_k_norm_type: str = "rmsnorm"
+    indexer_use_fp8: bool = False
+    # Checkpoint schema parity fields; Kimi-K3.1 supports only
+    # index_topk_freq == 1 (no index share), other values fail loudly.
+    index_topk_freq: int = 1
+    index_skip_topk_offset: int = 1
+
+    @classmethod
+    def from_dict(cls, config_dict: dict[str, Any]) -> "KimiLinearDSAConfig":
+        config_dict = dict(config_dict)
+        if "dsa_layers" not in config_dict and "layers" in config_dict:
+            config_dict["dsa_layers"] = config_dict["layers"]
+        config_dict.pop("layers", None)
+        allowed_keys = inspect.signature(cls).parameters
+        for key in config_dict:
+            if key not in allowed_keys:
+                logger.warning("%s is set but does not support. Ignore it.", key)
+        cfg = cls(**{k: v for k, v in config_dict.items() if k in allowed_keys})
+        if cfg.index_topk_freq < 1:
+            raise ValueError(
+                f"index_topk_freq must be >= 1, got {cfg.index_topk_freq}; "
+                "0 would ZeroDivisionError in the index-share modulo check"
+            )
+        return cfg
+
+
+class KimiLinearConfig(PreTrainedConfig):
     model_type = "kimi_linear"
     keys_to_ignore_at_inference = ["past_key_values"]
 
@@ -48,6 +101,7 @@ class KimiLinearConfig(PretrainedConfig):
         mla_use_output_gate: bool | None = False,
         num_nextn_predict_layers: int = 0,
         linear_attn_config: dict | None = None,
+        dsa_config: dict | KimiLinearDSAConfig | None = None,
         attn_res_block_size: int | None = None,
         latent_moe_use_norm: bool = False,
         activation_situ_beta: float | None = None,
@@ -120,6 +174,20 @@ class KimiLinearConfig(PretrainedConfig):
             assert linear_attn_config["full_attn_layers"] is not None
         self.linear_attn_config = linear_attn_config
 
+        # Kimi-K3.1 (KDA + DSA hybrid): DSA parameters arrive as a nested
+        # sub-structure from the checkpoint conversion.
+        if isinstance(dsa_config, dict):
+            self.dsa_config: KimiLinearDSAConfig | None = KimiLinearDSAConfig.from_dict(
+                dsa_config
+            )
+        else:
+            self.dsa_config = dsa_config
+        # SparseMLACommonMetadataBuilder reads top-level hf_config.index_topk
+        # like upstream DeepSeek; expose it at the config level instead of
+        # injecting it implicitly at model construction time.
+        if self.dsa_config is not None:
+            self.index_topk = self.dsa_config.index_topk
+
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
@@ -159,3 +227,15 @@ class KimiLinearConfig(PretrainedConfig):
             self.linear_attn_config is not None
             and (layer_idx + 1) in self.linear_attn_config["kda_layers"]
         )
+
+    def is_dsa_layer(self, layer_idx: int):
+        return (
+            self.dsa_config is not None
+            and (layer_idx + 1) in self.dsa_config.dsa_layers
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        ret = super().to_dict()
+        if isinstance(ret.get("dsa_config"), KimiLinearDSAConfig):
+            ret["dsa_config"] = asdict(ret["dsa_config"])
+        return ret

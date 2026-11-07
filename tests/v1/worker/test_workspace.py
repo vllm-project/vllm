@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -16,6 +17,11 @@ class _SpecConfig:
         self._dspark = dspark
 
     def use_dspark(self) -> bool:
+        return self._dspark
+
+    @property
+    def uses_separate_workspace_lane(self) -> bool:
+        # Only DSpark drafts in a separate workspace lane.
         return self._dspark
 
 
@@ -56,8 +62,8 @@ def test_workspace_lanes_do_not_alias_and_restore_context(monkeypatch) -> None:
         (draft_reused,) = manager.get_simultaneous(((8,), torch.uint8))
     (target_reused,) = manager.get_simultaneous(((8,), torch.uint8))
 
-    assert manager._current_workspaces[0].numel() == 512  # type: ignore[union-attr]
-    assert manager._current_workspaces[1].numel() == 256  # type: ignore[union-attr]
+    assert manager._current_workspaces[0].numel() == 512
+    assert manager._current_workspaces[1].numel() == 256
     assert manager._current_workspaces[2:] == [None, None]
     assert target.data_ptr() != draft.data_ptr()
     assert draft.data_ptr() == draft_reused.data_ptr()
@@ -124,3 +130,126 @@ def test_workspace_lane_validation(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="at least one"):
         workspace.WorkspaceManager(torch.device("cpu"), num_lanes=0)
+
+
+def test_persistent_resources_are_lazy_and_isolated(monkeypatch) -> None:
+    """Only the requesting slot allocates; each ubatch/lane owns its resource."""
+    active_ubatch = 0
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: active_ubatch)
+    manager = workspace.WorkspaceManager(
+        torch.device("cpu"), num_ubatches=2, num_lanes=2
+    )
+    factory = Mock(side_effect=lambda: {"buffer": torch.zeros(8)})
+    resources = []
+    for ubatch in range(2):
+        active_ubatch = ubatch
+        for lane in range(2):
+            with workspace.use_workspace_lane(lane):
+                resource = manager.get_persistent_resource("scratch", factory)
+                resources.append(resource)
+                resource["buffer"].fill_(len(resources))
+                assert manager.get_persistent_resource("scratch", factory) is resource
+                assert factory.call_count == len(resources)
+
+    assert len({r["buffer"].data_ptr() for r in resources}) == 4
+    for i, resource in enumerate(resources, 1):
+        assert torch.all(resource["buffer"] == i)
+
+
+def test_persistent_resource_lock_applies_to_each_slot(monkeypatch) -> None:
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
+    manager = workspace.WorkspaceManager(torch.device("cpu"), num_lanes=2)
+    factory = Mock(side_effect=object)
+    first = manager.get_persistent_resource("scratch", factory)
+    manager.lock()
+    assert manager.get_persistent_resource("scratch", factory) is first
+    with pytest.raises(AssertionError, match="was not allocated during warmup"):
+        manager.get_persistent_resource("new", factory)
+    with workspace.use_workspace_lane(1):
+        with pytest.raises(AssertionError, match="was not allocated during warmup"):
+            manager.get_persistent_resource("scratch", factory)
+        assert factory.call_count == 1
+        manager.unlock()
+        assert manager.get_persistent_resource("scratch", factory) is not first
+    assert manager.get_persistent_resource("scratch", factory) is first
+
+
+def test_persistent_tensor_preserves_contents_and_rejects_changes() -> None:
+    """Initialization happens once and transient scratch cannot overwrite locks."""
+    manager = workspace.WorkspaceManager(torch.device("cpu"))
+    first = manager.get_persistent("locks", (8,), torch.int32, zero_init=True)
+    assert torch.count_nonzero(first) == 0
+    first.fill_(1)
+    (scratch,) = manager.get_simultaneous(((1024,), torch.uint8))
+    scratch.zero_()
+    assert manager.get_persistent("locks", (8,), torch.int32, zero_init=True) is first
+    assert torch.all(first == 1)
+    with pytest.raises(ValueError, match="requested shape"):
+        manager.get_persistent("locks", (16,), torch.int32)
+    with pytest.raises(ValueError, match="requested shape"):
+        manager.get_persistent("locks", (8,), torch.int64)
+    manager.lock()
+    assert manager.get_persistent("locks", (8,), torch.int32) is first
+    with pytest.raises(AssertionError, match="was not allocated during warmup"):
+        manager.get_persistent("new", (8,), torch.int32)
+
+
+def test_retained_span_survives_small_scratch_at_the_tail(monkeypatch) -> None:
+    """The retained span sits at the workspace end, so head-sized scratch
+    requests leave its bytes intact and the next same-key call reports so."""
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
+    manager = workspace.WorkspaceManager(torch.device("cpu"))
+    (full,) = manager.get_simultaneous(((4096,), torch.uint8))
+
+    span, intact = manager.get_retained("kv", (256,), torch.int32)
+    assert not intact
+    assert span.data_ptr() == full.data_ptr() + 4096 - 1024
+    span.copy_(torch.arange(256, dtype=torch.int32))
+
+    (head,) = manager.get_simultaneous(((3072,), torch.uint8))
+    head.fill_(7)
+    again, intact = manager.get_retained("kv", (256,), torch.int32)
+    assert intact
+    assert again.data_ptr() == span.data_ptr()
+    assert torch.equal(again, torch.arange(256, dtype=torch.int32))
+
+
+@pytest.mark.parametrize(
+    "disturb",
+    ["scratch_overlap", "other_key", "other_size", "reallocation"],
+)
+def test_retained_span_reports_disturbance(monkeypatch, disturb: str) -> None:
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
+    manager = workspace.WorkspaceManager(torch.device("cpu"))
+    manager.get_simultaneous(((4096,), torch.uint8))
+    manager.get_retained("kv", (256,), torch.int32)
+
+    if disturb == "scratch_overlap":
+        # One byte past the head of the span is enough.
+        manager.get_simultaneous(((3073,), torch.uint8))
+    elif disturb == "other_key":
+        manager.get_retained("other", (256,), torch.int32)
+    elif disturb == "other_size":
+        manager.get_retained("kv", (128,), torch.int32)
+    else:
+        manager.get_simultaneous(((8192,), torch.uint8))
+
+    _, intact = manager.get_retained("kv", (256,), torch.int32)
+    assert not intact
+    # The call itself re-arms the span.
+    _, intact = manager.get_retained("kv", (256,), torch.int32)
+    assert intact
+
+
+def test_retained_span_is_per_slot(monkeypatch) -> None:
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
+    manager = workspace.WorkspaceManager(torch.device("cpu"), num_lanes=2)
+    manager.get_simultaneous(((4096,), torch.uint8))
+    manager.get_retained("kv", (256,), torch.int32)
+    with workspace.use_workspace_lane(1):
+        # Another lane's scratch and span requests do not touch lane 0.
+        manager.get_simultaneous(((4096,), torch.uint8))
+        _, intact = manager.get_retained("kv", (256,), torch.int32)
+        assert not intact
+    _, intact = manager.get_retained("kv", (256,), torch.int32)
+    assert intact

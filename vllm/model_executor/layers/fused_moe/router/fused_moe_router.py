@@ -10,8 +10,7 @@ from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 
 
 class FusedMoERouter(ABC):
-    """
-    FusedMoERouter is an abstract class that provides a 'select_experts'
+    """FusedMoERouter is an abstract class that provides a 'select_experts'
     method that is used for routing hidden states based on router logits.
     """
 
@@ -35,6 +34,23 @@ class FusedMoERouter(ABC):
     def routing_method_type(self) -> RoutingMethodType:
         raise NotImplementedError
 
+    @property
+    def kernel_routing_method_type(self) -> RoutingMethodType:
+        """Routing method executed by kernels, before any router override."""
+        return self.routing_method_type
+
+    @property
+    def supports_monolithic_kernels(self) -> bool:
+        return True
+
+    def prepare_monolithic_logits(self, router_logits: torch.Tensor) -> torch.Tensor:
+        return router_logits
+
+    def prepare_monolithic_bias(
+        self, e_score_correction_bias: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        return e_score_correction_bias
+
     @abstractmethod
     def _select_experts(
         self,
@@ -54,8 +70,7 @@ class FusedMoERouter(ABC):
         *,
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Route the input hidden states to the top-k experts based on the
+        """Route the input hidden states to the top-k experts based on the
         router logits.
 
         Returns:
@@ -66,14 +81,20 @@ class FusedMoERouter(ABC):
             **Compatibility**: When EPLB is not enabled, the returned ids are
             equivalent to global logical ids, so should be compatible with
             plain MoE implementations without redundant experts.
-        """
 
+        """
         topk_weights, topk_ids = self._select_experts(
             hidden_states,
             router_logits,
             topk_indices_dtype=topk_indices_dtype,
             input_ids=input_ids,
         )
+        # MoE kernels read routing tensors as dense buffers and ignore strides
+        if not (topk_weights.is_contiguous() and topk_ids.is_contiguous()):
+            raise ValueError(
+                f"{type(self).__name__} returned non-contiguous topk_weights "
+                "or topk_ids"
+            )
 
         # Write routing data for non-monolithic path (Triton, etc.)
         # (set by bind_routing_capture_to_model during capturer init)

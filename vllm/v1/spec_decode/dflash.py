@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import replace
 from typing import Any
 
 import torch
 from typing_extensions import override
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, replace
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -219,8 +218,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
-        """
-        Key differences to default dummy_run:
+        """Key differences to default dummy_run:
         - Only one forward pass due to parallel drafting
         - DFlash uses context states as unpadded metadata, so hidden_states will
         use the unpadded num_tokens instead of num_input_tokens

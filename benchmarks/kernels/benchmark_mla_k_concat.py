@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Benchmark script comparing torch.cat vs direct copy for k_nope/k_pe concatenation
+"""Benchmark script comparing torch.cat vs direct copy for k_nope/k_pe concatenation
 in MLA (Multi-head Latent Attention) prefill.
 
 This validates that the optimization from commit 8d4142bd is beneficial across
