@@ -9,6 +9,10 @@ From the repository root, run:
 
 Both adapters must target the selected base model. Supported NVIDIA configurations
 use CUDA graphs by default. For CPU and other backends, add --enforce-eager.
+Native MoE expert composition is experimental; its validation limits are listed
+in docs/features/lora.md. Expert targets require compatible MoE adapter files.
+This example does not configure distributed execution. For native-MoE distributed
+requirements and execution modes, see docs/features/lora.md.
 On CPU hosts, set VLLM_CPU_KVCACHE_SPACE to a suitable cache size in GiB for the
 available memory.
 """

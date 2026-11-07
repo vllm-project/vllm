@@ -453,8 +453,9 @@ class LLM(
                 If `False`, no progress bar is created.
             lora_request: Adapter or fixed-weight composition to use for generation.
                 A single request applies to every prompt; a sequence selects one
-                request per prompt. Compositions require eager execution and
-                max_loras_per_request large enough for all component adapters.
+                request per prompt. Set max_loras_per_request large enough for
+                all component adapters. Graph support depends on the platform
+                and adapter targets; see the LoRA feature guide.
             priority: The priority of the requests, if any.
                 Only applicable when priority scheduling policy is enabled.
                 When it is a single value, it is applied to every prompt.
