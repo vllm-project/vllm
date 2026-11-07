@@ -3,6 +3,7 @@
 import copy
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -19,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
 from vllm.v1.worker.gpu.cp_utils import cp_local_slot
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -33,6 +35,10 @@ from vllm.v1.worker.gpu.spec_decode.utils import get_parallel_drafting_token_id
 from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
+
+# Trimming the draft context to its window costs a few fixed launches, so a
+# step trims only when it skips at least this many context rows.
+MIN_TRIMMED_CONTEXT_ROWS = 2048
 
 
 class DFlashSpeculator(DraftModelSpeculator):
@@ -129,6 +135,10 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
         self.draft_kv_cache_group_id: int = -1
+        # See _init_context_trim: rows kept per request, and this step's rows.
+        self._kept_context_len: int | None = None
+        self._kept_lens: UvaBufferPool | None = None
+        self._kept_rows: torch.Tensor | None = None
 
     @property
     def attn_vllm_config(self) -> VllmConfig:
@@ -213,11 +223,11 @@ class DFlashSpeculator(DraftModelSpeculator):
         aux_hidden_states: list[torch.Tensor] | None,
         num_rejected: torch.Tensor,
         dummy_run: bool,
+        num_target_tokens: int,
     ) -> None:
         """Eager work before a FULL replay: stage the inputs _prepare_graph_forward
         reads and store the context rows past the graph's num_context rows."""
         num_reqs = input_batch.num_reqs
-        num_target_tokens = input_batch.num_tokens
         num_context = self._num_graph_context_tokens(num_graph_reqs)
         self._store_hidden_states(
             num_target_tokens, last_hidden_states, aux_hidden_states, num_context
@@ -277,6 +287,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         ]
         assert self.draft_kv_cache_group_ids, "No draft attention groups found."
         self.draft_kv_cache_group_id = self.draft_kv_cache_group_ids[0]
+        self._init_context_trim()
 
         # Per-group context slot buffers for the precompute (one row per group).
         self._context_slot_mappings = torch.zeros(
@@ -372,6 +383,56 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_reqs, self.num_speculative_steps
         )
 
+    def _init_context_trim(self) -> None:
+        """A drafter whose KV groups are all sliding-window reads only the last
+        ``window`` context rows of each request, so a long prefill step needs
+        the context projection and K/V of only its trailing rows. Older rows
+        could still be read through a prefix-cache hit or an external KV store,
+        both of which use only prefix-cacheable groups, or by a context anchor
+        that reads hidden states by target row."""
+        specs = [groups[0].kv_cache_spec for groups in self.attn_groups if groups]
+        windows = [get_kv_cache_spec_sliding_window(spec) or 0 for spec in specs]
+        reusable = any(spec.prefix_cacheable for spec in specs) and (
+            self.vllm_config.cache_config.enable_prefix_caching
+            or self.vllm_config.kv_transfer_config is not None
+        )
+        if (
+            not specs
+            or min(windows) <= self.num_speculative_steps
+            or reusable
+            or type(self).prepare_context_anchor
+            is not DFlashSpeculator.prepare_context_anchor
+        ):
+            return
+        # The query block can shift the window when it is clamped at
+        # max_model_len.
+        self._kept_context_len = max(windows) + self.num_query_per_req
+        self._kept_lens = UvaBufferPool(self.max_num_reqs, torch.int64)
+
+    def _select_context_rows(self, input_batch: InputBatch, num_reqs: int) -> int:
+        """Context rows this step projects and stores. When trimming, sets
+        ``_kept_rows`` to each request's trailing rows, compacted."""
+        self._kept_rows = None
+        num_tokens = input_batch.num_tokens
+        if self._kept_context_len is None or num_tokens <= MIN_TRIMMED_CONTEXT_ROWS:
+            return num_tokens
+        assert self._kept_lens is not None
+        kept_lens = np.minimum(
+            input_batch.num_scheduled_tokens[:num_reqs], self._kept_context_len
+        )
+        num_kept = int(kept_lens.sum())
+        if num_tokens - num_kept < MIN_TRIMMED_CONTEXT_ROWS:
+            return num_tokens
+        # Rows end at the device query_start_loc, which adaptive verification
+        # may shorten for decodes.
+        kept_lens_uva = self._kept_lens.copy_to_uva(kept_lens)
+        rows = torch.arange(num_kept, device=self.device)
+        rows += (
+            input_batch.query_start_loc[1 : num_reqs + 1] - kept_lens_uva.cumsum(0)
+        ).repeat_interleave(kept_lens_uva, output_size=num_kept)
+        self._kept_rows = rows.clamp_min_(0)
+        return num_kept
+
     def _num_graph_context_tokens(self, num_reqs: int) -> int:
         # Context rows a captured draft step stores: one full verify per request.
         return min(num_reqs * (self.num_speculative_steps + 1), self.max_num_tokens)
@@ -401,6 +462,12 @@ class DFlashSpeculator(DraftModelSpeculator):
         aux_hidden_states: list[torch.Tensor] | None,
         num_graph_tokens: int = 0,
     ) -> None:
+        if self._kept_rows is not None:
+            rows = self._kept_rows
+            if aux_hidden_states:
+                aux_hidden_states = [h.index_select(0, rows) for h in aux_hidden_states]
+            else:
+                last_hidden_states = last_hidden_states.index_select(0, rows)
         # A FULL graph combines its first num_graph_tokens rows from the staged
         # aux hidden states; the remaining rows are combined here.
         start = 0
@@ -510,6 +577,12 @@ class DFlashSpeculator(DraftModelSpeculator):
                 input_batch.idx_mapping, num_reqs_padded=num_reqs
             )
 
+        num_context_rows = (
+            self._select_context_rows(input_batch, num_reqs)
+            if not dummy_run
+            else num_target_tokens
+        )
+
         # The query slot mapping is written into the shared BlockTables slot_mappings.
         # That buffer's address is what the captured CUDA graph reads from at replay.
         assert self.draft_kv_cache_group_id >= 0
@@ -546,14 +619,23 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.sample_from_anchor,
                 num_reqs,
             )
+        if self._kept_rows is not None:
+            rows = self._kept_rows
+            self.context_positions[:num_context_rows] = (
+                self.context_positions.index_select(0, rows)
+            )
+            self._context_slot_mappings[:, :num_context_rows] = (
+                self._context_slot_mappings.index_select(1, rows)
+            )
 
         if num_speculative_tokens == 0:
             # No drafts are needed: store the context K/V to keep the drafter in
             # sync, and skip the query pass.
             self._store_hidden_states(
-                num_target_tokens, last_hidden_states, aux_hidden_states
+                num_context_rows, last_hidden_states, aux_hidden_states
             )
-            self._precompute_context_kv(0, num_target_tokens, dummy_run)
+            self._precompute_context_kv(0, num_context_rows, dummy_run)
+            self._kept_rows = None
             return self.draft_tokens[:num_reqs]
 
         batch_sync, num_batch_tokens = (
@@ -591,15 +673,17 @@ class DFlashSpeculator(DraftModelSpeculator):
                 aux_hidden_states,
                 num_rejected,
                 dummy_run,
+                num_context_rows,
             )
         else:
             self._store_hidden_states(
-                num_target_tokens, last_hidden_states, aux_hidden_states
+                num_context_rows, last_hidden_states, aux_hidden_states
             )
             self.prepare_context_anchor(
                 num_reqs, input_batch.query_start_loc, num_rejected
             )
-            self._precompute_context_kv(0, num_target_tokens, dummy_run)
+            self._precompute_context_kv(0, num_context_rows, dummy_run)
+        self._kept_rows = None
 
         is_full_cudagraph = batch_desc.cg_mode == CUDAGraphMode.FULL
         # During FULL cudagraph with a model that supports decode metadata updates,
