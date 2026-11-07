@@ -3659,10 +3659,8 @@ class VllmConfig:
             unsupported.append("dual batch overlap with pipeline parallelism")
         if parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("dual batch overlap with prefill context parallelism")
-        if model_config is not None and (
-            model_config.is_multimodal_model or model_config.is_encoder_decoder
-        ):
-            unsupported.append("dual batch overlap with multimodal models")
+        if model_config is not None and model_config.is_encoder_decoder:
+            unsupported.append("dual batch overlap with encoder-decoder models")
         if model_config is not None and model_config.is_hybrid:
             unsupported.append("dual batch overlap with hybrid models")
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:

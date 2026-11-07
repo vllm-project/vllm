@@ -436,6 +436,33 @@ def test_slice_model_inputs_handles_mrope_positions():
     assert sliced["intermediate_tensors"] is None
 
 
+def test_slice_model_inputs_handles_declared_model_inputs():
+    model_inputs = {
+        "input_ids": torch.arange(8),
+        "positions": torch.arange(8),
+        "inputs_embeds": None,
+        "intermediate_tensors": None,
+        "visual_embeds": torch.arange(16).view(8, 2),
+    }
+
+    sliced = slice_model_inputs(model_inputs, slice(2, 6), frozenset({"visual_embeds"}))
+
+    torch.testing.assert_close(sliced["visual_embeds"], torch.arange(8, 12).view(4, 2))
+
+
+def test_slice_model_inputs_rejects_undeclared_model_inputs():
+    model_inputs = {
+        "input_ids": torch.arange(8),
+        "positions": torch.arange(8),
+        "inputs_embeds": None,
+        "intermediate_tensors": None,
+        "visual_embeds": torch.arange(16).view(8, 2),
+    }
+
+    with pytest.raises(ValueError, match="visual_embeds"):
+        slice_model_inputs(model_inputs, slice(2, 6))
+
+
 @pytest.mark.parametrize(
     ("cudagraph_runtime_mode", "execution_method"),
     [

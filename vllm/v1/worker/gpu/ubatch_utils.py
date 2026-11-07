@@ -257,7 +257,9 @@ def _slice_seq_lens(
 
 
 def slice_model_inputs(
-    model_inputs: dict[str, Any], token_slice: slice
+    model_inputs: dict[str, Any],
+    token_slice: slice,
+    model_specific_keys: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Narrow the model's per-token inputs to one microbatch."""
     sliced = dict(model_inputs)
@@ -275,6 +277,23 @@ def slice_model_inputs(
     intermediate_tensors = model_inputs.get("intermediate_tensors")
     if intermediate_tensors is not None:
         sliced["intermediate_tensors"] = intermediate_tensors[token_slice]
+
+    base_keys = {"input_ids", "inputs_embeds", "positions", "intermediate_tensors"}
+    for key, value in model_inputs.items():
+        if key in base_keys or value is None:
+            continue
+        if key not in model_specific_keys:
+            raise ValueError(
+                f"DBO cannot slice model input {key!r}; declare it in "
+                "ModelState.get_dbo_supported_input_keys()"
+            )
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(
+                f"DBO model-specific input {key!r} must be a tensor, "
+                f"got {type(value).__name__}"
+            )
+        sliced[key] = value[token_slice]
+
     return sliced
 
 
@@ -541,7 +560,11 @@ class UBatchRunner:
                 target=run_ubatch,
                 args=(
                     ubatch_context,
-                    slice_model_inputs(model_inputs, ubatch_slice.token_slice),
+                    slice_model_inputs(
+                        model_inputs,
+                        ubatch_slice.token_slice,
+                        self.model_state.get_dbo_supported_input_keys(),
+                    ),
                 ),
             )
             threads.append(thread)

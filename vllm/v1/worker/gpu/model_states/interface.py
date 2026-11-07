@@ -226,6 +226,10 @@ class ModelState(ABC):
     ) -> dict[str, Any]:
         raise NotImplementedError
 
+    def get_dbo_supported_input_keys(self) -> frozenset[str]:
+        """Return model-specific per-token inputs that DBO can slice."""
+        return frozenset()
+
     @abstractmethod
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         raise NotImplementedError
