@@ -8,7 +8,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-import vllm._custom_ops as ops
+import vllm._cpu_ops as ops
 from vllm.model_executor.layers.mamba.ops.cpu import gdn_attention
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed

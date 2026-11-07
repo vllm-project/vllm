@@ -15,7 +15,7 @@ from vllm.utils.torch_utils import set_random_seed
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
-import vllm._custom_ops as ops  # noqa: E402
+import vllm._cpu_ops as ops  # noqa: E402
 
 if not hasattr(torch.ops._C, "fused_experts_cpu"):
     pytest.skip("fused_experts_cpu op not available", allow_module_level=True)
