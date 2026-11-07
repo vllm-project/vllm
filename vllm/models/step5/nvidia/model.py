@@ -58,6 +58,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.reload.direct import direct_reload_active
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     SupportsLoRA,
@@ -677,14 +678,6 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
             dim=-1,
         )
         return index_q, index_k, index_z, gate
-
-
-def _in_weight_update(model: nn.Module) -> bool:
-    """One `load_weights` call during an update may hold only some of the shards."""
-    from vllm.model_executor.model_loader.reload.direct import direct_reload_active
-    from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
-
-    return direct_reload_active(model) or get_layerwise_info(model).can_load()
 
 
 def _reset_fused_qkv_indexer_load_state(module: nn.Module) -> None:
@@ -2435,7 +2428,7 @@ class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             moe.experts.update_expert_map()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        validate_completeness = not _in_weight_update(self)
+        validate_completeness = not direct_reload_active(self)
         if validate_completeness:
             _reset_fused_qkv_indexer_load_state(self.model)
         skip_prefixes = ["vision_model."]
