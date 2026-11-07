@@ -10,12 +10,12 @@ import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import msgspec
 import numpy as np
 import pytest
 import torch
 import zmq.asyncio
+from huggingface_hub.utils import httpx
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import envs
@@ -929,9 +929,6 @@ class _FlakyAsyncClient:
         return response
 
 
-@pytest.mark.xfail(
-    strict=True, reason="Patches the wrong httpx module; fixed by #63122"
-)
 @pytest.mark.asyncio
 async def test_register_worker_retries_on_read_timeout(monkeypatch):
     """A slow rank-0 bootstrap response must be retried, not treated as fatal."""
@@ -951,9 +948,6 @@ async def test_register_worker_retries_on_read_timeout(monkeypatch):
     assert len(calls) == 3
 
 
-@pytest.mark.xfail(
-    strict=True, reason="Patches the wrong httpx module; fixed by #63122"
-)
 @pytest.mark.asyncio
 async def test_register_worker_raises_after_max_attempts(monkeypatch):
     """Terminal registration failure must raise, not loop forever."""
@@ -1167,7 +1161,7 @@ def patch_worker_dependencies():
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.make_zmq_socket"
         ) as mock_make_zmq,
-        patch("httpx.AsyncClient") as mock_async_client,
+        patch.object(mooncake_connector.httpx, "AsyncClient") as mock_async_client,
     ):
         # Mock PP group
         mock_pp_group = MagicMock()
@@ -2014,10 +2008,19 @@ def test_decode_renews_lease_until_pull_settles(settled_by):
 
 
 @pytest.mark.asyncio
-async def test_decode_heartbeat_reaches_every_paired_prefill_worker():
+@pytest.mark.parametrize(
+    ("mode", "role"),
+    [
+        ("request", "kv_consumer"),
+        ("request", "kv_both"),
+        ("layerwise", "kv_consumer"),
+    ],
+)
+async def test_decode_heartbeat_reaches_every_paired_prefill_worker(mode, role):
     """A renewal for a request still queued on D queries P's bootstrap first."""
     vllm_config = _make_worker_vllm_config(
-        "kv_consumer", kv_connector_extra_config={"kv_lease_duration": 30}
+        role,
+        kv_connector_extra_config={"kv_lease_duration": 30, "transfer_mode": mode},
     )
     # P TP=2 serves this D TP=1 worker from both of its ranks.
     workers = {
