@@ -6285,6 +6285,11 @@ class GPUModelRunner(
         _ROPE_DICT.clear()
 
         reset_workspace_manager()
+        from vllm.v1.attention.backends.flashinfer_workspace import (
+            reset_flashinfer_workspace_state,
+        )
+
+        reset_flashinfer_workspace_state()
         if current_platform.is_rocm() or current_platform.is_xpu():
             gc.collect()
             torch.accelerator.empty_cache()

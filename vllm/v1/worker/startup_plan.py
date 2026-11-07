@@ -71,6 +71,19 @@ def compute_plan_fingerprint(
         "rank": rank,
         "world_size": world_size,
     }
+    # Present only after an opt-in FlashInfer workspace decision. Omitting it
+    # when auto-size is off keeps plans recorded before that decision valid.
+    from vllm.v1.attention.backends.flashinfer_workspace import (
+        current_flashinfer_workspace_decision,
+    )
+
+    workspace = current_flashinfer_workspace_decision()
+    if workspace is not None:
+        factors["flashinfer_workspace_source"] = workspace.source
+        factors["flashinfer_workspace_selected"] = workspace.selected_bytes
+        factors["flashinfer_workspace_explicit"] = envs.is_set(
+            "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE"
+        )
     digest = hashlib.sha256(json.dumps(factors, sort_keys=True).encode()).hexdigest()
     return digest[:16]
 

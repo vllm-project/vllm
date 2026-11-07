@@ -697,6 +697,15 @@ class Worker(WorkerBase):
             by adjusting the `gpu_memory_utilization` parameter.
 
         """
+        # Opt-in only. Reserve before the startup plan and the memory profile so
+        # a smaller FlashInfer workspace is already allocated when KV capacity
+        # is decided. Unset, this is a no-op and the plan fingerprint is unchanged.
+        if envs.VLLM_FLASHINFER_WORKSPACE_AUTO_SIZE:
+            from vllm.v1.attention.backends.flashinfer_workspace import (
+                maybe_reserve_flashinfer_workspace,
+            )
+
+            maybe_reserve_flashinfer_workspace(self.vllm_config, self.device)
         maybe_apply_startup_plan(self)
 
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
@@ -972,6 +981,13 @@ class Worker(WorkerBase):
                     kv_cache_config, kv_cache_allocation_context=allocation_context
                 )
 
+        if envs.VLLM_FLASHINFER_WORKSPACE_AUTO_SIZE:
+            from vllm.v1.attention.backends.flashinfer_workspace import (
+                log_flashinfer_workspace_kv_capacity,
+            )
+
+            log_flashinfer_workspace_kv_capacity(self.vllm_config, kv_cache_config)
+
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
         # allocator and are not discarded during sleep/wake cycles.
@@ -1029,6 +1045,14 @@ class Worker(WorkerBase):
         """Commit the final size of an extensible KV cache."""
         extend_kv_cache(self._v2_model_runner(), self._kv_cache_config, num_blocks)
         self.cache_config.num_gpu_blocks = num_blocks
+        if envs.VLLM_FLASHINFER_WORKSPACE_AUTO_SIZE:
+            from vllm.v1.attention.backends.flashinfer_workspace import (
+                log_flashinfer_workspace_kv_capacity,
+            )
+
+            log_flashinfer_workspace_kv_capacity(
+                self.vllm_config, self._kv_cache_config, num_blocks=num_blocks
+            )
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:

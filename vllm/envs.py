@@ -230,6 +230,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
+    VLLM_FLASHINFER_WORKSPACE_AUTO_SIZE: bool = False
     VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 512
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
@@ -1907,9 +1908,25 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "auto",
         ["auto", "trtllm", "mnnvl"],
     ),
-    # Control the workspace buffer size for the FlashInfer backend.
+    # Workspace bytes for the FlashInfer attention backend. Unset uses 394 MiB.
+    # The backend still grows above this when the prefill head footprint is
+    # larger. An explicit value, including one equal to 394 MiB, disables
+    # VLLM_FLASHINFER_WORKSPACE_AUTO_SIZE.
     "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(
         os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(394 * 1024 * 1024))
+    ),
+    # Opt in to sizing the FlashInfer workspace before memory profiling.
+    # Default off: the historical reservation is unchanged.
+    # Set to 1 to ask FlashInfer for a workspace upper bound
+    # (``workspace_size_upper_bound``) from the model geometry and scheduler
+    # limits, then reserve that smaller buffer so the freed bytes can become
+    # KV cache under the same ``gpu_memory_utilization``. First-request latency
+    # can get worse. Unsupported routes, a missing FlashInfer API, and an
+    # explicit ``VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE`` keep native allocation.
+    # The startup log records configured bytes, selected bytes, the selection
+    # source, any fallback reason, and the resulting KV capacity.
+    "VLLM_FLASHINFER_WORKSPACE_AUTO_SIZE": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_WORKSPACE_AUTO_SIZE", "0"))
     ),
     # Transmit MoE all-to-all combine (expert-output) payloads in FP8 instead
     # of BF16, halving NVLink traffic on the combine leg. Only takes effect
