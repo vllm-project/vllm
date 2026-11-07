@@ -12,6 +12,7 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
+from transformers import MiniMaxM3VLTextConfig
 
 from vllm import _custom_ops as ops
 from vllm.config import CacheConfig, VllmConfig
@@ -39,7 +40,6 @@ from vllm.models.minimax_m3.common.ops.dspark_context_kv import (
     rotary_dims_supported,
 )
 from vllm.platforms import current_platform
-from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3TextConfig
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -147,7 +147,7 @@ direct_register_custom_op(
 class MiniMaxM3DSparkAttention(DFlashQwen3Attention):
     def __init__(
         self,
-        config: MiniMaxM3TextConfig,
+        config: MiniMaxM3VLTextConfig,
         sliding_window: int | None,
         causal: bool,
         cache_config: CacheConfig | None,
@@ -160,8 +160,10 @@ class MiniMaxM3DSparkAttention(DFlashQwen3Attention):
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             rope_parameters={
-                "rope_theta": config.rope_theta,
-                "partial_rotary_factor": config.partial_rotary_factor,
+                "rope_theta": config.rope_parameters["rope_theta"],
+                "partial_rotary_factor": config.rope_parameters.get(
+                    "partial_rotary_factor", 0.5
+                ),
             },
             max_position=config.max_position_embeddings,
             head_dim=config.head_dim,
@@ -237,16 +239,11 @@ class MiniMaxM3DSparkMLP(nn.Module):
 
     def __init__(
         self,
-        config: MiniMaxM3TextConfig,
+        config: MiniMaxM3VLTextConfig,
         quant_config: QuantizationConfig | None,
         prefix: str,
     ) -> None:
         super().__init__()
-        if config.hidden_act != "swigluoai":
-            raise ValueError(
-                f"Unsupported MiniMax DSpark activation {config.hidden_act!r}; "
-                "only swigluoai is supported."
-            )
         intermediate_size = config.dspark_ffn_hidden_size
         self.gate_up_proj = MergedColumnParallelLinear(
             config.hidden_size,
@@ -265,7 +262,7 @@ class MiniMaxM3DSparkMLP(nn.Module):
         self.act_fn = SiluAndMulWithClamp(
             swiglu_limit=config.swiglu_limit,
             alpha=config.swiglu_alpha,
-            beta=config.swiglu_beta,
+            beta=1.0,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -279,7 +276,7 @@ class MiniMaxM3DSparkDecoderLayer(DFlashQwen3DecoderLayer):
         self,
         vllm_config: VllmConfig,
         *,
-        config: MiniMaxM3TextConfig,
+        config: MiniMaxM3VLTextConfig,
         layer_idx: int,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -327,6 +324,26 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
         hidden_size, eps = self.config.hidden_size, self.config.rms_norm_eps
         self.hidden_norm = _gemma_rms_norm(hidden_size, eps=eps)
         self.norm = _gemma_rms_norm(hidden_size, eps=eps)
+        # VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1: supported draft steps run the draft
+        # layers as FlyDSL launches (MI355X)
+        self._mono_drafter = None
+        if current_platform.is_rocm():
+            from vllm.models.minimax_m3.amd.mono.envs import envs as mono_envs
+
+            if mono_envs.MONO_DRAFTER:
+                from vllm.models.minimax_m3.amd.mono.drafter.dispatch import (
+                    DrafterDecode,
+                )
+
+                self._mono_drafter = DrafterDecode(self, vllm_config)
+
+    def __call__(self, *args, **kwargs):
+        # ahead of torch.compile's wrapper: the kernels launch outside the graph
+        if self._mono_drafter is not None:
+            out = self._mono_drafter.maybe_forward(*args, **kwargs)
+            if out is not None:
+                return out
+        return super().__call__(*args, **kwargs)
 
     def _normalize_context_states(self, context_states: torch.Tensor) -> torch.Tensor:
         return self.hidden_norm(context_states)

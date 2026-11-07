@@ -17,7 +17,6 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.exceptions import RetryableRequestError
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
-from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine import EngineCoreRequestType
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -91,10 +90,6 @@ async def test_load(
     if async_scheduling and data_parallel_backend == "ray":
         # TODO(NickLucche) Re-enable when async scheduling is supported
         pytest.skip("Async scheduling is not supported with ray")
-    elif data_parallel_backend == "ray" and current_platform.is_rocm():
-        pytest.skip(
-            "Ray as the distributed executor backend is not supported with ROCm."
-        )
     stats_loggers = {}
 
     @dataclass
@@ -312,7 +307,7 @@ async def test_dp_pause_resume_basic(expert_parallel: bool):
 
         # Engine still works after resume
         sampling_params = SamplingParams(max_tokens=5)
-        async for out in engine.generate(
+        async for out in engine.generate(  # noqa: B007
             request_id="after-resume",
             prompt=DP_PAUSE_PROMPT,
             sampling_params=sampling_params,
@@ -533,7 +528,7 @@ async def test_dp_pause_abort(expert_parallel: bool):
         assert not await engine.is_paused()
 
         # New request completes after resume
-        async for out in engine.generate(
+        async for out in engine.generate(  # noqa: B007
             request_id="after-abort",
             prompt=DP_PAUSE_PROMPT,
             sampling_params=SamplingParams(max_tokens=5),
@@ -790,7 +785,7 @@ async def test_dp_pause_wait_mode_drains_in_flight():
             out = await asyncio.wait_for(collector.get(), timeout=30)
 
         await engine.resume_generation()
-        async for out in engine.generate(
+        async for out in engine.generate(  # noqa: B007
             request_id="after-wait",
             prompt=DP_PAUSE_PROMPT,
             sampling_params=SamplingParams(max_tokens=5),
@@ -823,7 +818,7 @@ async def test_dp_pause_while_asleep():
         # A full wake makes the memory resident and resumes the scheduler.
         await engine.wake_up()
         assert not await engine.is_sleeping()
-        async for out in engine.generate(
+        async for out in engine.generate(  # noqa: B007
             request_id="after-wake",
             prompt=DP_PAUSE_PROMPT,
             sampling_params=SamplingParams(max_tokens=5),

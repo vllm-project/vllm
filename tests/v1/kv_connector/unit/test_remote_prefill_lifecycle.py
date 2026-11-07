@@ -337,7 +337,7 @@ def test_basic_lifecycle():
         0
     ].req_to_blocks[request_id]
     for block in blocks:
-        assert block._block_hash is None
+        assert block.block_hash is None
 
     # (1b): forward()
     model_runner_output = EMPTY_MODEL_RUNNER_OUTPUT
@@ -381,7 +381,7 @@ def test_basic_lifecycle():
     ].req_to_blocks[request_id]
     for block in blocks:
         assert block.ref_cnt == 1
-        num_hashed_blocks += 1 if block._block_hash is not None else 0
+        num_hashed_blocks += 1 if block.block_hash is not None else 0
     assert num_hashed_blocks == NUM_EXTERNAL_FULL_BLOCKS
 
     # Confirm the rest of the prompt is scheduled in this step.
@@ -569,13 +569,13 @@ def test_no_spurious_prefix_caching():
     num_hashed_blocks = 0
     for block in local_blocks:
         assert block.ref_cnt == 1
-        num_hashed_blocks += 1 if block._block_hash is not None else 0
+        num_hashed_blocks += 1 if block.block_hash is not None else 0
     assert num_hashed_blocks > 0
 
     # Remote blocks should not be cached.
     for block in remote_blocks:
         assert block.ref_cnt == 1
-        assert block._block_hash is None
+        assert block.block_hash is None
 
 
 def test_full_block_prompt():
@@ -735,13 +735,9 @@ def test_cannot_schedule_after_recv():
     # request is retrieved from preempted list.
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output(reqs=[request_remote])
-    # V2 emits a resumed (previously preempted) request as a NewRequestData
+    # A resumed (previously preempted) request is emitted as a NewRequestData
     # rather than a cached request.
-    if scheduler.use_v2_model_runner:
-        num_computed = scheduler_output.scheduled_new_reqs[0].num_computed_tokens
-    else:
-        cached = scheduler_output.scheduled_cached_reqs
-        num_computed = cached.num_computed_tokens[0]
+    num_computed = scheduler_output.scheduled_new_reqs[0].num_computed_tokens
     assert num_computed == NUM_PROMPT_BLOCKS * BLOCK_SIZE
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 1
@@ -918,7 +914,6 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
     # Model returns no tokens for intermediate prefill chunk
     intermediate_output = ModelRunnerOutput(
         req_ids=[request.request_id],
-        req_id_to_index={request.request_id: 0},
         sampled_token_ids=[[]],
     )
     scheduler.update_from_output(scheduler_output, intermediate_output)
