@@ -46,6 +46,7 @@ def mock_instanttensor(monkeypatch):
         ("mlp.experts.gate_proj.weight", {0}, True),
         ("mlp.experts.0.gate_proj.weight", {0}, False),
         ("mlp.experts.0.gate_proj.weight", set(), False),
+        ("mlp.experts.0.gate_proj.weight", None, False),
     ],
 )
 def test_instanttensor_ep_collective_loading(
@@ -56,7 +57,11 @@ def test_instanttensor_ep_collective_loading(
     path = tmp_path / "model.safetensors"
     save_file({weight_name: torch.ones(1)}, str(path))
 
-    list(instanttensor_weights_iterator([str(path)], False, local_expert_ids=local_ids))
+    list(
+        instanttensor_weights_iterator(
+            [str(path)], False, local_expert_ids=local_ids, ep_filter_enabled=True
+        )
+    )
     kwargs = native_open.call_args.kwargs
     assert kwargs["process_group"] is (group.device_group if collective else None)
 
@@ -127,6 +132,7 @@ def test_instanttensor_embedding_table_routing(
         LoadConfig(load_format="instanttensor", use_tqdm_on_load=False)
     )
     loader.local_expert_ids = local_ids
+    loader.ep_filter_enabled = local_ids is not None
     model_config = SimpleNamespace(model=str(tmp_path), revision=None)
     loaded = list(loader.get_all_weights(model_config, torch.nn.Module()))
     kwargs = native_open.call_args.kwargs
@@ -197,6 +203,7 @@ def test_instanttensor_ep_filter_cuda(tmp_path, load_engram_on_cpu):
             [str(path)],
             False,
             local_expert_ids={0},
+            ep_filter_enabled=True,
             load_engram_on_cpu=load_engram_on_cpu,
         )
     )

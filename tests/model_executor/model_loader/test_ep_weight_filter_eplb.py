@@ -13,7 +13,7 @@ from vllm.platforms import current_platform
 # Already used by other CI tests. Its 72 routed experts are stored per expert;
 # with EP2 and 2 redundant experts each rank holds 37 slots, and rank 1's
 # redundant slots replicate experts 0 and 1 from rank 0's plain EP shard.
-MODEL = "luccafong/deepseek_mtp_main_random"
+MODEL = "vllm-project/deepseek_mtp_main_random"
 PROMPTS = [
     "The capital of France is",
     "The future of AI is",
@@ -23,23 +23,39 @@ PROMPTS = [
 MAX_TOKENS = 16
 FILTER_LOG = "EP weight filter: ep_size=2, ep_rank=0, loading 37/72 experts"
 
-pytestmark = [
-    *multi_gpu_marks(num_gpus=2),
-    pytest.mark.skipif(
-        not current_platform.is_cuda(),
-        reason="Exact comparison needs VLLM_BATCH_INVARIANT, unsupported for MLA "
-        "on this platform.",
-    ),
-]
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Exact comparison needs VLLM_BATCH_INVARIANT, unsupported for MLA "
+    "on this platform.",
+)
 
 
+@pytest.mark.parametrize(
+    ("pipeline_parallel_size", "load_format"),
+    [
+        pytest.param(1, "auto", id="tp2", marks=multi_gpu_marks(num_gpus=2)),
+        # Only the second stage has experts to filter, and InstantTensor must
+        # not load collectively on the first stage alone.
+        pytest.param(
+            2, "instanttensor", id="tp2-pp2", marks=multi_gpu_marks(num_gpus=4)
+        ),
+    ],
+)
 def test_ep_weight_filter_matches_unfiltered_with_eplb(
-    vllm_runner, caplog_mp_spawn, monkeypatch: pytest.MonkeyPatch
+    vllm_runner,
+    caplog_mp_spawn,
+    monkeypatch: pytest.MonkeyPatch,
+    pipeline_parallel_size: int,
+    load_format: str,
 ):
     # Batch invariance makes the two runs comparable token for token, and
     # spawned workers let caplog_mp_spawn read their logs.
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    if pipeline_parallel_size > 1:
+        # Only layer 0 is dense, so the first stage has no MoE layers and takes
+        # no part in EPLB.
+        monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "1,4")
 
     outputs = {}
     for enable_ep_weight_filter in (False, True):
@@ -48,6 +64,8 @@ def test_ep_weight_filter_matches_unfiltered_with_eplb(
             vllm_runner(
                 MODEL,
                 tensor_parallel_size=2,
+                pipeline_parallel_size=pipeline_parallel_size,
+                load_format=load_format,
                 enable_expert_parallel=True,
                 enable_eplb=True,
                 # A small window and interval make EPLB rebalance mid-generation;
