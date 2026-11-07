@@ -63,28 +63,24 @@ def test_disabling_extensible_cache_keeps_fallback_budget(
     assert worker.requested_memory == requested
 
 
-def test_sleep_preservation_restores_private_draft_not_shared_target():
+def _storage(parameter: torch.nn.Parameter) -> int:
+    return parameter.untyped_storage().data_ptr()
+
+
+def test_sleep_preservation_keeps_private_draft_not_shared_target():
     target = torch.nn.Linear(2, 2, bias=False)
     draft = torch.nn.Module()
     draft.private = torch.nn.Linear(2, 2, bias=False)
     draft.shared = target.weight
-    expected = draft.private.weight.detach().clone()
-    pointer = draft.private.weight.data_ptr()
     worker = object.__new__(gpu_worker.Worker)
     worker.get_draft_model = lambda: draft  # type: ignore[method-assign]
-    assert set(worker._get_sleep_parameters(target)) == {
-        "weight",
-        "draft.private.weight",
+    worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=[])
+    assert worker._discardable_parameters(target) == {
+        _storage(target.weight),
+        _storage(draft.private.weight),
     }
-    worker._sleep_saved_parameters = {"draft.private.weight": expected}
-    with torch.no_grad():
-        target.weight.fill_(3.0)
-        draft.private.weight.zero_()
-    worker._restore_sleep_parameters(target)
-    torch.testing.assert_close(draft.private.weight, expected)
-    assert draft.private.weight.data_ptr() == pointer
-    assert torch.all(target.weight == 3.0)
-    assert worker._sleep_saved_parameters == {}
+    worker.model_config.sleep_preserve_parameter_names = ["draft.*"]
+    assert worker._discardable_parameters(target) == {_storage(target.weight)}
 
 
 @pytest.mark.parametrize("has_shared_draft", [False, True])
@@ -98,11 +94,10 @@ def test_sleep_preservation_allows_empty_draft_but_rejects_target_typo(
     worker = object.__new__(gpu_worker.Worker)
     worker.get_draft_model = lambda: draft  # type: ignore[method-assign]
     worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=["draft.*"])
-    worker._save_sleep_parameters(target)
-    assert worker._sleep_saved_parameters == {}
+    assert worker._discardable_parameters(target) == {_storage(target.weight)}
     worker.model_config.sleep_preserve_parameter_names = ["missing"]
     with pytest.raises(ValueError, match="No parameter matches sleep retention"):
-        worker._save_sleep_parameters(target)
+        worker._discardable_parameters(target)
 
 
 def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
@@ -283,6 +278,98 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
     assert get_current_vllm_config_or_none() is None
 
 
+@pytest.mark.parametrize(
+    "use_v2,extensible,cudagraphs,estimate_enabled,estimate,warns",
+    [
+        # MRV1: the flag decides whether the estimate runs and is applied.
+        (False, False, True, True, 3, False),
+        (False, False, True, False, 3, True),
+        # MRV2 with the extensible cache: the estimate is 0 by design, and
+        # neither flag value warns about unaccounted graph memory.
+        (True, True, True, True, 0, False),
+        (True, True, True, False, 0, False),
+        # MRV2 fallback (extensible cache off).
+        (True, False, True, True, 3, False),
+        (True, False, True, False, 3, True),
+        # MRV2 with no graphs to capture and the flag at 1.
+        (True, False, False, True, 0, False),
+    ],
+)
+def test_cudagraph_memory_profile_runs_only_when_applied(
+    monkeypatch, use_v2, extensible, cudagraphs, estimate_enabled, estimate, warns
+):
+    """The graph memory estimate is a throwaway capture pass; with the
+    estimate disabled it is neither run nor subtracted from the KV cache
+    budget, and the disabled-estimate warning only fires when graph memory
+    goes unaccounted for."""
+    from vllm.config import CUDAGraphMode
+
+    estimate *= GiB_bytes
+    calls = []
+    warnings = []
+
+    def profile_cudagraph_memory():
+        calls.append(1)
+        return estimate
+
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(
+                cudagraph_mode=CUDAGraphMode.FULL if cudagraphs else CUDAGraphMode.NONE
+            )
+        ),
+        randomize_dummy_inputs=False,
+        use_v2_model_runner=use_v2,
+        cache_config=SimpleNamespace(
+            kv_cache_memory_bytes=None,
+            gpu_memory_utilization=0.9,
+            resolved_gpu_memory_utilization=0.9,
+            enable_extensible_kv_cache=extensible,
+        ),
+        model_config=SimpleNamespace(multimodal_config=None),
+        parallel_config=SimpleNamespace(),
+        model_runner=SimpleNamespace(
+            profile_run=lambda **kwargs: None,
+            model_memory_usage=0,
+            profile_cudagraph_memory=profile_cudagraph_memory,
+        ),
+        init_snapshot=SimpleNamespace(
+            free_memory=80 * GiB_bytes, total_memory=80 * GiB_bytes
+        ),
+        requested_memory=72 * GiB_bytes,
+        _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+    )
+    profile_result = SimpleNamespace(
+        after_profile=SimpleNamespace(free_memory=60 * GiB_bytes),
+        total_consumed=20 * GiB_bytes,
+        non_kv_cache_memory=20 * GiB_bytes,
+        transient_peak_headroom=0,
+    )
+    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
+    monkeypatch.setattr(
+        gpu_worker,
+        "memory_profiling",
+        lambda *args, **kwargs: nullcontext(profile_result),
+    )
+    monkeypatch.setattr(gpu_worker.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(
+        gpu_worker.logger, "warning", lambda msg, *args: warnings.append(msg)
+    )
+    monkeypatch.setenv(
+        "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1" if estimate_enabled else "0"
+    )
+
+    available = gpu_worker.Worker.determine_available_memory(worker)
+
+    assert calls == ([1] if estimate_enabled else [])
+    expected = 52 * GiB_bytes - (estimate if estimate_enabled else 0)
+    assert available == expected
+    disabled_warnings = [
+        msg for msg in warnings if "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0" in msg
+    ]
+    assert len(disabled_warnings) == (1 if warns else 0), warnings
+
+
 # Startup-plan persistence (vllm/v1/worker/startup_plan.py), applied and
 # saved by Worker.determine_available_memory / compile_or_warm_up_model.
 
@@ -290,7 +377,7 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
 def _plan_worker(config_hash="abc123", free_memory=78 * GiB_bytes, kv_bytes=None):
     """The minimal Worker surface the startup-plan entry points touch."""
     return SimpleNamespace(
-        vllm_config=SimpleNamespace(compute_hash=lambda: config_hash),
+        vllm_config=SimpleNamespace(compile_factors=lambda: {"id": config_hash}),
         rank=0,
         parallel_config=SimpleNamespace(world_size=1),
         init_snapshot=SimpleNamespace(free_memory=free_memory),
@@ -537,6 +624,7 @@ def test_jit_monitor_activation_follows_enable_jit_warmup(
 def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
     """Under the extensible cache the connector is created at the final extend,
     not at init, and the config is kept for it."""
+    from vllm.v1.kv_cache_layout import KVCacheLayout
     from vllm.v1.worker import gpu_worker
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -544,6 +632,7 @@ def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
         raise AssertionError("connector created at init")
 
     monkeypatch.setattr(gpu_worker, "ensure_kv_transfer_initialized", fail)
+    monkeypatch.setattr(gpu_worker, "granule_size", lambda device: 2 << 20)
     log: list[str] = []
     runner = SimpleNamespace(
         initialize_kv_cache=lambda *args, **kwargs: log.append("initialize_kv_cache"),
@@ -559,7 +648,11 @@ def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
         cache_hit_alignment_tokens=16,
     )
     worker = SimpleNamespace(
-        cache_config=SimpleNamespace(enable_extensible_kv_cache=True),
+        cache_config=SimpleNamespace(
+            enable_extensible_kv_cache=True,
+            # Block-outermost layouts are not padded, so the config is kept as is.
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLNHC,
+        ),
         model_config=SimpleNamespace(enable_return_routed_experts=False),
         vllm_config=SimpleNamespace(kv_transfer_config=None),
         model_runner=runner,

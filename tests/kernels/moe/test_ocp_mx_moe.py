@@ -13,6 +13,7 @@ from tests.kernels.moe.utils import (
     check_deferred_moe_finalize,
     make_dummy_moe_config,
 )
+from tests.kernels.utils import torch_moe
 from vllm._aiter_ops import (
     is_aiter_found,
     is_aiter_found_and_supported,
@@ -25,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.math_utils import next_power_of_2
 
 TRTLLM_GEN_MXFP4_AVAILABLE = (
     current_platform.is_cuda() and current_platform.is_device_capability_family(100)
@@ -812,6 +814,190 @@ def test_trtllm_mxfp4_deferred_finalize(
         router_weights=topk_weights,
         chunked=chunk_size is not None,
     )
+
+
+@pytest.mark.parametrize("activation_key", ["bf16", "mxfp8"])
+@pytest.mark.skipif(
+    not TRTLLM_GEN_MXFP4_AVAILABLE,
+    reason="nvidia gpu and compute capability sm100 is required for this test",
+)
+@torch.inference_mode()
+def test_trtllm_mxfp4_modular_padding_robust(
+    activation_key: str, workspace_init, default_vllm_config
+):
+    """Padding rows (topk_ids == -1) must be skipped, never fed into results.
+
+    DeepEP v2 hands the modular MXFP4 experts a PaddedStandard buffer whose
+    tail rows are inactive. Construct that layout directly, poison the padding
+    rows with NaN, and check the valid outputs are finite, bit-identical to a
+    zero-padding run, and bit-identical to the unpadded kernel run, which also
+    matches a float32 reference.
+    """
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
+        TrtLlmMxfp4ExpertsModular,
+        TrtLlmMxfp4Mxfp8ExpertsModular,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        convert_weight_to_mxfp4_moe_kernel_format,
+        make_mxfp4_moe_quant_config,
+    )
+
+    if activation_key == "bf16":
+        backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16
+        experts_cls = TrtLlmMxfp4ExpertsModular
+    else:
+        backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8
+        experts_cls = TrtLlmMxfp4Mxfp8ExpertsModular
+
+    m, n, k, e, topk, pad = 64, 1024, 1024, 128, 8, 64
+    device = torch.device("cuda:0")
+    torch.manual_seed(0)
+
+    def quantize_weights(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        w_q, w_scale = fp4_quantize(
+            w,
+            torch.tensor(1.0, device=device),
+            32,
+            sf_use_ue8m0=True,
+            is_sf_swizzled_layout=False,
+        )
+        return (
+            w_q.reshape(*w.shape[:-1], -1),
+            w_scale.view(torch.uint8).reshape(*w.shape[:-1], -1),
+        )
+
+    def quantize_activations(
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if activation_key == "bf16":
+            return x, None
+        x_q, x_scale = mxfp8_quantize(x, is_sf_swizzled_layout=False)
+        return x_q, x_scale.view(x.shape[0], k // 32)
+
+    def dequantize_activations(
+        x: torch.Tensor, x_scale: torch.Tensor | None
+    ) -> torch.Tensor:
+        return x.float() if x_scale is None else mxfp8_dequantize(x, x_scale)
+
+    w13 = torch.randn(e, 2 * n, k, device=device, dtype=torch.bfloat16) / 10
+    w2 = torch.randn(e, k, n, device=device, dtype=torch.bfloat16) / 10
+    w13_q, w13_scale = quantize_weights(w13)
+    w2_q, w2_scale = quantize_weights(w2)
+    # Preserve the checkpoint layout for the independent torch reference.
+    w13_q_ref, w13_scale_ref = w13_q.clone(), w13_scale.clone()
+    w2_q_ref, w2_scale_ref = w2_q.clone(), w2_scale.clone()
+    w13, w2, w13_scale, w2_scale, _, _ = convert_weight_to_mxfp4_moe_kernel_format(
+        backend,
+        torch.nn.Module(),
+        w13_q,
+        w2_q,
+        w13_scale,
+        w2_scale,
+        None,
+        None,
+        _cache_permute_indices={},
+    )
+    quant_config = make_mxfp4_moe_quant_config(
+        backend, w1_scale=w13_scale, w2_scale=w2_scale
+    )
+    assert quant_config is not None
+    moe_config = FusedMoEConfig(
+        num_experts=e,
+        experts_per_token=topk,
+        hidden_dim=k,
+        intermediate_size=n,
+        num_local_experts=e,
+        num_logical_experts=e,
+        activation=MoEActivation.SILU,
+        device=device,
+        routing_method=RoutingMethodType.TopK,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+        max_num_tokens=next_power_of_2(m + pad),
+    )
+    experts = experts_cls(moe_config=moe_config, quant_config=quant_config)
+
+    def run(
+        hidden_states: torch.Tensor,
+        hidden_states_scale: torch.Tensor | None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        output = torch.empty(
+            (hidden_states.shape[0], experts.hidden_dim_unpadded),
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        empty_ws = torch.empty((0,), device=device, dtype=torch.bfloat16)
+        experts.apply(
+            output=output,
+            hidden_states=hidden_states,
+            w1=w13,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=e,
+            expert_map=None,
+            a1q_scale=hidden_states_scale,
+            a2_scale=None,
+            workspace13=empty_ws,
+            workspace2=empty_ws,
+            expert_tokens_meta=None,
+            apply_router_weight_on_input=False,
+        )
+        return output
+
+    a = torch.randn((m, k), device=device, dtype=torch.bfloat16) / 10
+    score = torch.randn((m, e), device=device, dtype=torch.bfloat16)
+    scores = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weights, topk_ids = torch.topk(scores, topk)
+    topk_ids = topk_ids.to(torch.int32)
+
+    topk_ids_padded = torch.full((m + pad, topk), -1, device=device, dtype=torch.int32)
+    topk_ids_padded[:m] = topk_ids
+    topk_weights_padded = torch.zeros(
+        (m + pad, topk), device=device, dtype=topk_weights.dtype
+    )
+    topk_weights_padded[:m] = topk_weights
+
+    a_clean = torch.zeros((m + pad, k), device=device, dtype=torch.bfloat16)
+    a_clean[:m] = a
+    a_poison = a_clean.clone()
+    a_poison[m:] = float("nan")
+
+    hs_clean, scale_clean = quantize_activations(a_clean)
+    hs_poison, scale_poison = quantize_activations(a_poison)
+    hs_unpadded, scale_unpadded = quantize_activations(a)
+
+    out_clean = run(hs_clean, scale_clean, topk_weights_padded, topk_ids_padded)
+    out_poison = run(hs_poison, scale_poison, topk_weights_padded, topk_ids_padded)
+    out_unpadded = run(hs_unpadded, scale_unpadded, topk_weights, topk_ids)
+
+    assert torch.isfinite(out_poison[:m]).all(), (
+        "padding garbage leaked into valid outputs"
+    )
+    torch.testing.assert_close(out_poison[:m], out_clean[:m], rtol=0, atol=0)
+    torch.testing.assert_close(out_clean[:m], out_unpadded, rtol=0, atol=0)
+
+    reference = torch_moe(
+        dequantize_activations(hs_unpadded, scale_unpadded),
+        mxfp4_dequantize(w13_q_ref, w13_scale_ref),
+        mxfp4_dequantize(w2_q_ref, w2_scale_ref),
+        score.float(),
+        topk,
+        activation=MoEActivation.SILU,
+    )
+    # mxfp8 activations add their own accumulation error on top of the bf16
+    # path's, so use the looser tolerance for both.
+    torch.testing.assert_close(out_unpadded.float(), reference, atol=2e-2, rtol=2e-1)
 
 
 @pytest.mark.parametrize("topk", [1, 4])
@@ -1897,21 +2083,28 @@ def test_rocm_mxfp4_moe_oracle(
 
 
 @pytest.mark.parametrize("intermediate_size_unpadded", [640, 704])
+@pytest.mark.parametrize(
+    ("backend_name", "activation_name"),
+    [("AITER_MXFP4_MXFP4", "SILU"), ("AITER_MXFP4_BF16", "SWIGLUOAI")],
+)
 @pytest.mark.skipif(not ROCM_GFX950, reason="Requires GFX950")
 @pytest.mark.skipif(not ROCM_AITER_AVAILABLE, reason="Requires AITER")
 @torch.inference_mode()
-def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
+def test_aiter_mxfp4_moe_pad_masks_only_padding(
     intermediate_size_unpadded: int,
+    backend_name: str,
+    activation_name: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """At MoE tp_size == 1 the W4A4 MoE masks the padding and nothing else.
+    """At MoE tp_size == 1 the MXFP4 MoE masks the padding and nothing else.
 
     The experts are stored 768 wide with zeros past the real width, so the
     layer computes the same function whether the kernel is told that the tail
     is padding or not. A pad that is doubled twice (once by vLLM, once inside
     AITER for the fused gate/up weight) masks live intermediate rows as well.
-    640 stored at 768 is Qwen3.8 Flash Next's shape at TP1 and under expert
-    parallelism before the W4A4 intermediate was aligned to 128.
+    640 stored at 768 is Qwen3.8 Flash Next's W4A4 shape at TP1 and under
+    expert parallelism before the W4A4 intermediate was aligned to 128. The
+    W4A16 case uses gpt-oss's interleaved, biased layout.
     """
     import vllm.distributed.parallel_state as ps
     from vllm.config import VllmConfig, set_current_vllm_config
@@ -1934,7 +2127,9 @@ def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
     monkeypatch.setattr(ps, "_TP", types.SimpleNamespace(world_size=1))
     monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
 
-    backend = Mxfp4MoeBackend.AITER_MXFP4_MXFP4
+    backend = Mxfp4MoeBackend[backend_name]
+    activation = MoEActivation[activation_name]
+    gpt_oss = backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
     experts_cls = backend_to_kernel_cls(backend)[0]
     num_experts, topk, num_tokens = 8, 2, 64
     hidden_size, intermediate_size = 512, 768
@@ -1944,12 +2139,24 @@ def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
     w13 = torch.randn(
         num_experts, 2 * intermediate_size, hidden_size, dtype=dtype, device=device
     )
-    w13[:, intermediate_size_unpadded:intermediate_size] = 0
-    w13[:, intermediate_size + intermediate_size_unpadded :] = 0
     w2 = torch.randn(
         num_experts, hidden_size, intermediate_size, dtype=dtype, device=device
     )
     w2[..., intermediate_size_unpadded:] = 0
+    w13_bias = w2_bias = None
+    if gpt_oss:
+        # Checkpoint layout: gate/up rows interleaved, padding at the end.
+        w13[:, 2 * intermediate_size_unpadded :] = 0
+        w13_bias = torch.randn(
+            num_experts, 2 * intermediate_size, dtype=torch.float32, device=device
+        )
+        w13_bias[:, 2 * intermediate_size_unpadded :] = 0
+        w2_bias = torch.randn(
+            num_experts, hidden_size, dtype=torch.float32, device=device
+        )
+    else:
+        w13[:, intermediate_size_unpadded:intermediate_size] = 0
+        w13[:, intermediate_size + intermediate_size_unpadded :] = 0
     w13_q, w13_scale = dynamic_mxfp4_quant(w13.reshape(-1, hidden_size))
     w2_q, w2_scale = dynamic_mxfp4_quant(w2.reshape(-1, intermediate_size))
     w13_q = w13_q.reshape(num_experts, 2 * intermediate_size, -1)
@@ -1958,7 +2165,7 @@ def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
     w2_scale = w2_scale.reshape(num_experts, hidden_size, -1)
 
     layer = types.SimpleNamespace(w13_input_scale=None, w2_input_scale=None)
-    w13_q, w2_q, w13_scale, w2_scale, _, _ = (
+    w13_q, w2_q, w13_scale, w2_scale, w13_bias, w2_bias = (
         convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             mxfp4_backend=backend,
             layer=layer,
@@ -1966,8 +2173,8 @@ def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
             w2_weight=w2_q,
             w13_weight_scale=w13_scale,
             w2_weight_scale=w2_scale,
-            w13_bias=None,
-            w2_bias=None,
+            w13_bias=w13_bias,
+            w2_bias=w2_bias,
         )
     )
     weights = (w13_q, w2_q, w13_scale, w2_scale)
@@ -1990,14 +2197,18 @@ def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
             num_local_experts=num_experts,
             num_logical_experts=num_experts,
             moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-            activation=MoEActivation.SILU,
+            activation=activation,
             in_dtype=dtype,
             device=device,
             routing_method=RoutingMethodType.Renormalize,
             intermediate_size_per_partition_unpadded=unpadded,
         )
         quant_config = make_mxfp4_moe_quant_config(
-            mxfp4_backend=backend, w1_scale=w13_scale, w2_scale=w2_scale
+            mxfp4_backend=backend,
+            w1_scale=w13_scale,
+            w2_scale=w2_scale,
+            w1_bias=w13_bias,
+            w2_bias=w2_bias,
         )
         with set_current_vllm_config(VllmConfig()):
             kernel = make_mxfp4_moe_kernel(
@@ -2013,7 +2224,7 @@ def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
                 w2=w2_q,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                activation=MoEActivation.SILU,
+                activation=activation,
                 global_num_experts=num_experts,
                 expert_map=None,
                 apply_router_weight_on_input=False,
