@@ -358,7 +358,7 @@ def _warm_state_gather_scatter_kernels(
     """Compile the gather/scatter variants serving hits.
 
     Triton specializes on 16-byte pointer alignment and stride == 1; mixed
-    batches slice the indices/mask at ``num_decodes`` and spec-decode block
+    batches slice the indices/mask at `num_decodes` and spec-decode block
     tables give stride-2 indices, so warm each combination.
     """
     from vllm.model_executor.layers.mamba.ops.gather_initial_states import (

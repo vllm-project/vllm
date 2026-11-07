@@ -640,7 +640,7 @@ def cuda_unquantized_gemm(
 def warmup_rocm_skinny_gemm_workspaces(device: torch.device) -> None:
     """Eagerly allocate wvSplitKrc's per-device split-K workspace pool.
 
-    wvSplitKrc partitions one per-device allocation into ``kWvSlots`` slots
+    wvSplitKrc partitions one per-device allocation into `kWvSlots` slots
     (csrc/rocm/skinny_gemms_wvsplitkrc.cu) and hands each stream one on first
     use, so that two streams never share the split-K partials and counters.
 

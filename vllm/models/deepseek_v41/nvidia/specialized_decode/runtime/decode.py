@@ -86,7 +86,7 @@ class DecodeStep(NamedTuple):
         streams: torch.Tensor | None = None,
     ) -> DecodeOutput:
         """The backbone's output after its embedding (and, from the
-        executor's ``embedding``, the embedding's hc ``streams``)."""
+        executor's `embedding`, the embedding's hc `streams`)."""
         return self.executor.run(
             self,
             hidden_states,
@@ -292,8 +292,8 @@ class SpecializedDecode:
         streams: torch.Tensor | None = None,
     ) -> DecodeOutput:
         """The decoder layers and the final collapse of the step, on the
-        embedding ``x`` (with its hc ``streams`` when the step's embedding
-        wrote them); returns what ``DeepseekV4Model.forward`` returns."""
+        embedding `x` (with its hc `streams` when the step's embedding
+        wrote them); returns what `DeepseekV4Model.forward` returns."""
         backbone = self.backbone
         aux_layers = backbone.aux_hidden_state_layers
         aux: dict[int, torch.Tensor] = {}

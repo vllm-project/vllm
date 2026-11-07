@@ -255,8 +255,8 @@ QUAD = 4  # columns a thread of ``stage_reduce_slice``
 
 @traced
 def stage_reduce_slice(c, task, reduce=True):
-    """``stage_reduce`` then ``stage_slice`` (fold), the same values (tuned
-    builds; ``reduce`` False: K1's seam, its pend row for the TP partials). A
+    """`stage_reduce` then `stage_slice` (fold), the same values (tuned
+    builds; `reduce` False: K1's seam, its pend row for the TP partials). A
     thread takes four columns of a token through the TP sum (rank order), R_new
     of the four streams and the layer input in registers, every operand that
     does not depend on the partials (residual, mixes, fn weights) loaded before
@@ -301,8 +301,8 @@ def stage_reduce_slice(c, task, reduce=True):
 
 @traced
 def reduce_slice_quad(c, task, t, col, ws, rw, cmv, postv, prev, pw=None):
-    """A thread's (token t, columns col .. col + 3) of ``stage_reduce_slice``
-    (``ws``: the TP partials' words; None: ``pw``, the pend row's)."""
+    """A thread's (token t, columns col .. col + 3) of `stage_reduce_slice`
+    (`ws`: the TP partials' words; None: `pw`, the pend row's)."""
     rl, a = c["rl"], c["args"]
     if const_expr(ws is None):
         pend = [x for p in range(2) for x in bf2_f32(fx.Int32(pw[p]))]
@@ -343,8 +343,8 @@ def reduce_slice_quad(c, task, t, col, ws, rw, cmv, postv, prev, pw=None):
 
 @traced
 def slice_rest(c, task):
-    """``stage_slice`` past the layer input: the sums of squares and the mix
-    projection partials (``fl`` filled, ``rl`` complete)."""
+    """`stage_slice` past the layer input: the sums of squares and the mix
+    projection partials (`fl` filled, `rl` complete)."""
     s, lane, wave = c["S"], c["lane"], c["wave"]
     rl = c["rl"]
     for t in range_constexpr(s):
@@ -361,14 +361,14 @@ RED_TILE = WAVES * 2 * 64 * 4  # ``slice_mix``'s MFMA partials of a token tile
 
 
 def red_words(s, tuned=False):
-    """The seam's LDS ``red``: ``slice_mix``'s partials of a token tile, or
-    (``tuned``) ``slice_mix_all``'s of every token tile."""
+    """The seam's LDS `red`: `slice_mix`'s partials of a token tile, or
+    (`tuned`) `slice_mix_all`'s of every token tile."""
     return RED_TILE * (len(token_tiles(s)) if tuned else 1)
 
 
 @traced
 def slice_mix_all(c, task):
-    """``slice_mix`` of every token tile, the same sums: all tiles' MFMAs, one
+    """`slice_mix` of every token tile, the same sums: all tiles' MFMAs, one
     barrier, then all tiles' wave sums (two barriers in all, not two a tile)."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     rl, fl, red = c["rl"], c["fl"], c["red"]

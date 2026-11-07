@@ -119,7 +119,7 @@ _ROPE_QUANT_BLOCK = 128
 def rope_quant_unsupported_reason(
     layer: torch.nn.Module, vllm_config: "VllmConfig"
 ) -> str | None:
-    """Why ``layer`` cannot take FlashInfer's fused inverse RoPE + FP8 output.
+    """Why `layer` cannot take FlashInfer's fused inverse RoPE + FP8 output.
 
     DSv4 always has 8 heads per `wo_a` group at any TP size, and the rest of
     the kernel's fixed shape (head/RoPE dims, per-128 einsum scales, FP32 RoPE

@@ -114,8 +114,8 @@ def _largest_kernel_block_within(
     `MultipleOf` declarations are expanded to the largest aligned block that fits.
     Falls back to the smallest supported block when nothing fits.
 
-    With ``divisor_of``, prefer the largest fitting block that divides it, so the
-    page can be scaled to ``divisor_of`` by an integer ratio instead of padded.
+    With `divisor_of`, prefer the largest fitting block that divides it, so the
+    page can be scaled to `divisor_of` by an integer ratio instead of padded.
     """
     from vllm.v1.attention.backend import MultipleOf
 

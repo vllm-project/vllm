@@ -97,13 +97,13 @@ def requant_block_fp8_to_ue8m0(
     scales per block (e.g. 128x128) is rounded once more to get there.
 
     Args:
-        weight: ``(n, mn, k)`` E4M3 values.
-        scale: ``(n, mn / block_m, k / block_k)`` float32 dequantization
-            scales (``real = weight * scale``).
+        weight: `(n, mn, k)` E4M3 values.
+        scale: `(n, mn / block_m, k / block_k)` float32 dequantization
+            scales (`real = weight * scale`).
 
     Returns:
-        ``(weight, sf)``: the requantized E4M3 weights and their UE8M0 scale
-        bytes, ``(n, mn, k / 32)`` uint8.
+        `(weight, sf)`: the requantized E4M3 weights and their UE8M0 scale
+        bytes, `(n, mn, k / 32)` uint8.
 
     """
     n, mn, k = weight.shape

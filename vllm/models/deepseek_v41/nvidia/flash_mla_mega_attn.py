@@ -12,10 +12,10 @@ of bf16, since the output needs no rotation or quantization here.
 `wq_b` rows and `wo_a` columns are permuted once at load so the surrounding
 GEMMs speak the kernel's chunk-interleaved layouts directly. A step's prefill
 and decode segments write disjoint token ranges of one output buffer pair, so
-a single ``wo_a`` einsum covers the whole step.
+a single `wo_a` einsum covers the whole step.
 
 Small decode steps with 16 or 32 live heads run a swap-AB kernel with the same
-inputs and output instead (see ``_swapab_decode_supported``).
+inputs and output instead (see `_swapab_decode_supported`).
 """
 
 from dataclasses import replace
@@ -251,7 +251,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
 
         Every field is fixed at construction. The compressed cache is read in
         kernel blocks of this backend's single size, which hold
-        ``kernel_block // compress_ratio`` compressed slots each, whatever the
+        `kernel_block // compress_ratio` compressed slots each, whatever the
         KV cache manager's block size is. Layers sharing a key register it
         once.
         """
@@ -434,11 +434,11 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
     ) -> None:
         """Mega attention over the paged quantized caches, in place into `out`.
 
-        The caches are ``[num_blocks, page, 1, bytes]``, the record taken from
-        ``bytes`` (528 V4.1 fp8, 288 V4.1 NVFP4; NVFP4 only as the compressed
-        cache beside an fp8 SWA one), and the indices ``[s_q, topk]`` int32
-        slot ids (``block * page + offset``, ``-1`` invalid). Where
-        ``_use_swapab`` holds, steps of at most ``_SWAPAB_MAX_TOKENS`` tokens
+        The caches are `[num_blocks, page, 1, bytes]`, the record taken from
+        `bytes` (528 V4.1 fp8, 288 V4.1 NVFP4; NVFP4 only as the compressed
+        cache beside an fp8 SWA one), and the indices `[s_q, topk]` int32
+        slot ids (`block * page + offset`, `-1` invalid). Where
+        `_use_swapab` holds, steps of at most `_SWAPAB_MAX_TOKENS` tokens
         take the swap-AB kernel instead, which reads the same inputs and
         writes the same output layout.
         """

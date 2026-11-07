@@ -22,20 +22,20 @@ routing kernel with precomputed ids and an 8-token tile:
       [4 + 2C, 4 + 2C + 8 M)   padded row -> token (GEMM1 only)
       [4 + 2C + 8 M, + C)      tile -> GEMM1 items done (the ready words), zero
 
-  where ``M`` is :func:`max_tiles` (the most tiles any routing of the call's
-  slots needs) and ``C`` is ``M`` rounded up to a multiple of four. GEMM1
+  where `M` is :func:`max_tiles` (the most tiles any routing of the call's
+  slots needs) and `C` is `M` rounded up to a multiple of four. GEMM1
   counts up the ready words and GEMM2 waits on them
-  (``routed_expert_gemm_cute.py``), so a record serves one GEMM1 and GEMM2
+  (`routed_expert_gemm_cute.py`), so a record serves one GEMM1 and GEMM2
   pair.
 
 The ids come from a top-k selection, so the valid ids of one row are distinct:
-an expert is chosen by at most ``rows`` slots, and a slot's rank is the number
+an expert is chosen by at most `rows` slots, and a slot's rank is the number
 of earlier rows that chose the expert (a row mask per expert, one 32-bit word
 per 32 rows). Up to eight rows every chosen expert owns exactly one tile, so
 its first tile is the number of distinct selected experts below it (a
-presence bitmap). Above eight rows an expert chosen by ``n`` rows owns
-``ceil(n / 8)`` tiles: level ``l`` of the bitmap marks the experts chosen by
-more than ``8 l`` rows, and the first tile is the sum over levels of the
+presence bitmap). Above eight rows an expert chosen by `n` rows owns
+`ceil(n / 8)` tiles: level `l` of the bitmap marks the experts chosen by
+more than `8 l` rows, and the first tile is the sum over levels of the
 marked experts below it. Either way the record takes a few population
 counts, no scans. Above two levels, one warp first sums each bitmap word's
 counts over the levels and prefixes them over the words, so a slot reads its
@@ -60,20 +60,20 @@ PREFIX_LEVELS = 2
 
 
 def levels_for(max_rows: int) -> int:
-    """Bitmap levels of the record build for calls of up to ``max_rows`` rows:
+    """Bitmap levels of the record build for calls of up to `max_rows` rows:
     the most tiles one expert can own."""
     return (max_rows + TILE - 1) // TILE
 
 
 def mask_words_for(levels: int) -> int:
-    """32-bit words of an expert's row mask for ``8 * levels`` rows."""
+    """32-bit words of an expert's row mask for `8 * levels` rows."""
     return (levels * TILE + 31) // 32
 
 
 def present_words(levels: int) -> int:
-    """32-bit words of the ``present`` scratch: the bitmap's ``levels`` levels,
-    then, above ``PREFIX_LEVELS`` levels, the word prefix of their counts
-    (``WORDS + 1`` words, the last the total)."""
+    """32-bit words of the `present` scratch: the bitmap's `levels` levels,
+    then, above `PREFIX_LEVELS` levels, the word prefix of their counts
+    (`WORDS + 1` words, the last the total)."""
     if levels > PREFIX_LEVELS:
         return levels * WORDS + WORDS + 1
     return levels * WORDS
@@ -110,7 +110,7 @@ def clear_scratch(
     threads: cutlass.Constexpr[int],
     levels: cutlass.Constexpr[int] = 1,
 ):
-    """Zero the expert bitmap's ``levels`` levels and the per-expert row
+    """Zero the expert bitmap's `levels` levels and the per-expert row
     masks (not the word prefix, which :func:`build_record` writes whole); a
     block barrier must separate it from :func:`build_record`."""
     for word in cutlass.range(
@@ -140,8 +140,8 @@ def zero_record(
 
 @cute.jit
 def slot_expert(ids: cute.Tensor, slot: Int32, slots: Int32, experts: Int32) -> Int32:
-    """Slot ``slot``'s expert: its id, or -1 past the call's slots or for an
-    id outside ``[0, experts)``."""
+    """Slot `slot`'s expert: its id, or -1 past the call's slots or for an
+    id outside `[0, experts)`."""
     expert = Int32(-1)
     if slot < slots:
         expert = Int32(ids[slot])
@@ -158,7 +158,7 @@ def mark_slot(
     row: Int32,
     mask_words: cutlass.Constexpr[int],
 ):
-    """Mark ``expert`` in the bitmap's level 0 and ``row`` in its row mask."""
+    """Mark `expert` in the bitmap's level 0 and `row` in its row mask."""
     if expert >= 0:
         cute.arch.atomic_or(
             present.iterator + (expert >> 5),
@@ -179,7 +179,7 @@ def count_and_rank(
     row: Int32,
     mask_words: cutlass.Constexpr[int],
 ):
-    """The rows that chose ``expert``, and those of them before ``row`` (the
+    """The rows that chose `expert`, and those of them before `row` (the
     slot's rank)."""
     count = Int32(0)
     rank = Int32(0)
@@ -197,8 +197,8 @@ def count_and_rank(
 
 @cute.jit
 def mark_level(present: cute.Tensor, expert: Int32, rank: Int32):
-    """Level ``l`` marks the experts chosen by more than ``8 l`` rows; the
-    slot of rank ``8 l`` sets it."""
+    """Level `l` marks the experts chosen by more than `8 l` rows; the
+    slot of rank `8 l` sets it."""
     if expert >= 0 and rank >= TILE and rank % TILE == 0:
         cute.arch.atomic_or(
             present.iterator + (rank // TILE) * WORDS + (expert >> 5),
@@ -221,7 +221,7 @@ def write_slot(
     rank: Int32,
     levels: cutlass.Constexpr[int],
 ):
-    """Store slot ``slot``'s permuted row, its token and, for the first slot
+    """Store slot `slot`'s permuted row, its token and, for the first slot
     of each of its expert's tiles, the tile's expert and row limit; slot 0
     also stores the tile count."""
     if slot < slots:
@@ -277,13 +277,13 @@ def build_record(
     threads: cutlass.Constexpr[int],
     levels: cutlass.Constexpr[int] = 1,
 ):
-    """Build the permutation and the record from ``ids`` (visible to every
+    """Build the permutation and the record from `ids` (visible to every
     thread of the block) into a zeroed record. Every thread of the block's
-    ``threads`` calls it (it synchronizes the block up to three times); thread
-    ``t`` handles slots ``t``, ``t + threads``, ... below ``rows * top_k``.
-    ``experts``: a multiple of 32, at most 384; ``rows <= 8 * levels``,
-    ``top_k <= 8``; ``present`` holds ``present_words(levels)`` words and
-    ``rows_of`` ``mask_words_for(levels)`` words per expert."""
+    `threads` calls it (it synchronizes the block up to three times); thread
+    `t` handles slots `t`, `t + threads`, ... below `rows * top_k`.
+    `experts`: a multiple of 32, at most 384; `rows <= 8 * levels`,
+    `top_k <= 8`; `present` holds `present_words(levels)` words and
+    `rows_of` `mask_words_for(levels)` words per expert."""
     mask_words = mask_words_for(levels)
     # Slots a thread handles: up to 8 rows of 8 slots per level.
     per_thread = (64 * levels + threads - 1) // threads
@@ -342,7 +342,7 @@ def build_record(
 
 class RoutedExpertRoute:
     """The route kernel: the record from precomputed top-k ids (int32), for
-    calls of up to ``8 * levels`` rows.
+    calls of up to `8 * levels` rows.
 
     PDL: dependents may launch at once (the trigger is the first instruction),
     so GEMM1's set-up overlaps this kernel; GEMM1 reads the outputs only after
@@ -367,8 +367,8 @@ class RoutedExpertRoute:
         experts: Int32,
         stream: cuda.CUstream,
     ):
-        """``ids``/``permuted``: int32 [rows, top_k]; rows in
-        [1, 8 * levels], ``rows * top_k <= 64 * levels``."""
+        """`ids`/`permuted`: int32 [rows, top_k]; rows in
+        [1, 8 * levels], `rows * top_k <= 64 * levels`."""
         slots = cute.make_layout(rows * top_k)
         self.kernel(
             cute.make_tensor(ids_ptr, slots),
@@ -393,7 +393,7 @@ class RoutedExpertRoute:
         top_k: Int32,
         experts: Int32,
     ):
-        """One CTA of ``min(64 * levels, 1024)`` threads."""
+        """One CTA of `min(64 * levels, 1024)` threads."""
         cute.arch.griddepcontrol_launch_dependents()
         bitmap_words = present_words(self.levels)
         mask_size = MAX_EXPERTS * mask_words_for(self.levels)

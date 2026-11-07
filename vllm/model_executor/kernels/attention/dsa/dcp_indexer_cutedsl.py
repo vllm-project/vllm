@@ -62,11 +62,11 @@ def stable_topk_from_gathered_candidates_cutedsl(
 ) -> torch.Tensor:
     """Select each row's global top-`topk` from all ranks' candidates.
 
-    ``gathered`` is rank-major ``[world_size, rows, topk, 2]``, as produced by a
-    dim-0 all-gather of each rank's ``[rows, topk, 2]`` candidates, and is read
-    in place: a dim-1 gather into ``[rows, world_size * topk, 2]`` would cost a
-    full reorder copy. The key ranks only the high ``score_bits`` of each score
-    (see ``dcp_topk_score_bits``) and the low ``id_bits`` of each id.
+    `gathered` is rank-major `[world_size, rows, topk, 2]`, as produced by a
+    dim-0 all-gather of each rank's `[rows, topk, 2]` candidates, and is read
+    in place: a dim-1 gather into `[rows, world_size * topk, 2]` would cost a
+    full reorder copy. The key ranks only the high `score_bits` of each score
+    (see `dcp_topk_score_bits`) and the low `id_bits` of each id.
     """
     assert gathered.dim() == 4 and gathered.shape[2:] == (topk, 2), (
         f"Expected [world_size, rows, {topk}, 2] candidates, "

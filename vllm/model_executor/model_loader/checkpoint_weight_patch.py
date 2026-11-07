@@ -238,7 +238,7 @@ def load_checkpoint_weight_patches(
         model: Model whose native `load_weights` method applies the patches.
         patches: Dense replacements or sparse updates in checkpoint coordinates.
         max_chunk_bytes: Target checkpoint tensor bytes per
-            ``model.load_weights`` call and patch bytes per sparse validation
+            `model.load_weights` call and patch bytes per sparse validation
             batch. A single tensor may exceed this target.
         validate_unique_indices: Whether to reject duplicate sparse indices within
             each patch. Repeated patches may update the same positions. Disable

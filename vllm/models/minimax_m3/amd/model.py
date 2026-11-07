@@ -356,10 +356,10 @@ class MiniMaxM3MLP(nn.Module):
         self._prequant: tuple[torch.Tensor, QuantizedActivation] | None = None
 
     def set_prequant(self, src: torch.Tensor, qa: QuantizedActivation) -> None:
-        """Hand over ``src`` already quantized, for the next forward only.
+        """Hand over `src` already quantized, for the next forward only.
 
         The MoE runner calls the shared expert with the layer's own input
-        tensor, so ``src`` is checked against it and ignored if it differs.
+        tensor, so `src` is checked against it and ignored if it differs.
         """
         self._prequant = (src, qa)
 
@@ -583,7 +583,7 @@ class MiniMaxM3MoE(nn.Module):
         hidden_states: torch.Tensor,
         shared_prequant: QuantizedActivation | None = None,
     ) -> torch.Tensor:
-        """``shared_prequant``: ``hidden_states`` already MXFP8-quantized, for
+        """`shared_prequant`: `hidden_states` already MXFP8-quantized, for
         the shared expert's gate_up_proj (the routed path needs the bf16 rows)."""
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -1479,8 +1479,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         return output
 
     def _emits_o_proj_mxfp8(self) -> bool:
-        """Whether this step's attention writes MXFP8 for ``o_proj`` itself:
-        the NVFP4 decode kernel can, ``o_proj`` takes MXFP8 input, and the
+        """Whether this step's attention writes MXFP8 for `o_proj` itself:
+        the NVFP4 decode kernel can, `o_proj` takes MXFP8 input, and the
         batch is decode-only (a captured piecewise graph or a mixed batch keeps
         the bf16 output)."""
         if self._o_proj_mxfp8 is None:

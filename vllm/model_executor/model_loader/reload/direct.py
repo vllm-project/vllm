@@ -10,7 +10,7 @@ write the checkpoint in place, and `finish` reruns PWAL, which must keep address
 
 Delivery contract (not checked here): an update delivers every checkpoint
 tensor of each module whose PWAL changes its layout or is not idempotent, and
-of every ``padding_fill_params()`` parameter, which ``begin`` zero-fills whole.
+of every `padding_fill_params()` parameter, which `begin` zero-fills whole.
 """
 
 from collections.abc import Iterator
@@ -60,7 +60,7 @@ def direct_reload_enabled() -> bool:
 
 
 def direct_reload_active(model: torch.nn.Module) -> bool:
-    """Whether ``model`` is between ``begin_direct_reload`` and its finish."""
+    """Whether `model` is between `begin_direct_reload` and its finish."""
     return getattr(model, "_direct_reload_begun", False)
 
 

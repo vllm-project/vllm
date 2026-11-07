@@ -12,11 +12,11 @@ Granite 4.2 emits tool calls in an XML format::
 
 Granite 4.2 shares the Nemotron V3 tool-call and reasoning format, so this
 parser subclasses :class:`NemotronV3Parser` to reuse its grammar, argument
-converter and streaming logic, exposed as a standalone ``--tool-call-parser``.
+converter and streaming logic, exposed as a standalone `--tool-call-parser`.
 
 It deliberately does NOT subclass :class:`GraniteThinkingParser`: that parser
 strips a leading newline from content (to clean up the chat template's
-``\\n</think>\\n`` markup), which is a reasoning-side concern. A tool parser
+`\\n</think>\\n` markup), which is a reasoning-side concern. A tool parser
 running on its own (no reasoning parser) must leave content untouched, so the
 leading-newline handling stays in the reasoning parser where it belongs.
 

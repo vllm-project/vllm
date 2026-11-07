@@ -40,17 +40,17 @@
 
 """Routed-expert GEMMs of the DeepSeek-V4.1 low-batch MoE in CuTe DSL.
 
-The low-batch MoE (``routed_expert_gemm.py``) multiplies at most 192 token
+The low-batch MoE (`routed_expert_gemm.py`) multiplies at most 192 token
 rows by the weights of the experts they chose. Its routing record
-(``routed_expert_route_cute.py``) lists, for each 8-row token tile, the
+(`routed_expert_route_cute.py`) lists, for each 8-row token tile, the
 tile's expert and its row limit (the end of the expert's rows within the
 tile). A GEMM here computes 128 x 8 output tiles from MXFP4 weights (operand
 A, 128 rows of one expert) and MXFP8 activations (operand B, 8 rows) with
-``tcgen05`` block-scaled MMAs, as FlashInfer's low-latency block-scaled GEMM
+`tcgen05` block-scaled MMAs, as FlashInfer's low-latency block-scaled GEMM
 does, over the work items (weight row tile, token tile) of the tiles the
 record uses:
 
-* the kernel is persistent: CTA ``b`` of ``G`` takes items ``b, b + G, ..``,
+* the kernel is persistent: CTA `b` of `G` takes items `b, b + G, ..`,
   so the weight loads stream without a gap from one item to the next, and no
   CTA works on a token tile the call does not use;
 * the warp that loads A loads it at the item's expert `record[4 + c]`;
@@ -70,10 +70,10 @@ triggers only after its own wait for that kernel). Its CTAs take the SMs that
 GEMM1's CTAs leave (one CTA of either fills an SM's shared memory) and stream
 their weights at once. Its B load warp waits for each item's token tile
 alone: GEMM1 counts a tile's finished items in the record's ready words
-(``record[ready + c]``, zeroed with the record). After an item's epilogue
+(`record[ready + c]`, zeroed with the record). After an item's epilogue
 stores, GEMM1's four epilogue warps meet at a barrier and one thread adds 1
 with release semantics at GPU scope. GEMM2's B load warp spins with acquire
-loads until tile ``c`` counts all of GEMM1's m tiles, then fences the async
+loads until tile `c` counts all of GEMM1's m tiles, then fences the async
 proxy before its TMA loads of H and HS. So GEMM2 works on the tiles of
 GEMM1's first waves while GEMM1's last, partial wave runs. A record serves
 one GEMM1 and GEMM2 pair: the ready words are zeroed only when the record is
@@ -88,7 +88,7 @@ shuffled for 128-row epilogue tiles: in each block of 32, shuffled row
 scales are in the 128x4 layout the kernel reads for A.
 
 GEMM1 (:class:`RoutedExpertGemm1`) gathers each tile's tokens from the
-routed input (``record[4 + 2C + 8c + r]``, the token of tile row ``r``) and
+routed input (`record[4 + 2C + 8c + r]`, the token of tile row `r`) and
 multiplies them by the tile's expert: clamped SwiGLU of the interleaved
 up/gate rows, quantized to MXFP8 (H and its block scales). The epilogue's
 arithmetic follows the GEMM1 kernel from Cake (vllm-project/vllm#59725).
@@ -234,9 +234,9 @@ class RoutedExpertGemm:
         ctas: Int32,
         stream: cuda.CUstream,
     ):
-        """Build the TMA atoms and launch ``ctas`` persistent CTAs. ``sfb``
-        None: the B load warp writes B's scales itself (``b_side``).
-        ``ready``: the record's first ready word."""
+        """Build the TMA atoms and launch `ctas` persistent CTAs. `sfb`
+        None: the B load warp writes B's scales itself (`b_side`).
+        `ready`: the record's first ready word."""
         self.mxf8f6f4 = self.a_dtype.width != self.b_dtype.width
         self.smem_alloc_a_dtype = (
             cutlass.Int8 if self.mxf8f6f4 and self.a_dtype.width < 8 else self.a_dtype
@@ -809,7 +809,7 @@ class RoutedExpertGemm:
         count: Int32,
     ):
         """The B load warp: TMA of each item's B tile and its scales, each
-        item's once its token tile's ready count reaches ``ready_target``
+        item's once its token tile's ready count reaches `ready_target`
         (when set)."""
         bid, _, _ = cute.arch.block_idx()
         grid, _, _ = cute.arch.grid_dim()
@@ -883,7 +883,7 @@ class RoutedExpertGemm:
         count: Int32,
     ):
         """The B load warp of a subclass that gathers B's rows itself
-        (``gather_b``)."""
+        (`gather_b`)."""
         raise NotImplementedError
 
 
@@ -905,7 +905,7 @@ class RoutedExpertGemm2(RoutedExpertGemm):
         cta_k: int = 128,
         num_ab_stage: int = 10,
     ) -> None:
-        """``gemm1_m_tiles``: GEMM1's items per token tile, the ready count
+        """`gemm1_m_tiles`: GEMM1's items per token tile, the ready count
         at which a tile's H is complete."""
         super().__init__(hidden, hidden // 128, intermediate, cta_k, num_ab_stage)
         self.ready_target = gemm1_m_tiles
@@ -1080,8 +1080,8 @@ def _asm(result, operands: list, text: str, constraints: str, loc, ip):
 
 @dsl_user_op
 def cp_async_16(dst: Int32, src: Int64, *, loc=None, ip=None) -> None:
-    """``cp.async`` of 16 bytes from global address ``src`` to shared
-    address ``dst`` (cached in L2 only)."""
+    """`cp.async` of 16 bytes from global address `src` to shared
+    address `dst` (cached in L2 only)."""
     llvm.inline_asm(
         None,
         [Int32(dst).ir_value(loc=loc, ip=ip), Int64(src).ir_value(loc=loc, ip=ip)],
@@ -1097,8 +1097,8 @@ def cp_async_16(dst: Int32, src: Int64, *, loc=None, ip=None) -> None:
 
 @dsl_user_op
 def cp_async_4(dst: Int32, src: Int64, *, loc=None, ip=None) -> None:
-    """``cp.async`` of 4 bytes from global address ``src`` to shared address
-    ``dst``."""
+    """`cp.async` of 4 bytes from global address `src` to shared address
+    `dst`."""
     llvm.inline_asm(
         None,
         [Int32(dst).ir_value(loc=loc, ip=ip), Int64(src).ir_value(loc=loc, ip=ip)],
@@ -1114,7 +1114,7 @@ def cp_async_4(dst: Int32, src: Int64, *, loc=None, ip=None) -> None:
 
 @dsl_user_op
 def red_add_release(addr: Int64, *, loc=None, ip=None) -> None:
-    """Add 1 to the 32-bit word at global address ``addr`` with release
+    """Add 1 to the 32-bit word at global address `addr` with release
     semantics at GPU scope."""
     llvm.inline_asm(
         None,
@@ -1131,7 +1131,7 @@ def red_add_release(addr: Int64, *, loc=None, ip=None) -> None:
 
 @dsl_user_op
 def load_acquire(addr: Int64, *, loc=None, ip=None) -> Int32:
-    """The 32-bit word at global address ``addr``, loaded with acquire
+    """The 32-bit word at global address `addr`, loaded with acquire
     semantics at GPU scope (never hoisted out of a polling loop)."""
     return Int32(
         llvm.inline_asm(
@@ -1150,7 +1150,7 @@ def load_acquire(addr: Int64, *, loc=None, ip=None) -> Int32:
 
 @dsl_user_op
 def nanosleep(ns: int, *, loc=None, ip=None) -> None:
-    """Suspend the calling thread for about ``ns`` nanoseconds."""
+    """Suspend the calling thread for about `ns` nanoseconds."""
     llvm.inline_asm(
         None,
         [],
@@ -1166,7 +1166,7 @@ def nanosleep(ns: int, *, loc=None, ip=None) -> None:
 
 @cute.jit
 def wait_ready(addr: Int64, target: cutlass.Constexpr[int]):
-    """Spin until the ready count at ``addr`` reaches ``target`` (acquire
+    """Spin until the ready count at `addr` reaches `target` (acquire
     loads), then fence the async proxy, so that the caller's later TMA loads
     see what the count's releasing writers stored (module docstring)."""
     seen = load_acquire(addr)
@@ -1291,10 +1291,10 @@ class RoutedExpertGemm1(RoutedExpertGemm):
     """GEMM1: `h = MXFP8(clamped SwiGLU(x @ w13[expert]^T))` of each token
     tile, in the tile's permuted rows.
 
-    B is tile ``c``'s rows of the routed input ``x``: tile row ``r`` below
-    the tile's limit is token ``record[4 + 2 C + 8 c + r]``. The B load warp
+    B is tile `c`'s rows of the routed input `x`: tile row `r` below
+    the tile's limit is token `record[4 + 2 C + 8 c + r]`. The B load warp
     gathers those rows and their linear UE8M0 scales into the layout the MMA
-    reads, so accumulator column ``r`` is tile row ``r``, and the epilogue
+    reads, so accumulator column `r` is tile row `r`, and the epilogue
     writes the columns below the limit. w13's rows interleave up and
     gate, so each thread pairs them, clamps them, applies SwiGLU, scales each
     32-column block by its amax / 448 rounded up to a power of two (UE8M0),
@@ -1398,13 +1398,13 @@ class RoutedExpertGemm1(RoutedExpertGemm):
         cta_words: Int32,
         count: Int32,
     ):
-        """Gather each item's tile rows of ``x`` and their scales into B.
+        """Gather each item's tile rows of `x` and their scales into B.
 
-        Per stage, lane ``l`` copies the 16-byte chunk ``l % 16`` of tile rows
-        ``l // 16 + 2 j`` (``j < 4``) with ``cp.async``, to its address under
+        Per stage, lane `l` copies the 16-byte chunk `l % 16` of tile rows
+        `l // 16 + 2 j` (`j < 4`) with `cp.async`, to its address under
         the 128-byte swizzle that TMA and the MMA apply to shared addresses,
-        and lane ``l < 8 x atoms`` copies one 32-bit word (four K blocks) of
-        row ``l // atoms``'s scales. Rows at or past the tile's limit are not
+        and lane `l < 8 x atoms` copies one 32-bit word (four K blocks) of
+        row `l // atoms`'s scales. Rows at or past the tile's limit are not
         loaded; their accumulator columns are never stored. The warp never
         waits for a copy it has just issued: each stage is published two
         stages late (after issuing a stage's copies, the warp waits for those
@@ -1502,8 +1502,8 @@ class RoutedExpertGemm1(RoutedExpertGemm):
         exchange: cute.Tensor,
     ):
         """H and HS of the item (class docstring). The thread holds, for tile
-        rows ``t, t + 1`` (``t`` = 2 x lane % 4), the up and gate rows of H
-        columns ``p`` (registers 0-3) and ``p + 1`` (4-7), ``p`` = 64 x m_tile
+        rows `t, t + 1` (`t` = 2 x lane % 4), the up and gate rows of H
+        columns `p` (registers 0-3) and `p + 1` (4-7), `p` = 64 x m_tile
         + 16 x warp + 2 x lane / 4."""
         mH, mHS, mClamp = epi
         warp = cute.arch.make_warp_uniform(cute.arch.warp_idx()) - self.epilogue_warp

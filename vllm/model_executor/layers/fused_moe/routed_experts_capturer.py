@@ -35,7 +35,7 @@ class RoutedExpertsRowRestorer(Protocol):
     ) -> torch.Tensor:
         """Restore local token-ordered logical IDs for all captured MoE layers.
 
-        Binding selects the first provider. Read current metadata from ``ctx``;
+        Binding selects the first provider. Read current metadata from `ctx`;
         do not depend on the provider's layer-specific state or modify input.
         Return a 2-D tensor with the input device, dtype and top-k width.
         Collectives must be rank-consistent and graph-replay safe.

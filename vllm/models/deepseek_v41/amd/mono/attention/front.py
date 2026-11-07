@@ -122,7 +122,7 @@ def plus(t0, v):
 @traced
 def publish(c, region, i, stride=0):
     """This CTA's stores visible device-wide, then the flag pair (region, i);
-    a tuned build with ``stride``: each of its copies (``back.publish``)."""
+    a tuned build with `stride`: each of its copies (`back.publish`)."""
     rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
     if const_expr(c["tuned"] and stride):
@@ -288,9 +288,9 @@ def quant_x_half(c, regs, n):
 
 @traced
 def stage_wqkv(c, task, part, ops, t0, n, live, settle=False):
-    """Rows 16 task .. of wqkv over K half ``part`` against tokens t0 .. t0 + n
-    -> fp32 partials QKVP[part] (``live``: a CTA with a wqkv part; ``settle``:
-    ``back.stage_woa``'s)."""
+    """Rows 16 task .. of wqkv over K half `part` against tokens t0 .. t0 + n
+    -> fp32 partials QKVP[part] (`live`: a CTA with a wqkv part; `settle`:
+    `back.stage_woa`'s)."""
     tid, red = c["tid"], c["red"]
     gemv_mfmas(c, HIDDEN, c["xl"], c["xsl"], red, ops, rows=n, nsteps=KSTEPS)
     if const_expr(settle):
@@ -502,7 +502,7 @@ def wqb_pos(c, t0, n):
 def stage_wqb(c, task0, bops, t0, n, rope, settle=False):
     """Rows 16 (task0 + BLOCKS k) .. of the rank's H x 512 query rows, every
     task k of the CTA: GEMVs -> bf16 -> GPT-J RoPE of a head's dims 448..
-    (fp32) -> bf16 -> q (``settle``: ``back.stage_woa``'s)."""
+    (fp32) -> bf16 -> q (`settle`: `back.stage_woa`'s)."""
     tid, red, d = c["tid"], c["red"], c["d"]
     a = c["args"]
     nt = len(bops)

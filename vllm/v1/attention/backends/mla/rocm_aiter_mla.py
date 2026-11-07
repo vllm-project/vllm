@@ -171,7 +171,7 @@ def _fp8_mla_prefill_supported() -> bool:
 def _asm_fp8_prefill_superseded(prefill_backend: object) -> bool:
     """Whether the selected MLA prefill backend supersedes the ASM FP8 prefill.
 
-    ``AiterFlyDSLFP8PrefillBackend`` runs FP8 attention itself and also serves
+    `AiterFlyDSLFP8PrefillBackend` runs FP8 attention itself and also serves
     context-free prefills, so the assembly prefill kernel must not claim them.
     """
     return isinstance(prefill_backend, AiterFlyDSLFP8PrefillBackend)
@@ -3145,7 +3145,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     ) -> None:
         """Dispatch prefill to the FP8 ASM kernel when available.
 
-        Falls back to the parent (``flash_attn_varlen_func``) when FP8
+        Falls back to the parent (`flash_attn_varlen_func`) when FP8
         MLA prefill is disabled, the selected prefill backend supersedes
         it, PS metadata is missing, or chunked context requires two-pass
         merge.

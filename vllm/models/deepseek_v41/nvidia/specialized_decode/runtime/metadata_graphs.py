@@ -106,7 +106,7 @@ class AttnMetadataCudaGraphs:
         """The keys of the decode steps the FULL decode graphs serve, largest
         first.
 
-        The graphs are the ones ``CudaGraphManager`` captures, and a step runs
+        The graphs are the ones `CudaGraphManager` captures, and a step runs
         the smallest graph that holds its requests. Under dynamic speculative
         decoding only the widest query length is recorded; steps of the
         narrower tiers build their metadata eagerly.
@@ -190,7 +190,7 @@ class AttnMetadataCudaGraphs:
         The groups share only read-only inputs, with two exceptions. The sparse
         MLA and compressor builders clamp their block table in place, so the
         groups of one block table storage build on one branch, in serial order;
-        the groups that only read the table (``_BLOCK_TABLE_READERS``) then
+        the groups that only read the table (`_BLOCK_TABLE_READERS`) then
         build on branches of their own, each started after that branch. And
         the first group that needs the token-to-request map builds it into its
         own buffer, which later groups reuse. Each branch builds its own map;

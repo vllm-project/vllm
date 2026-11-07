@@ -7,10 +7,10 @@ reduction, the shared-expert add and the all-reduce to the next boundary's
 fused kernel, including the layers before an Engram layer and the last one,
 whose boundaries take the kernel's residual-only variant:
 
-- up to ``routed_expert_gemm.MAX_ROWS`` rows, on the low-batch routed-expert
-  GEMMs (``routed_expert_gemm``);
-- above that, on the runner's own ``_forward_impl`` with the deferral raised to
-  the step's rows for the call (``deferred_finalize``).
+- up to `routed_expert_gemm.MAX_ROWS` rows, on the low-batch routed-expert
+  GEMMs (`routed_expert_gemm`);
+- above that, on the runner's own `_forward_impl` with the deferral raised to
+  the step's rows for the call (`deferred_finalize`).
 """
 
 from collections.abc import Iterator

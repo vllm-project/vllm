@@ -252,8 +252,8 @@ class DSV41MonoLayer:
         self._tuned_flags: dict = {}  # (width, ratio) -> ``MonoBuild.tuned``
 
     def scratch(self, tokens: int, tuned: bool = False) -> torch.Tensor:
-        """Step width ``tokens``'s scratch: a width's layout has memory of its own
-        (``layer.scratch_layout``), and so has a tuned build's. Allocated at the
+        """Step width `tokens`'s scratch: a width's layout has memory of its own
+        (`layer.scratch_layout`), and so has a tuned build's. Allocated at the
         width's first step, which is eager: vLLM runs every graph's batch
         eagerly before capturing it."""
         buf = self._scratch.get((tokens, tuned))
@@ -281,8 +281,8 @@ class DSV41MonoLayer:
         return 1 <= tokens <= MAX_TOKENS
 
     def tuned(self, tokens: int, ratio: int) -> bool:
-        """Whether this runner's layer builds are tuned (``MonoBuild.tuned``),
-        looked up once per (width, ratio) and cached: ``forward`` calls it on
+        """Whether this runner's layer builds are tuned (`MonoBuild.tuned`),
+        looked up once per (width, ratio) and cached: `forward` calls it on
         every step, the runners that are never tuned included."""
         key = (tokens, ratio)
         if key not in self._tuned_flags:

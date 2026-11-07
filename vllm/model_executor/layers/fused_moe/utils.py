@@ -515,25 +515,25 @@ def masked_amax_scale(
 ) -> torch.Tensor:
     """Per-tensor activation quant scale that skips rows without a route.
 
-    ``PaddedStandard`` buffers carry rows that hold no route (``topk_ids == -1``)
+    `PaddedStandard` buffers carry rows that hold no route (`topk_ids == -1`)
     and whose contents are uninitialized, so a tensor-wide absmax would be
     poisoned by them. Batched dispatch buffers have the same problem per
-    expert: rows past ``expert_num_tokens[e]`` hold stale tokens. Those rows
+    expert: rows past `expert_num_tokens[e]` hold stale tokens. Those rows
     are dropped from the reduction instead; their quantized values are never
     consumed by an expert GEMM.
 
-    Exactly one of ``row_valid``, ``num_valid`` and ``expert_num_tokens``
+    Exactly one of `row_valid`, `num_valid` and `expert_num_tokens`
     selects the valid rows.
 
     Args:
         x: 2D activations to reduce.
-        quant_dtype: Target quantization dtype (``torch.int8`` or a float8).
-        row_valid: Boolean flags, one per row of ``x``. Use when the valid rows
+        quant_dtype: Target quantization dtype (`torch.int8` or a float8).
+        row_valid: Boolean flags, one per row of `x`. Use when the valid rows
             are not a prefix.
         num_valid: 1-element device tensor holding the number of leading valid
-            rows. Cheaper than ``row_valid`` when padding trails the rows.
+            rows. Cheaper than `row_valid` when padding trails the rows.
         expert_num_tokens: Device tensor of received token counts, one per
-            expert, for a buffer laid out as ``[expert, rows_per_expert, K]``.
+            expert, for a buffer laid out as `[expert, rows_per_expert, K]`.
         rows_per_expert: Row stride between experts, i.e. the worst-case
             per-expert capacity of the buffer.
         eps: Lower bound on the returned scale, matching the dynamic kernels.

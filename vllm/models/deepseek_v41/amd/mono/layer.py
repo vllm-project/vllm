@@ -105,7 +105,7 @@ class MonoBuild:
     def tuned(self) -> bool:
         """A target layer of compress ratio 2 at TP2 on gfx950: its tuned paths
         are on (bit-exact against the generic ones), every other build compiles
-        the generic code. Its scratch layout is its own (``scratch_layout``)."""
+        the generic code. Its scratch layout is its own (`scratch_layout`)."""
         return (
             not GFX942
             and not self.generic
@@ -179,7 +179,7 @@ def scratch_layout(
     outlive a step width, are in the epoch buffer. The MoE regions follow the
     runner's routing and FP4 groups of an ug task: with one group a task (the
     DSpark draft's runner) the ug flags take twice the room of two groups.
-    ``tuned``: a tuned build's layout (``MonoBuild.tuned``), in a scratch of its
+    `tuned`: a tuned build's layout (`MonoBuild.tuned`), in a scratch of its
     own."""
     d = Dims(tp)
     out: dict = {}
@@ -553,7 +553,7 @@ def build_mono_k1(key: MonoBuild):
 @traced
 def store_normed(normed, t, col, ys, live, wide=False):
     """The FFN seam's norm output -> the MoE input row (bf16, device scope:
-    this launch reads it). ``wide``: the 8 values as one 16-byte store (a store
+    this launch reads it). `wide`: the 8 values as one 16-byte store (a store
     each kept the publish's drain behind 24 of them)."""
     if const_expr(wide):  # noqa: SIM102 (a build-time and a run-time test)
         if live:

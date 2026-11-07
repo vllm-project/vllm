@@ -296,7 +296,7 @@ class P2PSession:
         self._server.finish(kv_request_id)
 
     def abort_loads(self) -> None:
-        """Abort every inbound load, failing each now; see ``ClientRole``."""
+        """Abort every inbound load, failing each now; see `ClientRole`."""
         self._client.abort_loads()
 
     def register_lookup(self, kv_request_id: str, key: bytes) -> bool | None:

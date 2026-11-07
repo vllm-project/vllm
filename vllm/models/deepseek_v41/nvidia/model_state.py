@@ -304,7 +304,7 @@ class DeepseekV41ModelState(DefaultModelState):
         return model_inputs
 
     def _fill_lookback(self, input_batch: InputBatch, req_states: RequestState) -> None:
-        """Gather the batch's lookback windows into ``lookback_token_ids``."""
+        """Gather the batch's lookback windows into `lookback_token_ids`."""
         window = self.lookback_token_ids
         assert window is not None
         all_token_ids = req_states.all_token_ids.gpu

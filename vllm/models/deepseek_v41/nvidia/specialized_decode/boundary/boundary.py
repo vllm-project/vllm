@@ -8,7 +8,7 @@ TP group, mixes it into the hc residual streams (mHC post) and collapses and
 normalizes the streams into the next sublayer's input (mHC pre). Here the
 fused all-reduce + mHC kernel (`BoundaryAllReduce`) does all of that for every
 step the executor runs; the next sublayer's mHC coefficients then come from the
-stock ``mhc_pre_delayed_overlap`` on the shared mHC side stream.
+stock `mhc_pre_delayed_overlap` on the shared mHC side stream.
 
 The fused kernel also finalizes a MoE output left unfinalized, collects a `wo_b` output
 the publishing GEMM already stored into its mailbox, writes the attention input as MXFP8
@@ -83,7 +83,7 @@ class Boundaries:
         streams: torch.Tensor | None = None,
     ) -> tuple[BoundaryState, torch.Tensor]:
         """The first layer's attention entry: the embedding broadcast to the
-        hc streams (or written with them, ``streams``), whose identity pre-mix
+        hc streams (or written with them, `streams`), whose identity pre-mix
         selects stream zero."""
         assert layer.hc_attn_fn_broadcast is not None
         residual = (
@@ -117,7 +117,7 @@ class Boundaries:
         (or with `ffn`, the MoE) input of `layer`.
 
         Returns the new state, the layer input, the same input as MXFP8 with
-        ``quantize``, and with ``capture_aux`` the mean of the streams (on the
+        `quantize`, and with `capture_aux` the mean of the streams (on the
         side stream, after the coefficients: join it before reading).
         """
         if ffn:
@@ -195,7 +195,7 @@ class Boundaries:
         x: torch.Tensor | None,
     ) -> tuple[BoundaryState, torch.Tensor]:
         """The stock attention entry without a reduction: mHC pre of
-        ``residual`` on the side stream."""
+        `residual` on the side stream."""
         post, comb, layer_input, next_pre = mhc_pre_delayed_overlap(
             residual,
             fn,

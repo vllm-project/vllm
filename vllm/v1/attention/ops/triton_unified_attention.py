@@ -96,7 +96,7 @@ _GFX1100_SW_2D_MIN_FILL = {64: 32, 512: 8}
 
 def _prefill_band_config(configs, head_size_padded, max_seqlen_q):
     """2D launch for a batch with prefill tokens: (BLOCK_M, TILE_SIZE, num_warps,
-    num_stages) from ``configs`` for the max_seqlen_q band, or None."""
+    num_stages) from `configs` for the max_seqlen_q band, or None."""
     bands = configs.get(head_size_padded)
     if bands is None:
         return None
@@ -104,8 +104,8 @@ def _prefill_band_config(configs, head_size_padded, max_seqlen_q):
 
 
 def _decode_2d_config(configs, head_size_padded, min_tile):
-    """2D decode launch: (TILE_SIZE, num_warps, num_stages) from ``configs``, with
-    TILE_SIZE at least ``min_tile``, or None."""
+    """2D decode launch: (TILE_SIZE, num_warps, num_stages) from `configs`, with
+    TILE_SIZE at least `min_tile`, or None."""
     config = configs.get(head_size_padded)
     if config is None:
         return None
@@ -118,7 +118,7 @@ def _gfx1201_split_kv_segments(
 ):
     """gfx1201: segments so that requests x KV heads x segments is about 128 (more
     for small batches; fewer, down to 4, for larger ones with a 16-bit query).
-    Sliding windows < 2048 keep ``segments``."""
+    Sliding windows < 2048 keep `segments`."""
     if 0 < sliding_window < 2048:
         return segments
     programs = 64 if fp8_query and head_size_padded == 256 else 128

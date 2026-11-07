@@ -129,7 +129,7 @@ def inv_rms(value, eps, *, m8=False):
 @asm(Float32, pure=True)
 def query_norm_rsqrt(total: Float32, eps: Float32, *, triton: bool = False):
     """rsqrt(total / 1536 + eps) of the q_a RMSNorm as the stock layer computes it:
-    vllm_c's rms_norm (IEEE divide; K3.1 DSA), or ``triton`` K3 MLA's Triton
+    vllm_c's rms_norm (IEEE divide; K3.1 DSA), or `triton` K3 MLA's Triton
     fused_q_kv_rmsnorm (Triton's fp32 divide)."""
     divide = "div.full.f32" if triton else "div.rn.f32"
     rsqrt = "rsqrt.approx.ftz.f32" if triton else "rsqrt.approx.f32"
@@ -141,7 +141,7 @@ def query_norm_rsqrt(total: Float32, eps: Float32, *, triton: bool = False):
 @asm(Float32, pure=True)
 def attn_res_rstd(total: Float32, eps: Float32, scale=None):
     """rsqrtf(total / 7168 + eps) as attn_res_kernel.cu compiles it (--use_fast_math);
-    with ``scale`` its fused output norm's rsqrtf(total / 7168 + eps * scale * scale).
+    with `scale` its fused output norm's rsqrtf(total / 7168 + eps * scale * scale).
     """
     code = "{ .reg .f32 m,t; div.approx.ftz.f32 m,$1,0f45E00000; "
     if scale is None:
@@ -253,7 +253,7 @@ def situ(g, u, beta, linear_beta, inv_beta, inv_linear_beta):
 
 @asm(Float32, pure=True)
 def situ_tanh(x: Float32):
-    """``tanhf`` of the ``_C`` situ_and_mul kernel (csrc/activation_kernels.cu, built
+    """`tanhf` of the `_C` situ_and_mul kernel (csrc/activation_kernels.cu, built
     without fast math), from its PTX: an odd polynomial below 0.6, else copysign(1 - 2
     / (1 + ex2.approx.ftz(2|x| log2 e)), x) with rcp.approx.ftz, 1 from 9.01; non-FTZ
     multiplies and FMAs."""
@@ -283,7 +283,7 @@ def mul_rn(a: Float32, b: Float32):
 
 @cute.jit
 def situ_gate(gate, beta):
-    """The gate factor of the ``_C`` situ_and_mul kernel: (0.5 beta) * tanh(g *
+    """The gate factor of the `_C` situ_and_mul kernel: (0.5 beta) * tanh(g *
     fl(1 / beta)) * (1 + tanh(0.5 g)), sigmoid(g) taken as (1 + tanh(g / 2)) / 2."""
     half_beta = mul_rn(beta, Float32(0.5))
     scaled = mul_rn(half_beta, situ_tanh(mul_rn(rcp_rn(beta), gate)))
@@ -292,8 +292,8 @@ def situ_gate(gate, beta):
 
 @cute.jit
 def situ_up(up, linear_beta):
-    """The up factor of the ``_C`` kernel: linear_beta * tanh(u * fl(1 / linear_beta)),
-    or u when ``linear_beta`` <= 0 (unset)."""
+    """The up factor of the `_C` kernel: linear_beta * tanh(u * fl(1 / linear_beta)),
+    or u when `linear_beta` <= 0 (unset)."""
     u = Float32(up)
     if linear_beta > 0:
         u = mul_rn(linear_beta, situ_tanh(mul_rn(rcp_rn(linear_beta), up)))
@@ -302,9 +302,9 @@ def situ_up(up, linear_beta):
 
 @cute.jit
 def situ_and_mul(gate, up, beta, linear_beta):
-    """The ``SituAndMul`` op as the deployment runs it, before the BF16 store: the
+    """The `SituAndMul` op as the deployment runs it, before the BF16 store: the
     op enabled (custom_ops "all", e.g. compilation mode NONE under the breakable
-    CUDA graph), i.e. the ``_C`` situ_and_mul kernel, gate factor times up factor."""
+    CUDA graph), i.e. the `_C` situ_and_mul kernel, gate factor times up factor."""
     return mul_rn(situ_gate(gate, beta), situ_up(up, linear_beta))
 
 

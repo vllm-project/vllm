@@ -135,7 +135,7 @@ def _deep_gemm_nvcc_path() -> str | None:
 
 
 def _nvcc_version(nvcc: str) -> tuple[int, int] | None:
-    """Return the (major, minor) release of ``nvcc``, or None if unreadable."""
+    """Return the (major, minor) release of `nvcc`, or None if unreadable."""
     try:
         out = subprocess.run(
             [nvcc, "--version"], capture_output=True, text=True, timeout=60
@@ -680,8 +680,8 @@ def mqa_logits_mx_inputs(
 
     FP8 Q folds its per-(token, head) power-of-two scale into `weights`, so
     it is passed with unit MX scales, which is exact since relu commutes with
-    a positive scale. ``weights`` are cast to ``logits_dtype``, so BF16 logits
-    reduce in BF16 and FP32 logits in FP32. Returns ``(q_scale, weights)``
+    a positive scale. `weights` are cast to `logits_dtype`, so BF16 logits
+    reduce in BF16 and FP32 logits in FP32. Returns `(q_scale, weights)`
     unchanged off SM100.
     """
     if not mqa_logits_use_mx_scales():
@@ -720,17 +720,17 @@ def fp8_fp4_mqa_logits(
         kv: Tuple `(k_values, k_scales)` of shape [N, D] and [N]; k_scales
             is int32 packed UE8M0 with MX scales, fp32 otherwise.
         weights: Tensor of shape [M, H], fp32, or bf16 on SM100 with bf16
-            ``logits_dtype``.
+            `logits_dtype`.
         cu_seqlen_ks: Start indices (inclusive) for valid K per query
             position, shape [M], dtype int32.
         cu_seqlen_ke: End indices (exclusive) for valid K per query
             position, shape [M], dtype int32.
-        max_seqlen_k: Upper bound on ``cu_seqlen_ke - cu_seqlen_ks``.
+        max_seqlen_k: Upper bound on `cu_seqlen_ke - cu_seqlen_ks`.
         logits_dtype: Output dtype, fp32 or bf16.
 
     Returns:
-        Compressed logits of shape [M, max_seqlen_k]: row ``i`` holds K
-        positions ``[cu_seqlen_ks[i], cu_seqlen_ke[i])`` starting at column
+        Compressed logits of shape [M, max_seqlen_k]: row `i` holds K
+        positions `[cu_seqlen_ks[i], cu_seqlen_ke[i])` starting at column
         zero, and the tail is not cleaned.
 
     """
@@ -827,7 +827,7 @@ def fp8_fp4_paged_mqa_logits(
             (block, pos) hold the int32 packed UE8M0 scales with MX scales,
             or the fp32 dequant scale otherwise.
         weights: Tensor of shape [B * next_n, H], fp32, or bf16 on SM100
-            with bf16 ``logits_dtype``.
+            with bf16 `logits_dtype`.
         context_lens: Tensor of shape [B], dtype int32; effective context length
             for each batch element.
         block_tables: Tensor of shape [B, max_blocks], dtype int32; maps logical

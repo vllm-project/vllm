@@ -51,7 +51,7 @@ def _page_segments(
     num_blocks: int,
     layout: KVCacheLayout,
 ) -> tuple[tuple[int, int], ...]:
-    """Byte ``(offset, length)`` runs of a layer's page from its block start.
+    """Byte `(offset, length)` runs of a layer's page from its block start.
 
     Empty when the page is one contiguous run. LHBNC and BHLNC store each
     head's tokens as a separate run.

@@ -322,11 +322,11 @@ class FusedMoEQuantConfig:
         return self.block_shape is not None
 
     def act_scale_is_tensor_wide(self, scale: torch.Tensor | None) -> bool:
-        """Whether ``scale`` is a runtime-reduced, tensor-wide act scale.
+        """Whether `scale` is a runtime-reduced, tensor-wide act scale.
 
         Only native fp8/int8 per-tensor quantization derives its scale from
         every element of the activation, so only that scheme is affected by
-        rows that hold no route (e.g. ``PaddedStandard`` padding) and must be
+        rows that hold no route (e.g. `PaddedStandard` padding) and must be
         masked out of the reduction. Per-token and block scales are row-local,
         and a static scale does not depend on the data at all.
 

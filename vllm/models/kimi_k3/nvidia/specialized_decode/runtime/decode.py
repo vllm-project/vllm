@@ -102,7 +102,7 @@ def caches_of(attention):
 class SpecializedDecode:
     """Built once the weights are loaded; owns every prepared provider, the
     mailboxes and the decode buffers. Reads the backbone, never modifies it (but
-    for the deferred RecoverSSM's per-instance KDA verify, ``recoverssm.state``)."""
+    for the deferred RecoverSSM's per-instance KDA verify, `recoverssm.state`)."""
 
     attention: dict[int, Any]
     feed_forward: dict[int, Any]
@@ -198,7 +198,7 @@ class SpecializedDecode:
     def build_dep(self, rounded):
         """DEP: no full specialized step (its MoE, o-projection and AttnRes
         providers are TP8 / TP16 ones); every decode or uniform verify step of up
-        to the KV cache dtype's DEP_ROWS rows runs ``run_wide`` with the DEP_KINDS
+        to the KV cache dtype's DEP_ROWS rows runs `run_wide` with the DEP_KINDS
         attention layers specialized at TP1 (runtime.dep.DepAttention), the rest
         stock."""
         from .dep import (
@@ -233,7 +233,7 @@ class SpecializedDecode:
                 self.wide_moe[layer.layer_idx] = moe
 
     def wide_batches(self, kind):
-        """The wide step rows whose ``kind`` attention layers run the specialized
+        """The wide step rows whose `kind` attention layers run the specialized
         projection and core."""
         return tuple(b for b in self.wide if b <= self.wide_cap[kind])
 
@@ -310,7 +310,7 @@ class SpecializedDecode:
 
     def bind_model_state(self, state):
         """Install the runner-state side of the deferred RecoverSSM on the model
-        runner state (``recoverssm.state.install_model_state``)."""
+        runner state (`recoverssm.state.install_model_state`)."""
         install_recoverssm_model_state(state)
 
     @torch.no_grad()
@@ -357,11 +357,11 @@ class SpecializedDecode:
         """This step's decode plan, or None to run the stock forward instead.
 
         Steps that run the stock forward:
-        - pipeline-parallel stage inputs (``intermediate_tensors``);
-        - token counts without prepared providers (not in ``batches``, and not a
-          wide verify step: q > 1 and in ``wide``, the rows past the step cap
+        - pipeline-parallel stage inputs (`intermediate_tensors`);
+        - token counts without prepared providers (not in `batches`, and not a
+          wide verify step: q > 1 and in `wide`, the rows past the step cap
           that some attention layer kind's projection and core take, run_wide);
-        - steps before ``prepare_kv`` bound the KV cache (the memory profiling's
+        - steps before `prepare_kv` bound the KV cache (the memory profiling's
           cache is never prepared);
         - steps outside a CUDA graph capture (profiling, warmup and the warmup run
           before each capture), so every stock kernel runs before its capture;

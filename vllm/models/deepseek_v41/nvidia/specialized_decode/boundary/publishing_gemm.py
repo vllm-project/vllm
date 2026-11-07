@@ -456,7 +456,7 @@ class PublishingMxfp8Linear:
         self._compiled: dict[tuple[Tactic, int], object] = {}
 
     def supports(self, linear: torch.nn.Module, num_tokens: int) -> bool:
-        """Whether ``linear`` on ``num_tokens`` rows runs the publishing GEMM.
+        """Whether `linear` on `num_tokens` rows runs the publishing GEMM.
         It publishes into the LL mailbox, so it takes no call of the all-reduce's
         BT sizes."""
         all_reduce = self.all_reduce

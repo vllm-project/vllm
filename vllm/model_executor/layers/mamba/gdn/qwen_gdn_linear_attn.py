@@ -211,13 +211,13 @@ def _resolve_gdn_prefill_backend(
     AITER FlyDSL GDN prefill kernels are chosen when:
     * "aiter_flydsl" is requested, or "auto" is requested on gfx942/gfx950;
     * ROCm AITER exposes the optimized VK prefill API and FlyDSL kernels;
-    * the model uses BF16 activations with ``head_k_dim == head_v_dim == 128``.
+    * the model uses BF16 activations with `head_k_dim == head_v_dim == 128`.
 
     The HIP GDN prefill kernel is chosen when:
     * "hip" is requested on RDNA3.5 (gfx1150-gfx1153), or "auto" on gfx1151;
-    * the build includes ``_rocm_C.rdna35_gdn_chunked``;
+    * the build includes `_rocm_C.rdna35_gdn_chunked`;
     * the model uses BF16 or FP16 activations with
-      ``head_k_dim == head_v_dim == 128``.
+      `head_k_dim == head_v_dim == 128`.
     """
     additional_config = vllm_config.additional_config
     backend_cfg = (

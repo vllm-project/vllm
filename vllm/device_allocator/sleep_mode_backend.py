@@ -50,10 +50,10 @@ class SleepModeBackend(ABC):
 
     @abstractmethod
     def suspend(self, discardable: Collection[int] = ()) -> None:
-        """Free GPU state, so that ``resume`` restores it at the same addresses.
+        """Free GPU state, so that `resume` restores it at the same addresses.
 
-        ``discardable`` holds the storage addresses of the tensors the caller
-        rewrites after ``resume``, so they need no backup: the parameters not
+        `discardable` holds the storage addresses of the tensors the caller
+        rewrites after `resume`, so they need no backup: the parameters not
         selected for preservation at level 2, nothing at level 1. A backend
         doesn't need to know the level. KV cache and workspace scratch are never
         restored.
@@ -117,8 +117,8 @@ class SleepModeBackend(ABC):
 class CuMemBackend(SleepModeBackend):
     """Default backend.
 
-    Wraps the platform sleep-mode allocator, ``CuMemAllocator`` on CUDA and
-    ``XpuMemAllocator`` on XPU. Suspend offloads per allocation between GPU and
+    Wraps the platform sleep-mode allocator, `CuMemAllocator` on CUDA and
+    `XpuMemAllocator` on XPU. Suspend offloads per allocation between GPU and
     host, with NCCL buffers left untouched (they are outside the allocator pool).
     """
 

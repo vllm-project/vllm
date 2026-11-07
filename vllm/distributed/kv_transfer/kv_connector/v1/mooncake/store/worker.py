@@ -2889,7 +2889,7 @@ class LookupKeyClient:
         self, req_id: str, num_tokens: int, block_hashes: list[BlockHash]
     ) -> bool:
         """Start a lookup for a newly added request; a later lookup(req_id)
-        reuses it. At most ``lookup_prefetch_limit`` prefetches are in flight;
+        reuses it. At most `lookup_prefetch_limit` prefetches are in flight;
         beyond that, returns False and the scheduler looks up as usual."""
         assert req_id not in self._lookups
         slots = self._prefetch_slots
@@ -2908,7 +2908,7 @@ class LookupKeyClient:
         return True
 
     def discard(self, req_id: str) -> None:
-        """Drop any cached/in-flight lookup for ``req_id`` (e.g. on abort)."""
+        """Drop any cached/in-flight lookup for `req_id` (e.g. on abort)."""
         state = self._lookups.pop(req_id, None)
         if state is not None:
             state.future.cancel()

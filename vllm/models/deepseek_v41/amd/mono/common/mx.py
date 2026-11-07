@@ -47,18 +47,18 @@ def rcp_pow2(code):
 
 
 def scale_index(row, col, cols, sm=False):
-    """Byte of e8m0 scale (row, col) in aiter's ``shuffle_scale`` layout:
-    ``view(rows/32, 2, 16, cols/8, 2, 4).permute(0, 3, 5, 2, 4, 1)`` (``sm``:
-    in shifts and masks, ``udiv``)."""
+    """Byte of e8m0 scale (row, col) in aiter's `shuffle_scale` layout:
+    `view(rows/32, 2, 16, cols/8, 2, 4).permute(0, 3, 5, 2, 4, 1)` (`sm`:
+    in shifts and masks, `udiv`)."""
     r32, a, b = udiv(row, 32, sm), umod(udiv(row, 16, sm), 2, sm), umod(row, 16, sm)
     c8, d, e = udiv(col, 8, sm), umod(udiv(col, 4, sm), 2, sm), umod(col, 4, sm)
     return ((((r32 * (cols // 8) + c8) * 4 + e) * 16 + b) * 2 + d) * 2 + a
 
 
 def udiv(x, d, unsigned=True):
-    """``x // d`` by a constant ``d > 0`` as a shift (``d`` a power of two, any
-    sign) or an unsigned division (``x >= 0``), where a traced ``//`` is a
-    signed floor division with its fix-ups. ``unsigned`` false: ``//``."""
+    """`x // d` by a constant `d > 0` as a shift (`d` a power of two, any
+    sign) or an unsigned division (`x >= 0`), where a traced `//` is a
+    signed floor division with its fix-ups. `unsigned` false: `//`."""
     if isinstance(x, int) or not unsigned:
         return x // d
     if d & (d - 1) == 0:
@@ -67,7 +67,7 @@ def udiv(x, d, unsigned=True):
 
 
 def umod(x, d, unsigned=True):
-    """``x % d`` as a mask or an unsigned remainder (``udiv``)."""
+    """`x % d` as a mask or an unsigned remainder (`udiv`)."""
     if isinstance(x, int) or not unsigned:
         return x % d
     if d & (d - 1) == 0:
@@ -90,10 +90,10 @@ def oob_rsrc(addr, live):
 
 
 def fp4_tile_load(r_w, base, rg, k, st, at, live=None):
-    """A lane's 16 B of an FP4 weight's (16, 16)-shuffled 16-row group ``rg``
-    (K = ``k``) at 128-k step ``st``: dword ``base`` + the group's 2 k + 256 a
-    step + ``at`` (``lane * 4``: 32 fp4, K block lane / 16 of row lane % 16).
-    Nontemporal: a weight a step reads once. ``live``: ``oob``."""
+    """A lane's 16 B of an FP4 weight's (16, 16)-shuffled 16-row group `rg`
+    (K = `k`) at 128-k step `st`: dword `base` + the group's 2 k + 256 a
+    step + `at` (`lane * 4`: 32 fp4, K block lane / 16 of row lane % 16).
+    Nontemporal: a weight a step reads once. `live`: `oob`."""
     return fx.Vector(
         bo.buffer_load(
             r_w,

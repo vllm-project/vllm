@@ -8,7 +8,7 @@
   model runner creates the model state after loading the target and draft
   models, and before memory profiling);
 - CUDA graphs of the attention metadata builds of FULL decode steps
-  (``metadata_graphs``), recorded with the inner CUDA graphs and replayed in
+  (`metadata_graphs`), recorded with the inner CUDA graphs and replayed in
   place of the eager build. A step that replays one gathers its engram
   lookback windows on a side stream beside it, so the metadata graph hands
   off to the forward's graph with no eager kernel between them;

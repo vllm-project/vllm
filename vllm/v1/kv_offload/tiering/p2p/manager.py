@@ -482,8 +482,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         `_unbound_stores` are left in place and cleaned up only by
         `_reap_unbound_stores` after `_unbound_store_timeout_s`.
 
-        A PD prefiller request may carry both roles: ``remote_kv_source``
-        (pull cached blocks from a P2P source) and ``remote_decoder`` (serve
+        A PD prefiller request may carry both roles: `remote_kv_source`
+        (pull cached blocks from a P2P source) and `remote_decoder` (serve
         the decoder). Each role is finished independently, on its own
         session. Both roles may share one session when the source and the
         decoder are the same node; that session is then finished once per

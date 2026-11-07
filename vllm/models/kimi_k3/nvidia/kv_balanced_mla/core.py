@@ -55,9 +55,9 @@ def query_tiles(heads: int, q: int) -> int:
 def max_planned_requests(
     heads: int, q: int, capacity: int = CAPACITY, partial_fp16: bool = True
 ) -> int:
-    """Most requests whose partials the kernel can address (at most ``capacity``
+    """Most requests whose partials the kernel can address (at most `capacity`
     splits each): the kernel addresses the partials in Int32 bytes, rows x splits x
-    LATENT x (2 B FP16 or 4 B FP32 ``partial_fp16`` off)."""
+    LATENT x (2 B FP16 or 4 B FP32 `partial_fp16` off)."""
     tiles = (1 << 31) // (ROWS * capacity * LATENT * (2 if partial_fp16 else 4))
     return tiles // query_tiles(heads, q)
 
@@ -69,7 +69,7 @@ def workspace_bytes(
     capacity: int = CAPACITY,
     partial_fp16: bool = True,
 ) -> int:
-    """Split-KV scratch of ``requests``: FP16 (FP32 with ``partial_fp16`` off)
+    """Split-KV scratch of `requests`: FP16 (FP32 with `partial_fp16` off)
     partials and FP32 partial LSEs."""
     partial = LATENT * (2 if partial_fp16 else 4)
     return requests * query_tiles(heads, q) * ROWS * capacity * (partial + 4)
@@ -179,13 +179,13 @@ def _compile(
     reducer_d_tiles: int = 1,
 ):
     """The KV-balanced FP8 MLA decode for one shape: packed query rows, causal among a
-    request's q rows unless ``causal`` is off, FP16 partials (FP32 with
-    ``partial_fp16`` off), ``p_scale`` (see P_SCALE), ``reducer_d_tiles`` D512 bands
+    request's q rows unless `causal` is off, FP16 partials (FP32 with
+    `partial_fp16` off), `p_scale` (see P_SCALE), `reducer_d_tiles` D512 bands
     per reduced row, BF16 latent output,
-    and each row's log2 LSE with ``lse``. ``cp`` is (DCP world, rank, interleave):
+    and each row's log2 LSE with `lse`. `cp` is (DCP world, rank, interleave):
     with a world above 1 the cache holds this rank's shard and the causal mask maps
-    each row's global bound onto it. ``pdl``: launched as a programmatic dependent
-    of the previous kernel (and its dependents launch early). ``capacity``: the most
+    each row's global bound onto it. `pdl`: launched as a programmatic dependent
+    of the previous kernel (and its dependents launch early). `capacity`: the most
     splits of one request."""
     qk_tiler, pv_tiler = select_mla_decode_tilers(
         heads, q, is_fp8=True, compute_capability=arch
@@ -284,12 +284,12 @@ def supports(heads: int, q: int, device: torch.device) -> bool:
 
 class KvBalancedMla:
     """The KV-balanced MLA decode of one (heads, q, causal) shape for up to
-    ``max_requests`` requests: ``plan`` once per forward, then ``decode`` per layer.
-    ``capacity`` bounds the splits of one request (and sizes the workspace);
-    ``min_split_tokens`` is the shortest split the plan makes. ``partial_fp16`` and
-    ``p_scale`` set the split-KV partial dtype and the P scaling (the defaults are
+    `max_requests` requests: `plan` once per forward, then `decode` per layer.
+    `capacity` bounds the splits of one request (and sizes the workspace);
+    `min_split_tokens` is the shortest split the plan makes. `partial_fp16` and
+    `p_scale` set the split-KV partial dtype and the P scaling (the defaults are
     this backend's; FP32 partials and TOKENSPEED_P_SCALE are tokenspeed_mla_decode's).
-    ``reducer_d_tiles``: the split-KV reduction's D512 bands per row (1, 2 or 4;
+    `reducer_d_tiles`: the split-KV reduction's D512 bands per row (1, 2 or 4;
     the same per-element sums, more reduction CTAs for few rows).
 
     The caller owns the plan buffers (`counts` [max_requests], `work`
@@ -370,14 +370,14 @@ class KvBalancedMla:
         out: torch.Tensor | None = None,
         pdl: bool = False,
     ) -> torch.Tensor:
-        """BF16 latent [T, H, 512] of the FP8 ``query`` [T, H, 576] (``q`` rows per
-        request) over the FP8 ``cache`` [blocks, page, 576] with the plan in
-        ``counts`` and ``work``. With ``lse`` [requests, q, H] FP32 it also writes
-        each row's log2 LSE. Under DCP (``cp`` = world, rank, interleave),
-        ``seq_lens`` are this rank's shard lengths and ``causal_lens`` the global
-        ones. An empty request gets a zero output and an LSE of -inf. ``out``: a
-        caller-owned BF16 [T, H, 512] output; ``pdl``: PDL chained (see
-        ``_compile``)."""
+        """BF16 latent [T, H, 512] of the FP8 `query` [T, H, 576] (`q` rows per
+        request) over the FP8 `cache` [blocks, page, 576] with the plan in
+        `counts` and `work`. With `lse` [requests, q, H] FP32 it also writes
+        each row's log2 LSE. Under DCP (`cp` = world, rank, interleave),
+        `seq_lens` are this rank's shard lengths and `causal_lens` the global
+        ones. An empty request gets a zero output and an LSE of -inf. `out`: a
+        caller-owned BF16 [T, H, 512] output; `pdl`: PDL chained (see
+        `_compile`)."""
         requests = seq_lens.numel()
         assert cache.shape[-1] == LATENT + ROPE, cache.shape
         assert workspace.numel() >= self.workspace_bytes

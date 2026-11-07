@@ -12,18 +12,18 @@ Prefetch points (`fork(point, layer, batch)`), each with its batches per TP:
 
 - `oproj_down`: after the o-projection (B3-8), the MoE front's packed
   router + latent-down rows.
-- ``attention_moe``: at TP8 only, after the KDA input projection (B5-8) or the MLA
+- `attention_moe`: at TP8 only, after the KDA input projection (B5-8) or the MLA
   core (B8), this layer's o-projection, the same front rows, the shared expert's
   weights and this rank's shard of the latent up projection (the MoE tail's weights,
   which otherwise stream from HBM on the critical path beside the next-attention
   prefetch). GB300 TP8 K3.1 DSpark k=4 R1 (B5) 32K step, ms: front + shared 10.28,
   + up projection 10.03, + o-projection 9.89.
-- ``next_attention``: once the routed experts are launched, the next layer's
-  attention weights, capped in MiB per batch (``NEXT_ATTENTION``). Not above B8,
+- `next_attention`: once the routed experts are launched, the next layer's
+  attention weights, capped in MiB per batch (`NEXT_ATTENTION`). Not above B8,
   where the HBM-bound experts lose more bandwidth than the attention gains.
 
-At the ``EXPERTS_AHEAD`` batches the next layer's attention weights are not a side
-stream launch: the routed experts' producers prefetch them (``ahead``), each CTA its
+At the `EXPERTS_AHEAD` batches the next layer's attention weights are not a side
+stream launch: the routed experts' producers prefetch them (`ahead`), each CTA its
 share, once its last weight stage is issued. The experts' drain (FC2 hand-off,
 finalize) leaves HBM idle for ~10 us, and no extra CTAs hold SMs the WaveMoeTail
 clusters need when the experts exit.
@@ -90,7 +90,7 @@ def attention_weights(attention):
 
 def weight_ranges(weights, byte_cap=0):
     """(address, bytes) of each weight's span in order, the total capped at
-    ``byte_cap`` bytes (0: uncapped)."""
+    `byte_cap` bytes (0: uncapped)."""
     ranges, remaining = [], byte_cap
     for weight in weights:
         if weight.numel() == 0:
@@ -201,7 +201,7 @@ class PrefetchController:
     def ahead(self, layer, batch):
         """The [PREFETCH_ROWS, 2] (address, bytes) table of the next layer's attention
         weights the routed experts of (layer, batch) prefetch in-kernel, or None
-        (``EXPERTS_AHEAD``)."""
+        (`EXPERTS_AHEAD`)."""
         return self.ahead_tables.get((layer, batch))
 
     def _add_capped(self, point, layer, weights, table):

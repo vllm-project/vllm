@@ -1032,9 +1032,9 @@ def dcp_a2a_v_up_proj_lse_reduce(
     """Combine partial MLA outputs with All-to-All and up-project them by W_UV.
 
     The LSE merge is a per-head weighted sum and W_UV is linear per head, so
-    up-projecting first matches ``dcp_a2a_lse_reduce`` followed by the
+    up-projecting first matches `dcp_a2a_lse_reduce` followed by the
     up-projection up to rounding, while the All-to-All carries V instead of L
-    values per head. Below ``_V_UP_PROJ_FIRST_MIN_TOKENS`` tokens it merges
+    values per head. Below `_V_UP_PROJ_FIRST_MIN_TOKENS` tokens it merges
     first and projects only this rank's heads instead.
 
     Args:

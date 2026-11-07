@@ -15,7 +15,7 @@ Entry points:
         -> (MXFP8 values, E8M0 scales, x + res): the fused add + norm with the
            per-32-block MXFP8 activation quant as an epilogue, so a following
            MXFP8 linear need not quantize its input again.
-  * ``gemma_fused_add_rmsnorm_mxfp8_and_bf16(x, res, w, eps)``
+  * `gemma_fused_add_rmsnorm_mxfp8_and_bf16(x, res, w, eps)`
         -> (MXFP8 values, E8M0 scales, normed, x + res): the same, plus the
            normed rows in the input dtype for consumers that cannot take MXFP8.
 
@@ -215,14 +215,14 @@ def gemma_fused_add_rmsnorm_mxfp8_and_bf16(
     weight: torch.Tensor,
     eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``gemma_fused_add_rmsnorm_mxfp8`` that also writes the bf16 normed row.
+    """`gemma_fused_add_rmsnorm_mxfp8` that also writes the bf16 normed row.
 
     For a norm whose output feeds both an MXFP8 linear and bf16 consumers (the
     MoE router and routed experts next to the shared expert's gate_up_proj).
 
     Returns:
-        ``(x_q, x_scale, normed, residual_out)``; ``normed`` is bit-identical
-        to ``gemma_fused_add_rmsnorm(...)[0]``.
+        `(x_q, x_scale, normed, residual_out)`; `normed` is bit-identical
+        to `gemma_fused_add_rmsnorm(...)[0]`.
 
     """
     n = x.shape[-1]

@@ -26,7 +26,7 @@ from .producer import OprojProducer, OprojUmma
 
 class OprojMailbox:
     """Sentinel-armed multicast mailbox; defaults to [parity, TP, 64, 7168] BF16.
-    ``multicast=False``: a peer-store mailbox (``handle.buffer_ptrs`` only, ``mc``
+    `multicast=False`: a peer-store mailbox (`handle.buffer_ptrs` only, `mc`
     0), which spends no NVLink multicast object."""
 
     def __init__(self, group, device, tp, rank, shape=None, multicast=True):

@@ -81,9 +81,9 @@ class SchedulerConfig:
     and waiting for a running slot.
 
     Setting it also lets requests the connector may load asynchronously
-    (``KVConnectorBase_V1.may_load_async``, by default P/D remote-prefill
+    (`KVConnectorBase_V1.may_load_async`, by default P/D remote-prefill
     requests) start their loads while the running batch is full, so they are
-    ready when a slot frees. ``None`` (default) keeps current behavior: no cap,
+    ready when a slot frees. `None` (default) keeps current behavior: no cap,
     and loads start only when a running slot is free.
     """
 

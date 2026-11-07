@@ -198,7 +198,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
 
 
 class DeepseekV4CompressorKVScoreLinear(MergedColumnParallelLinear):
-    """Fused ``wkv``/``wgate`` projection with the FP32 output the compressor
+    """Fused `wkv`/`wgate` projection with the FP32 output the compressor
     state accumulates in."""
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:

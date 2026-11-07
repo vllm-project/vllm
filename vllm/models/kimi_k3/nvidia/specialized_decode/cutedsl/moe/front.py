@@ -415,7 +415,7 @@ def front_geometry(batch, n, ks, kb=None, tg=None, rt=None, ch=None):
 def compile_route(
     batch, shared, renorm, roles, device, polled=False, plan=False, early=None
 ):  # fmt: skip
-    """``early`` (default: B<=2) releases the persistent experts at entry."""
+    """`early` (default: B<=2) releases the persistent experts at entry."""
     early = batch <= 2 if early is None else early
     kernel = RouteSitu(batch, shared, renorm, early, roles, polled, plan)
     f32 = c.Float32
@@ -530,8 +530,8 @@ class SharedFront:
         return bool(self.plans[batch][5])
 
     def gated(self, batch):
-        """``EARLY_ROUTE`` batches: their split-K shared expert runs on the urgent
-        side stream and their tail does not join it (``PreparedMoE.finish``)."""
+        """`EARLY_ROUTE` batches: their split-K shared expert runs on the urgent
+        side stream and their tail does not join it (`PreparedMoE.finish`)."""
         return batch in self.early
 
     def shared_expert(self, x, tail):

@@ -147,8 +147,8 @@ def p_row(d: Dims, s: int) -> int:
 @traced
 def publish(c, region, i, stride=0):
     """This CTA's stores visible device-wide, then the flag pair (region, i);
-    a tuned build with ``stride``: each of its copies, ``stride`` pairs apart
-    (``plan.COPIES``; thread j stores copy j)."""
+    a tuned build with `stride`: each of its copies, `stride` pairs apart
+    (`plan.COPIES`; thread j stores copy j)."""
     rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
     if const_expr(c["tuned"] and stride):
@@ -651,7 +651,7 @@ def stage_combine(c, unit):
 @traced
 def stage_woa(c, task, ops, t0, n, settle=False):
     """Rows 32 task .. of wo_a -> bf16 -> vLLM's MXFP8 of the 32 -> X8B
-    (``settle``: the next token tile's rows, in flight, landed first, so this
+    (`settle`: the next token tile's rows, in flight, landed first, so this
     tile's LDS stores do not wait behind them)."""
     tid, red, d, lane = c["tid"], c["red"], c["d"], c["lane"]
     split = WOA_SPLIT_K
@@ -707,9 +707,9 @@ def _wob_store(a, t, col, v0, v1):
 
 @traced
 def stage_wob(c, task, ops, task2, ops2, has2, t0, n, mark=False, settle=False):
-    """Rows 16 task .. (and 16 task2 .., ``has2``) of wo_b -> bf16 -> out, or
-    (``c["wob_out"]``, the mono layer) the caller's hook with each bf16 pair
-    (``settle``: as ``stage_woa``'s)."""
+    """Rows 16 task .. (and 16 task2 .., `has2`) of wo_b -> bf16 -> out, or
+    (`c["wob_out"]`, the mono layer) the caller's hook with each bf16 pair
+    (`settle`: as `stage_woa`'s)."""
     tid, red = c["tid"], c["red"]
     o_rows = c["d"].o_rows
     a = c["args"]

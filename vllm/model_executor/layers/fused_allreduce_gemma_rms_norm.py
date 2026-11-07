@@ -198,15 +198,15 @@ def allreduce_gemma_rms_norm_mxfp8(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor] | None:
     """All-reduce + residual add + GemmaRMSNorm with MXFP8-quantized output.
 
-    ``fused_allreduce_gemma_rms_norm`` followed by an MXFP8 activation quant,
+    `fused_allreduce_gemma_rms_norm` followed by an MXFP8 activation quant,
     with the quant as an epilogue of the Triton norm instead of its own launch.
     The fused all-reduce + norm kernels have no quantized output, so this only
     covers the plain collective + Triton norm; when one of them would run it
-    returns ``None`` and the caller keeps the unfused path.
+    returns `None` and the caller keeps the unfused path.
 
-    Returns ``(x_q, x_scale, normed, residual_out)``: float8_e4m3fn values
-    ``[M, N]``, row-major E8M0 scales ``[M, N // 32]``, the bf16 normed rows
-    (only if ``return_normed``, else ``None``) and the new residual.
+    Returns `(x_q, x_scale, normed, residual_out)`: float8_e4m3fn values
+    `[M, N]`, row-major E8M0 scales `[M, N // 32]`, the bf16 normed rows
+    (only if `return_normed`, else `None`) and the new residual.
     """
     from vllm.models.minimax_m3.amd.ops import (
         gemma_fused_add_rmsnorm_mxfp8,

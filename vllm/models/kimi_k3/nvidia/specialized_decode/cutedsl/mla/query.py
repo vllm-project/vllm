@@ -3,10 +3,10 @@
 """Cluster MLA query RMSNorm, Q_B projection, W_UK absorption and paged FP8 KV insert.
 Static weights load before the PDL wait; current-token data is consumed after it.
 
-DSA (``dsa=True``, Kimi K3.1): the normalized q_c rows are also stored for the indexer
+DSA (`dsa=True`, Kimi K3.1): the normalized q_c rows are also stored for the indexer
 query projection. On FlashMLA sparse the query rows are BF16 and the KV row is written
-in the fp8_ds_mla layout (per 128-column power-of-two scales, BF16 k_pe); with ``fp8``
-(FlashInfer sparse) both are per-tensor FP8 as for dense MLA, or (``nvfp4``, prims_ts)
+in the fp8_ds_mla layout (per 128-column power-of-two scales, BF16 k_pe); with `fp8`
+(FlashInfer sparse) both are per-tensor FP8 as for dense MLA, or (`nvfp4`, prims_ts)
 the query is per-tensor FP8 and the KV row is written in the nvfp4_ds_mla layout."""
 
 import cutlass
@@ -61,7 +61,7 @@ TILED_FROM = {12: 4, 6: 6}
 
 
 def tiled_from(heads: int) -> int:
-    """The smallest batch MlaQuery tiles at ``heads`` local heads."""
+    """The smallest batch MlaQuery tiles at `heads` local heads."""
     return TILED_FROM.get(heads, 4)
 
 
@@ -101,17 +101,17 @@ class MlaQuery:
     bytes it wrote into head block `rank` of every rank's Lamport q mailbox
     (mla.dcp.DcpBox), then polls its share of the gathered mailbox until no word is
     the sentinel, so the next kernel reads the gathered query. DSA publishes BF16
-    rows into a mailbox of ``q_heads`` (FlashMLA's padding) rows per token. Above 64
+    rows into a mailbox of `q_heads` (FlashMLA's padding) rows per token. Above 64
     rows (several tiles per head, more CTAs than one wave) each tile polls only its
     own tokens, so a resident tile never waits for one that is not yet scheduled.
 
-    DSA query overlap (dsa.overlap): ``store_qc=False`` leaves the q_c rows to
-    QueryNorm and ``poll=False`` leaves the mailbox poll to QueryWait.
+    DSA query overlap (dsa.overlap): `store_qc=False` leaves the q_c rows to
+    QueryNorm and `poll=False` leaves the mailbox poll to QueryWait.
 
     Stock numerics: K3 MLA normalizes q_a as the Triton fused_q_kv_rmsnorm, K3.1 DSA
-    (``dsa``) as vllm_c's rms_norm and writes as concat_and_cache_(ds_)mla. A per-tensor
-    FP8 KV row is divided by k_scale (``args[8]``) as concat_and_cache_mla does under
-    DSA, and multiplied by its inverse (``args[8]``) as K3 MLA's fused insert does.
+    (`dsa`) as vllm_c's rms_norm and writes as concat_and_cache_(ds_)mla. A per-tensor
+    FP8 KV row is divided by k_scale (`args[8]`) as concat_and_cache_mla does under
+    DSA, and multiplied by its inverse (`args[8]`) as K3 MLA's fused insert does.
     """
 
     def __init__(
@@ -209,8 +209,8 @@ class MlaQuery:
     @cute.jit
     def gathered(self, args, tid, tok0=0):
         """DCP: poll this CTA's share of the gathered mailbox (16 B chunks of the
-        B x DCP*H x 576 bytes) until every rank's bytes have landed (``tile_poll``:
-        the share of this tile's tokens from ``tok0``)."""
+        B x DCP*H x 576 bytes) until every rank's bytes have landed (`tile_poll`:
+        the share of this tile's tokens from `tok0`)."""
         mailbox = args[self.box_arg]
         part, head, tile = cute.arch.block_idx()
         row: cutlass.Constexpr = 36 * self.q_bytes  # 16 B chunks per head row
@@ -447,7 +447,7 @@ class MlaQuery:
 
     @cute.jit
     def insert_ds(self, args, ss, tok0, j, valid, tid):
-        """``insert`` in the fp8_ds_mla layout: each 128-column tile of the RMSNormed
+        """`insert` in the fp8_ds_mla layout: each 128-column tile of the RMSNormed
         BF16 latent is scaled by the stock writer's exp2(ceil(log2(max(amax / 448,
         1e-4)))) (16 lanes per tile), and k_pe is stored unquantized."""
         qkv, w_kva, (cache, slots), eps = args[0], args[2], args[5:7], args[9]
@@ -497,7 +497,7 @@ class MlaQuery:
 
     @cute.jit
     def insert_nvfp4(self, args, ss, tok0, j, valid, tid):
-        """``insert`` in the nvfp4_ds_mla layout (byte-exact with vLLM's writer): each
+        """`insert` in the nvfp4_ds_mla layout (byte-exact with vLLM's writer): each
         16-value block of the RMSNormed BF16 latent (two lanes) gets the E4M3 scale
         sf = max(amax / 6, 2^-9) and is stored as E2M1 of x * (1 / sf); k_pe is
         stored as unscaled E4M3."""
@@ -547,8 +547,8 @@ class MlaQuery:
 
     @cute.jit
     def store_qc(self, args, rows, pitch, tok0, tokens, block, tid):
-        """DSA: the first CTA stores the ``tokens`` normalized q_c rows staged at
-        ``rows`` (``pitch`` elements apart), 16 B per thread and chunk."""
+        """DSA: the first CTA stores the `tokens` normalized q_c rows staged at
+        `rows` (`pitch` elements apart), 16 B per thread and chunk."""
         if (block[0] == 0) & (block[1] == 0):
             for c in range(tid, tokens * 192, 256):
                 t, chunk = c // 192, c % 192

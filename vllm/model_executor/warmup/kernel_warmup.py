@@ -224,7 +224,7 @@ def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
 
 
 def _aiter_gemm_m_buckets(max_m: int) -> list[int]:
-    """One token count per AITER tuned-GEMM bucket up to ``max_m``.
+    """One token count per AITER tuned-GEMM bucket up to `max_m`.
 
     AITER pads M to 1, 2, 4 or 8 below 16, then to multiples of 16 / 32 / 64 /
     128 up to 256 / 1024 / 4096 / beyond, and builds each bucket's kernel on

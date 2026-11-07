@@ -34,11 +34,11 @@ def _json_type(value: Any) -> str:
 def _schema_types(
     schema: Any, root: dict, refs: dict[str, set[str] | None]
 ) -> set[str] | None:
-    """JSON types a parameter schema admits, or ``None`` if it admits any.
+    """JSON types a parameter schema admits, or `None` if it admits any.
 
-    Covers ``type``, ``const``, ``enum``, local ``$ref``, ``anyOf``/``oneOf``
-    (union) and ``allOf`` (intersection), so that e.g. pydantic's
-    ``Optional[str]`` counts as a string. *refs* memoizes each ``$ref``, which
+    Covers `type`, `const`, `enum`, local `$ref`, `anyOf`/`oneOf`
+    (union) and `allOf` (intersection), so that e.g. pydantic's
+    `Optional[str]` counts as a string. *refs* memoizes each `$ref`, which
     keeps the walk linear and ends cycles.
     """
     if not isinstance(schema, dict):
@@ -118,7 +118,7 @@ def convert_value(
     raw: str, allowed: set[str] | None, decode: Callable[[str], Any]
 ) -> Any:
     """Decode *raw*, but keep the text if the schema admits a string, unless it
-    decodes to another admitted type (``null`` for ``Optional[str]``).
+    decodes to another admitted type (`null` for `Optional[str]`).
     """
     if allowed == {"string"}:
         return raw

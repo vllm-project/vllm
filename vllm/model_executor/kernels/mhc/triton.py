@@ -178,7 +178,7 @@ def _mhc_post_collapse_rms_norm_kernel(
     BLOCK_H: tl.constexpr,
 ):
     """The post-mix and collapse keep the expression order of aiter's
-    ``_mhc_fused_post_pre_delayed_rmsnorm_main_kernel``, so the new residual is
+    `_mhc_fused_post_pre_delayed_rmsnorm_main_kernel`, so the new residual is
     bit-identical to it."""
     t = tl.program_id(0).to(tl.int64)
     cols = tl.arange(0, BLOCK_H)
@@ -284,8 +284,8 @@ def mhc_post_collapse_rms_norm_triton(
     """The layer-input half of a delayed mHC seam, without the gate projection.
 
     Applies the post block and returns the new residual and the RMSNorm of its
-    collapse with the carried ``pre_mix``, which is what
-    ``mhc_fused_post_pre_delayed_rms_norm_aiter`` returns besides the gates.
+    collapse with the carried `pre_mix`, which is what
+    `mhc_fused_post_pre_delayed_rms_norm_aiter` returns besides the gates.
 
     Args:
         residual: [T, 4, H] bf16 residual streams entering the seam.

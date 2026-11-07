@@ -108,7 +108,7 @@ class QuantSpec:
     """Quantization spec for one layer kind (linear or MoE).
 
     An omitted activation key lets the quantization implementation choose its
-    default. An explicitly configured ``activation: null`` requests no
+    default. An explicitly configured `activation: null` requests no
     activation quantization; methods that do not support that request raise an
     error.
     """

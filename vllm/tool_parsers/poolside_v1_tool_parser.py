@@ -133,7 +133,7 @@ class PoolsideV1ToolParser(ToolParser):
     def _allowed_types(
         self, tool_name: str, arg_name: str, tools: list[Tool] | None
     ) -> set[str] | None:
-        """JSON types the argument's schema admits; ``None`` if unconstrained."""
+        """JSON types the argument's schema admits; `None` if unconstrained."""
         tool_types = self._parameter_types_cache.for_tools(tools)
         props, extra = tool_types.get(tool_name, ({}, None))
         return props.get(arg_name, extra)

@@ -72,7 +72,7 @@ def arm_exchanges(bars, counts):
 
 
 class ClusterAttnRes:
-    """``final``: the last AttnRes, normalized by the backbone norm."""
+    """`final`: the last AttnRes, normalized by the backbone norm."""
 
     def __init__(self, nb, *, slots=1, has_delta=True, write=-1, final=False):
         self.nb, self.slots, self.has_delta = nb, slots, has_delta

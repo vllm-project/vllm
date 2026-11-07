@@ -118,18 +118,18 @@ def _merge_dcp_topk_global(
 ) -> None:
     """Merge each DCP rank's local top-K into the global top-K.
 
-    ``topk_indices`` are this rank's local top-K positions into its 1/N KV
+    `topk_indices` are this rank's local top-K positions into its 1/N KV
     shard. A token in the global top-K must also be in its owning rank's local
-    top-K (at most ``topk_tokens - 1`` tokens rank globally above it, hence at
+    top-K (at most `topk_tokens - 1` tokens rank globally above it, hence at
     most that many on its own rank), so exchanging only the per-rank local
     candidates is exact -- equivalent to all-gathering the full logit matrix,
-    but it ships ``dcp_world_size * topk_tokens`` candidates instead of the whole
-    score row. Overwrites ``topk_indices`` with global token ids (``-1`` for
+    but it ships `dcp_world_size * topk_tokens` candidates instead of the whole
+    score row. Overwrites `topk_indices` with global token ids (`-1` for
     padding); the attention backend localizes them back to physical slots per
     rank.
-    The selector keys only the score bits that ``logits_dtype`` (the dtype the
+    The selector keys only the score bits that `logits_dtype` (the dtype the
     MQA logits were computed in, before the FP32 upcast) carries and the id
-    bits that positions below ``num_positions`` use.
+    bits that positions below `num_positions` use.
     """
     if dcp_world_size <= 1:
         return
@@ -355,7 +355,7 @@ def _decode_chunk_ranges(
     rows: int, width: int, budget: int, itemsize: int
 ) -> list[tuple[int, int]]:
     """Partition independent Q rows under a payload budget of logits whose
-    elements take ``itemsize`` bytes."""
+    elements take `itemsize` bytes."""
     if budget < 0:
         raise ValueError("Decode logits budget must be nonnegative")
     if not rows or not budget or rows * width * itemsize <= budget:

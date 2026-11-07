@@ -2581,10 +2581,10 @@ def lut_b_moe_gemm(
 ) -> None:
     """Grouped GEMM of MXFP8 activations with LUT-B expert weights.
 
-    ``c[i] = a[sorted_token_ids[i] // top_k] @ W[expert].T`` for each routed
-    row ``i`` (scaled by ``topk_weights[i]`` when given), using routing
-    aligned to blocks of 128 by ``moe_align_block_size``. ``b`` holds the
-    weights in the kernel tile layout from ``lut_b_to_sm107_tiles``.
+    `c[i] = a[sorted_token_ids[i] // top_k] @ W[expert].T` for each routed
+    row `i` (scaled by `topk_weights[i]` when given), using routing
+    aligned to blocks of 128 by `moe_align_block_size`. `b` holds the
+    weights in the kernel tile layout from `lut_b_to_sm107_tiles`.
     """
     torch.ops._moe_C.lut_b_moe_gemm(
         a,

@@ -53,7 +53,7 @@ def ld_bf(ptr, i):
 
 
 def ld_vec(ptr, i, n, f32=False, cm=0):
-    """``n`` 32-bit elements (i32, or ``f32``) of ``ptr`` from element ``i``."""
+    """`n` 32-bit elements (i32, or `f32`) of `ptr` from element `i`."""
     dtype = T.f32 if f32 else T.i32
     v = bo.buffer_load(rsrc(ptr), i, vec_width=n, dtype=dtype, cache_modifier=cm)
     return fx.Vector(v) if n > 1 else v

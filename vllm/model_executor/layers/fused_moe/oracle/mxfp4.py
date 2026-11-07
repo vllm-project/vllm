@@ -520,8 +520,8 @@ def _user_moe_activation_override_is_set() -> bool:
 def _resolve_activation_key(
     model_activation_key: QuantKey | None,
 ) -> QuantKey | None:
-    """Apply ``--quantization-config.moe.activation`` to the checkpoint's
-    activation key. An explicit override wins, ``null`` included (BF16)."""
+    """Apply `--quantization-config.moe.activation` to the checkpoint's
+    activation key. An explicit override wins, `null` included (BF16)."""
     user_override = _user_moe_activation_override()
     if user_override is None and not _user_moe_activation_override_is_set():
         return model_activation_key

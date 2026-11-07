@@ -939,7 +939,7 @@ def low_latency_linear(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
 
 def request_low_latency_warmup(weight: torch.Tensor) -> None:
     """Warm up the measured CuTe configs for a weight that no linear module owns
-    (``enable_kimi_k3_low_latency_gemm`` only covers modules)."""
+    (`enable_kimi_k3_low_latency_gemm` only covers modules)."""
     table = _low_latency_table()
     spec = table.get(tuple(weight.shape)) if table is not None else None
     if spec is not None and shape_dynamic_skinny_gemm.is_available():
@@ -1045,7 +1045,7 @@ def enable_kimi_k3_low_latency_gemm(
     """Install shape-selected low-latency GEMMs and register CuTe warmups.
 
     Modules are matched purely by type, an exactly-unquantized method, and a
-    local ``(N, K)`` present in the current device's measured table
+    local `(N, K)` present in the current device's measured table
     (:data:`KIMI_K3_PROJECTIONS` on SM103 and SM107,
     :data:`KIMI_K3_PROJECTIONS_SM100` on SM100, :data:`KIMI_K3_PROJECTIONS_SM90`
     on SM90).

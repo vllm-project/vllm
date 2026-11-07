@@ -53,7 +53,7 @@ def _can_fuse_wo_a(layer: nn.Module) -> bool:
 
 
 def _fused_wo_a_shape(layer: nn.Module) -> dict[str, int]:
-    """The fused WO-A kernel's warmup arguments for ``layer``."""
+    """The fused WO-A kernel's warmup arguments for `layer`."""
     return dict(
         max_tokens=_fused_wo_a_max_tokens(layer),
         n_groups=layer.n_local_groups,
@@ -63,8 +63,8 @@ def _fused_wo_a_shape(layer: nn.Module) -> dict[str, int]:
 
 
 def precompile_dsv41_o_proj_early_trigger(layer: nn.Module, max_tokens: int) -> None:
-    """Compile the fused WO-A variant ``dsv41_o_proj`` dispatches with
-    ``early_trigger``, for its token counts up to ``max_tokens``."""
+    """Compile the fused WO-A variant `dsv41_o_proj` dispatches with
+    `early_trigger`, for its token counts up to `max_tokens`."""
     if _can_fuse_wo_a(layer):
         from .fused_wo_a import _FUSED_WO_A_KERNEL
 
@@ -90,10 +90,10 @@ def dsv41_o_proj(
     wo_b_proj: Callable[..., torch.Tensor] | None = None,
     early_trigger: bool = False,
 ) -> torch.Tensor:
-    """``deep_gemm_fp8_o_proj`` with WO-A fused for small SM100/SM103 batches;
-    ``wo_b_proj`` replaces ``layer._wo_b_proj``. With ``early_trigger``, the
-    fused WO-A launches ``wo_b_proj`` (PDL) right after its TMEM allocation,
-    for a ``wo_b_proj`` that loads its weights before its grid wait."""
+    """`deep_gemm_fp8_o_proj` with WO-A fused for small SM100/SM103 batches;
+    `wo_b_proj` replaces `layer._wo_b_proj`. With `early_trigger`, the
+    fused WO-A launches `wo_b_proj` (PDL) right after its TMEM allocation,
+    for a `wo_b_proj` that loads its weights before its grid wait."""
     wo_b_proj = wo_b_proj or layer._wo_b_proj
     o = attn_out[:, : layer.n_local_heads, :]
     cos_sin_cache = layer.rotary_emb.cos_sin_cache

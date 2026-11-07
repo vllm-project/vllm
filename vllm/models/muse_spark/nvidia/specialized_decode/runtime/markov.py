@@ -2,20 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The Muse Spark DSpark draft's fused Markov sampling loop.
 
-``DSparkSpeculator`` samples the draft tokens left to right, adding each
-step's Markov bias to the base draft logits. ``MarkovSampler`` runs that loop
-with each step's tail as one CuTe DSL kernel (``cutedsl/draft/markov.py``),
+`DSparkSpeculator` samples the draft tokens left to right, adding each
+step's Markov bias to the base draft logits. `MarkovSampler` runs that loop
+with each step's tail as one CuTe DSL kernel (`cutedsl/draft/markov.py`),
 bitwise equal to the speculator's eager loop on rows without NaN.
 
 Each row samples the lowest vocab id whose noised logit is NaN, else the
-lowest id of the maximum (the ``torch.argmax`` order), at every block size and
+lowest id of the maximum (the `torch.argmax` order), at every block size and
 vocab shard. On a row with a NaN the eager loop's pick depends on its block
 layout, so the two can differ there.
 
 With a vocab-parallel Markov w2 each rank samples its own vocab range
-(``VocabParallelMarkovHead``) and the ranks exchange one packet per request
+(`VocabParallelMarkovHead`) and the ranks exchange one packet per request
 and step. The draft model builds it on the first call of its
-``sample_sequential`` hook, from the speculator's sampling state.
+`sample_sequential` hook, from the speculator's sampling state.
 """
 
 import dataclasses
@@ -58,16 +58,16 @@ class FusedMarkovParams:
     """Static inputs of the fused loop, fixed once the draft model loads."""
 
     w1: torch.Tensor
-    """Markov w1 table ``[V, R]`` (bf16, R a power of two)."""
+    """Markov w1 table `[V, R]` (bf16, R a power of two)."""
     vocab_size: int
     output_multiplier: float
     """Rounded to fp32, as torch multiplies an fp32 tensor by it."""
     soft_cap: float | None
-    """Rounded to fp32; ``None`` without a soft cap."""
+    """Rounded to fp32; `None` without a soft cap."""
     inv_soft_cap: float
-    """``fp32(1) / fp32(soft_cap)``: torch divides by a scalar this way."""
+    """`fp32(1) / fp32(soft_cap)`: torch divides by a scalar this way."""
     vocab_shard: "MarkovVocabShard | None" = None
-    """Set when ``markov_w2`` is vocab-parallel."""
+    """Set when `markov_w2` is vocab-parallel."""
 
 
 @dataclass(frozen=True)
@@ -94,14 +94,14 @@ MIN_STEP_BLOCK = min(MARKOV_BLOCK, *STEP_BLOCKS.values())
 
 
 def step_block(num_rows: int) -> int:
-    """markov_step's block for a call over ``num_rows`` rows."""
+    """markov_step's block for a call over `num_rows` rows."""
     return STEP_BLOCKS.get(num_rows, MARKOV_BLOCK)
 
 
 class VocabParallelMarkovHead(DSparkMarkovHead):
-    """``DSparkMarkovHead`` with ``markov_w2`` sharded like the draft lm_head:
+    """`DSparkMarkovHead` with `markov_w2` sharded like the draft lm_head:
     each rank computes its vocab range of the transition bias
-    (``local_bias``)."""
+    (`local_bias`)."""
 
     def __init__(
         self,
@@ -130,7 +130,7 @@ class VocabParallelMarkovHead(DSparkMarkovHead):
         self._local_w2: torch.Tensor | None = None
 
     def align_vocab_shard(self) -> None:
-        """Back the rank's unquantized ``markov_w2`` rows with storage padded
+        """Back the rank's unquantized `markov_w2` rows with storage padded
         by zero rows to a 16-byte multiple, read by :meth:`local_bias`.
 
         cuBLAS picks its GEMV kernel by shape; the padded shard keeps the
@@ -166,14 +166,14 @@ class VocabParallelMarkovHead(DSparkMarkovHead):
 
 
 def markov_vocab_shard(model: Any) -> tuple[int, int] | None:
-    """This rank's ``[start, end)`` draft-vocab range of a vocab-parallel
+    """This rank's `[start, end)` draft-vocab range of a vocab-parallel
     Markov w2, or None when the w2 is replicated.
 
     Called once the weights are loaded; prepares the padded w2 storage
-    ``VocabParallelMarkovHead.local_bias`` reads. Fails where the local
+    `VocabParallelMarkovHead.local_bias` reads. Fails where the local
     computations would not return this range's columns of
-    ``model.compute_draft_logits`` and ``model.markov_bias`` on the default
-    GEMM (under ``--linear-backend`` they match to rounding only).
+    `model.compute_draft_logits` and `model.markov_bias` on the default
+    GEMM (under `--linear-backend` they match to rounding only).
     """
     head = model.model.markov_head
     w2 = head.markov_w2
@@ -212,7 +212,7 @@ def markov_vocab_shard(model: Any) -> tuple[int, int] | None:
 
 
 def compute_local_draft_logits(model: Any, hidden_states: torch.Tensor) -> torch.Tensor:
-    """This rank's vocab shard of ``model.compute_draft_logits``, ungathered."""
+    """This rank's vocab shard of `model.compute_draft_logits`, ungathered."""
     return model.logits_processor(
         model.lm_head, hidden_states.to(model.lm_head.weight.dtype), skip_gather=True
     )
@@ -294,7 +294,7 @@ def unsupported(
 
 
 def fused_markov_params(model: Any, draft_logits: torch.Tensor) -> FusedMarkovParams:
-    """Inputs of the fused Markov loop for a draft ``unsupported`` accepts.
+    """Inputs of the fused Markov loop for a draft `unsupported` accepts.
 
     The fused loop rounds each step's logits to bf16 before sampling, as the
     eager loop does through the bf16 d2t scatter buffer, and it applies the
@@ -327,7 +327,7 @@ def build_markov_sampler(
     max_num_reqs: int,
     num_steps: int,
 ) -> "MarkovSampler":
-    """The fused loop over ``model``, which the specialized decode's draft
+    """The fused loop over `model`, which the specialized decode's draft
     runs: a draft it does not reproduce fails at its first draft step, as the
     vocab-parallel Markov w2 has no eager loop."""
     reason = unsupported(
@@ -358,25 +358,25 @@ def build_markov_sampler(
 
 
 class MarkovCall(NamedTuple):
-    """The views one call of the fused loop runs on (``MarkovSampler.call_views``)."""
+    """The views one call of the fused loop runs on (`MarkovSampler.call_views`)."""
 
     width: int
     """Vocab entries per rank: the whole vocab, or this rank's shard."""
     offset: int
     """The first vocab id of this rank's shard (0 without a shard)."""
     base_logits: torch.Tensor
-    """``[rows, n_spec, width]`` BF16."""
+    """`[rows, n_spec, width]` BF16."""
     markov_bias: Callable[[torch.Tensor], torch.Tensor]
     cache: torch.Tensor
-    """The draft-logits cache, or with a shard ``[rows, n_spec, width]``."""
+    """The draft-logits cache, or with a shard `[rows, n_spec, width]`."""
     flat_cache: torch.Tensor | None
     """With a shard, the flat cache the all-gather moves (else None)."""
     packets: torch.Tensor
-    """``[rows, 4]`` FP32: a row's packet (with a shard)."""
+    """`[rows, 4]` FP32: a row's packet (with a shard)."""
     idx_map: torch.Tensor
     pos: torch.Tensor
     markov_embeds: torch.Tensor
-    """``[n_spec + 1, rows, rank]``."""
+    """`[n_spec + 1, rows, rank]`."""
     arrivals: torch.Tensor
     block: int
     num_blocks: int
@@ -453,7 +453,7 @@ class MarkovSampler:
         )
 
     def _heads(self) -> tuple[Callable, Callable]:
-        """``(base logits, Markov bias)`` of a call: the draft's full-vocab
+        """`(base logits, Markov bias)` of a call: the draft's full-vocab
         heads, or with a vocab shard this rank's (neither all-gathers)."""
         if self.params.vocab_shard is None:
             return self.model.compute_draft_logits, self.model.markov_bias
@@ -465,14 +465,14 @@ class MarkovSampler:
     def _step_variants(
         self, max_rows: int, width: int, draft_logits: torch.Tensor
     ) -> set[tuple[int, bool, bool]]:
-        """The ``(block, PDL, vector)`` of every step a call over 1 to
-        ``max_rows`` rows launches (``MarkovKernels.step`` picks ``vector``
+        """The `(block, PDL, vector)` of every step a call over 1 to
+        `max_rows` rows launches (`MarkovKernels.step` picks `vector`
         from its operands).
 
         The base logits and the bias of a call are fresh outputs of the
-        heads (``_heads``): their row strides are the heads' own (a padded
+        heads (`_heads`): their row strides are the heads' own (a padded
         lm_head or Markov w2 leaves its padded rows' stride under the
-        ``[..., :vocab]`` view the logits processor returns), read here from
+        `[..., :vocab]` view the logits processor returns), read here from
         one call of each on zeros, and they start as aligned as these
         probes do (allocator blocks)."""
         kernels, n_spec, w1 = self._kernels, self.num_steps, self.params.w1
@@ -518,8 +518,8 @@ class MarkovSampler:
         sample_pos: torch.Tensor,
         draft_logits: torch.Tensor,
     ) -> MarkovCall:
-        """The base logits of a call over ``num_reqs`` rows and the views of
-        its buffers that the loop's kernels run on (``sample``)."""
+        """The base logits of a call over `num_reqs` rows and the views of
+        its buffers that the loop's kernels run on (`sample`)."""
         n_spec = self.num_steps
         num_sample = num_reqs * n_spec
         shard = self.params.vocab_shard
@@ -585,8 +585,8 @@ class MarkovSampler:
     ) -> None:
         """The eager Markov loop with each step's tail as one kernel.
 
-        Writes ``draft_tokens`` and the ``draft_logits`` cache for the first
-        ``num_reqs`` requests, as ``DSparkSpeculator``'s eager loop does over
+        Writes `draft_tokens` and the `draft_logits` cache for the first
+        `num_reqs` requests, as `DSparkSpeculator`'s eager loop does over
         the same buffers. (The specialized decode refuses adaptive
         verification, so there is no confidence head to run.)
 

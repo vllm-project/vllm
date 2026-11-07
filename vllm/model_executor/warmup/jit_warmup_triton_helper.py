@@ -169,9 +169,9 @@ def triton_scalar_specialization_rep(value: int) -> int:
 
 
 def triton_ptr_range(tensor: Any) -> int:
-    """Pointer range Triton's backend would read off ``tensor``.
+    """Pointer range Triton's backend would read off `tensor`.
 
-    Mirrors ``HIPBackend.is_within_2gb``.
+    Mirrors `HIPBackend.is_within_2gb`.
     """
     ptr_range = getattr(tensor, "ptr_range", None)
     if ptr_range is not None:
@@ -186,10 +186,10 @@ class TritonWarmupTensor:
     `strides=None` represents compact row-major storage. Pass explicit strides
     whenever the runtime tensor can be padded, transposed, or otherwise strided.
 
-    ``ptr_range_bytes`` is the byte size of the storage behind the runtime
-    tensor (its ``untyped_storage()``, not the view), most easily derived with
-    ``triton_ptr_range``. With buffer ops enabled, Triton's ROCm backend gives
-    pointers into storage of at most 2 GB a ``tt.pointer_range = 32``
+    `ptr_range_bytes` is the byte size of the storage behind the runtime
+    tensor (its `untyped_storage()`, not the view), most easily derived with
+    `triton_ptr_range`. With buffer ops enabled, Triton's ROCm backend gives
+    pointers into storage of at most 2 GB a `tt.pointer_range = 32`
     specialization (32-bit buffer offsets), which is part of the compile key.
     The default 0 assumes such a small storage; set it above 2 GB for tensors
     that view a larger pool, such as a KV cache layer, or warmup compiles a

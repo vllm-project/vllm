@@ -3,9 +3,9 @@
 """Persistent routed experts: TMA producer, MXFP8 activations, FP4 x MXFP8 FC1/FC2 MMAs,
 SiTU hidden exchange and output epilogue. Capacity <= 8 keeps the batch's activations in
 SMEM; capacity > 8 (grouped) runs (expert, <= 8 tokens) units whose FC1 stages gather
-8-row slices of the grid-quantized batch. Capacity > 64 (wide, up to ``WIDE_ROWS``
-tokens) is the grouped engine over a wide workspace (``WIDE_UNITS`` unit slots, a
-``WIDE_ROWS``-row plan), always pregrouped by ``ExpertsGroupKernel``."""
+8-row slices of the grid-quantized batch. Capacity > 64 (wide, up to `WIDE_ROWS`
+tokens) is the grouped engine over a wide workspace (`WIDE_UNITS` unit slots, a
+`WIDE_ROWS`-row plan), always pregrouped by `ExpertsGroupKernel`."""
 
 import cutlass
 import cutlass.cute as cute
@@ -74,7 +74,7 @@ LIST_WORDS = LIST_PAIRS + LIST_PAIRS * WIDE_ROWS
 
 
 def plan_xsf(rows):
-    """Byte offset of the scale words in a ``rows``-row plan."""
+    """Byte offset of the scale words in a `rows`-row plan."""
     return rows * 3584
 
 
@@ -83,7 +83,7 @@ def plan_bytes(rows):
 
 
 def plan_rows(capacity):
-    """Rows of the plan a grouped engine of ``capacity`` reads (64, or WIDE_ROWS)."""
+    """Rows of the plan a grouped engine of `capacity` reads (64, or WIDE_ROWS)."""
     return WIDE_ROWS if capacity > 64 else 64
 
 
@@ -207,9 +207,9 @@ PLAN_BYTES = PLAN_XSF + 64 * 448
 
 @cute.jit
 def plan_chunk(plan, token, chunk, words, xsf: cutlass.Constexpr = PLAN_XSF):
-    """Write 8-element ``chunk`` (four BF16x2 ``words``) of ``token`` as MXFP8 into
-    the plan (scale words at ``xsf``); lanes 4k..4k+3 hold one 32-element block, 16
-    lanes one scale word. Bit-identical to ``mx_block`` (an exact max, the same
+    """Write 8-element `chunk` (four BF16x2 `words`) of `token` as MXFP8 into
+    the plan (scale words at `xsf`); lanes 4k..4k+3 hold one 32-element block, 16
+    lanes one scale word. Bit-identical to `mx_block` (an exact max, the same
     scaling and packing)."""
     lane, values = (thread()[2], cute.make_rmem_tensor(8, Float32))
     for i in cutlass.range_constexpr(4):
@@ -338,13 +338,13 @@ class ExpertsKernel(ExpertsGeometry):
     `publish` stages FC2 rows for `finalize`: routing weights replace the output
     arg, and (latent multicast, parity, rank) follow the SiTU scalars; `"twoshot"`:
     (receive slots [3 x TP, 64, 3584/TP], their owners' bases, parity x TP + rank) of
-    ``common.twoshot`` instead. Capacity > 8 (grouped) takes the plan (``PLAN_BYTES``:
-    MXFP8 x) in place of x. ``stream`` runs capacity <= 8 on the incremental producer
-    and CTA-scoped waits (grouped always). ``listed`` (wide, pregrouped) builds its unit
-    windows from the routing lists (``LIST_WORDS``, passed as ``ids``) instead of a unit
-    table. ``pregrouped`` (grouped) reads the unit table
-    ``ExpertsGroupKernel`` left in the workspace instead of grouping the routes itself.
-    ``steal`` (grouped) balances the end: each CTA's last ``zone`` FC2(B) grains (TP8 a
+    `common.twoshot` instead. Capacity > 8 (grouped) takes the plan (`PLAN_BYTES`:
+    MXFP8 x) in place of x. `stream` runs capacity <= 8 on the incremental producer
+    and CTA-scoped waits (grouped always). `listed` (wide, pregrouped) builds its unit
+    windows from the routing lists (`LIST_WORDS`, passed as `ids`) instead of a unit
+    table. `pregrouped` (grouped) reads the unit table
+    `ExpertsGroupKernel` left in the workspace instead of grouping the routes itself.
+    `steal` (grouped) balances the end: each CTA's last `zone` FC2(B) grains (TP8 a
     tile pair, TP16 three tiles) are claimed by the owner from the front and by the
     `victims` CTAs before it from the back, through one counter per CTA re-armed by
     call parity; a stolen grain is computed exactly as by its owner."""
@@ -453,7 +453,7 @@ class ExpertsKernel(ExpertsGeometry):
 
     @cute.jit
     def clear_table(self, sm):
-        """``route``'s first-occurrence table, cleared before the dependency wait."""
+        """`route`'s first-occurrence table, cleared before the dependency wait."""
         table = view(sm.iterator, 0, Int32, self.experts)
         for i in range(thread()[0], self.experts, 384):
             table[i] = Int32(2147483647)
@@ -649,11 +649,11 @@ class ExpertsKernel(ExpertsGeometry):
     @cute.jit
     def list_windows(self, sm, workspace, lists):
         """Listed: this call's units are ceil(n_e / 8) per expert in expert order over
-        the routing lists of parity ``generation & 1``; a unit's rows are its expert's
+        the routing lists of parity `generation & 1`; a unit's rows are its expert's
         listed pairs 8v..8v+7 (-1 padded; any pair order: every token's FC1/FC2 column
         is computed alone, so outputs do not depend on it). Every CTA scans the 896
         counts into unit bases (SMEM scratch at 0, before the weight ring is used),
-        copies its four windows as ``fetch_windows`` does, and clears its share of the
+        copies its four windows as `fetch_windows` does, and clears its share of the
         other parity's counts for the next call."""
         tid, warp, lane, cta = thread()
         experts: cutlass.Constexpr = LIST_EXPERTS
@@ -1495,8 +1495,8 @@ class ExpertsKernel(ExpertsGeometry):
 
     @cute.jit
     def walk_fc1(self, bars, descs, tmem, ranges):
-        """The FC1 stages of ``ranges`` as ``stream`` issues them, consumed as
-        ``consume`` does (same MMAs, scale copies, commits and published metadata):
+        """The FC1 stages of `ranges` as `stream` issues them, consumed as
+        `consume` does (same MMAs, scale copies, commits and published metadata):
         one accumulator per tile run, slot bytes the only per-stage wait. Returns
         the ring (slot, phase) and accumulator uses after them."""
         full, empty, accfull, accempty, xready, accmeta = bars
@@ -1547,11 +1547,11 @@ class ExpertsKernel(ExpertsGeometry):
 
     @cute.jit
     def consume_static(self, sm, tmem, ranges):
-        """``consume`` for the streamed B<=8 engine with TP8 FC2 pairs: the MMA warp
-        walks ``stream``'s FC1 runs (one accumulator per tile segment) and FC2 tile
-        pairs from ``ranges`` and only waits for each slot's bytes. The MMAs, scale
-        copies, commits and published accumulator metadata are ``consume``'s, in the
-        same order (bit-identical outputs). ``dynamic``: the FC2 pairs are the ones the
+        """`consume` for the streamed B<=8 engine with TP8 FC2 pairs: the MMA warp
+        walks `stream`'s FC1 runs (one accumulator per tile segment) and FC2 tile
+        pairs from `ranges` and only waits for each slot's bytes. The MMAs, scale
+        copies, commits and published accumulator metadata are `consume`'s, in the
+        same order (bit-identical outputs). `dynamic`: the FC2 pairs are the ones the
         producer claimed, read from each pair's first slot up to the end marker; else
         the end marker slot is not read."""
         lane = thread()[2]
@@ -1606,7 +1606,7 @@ class ExpertsKernel(ExpertsGeometry):
 
     @cute.jit
     def pair_job(self, ctx, state, unit, job):
-        """The MMA warp's three stages of FC2 tile pair ``job`` of ``unit`` (chunks
+        """The MMA warp's three stages of FC2 tile pair `job` of `unit` (chunks
         0-1 of tiles 2 job and 2 job + 1, then chunk 2 of both); returns the state
         (slot, phase, accumulator uses, current unit, hidden ordinal, buffer)."""
         full, empty, accfull, accempty, hfull, hempty, accmeta = ctx[:7]

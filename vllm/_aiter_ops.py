@@ -2361,11 +2361,11 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_topk_gating_enabled(cls) -> bool:
-        """Use AITER ``topk_gating`` for softmax and sigmoid routing.
+        """Use AITER `topk_gating` for softmax and sigmoid routing.
 
         CDNA3 and CDNA4 only (gfx942, gfx950): those are the targets it was
-        measured on. Other AITER targets keep the legacy ``topk_softmax``
-        launcher (softmax) or the native ``vllm_topk_sigmoid`` (sigmoid).
+        measured on. Other AITER targets keep the legacy `topk_softmax`
+        launcher (softmax) or the native `vllm_topk_sigmoid` (sigmoid).
         """
         from vllm.platforms.rocm import get_cdna_version
 

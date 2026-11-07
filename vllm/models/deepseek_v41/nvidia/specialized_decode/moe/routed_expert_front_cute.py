@@ -33,9 +33,9 @@ three kernels; :class:`RoutedExpertFront` replaces them with one launch:
    per row, `score = sqrt(softplus(logit))` (softplus(x) = x above 20, else
    log(1 + exp(x))), `biased = score + bias` (`bias_vl` for image sentinel
    tokens), the six largest biased scores (lowest expert id on exact ties, NaN
-   ranked as -1e30), and ``weights`` = the unbiased scores times scale / sum
+   ranked as -1e30), and `weights` = the unbiased scores times scale / sum
    (sum replaced by 1 unless positive); a CUDA graph padding row
-   (``VLLM_MOE_SKIP_PADDING``'s mask) gets ids -1 and weights 0, so no expert
+   (`VLLM_MOE_SKIP_PADDING`'s mask) gets ids -1 and weights 0, so no expert
    computes it;
 2. the routed input's MXFP8 quantization (FlashInfer's linear-layout
    `mxfp8_quantize`): per 32-value block, a UE8M0 scale rounded up from
@@ -52,11 +52,11 @@ like the Triton kernel, the kernel calls the toolchain's `logf` (libdevice, thro
 operation is left to the compiler, which could contract or flush it.
 
 Work split (1024 threads a CTA). The kernel is built for calls of up to 8,
-16, 32, 64, 128 or 192 rows (``max_rows``); the first ``S = 8`` CTAs select
+16, 32, 64, 128 or 192 rows (`max_rows`); the first `S = 8` CTAs select
 and form one thread block cluster, the rest quantize:
 
-* Selecting CTA ``s`` takes rows ``s``, ``s + S``, ``s + 2 S``, ... (at most
-  ``max_rows / S`` rows: 1, 2, 4 or 8 up to 64 rows, 16 at 128, 24 at 192).
+* Selecting CTA `s` takes rows `s`, `s + S`, `s + 2 S`, ... (at most
+  `max_rows / S` rows: 1, 2, 4 or 8 up to 64 rows, 16 at 128, 24 at 192).
   Four warps per row (two at 16 rows a CTA, one at 24) each take the top-6 of
   their share of the experts (3, 6 or 12 per lane); one warp per row merges
   the candidates and normalizes. The top-k is bound by instruction issue,
@@ -68,7 +68,7 @@ and form one thread block cluster, the rest quantize:
   them with the cluster barrier, then CTA 0 builds the routing record from
   them. The ids and weights go to global memory only after that release,
   which would otherwise wait for those stores to reach L2.
-* Quantizing CTA ``S + c``: rows ``3c .. 3c + 2`` of the BF16 input, two
+* Quantizing CTA `S + c`: rows `3c .. 3c + 2` of the BF16 input, two
   threads per 32-value block. The grid is rounded up to whole clusters.
 
 PDL: every CTA triggers its dependents on entry (GEMM1's set-up overlaps this
@@ -232,11 +232,11 @@ def lane_best(key: cute.Tensor):
 @cute.jit
 def part_top_k(logit: cute.Tensor, bias: cute.Tensor, base: Int32, lane: Int32):
     """One warp's top-6 of its share of the experts (expert = base + lane +
-    32 j, ``j`` below the size of ``logit``), in
+    32 j, `j` below the size of `logit`), in
     selection order: each round takes the warp's largest key with one
-    ``redux.sync`` max, then the lowest expert id holding it with one min
-    (Triton's ``tl.max``, then the lowest index equal to it); only the winning
-    lane rescans. Lane ``s < 6`` gets slot ``s``: its key, id and unbiased
+    `redux.sync` max, then the lowest expert id holding it with one min
+    (Triton's `tl.max`, then the lowest index equal to it); only the winning
+    lane rescans. Lane `s < 6` gets slot `s`: its key, id and unbiased
     score."""
     per_lane = cute.size(logit)
     score = cute.make_rmem_tensor((per_lane,), Float32)
@@ -277,9 +277,9 @@ def merge_row(
     lane: Int32,
     padding: Int32,
 ):
-    """Merge a row's candidates (lane ``c`` holds candidate ``c``) into
-    its top-6 and normalize as Triton does; lane ``s < 6`` returns slot
-    ``s``'s expert id and weight. A padding row (``padding`` nonzero) gets
+    """Merge a row's candidates (lane `c` holds candidate `c`) into
+    its top-6 and normalize as Triton does; lane `s < 6` returns slot
+    `s`'s expert id and weight. A padding row (`padding` nonzero) gets
     id -1 and weight 0, as the Triton kernel's padding mask does."""
     slot_weight = Float32(0.0)  # lane s < 8 keeps slot s (Triton's 8-wide vector)
     slot_id = Int32(0)
@@ -313,7 +313,7 @@ def merge_row(
 
 @dsl_user_op
 def store_cta0_shared(pointer: cute.Pointer, value, *, loc=None, ip=None):
-    """Store the 32-bit ``value`` at ``pointer``'s shared-memory offset in CTA 0
+    """Store the 32-bit `value` at `pointer`'s shared-memory offset in CTA 0
     of the cluster (distributed shared memory)."""
     llvm.inline_asm(
         None,
@@ -506,8 +506,8 @@ def quantize_row(
 
 
 class RoutedExpertFront:
-    """The fused front (module docstring); ``image``: whether the router
-    routes image sentinel tokens with ``bias_vl``; ``max_rows``: 8, 16, 32,
+    """The fused front (module docstring); `image`: whether the router
+    routes image sentinel tokens with `bias_vl`; `max_rows`: 8, 16, 32,
     64, 128 or 192, the most rows of a call."""
 
     def __init__(self, image: bool, max_rows: int = 8) -> None:
@@ -545,14 +545,14 @@ class RoutedExpertFront:
         rows: Int32,
         stream: cuda.CUstream,
     ):
-        """``logits``: FP32 [rows, 384]; ``bias``, ``bias_vl``: FP32 [384];
-        ``input_ids``: [rows] int32, or int64 if ``ids_are_64bit``, as Int32
-        words (``bias_vl`` and ``input_ids`` are read only with image routing;
-        pass any pointers otherwise); ``is_padding``: bool [rows], read only
-        if ``has_padding``; ``x``: BF16 [rows, 5120] as Uint32
-        words; outputs: ``topk_ids`` int32 / ``topk_weights`` FP32 [rows, 6],
-        ``x_quant`` [rows, 5120] E4M3 bytes, ``x_scale`` [rows, 160] UE8M0,
-        ``permuted`` [rows, 6] and the routing record. rows in [1, max_rows]."""
+        """`logits`: FP32 [rows, 384]; `bias`, `bias_vl`: FP32 [384];
+        `input_ids`: [rows] int32, or int64 if `ids_are_64bit`, as Int32
+        words (`bias_vl` and `input_ids` are read only with image routing;
+        pass any pointers otherwise); `is_padding`: bool [rows], read only
+        if `has_padding`; `x`: BF16 [rows, 5120] as Uint32
+        words; outputs: `topk_ids` int32 / `topk_weights` FP32 [rows, 6],
+        `x_quant` [rows, 5120] E4M3 bytes, `x_scale` [rows, 160] UE8M0,
+        `permuted` [rows, 6] and the routing record. rows in [1, max_rows]."""
         slots = cute.make_layout(rows * TOP_K)
         selecting = self.selecting
         quantizing = (rows + QUANT_ROWS - 1) // QUANT_ROWS
@@ -607,7 +607,7 @@ class RoutedExpertFront:
         record: cute.Tensor,
         rows: Int32,
     ):
-        """The first ``selecting`` CTAs select (CTA 0 also routes); the others
+        """The first `selecting` CTAs select (CTA 0 also routes); the others
         quantize (module docstring)."""
         cute.arch.griddepcontrol_launch_dependents()
         thread, _, _ = cute.arch.thread_idx()
@@ -657,7 +657,7 @@ class RoutedExpertFront:
         rank: Int32,
         thread: Int32,
     ):
-        """Selecting CTA ``rank``: top-k of its rows; then CTA 0 builds the
+        """Selecting CTA `rank`: top-k of its rows; then CTA 0 builds the
         routing record from every row's ids."""
         selecting, levels = self.selecting, self.levels
         bitmap_words = present_words(levels)

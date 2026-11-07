@@ -1395,9 +1395,9 @@ class MambaBuffers:
     """Single owner for all mamba-specific runner buffers.
 
     The two sub-objects have different gates:
-    ``preprocess`` handles prefix-cache state migration; ``postprocess_align``
+    `preprocess` handles prefix-cache state migration; `postprocess_align`
     owns the fused lifecycle state used by hybrid speculative decoding and
-    FlashInfer ReplaySSM, and is ``None`` otherwise.
+    FlashInfer ReplaySSM, and is `None` otherwise.
     """
 
     preprocess: MambaCopyBuffers
@@ -1696,7 +1696,7 @@ def postprocess_mamba_gpu(
     counts, copies canonical state at crossed boundaries, and normalizes the live
     counts for the next step. ReplaySSM then commits its group-shared trackers
     from the original counts and materializes any planned prefix snapshots; mode
-    ``none`` skips the copy phase and commits directly. Finally, the normalized
+    `none` skips the copy phase and commits directly. Finally, the normalized
     live counts are copied back only when the next iteration has a CPU consumer.
     """
     ctx = bufs.postprocess_align

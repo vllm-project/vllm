@@ -11,15 +11,15 @@ The backend's tactics are close when tuned in isolation, but split-K tactics
 are slower inside the back-to-back PDL chain of a decode step, so the 5-8-row
 bucket of the GB300 TP4 shapes is tuned over one pinned tactic.
 
-Up to ``WIDE_LOW_LATENCY_MAX_ROWS`` rows the GB300 TP4 shapes keep the
+Up to `WIDE_LOW_LATENCY_MAX_ROWS` rows the GB300 TP4 shapes keep the
 low-latency kernel, which the backend's runner offers only with an 8-row
 activation tile: this module compiles FlashInfer's kernel class itself with a
 16-, 32- or 48-row tile and a fixed tactic per tile. The kernel loads the
 weights before its programmatic grid wait and lets its dependents launch once
 its weight loads are issued, so in the PDL chain of a decode step the weight
-read overlaps the previous kernel; ``cute-dsl`` waits before any load.
+read overlaps the previous kernel; `cute-dsl` waits before any load.
 
-Above that, the projections stay on ``cute-dsl``, whose tuner picks a tactic
+Above that, the projections stay on `cute-dsl`, whose tuner picks a tactic
 per power-of-two row bucket at every server start. Timed in isolation the
 candidates are close, so the pick varies from start to start, and inside a
 decode step one start's pick can be much slower than another's. The GB300
@@ -163,7 +163,7 @@ def low_latency_mm(
 
 @cache
 def _cute_dsl_runner(out_dtype: torch.dtype) -> "TunableRunner | None":
-    """``mm_mxfp8``'s ``cute-dsl`` runner (with PDL), when this device and
+    """`mm_mxfp8`'s `cute-dsl` runner (with PDL), when this device and
     FlashInfer are the ones the pinned tactics were chosen on."""
     if not (
         current_platform.is_device_capability(103)
@@ -182,8 +182,8 @@ _pinned: dict[tuple[int, int, int], CuteDslTactic | None] = {}
 def pinned_mm(
     layer: nn.Module, x: torch.Tensor | QuantizedActivation
 ) -> torch.Tensor | None:
-    """``layer``'s ``cute-dsl`` GEMM of ``x`` with the pinned tactic of its
-    shape and row count, quantizing a BF16 ``x`` as the layer does; None when
+    """`layer`'s `cute-dsl` GEMM of `x` with the pinned tactic of its
+    shape and row count, quantizing a BF16 `x` as the layer does; None when
     no tactic is pinned for them."""
     kernel = _mxfp8_kernel(layer)
     assert kernel is not None
@@ -240,7 +240,7 @@ def _wide_supported() -> bool:
 
 def wide_tactic(n: int, k: int, rows: int) -> tuple[int, Tactic] | None:
     """(activation tile, tactic) of the wide low-latency GEMM of an (N, K)
-    weight at ``rows`` rows; None where it does not run."""
+    weight at `rows` rows; None where it does not run."""
     if not LOW_BATCH_MAX_ROWS < rows <= WIDE_LOW_LATENCY_MAX_ROWS:
         return None
     tile = (rows + 15) // 16 * 16
@@ -258,8 +258,8 @@ def _gmem_ptr(dtype, address: int, align: int):
 
 
 def compile_low_latency(gemm, tile: int, cta_k: int, device: torch.device):
-    """``gemm``, a FlashInfer ``LowLatencyBlockscaledGemmKernel`` with a
-    ``tile``-row activation tile, compiled for MXFP8 operands and a BF16
+    """`gemm`, a FlashInfer `LowLatencyBlockscaledGemmKernel` with a
+    `tile`-row activation tile, compiled for MXFP8 operands and a BF16
     output without scale or bias, as FlashInfer's runner compiles it."""
     import cutlass
     import cutlass.cute as cute
@@ -289,9 +289,9 @@ def launch_low_latency(
     a_scale: torch.Tensor,
     out: torch.Tensor,
 ) -> None:
-    """Launch a compiled low-latency GEMM on the current stream: ``out`` =
-    ``a`` (rows x K, F8_128x4 scales) times the column-major [K, N]
-    ``weight``. The kernel computes ``out.T``: its M is the weight's N."""
+    """Launch a compiled low-latency GEMM on the current stream: `out` =
+    `a` (rows x K, F8_128x4 scales) times the column-major [K, N]
+    `weight`. The kernel computes `out.T`: its M is the weight's N."""
     import cutlass
 
     from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
@@ -316,7 +316,7 @@ _wide_kernels: dict[tuple[Tactic, int, int | None], object] = {}
 
 
 def _wide_kernel(tactic: Tactic, tile: int, device: torch.device):
-    """The low-latency GEMM of ``tactic`` with a ``tile``-row activation
+    """The low-latency GEMM of `tactic` with a `tile`-row activation
     tile, compiled once per device."""
     key = (tactic, tile, device.index)
     compiled = _wide_kernels.get(key)
@@ -344,8 +344,8 @@ def _wide_kernel(tactic: Tactic, tile: int, device: torch.device):
 def wide_mm(
     layer: nn.Module, x: torch.Tensor | QuantizedActivation
 ) -> torch.Tensor | None:
-    """``layer``'s low-latency GEMM of ``x`` with a wide activation tile,
-    quantizing a BF16 ``x`` as the layer does; None where it does not run."""
+    """`layer`'s low-latency GEMM of `x` with a wide activation tile,
+    quantizing a BF16 `x` as the layer does; None where it does not run."""
     kernel = _mxfp8_kernel(layer)
     assert kernel is not None
     k, n = layer.weight.shape  # column-major [K, N]
@@ -375,8 +375,8 @@ def wide_mm(
 def wide_or_pinned_mm(
     layer: nn.Module, x: torch.Tensor | QuantizedActivation
 ) -> torch.Tensor | None:
-    """An eligible ``layer``'s GEMM of ``x`` above ``LOW_BATCH_MAX_ROWS``
-    rows: on the wide low-latency GEMM, else with the pinned ``cute-dsl``
+    """An eligible `layer`'s GEMM of `x` above `LOW_BATCH_MAX_ROWS`
+    rows: on the wide low-latency GEMM, else with the pinned `cute-dsl`
     tactic; None where neither applies."""
     out = wide_mm(layer, x)
     return out if out is not None else pinned_mm(layer, x)
@@ -385,9 +385,9 @@ def wide_or_pinned_mm(
 def projection_mm(
     layer: nn.Module, x: torch.Tensor | QuantizedActivation, low_batch: bool
 ) -> torch.Tensor | None:
-    """An eligible ``layer``'s GEMM of ``x``: on ``cutedsl_low_latency`` in a
-    step of up to ``LOW_BATCH_MAX_ROWS`` rows (``low_batch``), else
-    ``wide_or_pinned_mm``; None where none applies."""
+    """An eligible `layer`'s GEMM of `x`: on `cutedsl_low_latency` in a
+    step of up to `LOW_BATCH_MAX_ROWS` rows (`low_batch`), else
+    `wide_or_pinned_mm`; None where none applies."""
     return low_latency_mm(layer, x) if low_batch else wide_or_pinned_mm(layer, x)
 
 
@@ -402,7 +402,7 @@ def shape_representatives(linears: Iterable[nn.Module]) -> list[nn.Module]:
 
 
 def _zeros(linear: nn.Module, rows: int) -> QuantizedActivation:
-    """An input of ``linear`` laid out like the fused quantize producers'."""
+    """An input of `linear` laid out like the fused quantize producers'."""
     k = linear.weight.shape[0]  # column-major [K, N]
     device = linear.weight.device
     shape = torch.Size((rows, k))
@@ -416,12 +416,12 @@ def _zeros(linear: nn.Module, rows: int) -> QuantizedActivation:
 
 
 def run_zeros(linear: nn.Module, rows: int) -> torch.Tensor:
-    """Call ``linear`` on ``cutedsl_low_latency`` on a zero input."""
+    """Call `linear` on `cutedsl_low_latency` on a zero input."""
     return mxfp8_mm(linear, _zeros(linear, rows))
 
 
 def compile_pinned(linear: nn.Module) -> None:
-    """Compile ``linear``'s pinned ``cute-dsl`` tactics, each at the largest
+    """Compile `linear`'s pinned `cute-dsl` tactics, each at the largest
     row count of its range, and its wide low-latency GEMMs."""
     k, n = linear.weight.shape
     for rows, _ in CUTE_DSL_TACTICS.get((n, k), ()):

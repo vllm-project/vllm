@@ -90,8 +90,8 @@ def warm_up(decode: SpecializedDecode, vllm_config: VllmConfig) -> None:
 
 
 def _decode_topk_variants(steps: list[AttentionStep]) -> set[tuple[int, int, bool]]:
-    """(logits width, k, block mode) of every ``decode_topk`` call the dense
-    indexers can make: the paged MQA logits are ``max_model_len`` wide."""
+    """(logits width, k, block mode) of every `decode_topk` call the dense
+    indexers can make: the paged MQA logits are `max_model_len` wide."""
     variants: set[tuple[int, int, bool]] = set()
     for step in steps:
         op = None if step.attn.indexer is None else step.attn.indexer.indexer_op
@@ -130,7 +130,7 @@ def _aux_weights(steps: list[AttentionStep]) -> list[torch.Tensor]:
 def _deferred_moe(
     decode: SpecializedDecode, vllm_config: VllmConfig, rows: int, tune: bool
 ) -> None:
-    """One deferring MoE layer on ``rows`` random rows with the finalize
+    """One deferring MoE layer on `rows` random rows with the finalize
     deferred, as the executor runs it above the routed-expert GEMMs' rows:
     tunes its experts over the serving buckets, and allocates what the
     deferred launch allocates on first use before memory profiling."""

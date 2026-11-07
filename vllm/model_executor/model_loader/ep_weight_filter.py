@@ -73,13 +73,13 @@ def compute_eplb_local_expert_ids(
 ) -> set[int] | None:
     """Compute the logical expert ids *ep_rank* must load when EPLB is on.
 
-    EPLB splits ``num_experts + num_redundant_experts`` physical slots
+    EPLB splits `num_experts + num_redundant_experts` physical slots
     linearly across ranks and fills each from the initial physical-to-logical
     map, so redundant slots can need experts from other ranks' shards.
     Rebalancing later moves weights GPU-to-GPU, so loading only has to
     satisfy the initial map.
 
-    Returns ``None`` when EP is not active (``ep_size <= 1``).
+    Returns `None` when EP is not active (`ep_size <= 1`).
     """
     # Lazy: this module is imported by weight_utils. The map comes from
     # EplbState so the filter and the weight loader always agree.

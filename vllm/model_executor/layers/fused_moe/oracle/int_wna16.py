@@ -565,7 +565,7 @@ def _process_weights_marlin(
     Steps
     -----
     1. Transpose canonical N-first to K-first for Marlin.
-    2. Repack weights via ``gptq_marlin_moe_repack``.
+    2. Repack weights via `gptq_marlin_moe_repack`.
     3. Permute scales.
     4. Permute bias tensors.
     """
@@ -953,8 +953,8 @@ def _process_weights_cpu(
 def _zen_decode_weight(
     packed: torch.Tensor, in_features: int, num_bits: int
 ) -> torch.Tensor:
-    """Decode a CT ``[E, N, K//pack_factor]`` weight into the layout the op
-    reads: packed s4 ``[E, N, K//8]`` for int4, plain s8 ``[E, N, K]`` for
+    """Decode a CT `[E, N, K//pack_factor]` weight into the layout the op
+    reads: packed s4 `[E, N, K//8]` for int4, plain s8 `[E, N, K]` for
     int8. The trailing dim is what makes the op pick DA8W4 over DA8W8."""
     from vllm.model_executor.kernels.linear.mixed_precision.zentorch import (
         _import_unpack_from_int32,
@@ -1429,9 +1429,9 @@ def convert_to_wna16_moe_kernel_format(
     (e.g. Humming) return `None`; the caller then skips the param scatter.
 
     Args:
-        backend: the selected ``WNA16MoEBackend``.
-        layer: the ``MoERunner`` layer whose parameters are being prepared.
-        quant_config: the ``QuantizationConfig`` for this layer.
+        backend: the selected `WNA16MoEBackend`.
+        layer: the `MoERunner` layer whose parameters are being prepared.
+        quant_config: the `QuantizationConfig` for this layer.
         w13: fused gate/up expert weights.
         w2: down-projection expert weights.
         w13_scale: quantization scales for `w13`.

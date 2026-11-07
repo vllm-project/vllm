@@ -3091,10 +3091,10 @@ class NixlBaseConnectorWorker:
             * kv_cache_postprocess_blksize_and_layout => convert from small
               block size to large block size and convert from HND to NHD
 
-        The transfer only covers ``covered_sub_blocks`` remote-sized
+        The transfer only covers `covered_sub_blocks` remote-sized
         sub-blocks of each request's local attention blocks; the rest was
         clipped when pairing local and remote blocks from the last token
-        (``_pair_blocks_by_last_token``). Those blocks were
+        (`_pair_blocks_by_last_token`). Those blocks were
         excluded from the scheduler's alloc-time KV zeroing (which would race
         the RDMA write), so everything outside the covered range is zeroed here.
         Stale bytes would otherwise surface as garbage or NaNs once decode
@@ -3630,9 +3630,9 @@ class NixlBaseConnectorWorker:
 
         Positional pairing, only valid when both lists start at the same
         token (push, and DCP pulls, which require equal logical block sizes).
-        Other pulls pair from the last token in ``_pair_blocks_by_last_token``.
+        Other pulls pair from the last token in `_pair_blocks_by_last_token`.
 
-        Each local attention block is split into ``block_size_ratio``
+        Each local attention block is split into `block_size_ratio`
         sub-blocks paired 1:1 with remote blocks. Sub-blocks beyond the
         remote list — the untransferred tail of the last local block — are
         clipped here and zeroed in the receive post-process. Mamba state
@@ -3674,7 +3674,7 @@ class NixlBaseConnectorWorker:
         """Pair kernel blocks holding the same tokens across P/D block sizes.
 
         Local blocks are split into remote-sized sub-blocks. Each side
-        allocates whole logical blocks up to the last of ``num_tokens``, while
+        allocates whole logical blocks up to the last of `num_tokens`, while
         a local prefix hit or sliding-window clipping can start the lists at
         different tokens. So drop each side's sub-blocks past that last token
         and pair the lists from their ends. SSM groups pass through unpaired.

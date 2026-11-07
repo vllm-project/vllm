@@ -4,17 +4,17 @@
 
 The OffloadingManager identifies an offloaded chunk only by its OffloadKey,
 so its raw events carry no token ids, parent hash, or block size. For complete
-chunks, :class:`OffloadingEventsTracker` builds ``BlockStored`` from the
+chunks, :class:`OffloadingEventsTracker` builds `BlockStored` from the
 originating request data carried by the raw event. A store may describe multiple
 blocks, and removals still expand to those block hashes using captured
 metadata. Partial tails also use captured metadata. Opt-in via
-``kv_connector_extra_config["self_describing_kv_events"]``; inert unless
+`kv_connector_extra_config["self_describing_kv_events"]`; inert unless
 KV cache events are enabled. See the PR description for the full design.
 
 Recurrent (Mamba / linear-attention) state groups announce state checkpoints,
 not token ranges: an offloaded chunk holds the recurrent state at the chunk's
-last hash only. Their ``BlockStored`` therefore carries that single hash, its
-parent, an empty ``token_ids`` and ``kv_cache_spec_kind`` ``"mamba"``. A
+last hash only. Their `BlockStored` therefore carries that single hash, its
+parent, an empty `token_ids` and `kv_cache_spec_kind` `"mamba"`. A
 consumer aligns it by hash with the attention group's blocks, and a hybrid
 prefix is reusable only up to a boundary where every group has a residency.
 Windowed attention groups keep the legacy placeholder payload.

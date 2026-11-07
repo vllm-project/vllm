@@ -91,14 +91,14 @@ WIDTHS = tuple(w for w in (8, 16, 32, 64, 128, 192) if w <= MAX_ROWS)
 
 
 def width(rows: int) -> int:
-    """The kernels' build for calls of ``rows`` rows: the narrowest that
+    """The kernels' build for calls of `rows` rows: the narrowest that
     fits."""
     return next(w for w in WIDTHS if rows <= w)
 
 
 def padding_mask(rows: int) -> torch.Tensor | None:
-    """The CUDA graph padding rows of this forward's first ``rows`` (bool),
-    the mask the stock router applies with ``VLLM_MOE_SKIP_PADDING``; None
+    """The CUDA graph padding rows of this forward's first `rows` (bool),
+    the mask the stock router applies with `VLLM_MOE_SKIP_PADDING`; None
     without one."""
     if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
         is_padding = get_forward_context().is_padding
@@ -119,8 +119,8 @@ def cta_words(ctas: int) -> int:
 
 
 def route_words(ctas: int) -> int:
-    """int32 length of the routing record for ``ctas`` token tiles (its
-    layout is in ``routed_expert_route_cute.py``)."""
+    """int32 length of the routing record for `ctas` token tiles (its
+    layout is in `routed_expert_route_cute.py`)."""
     return 4 + 3 * cta_words(ctas) + TILE * ctas
 
 
@@ -183,14 +183,14 @@ class RoutedExpertGemm:
         self.clamp = clamp
 
     def set_front(self, config: FrontConfig) -> None:
-        """Use the fused front with the router's ``config``."""
+        """Use the fused front with the router's `config`."""
         for built in WIDTHS:
             _front_kernel(self.device_index, config.bias_vl is not None, built)
         self.front_config = config
 
     def accepts(self, x: torch.Tensor, runner: torch.nn.Module) -> bool:
-        """Whether a call with router input ``x`` can take these kernels: 1 to
-        ``MAX_ROWS`` BF16 rows, and the runner's expert weights still the
+        """Whether a call with router input `x` can take these kernels: 1 to
+        `MAX_ROWS` BF16 rows, and the runner's expert weights still the
         tensors bound here (a weight reload replaces them)."""
         return (
             1 <= x.size(0) <= MAX_ROWS
@@ -243,9 +243,9 @@ class RoutedExpertGemm:
     ) -> Routing:
         """Top-k, MXFP8 quantization and routing record in one launch.
 
-        ``x``: BF16 router input [rows, 5120]; ``logits``: FP32 router logits
-        [rows, 384]; ``input_ids``: [rows] int32 or int64, read only with image
-        routing; ``is_padding``: bool [rows], rows no expert computes (ids -1,
+        `x`: BF16 router input [rows, 5120]; `logits`: FP32 router logits
+        [rows, 384]; `input_ids`: [rows] int32 or int64, read only with image
+        routing; `is_padding`: bool [rows], rows no expert computes (ids -1,
         weights 0), as the router's padding mask (:func:`padding_mask`).
         """
         config = self.front_config
@@ -361,8 +361,8 @@ def _fake(dtype: type[cutlass.Numeric], align: int):
 
 @cache
 def _route_kernel(device_index: int, built: int):
-    """``RoutedExpertRoute`` compiled for a device and calls of up to
-    ``built`` rows."""
+    """`RoutedExpertRoute` compiled for a device and calls of up to
+    `built` rows."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
             RoutedExpertRoute(levels_for(built)),
@@ -378,8 +378,8 @@ def _route_kernel(device_index: int, built: int):
 
 @cache
 def _front_kernel(device_index: int, image: bool, built: int):
-    """``RoutedExpertFront`` compiled for a device, with or without image
-    routing, for calls of up to ``built`` rows."""
+    """`RoutedExpertFront` compiled for a device, with or without image
+    routing, for calls of up to `built` rows."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
             RoutedExpertFront(image, built),

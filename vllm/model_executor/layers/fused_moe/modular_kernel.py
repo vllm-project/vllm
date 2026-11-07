@@ -117,13 +117,13 @@ class FusedMoEActivationFormat(Enum):
     PaddedStandard = ("padded_standard",)
 
     def is_superset(self, pf_format: "FusedMoEActivationFormat") -> bool:
-        """Whether this (experts) format is a superset of ``pf_format``, i.e.
-        an experts kernel declaring ``self`` can consume activations produced
-        by a prepare/finalize step in ``pf_format``.
+        """Whether this (experts) format is a superset of `pf_format`, i.e.
+        an experts kernel declaring `self` can consume activations produced
+        by a prepare/finalize step in `pf_format`.
 
-        The relation is directional: ``self`` is the experts format and
-        ``pf_format`` is the prepare/finalize format. ``PaddedStandard`` is a
-        superset of ``Standard`` (a padding-aware kernel treats unpadded input
+        The relation is directional: `self` is the experts format and
+        `pf_format` is the prepare/finalize format. `PaddedStandard` is a
+        superset of `Standard` (a padding-aware kernel treats unpadded input
         as the zero-padding case), but not vice versa. All other formats are
         only supersets of themselves.
         """
@@ -136,7 +136,7 @@ class FusedMoEActivationFormat(Enum):
 
     @property
     def is_batched(self) -> bool:
-        """Whether this is the disjoint ``BatchedExperts`` format."""
+        """Whether this is the disjoint `BatchedExperts` format."""
         return self == FusedMoEActivationFormat.BatchedExperts
 
 
@@ -623,8 +623,8 @@ class FusedMoEExperts(ABC):
     @abstractmethod
     def activation_format() -> FusedMoEActivationFormat:
         """The activation format this experts kernel consumes. A kernel declaring
-        ``PaddedStandard`` also accepts ``Standard`` input (see
-        ``FusedMoEActivationFormat.is_superset``).
+        `PaddedStandard` also accepts `Standard` input (see
+        `FusedMoEActivationFormat.is_superset`).
         """
         raise NotImplementedError
 

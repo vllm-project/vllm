@@ -36,13 +36,13 @@ the RMSNorm then normalizes. The finalize variant also reads FP32 routing
 weights.
 
 Every rank receives every rank's whole contribution in LL, so its NVLink
-traffic grows with ``tp`` times the rows. From ``BT_MIN_ROWS`` rows on
-(``BT_MIN_FINALIZE_ROWS`` for the MoE finalize), the
+traffic grows with `tp` times the rows. From `BT_MIN_ROWS` rows on
+(`BT_MIN_FINALIZE_ROWS` for the MoE finalize), the
 two-shot protocol of FlashInfer's BT kernels takes over: the publish kernels
 store each token's contribution only into its owner rank's mailbox (token
-``t`` belongs to rank ``t % tp``), an owner kernel reduces its tokens and
+`t` belongs to rank `t % tp`), an owner kernel reduces its tokens and
 multicasts the BF16 sums into a second mailbox, and the same mHC consumer reads
-that one reduced value instead of ``tp`` contributions::
+that one reduced value instead of `tp` contributions::
 
     LL:  publish ──multicast──► mailbox[gen][rank][token] ─► consumer (sum, mHC)
     BT:  publish ──unicast to owner──► mailbox[gen][rank][token // tp]
@@ -128,10 +128,10 @@ SCALE_TILE_COLS = 4
 
 
 class _SharedOnlyPublishDeviceKernel:
-    """Publishes a rank's contribution. LL (``owner_capacity`` None): the
+    """Publishes a rank's contribution. LL (`owner_capacity` None): the
     Int64 argument is the mailbox's multicast address. BT: it is the address
     of an int64 table of every rank's unicast mailbox address, and each token
-    goes only to its owner's mailbox, ``owner_capacity`` tokens a rank."""
+    goes only to its owner's mailbox, `owner_capacity` tokens a rank."""
 
     def __init__(
         self,
@@ -312,7 +312,7 @@ class _SharedOnlyPublishDeviceKernel:
 
 class _QuadFinalizePublishDeviceKernel:
     """The MoE finalize (top-k weighted sum plus the shared expert) fused with
-    the publish, ``elements_per_thread`` (4 or 8) values a thread."""
+    the publish, `elements_per_thread` (4 or 8) values a thread."""
 
     def __init__(
         self,
@@ -592,10 +592,10 @@ class _QuadFinalizePublishDeviceKernel:
 
 
 class _OwnerReduceMulticastDeviceKernel:
-    """FlashInfer's BT ``_OwnerReduceMulticastDeviceKernel`` without its
+    """FlashInfer's BT `_OwnerReduceMulticastDeviceKernel` without its
     residual add: each rank waits for every rank's contribution to the tokens
     it owns, sums them in FP32 in rank order, and multicasts the BF16 sums into
-    every rank's reduced mailbox ``[generation][token]``. It then advances the
+    every rank's reduced mailbox `[generation][token]`. It then advances the
     generation and resets its contribution slots."""
 
     def __init__(
@@ -725,13 +725,13 @@ class _LamportMHCDeviceKernel:
 
     The residual add and residual copy become the mHC post-mix of the hc
     streams, stored as the residual output, and their pre-mix collapse, which
-    the unchanged RMSNorm normalizes. With ``quantize``, the normalized output
+    the unchanged RMSNorm normalizes. With `quantize`, the normalized output
     is also written as MXFP8 with swizzled 128x4 UE8M0 scales, including the
     zero scales of the padding rows up to a multiple of 128. With
-    ``residual_only``, only the residual output is written; the pre-mix, gamma
-    and normalized output are unused. With ``reduced_input`` (BT), the mailbox
-    holds each token's reduced sum, ``[generation][token]``, from
-    ``_OwnerReduceMulticastDeviceKernel``, which also advanced the generation.
+    `residual_only`, only the residual output is written; the pre-mix, gamma
+    and normalized output are unused. With `reduced_input` (BT), the mailbox
+    holds each token's reduced sum, `[generation][token]`, from
+    `_OwnerReduceMulticastDeviceKernel`, which also advanced the generation.
     """
 
     def __init__(
@@ -795,8 +795,8 @@ class _LamportMHCDeviceKernel:
         self.rank_waves = 1 if reduced_input else tp // rank_lanes
 
     def source_element(self, stage, source_rank, token, fragment) -> Int64:
-        """Mailbox element of a fragment: of ``source_rank``'s contribution,
-        or of the reduced sum (``reduced_input``)."""
+        """Mailbox element of a fragment: of `source_rank`'s contribution,
+        or of the reduced sum (`reduced_input`)."""
         if self.reduced_input:
             slot = Int64(stage) * self.capacity_m + Int64(token)
         else:
@@ -1185,17 +1185,17 @@ class _Consumer(NamedTuple):
 class AllReduceMHC:
     """Lamport TP all-reduce fused with mHC post, collapse and RMSNorm.
 
-    ``__call__`` reduces ``x`` across the TP group, writes the post-mixed hc
+    `__call__` reduces `x` across the TP group, writes the post-mixed hc
     streams and the normalized collapse, and leaves the next mixes to the
-    caller. ``finalize`` does the same for an unfinalized MoE output, folding
+    caller. `finalize` does the same for an unfinalized MoE output, folding
     the top-k reduction and the shared-expert add into the publish. Each
     instance owns a Lamport mailbox; construction is collective over the TP
-    group. With ``quantize_layer_input``, both also accept ``mxfp8_out``
+    group. With `quantize_layer_input`, both also accept `mxfp8_out`
     buffers that receive the normalized collapse as MXFP8. With
-    ``residual_only``, both also accept ``pre`` and ``norm_weight`` of None and
+    `residual_only`, both also accept `pre` and `norm_weight` of None and
     then write only the post-mixed streams, for a consumer that collapses them
-    itself. Calls of ``bt_min_rows`` rows or more (finalize:
-    ``bt_min_finalize_rows``) use the two-shot BT protocol, with its own
+    itself. Calls of `bt_min_rows` rows or more (finalize:
+    `bt_min_finalize_rows`) use the two-shot BT protocol, with its own
     mailboxes and generation state.
     """
 
@@ -1491,7 +1491,7 @@ class AllReduceMHC:
         owner_capacity: int,
         device: torch.device,
     ) -> None:
-        """Allocate the BT mailboxes (collective over ``group``)."""
+        """Allocate the BT mailboxes (collective over `group`)."""
         # BT: contributions [generation][source rank][owned token] on each
         # owner, stored by unicast through a table of the owners' addresses,
         # and the owners' sums [generation][token] on every rank.
@@ -1734,7 +1734,7 @@ class AllReduceMHC:
         bt: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Launch the call's reduction after its publish: for BT the owner
-        reduce, then the consumer that ``_consumer`` selected."""
+        reduce, then the consumer that `_consumer` selected."""
         hidden, hc = self.hidden_size, self.hc_mult
         if bt:
             # The owners reduce first; the consumer then reads their sums.

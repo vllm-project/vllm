@@ -6,7 +6,7 @@ Four modes, configured via `--fingerprint-mode`:
 
 * `full` (default): `vllm-<version>[-<parallelism>]-<hash8>` — encodes
   server version, any non-trivial parallelism degree (tp/pp/dp/ep), and an
-  8-char prefix of ``hash_config(vllm_config)`` (covers model identity,
+  8-char prefix of `hash_config(vllm_config)` (covers model identity,
   quant config, speculative, attention backend, etc.).
 * `hash`: `vllm-<version>-<hash8>` — parallelism stripped.
 * `custom`: user-provided literal via `--fingerprint-value`.

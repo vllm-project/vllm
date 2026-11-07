@@ -135,14 +135,14 @@ class KdaSplit:
     [c_accepted, c_accepted + 1, x_0, ..., x_q-1]. Token t's F_B row is MMA column t;
     CTA t % C normalizes token t.
 
-    ``record`` (verify only, RecoverSSM): the state slot is a checkpoint the verify
+    `record` (verify only, RecoverSSM): the state slot is a checkpoint the verify
     leaves unchanged, and two more last tensors take the records the commit after
     sampling folds the accepted tokens in with: the correction [R, H, q, V] (FP32)
     and the key and raw gate [R, H, q, 2K] (BF16), row R = request.
 
     Every step has the precision of the composed decode production runs (next to its
-    speculative config, at q = 1 too), Triton ``causal_conv1d_update`` ->
-    ``fused_recurrent_kda`` -> ``rms_norm_gated``: the convolution's Q/K/V and the
+    speculative config, at q = 1 too), Triton `causal_conv1d_update` ->
+    `fused_recurrent_kda` -> `rms_norm_gated`: the convolution's Q/K/V and the
     recurrence's output round to BF16, and every step uses the Triton formula
     (x / (1 + exp(-x)), q / sqrt(|q|^2 + eps) * scale, 1 / sqrt(var + eps)) and
     instructions."""
@@ -508,8 +508,8 @@ class KdaSplit:
 
     @cute.jit
     def update(self, history, dots, operands, lanes, span, staged, record=(None, 0)):
-        """Decay, delta-rule update and query dot of the passes in ``span``, whose rows
-        ``staged`` (if given) first supplies from shared memory. ``record``: the
+        """Decay, delta-rule update and query dot of the passes in `span`, whose rows
+        `staged` (if given) first supplies from shared memory. `record`: the
         token's corrections [V] (if given) and the CTA's first value row."""
         kr, qr, decays, shared_v, beta = operands
         (group, lane), (start, stop) = lanes, span
@@ -720,7 +720,7 @@ class KdaSplit:
     def multicast(self, acc, gates, targets, lane, key_gate=None):
         """Decays (q > 1) of the lane's D fragments (feature rows, token columns 2
         quarter + {0, 1}) to every CTA's shared [token, 128] decays; with
-        ``key_gate`` [q, 2K] (RecoverSSM), also the raw gates."""
+        `key_gate` [q, 2K] (RecoverSSM), also the raw gates."""
         (a, lower_bound, dt, features), (shared_decay, barrier, value_base) = (
             gates,
             targets,

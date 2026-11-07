@@ -1348,7 +1348,7 @@ class MuseSpark1xAttention(nn.Module):
     ) -> torch.Tensor:
         """Attention over an input the caller has already normalized.
 
-        With ``gather_input``, ``hidden_states`` is this rank's sequence shard;
+        With `gather_input`, `hidden_states` is this rank's sequence shard;
         the all-gather is fused into the QKV GEMM.
         """
         if gather_input:

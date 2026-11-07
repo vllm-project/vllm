@@ -207,8 +207,8 @@ def get_fi_ar_workspace(
 
     Used by AllReduceFusionPass (non-quant patterns) and FlashInferAllReduce
     for standalone allreduce. Backend is controlled by
-    VLLM_FLASHINFER_ALLREDUCE_BACKEND env var. ``resolved_backend`` is a
-    ``_resolve_fi_ar_backend`` result taken while the vLLM config was current;
+    VLLM_FLASHINFER_ALLREDUCE_BACKEND env var. `resolved_backend` is a
+    `_resolve_fi_ar_backend` result taken while the vLLM config was current;
     lazy creation can run outside it.
     """
     global _fi_ar_workspace, _fi_ar_workspace_failed

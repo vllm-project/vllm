@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Grouped ``wo_a`` output projection for DeepSeek-V4."""
+"""Grouped `wo_a` output projection for DeepSeek-V4."""
 
 import torch
 

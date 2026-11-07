@@ -262,7 +262,7 @@ def compile_topk_prefill(strips: int, *, decode: bool = False):
 
         def lane_max_bound(m, d1=12, d0=0, key=INT_MIN):
             """The 16th largest lane maximum m, to its top d1 bits (from d0 on,
-            above the bound ``key`` of the top d0)."""
+            above the bound `key` of the top d0)."""
             p = fx.Int32(key ^ INT_MIN)
             for d in range_constexpr(d0, d1):
                 t = p | _s32(1 << (31 - d))

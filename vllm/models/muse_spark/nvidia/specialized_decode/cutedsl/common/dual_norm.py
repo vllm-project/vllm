@@ -22,12 +22,12 @@ next branch::
     r2 = rsqrt(mean(stream**2) + next_eps)
     out = bf16(stream * r2 * (next_weight + next_gain_center))
 
-``dual_norm_fragment`` is the device function: one thread's 8 columns of one
+`dual_norm_fragment` is the device function: one thread's 8 columns of one
 row, with the two row statistics supplied by a cluster reduction. The
-standalone kernel (``DualNorm``) uses the reduction of the public
-``gated_residual_next_rmsnorm`` (``tree_row_sum``: a butterfly over the
+standalone kernel (`DualNorm`) uses the reduction of the public
+`gated_residual_next_rmsnorm` (`tree_row_sum`: a butterfly over the
 cluster's 32 warp sums); the boundary all-gathers use the one of the public
-all-gather dual norm (``serial_row_sum``: the 32 warp sums added in order).
+all-gather dual norm (`serial_row_sum`: the 32 warp sums added in order).
 Each matches its reference bit for bit; the two differ in their last bits.
 
 Both use grid (rows, 8), cluster (1, 8, 1), 128 threads, 8 columns per thread
@@ -89,8 +89,8 @@ class DualNormConstants(NamedTuple):
 
 
 def boundary_constants(post_norm, connection, pre_norm) -> DualNormConstants:
-    """The constants of the stock boundary ``post_norm`` -> ``connection`` ->
-    ``pre_norm`` (MuseSpark1xRMSNorm, MuseSpark1xNormPreservingResidualConnection
+    """The constants of the stock boundary `post_norm` -> `connection` ->
+    `pre_norm` (MuseSpark1xRMSNorm, MuseSpark1xNormPreservingResidualConnection
     with materialized coefficients, MuseSpark1xRMSNorm), as the stock forward
     passes them to the dual-norm kernel."""
     if not getattr(connection, "_coefficients_ready", False):
@@ -196,7 +196,7 @@ def cluster_row_sum(
 ) -> Float32:
     """Sum one value per thread over the cluster; every thread gets the total.
 
-    Each warp scatters its sum into ``slots[cluster_rank, warp]`` of every peer
+    Each warp scatters its sum into `slots[cluster_rank, warp]` of every peer
     CTA, then the slots are added in order. The caller must complete one
     cluster barrier before the first call (a remote store to a peer CTA that
     has not started faults).
@@ -216,8 +216,8 @@ def cluster_row_sum(
 
 def tree_row_sum(buf, mbar, tidx, lane, warp, rank):
     """The row reduction of the standalone kernel: two cluster rounds through
-    halves of ``buf`` ([4, 2 * NSLOT] FP32 SMEM) and mbarriers ``mbar`` and
-    ``mbar + 1``. Before round 0: the mbarriers initialized and fenced and one
+    halves of `buf` ([4, 2 * NSLOT] FP32 SMEM) and mbarriers `mbar` and
+    `mbar + 1`. Before round 0: the mbarriers initialized and fenced and one
     cluster barrier completed; after round 1: one more cluster barrier."""
     halves = (
         cute.make_tensor(buf.iterator, cute.make_layout((4, NSLOT), stride=(1, 4))),
@@ -246,8 +246,8 @@ def tree_row_sum(buf, mbar, tidx, lane, warp, rank):
 
 
 def serial_row_sum(post_slots, next_slots, cluster_rank, warp, lane):
-    """The row reduction of the boundary all-gathers: ``cluster_row_sum`` into
-    ``post_slots`` then ``next_slots`` (NSLOT FP32 each, SMEM)."""
+    """The row reduction of the boundary all-gathers: `cluster_row_sum` into
+    `post_slots` then `next_slots` (NSLOT FP32 each, SMEM)."""
     slots = (post_slots, next_slots)
 
     def row_sum(value, round_index):
@@ -271,11 +271,11 @@ def dual_norm_fragment(
 ):
     """One thread's 8 columns of the dual norm (traced inline).
 
-    ``branch`` (the BF16 branch widened), ``stream``, ``beta`` and
-    ``next_gamma`` = next_weight + next_gain_center are FP32x8; ``alpha`` is
-    FP32x8, a Float32 scalar or None (1.0); ``post_gamma`` = post_weight +
-    post_gain_center is FP32x8 or None (no post weight). ``row_sum(value,
-    round_index)`` sums one value per thread over the row (round 0: the
+    `branch` (the BF16 branch widened), `stream`, `beta` and
+    `next_gamma` = next_weight + next_gain_center are FP32x8; `alpha` is
+    FP32x8, a Float32 scalar or None (1.0); `post_gamma` = post_weight +
+    post_gain_center is FP32x8 or None (no post weight). `row_sum(value,
+    round_index)` sums one value per thread over the row (round 0: the
     branch's squares, round 1: the stream's). Returns (stream, out), the FP32
     updated stream and the unrounded FP32 next-norm output.
     """
@@ -424,11 +424,11 @@ class DualNorm:
     the kernel compiled at construction (build time, before CUDA graph
     capture).
 
-    ``run`` is graph-capturable and allocates nothing. Every tensor is
+    `run` is graph-capturable and allocates nothing. Every tensor is
     contiguous on one device: branch and out BF16 [b, H], stream FP32 [b, H]
     (updated in place), post_weight and next_weight BF16 [H], alpha (unless
     bound as a scalar) and beta FP32 [H], router_input FP32 [b, H] when the
-    kernel was built with ``router``. Rows (b) are a runtime value.
+    kernel was built with `router`. Rows (b) are a runtime value.
     """
 
     def __init__(

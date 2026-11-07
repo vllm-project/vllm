@@ -199,10 +199,10 @@ class BaseFrontendArgs:
     explicit request-level `chat_template_kwargs.cohere_format` takes
     priority."""
     anthropic_disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto"
-    """The ``reasoning_effort`` used for Anthropic Messages, token counting,
-    and render requests with ``thinking: {"type": "disabled"}`` or
-    ``thinking: {"type": "between_tools"}``.
-    ``none`` turns thinking off for models that support it; ``low`` suits
+    """The `reasoning_effort` used for Anthropic Messages, token counting,
+    and render requests with `thinking: {"type": "disabled"}` or
+    `thinking: {"type": "between_tools"}`.
+    `none` turns thinking off for models that support it; `low` suits
     models that always think
     (e.g. GLM-5.3) or reject `none` (e.g. gpt-oss). `auto` (default) uses
     `low` when the renderer rejects `none` or renders it the same as a
