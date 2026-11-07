@@ -38,7 +38,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.reload.direct import direct_reload_active
+from vllm.model_executor.model_loader.reload import weight_update_active
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen3_dspark import (
     DSparkConfidenceHead,
@@ -533,7 +533,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         if (
             self.model.confidence_head is not None
             and not loaded_confidence_head
-            and not direct_reload_active(self)
+            and not weight_update_active(self)
         ):
             self.model.confidence_head = None
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))

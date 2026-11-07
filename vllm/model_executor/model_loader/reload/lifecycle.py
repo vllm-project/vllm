@@ -7,10 +7,25 @@ import torch
 
 from vllm.config import ModelConfig
 
-from .direct import begin_direct_reload, direct_reload_enabled, finish_direct_reload
-from .layerwise import finalize_layerwise_reload, initialize_layerwise_reload
+from .direct import (
+    begin_direct_reload,
+    direct_reload_active,
+    direct_reload_enabled,
+    finish_direct_reload,
+)
+from .layerwise import (
+    finalize_layerwise_reload,
+    get_layerwise_info,
+    initialize_layerwise_reload,
+)
 
-__all__ = ["finish_reload", "start_reload"]
+__all__ = ["finish_reload", "start_reload", "weight_update_active"]
+
+
+def weight_update_active(model: torch.nn.Module) -> bool:
+    """Whether ``model`` is in a weight update, when one ``load_weights`` call may
+    hold only part of the checkpoint."""
+    return direct_reload_active(model) or get_layerwise_info(model).can_load()
 
 
 def start_reload(model: torch.nn.Module) -> None:

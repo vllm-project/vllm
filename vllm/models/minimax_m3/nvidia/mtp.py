@@ -19,7 +19,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.reload.direct import direct_reload_active
+from vllm.model_executor.model_loader.reload import weight_update_active
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -308,7 +308,7 @@ class MiniMaxM3MTP(nn.Module):
         if self._tracks_own_embed:
             if "model.embed_tokens.weight" in loaded_params:
                 self.has_own_embed_tokens = True
-            elif not direct_reload_active(self):
+            elif not weight_update_active(self):
                 # A complete checkpoint without embeddings borrows the target's.
                 self.has_own_embed_tokens = False
         return loaded_params

@@ -16,7 +16,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.reload.direct import direct_reload_active
+from vllm.model_executor.model_loader.reload import weight_update_active
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     MultiModalEmbeddings,
@@ -356,7 +356,7 @@ class Step5MTP(nn.Module, MixtureOfExperts, SupportsMultiModal):
             default_weight_loader,
         )
 
-        validate_completeness = not direct_reload_active(self)
+        validate_completeness = not weight_update_active(self)
         if validate_completeness:
             _reset_fused_qkv_indexer_load_state(self)
         params_dict = dict(self.named_parameters())
