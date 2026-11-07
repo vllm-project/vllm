@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 from contextlib import ExitStack
+from typing import Any
 
 import pytest
 
@@ -167,7 +168,7 @@ def test_tree_speculator_runs_chains(model, tp, capfd):
 
 # The test backend reads the batch layout on the host, so attention runs
 # eagerly: piecewise CUDA graphs at most.
-_TREE_MODES = {
+_TREE_MODES: dict[str, dict[str, Any]] = {
     "eager": {"enforce_eager": True},
     "piecewise": {"compilation_config": {"cudagraph_mode": "PIECEWISE"}},
 }

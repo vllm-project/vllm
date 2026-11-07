@@ -42,6 +42,7 @@ from vllm.v1.worker.gpu.spec_decode.capabilities import (
 from vllm.v1.worker.gpu.spec_decode.kernels import (
     CommitStep,
     KernelContext,
+    KernelKey,
     KernelRegistry,
     SpecKernel,
     SpecLayerSpec,
@@ -50,10 +51,10 @@ from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound
 from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 from vllm.v1.worker.utils import AttentionGroup
 
-GDN_VERIFY = ("mamba:gdn@slots", "verify")
-SHORT_CONV_VERIFY = ("mamba:short_conv@slots", "verify")
-STATE_COMMIT = ("layout:mamba_state@slots", "commit")
-KV_COMMIT = ("layout:paged_token", "commit")
+GDN_VERIFY: KernelKey = ("mamba:gdn@slots", "verify")
+SHORT_CONV_VERIFY: KernelKey = ("mamba:short_conv@slots", "verify")
+STATE_COMMIT: KernelKey = ("layout:mamba_state@slots", "commit")
+KV_COMMIT: KernelKey = ("layout:paged_token", "commit")
 
 
 def _spec(cls=FullAttentionSpec, **kwargs):
