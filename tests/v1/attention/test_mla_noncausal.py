@@ -9,6 +9,7 @@ import torch
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadata,
     MLACommonMetadataBuilder,
+    QueryLenSupport,
 )
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
@@ -29,6 +30,7 @@ class _DraftMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
 
 
 class _DcpCapableMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+    query_len_support = QueryLenSupport.UNIFORM
     supports_non_causal_multi_token_decode = True
     supports_non_causal_multi_token_dcp = True
 
@@ -97,10 +99,14 @@ def _merged_mla_spec() -> MLAAttentionSpec:
 
 def _dspark_dcp_vllm_config(
     static_forward_context: dict[str, SimpleNamespace],
+    num_speculative_tokens: int | None = None,
+    method: str = "dspark",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         speculative_config=SimpleNamespace(
-            method="dspark", num_speculative_tokens=None
+            method=method,
+            num_speculative_tokens=num_speculative_tokens,
+            parallel_drafting=False,
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=2,
@@ -256,3 +262,35 @@ def test_merged_group_spec_does_not_mark_a_target_only_builder():
             device,
             supports_dcp_with_varlen=True,
         )
+
+
+def test_dcp_noncausal_group_keeps_spec_decode_reorder_threshold():
+    # Full-cudagraph capture asserts the draft block fits the threshold, and a
+    # non-causal block needs no causal varlen support on the DCP shard.
+    vllm_config = _dspark_dcp_vllm_config(
+        {"draft": _mla_layer(non_causal=True)}, num_speculative_tokens=7
+    )
+    builder = _DcpCapableMLAMetadataBuilder(
+        _merged_mla_spec(),
+        ["draft"],
+        vllm_config,
+        torch.device("cpu"),
+        supports_dcp_with_varlen=False,
+    )
+    assert builder.reorder_batch_threshold == 8
+
+
+def test_dcp_causal_group_without_varlen_support_stays_single_token():
+    # A causal multi-token block under DCP must keep running as prefill on a
+    # backend without causal varlen support, even one with the non-causal flag.
+    vllm_config = _dspark_dcp_vllm_config(
+        {"target": _mla_layer()}, num_speculative_tokens=7, method="mtp"
+    )
+    builder = _DcpCapableMLAMetadataBuilder(
+        _merged_mla_spec(),
+        ["target"],
+        vllm_config,
+        torch.device("cpu"),
+        supports_dcp_with_varlen=False,
+    )
+    assert builder.reorder_batch_threshold == 1
