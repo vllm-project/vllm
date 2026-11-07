@@ -2214,16 +2214,19 @@ class MooncakeConnectorWorker:
                     lengths.extend((run_lens * transfer_len).tolist())
                 else:
                     lengths.extend([transfer_len] * len(local_ids))
+                # uint64: device addresses can be above 2**63 (Intel XPU USM
+                # pointers), which do not fit the int64 block id arrays.
                 src_ptrs.extend(
                     (
-                        local_ids * local_region.block_len
-                        + (local_region.base_addr + src_region_offset)
+                        local_ids.astype(np.uint64) * np.uint64(local_region.block_len)
+                        + np.uint64(local_region.base_addr + src_region_offset)
                     ).tolist()
                 )
                 dst_ptrs.extend(
                     (
-                        remote_ids * remote_region.block_len
-                        + (remote_region.base_addr + dst_region_offset)
+                        remote_ids.astype(np.uint64)
+                        * np.uint64(remote_region.block_len)
+                        + np.uint64(remote_region.base_addr + dst_region_offset)
                     ).tolist()
                 )
 
