@@ -61,23 +61,51 @@ def _mamba_chunk_scan_combined_fwd_cpu(
             d = d.squeeze(-1)
         D_1d = d.contiguous()
 
-    ops.mamba_chunk_scan_fwd_cpu(
-        out,
-        all_states,
-        x,
-        dt_f,
-        A,
-        B,
-        C,
-        D_1d,
-        z,
-        cu_seqlens.to(torch.int32),
-    )
-
     out_dtype = state_dtype if state_dtype is not None else x.dtype
-    all_states = all_states.to(out_dtype)
+    if not return_intermediate_states:
+        ops.mamba_chunk_scan_fwd_cpu(
+            out,
+            all_states,
+            x,
+            dt_f,
+            A,
+            B,
+            C,
+            D_1d,
+            z,
+            cu_seqlens.to(torch.int32),
+        )
+        return all_states.to(out_dtype)
 
-    return all_states
+    # Scan chunk by chunk to return the state at every chunk end.
+    assert cu_chunk_seqlens is not None and seq_idx is not None
+    assert cu_chunk_seqlens.dim() == 1
+    assert seq_idx.numel() == cu_chunk_seqlens.numel() - 1
+    bounds = cu_chunk_seqlens.tolist()
+    chunk_seq = seq_idx.tolist()
+    chunk_states = torch.empty(
+        len(chunk_seq), *all_states.shape[1:], dtype=torch.float32, device=x.device
+    )
+    chunk_range = torch.zeros(2, dtype=torch.int32)
+    for c, b in enumerate(chunk_seq):
+        start, end = bounds[c], bounds[c + 1]
+        state = all_states[b : b + 1]
+        if end > start:
+            chunk_range[1] = end - start
+            ops.mamba_chunk_scan_fwd_cpu(
+                out[start:end],
+                state,
+                x[start:end],
+                dt_f[start:end],
+                A,
+                B[start:end],
+                C[start:end],
+                D_1d,
+                None if z is None else z[start:end],
+                chunk_range,
+            )
+        chunk_states[c] = state[0]
+    return chunk_states.to(out_dtype)
 
 
 def selective_state_update(
@@ -142,3 +170,51 @@ def selective_state_update(
         cu_seqlens,
     )
     return _out.squeeze(1) if out.dim() == 2 else _out
+
+
+def _flat_rows(t: torch.Tensor, row_size: int) -> torch.Tensor:
+    return t.as_strided((t.size(0), row_size), (t.stride(0), 1), t.storage_offset())
+
+
+def store_cache_checkpoints_cpu(
+    checkpoint_offsets: torch.Tensor,
+    state_indices: torch.Tensor,
+    *,
+    raw_qkv: torch.Tensor,
+    conv_state: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    state_len: int,
+    recurrent_checkpoint: torch.Tensor | None = None,
+    recurrent_state: torch.Tensor | None = None,
+    recurrent_rows: torch.Tensor | None = None,
+    token_indices: torch.Tensor | None = None,
+) -> None:
+    """CPU version of ``store_cache_checkpoints_kernel``."""
+    offsets = checkpoint_offsets.long()
+    rows = ((state_indices != NULL_BLOCK_ID) & (offsets > 0)).nonzero().flatten()
+    if rows.numel() == 0:
+        return
+    dst = state_indices[rows].long()
+
+    has_conv = offsets[rows] >= state_len
+    conv_rows = rows[has_conv]
+    if conv_rows.numel() > 0:
+        ends = cu_seqlens[conv_rows].long() + offsets[conv_rows]
+        tokens = ends[:, None] - state_len + torch.arange(state_len)
+        if token_indices is not None:
+            tokens = token_indices[tokens].long()
+        width = raw_qkv.shape[-1]
+        conv_state[dst[has_conv], :width, :state_len] = (
+            raw_qkv[tokens].transpose(1, 2).to(conv_state.dtype)
+        )
+
+    if recurrent_checkpoint is not None:
+        assert recurrent_state is not None
+        src = rows if recurrent_rows is None else recurrent_rows[rows].long()
+        # Like the kernel, copy flat rows from each block start, so padded
+        # pages keep their padding.
+        row_size = recurrent_checkpoint[0].numel()
+        assert recurrent_state[0].numel() >= row_size
+        _flat_rows(recurrent_state, row_size)[dst] = _flat_rows(
+            recurrent_checkpoint, row_size
+        )[src].to(recurrent_state.dtype)
