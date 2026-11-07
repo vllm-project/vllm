@@ -74,7 +74,9 @@ model_tests() {
 
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
-    pytest -x -v -s tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs"
+    pytest -x -v -s tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs
+    pytest -x -v -s tests/quantization/test_cpu_int8_w4a8.py
+  "
 }
 
 serving_tests() {
