@@ -23,7 +23,7 @@ async def http_exception_handler(req: Request, exc: HTTPException):
         )
     err = ErrorResponse(
         error=ErrorInfo(
-            message=sanitize_message(exc.detail),
+            message=sanitize_message(str(exc.detail)),
             type=HTTPStatus(exc.status_code).phrase,
             code=exc.status_code,
         )

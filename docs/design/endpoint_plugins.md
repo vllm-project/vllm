@@ -76,6 +76,13 @@ class MyAdminEndpointPlugin:
 
 A complete and tested version of this example is in-repo as `tests/plugins/vllm_add_dummy_endpoint_plugin` and is exercised e2e (including a real HTTP request) in `tests/plugins_tests/test_endpoint_plugins.py`.
 
+### HTTP errors
+
+Plugin routes can raise `fastapi.HTTPException` with a JSON-compatible `detail`,
+including a dictionary, list, number, or boolean. vLLM preserves the exception's
+HTTP status and converts `detail` to a string for `error.message`, then applies
+its standard error-message sanitization. This behavior is enabled by default.
+
 ## Registering the entry point
 
 Register a zero argument factory (a class or function) under the `vllm.endpoint_plugins` group. The factory must return an object satisfying `EndpointPlugin`:
