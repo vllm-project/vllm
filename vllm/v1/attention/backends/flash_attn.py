@@ -353,12 +353,29 @@ class FlashAttentionBackend(AttentionBackend):
             return FA4_HD256_PAGE_SIZE
         return None
 
+    @staticmethod
+    def _get_xpu_kernel_block_sizes() -> list[int | MultipleOf]:
+        # XPU kernels run any multiple of 16; multiples of 64 are perf optimized.
+        # Block-size heuristics that read only the supported sizes (composite
+        # preferred size, SWA and skip-layer sizing) would pick sizes below 64,
+        # so advertise 16 only when the user explicitly asked for a
+        # non-64-multiple block size.
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None:
+            cache_config = vllm_config.cache_config
+            if (
+                cache_config.user_specified_block_size
+                and cache_config.block_size % 64 != 0
+            ):
+                return [MultipleOf(16)]
+        return [MultipleOf(64)]
+
     @classmethod
     def get_supported_kernel_block_sizes(
         cls, kv_cache_spec: KVCacheSpec | None = None
     ) -> list[int | MultipleOf]:
         if current_platform.is_xpu():
-            return [MultipleOf(64)]
+            return cls._get_xpu_kernel_block_sizes()
         if block_size := cls._get_sm90_fa4_fp8_kv_block_size(kv_cache_spec):
             return [block_size]
         if block_size := cls._get_fa4_hd256_block_size(kv_cache_spec):
