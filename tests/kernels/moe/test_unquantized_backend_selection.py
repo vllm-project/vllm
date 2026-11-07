@@ -10,15 +10,31 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
+    UnquantizedMoEKernelOracle,
     backend_to_kernel_cls,
     select_unquantized_moe_backend,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Static
 from vllm.platforms import CpuArchEnum, current_platform
 
 skipif_not_cuda_rocm = pytest.mark.skipif(
     not (current_platform.is_cuda() or current_platform.is_rocm()),
     reason="Only supported on CUDA/ROCm platforms.",
 )
+
+
+@pytest.fixture(params=["module", "oracle", "oracle_with_config"])
+def select_backend(request):
+    if request.param == "module":
+        return select_unquantized_moe_backend
+
+    def select(moe_config):
+        oracle = UnquantizedMoEKernelOracle(moe_config)
+        if request.param == "oracle_with_config":
+            return oracle.select_backend(moe_config)
+        return oracle.select_backend()
+
+    return select
 
 
 @pytest.mark.parametrize(
@@ -625,7 +641,7 @@ def test_select_lora_explicit_non_triton_backend():
     ],
 )
 def test_lora_rejects_non_standard_activation_layout(
-    all2all_backend, moe_backend, expected_format
+    all2all_backend, moe_backend, expected_format, select_backend
 ):
     """LoRA's token-major Punica path cannot consume BatchedExperts or padded
     layouts, so backend selection must reject them with a clear error."""
@@ -640,7 +656,7 @@ def test_lora_rejects_non_standard_activation_layout(
     assert moe_config.activation_format.value[0] == expected_format
 
     with pytest.raises(ValueError, match="requires a Standard activation layout"):
-        select_unquantized_moe_backend(moe_config=moe_config)
+        select_backend(moe_config=moe_config)
 
 
 def test_batched_experts_do_not_support_lora():
@@ -655,15 +671,13 @@ def test_batched_experts_do_not_support_lora():
 
 @skipif_not_cuda_rocm
 @pytest.mark.parametrize("is_lora_enabled", [False, True])
-def test_select_explicit_triton_backend(is_lora_enabled):
+def test_select_explicit_triton_backend(is_lora_enabled, select_backend):
     """Explicit triton backend selection should return Triton."""
     moe_config = make_dummy_moe_config()
     moe_config.is_lora_enabled = is_lora_enabled
     moe_config.moe_backend = "triton"
 
-    selected_backend, experts_cls = select_unquantized_moe_backend(
-        moe_config=moe_config
-    )
+    selected_backend, experts_cls = select_backend(moe_config=moe_config)
 
     assert selected_backend == UnquantizedMoeBackend.TRITON
     assert experts_cls is not None
@@ -671,13 +685,52 @@ def test_select_explicit_triton_backend(is_lora_enabled):
 
 @skipif_not_cuda_rocm
 @pytest.mark.parametrize("moe_backend", ["humming", "marlin"])
-def test_quantization_only_backend_falls_back_to_auto(moe_backend):
+def test_quantization_only_backend_falls_back_to_auto(moe_backend, select_backend):
     """A quantization-only --moe-backend also reaches the unquantized MoE
     layers of a quantized model (e.g. a BF16 MTP draft), which must use the
     auto-selected backend instead of failing."""
     moe_config = make_dummy_moe_config()
     moe_config.moe_backend = moe_backend
 
-    assert select_unquantized_moe_backend(
-        moe_config=moe_config
-    ) == select_unquantized_moe_backend(moe_config=make_dummy_moe_config())
+    assert select_backend(moe_config=moe_config) == select_backend(
+        moe_config=make_dummy_moe_config()
+    )
+
+
+@skipif_not_cuda_rocm
+def test_oracle_legacy_config_does_not_replace_instance_config():
+    """A per-call config override must not leak into subsequent selections."""
+    config = make_dummy_moe_config()
+    config.moe_backend = "triton"
+    override = make_dummy_moe_config()
+    override.moe_backend = "batched_triton"
+    override.is_lora_enabled = True
+    oracle = UnquantizedMoEKernelOracle(config)
+
+    with pytest.raises(ValueError, match="requires a Standard activation layout"):
+        oracle.select_backend(override)
+    assert oracle.select_backend() == select_unquantized_moe_backend(config)
+
+
+@skipif_not_cuda_rocm
+def test_oracle_legacy_call_ignores_constructor_quant_keys():
+    """The legacy entry point selects unquantized kernels from its arguments."""
+    config = make_dummy_moe_config()
+    config.moe_backend = "triton"
+    oracle = UnquantizedMoEKernelOracle(config, weight_key=kNvfp4Static)
+
+    assert oracle.select_backend(config) == select_unquantized_moe_backend(config)
+
+
+@skipif_not_cuda_rocm
+def test_oracle_priority_lists_are_independent():
+    """Filtering candidates for one selection must not alter later selections."""
+    config = make_dummy_moe_config()
+    oracle = UnquantizedMoEKernelOracle(config)
+    expected = oracle.get_priority_backends()
+    filtered = oracle.get_priority_backends(config)
+    filtered.clear()
+
+    assert expected
+    assert oracle.get_priority_backends() == expected
+    assert UnquantizedMoEKernelOracle(config).get_priority_backends() == expected
