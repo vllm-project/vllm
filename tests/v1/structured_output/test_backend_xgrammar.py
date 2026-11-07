@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import json
 from typing import ClassVar
 
 import pytest
@@ -609,3 +610,26 @@ class TestXgrammarBackend:
             #     backend,
             #     '{"where_space_after_comma":42, "wow_thats_cool":4242}',
             # )
+
+
+_ISSUE_957_SCHEMA = {
+    # Bounded repetition in a `pattern`: the cached compile fails on
+    # xgrammar 0.2.8 (mlc-ai/xgrammar#957).
+    "type": "object",
+    "properties": {"q": {"type": "string", "pattern": r"^[^\r\n?]{14,199}\?$"}},
+    "required": ["q"],
+    "additionalProperties": False,
+}
+
+
+def test_cached_compile_failure_is_retried_uncached():
+    tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
+    vllm_config = VllmConfig(
+        structured_outputs_config=StructuredOutputsConfig(backend="xgrammar")
+    )
+    backend = XgrammarBackend(vllm_config, tokenizer=tokenizer, vocab_size=50257)
+    grammar = backend.compile_grammar(
+        StructuredOutputOptions.JSON, json.dumps(_ISSUE_957_SCHEMA)
+    )
+    text = '{"q": "What does your current CRM process look like?"}'
+    assert grammar.accept_tokens("req", tokenizer.encode(text))
