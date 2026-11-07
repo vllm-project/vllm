@@ -17,6 +17,10 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+from vllm.distributed.device_communicators.custom_all_reduce import (
+    _all_ranks_true,
+    _can_p2p,
+)
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -81,6 +85,15 @@ class FlashInferPcieIpcAllReduce:
             logger.warning_once(
                 "FlashInfer PCIe IPC all-reduce requires every rank in the TP "
                 "group to be on one node."
+            )
+            return
+        # The IPC workspace maps every peer's buffer, so all ranks need P2P.
+        if not _all_ranks_true(tune_group, _can_p2p(self.rank, self.world_size)):
+            logger.warning_once(
+                "FlashInfer PCIe IPC all-reduce requires CUDA peer access "
+                "between all %d TP ranks, which this platform does not "
+                "provide; falling back to another all-reduce backend.",
+                self.world_size,
             )
             return
 
