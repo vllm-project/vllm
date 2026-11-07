@@ -71,6 +71,7 @@ if TYPE_CHECKING:
         ChatCompletionMessageParam,
         ConversationMessage,
     )
+    from vllm.utils.session_prefix import PrefixContext
 
 logger = init_logger(__name__)
 
@@ -431,6 +432,11 @@ class BaseRenderer(ABC, Generic[_T]):
         # the cache (both are registered as resources in __init__).
         self._join_mm_warmup()
         self._resources.close()
+
+    def session_prefix_context(
+        self, session_id: str | None, cache_salt: str | None
+    ) -> "PrefixContext | None":
+        return None
 
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:
