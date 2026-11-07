@@ -155,21 +155,51 @@ def _device_name_for_current_gpu(config: MooncakeStoreConfig) -> str:
 
 
 def setup_mooncake_store(
-    store: Any, config: MooncakeStoreConfig, local_hostname: str
+    store: Any,
+    config: MooncakeStoreConfig,
+    local_hostname: str,
+    engine: Any | None = None,
 ) -> None:
-    """Initialize a native Store, preserving explicit tenant configuration."""
-    setup_kwargs: dict[str, str] = {}
+    """Initialize a native Store, preserving explicit tenant configuration.
+
+    ``engine`` is an existing Mooncake ``TransferEngine`` (the object returned
+    by ``TransferEngine.get_engine()``). When it is set, the store client uses
+    that engine instead of creating its own.
+
+    Args:
+        store: Native ``MooncakeDistributedStore``.
+        config: Store topology and connection settings.
+        local_hostname: Hostname, or ``host:port``, advertised for this client.
+        engine: Inner TransferEngine to reuse. ``None`` creates one inside setup.
+
+    Raises:
+        RuntimeError: Store setup failed, or this Mooncake build cannot reuse
+            an existing TransferEngine.
+
+    """
+    setup_kwargs: dict[str, Any] = {}
     if config.tenant_id != DEFAULT_TENANT_ID:
         setup_kwargs["tenant_id"] = config.tenant_id
-    ret = store.setup(
-        local_hostname,
-        config.metadata_server,
-        config.global_segment_size,
-        config.local_buffer_size,
-        config.protocol,
-        _device_name_for_current_gpu(config),
-        config.master_server_address,
-        **setup_kwargs,
-    )
+    if engine is not None:
+        setup_kwargs["engine"] = engine
+    rdma_devices = "" if engine is not None else _device_name_for_current_gpu(config)
+    try:
+        ret = store.setup(
+            local_hostname,
+            config.metadata_server,
+            config.global_segment_size,
+            config.local_buffer_size,
+            config.protocol,
+            rdma_devices,
+            config.master_server_address,
+            **setup_kwargs,
+        )
+    except TypeError as exc:
+        if engine is None:
+            raise
+        raise RuntimeError(
+            "Reusing an existing TransferEngine requires a mooncake-transfer-engine "
+            "build whose MooncakeDistributedStore.setup accepts engine=."
+        ) from exc
     if ret != 0:
         raise RuntimeError("Initialize MooncakeDistributedStore failed.")
