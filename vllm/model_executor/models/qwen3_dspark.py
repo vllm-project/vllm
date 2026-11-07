@@ -32,7 +32,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
-from vllm.model_executor.utils import in_weight_update
+from vllm.model_executor.model_loader.reload.direct import direct_reload_active
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 
@@ -356,7 +356,7 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             orig_to_new_substr["lm_head"] = None
         if not includes_draft_id_mapping:
             orig_to_new_substr["draft_id_to_target_id"] = None
-        if not includes_confidence_head and not in_weight_update(self):
+        if not includes_confidence_head and not direct_reload_active(self):
             self.model.confidence_head = None
         if self.model.confidence_head is None:
             orig_to_new_substr["confidence_head"] = None

@@ -38,13 +38,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.reload.direct import direct_reload_active
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen3_dspark import (
     DSparkConfidenceHead,
     DSparkMarkovHead,
 )
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.model_executor.utils import in_weight_update
 
 from .mega_moe import finalize_mega_moe_weights
 from .model import (
@@ -481,7 +481,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         if (
             self.model.confidence_head is not None
             and not loaded_confidence_head
-            and not in_weight_update(self)
+            and not direct_reload_active(self)
         ):
             self.model.confidence_head = None
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))

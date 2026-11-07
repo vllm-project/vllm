@@ -19,8 +19,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.reload.direct import direct_reload_active
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.utils import in_weight_update, refill_derived
+from vllm.model_executor.utils import refill_derived
 
 from .gemma4_mtp import Gemma4MTPAttention, Gemma4MTPDecoderLayer
 from .qwen3_dflash import (
@@ -344,6 +345,6 @@ class Gemma4DSparkForCausalLM(Qwen3DSparkForCausalLM):
                     loaded.add(name)
                     if "confidence_head" in name:
                         includes_confidence_head = True
-        if not includes_confidence_head and not in_weight_update(self):
+        if not includes_confidence_head and not direct_reload_active(self):
             self.model.confidence_head = None
         return loaded

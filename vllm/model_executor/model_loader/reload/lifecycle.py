@@ -15,7 +15,6 @@ __all__ = ["finish_reload", "start_reload"]
 
 def start_reload(model: torch.nn.Module) -> None:
     """Begin a weight update in the configured mode."""
-    model._in_weight_update = True
     if direct_reload_enabled():
         begin_direct_reload(model)
     else:
@@ -30,4 +29,3 @@ def finish_reload(
         finish_direct_reload(model, model_config, device)
     else:
         finalize_layerwise_reload(model, model_config)
-    model._in_weight_update = False
