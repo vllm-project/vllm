@@ -232,16 +232,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             return
 
         elif self.unquantized_backend == UnquantizedMoeBackend.XPU:
-            w13 = layer.w13_weight
-            w2 = layer.w2_weight
-
-            w13.data = w13.transpose(-1, -2).contiguous()
-            w2.data = w2.transpose(-1, -2).contiguous()
-
+            # XpuFusedMoe (vllm_xpu_kernels >= 0.1.17) rewrites the loaded
+            # layout in place into what the device's grouped GEMM indexes.
             self._setup_kernel(
                 layer=layer,
-                w13=w13,
-                w2=w2,
+                w13=layer.w13_weight,
+                w2=layer.w2_weight,
             )
         else:
             self._setup_kernel(
