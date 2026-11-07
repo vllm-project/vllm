@@ -490,7 +490,11 @@ def rocm_bf16x3_router_gemm_dispatch_impl(
         return bf16x3_router_gemm_rocm.bf16x3_router_gemm(x, weight_split)
     # Below MIN_TOKENS, hand back to the low-M gfx950 kernel this tier is
     # checked ahead of.
-    if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
+    from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (  # noqa: E501
+        max_tokens as rocm_fp32_router_gemm_max_tokens,
+    )
+
+    if x.shape[0] <= rocm_fp32_router_gemm_max_tokens(*weight.shape):
         from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (  # noqa: E501
             can_use_rocm_fp32_router_gemm,
             rocm_fp32_router_gemm,
@@ -534,8 +538,11 @@ def fp32_router_gemm_dispatch_impl(
             can_use_rocm_fp32_router_gemm,
             rocm_fp32_router_gemm,
         )
+        from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (
+            max_tokens as rocm_fp32_router_gemm_max_tokens,
+        )
 
-        if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
+        if x.shape[0] <= rocm_fp32_router_gemm_max_tokens(*weight.shape):
             x = x.contiguous()
             if can_use_rocm_fp32_router_gemm(x, weight):
                 return rocm_fp32_router_gemm(x, weight)
