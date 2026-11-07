@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Single-launch fused FP8 MQA-logits + top-k prefill selection (SM100 family)"""
+"""Fused FP8 MQA-logits + top-k prefill selection.
+
+SM100 family: the single-launch ``torch.ops._C.fused_mqa_topk_prefill``.
+SM90: FlashTopK (https://github.com/Tencent-Hunyuan/FlashTopK), when the optional
+``flashtopk`` package is installed.
+"""
 
 import functools
+from types import ModuleType
 
 import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 
 logger = init_logger(__name__)
 
@@ -26,9 +33,22 @@ FUSED_MQA_TOPK_MAX_KEYS = 1 << 20
 FUSED_MQA_TOPK_MAX_ROWS = 16384
 
 
+# SM90 (FlashTopK, measured on H200 with random and GLM-5.1 indexer inputs):
+# fused from 64K keys in the longest row for chunks of at least 4096 rows, from
+# 256K keys for smaller chunks, whose fixed per-call work dense outruns below.
+# A call works on FLASHTOPK_CHUNK_ROWS rows at a time, which bounds its
+# workspace (larger slices were no faster).
+FLASHTOPK_MIN_KEYS = 1 << 16
+FLASHTOPK_MIN_KEYS_FEW_ROWS = 1 << 18
+FLASHTOPK_CHUNK_ROWS = 4096
+
+
 def fused_mqa_topk_min_keys(topk: int) -> int:
     """Longest-row key count from which fused_mqa_topk beats the dense path
-    on SM100f (shorter chunks stay dense): 32K, or 64K for top-2048."""
+    (shorter chunks stay dense): on SM100f 32K, or 64K for top-2048; on SM90
+    FLASHTOPK_MIN_KEYS (FLASHTOPK_MIN_KEYS_FEW_ROWS below 4096 rows)."""
+    if _flashtopk() is not None:
+        return FLASHTOPK_MIN_KEYS
     return 1 << 16 if topk > 1024 else 1 << 15
 
 
@@ -45,13 +65,27 @@ def _sm_count(index: int) -> int:
 
 
 @functools.cache
+def _flashtopk() -> ModuleType | None:
+    """The FlashTopK package on SM90, else None (not installed, or another GPU)."""
+    if not (current_platform.is_cuda() and current_platform.is_device_capability(90)):
+        return None
+    try:
+        import flashtopk
+    except ImportError:
+        return None
+    return flashtopk
+
+
+@functools.cache
 def fused_mqa_topk_available() -> bool:
-    """True when the fused_mqa_topk op is compiled in and the GPU is SM100-family."""
-    return (
+    """True when a fused kernel serves this GPU: the compiled op on SM100-family,
+    or FlashTopK on SM90."""
+    sm100 = (
         current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
         and hasattr(torch.ops._C, "fused_mqa_topk_prefill")
     )
+    return sm100 or _flashtopk() is not None
 
 
 def use_fused_mqa_topk(
@@ -99,13 +133,38 @@ def fused_mqa_topk_chunk(
     waves of one per SM. A last wave that fills less than half the SMs costs a
     whole wave and makes the kernel slower than dense, unless dense needs more
     than one logits call (rows > dense_rows, its rows per call).
+
+    SM90 (FlashTopK) depends on the rows and keys only (see FLASHTOPK_MIN_KEYS).
     """
+    if _flashtopk() is not None:
+        few_rows = rows < FLASHTOPK_CHUNK_ROWS
+        min_keys = FLASHTOPK_MIN_KEYS_FEW_ROWS if few_rows else FLASHTOPK_MIN_KEYS
+        return max_seqlen_k >= min_keys and keys <= FUSED_MQA_TOPK_MAX_KEYS
     sms = _sm_count(torch.accelerator.current_device_index())
     last_wave = (-(-rows // _BLOCK_ROWS) - 1) % sms + 1  # blocks, 1..sms
     return (
         max_seqlen_k >= fused_mqa_topk_min_keys(topk)
         and keys <= FUSED_MQA_TOPK_MAX_KEYS
         and (rows > dense_rows or 2 * last_wave >= sms)
+    )
+
+
+def reserve_fused_mqa_topk(
+    device: torch.device, rows: int, keys: int, topk: int
+) -> None:
+    """Allocate, then free, the workspaces of the largest fused_mqa_topk call
+    over ``rows`` rows and ``keys`` keys, so the profiling run accounts for
+    them (they overlap the dense logits). On SM90 this also compiles
+    FlashTopK's kernels."""
+    if (flashtopk := _flashtopk()) is not None:
+        _flashtopk_selector(flashtopk, topk, device).plan(rows, keys, warmup=True)
+    else:
+        get_fused_mqa_topk_workspaces(device, rows)
+
+
+def _flashtopk_selector(flashtopk: ModuleType, topk: int, device: torch.device):
+    return flashtopk.Selector(
+        topk, dtype=torch.float8_e4m3fn, device=device, chunk_size=FLASHTOPK_CHUNK_ROWS
     )
 
 
@@ -140,7 +199,10 @@ def fused_mqa_topk_key_scales(scales: torch.Tensor) -> torch.Tensor:
 
     scales: [keys, 4] uint8. SM100 caches store each power-of-two scale as four
     equal UE8M0 bytes; the fp32 value 2**(e - 127) has bit pattern ``e << 23``.
+    Other caches store the fp32 scale itself.
     """
+    if not mqa_logits_use_mx_scales():
+        return scales.view(torch.float32).squeeze(-1)
     exponents = scales.view(torch.int32).squeeze(-1) & 0xFF
     return (exponents << 23).view(torch.float32)
 
@@ -167,6 +229,9 @@ def fused_mqa_topk_prefill(
     relative to the row's ``start`` (i.e. ``key - start``), unordered, ``-1``
     padded when fewer than k keys are visible.
     """
+    if (flashtopk := _flashtopk()) is not None:
+        _flashtopk_prefill(flashtopk, q, k, scales, weights, starts, ends, output)
+        return
     logger.info_once(
         "Using the single-launch fused MQA+top-k prefill kernel "
         "(FP8, 32 heads, top-k %d).",
@@ -182,3 +247,31 @@ def fused_mqa_topk_prefill(
         output,
         *get_fused_mqa_topk_workspaces(q.device, q.shape[0]),
     )
+
+
+def _flashtopk_prefill(
+    flashtopk: ModuleType,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    scales: torch.Tensor,
+    weights: torch.Tensor,
+    starts: torch.Tensor,
+    ends: torch.Tensor,
+    output: torch.Tensor,
+) -> None:
+    """fused_mqa_topk_prefill on SM90: FlashTopK's exact top-k of the same
+    scores, ``scales[key] * sum_h weights[row, h] * relu(q[row, h] . k[key])``.
+
+    FlashTopK writes absolute key indices (``-1`` past a short window); they are
+    made relative to the row's start in place.
+    """
+    if not output.is_contiguous():
+        raise RuntimeError("fused_mqa_topk_prefill: output must be contiguous")
+    logger.info_once(
+        "Using FlashTopK for the fused MQA+top-k prefill (SM90, FP8, top-k %d).",
+        output.shape[1],
+    )
+    _flashtopk_selector(flashtopk, output.shape[1], q.device).run(
+        q, k, weights, starts, ends, scales, out=output
+    )
+    output.sub_(starts[:, None]).clamp_(min=-1)

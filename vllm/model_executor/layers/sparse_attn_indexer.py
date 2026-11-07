@@ -33,7 +33,7 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     fused_mqa_topk_chunk,
     fused_mqa_topk_key_scales,
     fused_mqa_topk_prefill,
-    get_fused_mqa_topk_workspaces,
+    reserve_fused_mqa_topk,
     use_fused_mqa_topk,
 )
 from vllm.model_executor.layers.indexer_topk import (
@@ -576,9 +576,9 @@ def sparse_attn_indexer(
             profile_specs.extend(gather_spec * 2)
         current_workspace_manager().get_simultaneous(*profile_specs)
         if fused_mqa_topk:
-            # Allocate the largest fused_mqa_topk workspaces so they are
-            # accounted for (freed again, they overlap the dense logits below).
-            get_fused_mqa_topk_workspaces(q_quant.device, q_quant.shape[0])
+            reserve_fused_mqa_topk(
+                q_quant.device, q_quant.shape[0], total_seq_lens, topk_tokens
+            )
 
         # Decode rows per step: each decode is padded to 1 + speculative tokens.
         # The profiling run sets the vLLM config; other dummy runs may not.

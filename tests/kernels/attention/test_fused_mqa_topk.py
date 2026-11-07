@@ -29,6 +29,13 @@ from vllm.v1.attention.backends.mla.indexer import (
 
 requires_fused_mqa_topk = pytest.mark.skipif(
     not torch.cuda.is_available() or not fused_mqa_topk_available(),
+    reason="Requires the SM100 fused MQA+top-k extension or FlashTopK on SM90",
+)
+# Tests of the SM100 op itself: its workspaces, launch contract and rescan.
+requires_sm100_op = pytest.mark.skipif(
+    not torch.cuda.is_available()
+    or not fused_mqa_topk_available()
+    or not mqa_logits_use_mx_scales(),
     reason="Requires the SM100 fused MQA+top-k extension",
 )
 
@@ -73,7 +80,22 @@ def _dense(q, k, scales, weights, starts, ends, topk=TOPK):
 
 
 def _logits(q, k, scales, weights, starts, ends):
-    """fp32 reference scores: sum_h w * relu(q . k) * scale, -inf off-range."""
+    """fp32 reference scores: sum_h w * relu(q . k) * scale, -inf off-range.
+
+    On SM90 these are the dense path's DeepGEMM logits: its FP8 tensor cores,
+    used by both the dense and the fused path, do not accumulate the dot
+    products exactly (both are up to ~2e-3 from exact fp32 math).
+    """
+    if not mqa_logits_use_mx_scales():
+        lens = ends - starts
+        rel = fp8_fp4_mqa_logits(
+            (q, None), (k, scales), weights, starts, ends, max(1, int(lens.max()))
+        )
+        # Compressed logits: column c of row r is key starts[r] + c.
+        n = torch.arange(k.shape[0], device=q.device)
+        cols = (n[None] - starts[:, None]).clamp(0, rel.shape[1] - 1)
+        off = (n[None] < starts[:, None]) | (n[None] >= ends[:, None])
+        return rel.gather(1, cols).masked_fill(off, -torch.inf)
     kf = k.float()
     out = torch.zeros(q.shape[0], k.shape[0], device=q.device)
     for h in range(q.shape[1]):
@@ -232,7 +254,7 @@ def test_large_chunk_single_call(rows):
     _check(out, q, k, scales, weights, starts, ends)
 
 
-@requires_fused_mqa_topk
+@requires_sm100_op
 def test_rescan_scores_only_its_block():
     """The exact rescan of a block touches only that block's 8 rows.
 
@@ -274,7 +296,7 @@ def test_rescan_scores_only_its_block():
     )
 
 
-@requires_fused_mqa_topk
+@requires_sm100_op
 def test_gate_with_common_score_offset():
     """Regression test: scores sharing a large common offset with a narrow top
     tail (top ranks within ~1 of each other at ~+68) must still get a tight gate.
@@ -327,7 +349,7 @@ def test_cuda_graph_replay():
     _check(out, q, k, scales, weights, starts, ends)
 
 
-@requires_fused_mqa_topk
+@requires_sm100_op
 def test_op_rejects_bad_inputs():
     """The launcher does not re-check; the op enforces its contract."""
     q, k, scales, weights = _inputs(16, 4096)
@@ -357,8 +379,12 @@ def _kpool_inputs(pool_lens=(20000, 70000), q_rows=96, tail=2, seed=919):
         ends += (base + (pos + 1) // KPOOL).tolist()
         base += n
     i32 = dict(device="cuda", dtype=torch.int32)
-    # Unit power-of-two scales as four UE8M0 bytes, like the SM100 K cache.
-    scales = torch.full((k.shape[0], 4), 127, device="cuda", dtype=torch.uint8)
+    # Unit scales as the K cache stores them: four UE8M0 bytes on SM100, an
+    # fp32 elsewhere.
+    if mqa_logits_use_mx_scales():
+        scales = torch.full((k.shape[0], 4), 127, device="cuda", dtype=torch.uint8)
+    else:
+        scales = torch.ones(k.shape[0], 1, device="cuda").view(torch.uint8)
     return (
         q,
         k,
@@ -452,7 +478,9 @@ def _row_sets(out):
 def test_kpool_indexer_fused_matches_dense(monkeypatch):
     """GLM-5.3-Flash kpool indexer: the fused_mqa_topk kernel ranks the top-512 pools of
     a packed multi-request chunk like the dense logits + top-k path."""
-    inputs = _kpool_inputs()
+    # SM90 keeps chunks this small dense below 256K pools.
+    long_pools = 70000 if mqa_logits_use_mx_scales() else 1 << 18
+    inputs = _kpool_inputs(pool_lens=(20000, long_pools))
     # 192 rows take the kernel only when dense needs more than one logits
     # call, so shrink the budget below one call.
     fused_mqa_topk_out, calls = _run_kpool_indexer(
@@ -500,7 +528,12 @@ def test_kpool_indexer_dense_fallback_splits_rows(monkeypatch):
     logits = as_fp32_logits(
         fp8_fp4_mqa_logits(
             (q, q_scale),
-            (k, scales.view(torch.int32).squeeze(-1)),
+            (
+                k,
+                scales.view(
+                    torch.int32 if mqa_logits_use_mx_scales() else torch.float32
+                ).squeeze(-1),
+            ),
             w,
             starts,
             ends,
