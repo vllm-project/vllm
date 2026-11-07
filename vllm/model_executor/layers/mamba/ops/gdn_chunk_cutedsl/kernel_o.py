@@ -111,7 +111,8 @@ class Sm100ChunkOKernel:
         num_sms: Int32,
         stream: CUstream,
     ):
-        grid = (num_sms // self.Hv, self.Hv, 1)
+        # Grid-stride kernel: at least one CTA per head even when Hv > num_sms.
+        grid = (cutlass.max(num_sms // self.Hv, 1), self.Hv, 1)
         block = (self.num_warps * 32, 1, 1)
         tma_g2s = cpasync.CopyBulkTensorTileG2SOp()
         tma_s2g = cpasync.CopyBulkTensorTileS2GOp()
