@@ -79,6 +79,9 @@ void dispatch_topk_softplus_sqrt_launch(
     if (tid2eid.has_value()) {
       STD_TORCH_CHECK(input_ids.has_value(),
                       "input_ids is required for hash MoE");
+      // Row count of the [vocab_size, topk] hash table; the kernels bound
+      // token_id against it before gathering.
+      const int64_t hash_table_rows = tid2eid.value().size(0);
       STD_TORCH_CHECK(
           input_ids.value().scalar_type() == tid2eid.value().scalar_type(),
           "input_ids and tid2eid must have the same dtype");
@@ -91,7 +94,7 @@ void dispatch_topk_softplus_sqrt_launch(
             num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
             bias_ptr, true, input_ids.value().const_data_ptr<int64_t>(),
             tid2eid.value().const_data_ptr<int64_t>(), stream, is_padding_ptr,
-            bias_vl_ptr, image_sentinel_lo);
+            bias_vl_ptr, image_sentinel_lo, hash_table_rows);
       } else {
         STD_TORCH_CHECK(tid2eid.value().scalar_type() ==
                         torch::headeronly::ScalarType::Int);
@@ -102,7 +105,7 @@ void dispatch_topk_softplus_sqrt_launch(
             num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
             bias_ptr, true, input_ids.value().const_data_ptr<int>(),
             tid2eid.value().const_data_ptr<int>(), stream, is_padding_ptr,
-            bias_vl_ptr, image_sentinel_lo);
+            bias_vl_ptr, image_sentinel_lo, hash_table_rows);
       }
     } else if (bias_vl_ptr != nullptr) {
       // Non-hash rows with bias_vl: image tokens (five sentinel ids starting
@@ -118,7 +121,7 @@ void dispatch_topk_softplus_sqrt_launch(
             num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
             bias_ptr, false, input_ids.value().const_data_ptr<int64_t>(),
             static_cast<const int64_t*>(nullptr), stream, is_padding_ptr,
-            bias_vl_ptr, image_sentinel_lo);
+            bias_vl_ptr, image_sentinel_lo, 0);
       } else {
         STD_TORCH_CHECK(input_ids.value().scalar_type() ==
                         torch::headeronly::ScalarType::Int);
@@ -129,7 +132,7 @@ void dispatch_topk_softplus_sqrt_launch(
             num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
             bias_ptr, false, input_ids.value().const_data_ptr<int>(),
             static_cast<const int*>(nullptr), stream, is_padding_ptr,
-            bias_vl_ptr, image_sentinel_lo);
+            bias_vl_ptr, image_sentinel_lo, 0);
       }
     } else {
       vllm::moe::topkGatingSoftplusSqrtKernelLauncher<OutIndType, ComputeType>(
@@ -138,7 +141,7 @@ void dispatch_topk_softplus_sqrt_launch(
           num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
           bias_ptr, false, static_cast<const OutIndType*>(nullptr),
           static_cast<const OutIndType*>(nullptr), stream, is_padding_ptr,
-          nullptr, 0);
+          nullptr, 0, 0);
     }
   };
 
