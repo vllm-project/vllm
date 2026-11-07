@@ -8,6 +8,7 @@ from tests.v1.attention.test_attention_backends import BATCH_SPECS
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
+    split_decodes_prefills_and_extends,
 )
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
@@ -310,6 +311,34 @@ def test_split_decodes_and_prefills_uniform_padded_batch_all_same():
     assert num_prefills == 0
     assert num_decode_tokens == padded_num_tokens
     assert num_prefill_tokens == 0
+
+
+@pytest.mark.parametrize(
+    "seq_lens,query_lens,expected",
+    [
+        # decode -> extend -> prefill
+        ([32, 40, 8], [1, 8, 8], (1, 1, 1, 1, 8, 8)),
+        # all decodes
+        ([32, 40], [1, 1], (2, 0, 0, 2, 0, 0)),
+        # all prefills
+        ([8, 16], [8, 16], (0, 0, 2, 0, 0, 24)),
+        # prefill before extend: both must take the extend path
+        ([24, 96], [24, 40], (0, 2, 0, 0, 64, 0)),
+        # decode, prefill, extend, prefill: only the trailing prefill is one
+        ([32, 24, 96, 40], [1, 24, 16, 40], (1, 2, 1, 1, 40, 40)),
+        # decode, extend, prefill, prefill
+        ([32, 96, 24, 40], [1, 16, 24, 40], (1, 1, 2, 1, 16, 64)),
+        # MRV1 order with a single-token prompt last
+        ([40, 96, 16, 1], [1, 16, 16, 1], (1, 1, 2, 1, 16, 17)),
+    ],
+)
+def test_split_decodes_prefills_and_extends_unordered(seq_lens, query_lens, expected):
+    common_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    assert split_decodes_prefills_and_extends(common_metadata) == expected
 
 
 @pytest.mark.parametrize(
