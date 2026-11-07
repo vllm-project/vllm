@@ -7,6 +7,8 @@ accumulator ``RequestSpecDecodeMetrics`` and its ``to_dict`` payload surfaced in
 response as ``metrics.speculative_decoding``.
 """
 
+from collections import Counter
+
 import msgspec
 import pytest
 
@@ -56,6 +58,7 @@ def test_to_dict_summary_omits_per_step_arrays():
         "mean_acceptance_length": pytest.approx(1 + 9 / 5),  # j+1
         "draft_acceptance_rate": pytest.approx(9 / 15),
         "acceptance_histogram": [1, 1, 1, 2],  # dense, index j = step count
+        "acceptance_histogram_by_draft_length": {3: [1, 1, 1, 2]},
         "num_spec_steps": 5,
         "num_accepted_draft_tokens": 9,
         "num_draft_tokens": 15,
@@ -124,6 +127,7 @@ def test_engine_core_output_round_trips_spec_decode_metrics():
     assert decoded.spec_decode_metrics.histogram == [1, 0, 1, 1]
     assert decoded.spec_decode_metrics.num_draft_tokens == 9
     assert decoded.spec_decode_metrics.per_step_accepted == [0, 3, 2]
+    assert decoded.spec_decode_metrics.histogram_by_draft_length == {3: [1, 0, 1, 1]}
 
     without = EngineCoreOutput(request_id="r2", new_token_ids=[1])
     decoded_without = decoder.decode(msgspec.msgpack.encode(without))
@@ -148,3 +152,32 @@ def test_completion_output_carries_spec_decode_metrics():
     out = _completion_output(spec_decode_metrics=metrics)
     assert out.spec_decode_metrics is metrics
     assert _completion_output().spec_decode_metrics is None
+
+
+def test_summary_distinguishes_draft_budgets_with_equal_aggregate_counts():
+    first = _metrics([(1, 1), (3, 2)]).to_dict()
+    second = _metrics([(2, 1), (2, 2)]).to_dict()
+    assert first["acceptance_histogram"] == second["acceptance_histogram"]
+    assert first["num_draft_tokens"] == second["num_draft_tokens"] == 4
+    assert first["acceptance_histogram_by_draft_length"] == {
+        1: [0, 1],
+        3: [0, 0, 1, 0],
+    }
+    assert second["acceptance_histogram_by_draft_length"] == {2: [0, 1, 1]}
+
+
+def test_budget_histograms_match_detailed_pairs_without_storing_steps():
+    pairs = [(0, 0), (1, 0), (1, 1), (3, 2), (3, 3)] * 100
+    summary = _metrics(pairs)
+    detailed = _metrics(pairs, detailed=True)
+    expected = Counter(zip(detailed.per_step_drafted, detailed.per_step_accepted))
+    actual = {
+        (k, j): count
+        for k, counts in summary.histogram_by_draft_length.items()
+        for j, count in enumerate(counts)
+        if count
+    }
+    assert actual == expected
+    assert summary.histogram_by_draft_length == detailed.histogram_by_draft_length
+    assert sum(map(len, summary.histogram_by_draft_length.values())) == 7
+    assert summary.per_step_accepted == summary.per_step_drafted == []
