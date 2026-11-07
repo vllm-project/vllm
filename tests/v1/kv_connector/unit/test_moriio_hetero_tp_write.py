@@ -20,6 +20,7 @@ import msgspec
 import pytest
 import torch
 
+from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.distributed.kv_transfer.kv_connector.v1 import ssm_conv_transfer_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
@@ -171,7 +172,11 @@ class Rank:
     sent: list = field(default_factory=list)
 
 
-def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Rank:
+def _build_rank(
+    model, tp_rank, tp_size, layout, hma, state, is_producer, kernel_block_size=None
+) -> Rank:
+    """``kernel_block_size`` builds attention caches through the allocator, split
+    into kernel blocks of that size; MLA only, as the content is seeded as bytes."""
     heads, layers = MODELS[model]
     groups = _groups(model, hma)
     caches, regions, specs, meta_counts = {}, [], {}, {}
@@ -193,6 +198,14 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
                 MoRIIOConnectorWorker._contiguous_byte_alias(ssm),
             ]
             meta_counts[layer.name] = 2
+        elif kernel_block_size is not None:
+            (cache,) = dense_kv_cache_views(
+                buffer.view(torch.int8), spec, NUM_BLOCKS, 1, layout, kernel_block_size
+            )
+            if is_producer:
+                buffer.view(state[layer.name].shape).copy_(state[layer.name])
+            regions.append(buffer)
+            meta_counts[layer.name] = 1
         else:
             strides = compute_layout_strides(spec, NUM_BLOCKS, 1, layout)[1:]
             shape = (
