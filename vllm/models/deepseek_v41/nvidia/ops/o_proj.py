@@ -17,7 +17,6 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     get_input_quant_key,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
-from vllm.models.deepseek_v4.nvidia.ops.o_proj import deep_gemm_fp8_o_proj
 from vllm.platforms import current_platform
 
 
@@ -34,6 +33,10 @@ def _fused_wo_a_max_tokens(layer: nn.Module) -> int:
 def _can_fuse_wo_a(layer: nn.Module) -> bool:
     """Whether the attention layer matches the fused WO-A kernel's layout."""
     if envs.VLLM_BATCH_INVARIANT:
+        return False
+    # The fused kernel never materializes the BF16 input an adapter on wo_a
+    # needs, so such a layer takes ``deep_gemm_fp8_o_proj`` instead.
+    if getattr(layer.wo_a, "requires_unquantized_input", False):
         return False
     method = getattr(layer.wo_b, "scheme", layer.wo_b.quant_method)
     return (
@@ -52,6 +55,27 @@ def _can_fuse_wo_a(layer: nn.Module) -> bool:
     )
 
 
+def _fused_wo_a_shape(layer: nn.Module) -> dict[str, int]:
+    """The fused WO-A kernel's warmup arguments for ``layer``."""
+    return dict(
+        max_tokens=_fused_wo_a_max_tokens(layer),
+        n_groups=layer.n_local_groups,
+        heads_per_group=layer.n_local_heads // layer.n_local_groups,
+        o_lora_rank=layer.o_lora_rank,
+    )
+
+
+def precompile_dsv41_o_proj_early_trigger(layer: nn.Module, max_tokens: int) -> None:
+    """Compile the fused WO-A variant ``dsv41_o_proj`` dispatches with
+    ``early_trigger``, for its token counts up to ``max_tokens``."""
+    if _can_fuse_wo_a(layer):
+        from .fused_wo_a import _FUSED_WO_A_KERNEL
+
+        shape = _fused_wo_a_shape(layer)
+        shape["max_tokens"] = min(shape["max_tokens"], max_tokens)
+        _FUSED_WO_A_KERNEL.warmup(**shape, early_trigger=True)
+
+
 def register_dsv41_o_proj_warmup(layer: nn.Module) -> None:
     """Warm the fused WO-A token counts ``dsv41_o_proj`` can dispatch."""
     # Draft models load outside the warmup registry; their layers share the
@@ -59,12 +83,7 @@ def register_dsv41_o_proj_warmup(layer: nn.Module) -> None:
     if _can_fuse_wo_a(layer):
         from .fused_wo_a import _FUSED_WO_A_KERNEL
 
-        _FUSED_WO_A_KERNEL.register_warmup(
-            max_tokens=_fused_wo_a_max_tokens(layer),
-            n_groups=layer.n_local_groups,
-            heads_per_group=layer.n_local_heads // layer.n_local_groups,
-            o_lora_rank=layer.o_lora_rank,
-        )
+        _FUSED_WO_A_KERNEL.register_warmup(**_fused_wo_a_shape(layer))
 
 
 def dsv41_o_proj(
@@ -72,9 +91,12 @@ def dsv41_o_proj(
     attn_out: torch.Tensor,
     positions: torch.Tensor,
     wo_b_proj: Callable[..., torch.Tensor] | None = None,
+    early_trigger: bool = False,
 ) -> torch.Tensor:
     """``deep_gemm_fp8_o_proj`` with WO-A fused for small SM100/SM103 batches;
-    ``wo_b_proj`` replaces ``layer._wo_b_proj``."""
+    ``wo_b_proj`` replaces ``layer._wo_b_proj``. With ``early_trigger``, the
+    fused WO-A launches ``wo_b_proj`` (PDL) right after its TMEM allocation,
+    for a ``wo_b_proj`` that loads its weights before its grid wait."""
     wo_b_proj = wo_b_proj or layer._wo_b_proj
     o = attn_out[:, : layer.n_local_heads, :]
     cos_sin_cache = layer.rotary_emb.cos_sin_cache
@@ -87,16 +109,15 @@ def dsv41_o_proj(
             rope=cos_sin_cache,
             weight=layer.wo_a.weight,
             weight_scale=layer.wo_a.weight_scale,
+            early_trigger=early_trigger,
         )
         return wo_b_proj(
             QuantizedActivation(q, scales, o.dtype, q.shape, kMxfp8Dynamic)
         )
-    return deep_gemm_fp8_o_proj(
+    z = layer.wo_a.grouped_forward(
         o,
         positions,
         cos_sin_cache,
-        layer.wo_a,
-        wo_b_proj,
         n_groups=layer.n_local_groups,
         heads_per_group=layer.n_local_heads // layer.n_local_groups,
         nope_dim=layer.nope_head_dim,
@@ -105,3 +126,4 @@ def dsv41_o_proj(
         einsum_recipe=layer._einsum_recipe,
         tma_aligned_scales=layer._tma_aligned_scales,
     )
+    return wo_b_proj(z.flatten(1))

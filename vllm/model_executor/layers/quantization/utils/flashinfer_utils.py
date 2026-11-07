@@ -28,6 +28,14 @@ def has_flashinfer_situ_activation() -> bool:
     return hasattr(ActivationType, "Situ")
 
 
+def has_flashinfer_swiglustep_activation() -> bool:
+    try:
+        from flashinfer.fused_moe.core import ActivationType
+    except ImportError:
+        return False
+    return hasattr(ActivationType, "SwigluStep")
+
+
 def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType":
     from flashinfer.fused_moe.core import ActivationType
 
@@ -36,6 +44,12 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         if situ is None:
             raise ValueError("The installed FlashInfer does not support SITU")
         return situ
+
+    if activation == MoEActivation.SWIGLUSTEP:
+        step = getattr(ActivationType, "SwigluStep", None)
+        if step is None:
+            raise ValueError("The installed FlashInfer does not support SWIGLUSTEP")
+        return step
 
     # silu and gelu are mapped to their gated versions SwiGLU and GeGLU respectively
     ACTIVATION_TO_FI_ACTIVATION = {
