@@ -127,7 +127,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.linear import LinearBase
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 
 @register_quantization_config("my_quant")
 class MyQuantConfig(QuantizationConfig):
@@ -161,7 +161,7 @@ class MyQuantConfig(QuantizationConfig):
         # NOTE: you only need to implement methods you care about
         if isinstance(layer, LinearBase):
             return MyQuantLinearMethod()
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             return MyQuantMoEMethod(layer.moe_config)
         return None
 ```
@@ -210,7 +210,7 @@ class MyQuantLinearMethod(UnquantizedLinearMethod):
 For Mixture of Experts (MoE) models, return a `FusedMoEMethodBase` subclass from `get_quant_method`. You can use `UnquantizedFusedMoEMethod` to skip MoE quantization:
 
 ```python
-from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
