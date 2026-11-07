@@ -353,6 +353,8 @@ The new format of `--lora-modules` is mainly to support the display of parent mo
 
 Currently, vLLM experimentally supports LoRA for the Tower and Connector components of multi-modal models. To enable this feature, you need to implement the corresponding token helper functions for the tower and connector. For more details on the rationale behind this approach, please refer to [PR 26674](https://github.com/vllm-project/vllm/pull/26674). We welcome contributions to extend LoRA support to additional models' tower and connector. Please refer to [Issue 31479](https://github.com/vllm-project/vllm/issues/31479) to check the current model support status.
 
+For LLaVA-NeXT, use `--enable-lora --enable-tower-connector-lora` to serve vision tower and connector adapters, including batches of non-square images within the encoder budget. vLLM reserves additional LoRA metadata for image tiles before unpadding; this increases metadata memory without increasing the scheduled batch size.
+
 ## Default LoRA Models For Multimodal Models
 
 Some models, e.g., [Granite Speech](https://huggingface.co/ibm-granite/granite-speech-3.3-8b) and [Phi-4-multimodal-instruct](https://huggingface.co/microsoft/Phi-4-multimodal-instruct) multimodal, contain LoRA adapter(s) that are expected to always be applied when a given modality is present. This can be a bit tedious to manage with the above approaches, as it requires the user to send the `LoRARequest` (offline) or to filter requests between the base model and LoRA model (server) depending on the content of the request's multimodal data.
