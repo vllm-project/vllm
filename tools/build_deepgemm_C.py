@@ -7,20 +7,29 @@ DeepGEMM now registers ops via TORCH_LIBRARY into ``deep_gemm._C_extension``
 delegates to DeepGEMM's ``setup.py build_ext --inplace`` and copies the shim
 plus extension into the cmake output directory.
 
-Usage: python build_deepgemm_C.py <DEEPGEMM_SRC_DIR> <OUTPUT_DIR>
+Usage: python build_deepgemm_C.py <DEEPGEMM_SRC_DIR> <OUTPUT_DIR> [--launcher CMD]
+
+``--launcher`` puts a compiler launcher such as ccache in front of the compiler
+setuptools uses, as CMAKE_CXX_COMPILER_LAUNCHER does for the rest of the build.
 """
 
+import argparse
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
-if len(sys.argv) != 3:
-    sys.exit(f"usage: {sys.argv[0]} <SRC> <OUT>")
+parser = argparse.ArgumentParser()
+parser.add_argument("src", type=Path)
+parser.add_argument("out", type=Path)
+parser.add_argument("--launcher", default="")
+args = parser.parse_args()
 
-src = Path(sys.argv[1]).resolve()
-out = Path(sys.argv[2]).resolve()
+src = args.src.resolve()
+out = args.out.resolve()
 _pkg = src / "deep_gemm"
 out.mkdir(parents=True, exist_ok=True)
 
@@ -33,6 +42,11 @@ if not (_pkg / "_C.py").is_file():
 # Avoid DeepGEMM's clean-git assertion when vendoring a local dirty tree.
 env = os.environ.copy()
 env.pop("DG_SKIP_CUDA_BUILD", None)
+if args.launcher.strip():
+    for var in ("CC", "CXX"):
+        compiler = env.get(var) or sysconfig.get_config_var(var)
+        if compiler and not shlex.split(compiler)[0].endswith("ccache"):
+            env[var] = f"{args.launcher} {compiler}"
 
 print(f"[build_deepgemm_C] building in {src} with {sys.executable}", flush=True)
 # CMake decides when to rebuild; setuptools would only check python_api.cpp.

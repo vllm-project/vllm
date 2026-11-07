@@ -124,11 +124,16 @@ if(DEEPGEMM_ARCHS)
 
   set(_dg_dir "${CMAKE_CURRENT_BINARY_DIR}/deepgemm_C")
   set(_dg_marker "${_dg_dir}/.built")
+  set(_dg_launcher "")
+  if(CMAKE_CXX_COMPILER_LAUNCHER)
+    list(JOIN CMAKE_CXX_COMPILER_LAUNCHER " " _dg_launcher_cmd)
+    set(_dg_launcher --launcher "${_dg_launcher_cmd}")
+  endif()
   add_custom_command(
     OUTPUT "${_dg_marker}"
     COMMAND "${Python_EXECUTABLE}"
             "${CMAKE_SOURCE_DIR}/tools/build_deepgemm_C.py"
-            "${deepgemm_SOURCE_DIR}" "${_dg_dir}"
+            "${deepgemm_SOURCE_DIR}" "${_dg_dir}" ${_dg_launcher}
     COMMAND "${CMAKE_COMMAND}" -E touch "${_dg_marker}"
     DEPENDS "${CMAKE_SOURCE_DIR}/tools/build_deepgemm_C.py"
             "${deepgemm_SOURCE_DIR}/csrc/python_api.cpp"
