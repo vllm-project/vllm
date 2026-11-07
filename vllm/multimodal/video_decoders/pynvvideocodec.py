@@ -154,7 +154,9 @@ def _sample_nearest_keyframes(
     if count == 0 or len(keyframes) < count:
         return uniform_indices
 
-    costs = [(keyframe - uniform_indices[0]) ** 2 for keyframe in keyframes]
+    costs: list[float] = [
+        (keyframe - uniform_indices[0]) ** 2 for keyframe in keyframes
+    ]
     predecessors: list[list[int]] = []
     for target in uniform_indices[1:]:
         next_costs = [float("inf")] * len(keyframes)
