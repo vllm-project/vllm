@@ -15,7 +15,7 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     fused_mqa_topk_chunk,
     fused_mqa_topk_key_scales,
     fused_mqa_topk_prefill,
-    get_fused_mqa_topk_workspaces,
+    reserve_fused_mqa_topk,
     use_fused_mqa_topk,
 )
 from vllm.model_executor.layers.indexer_topk import get_indexer_topk
@@ -170,10 +170,13 @@ def sparse_attn_indexer_kpool(
             scales_spec,
             ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
         )
-        # Allocate the largest fused_mqa_topk workspaces so they are accounted
-        # for (freed again, they overlap the dense logits below).
         if fused_mqa_topk:
-            get_fused_mqa_topk_workspaces(q_quant.device, q_quant.shape[0])
+            reserve_fused_mqa_topk(
+                q_quant.device,
+                q_quant.shape[0],
+                max_pool_len,
+                topk_tokens // max(index_kpool, 1),
+            )
 
         # Reserve profiler-visible memory for the worst-case decode logits,
         # whose shape is [B * next_n, max_pool_len]. This profiling branch
