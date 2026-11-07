@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -80,6 +80,14 @@ class BaseSpeculator(ABC):
     # Draft logits for probabilistic rejection sampling, or None for
     # greedy-draft verification and for speculators without a draft model.
     draft_logits: DraftLogitsCache | None = None
+
+    def close_requests(self, req_ids: Collection[str]) -> None:
+        """Release per-request draft state on finish, cancellation or preemption."""
+        return None
+
+    def close(self) -> None:
+        """Release external resources when the model runner shuts down."""
+        return None
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
