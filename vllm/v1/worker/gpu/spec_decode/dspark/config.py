@@ -68,7 +68,6 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             ]
             draft.quantization = target.quantization
             spec.update_arch_()
-        spec.parallel_drafting = True
 
     @classmethod
     def resolve_num_speculative_tokens(cls, spec: "SpeculativeConfig") -> None:

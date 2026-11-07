@@ -93,7 +93,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
       "Tensor? b_bias_or_none,Tensor b_scales, "
-      "Tensor? a_scales, Tensor? global_scale, Tensor? b_zeros_or_none, "
+      "Tensor? global_scale, Tensor? b_zeros_or_none, "
       "Tensor workspace, int b_type_id, "
       "SymInt size_m, SymInt size_n, SymInt size_k, "
       "bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) -> Tensor");
@@ -102,19 +102,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // gptq_marlin repack from GPTQ.
   ops.def(
       "gptq_marlin_repack(Tensor b_q_weight, "
-      "SymInt size_k, SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
+      "SymInt size_k, SymInt size_n, int num_bits) -> Tensor");
   // conditionally compiled so impl registrations are in source file
 
   // awq_marlin repack from AWQ.
   ops.def(
       "awq_marlin_repack(Tensor b_q_weight, SymInt size_k, "
-      "SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
-  // conditionally compiled so impl registrations are in source file
-
-  // preprocess W-int4A-fp8 weight for marlin kernel
-  ops.def(
-      "marlin_int4_fp8_preprocess(Tensor qweight, "
-      "Tensor? qzeros_or_none, bool inplace) -> Tensor");
+      "SymInt size_n, int num_bits) -> Tensor");
   // conditionally compiled so impl registrations are in source file
 #endif
 
@@ -196,7 +190,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "cutlass_scaled_fp4_mm(Tensor! out, Tensor a, Tensor b,"
       "                      Tensor block_scale_a, Tensor block_scale_b,"
-      "                      Tensor alpha) -> ()");
+      "                      Tensor alpha, Tensor? bias=None) -> ()");
 
   // cutlass nvfp4 block scaled group GEMM
   ops.def(
@@ -625,6 +619,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "beam_allreduce(Tensor input, Tensor! output, int buffer_ptrs, "
       "Tensor! flags, int multicast_ptr, int world, int rank) -> ()");
+#endif
+
+#ifdef VLLM_ENABLE_QWEN4_EXP_HC_UP_GATE_MIX
+  // SM100 only; impl registration is in csrc/qwen4_exp/hc_up_gate_mix.cu.
+  ops.def(
+      "qwen4_exp_hc_up_gate_mix(Tensor! out, Tensor lowrank, Tensor xn, "
+      "Tensor w_up) -> ()");
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
@@ -1087,21 +1088,18 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor? request_state_indices,"
       "                 int region_stride,"
       "                 int max_union_rows,"
-      "                 Tensor(a!)? miss_mask=None,"
-      "                 Tensor(b!)? stats=None,"
-      "                 Tensor(c!)? attention_indices=None,"
+      "                 Tensor(a!)? stats=None,"
+      "                 Tensor(b!)? attention_indices=None,"
       "                 int attention_block_stride=0,"
       "                 Tensor? request_ids=None,"
       "                 Tensor? source_block_table=None,"
       "                 int source_block_size=0,"
-      "                 Tensor(d!)? resolved_global_indices=None,"
-      "                 Tensor(e!)? valid_counts=None,"
-      "                 Tensor(f!)? swap_host_physical_rows=None,"
-      "                 Tensor(g!)? swap_device_physical_rows=None,"
-      "                 Tensor(h!)? swap_counts=None,"
+      "                 Tensor(c!)? valid_counts=None,"
+      "                 Tensor(d!)? swap_host_physical_rows=None,"
+      "                 Tensor(e!)? swap_device_physical_rows=None,"
+      "                 Tensor(f!)? swap_counts=None,"
       "                 Tensor? resident_block_table=None,"
       "                 int resident_block_size=0,"
-      "                 int resident_null_block=0,"
       "                 Tensor? num_valid_rows=None) -> ()");
 
   ops.def(
@@ -1117,10 +1115,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     Tensor! hot_cache,"
       "                     Tensor global_indices,"
       "                     Tensor hot_indices,"
-      "                     Tensor miss_mask,"
-      "                     Tensor? request_state_indices,"
-      "                     Tensor(a!)? attention_indices=None,"
-      "                     int attention_block_stride=0) -> ()");
+      "                     Tensor miss_mask) -> ()");
 
   ops.def(
       "hisparse_gather_compact(Tensor host_cache,"

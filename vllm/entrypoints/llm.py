@@ -51,7 +51,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.counter import Counter
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
-from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.v1.worker.gpu.sample.logits_processor.interface import LogitsProcessor
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -108,7 +108,8 @@ class LLM(
             reserve for the model weights, activations, and KV cache. Higher
             values will increase the KV cache size and thus improve the model's
             throughput. However, if the value is too high, it may cause out-of-
-            memory (OOM) errors.
+            memory (OOM) errors. Defaults to 1.0 with the extensible KV cache
+            (which sizes the cache from measured memory) and to 0.92 otherwise.
         kv_cache_memory_bytes: Size of KV Cache per GPU in bytes. By default,
             this is set to None and vllm can automatically infer the kv cache
             size based on gpu_memory_utilization. However, users may want to
@@ -117,6 +118,10 @@ class LLM(
             compared with using gpu_memory_utilization. Note that
             kv_cache_memory_bytes (when not-None) ignores
             gpu_memory_utilization
+        enable_extensible_kv_cache: Reserve the KV cache address range with
+            device virtual memory and commit physical pages after warmup, so
+            the cache is sized from the memory actually free after CUDA graph
+            capture. Defaults to on for CUDA and ROCm.
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data
@@ -193,7 +198,7 @@ class LLM(
         tokenizer_revision: str | None = None,
         chat_template: Path | str | None = None,
         seed: int = 0,
-        gpu_memory_utilization: float = 0.92,
+        gpu_memory_utilization: float | None = None,
         cpu_offload_gb: float = 0,
         offload_group_size: int = 0,
         offload_num_in_group: int = 1,
@@ -213,6 +218,7 @@ class LLM(
         profiler_config: dict[str, Any] | ProfilerConfig | None = None,
         attention_config: dict[str, Any] | AttentionConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
+        enable_extensible_kv_cache: bool | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         quantization_config: dict[str, Any] | QuantizationConfigArgs | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
@@ -310,6 +316,7 @@ class LLM(
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
             kv_cache_memory_bytes=kv_cache_memory_bytes,
+            enable_extensible_kv_cache=enable_extensible_kv_cache,
             cpu_offload_gb=cpu_offload_gb,
             offload_group_size=offload_group_size,
             offload_num_in_group=offload_num_in_group,
@@ -850,10 +857,11 @@ class LLM(
                            sleeping and waking up the engine to run the same
                            model again. Please make sure there's enough CPU
                            memory to store the model weights.
-                - Level 2: Discard all GPU memory (weights + KV cache).
-                           Good for sleeping and waking up the engine to run
-                           a different model or update the model, where
-                           previous model weights are not needed. It reduces
+                - Level 2: Discard model parameters and KV cache, and offload
+                           the rest of the model's GPU state to CPU.
+                           Good for sleeping and waking up the engine to update
+                           the model's weights, where the previous weights are
+                           not needed. It reduces
                            CPU memory pressure.
             mode: How to handle any existing requests, can be "abort", "wait",
                 or "keep".
@@ -891,7 +899,7 @@ class LLM(
         """Return a snapshot of aggregated metrics from Prometheus.
 
         Returns:
-            A `MetricSnapshot` instance capturing the current state
+            A `list[Metric]` capturing the current state
             of all aggregated metrics from Prometheus.
 
         Note:
