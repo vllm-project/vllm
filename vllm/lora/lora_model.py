@@ -170,6 +170,12 @@ class LoRAModel:
                 if pin_memory:
                     loras[module_name].lora_a = loras[module_name].lora_a.pin_memory()
             else:
+                if loras[module_name].scaling != 1:
+                    # Fold the scaling in float32 so lora_b is rounded to dtype once.
+                    tensor = (tensor.float() * loras[module_name].scaling).to(
+                        dtype or tensor.dtype
+                    )
+                    loras[module_name].scaling = 1
                 loras[module_name].lora_b = tensor.to(device=device, dtype=dtype)
 
                 if pin_memory:
