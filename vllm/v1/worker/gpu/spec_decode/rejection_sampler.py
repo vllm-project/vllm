@@ -74,7 +74,7 @@ def _flatten_sampled_kernel(
         tl.store(flat_sampled_ptr + start_idx + i, token_id)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_logits"])
 def _gather_draft_sampled_kernel(
     # [num_logits]
     draft_sampled_ptr,
