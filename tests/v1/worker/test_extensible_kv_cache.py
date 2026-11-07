@@ -249,11 +249,19 @@ def test_measured_sizing_counts_reclaimable_memory_on_integrated_gpu(monkeypatch
     monkeypatch.setattr(
         accelerator, "get_memory_info", lambda *args: (10 * gib, 120 * gib)
     )
+    from vllm.platforms.interface import Platform
     from vllm.utils import mem_utils
 
     monkeypatch.setattr(mem_utils, "in_wsl", lambda: False)
     monkeypatch.setattr(
         mem_utils.current_platform, "is_integrated_gpu", lambda *args: True
+    )
+    # Use the default (NVIDIA) UMA correction; platforms such as ROCm
+    # override it based on the real device.
+    monkeypatch.setattr(
+        mem_utils.current_platform,
+        "get_integrated_gpu_memory_info",
+        Platform.get_integrated_gpu_memory_info,
     )
     monkeypatch.setattr(
         mem_utils.psutil,
