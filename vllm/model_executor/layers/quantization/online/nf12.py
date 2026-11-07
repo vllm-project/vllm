@@ -36,6 +36,12 @@ class Nf12OnlineLinearMethod(OnlineLinearBase):
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
+        # Captured kernels retain the original scalar exponent base.
+        if hasattr(layer, "weight_exp_base"):
+            raise NotImplementedError(
+                "NF12 linear layers do not support checkpoint weight reloads. "
+                "Restart the engine to load new weights."
+            )
         weight = self.get_weight_for_quantization(layer)
         if weight.dtype != torch.bfloat16:
             raise ValueError("NF12 requires BF16 weights and activations")

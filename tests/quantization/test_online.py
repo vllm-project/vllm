@@ -2501,6 +2501,30 @@ def test_online_nf12_generation_matches_bf16(
     not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
     reason="NF12 requires CUDA SM80 or newer.",
 )
+def test_online_nf12_rejects_checkpoint_reload(vllm_runner, monkeypatch) -> None:
+    """Reject re-encoding weights that captured graphs may still reference."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+    with (
+        vllm_runner(
+            "Qwen/Qwen3-0.6B",
+            quantization="nf12",
+            dtype="bfloat16",
+            enforce_eager=True,
+            max_model_len=64,
+            max_num_seqs=1,
+            gpu_memory_utilization=0.4,
+            kv_cache_memory_bytes=256 * 1024**2,
+        ) as llm,
+        pytest.raises(NotImplementedError, match="checkpoint weight reloads"),
+    ):
+        llm.get_llm().collective_rpc("reload_weights")
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
+    reason="NF12 requires CUDA SM80 or newer.",
+)
 @pytest.mark.parametrize("output_size,input_size", [(64, 64), (65, 64), (64, 65)])
 @torch.inference_mode()
 def test_online_nf12_linear_matches_exact_bf16(
