@@ -60,6 +60,7 @@ from vllm.model_executor.models.utils import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.attention.backends.utils import compute_mm_prefix_ranges
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -154,6 +155,10 @@ class DiffusionGemmaForConditionalGeneration(
     In practice, the model's forward() dispatches based on the `mode` kwarg
     set by DiffusionGemmaModelState.prepare_inputs().
     """
+
+    # Same as Gemma4: image ranges wider than the sliding window are clamped
+    # in the kernel, so compute_mm_prefix_ranges must not drop them.
+    mm_prefix_clamp_sliding_window: bool = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -271,6 +276,16 @@ class DiffusionGemmaForConditionalGeneration(
             eps=getattr(text_config, "rms_norm_eps", 1e-6),
         )
 
+        # With use_bidirectional_attention="vision", only sliding layers see
+        # images bidirectionally; forward() clears the ranges on the rest.
+        self._full_attn_layer_idxs: frozenset[int] = frozenset()
+        if getattr(text_config, "use_bidirectional_attention", None) == "vision":
+            layer_types = getattr(text_config, "layer_types", None)
+            if layer_types:
+                self._full_attn_layer_idxs = frozenset(
+                    i for i, lt in enumerate(layer_types) if lt != "sliding_attention"
+                )
+
     # ------------------------------------------------------------------ #
     # Multimodal: reuse Gemma4's image parsing, processing & embedding
     # ------------------------------------------------------------------ #
@@ -299,6 +314,9 @@ class DiffusionGemmaForConditionalGeneration(
         Gemma4ForConditionalGeneration._process_video_input_local
     )
     embed_multimodal = Gemma4ForConditionalGeneration.embed_multimodal
+    _clear_mm_prefix_for_full_attn_layers = (
+        Gemma4ForConditionalGeneration._clear_mm_prefix_for_full_attn_layers
+    )
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix mapping for multimodal models."""
@@ -322,6 +340,7 @@ class DiffusionGemmaForConditionalGeneration(
     ) -> torch.Tensor:
         if intermediate_tensors is not None:
             inputs_embeds = None
+        self._clear_mm_prefix_for_full_attn_layers()
         return self.model(
             input_ids=input_ids,
             positions=positions,
@@ -1103,8 +1122,30 @@ class DiffusionGemmaModelState(ModelState):
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
 
-        query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
+        query_start_loc_cpu = torch.from_numpy(
+            input_batch.query_start_loc_np[: num_reqs + 1]
+        )
+        query_start_loc_gpu = input_batch.query_start_loc[: num_reqs + 1]
         max_query_len = input_batch.num_scheduled_tokens.max().item()
+        seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
+
+        req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
+        if (
+            self.supports_mm_inputs
+            and self.encoder_cache is not None
+            and self.model_config.is_mm_prefix_lm
+        ):
+            mm_features = self.encoder_cache.mm_features
+            hf_text_config = self.model_config.hf_text_config
+            req_doc_ranges = compute_mm_prefix_ranges(
+                [mm_features.get(req_id, ()) for req_id in input_batch.req_ids],
+                sliding_window=self.model_config.get_sliding_window(),
+                clamp_sliding_window=getattr(
+                    self.model, "mm_prefix_clamp_sliding_window", False
+                )
+                or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False),
+                span_pad=getattr(self.model, "mm_prefix_span_leading_pad_modulus", 0),
+            )
 
         # Per-request causal mode: encoder (commit) = causal,
         # denoise = bidirectional. Pass GPU tensor so the attention
@@ -1125,7 +1166,7 @@ class DiffusionGemmaModelState(ModelState):
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
-            query_start_loc_gpu=input_batch.query_start_loc,
+            query_start_loc_gpu=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
             seq_lens=input_batch.seq_lens,
@@ -1133,6 +1174,9 @@ class DiffusionGemmaModelState(ModelState):
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            is_prefilling=torch.from_numpy(input_batch.is_prefilling_np),
+            mm_req_doc_ranges=req_doc_ranges,
             causal=causal,
         )
 
