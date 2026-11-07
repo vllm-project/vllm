@@ -33,6 +33,7 @@ from transformers import PreTrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed.utils import get_pp_indices
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -246,6 +247,26 @@ class SolarDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+_BSKCN_KEYS = ("bskcn_h_1", "bskcn_r_1", "bskcn_h_2", "bskcn_r_2")
+
+
+def _bskcn_crosses_pp_boundary(config: PreTrainedConfig) -> bool:
+    """Whether a block skip connection is captured on one PP stage and
+    consumed on a later one, so its state must travel with the hidden states."""
+    pp_size = get_pp_group().world_size
+    starts = [
+        get_pp_indices(config.num_hidden_layers, rank, pp_size)[0]
+        for rank in range(1, pp_size)
+    ]
+    pairs = ((config.bskcn_1, config.bskcn_3), (config.bskcn_2, config.bskcn_4))
+    for captures, uses in pairs:
+        for use in uses:
+            capture = max((c for c in captures if c <= use), default=None)
+            if capture is not None and any(capture < s <= use for s in starts):
+                return True
+    return False
+
+
 @support_torch_compile
 class SolarModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -284,8 +305,11 @@ class SolarModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
+        self.relay_bskcn = _bskcn_crosses_pp_boundary(config)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+            ["hidden_states", "residual"]
+            + (list(_BSKCN_KEYS) if self.relay_bskcn else []),
+            config.hidden_size,
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -313,6 +337,11 @@ class SolarModel(nn.Module):
         bskcn_h_2 = None
         bskcn_r_1 = None
         bskcn_r_2 = None
+        if self.relay_bskcn and intermediate_tensors is not None:
+            bskcn_h_1 = intermediate_tensors["bskcn_h_1"]
+            bskcn_r_1 = intermediate_tensors["bskcn_r_1"]
+            bskcn_h_2 = intermediate_tensors["bskcn_h_2"]
+            bskcn_r_2 = intermediate_tensors["bskcn_r_2"]
         bskcn_tv = self.config.bskcn_tv[0] if self.training else self.config.bskcn_tv[1]
 
         for i in range(self.start_layer, self.end_layer):
@@ -338,9 +367,14 @@ class SolarModel(nn.Module):
             )
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
+            tensors = {"hidden_states": hidden_states, "residual": residual}
+            if self.relay_bskcn:
+                skip_states = (bskcn_h_1, bskcn_r_1, bskcn_h_2, bskcn_r_2)
+                for key, state in zip(_BSKCN_KEYS, skip_states):
+                    tensors[key] = (
+                        torch.zeros_like(hidden_states) if state is None else state
+                    )
+            return IntermediateTensors(tensors)
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
