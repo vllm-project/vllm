@@ -39,3 +39,26 @@ serving layer calls `parse` / `parse_delta` and `is_reasoning_end` on it.
 - Comment only where the code alone would leave a reader with a question —
   a non-obvious transition, a deliberate swallow, a model quirk being worked
   around. Keep it minimal and concise.
+
+## New model checklist
+
+Before calling a new parser done, check each of these:
+
+- Test every composition the server can build: both parsers, reasoning parser
+  alone (without `--enable-auto-tool-choice` no tool parser is composed), and
+  tool parser alone. In each, streaming at chunk sizes 1 and >1 must match
+  `parse()`, whitespace included.
+- Check the markers with the real tokenizer. Text markers that are not special
+  tokens stay out of `token_id_terminals`, and `reasoning_start_str` /
+  `reasoning_end_str` must tokenize the same alone as inside generated text:
+  the thinking-token budget matches them by token ids.
+- Choose `wait_for_reasoning` deliberately: it decides when structured output
+  starts constraining. If the model may skip reasoning, waiting for an end
+  marker it never emits leaves the output unconstrained.
+- Compare with the chat template. Newlines the template puts around a marker
+  belong to the marker's spellings, or they leak into reasoning and content and
+  break multi-turn round-trips.
+- Add a builder to `trace_builder._BUILDERS`; the replay suites fail at
+  collection without one.
+- Run a real streaming agent loop (multi-turn, parallel tool calls) against a
+  served model, and check that no marker leaks into `content`.
