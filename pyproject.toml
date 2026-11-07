@@ -230,6 +230,10 @@ inverse_std_variences = "inverse_std_variences"
 TPE = "TPE"
 stride_bse = "stride_bse"
 
+00abd0p = "00abd0p"
+03ede2p = "03ede2p"
+40daa4p = "40daa4p"
+
 [tool.typos.default.extend-words]
 # Muse Spark monokernel: shuffled-weight / scale tags, o_proj flag region
 shs = "shs"

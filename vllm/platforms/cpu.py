@@ -6,6 +6,7 @@ import os
 import platform
 import subprocess
 import sys
+from importlib.util import find_spec
 from typing import TYPE_CHECKING
 
 import torch
@@ -662,13 +663,13 @@ class CpuPlatform(Platform):
 
     @classmethod
     def import_kernels(cls) -> None:
+        # Note: The lib name is _C_AVX2/AVX512/SVE128/SVE256, but the module name is _C.
+        # This will cause a exception "dynamic module does define
+        # module export function". But the library is imported
+        # successfully. So ignore the exception for now, until we find
+        # a solution.
+        ignored_msg = "dynamic module does not define module export function"
         if Platform.get_cpu_architecture() in (CpuArchEnum.X86,):
-            # Note: The lib name is _C_AVX2/AVX512, but the module name is _C.
-            # This will cause a exception "dynamic module does define
-            # module export function". But the library is imported
-            # successfully. So ignore the exception for now, until we find
-            # a solution.
-            ignored_msg = "dynamic module does not define module export function"
             if torch.cpu._is_avx512_supported():
                 if torch.cpu._is_avx512_bf16_supported():
                     try:
@@ -693,6 +694,38 @@ class CpuPlatform(Platform):
                         logger.warning_once(
                             "Failed to import from vllm._C_AVX2: %s", repr(e)
                         )
+        elif (
+            Platform.get_cpu_architecture() in (CpuArchEnum.ARM,)
+            and torch.cpu.get_capabilities().get("bf16", False)
+            and torch.cpu.get_capabilities().get("sve", False)
+        ):
+            if (
+                find_spec("vllm._C_SVE256") is not None
+                and torch.cpu.get_capabilities().get("sve_max_length", False) == 256
+            ):
+                try:
+                    import vllm._C_SVE256  # noqa: F401
+                except ImportError as e:
+                    if ignored_msg not in e.msg:
+                        logger.warning_once(
+                            "Failed to import from vllm._C_SVE256: %s", repr(e)
+                        )
+            elif (
+                find_spec("vllm._C_SVE128") is not None
+                and torch.cpu.get_capabilities().get("sve_max_length", False) == 128
+            ):
+                try:
+                    import vllm._C_SVE128  # noqa: F401
+                except ImportError as e:
+                    if ignored_msg not in e.msg:
+                        logger.warning_once(
+                            "Failed to import from vllm._C_SVE128: %s", repr(e)
+                        )
+            else:
+                try:
+                    import vllm._C  # noqa: F401
+                except ImportError as e:
+                    logger.warning_once("Failed to import from vllm._C: %s", repr(e))
         else:
             try:
                 import vllm._C  # noqa: F401
