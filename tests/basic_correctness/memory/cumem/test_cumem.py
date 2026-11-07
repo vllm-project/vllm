@@ -403,6 +403,21 @@ def test_discard_tags():
     allocator.wake_up()
     assert torch.equal(weights, torch.full_like(weights, 2))
 
+    # Discarding asleep allocations releases their backups without affecting
+    # backups of other tags, even if the same allocations are offloaded again.
+    allocator.sleep(offload_tags=("weights", "kv_cache"))
+    kv_backups = {
+        ptr: backup
+        for ptr, backup in cpu_backups(allocator, {"weights", "kv_cache"}).items()
+        if allocator.pointer_to_data[ptr].tag == "kv_cache"
+    }
+    allocator.discard("kv_cache")
+    assert_released(kv_backups)
+    assert data_ptrs(cpu_backups(allocator, {"weights"})) == weight_ptrs
+    allocator.sleep(offload_tags=("weights", "kv_cache"))
+    allocator.wake_up()
+    assert torch.equal(weights, torch.full_like(weights, 2))
+
 
 @pytest.mark.parametrize("tag", ["workspace", None], ids=["workspace", "default"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
