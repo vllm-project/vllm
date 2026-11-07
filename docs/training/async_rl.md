@@ -45,6 +45,8 @@ await engine.resume_generation()
 
 Resumes the scheduler after a pause. Any requests frozen with `mode="keep"` will continue generating.
 
+Wait for `pause_generation()` to complete before resuming. After a completed resume, repeated `resume_generation()` calls are safe no-ops, including with data parallelism. Resuming a MoE data-parallel engine while its pause is still in flight raises `RuntimeError`.
+
 ### HTTP Endpoints
 
 With `VLLM_SERVER_DEV_MODE=1`, the vLLM HTTP server exposes the same functionality via:
