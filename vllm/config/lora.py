@@ -155,10 +155,20 @@ class LoRAConfig:
         )
 
     def verify_with_parallel_config(self, parallel_config: ParallelConfig) -> None:
-        if self.requires_distributed_routing(parallel_config):
+        if self.requires_distributed_routing(parallel_config) and (
+            not (current_platform.is_cuda_alike() or current_platform.is_xpu())
+            or parallel_config.all2all_backend != "allgather_reducescatter"
+            or parallel_config.pipeline_parallel_size != 1
+            or parallel_config.prefill_context_parallel_size != 1
+            or parallel_config.use_ubatching
+            or parallel_config.enable_eplb
+            or parallel_config.enable_elastic_ep
+            or self.fully_sharded_loras
+        ):
             raise ValueError(
-                "Distributed routed LoRA requires coordinated adapter residency "
-                "and is not supported yet."
+                "Distributed routed LoRA requires CUDA, ROCm or XPU, "
+                "allgather_reducescatter, PP=1, PCP=1, no microbatching "
+                "and no EPLB, elastic EP or fully sharded LoRA."
             )
 
     def verify_with_model_config(self, model_config: ModelConfig):

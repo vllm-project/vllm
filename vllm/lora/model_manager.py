@@ -133,7 +133,7 @@ class LoRAModelManager:
         )
         self.packed_modules: dict[str, list[str]] = {}
         self.modules: dict[str, BaseLayerWithLoRA] = {}
-        self._last_mapping: LoRAMapping | None = None
+        self._last_mapping: LoRAMapping | LoRARouteMapping | None = None
         self._last_slot_layout: tuple[int | None, ...] | None = None
         is_moe = is_moe_model(self.model)
         self._is_moe = is_moe
@@ -225,6 +225,18 @@ class LoRAModelManager:
             self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY] = (
                 llm_punica_wrapper
             )
+            if self.lora_config.requires_distributed_routing(
+                vllm_config.parallel_config
+            ):
+                from vllm.lora.routing_utils import DistributedLoRATensors
+
+                tp_size = vllm_config.parallel_config.tensor_parallel_size
+                llm_punica_wrapper.distributed_lora_tensors = DistributedLoRATensors(
+                    math.ceil(max_num_batched_tokens / tp_size) * tp_size,
+                    self.lora_config.max_loras_per_request,
+                    self.lora_config.max_loras,
+                    self.device,
+                )
 
     def _maybe_init_mm(
         self,
@@ -1430,7 +1442,7 @@ class LoRAModelManager:
         self._add_adapter(adapter)
         return True
 
-    def set_adapter_mapping(self, mapping: LoRAMapping) -> None:
+    def set_adapter_mapping(self, mapping: LoRAMapping | LoRARouteMapping) -> None:
         # The punica metadata derives from the slot layout as well as the
         # mapping: an out-of-band add_lora() can LRU-evict and reassign slots
         # while the running batch, and thus the mapping, is unchanged.

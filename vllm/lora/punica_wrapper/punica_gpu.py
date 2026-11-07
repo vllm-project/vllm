@@ -92,6 +92,14 @@ class PunicaWrapperGPU(PunicaWrapperBase):
     ):
         super().update_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
+        if self.distributed_lora_tensors is not None:
+            tokens, prompts = self._kernel_metadata_mapping(
+                mapping, lora_index_to_id, max_loras, vocab_size
+            )
+            self.token_mapping_meta.prepare_tensors(tokens)
+            self.prompt_mapping_meta.prepare_tensors(prompts)
+            return
+
         # TODO avoid gpu<->cpu sync here
         with gpu_sync_allowed():
             # Prepare cuda kernel metadata tensors

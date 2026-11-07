@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     # avoid circuit import
     from vllm.lora.layers import LoRAMapping, LoRARouteMapping
     from vllm.lora.ops.triton_ops.lora_kernel_metadata import LoRAKernelMeta
+    from vllm.lora.routing_utils import DistributedLoRATensors
 
 
 class PunicaWrapperABC(ABC):
@@ -169,6 +170,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self._lora_route_buffers: RoutedLoRATensors | None = None
         self.routed_lora_graph_mode = False
         self.max_loras_per_request = 1
+        self.distributed_lora_tensors: DistributedLoRATensors | None = None
 
     def _init_moe_route_metadata(self, max_loras: int) -> None:
         # Alignment includes the no-adapter sentinel in its launch bounds.
@@ -384,9 +386,31 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
         self.is_prefill = mapping.is_prefill
-        if mapping.is_prefill and not self.routed_lora_graph_mode:
+        if self.distributed_lora_tensors is not None:
+            # Coordinated dispatch does not consume legacy SGMV metadata.
+            self.no_lora = not any(i > 0 for i in mapping.index_mapping)
+        elif mapping.is_prefill and not self.routed_lora_graph_mode:
             # Routed CUDA graphs do not consume the legacy SGMV metadata.
             self._update_prefill_metadata(self.token_lora_indices)
+
+    def _kernel_metadata_mapping(
+        self,
+        mapping: "LoRAMapping | LoRARouteMapping",
+        lora_index_to_id: list[int | None],
+        max_loras: int,
+        vocab_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Prepare distributed kernel metadata without device-to-host reads."""
+        from vllm.lora.layers import LoRARouteMapping
+
+        if self.distributed_lora_tensors is None:
+            return self.token_lora_indices, self.sampler_indices
+        if isinstance(mapping, LoRARouteMapping):
+            mapping = mapping.scalar_fallback_mapping()
+        tokens, prompts, *_ = convert_mapping(
+            mapping, lora_index_to_id, max_loras, vocab_size, "cpu"
+        )
+        return tokens, prompts
 
     @abstractmethod
     def add_shrink(

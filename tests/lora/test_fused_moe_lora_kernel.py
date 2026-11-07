@@ -291,6 +291,290 @@ def test_routed_expert_projections_tp2(dtype, fully_sharded):
     )
 
 
+def _run_routed_expert_ep_rank(pgi, vllm_config, cpu_group, different_slots, use_graph):
+    from vllm.config import LoRAConfig
+    from vllm.forward_context import get_forward_context, set_forward_context
+    from vllm.lora.layers import LoRAMapping, LoRARouteMapping
+    from vllm.lora.lora_model import LoRAModel
+    from vllm.lora.lora_weights import LoRALayerWeights
+    from vllm.lora.model_manager import LoRAModelManager, SupportsLoRAModel
+    from vllm.lora.request import LoRARequest
+    from vllm.lora.routing_utils import DistributedLoRAPlan
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        FusedMoEQuantConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep import (
+        MoEPrepareAndFinalizeNaiveDPEPModular,
+    )
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    set_random_seed(42)
+    device, dtype = pgi.device, torch.bfloat16
+    hidden, intermediate, rank, experts, topk = 32, 32, 8, 4, 2
+    counts = (3, 5)
+    local = slice(sum(counts[: pgi.rank]), sum(counts[: pgi.rank + 1]))
+    expert_slice = slice(pgi.rank * 2, (pgi.rank + 1) * 2)
+
+    def weight(*shape):
+        return torch.randn(*shape, device=device, dtype=dtype) * 0.05
+
+    # Use the allocator's real activation order, not a hand-written slot table.
+    model = SupportsLoRAModel()
+    model.config = vllm_config.model_config.hf_config
+    model.add_module("proj", ReplicatedLinear(hidden, hidden, bias=False))
+    manager = LoRAModelManager(
+        model,
+        8,
+        8,
+        32,
+        LoRAConfig(
+            max_loras=2, max_lora_rank=8, max_loras_per_request=2, lora_dtype=dtype
+        ),
+        device,
+        vllm_config,
+    )
+    order = [2, 1] if different_slots and pgi.rank else [1, 2]
+    for adapter_id in order:
+        manager.add_adapter(
+            LoRAModel(
+                adapter_id,
+                rank,
+                {
+                    "proj": LoRALayerWeights(
+                        "proj",
+                        rank,
+                        rank,
+                        torch.zeros(rank, hidden, device=device),
+                        torch.zeros(hidden, rank, device=device),
+                    )
+                },
+            )
+        )
+        manager.activate_adapter(adapter_id)
+    wrapper = manager.punica_wrapper_mapping["language_model"]
+    resident_ids = manager.lora_index_to_id
+    assert sorted(i for i in resident_ids if i is not None) == [1, 2]
+    slot_order = torch.tensor(
+        [i - 1 for i in resident_ids if i is not None], device=device
+    )
+    full_a13 = tuple(weight(2, experts, rank, hidden) for _ in range(2))
+    full_b13 = tuple(weight(2, experts, intermediate, rank) for _ in range(2))
+    full_a2, full_b2 = (
+        weight(2, experts, rank, intermediate),
+        weight(2, experts, hidden, rank),
+    )
+    ctx = MoELoRAContext(
+        w13_lora_a_stacked=tuple(
+            a[slot_order, expert_slice].contiguous() for a in full_a13
+        ),
+        w13_lora_b_stacked=tuple(
+            b[slot_order, expert_slice].contiguous() for b in full_b13
+        ),
+        w2_lora_a_stacked=(full_a2[slot_order, expert_slice].contiguous(),),
+        w2_lora_b_stacked=(full_b2[slot_order, expert_slice].contiguous(),),
+        adapter_enabled=torch.ones(3, dtype=torch.int32, device=device),
+        max_loras=2,
+        top_k=topk,
+        w13_num_slices=2,
+        fully_sharded=False,
+        tp_rank=0,
+        tp_size=1,
+        local_num_experts=2,
+        punica_wrapper=wrapper,
+        use_tuned_config=False,
+    )
+    config = FusedMoEConfig(
+        num_experts=experts,
+        experts_per_token=topk,
+        hidden_dim=hidden,
+        intermediate_size=intermediate,
+        num_local_experts=2,
+        num_logical_experts=experts,
+        activation=MoEActivation.SILU,
+        device=device,
+        routing_method=RoutingMethodType.Unspecified,
+        moe_parallel_config=replace(
+            FusedMoEParallelConfig.make_no_parallel(),
+            use_ep=True,
+            ep_size=2,
+            ep_rank=pgi.rank,
+            dp_size=2,
+        ),
+        in_dtype=dtype,
+    )
+    layer = TritonExperts(config, FusedMoEQuantConfig.make())
+    prepare = MoEPrepareAndFinalizeNaiveDPEPModular()
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    init_workspace_manager(device)
+    layer.set_lora_context(ctx)
+    prepare.set_lora_context(ctx)
+    kernel = FusedMoEKernel(prepare, layer)
+    expert_map = torch.full((experts,), -1, dtype=torch.int32, device=device)
+    expert_map[expert_slice] = torch.arange(2, device=device, dtype=torch.int32)
+    x, w1, w2 = (
+        weight(8, hidden),
+        weight(experts, 2 * intermediate, hidden),
+        weight(experts, hidden, intermediate),
+    )
+    ids = torch.tensor([[0, 2], [3, 1]] * 4, dtype=torch.int32, device=device)
+    expert_weights = torch.tensor([[0.3, 0.7]] * 8, device=device)
+    graph = None
+
+    def run():
+        return kernel.apply(
+            x[local].clone(),
+            w1[expert_slice].contiguous(),
+            w2[expert_slice].contiguous(),
+            expert_weights[local],
+            ids[local],
+            MoEActivation.SILU,
+            experts,
+            expert_map,
+            False,
+        )
+
+    for step in range(3):
+        adapter_ids = [(1, 2), (0, 0), (2, 0), (2, 1), (1, 2), (0, 0), (1, 0), (2, 1)]
+        coefficients = [
+            (0.7, 0.3),
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.2, 0.8),
+            (0.0, 1.0),
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.4, 0.6),
+        ]
+        if step == 1:
+            adapter_ids = [(b, a) for a, b in adapter_ids]
+        if step == 2:
+            # Rank 1 switches to an entirely scalar/base batch after routing.
+            adapter_ids[3:] = [(1, 0), (0, 0), (2, 0), (0, 0), (1, 0)]
+            coefficients[3:] = [(1.0, 0.0)] * 5
+        mapping = LoRARouteMapping(
+            tuple(adapter_ids[local]), tuple(coefficients[local]), (), False
+        )
+        if step == 2 and pgi.rank == 1:
+            mapping = LoRAMapping(tuple(a for a, _ in adapter_ids[local]), (), False)
+        manager.set_adapter_mapping(mapping)
+        plan = DistributedLoRAPlan.from_rank_requests(
+            [
+                (
+                    2,
+                    (
+                        LoRARequest("a", 1, "/a"),
+                        LoRARequest("b", 2, "/b"),
+                    ),
+                )
+            ]
+        )
+        assert wrapper.distributed_lora_tensors is not None
+        wrapper.distributed_lora_tensors.update(plan, mapping, resident_ids)
+        with set_forward_context(
+            None,
+            vllm_config,
+            num_tokens=counts[pgi.rank],
+            num_tokens_across_dp=torch.tensor(counts, dtype=torch.int32, device="cpu"),
+        ):
+            dp_metadata = get_forward_context().dp_metadata
+            assert dp_metadata is not None
+            with dp_metadata.sp_local_sizes(1):
+                if use_graph:
+                    if graph is None:
+                        for _ in range(3):
+                            run()
+                        torch.accelerator.synchronize()
+                        torch.distributed.barrier(group=cpu_group)
+                        graph = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(graph):
+                            actual = run()
+                    graph.replay()
+                else:
+                    actual = run()
+        expected = []
+        for token in range(local.start, local.stop):
+            output = torch.zeros(hidden, device=device, dtype=torch.float32)
+            for choice, expert in enumerate(ids[token].tolist()):
+                up, down = w1[expert].float().clone(), w2[expert].float().clone()
+                for adapter_id, coefficient in zip(
+                    adapter_ids[token], coefficients[token]
+                ):
+                    if adapter_id == 0:
+                        continue
+                    a = adapter_id - 1
+                    for part in range(2):
+                        up[part * intermediate : (part + 1) * intermediate].add_(
+                            coefficient
+                            * (
+                                full_b13[part][a, expert].float()
+                                @ full_a13[part][a, expert].float()
+                            )
+                        )
+                    down.add_(
+                        coefficient
+                        * (full_b2[a, expert].float() @ full_a2[a, expert].float())
+                    )
+                gate, value = (up @ x[token].float()).chunk(2)
+                output.add_(
+                    expert_weights[token, choice]
+                    * (down @ (torch.nn.functional.silu(gate) * value))
+                )
+            expected.append(output)
+        assert isinstance(actual, torch.Tensor)
+        torch.testing.assert_close(
+            actual.float(), torch.stack(expected), atol=1e-5, rtol=1e-2
+        )
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("different_slots", [False, True])
+@pytest.mark.parametrize("use_graph", [False, True])
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Distributed composition requires CUDA"
+)
+def test_routed_expert_dispatch_dp2_ep2(different_slots, use_graph, tmp_path):
+    """Dispatch preserves adapter identity across uneven, changing DP batches."""
+    from transformers import OlmoeConfig
+
+    from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
+        parallel_launch_with_config,
+    )
+    from vllm.config import ModelConfig, VllmConfig
+
+    OlmoeConfig(
+        architectures=["OlmoeForCausalLM"],
+        hidden_size=32,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            enforce_eager=True,
+        )
+    )
+    config.parallel_config.data_parallel_size = 2
+    config.parallel_config.enable_expert_parallel = True
+    config.parallel_config.is_moe_model = True
+    config.parallel_config.all2all_backend = "allgather_reducescatter"
+    parallel_launch_with_config(
+        2, _run_routed_expert_ep_rank, config, None, different_slots, use_graph
+    )
+
+
 def _run_routed_expert_ep_rejection(pgi, vllm_config, cpu_group):
     from tests.lora.utils import make_moe_lora_context
     from vllm.lora.layers import LoRAMapping, LoRARouteMapping
@@ -317,6 +601,116 @@ def _run_routed_expert_ep_rejection(pgi, vllm_config, cpu_group):
         with pytest.raises(NotImplementedError, match="residency and slot identities"):
             prepare.prepare(x, weights, ids, 4, None, False, FusedMoEQuantConfig.make())
         torch.distributed.barrier(group=cpu_group)
+
+
+def _run_distributed_residency(pgi, config, cpu_group, adapter_path, missing_path):
+    from vllm.config import LoRAConfig
+    from vllm.lora.layers import LoRAMapping
+    from vllm.lora.model_manager import SupportsLoRAModel
+    from vllm.lora.request import LoRARequest
+    from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    config.lora_config = LoRAConfig(
+        max_loras=2,
+        max_cpu_loras=2,
+        max_lora_rank=8,
+        max_loras_per_request=2,
+        lora_dtype=torch.bfloat16,
+    )
+    config.scheduler_config.max_num_seqs = 8
+    config.scheduler_config.max_num_batched_tokens = 8
+    model = SupportsLoRAModel()
+    model.config = config.model_config.hf_config
+    model.add_module("proj", ReplicatedLinear(32, 32, bias=False))
+    manager = LRUCacheWorkerLoRAManager(config, pgi.device, {})
+    manager.create_lora_manager(model, config)
+    a, b, c = (LoRARequest(str(i), i, adapter_path) for i in (1, 2, 3))
+    manager.add_adapter(a if pgi.rank == 0 else b)
+    plan, _, lookup = manager.prepare_distributed_adapters(
+        (a,) if pgi.rank == 0 else (b,), cpu_group
+    )
+    assert [r.lora_int_id for r in plan.requests] == [1, 2]
+    assert lookup == ([-1, 0, 1] if pgi.rank == 0 else [-1, 1, 0])
+    assert manager.list_adapters() == {1, 2}
+    # An empty local batch still needs the peer's complete union.
+    plan, _, _ = manager.prepare_distributed_adapters(
+        (b, c) if pgi.rank == 0 else (), cpu_group
+    )
+    assert [r.lora_int_id for r in plan.requests] == [2, 3]
+    assert manager.list_adapters() == {2, 3}
+    with pytest.raises(ValueError, match="exceeds"):
+        manager.prepare_distributed_adapters(
+            (a, b) if pgi.rank == 0 else (c,), cpu_group
+        )
+    conflicting = LoRARequest(b.lora_name, b.lora_int_id, missing_path)
+    with pytest.raises(ValueError, match="Conflicting LoRA descriptors"):
+        manager.prepare_distributed_adapters(
+            (b,) if pgi.rank == 0 else (conflicting,), cpu_group
+        )
+    # Staging errors must also reach every rank before any model collective.
+    mapping = LoRAMapping((2 if pgi.rank == 0 else 999,), (), False)
+    with pytest.raises(RuntimeError, match="rank 1"):
+        manager.prepare_distributed_adapters((b,), cpu_group, mapping)
+    # Rank 0 retains ID 4 in cache; rank 1 must actually read its missing file.
+    missing = LoRARequest("missing", 4, missing_path)
+    if pgi.rank == 0:
+        manager.add_dummy_lora(missing, rank=8)
+    with pytest.raises(RuntimeError, match="rank 1"):
+        manager.prepare_distributed_adapters((missing,), cpu_group)
+    torch.distributed.barrier(group=cpu_group)
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Distributed composition requires CUDA"
+)
+def test_distributed_lora_residency_and_collective_errors(tmp_path):
+    import json
+
+    from safetensors.torch import save_file
+    from transformers import OlmoeConfig
+
+    from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
+        parallel_launch_with_config,
+    )
+    from vllm.config import ModelConfig, VllmConfig
+
+    OlmoeConfig(
+        architectures=["OlmoeForCausalLM"],
+        hidden_size=32,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), skip_tokenizer_init=True, enforce_eager=True
+        )
+    )
+    config.parallel_config.data_parallel_size = 2
+    config.parallel_config.enable_expert_parallel = True
+    config.parallel_config.all2all_backend = "allgather_reducescatter"
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    metadata = dict(peft_type="LORA", r=8, lora_alpha=8, target_modules=["proj"])
+    (adapter / "adapter_config.json").write_text(json.dumps(metadata))
+    save_file(
+        {
+            "base_model.model.proj.lora_A.weight": torch.ones(8, 32),
+            "base_model.model.proj.lora_B.weight": torch.ones(32, 8),
+        },
+        str(adapter / "adapter_model.safetensors"),
+    )
+    missing = tmp_path / "missing"
+    missing.mkdir()
+    (missing / "adapter_config.json").write_text(json.dumps(metadata))
+    parallel_launch_with_config(
+        2, _run_distributed_residency, config, None, str(adapter), str(missing)
+    )
 
 
 @multi_gpu_test(num_gpus=2)

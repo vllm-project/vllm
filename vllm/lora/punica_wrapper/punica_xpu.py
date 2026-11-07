@@ -83,9 +83,11 @@ class PunicaWrapperXPU(PunicaWrapperBase):
     ):
         super().update_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
-        # Prepare kernel metadata tensors
-        self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
-        self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
+        tokens, prompts = self._kernel_metadata_mapping(
+            mapping, lora_index_to_id, max_loras, vocab_size
+        )
+        self.token_mapping_meta.prepare_tensors(tokens)
+        self.prompt_mapping_meta.prepare_tensors(prompts)
 
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))

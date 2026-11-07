@@ -4,12 +4,14 @@
 from contextlib import contextmanager
 from typing import Any, Literal
 
+import msgspec
 import torch
 
 from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
+from vllm.lora.layers.utils import LoRAMapping, LoRARouteMapping
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.model_manager import (
     LoRAModelManager,
@@ -18,6 +20,7 @@ from vllm.lora.model_manager import (
 )
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
+from vllm.lora.routing_utils import DistributedLoRAPlan
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
@@ -51,6 +54,10 @@ class WorkerLoRAManager:
         if lora_config is None:
             raise ValueError("LoRA config must be set for WorkerLoRAManager.")
         self.lora_config: LoRAConfig = lora_config
+        self.distributed_routing = lora_config.requires_distributed_routing(
+            vllm_config.parallel_config
+        )
+        self._distributed_descriptors: dict[int, bytes] = {}
 
         # Use get_text_config() in case of multimodal models
         text_config = vllm_config.model_config.hf_config.get_text_config()
@@ -197,6 +204,75 @@ class WorkerLoRAManager:
         if mapping is not None:
             self._adapter_manager.set_adapter_mapping(mapping)
 
+    def prepare_distributed_adapters(
+        self,
+        requests: tuple[LoRARequest, ...],
+        cpu_group: torch.distributed.ProcessGroup,
+        mapping: LoRAMapping | LoRARouteMapping | None = None,
+    ) -> tuple[DistributedLoRAPlan, list[int], list[int]]:
+        """Agree on residency before dispatch; every group rank must participate.
+
+        Run outside graph capture, serialized with adapter mutation and forwards.
+        A failure aborts the distributed step; partially loaded state must not be
+        used for execution. Callers retain the union until that step completes.
+        """
+        size = torch.distributed.get_world_size(cpu_group)
+        gathered: list[Any] = [None] * size
+        torch.distributed.all_gather_object(
+            gathered, (self._adapter_manager.adapter_slots, requests), group=cpu_group
+        )
+        plan = DistributedLoRAPlan.from_rank_requests(gathered)
+        error = None
+        slot_to_batch: list[int] = []
+        batch_to_slot: list[int] = []
+        try:
+            # Touch resident members before new loads can evict an LRU entry.
+            resident = set(self._adapter_manager.lora_index_to_id)
+            for request in sorted(
+                plan.requests, key=lambda request: request.lora_int_id not in resident
+            ):
+                self.add_adapter(request)
+            slot_to_batch, batch_to_slot = plan.slot_tables(
+                self._adapter_manager.lora_index_to_id
+            )
+            if mapping is not None:
+                self.set_distributed_mapping(plan, mapping)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        statuses: list[Any] = [None] * size
+        torch.distributed.all_gather_object(statuses, error, group=cpu_group)
+        failures = [
+            f"rank {rank}: {error}" for rank, error in enumerate(statuses) if error
+        ]
+        if failures:
+            raise RuntimeError(
+                "Distributed LoRA residency failed: " + "; ".join(failures)
+            )
+        return plan, slot_to_batch, batch_to_slot
+
+    def set_distributed_mapping(
+        self, plan: DistributedLoRAPlan, mapping: LoRAMapping | LoRARouteMapping
+    ) -> None:
+        self._adapter_manager.set_adapter_mapping(mapping)
+        for wrapper in self._adapter_manager.punica_wrapper_mapping.values():
+            if wrapper.distributed_lora_tensors is not None:
+                wrapper.distributed_lora_tensors.update(
+                    plan, mapping, self._adapter_manager.lora_index_to_id
+                )
+
+    def _validate_distributed_request(self, request: LoRARequest) -> None:
+        if not self.distributed_routing or self._cached_dummy_lora is not False:
+            return
+        if request.load_inplace:
+            raise ValueError("Distributed routed LoRA rejects load_inplace")
+        descriptor = msgspec.json.encode(request)
+        previous = self._distributed_descriptors.get(request.lora_int_id)
+        if previous is not None and previous != descriptor:
+            raise ValueError(
+                f"Conflicting LoRA descriptors for ID {request.lora_int_id}"
+            )
+        self._distributed_descriptors[request.lora_int_id] = descriptor
+
     def supports_tower_connector_lora(self) -> bool:
         return (
             self._adapter_manager.supports_mm
@@ -223,6 +299,7 @@ class WorkerLoRAManager:
             self.add_adapter(models_map[adapter_id])
 
     def add_adapter(self, adapter_request: Any) -> bool:
+        self._validate_distributed_request(adapter_request)
         if adapter_request.adapter_id in self.list_adapters():
             return False
         # One-time per adapter
@@ -287,6 +364,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             self.add_adapter(lora)
 
     def add_adapter(self, lora_request: LoRARequest) -> bool:
+        self._validate_distributed_request(lora_request)
         # Note that this method is not thread-safe. It may be invoked multiple
         # times for the same adapter when using multiple API servers.
         # This is ok because it's currently only called from

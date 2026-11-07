@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (
     ColumnParallelLinearWithShardedLoRA,
+    LoRAMapping,
     LoRARouteMapping,
     MergedQKVParallelLinearWithLoRA,
     MergedQKVParallelLinearWithShardedLoRA,
@@ -42,6 +43,126 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.v1.worker.gpu.lora_utils import LoraState
 
 pytestmark = pytest.mark.skip_global_cleanup
+
+
+def test_distributed_route_identity_survives_reversed_slots():
+    from vllm.lora.routing_utils import DistributedLoRAPlan
+
+    a, b = make_lora_request(1), make_lora_request(2)
+    plan = DistributedLoRAPlan.from_rank_requests([(2, (a,)), (2, (b,)), (2, ())])
+    assert [request.lora_int_id for request in plan.requests] == [1, 2]
+    source, _ = plan.slot_tables([1, 2])
+    _, destination = plan.slot_tables([2, 1])
+    batch_indices = torch.tensor([source[0], source[1], 0])
+    destination_slots = torch.tensor(destination)[batch_indices]
+    assert destination_slots.tolist() == [1, 0, -1]
+    coefficients = torch.tensor([0.7, 0.3])
+    destination_outputs = torch.tensor([20.0, 10.0])
+    torch.testing.assert_close(
+        (destination_outputs[destination_slots[:2]] * coefficients).sum(),
+        torch.tensor(13.0),
+    )
+    # Rebuild the lookup after eviction/reassignment, without changing identities.
+    assert plan.slot_tables([1, 2])[1] == [-1, 0, 1]
+    with pytest.raises(ValueError, match="not active"):
+        plan.slot_tables([1, None])
+
+
+@pytest.mark.parametrize("conflict", ["path", "name", "inplace", "capacity"])
+def test_distributed_route_plan_rejects_unsafe_union(conflict):
+    from vllm.lora.routing_utils import DistributedLoRAPlan
+
+    a = LoRARequest("a", 1, "/adapters/a")
+    other = {
+        "path": LoRARequest("a", 1, "/adapters/different"),
+        "name": LoRARequest("a", 2, "/adapters/b"),
+        "inplace": LoRARequest("b", 2, "/adapters/b", load_inplace=True),
+        "capacity": LoRARequest("b", 2, "/adapters/b"),
+    }[conflict]
+    error = {
+        "path": "Conflicting LoRA descriptors",
+        "name": "Conflicting LoRA IDs",
+        "inplace": "load_inplace",
+        "capacity": "exceeds",
+    }[conflict]
+    with pytest.raises(ValueError, match=error):
+        DistributedLoRAPlan.from_rank_requests(
+            [(2, (a,)), (1 if conflict == "capacity" else 2, (other,))]
+        )
+
+
+def test_distributed_route_plan_deduplicates_full_descriptors():
+    from vllm.lora.routing_utils import DistributedLoRAPlan
+
+    a = make_lora_request(1)
+    plan = DistributedLoRAPlan.from_rank_requests([(1, (a,)), (1, (a,))])
+    assert len(plan.requests) == 1
+    empty = DistributedLoRAPlan.from_rank_requests([(2, ()), (2, ())])
+    assert empty.slot_tables([None, None]) == ([0, 0], [-1])
+
+
+def test_distributed_route_buffers_remap_without_changing_addresses():
+    from vllm.lora.routing_utils import DistributedLoRAPlan, DistributedLoRATensors
+
+    a, b = make_lora_request(1), make_lora_request(2)
+    plan = DistributedLoRAPlan.from_rank_requests([(2, (a, b))])
+    buffers = DistributedLoRATensors(4, 2, 2, "cpu")
+    tensors = (buffers.indices, buffers.weights, buffers.local_slots)
+    addresses = [tensor.data_ptr() for tensor in tensors]
+    mapping = LoRARouteMapping(((1, 2), (0, 2)), ((0.7, 0.3), (0.0, 1.0)), (), False)
+    buffers.update(plan, mapping, [2, 1])
+    assert buffers.local_slots[buffers.indices.long()].tolist() == [
+        [1, 0],
+        [-1, 0],
+        [-1, -1],
+        [-1, -1],
+    ]
+    torch.testing.assert_close(
+        buffers.weights[:2], torch.tensor([[0.7, 0.3], [0.0, 1.0]])
+    )
+    # A shorter scalar batch replaces the previous routes and clears padding.
+    buffers.update(plan, LoRAMapping((2,), (), False), [1, 2])
+    assert buffers.indices.tolist() == [[2, 0], [0, 0], [0, 0], [0, 0]]
+    assert buffers.weights.tolist() == [[1.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
+    buffers.update(DistributedLoRAPlan(()), LoRAMapping((), (), False), [1, 2])
+    assert not buffers.indices.any()
+    assert not buffers.weights.any()
+    assert buffers.local_slots.tolist() == [-1, -1, -1]
+    assert [tensor.data_ptr() for tensor in tensors] == addresses
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_distributed_route_updates_preserve_inflight_snapshots():
+    """Queued GPU consumers observe each update, not the next CPU snapshot."""
+    from vllm.lora.routing_utils import DistributedLoRAPlan, DistributedLoRATensors
+
+    plan = DistributedLoRAPlan((make_lora_request(1), make_lora_request(2)))
+    buffers = DistributedLoRATensors(1024, 1, 2, "cuda")
+    snapshots = []
+    for step in range(32):
+        adapter = 1 + step % 2
+        buffers.update(plan, LoRAMapping((adapter,) * 1024, (), False), [2, 1])
+        snapshots.append(buffers.local_slots[buffers.indices.long()].clone())
+    for step, snapshot in enumerate(snapshots):
+        assert torch.all(snapshot == 1 - step % 2).item()
+
+
+@pytest.mark.parametrize("failure", ["tokens", "routes", "missing"])
+def test_distributed_route_buffers_reject_invalid_mapping(failure):
+    from vllm.lora.routing_utils import DistributedLoRAPlan, DistributedLoRATensors
+
+    plan = DistributedLoRAPlan((make_lora_request(1),))
+    buffers = DistributedLoRATensors(1, 1, 1, "cpu")
+    mapping = {
+        "tokens": LoRAMapping((1, 1), (), False),
+        "routes": LoRARouteMapping(((1, 0),), ((1.0, 0.0),), (), False),
+        "missing": LoRAMapping((2,), (), False),
+    }[failure]
+    with pytest.raises(
+        ValueError, match="capacity exceeded|absent from distributed plan"
+    ):
+        buffers.update(plan, mapping, [1])
+    assert not buffers.indices.any()
 
 
 @pytest.mark.parametrize("routed", [False, True])

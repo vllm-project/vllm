@@ -91,6 +91,10 @@ steps:
     - pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp
     - pytest -v -s lora/test_fused_moe_lora_kernel.py::test_routed_expert_projections_tp2
     - pytest -v -s lora/test_fused_moe_lora_kernel.py::test_routed_expert_dispatch_rejected_across_ranks
+    - >-
+      pytest -v -s
+      lora/test_fused_moe_lora_kernel.py::test_routed_expert_dispatch_dp2_ep2
+      lora/test_fused_moe_lora_kernel.py::test_distributed_lora_residency_and_collective_errors
   mirror:
     amd:
       # Run on PRs even when the L4 step is optional (nightly only).

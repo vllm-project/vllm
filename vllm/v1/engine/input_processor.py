@@ -330,13 +330,23 @@ class InputProcessor:
                     "requires max_loras_per_request >= 2 for coordinated residency."
                 )
             if not self.model_config.enforce_eager and (
-                not current_platform.is_cuda()
+                not (
+                    current_platform.is_cuda()
+                    or (
+                        (current_platform.is_rocm() or current_platform.is_xpu())
+                        and self.lora_config.requires_distributed_routing(
+                            self.vllm_config.parallel_config
+                        )
+                        and self.lora_config.target_modules == ["experts"]
+                    )
+                )
                 or self.lora_config.max_loras_per_request < 2
                 or self.lora_config.fully_sharded_loras
                 or self.lora_config.max_lora_rank > 128
             ):
                 raise VLLMValidationError(
-                    "Routed LoRA CUDA graphs require NVIDIA CUDA, "
+                    "Routed LoRA graphs require NVIDIA CUDA or distributed "
+                    "native-MoE expert-only targets on ROCm/XPU, "
                     "max_loras_per_request >= 2, rank <= 128, and "
                     "non-fully-sharded LoRA. Otherwise use enforce_eager=True."
                 )

@@ -1640,6 +1640,7 @@ class Worker(WorkerBase):
             num_tokens,
             uniform_decode=True,
             randomize_inputs=self.randomize_dummy_inputs,
+            distributed_idle=self.model_runner.distributed_routed_lora,
         )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

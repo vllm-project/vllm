@@ -50,6 +50,28 @@ def dynamo_reset():
     yield
 
 
+@pytest.mark.parametrize("captured_counts", [None, [1, 2, 4]])
+def test_lora_kernel_metadata_cpu_staging_matches_device(captured_counts):
+    """CPU staging preserves slot grouping, graph counts, and base-only resets."""
+    staged = LoRAKernelMeta.make(3, 8, DEVICE_TYPE, captured_counts)
+    reference = LoRAKernelMeta.make(3, 8, DEVICE_TYPE, captured_counts)
+    for ids in ([2, -1, 0, 2, 0], [1], [-1, -1], [0, 1, 2, -1]):
+        cpu_ids = torch.tensor(ids, dtype=torch.int32, device="cpu")
+        staged.prepare_tensors(cpu_ids)
+        reference.prepare_tensors(cpu_ids.to(DEVICE_TYPE))
+        torch.testing.assert_close(staged.no_lora_flag_cpu, reference.no_lora_flag_cpu)
+        torch.testing.assert_close(
+            staged.num_active_loras_cpu, reference.num_active_loras_cpu
+        )
+        # The base-only fast path does not consume the stale token-index buffers.
+        start = 2 if all(i == -1 for i in ids) else 0
+        for actual, expected in zip(
+            staged.meta_args(len(ids), True)[start:5],
+            reference.meta_args(len(ids), True)[start:5],
+        ):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def _bgmv_shrink(
     inputs, lora_weight, output, seq_len_tensor, lora_indices, scaling=1.0
 ):

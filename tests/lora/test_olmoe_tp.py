@@ -3,6 +3,7 @@
 
 
 import json
+import os
 import shutil
 from collections.abc import Sequence
 
@@ -13,9 +14,258 @@ from safetensors.torch import load_file, save_file
 import vllm
 from vllm.lora.request import LoRARequest, LoRARoutingRequest
 from vllm.platforms import current_platform
+from vllm.v1.metrics.loggers import AggregateStatLoggerBase
 
 from ..models.utils import check_logprobs_close
 from ..utils import multi_gpu_test
+
+
+class GraphModeRecorder(AggregateStatLoggerBase):
+    def __init__(self, vllm_config, engine_indexes):
+        self.modes: set[str] = set()
+
+    def record(
+        self, scheduler_stats, iteration_stats, mm_cache_stats=None, engine_idx=0
+    ):
+        if scheduler_stats is not None and scheduler_stats.cudagraph_stats is not None:
+            self.modes.add(scheduler_stats.cudagraph_stats.runtime_mode)
+
+    def log_engine_initialized(self):
+        pass
+
+
+@pytest.fixture
+def tiny_distributed_moe(tmp_path):
+    from transformers import OlmoeConfig, OlmoeForCausalLM
+
+    torch.manual_seed(42)
+    model = OlmoeForCausalLM(
+        OlmoeConfig(
+            vocab_size=64,
+            hidden_size=64,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            num_experts=4,
+            num_experts_per_tok=2,
+            max_position_embeddings=128,
+            eos_token_id=2,
+            pad_token_id=0,
+        )
+    ).eval()
+    base = tmp_path / "base"
+    model.save_pretrained(base)
+    for adapter in (1, 2):
+        path = tmp_path / str(adapter)
+        path.mkdir()
+        (path / "adapter_config.json").write_text(
+            json.dumps(
+                dict(
+                    peft_type="LORA",
+                    task_type="CAUSAL_LM",
+                    r=8,
+                    lora_alpha=8,
+                    target_modules=["gate_proj", "up_proj", "down_proj"],
+                    bias="none",
+                    lora_dropout=0.0,
+                )
+            )
+        )
+        weights = {}
+        for expert in range(4):
+            for projection in ("gate_proj", "up_proj", "down_proj"):
+                prefix = (
+                    f"base_model.model.model.layers.0.mlp.experts.{expert}.{projection}"
+                )
+                weights[f"{prefix}.lora_A.weight"] = torch.randn(8, 64) * 0.1
+                weights[f"{prefix}.lora_B.weight"] = torch.randn(64, 8) * 0.1
+        save_file(weights, str(path / "adapter_model.safetensors"))
+    return str(tmp_path)
+
+
+def _distributed_generation_rank(
+    rank, root, port, enable_ep, eager, barrier, tp=1, runner="0"
+):
+    os.environ.update(
+        VLLM_DP_SIZE="2",
+        VLLM_DP_RANK=str(rank),
+        VLLM_DP_RANK_LOCAL=str(rank),
+        VLLM_DP_MASTER_IP="127.0.0.1",
+        VLLM_DP_MASTER_PORT=str(port),
+        VLLM_USE_V2_MODEL_RUNNER=runner,
+        VLLM_GPU_SYNC_CHECK="error",
+        VLLM_WORKER_MULTIPROC_METHOD="spawn",
+    )
+    llm = vllm.LLM(
+        model=f"{root}/base",
+        skip_tokenizer_init=True,
+        dtype="bfloat16",
+        max_model_len=64,
+        max_logprobs=64,
+        max_num_seqs=4,
+        max_num_batched_tokens=64,
+        enable_lora=True,
+        max_loras=2,
+        max_loras_per_request=2,
+        max_lora_rank=8,
+        lora_target_modules=["experts", "gate_proj", "up_proj", "down_proj"],
+        enable_expert_parallel=enable_ep,
+        tensor_parallel_size=tp,
+        all2all_backend="allgather_reducescatter",
+        enforce_eager=eager,
+        gpu_memory_utilization=0.25,
+        kv_cache_memory_bytes=16 * 1024 * 1024,
+        compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
+        disable_log_stats=False,
+        cudagraph_metrics=True,
+    )
+    try:
+        assert llm.llm_engine.vllm_config.use_v2_model_runner == (runner == "1")
+        _check_distributed_generation(llm, rank, root, barrier, eager)
+    finally:
+        llm.llm_engine.engine_core.shutdown()
+
+
+def _check_distributed_generation(llm, rank, root, barrier, eager):
+    from transformers import OlmoeForCausalLM
+
+    recorder = GraphModeRecorder(llm.llm_engine.vllm_config, [0])
+    manager = llm.llm_engine.logger_manager
+    assert manager is not None
+    manager.stat_loggers.append(recorder)
+    adapters = tuple(LoRARequest(str(i), i, f"{root}/{i}") for i in (1, 2))
+    # Each rank starts with a different resident adapter.
+    llm.llm_engine.add_lora(adapters[rank])
+    barrier.wait(timeout=180)
+    prompt = [3, 4, 5]
+    for step in range(3):
+        recorder.modes.clear()
+        coefficients = ((0.7, 0.3), (0.3, 0.7), (0.0, 0.0))[step]
+        request = (
+            LoRARoutingRequest("mixture", 100, adapters, coefficients)
+            if step != 2
+            else None
+        )
+        # Unequal completion lengths force the finished rank through idle steps.
+        params = vllm.SamplingParams(
+            temperature=0,
+            max_tokens=1 if rank == 0 else 3,
+            logprobs=64,
+            ignore_eos=True,
+        )
+        outputs = llm.generate(
+            [{"prompt_token_ids": prompt}, {"prompt_token_ids": prompt}],
+            params,
+            lora_request=[request, None],
+            use_tqdm=False,
+        )
+        output, base_output = (result.outputs[0] for result in outputs)
+        if not eager and rank == 1:
+            assert "FULL" in recorder.modes, recorder.modes
+        reference = OlmoeForCausalLM.from_pretrained(f"{root}/base").float().eval()
+        with torch.no_grad():
+            # Mixed routes must follow the same TP token partition as activations.
+            base_prefix = prompt + list(base_output.token_ids[:-1])
+            base_expected = (
+                reference(torch.tensor([base_prefix]))
+                .logits[0, len(prompt) - 1 :]
+                .log_softmax(-1)
+            )
+            assert base_output.logprobs is not None
+            base_actual = torch.tensor(
+                [
+                    [scores[i].logprob for i in range(64)]
+                    for scores in base_output.logprobs
+                ]
+            )
+            torch.testing.assert_close(base_actual, base_expected, atol=2e-2, rtol=2e-3)
+            experts = reference.model.layers[0].mlp.experts
+            for adapter, coefficient in zip(adapters, coefficients):
+                weights = load_file(f"{adapter.lora_path}/adapter_model.safetensors")
+                for expert in range(4):
+                    for name in ("gate_proj", "up_proj", "down_proj"):
+                        prefix = "base_model.model.model.layers.0.mlp.experts."
+                        prefix += f"{expert}.{name}"
+                        delta = (
+                            weights[f"{prefix}.lora_B.weight"]
+                            @ weights[f"{prefix}.lora_A.weight"]
+                        )
+                        if name == "down_proj":
+                            target = experts.down_proj[expert]
+                        elif name == "up_proj":
+                            target = experts.gate_up_proj[expert, 64:]
+                        else:
+                            target = experts.gate_up_proj[expert, :64]
+                        target.add_(delta, alpha=coefficient)
+            prefix = prompt + list(output.token_ids[:-1])
+            expected = (
+                reference(torch.tensor([prefix]))
+                .logits[0, len(prompt) - 1 :]
+                .log_softmax(-1)
+            )
+        assert output.logprobs is not None
+        actual = torch.tensor(
+            [[scores[i].logprob for i in range(64)] for scores in output.logprobs]
+        )
+        torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-3)
+        barrier.wait(timeout=180)
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Distributed composition requires CUDA"
+)
+@pytest.mark.parametrize("enable_ep", [False, True])
+@pytest.mark.parametrize("eager", [False, True])
+@pytest.mark.parametrize("runner", ["0", "1"], ids=["v1", "v2"])
+def test_distributed_moe_composition_generation(
+    tiny_distributed_moe, enable_ep, eager, runner
+):
+    """Real distributed generation, including idle ranks, matches merged weights."""
+    from vllm.utils.network_utils import get_open_port
+
+    context = torch.multiprocessing.get_context("spawn")
+    barrier = context.Barrier(2)
+    torch.multiprocessing.spawn(
+        _distributed_generation_rank,
+        args=(
+            tiny_distributed_moe,
+            get_open_port(),
+            enable_ep,
+            eager,
+            barrier,
+            1,
+            runner,
+        ),
+        nprocs=2,
+    )
+
+
+@multi_gpu_test(num_gpus=4)
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Distributed composition requires CUDA"
+)
+@pytest.mark.parametrize("runner", ["0", "1"], ids=["v1", "v2"])
+def test_distributed_moe_composition_generation_tp2_dp2(tiny_distributed_moe, runner):
+    """TP peers share adapter identities with both DP ranks during graph replay."""
+    from vllm.utils.network_utils import get_open_port
+
+    context = torch.multiprocessing.get_context("spawn")
+    torch.multiprocessing.spawn(
+        _distributed_generation_rank,
+        args=(
+            tiny_distributed_moe,
+            get_open_port(),
+            True,
+            False,
+            context.Barrier(2),
+            2,
+            runner,
+        ),
+        nprocs=2,
+    )
+
 
 MODEL_PATH = "allenai/OLMoE-1B-7B-0125-Instruct"
 
