@@ -59,16 +59,6 @@ def _subseq_index(haystack: Sequence[int], needle: Sequence[int]) -> int:
     return -1
 
 
-def _newest_marker(haystack: Sequence[int], a: Sequence[int], b: Sequence[int]) -> int:
-    """Report which of *a* / *b* occurs last in *haystack*.
-
-    Returns 0 if *a* is the newest marker, 1 if *b* is, -1 if neither occurs.
-    Equivalent to comparing two ``_subseq_index`` results, but a single backward
-    pass that stops at the first hit instead of walking to index 0 twice.
-    """
-    return -1 if not a or not b else rfind_token_sequences(haystack, (a, b))[1]
-
-
 class KimiK3ReasoningParser(ReasoningParser):
     """Reasoning parser for the Kimi K3 (XTML) think channel."""
 
@@ -161,8 +151,18 @@ class KimiK3ReasoningParser(ReasoningParser):
         # marker). A missing open marker (e.g. it was consumed as the generation
         # prefix) means a close marker alone ends reasoning, which is what
         # "close is the newest marker" already encodes.
+        # A response opener newer than every think marker means the model
+        # skipped the think channel entirely (#57714): reasoning never
+        # started, so it ends here — otherwise the structured-output gate
+        # never engages and the response body is generated unconstrained.
+        # Single backward pass: reasoning ends iff the newest marker is the
+        # think close or the response opener (kind 0 is the think open).
         return (
-            _newest_marker(input_ids, self._think_close_ids, self._think_open_ids) == 0
+            rfind_token_sequences(
+                input_ids,
+                (self._think_open_ids, self._think_close_ids, self._response_open_ids),
+            )[1]
+            > 0
         )
 
     def is_reasoning_end_streaming(
@@ -184,10 +184,25 @@ class KimiK3ReasoningParser(ReasoningParser):
         delta = list(delta_ids)
         if not delta:
             return False
-        carry = max(len(self._think_close_ids), len(self._think_open_ids)) - 1
+        carry = (
+            max(
+                len(self._think_close_ids),
+                len(self._think_open_ids),
+                len(self._response_open_ids),
+            )
+            - 1
+        )
         head = len(input_ids) - len(delta)
         window = list(input_ids[max(0, head - carry) : head]) + delta
-        return _newest_marker(window, self._think_close_ids, self._think_open_ids) == 0
+        # Same end rule as is_reasoning_end, on the step window: a response
+        # opener with no newer think marker ends reasoning (#57714).
+        return (
+            rfind_token_sequences(
+                window,
+                (self._think_open_ids, self._think_close_ids, self._response_open_ids),
+            )[1]
+            > 0
+        )
 
     def _extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if not self._thinking_enabled:
