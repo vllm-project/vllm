@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 
 from vllm.logprobs import (
     FlatLogprobs,
@@ -101,6 +102,33 @@ def test_append_logprobs_for_next_position_flat() -> None:
     assert logprobs.logprobs == [0.1, 0.2, 0.3]
     assert logprobs.ranks == [10, 11, 1]
     assert logprobs.decoded_tokens == ["1", "2", "3"]
+
+
+@pytest.mark.parametrize("flat_logprobs", [False, True])
+def test_append_logprobs_for_next_position_per_entry_ranks(
+    flat_logprobs: bool,
+) -> None:
+    logprobs = create_sample_logprobs(flat_logprobs=flat_logprobs)
+    append_logprobs_for_next_position(
+        logprobs,
+        token_ids=[7, 3, 7, 5, 0],
+        logprobs=[-0.5, -2.0, -0.5, -1.0, float("-inf")],
+        decoded_tokens=["7", "3", "7", "5", "0"],
+        rank=[1, 4, 1, 2, 50],
+        num_logprobs=3,
+    )
+    if flat_logprobs:
+        assert isinstance(logprobs, FlatLogprobs)
+        assert logprobs.token_ids == [7, 3, 7, 5]
+        assert logprobs.ranks == [1, 4, 1, 2]
+    else:
+        assert logprobs == [
+            {
+                7: Logprob(logprob=-0.5, rank=1, decoded_token="7"),
+                3: Logprob(logprob=-2.0, rank=4, decoded_token="3"),
+                5: Logprob(logprob=-1.0, rank=2, decoded_token="5"),
+            }
+        ]
 
 
 LOGPROBS_ONE_POSITION_0: LogprobsOnePosition = {

@@ -12,6 +12,7 @@ use bytes::Bytes;
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use self::array::DecodedRanks;
 use self::wire::*;
 use crate::error::{Error, Result, bail_ext_value_decode};
 use crate::protocol::dtype::{NumpyDtype, TensorDtype};
@@ -21,7 +22,7 @@ use crate::protocol::tensor::{WireArrayData, WireNdArray};
 ///
 /// The first entry in a [`PositionLogprobs`] is always the sampled/selected
 /// token for that position. Any remaining entries follow the engine's returned
-/// top-k candidate order.
+/// candidate order: the top-k, or the requested `logprob_token_ids`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TokenLogprob {
     pub token_id: u32,
@@ -29,7 +30,8 @@ pub struct TokenLogprob {
     pub logprob: f32,
     /// The sampled/selected token uses its actual vocab rank. Remaining entries
     /// use 1-based top-k ranks matching the engine's returned candidate
-    /// order.
+    /// order, unless the engine sends a rank per entry (`logprob_token_ids`),
+    /// in which case every entry uses its actual vocab rank.
     /// A sampled/selected rank of 0 occurs when its logprob is NaN: the engine's
     /// `(logprobs >= selected_logprob).sum(-1)` counts no matching values.
     pub rank: u32,
@@ -46,9 +48,12 @@ pub struct PositionLogprobs {
 
 impl PositionLogprobs {
     /// Convert one decoded logprobs row into this per-position form by grouping
-    /// each token/logprob pair together with the sampled/selected token's
-    /// actual vocab rank.
-    fn from_decoded_row(token_ids: &[u32], logprobs: &[f32], sampled_rank: u32) -> Result<Self> {
+    /// each token/logprob pair together with its rank.
+    fn from_decoded_row(
+        token_ids: &[u32],
+        logprobs: &[f32],
+        ranks: impl IntoIterator<Item = u32>,
+    ) -> Result<Self> {
         if token_ids.len() != logprobs.len() {
             bail_ext_value_decode!(
                 "logprobs row length mismatch: token_ids={}, logprobs={}",
@@ -56,19 +61,16 @@ impl PositionLogprobs {
                 logprobs.len()
             );
         }
-        let mut entries = Vec::with_capacity(token_ids.len());
-        for (index, (&token_id, &logprob)) in token_ids.iter().zip(logprobs.iter()).enumerate() {
-            let rank = if index == 0 {
-                sampled_rank
-            } else {
-                index as u32
-            };
-            entries.push(TokenLogprob {
+        let entries = token_ids
+            .iter()
+            .zip(logprobs)
+            .zip(ranks)
+            .map(|((&token_id, &logprob), rank)| TokenLogprob {
                 token_id,
                 logprob,
                 rank,
-            });
-        }
+            })
+            .collect();
         Ok(Self { entries })
     }
 }
@@ -251,7 +253,7 @@ impl WireLogprobs {
         )?;
         let logprobs =
             array::decode_array2_f32(self.logprobs, &format!("{field_prefix}.logprobs"), frames)?;
-        let token_ranks = array::decode_array1_u32(
+        let token_ranks = array::decode_ranks_u32(
             self.token_ranks,
             &format!("{field_prefix}.token_ranks"),
             frames,
@@ -266,12 +268,26 @@ impl WireLogprobs {
                 logprobs.cols
             );
         }
-        if token_ids.rows != token_ranks.len() {
-            bail_ext_value_decode!(
-                "{field_prefix}: token_ranks length {} does not match row count {}",
-                token_ranks.len(),
-                token_ids.rows
-            );
+        match &token_ranks {
+            DecodedRanks::Sampled(ranks) if ranks.len() != token_ids.rows => {
+                bail_ext_value_decode!(
+                    "{field_prefix}: token_ranks length {} does not match row count {}",
+                    ranks.len(),
+                    token_ids.rows
+                );
+            }
+            DecodedRanks::PerToken(ranks)
+                if ranks.rows != token_ids.rows || ranks.cols != token_ids.cols =>
+            {
+                bail_ext_value_decode!(
+                    "{field_prefix}: token_ranks shape ({}, {}) does not match token ids ({}, {})",
+                    ranks.rows,
+                    ranks.cols,
+                    token_ids.rows,
+                    token_ids.cols
+                );
+            }
+            _ => {}
         }
 
         // Empty position lists may be encoded as either [0, 0] or [0, k + 1].
@@ -287,19 +303,29 @@ impl WireLogprobs {
             );
         }
 
-        let mut positions = Vec::with_capacity(token_ids.rows);
-        for ((token_ids_row, logprobs_row), sampled_rank) in token_ids
-            .data
-            .chunks(token_ids.cols)
-            .zip(logprobs.data.chunks(logprobs.cols))
-            .zip(token_ranks)
-        {
-            positions.push(PositionLogprobs::from_decoded_row(
-                token_ids_row,
-                logprobs_row,
-                sampled_rank,
-            )?);
-        }
+        let rows = token_ids.data.chunks(token_ids.cols).zip(logprobs.data.chunks(logprobs.cols));
+        let positions: Vec<PositionLogprobs> = match token_ranks {
+            DecodedRanks::Sampled(ranks) => rows
+                .zip(ranks)
+                .map(|((token_ids_row, logprobs_row), sampled_rank)| {
+                    PositionLogprobs::from_decoded_row(
+                        token_ids_row,
+                        logprobs_row,
+                        std::iter::once(sampled_rank).chain(1..),
+                    )
+                })
+                .collect::<Result<_>>()?,
+            DecodedRanks::PerToken(ranks) => rows
+                .zip(ranks.data.chunks(ranks.cols))
+                .map(|((token_ids_row, logprobs_row), ranks_row)| {
+                    PositionLogprobs::from_decoded_row(
+                        token_ids_row,
+                        logprobs_row,
+                        ranks_row.iter().copied(),
+                    )
+                })
+                .collect::<Result<_>>()?,
+        };
 
         Ok(Logprobs { positions })
     }
