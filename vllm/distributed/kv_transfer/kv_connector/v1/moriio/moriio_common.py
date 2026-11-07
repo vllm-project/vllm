@@ -431,6 +431,11 @@ class MoRIIOConstants:
 
     VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT = 3600
 
+    # Handshake recv timeout (ms) and retry parameters (Gap 3).
+    HANDSHAKE_RECV_TIMEOUT_MS = 5000
+    HANDSHAKE_MAX_RETRIES = 5
+    HANDSHAKE_BACKOFF_BASE = 1.0  # seconds; doubled each retry
+
     # Timeout (seconds) for waiting_for_transfer_complete before raising TransferError.
     # Overridable via kv_connector_extra_config["transfer_timeout"].
     DEFAULT_TRANSFER_TIMEOUT = 30.0
