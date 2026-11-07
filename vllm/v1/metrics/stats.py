@@ -236,6 +236,11 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
+    # Free KV cache blocks currently held back from admissions: the watermark
+    # (while requests are running), and the reserve for in-flight prefills
+    # that an async KV load admission must leave free (with a KV connector).
+    num_watermark_blocks: int = 0
+    num_inflight_load_reserved_blocks: int = 0
     iteration_details: SchedulerIterationDetails | None = None
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)

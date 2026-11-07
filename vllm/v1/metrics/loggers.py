@@ -626,6 +626,29 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, per_engine_labelvalues
         )
 
+        gauge_kv_admission_reserved_blocks = self._gauge_cls(
+            name="vllm:kv_admission_reserved_blocks",
+            documentation=(
+                "Free KV cache blocks the scheduler currently holds back from "
+                "admissions. Kind labels: 'watermark' = headroom kept free when "
+                "admitting waiting requests while others are running "
+                "(--watermark); 'inflight_load' = blocks in-flight prefills "
+                "still need, which an async KV load admission must leave free "
+                "(0 without a KV connector)."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames + ["kind"],
+        )
+        self.gauge_kv_admission_reserved_blocks: dict[str, dict[int, Gauge]] = {}
+        for kind in ("watermark", "inflight_load"):
+            self.gauge_kv_admission_reserved_blocks[kind] = create_metric_per_engine(
+                gauge_kv_admission_reserved_blocks,
+                {
+                    idx: labelvalues + [kind]
+                    for idx, labelvalues in per_engine_labelvalues.items()
+                },
+            )
+
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             counter_corrupted_requests = self._counter_cls(
                 name="vllm:corrupted_requests",
@@ -1163,6 +1186,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     scheduler_stats.num_kv_fetch_reqs_by_stage.get(stage, 0)
                 )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+            self.gauge_kv_admission_reserved_blocks["watermark"][engine_idx].set(
+                scheduler_stats.num_watermark_blocks
+            )
+            self.gauge_kv_admission_reserved_blocks["inflight_load"][engine_idx].set(
+                scheduler_stats.num_inflight_load_reserved_blocks
+            )
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries
