@@ -401,22 +401,23 @@ def split_audio(
     audio_data: np.ndarray,
     sample_rate: int,
     max_clip_duration_s: float,
-    overlap_duration_s: float,
+    overlap_duration_s: float | None,
     min_energy_window_size: int,
 ) -> list[np.ndarray]:
     """Split audio into chunks with intelligent split points.
 
     Splits long audio into smaller chunks at low-energy regions to minimize
-    cutting through speech. Uses overlapping windows to find quiet moments
-    for splitting.
+    cutting through speech.
 
     Args:
         audio_data: 1D mono audio array to split. ASR models consume mono, so
                    callers must downmix before chunking.
         sample_rate: Sample rate of the audio in Hz.
         max_clip_duration_s: Maximum duration of each chunk in seconds.
-        overlap_duration_s: Overlap duration in seconds between consecutive chunks.
-                           Used to search for optimal split points.
+        overlap_duration_s: Duration in seconds of the region before each chunk's
+                           end that is searched for the split point. Chunks do
+                           not overlap. ``None`` means 10 s, capped at half of
+                           ``max_clip_duration_s``.
         min_energy_window_size: Window size in samples for finding low-energy regions.
 
     Returns:
@@ -442,6 +443,9 @@ def split_audio(
         raise ValueError(
             f"split_audio expects mono audio, got shape {audio_data.shape}"
         )
+
+    if overlap_duration_s is None:
+        overlap_duration_s = min(10.0, max_clip_duration_s / 2)
 
     chunk_size = int(sample_rate * max_clip_duration_s)
     overlap_size = int(sample_rate * overlap_duration_s)
