@@ -16,7 +16,7 @@ from vllm.config.kernel import (
     FLASHINFER_MOE_EP_CUTEDSL,
     FLASHINFER_MOE_EP_DEEP_GEMM,
 )
-from vllm.distributed import get_ep_group
+from vllm.distributed import get_ep_group, get_tp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -456,6 +456,16 @@ class FlashInferMoeEp:
                 for capacity in _SM90_WORKSPACE_CAPACITIES
                 if capacity < moe.max_num_tokens
             ]
+        parallel = moe.moe_parallel_config
+        self._tp_shard_group = None
+        if (
+            block_fp8
+            and parallel.dp_size == parallel.pcp_size == parallel.sp_size == 1
+            and not get_current_vllm_config().parallel_config.enable_hc_sp
+            and get_tp_group().world_size == ep_group.world_size
+            and get_tp_group().world_size > 1
+        ):
+            self._tp_shard_group = get_tp_group()
         self._device = weights.w13.device
         self._hidden_size = moe.hidden_dim
         self._max_num_tokens = moe.max_num_tokens
@@ -498,6 +508,41 @@ class FlashInferMoeEp:
         )
 
     def __call__(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        group = self._tp_shard_group
+        count = hidden_states.shape[0]
+        if group is None or count < 2048:
+            return self._forward(hidden_states, topk_ids, topk_weights)
+        if count > self._max_num_tokens:
+            raise ValueError("TP token batch exceeds the configured maximum")
+        local = (count + group.world_size - 1) // group.world_size
+        start = group.rank_in_group * local
+        available = max(0, min(local, count - start))
+
+        def chunk(tensor: torch.Tensor) -> torch.Tensor:
+            part = tensor[start : start + available]
+            return torch.nn.functional.pad(
+                part, (0, 0, 0, local - available)
+            ).contiguous()
+
+        output = self._forward(
+            chunk(hidden_states), chunk(topk_ids), chunk(topk_weights)
+        )
+        restored = torch.empty(
+            (local * group.world_size, hidden_states.shape[1]),
+            dtype=output.dtype,
+            device=output.device,
+        )
+        torch.distributed.all_gather_into_tensor(
+            restored, output.contiguous(), group=group.device_group
+        )
+        return restored[:count]
+
+    def _forward(
         self,
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
