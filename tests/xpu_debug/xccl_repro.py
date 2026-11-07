@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import argparse
 import os
 import sys
@@ -35,8 +38,12 @@ def dump_stacks(pids: list[int]) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("iterations", type=int, nargs="?", default=100)
-    ap.add_argument("--timeout", type=float, default=60.0,
-                    help="seconds before an iteration counts as hung")
+    ap.add_argument(
+        "--timeout",
+        type=float,
+        default=60.0,
+        help="seconds before an iteration counts as hung",
+    )
     ap.add_argument("--dump", action="store_true")
     ap.add_argument("--keep", action="store_true")
     args = ap.parse_args()
@@ -65,11 +72,15 @@ def main() -> None:
         if alive:
             hangs += 1
             pids = [p.pid for p in alive]
-            print(f"iter {i}: HANG (> {args.timeout:.0f}s), alive pids={pids}", flush=True)
+            print(
+                f"iter {i}: HANG (> {args.timeout:.0f}s), alive pids={pids}", flush=True
+            )
             if args.dump:
                 dump_stacks(pids)
             if args.keep:
-                print("keeping processes alive for inspection; Ctrl+C to stop", flush=True)
+                print(
+                    "keeping processes alive for inspection; Ctrl+C to stop", flush=True
+                )
                 for p in procs:
                     p.join()
             for p in alive:
@@ -89,7 +100,10 @@ def main() -> None:
         except OSError:
             pass
 
-    print(f"SUMMARY: iterations={args.iterations} hangs={hangs} failures={fails}", flush=True)
+    print(
+        f"SUMMARY: iterations={args.iterations} hangs={hangs} failures={fails}",
+        flush=True,
+    )
     sys.exit(1 if hangs or fails else 0)
 
 
