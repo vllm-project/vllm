@@ -71,7 +71,7 @@ class BudgetGraphMetadata:
     output_buffer: torch.Tensor      # encoder hidden states
 ```
 
-Budgets are auto-generated from a model-provided range via `get_encoder_cudagraph_budget_range()` on a subdivided grid — quarter-octave steps up to 1024 and half-octave steps above (e.g., `[64, 80, 96, ..., 12288, 16384]`, 25 levels for the range `[64, 16384]`) — with the model-provided minimum and maximum always included even when they do not fall on grid points. Budgets can also be explicitly specified by the user via `encoder_cudagraph_token_budgets` in `CompilationConfig`.
+Budgets are auto-generated from a model-provided range via `get_encoder_cudagraph_budget_range()` on a subdivided grid — quarter-octave steps up to 1024 and half-octave steps above (e.g., `[64, 80, 96, ..., 12288, 16384]`, 25 levels for the range `[64, 16384]`) — with the model-provided minimum and maximum always included even when they do not fall on grid points. Paths whose `EncoderCudaGraphPathConfig.min_token_budget` is set have fixed-size items and instead get exact item-multiple budgets (every item count up to 16 fits exactly, then 1/8-octave steps), so no budget is ever redundant for them. Budgets can also be explicitly specified by the user via `encoder_cudagraph_token_budgets` in `CompilationConfig`.
 
 The dense default table is affordable for every model because capture buffers are shared across budgets automatically, with no model opt-in: budgets are captured largest-first, the first capture of each (path, capture-axis) group provides one set of max-size input buffers and one max-size output buffer, and every later capture of the group records its graph into prefix views of them (the same pattern as decoder `input_ids[:num_tokens]`). At capture time the manager checks each probed buffer for prefix compatibility (same trailing dims and dtype, no more rows than the shared buffer; scalars are shared wholesale) and copies it into the shared buffer; buffers that do not fit this pattern keep their own per-budget allocation, so models need no code changes. Buffer memory therefore stays at ~1× the largest budget instead of scaling with the sum of all budgets.
 
@@ -83,8 +83,8 @@ Each entry in `EncoderCudaGraphConfig.paths` defines an independently captured e
 
 **Budget generation.** Each path gets a separate budget list. For DeepSeek-OCR:
 
-* the `global` path — subdivided-grid budgets starting at the global path minimum (e.g., `[272, 320, 384, 448, 512, 640, 768, 896, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 13824]` for DeepSeek-OCR).
-* the `local` path — subdivided-grid budgets starting at the local path minimum (e.g., `[0, 100, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 13824]` for DeepSeek-OCR). A budget of `0` is included when `allow_zero_tokens=True` to handle images with no local patches (images ≤ 640×640 that produce only global features).
+* the `global` path — DeepSeek-OCR's global path has fixed-size items (272 tokens per image), so it gets exact item-multiple budgets instead of the subdivided grid: every item count up to 16 fits exactly, then 1/8-octave steps (e.g., `[272, 544, 816, 1088, ..., 4352, 4896, 5440, ..., 13056, 13600]`).
+* the `local` path — also fixed-size items (100 tokens per crop patch), so likewise item-multiple budgets (e.g., `[0, 100, 200, ..., 1600, 1800, 2000, ..., 12200, 13400, 13800]`). A budget of `0` is included when `allow_zero_tokens=True` to handle images with no local patches (images ≤ 640×640 that produce only global features).
 
 Both lists are capped at the same `max_budget`.
 
