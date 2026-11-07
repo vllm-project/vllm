@@ -553,6 +553,24 @@ class BatchDCPPrefillWrapper:
         return out
 
 
+def _kernel_block_sizes(
+    num_qo_heads: int | None, num_kv_heads: int
+) -> list[int | MultipleOf]:
+    # Page sizes >= 128 only run on the trtllm-gen dynamic kernel (GQA/MQA
+    # on Blackwell); advertise them only when usable so selection never
+    # picks a large kernel block we cannot serve.
+    use_large_pages = (
+        num_qo_heads is not None
+        and num_kv_heads > 0
+        and num_qo_heads // num_kv_heads > 1
+        and current_platform.is_device_capability_family(100)
+        and can_use_trtllm_attention(num_qo_heads, num_kv_heads)
+    )
+    if not use_large_pages:
+        return [16, 32, 64]
+    return [16, 32, 64, 128, 256, 512, 1024]
+
+
 class FlashInferBackend(AttentionBackend):
     supports_kv_cache_update_bypass: bool = True
 
@@ -585,25 +603,30 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        # Page sizes >= 128 only run on the trtllm-gen dynamic kernel (GQA/MQA
-        # on Blackwell); advertise them only when usable so selection never
-        # picks a large kernel block we cannot serve.
-        use_large_pages = False
         vllm_config = get_current_vllm_config_or_none()
-        if vllm_config is not None and vllm_config.model_config is not None:
-            pc = vllm_config.parallel_config
-            mc = vllm_config.model_config
-            num_qo_heads = mc.get_num_attention_heads(pc)
-            num_kv_heads = mc.get_num_kv_heads(pc)
-            use_large_pages = (
-                num_kv_heads > 0
-                and num_qo_heads // num_kv_heads > 1
-                and current_platform.is_device_capability_family(100)
-                and can_use_trtllm_attention(num_qo_heads, num_kv_heads)
-            )
-        if not use_large_pages:
-            return [16, 32, 64]
-        return [16, 32, 64, 128, 256, 512, 1024]
+        if vllm_config is None or vllm_config.model_config is None:
+            return _kernel_block_sizes(None, 0)
+        pc = vllm_config.parallel_config
+        mc = vllm_config.model_config
+        return _kernel_block_sizes(
+            mc.get_num_attention_heads(pc), mc.get_num_kv_heads(pc)
+        )
+
+    @classmethod
+    def get_supported_kernel_block_sizes_for_layers(
+        cls, kv_cache_spec, layer_names: list[str]
+    ) -> list[int | MultipleOf]:
+        # A draft head can have other head counts than the target model, so
+        # take them from its own layers and spec.
+        vllm_config = get_current_vllm_config_or_none()
+        num_qo_heads = (
+            get_num_attention_heads_from_layers(vllm_config, layer_names)
+            if vllm_config is not None
+            else None
+        )
+        if num_qo_heads is None or not isinstance(kv_cache_spec, AttentionSpec):
+            return cls.get_supported_kernel_block_sizes(kv_cache_spec)
+        return _kernel_block_sizes(num_qo_heads, kv_cache_spec.num_kv_heads)
 
     @staticmethod
     def get_name() -> str:
