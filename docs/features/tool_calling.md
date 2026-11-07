@@ -537,6 +537,10 @@ Supported models:
 
 Flags: `--tool-call-parser qwen3_xml`
 
+With automatic tool choice and streaming, the Qwen3 XML parser buffers tool
+calls after the first until generation ends. This lets it check for extra
+closing tags copied into a parameter before returning additional calls.
+
 ### MiMo-V2.6 Models (`mimo`)
 
 Supported models:

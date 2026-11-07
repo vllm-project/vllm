@@ -164,7 +164,7 @@ def replay_streaming(
     tokens: list[tuple[int, str]],
     chunk_size: int | None = None,
     holdback_chars: int = 0,
-    finished_on_last: bool = False,
+    finished_on_last: bool = True,
     tools: list[dict] | None = None,
     prompt_token_ids: list[int] | None = None,
 ) -> list[DeltaMessage | None]:
