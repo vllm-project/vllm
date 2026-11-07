@@ -51,6 +51,8 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 A complete example is available at [`examples/features/speculative_decoding/extract_hidden_states_offline.py`](../../../examples/features/speculative_decoding/extract_hidden_states_offline.py).
 
+Ming-3.0-ASR supports audio-conditioned extraction through the offline `LLM` API. Keep the original audio in `multi_modal_data` when replaying a transcript: token IDs alone do not preserve the audio embeddings. Use the native transcription prompt and append the target-generated transcript tokens before extraction.
+
 ## Online Example
 
 For improved performance, it is recommended to use a RAM-mounted file system such as `/dev/shm/` for online usage in which the client cleans up the files soon after they are generated.
