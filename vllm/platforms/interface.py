@@ -1235,7 +1235,7 @@ class Platform:
         """Returns whether the GPU is an integrated (UMA) device that shares
         system memory with the CPU. device_id None means the current device.
 
-        On UMA systems (e.g. NVIDIA GH200, DGX Spark, Jetson Orin),
+        On UMA systems (e.g. NVIDIA DGX Spark, Jetson Orin),
         cudaMemGetInfo may underreport free memory because it does not
         account for reclaimable OS memory (page cache, buffers).
         """

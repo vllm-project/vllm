@@ -696,6 +696,7 @@ class CudaPlatformBase(Platform):
         )
 
     @classmethod
+    @cache
     def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:
         return bool(torch.cuda.get_device_properties(device_id).is_integrated)
 
