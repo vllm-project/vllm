@@ -39,6 +39,7 @@ from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.models.deepseek_v4.common.vision import (
     DeepseekV4Aligner,
     DeepseekV4ViT,
+    encode_images,
     run_dp_sharded_vision_tower,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -49,6 +50,7 @@ from ..common.mm_preprocess import (
     DeepseekV4VLDummyInputsBuilder,
     DeepseekV4VLMultiModalProcessor,
     DeepseekV4VLProcessingInfo,
+    num_image_tokens,
 )
 from ..common.vl_cudagraph import DeepseekV4VLEncoderCudaGraphMixin
 from ..decoder_replay_layers import DecoderReplayLayers
@@ -157,7 +159,7 @@ class DeepseekV41ForCausalLM(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        if modality == "image":
+        if modality.startswith("image"):
             return IMAGE_PLACEHOLDER
         raise ValueError(f"Unsupported modality: {modality!r}")
 
@@ -237,16 +239,9 @@ class DeepseekV41ForCausalLM(
                 self.vision, self.aligner, patches, vit_grid
             )
         else:
-            image_embeds_list = []
-            vit_offset = 0
-            for n_vit_h, n_vit_w in vit_grid:
-                n_vit = n_vit_h * n_vit_w
-                image_embeds_list.append(
-                    self._encode_image(
-                        patches[vit_offset : vit_offset + n_vit], n_vit_h, n_vit_w
-                    )
-                )
-                vit_offset += n_vit
+            image_embeds_list = encode_images(
+                self.vision, self.aligner, patches, vit_grid
+            )
 
         embeds: list[torch.Tensor] = []
         span_offset = 0
@@ -264,6 +259,13 @@ class DeepseekV41ForCausalLM(
         return tuple(embeds)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        image_embeds = kwargs.get("image_embeds")
+        if image_embeds is not None:
+            llm_grid = kwargs["llm_grid"]
+            assert isinstance(image_embeds, torch.Tensor)
+            assert isinstance(llm_grid, torch.Tensor)
+            sizes = [num_image_tokens(h, w) for h, w in llm_grid.tolist()]
+            return image_embeds.split(sizes)
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []

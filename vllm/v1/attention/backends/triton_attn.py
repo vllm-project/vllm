@@ -114,8 +114,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self.num_heads_q = get_num_attention_heads_from_layers(
             vllm_config, layer_names
         ) or model_config.get_num_attention_heads(vllm_config.parallel_config)
-        self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
-        self.headdim = model_config.get_head_size()
+        self.num_heads_kv = kv_cache_spec.num_kv_heads
+        self.headdim = kv_cache_spec.head_size
 
         # Check if CUDA Graphs are enabled for decode
         self.decode_cudagraph_enabled = (
@@ -474,6 +474,8 @@ class TritonAttentionImpl(AttentionImpl):
             stride=(block_f32, slot_f32, head_f32),
             storage_offset=v_scale_off_f32,
         )
+        if self._set_kv_ptr_range:
+            set_triton_ptr_range(kv_cache, self._k_scale_cache, self._v_scale_cache)
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
@@ -746,6 +748,8 @@ class TritonAttentionImpl(AttentionImpl):
         if self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
+        if self._set_kv_ptr_range:
+            set_triton_ptr_range(kv_cache, key_cache, value_cache)
         return key_cache, value_cache
 
     def _forward_encoder_attention(
