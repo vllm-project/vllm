@@ -9,7 +9,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -22,6 +22,7 @@ from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+    get_flashinfer_mm_encoder_autotune_config,
     resolve_flashinfer_autotune_v2_root,
     resolve_rank_flashinfer_autotune_file,
     use_flashinfer_autotune_v2,
@@ -52,6 +53,8 @@ from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
 
 if TYPE_CHECKING:
+    from vllm.config import MultiModalConfig
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -437,6 +440,66 @@ def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ..
     return tuple(dict.fromkeys(token_counts))
 
 
+def _flashinfer_mm_encoder_autotune_num_items(
+    num_items: int, mm_config: "MultiModalConfig", tp_size: int
+) -> int:
+    # Identical dummy items must split evenly for matching rank caches.
+    if mm_config.mm_encoder_tp_mode == "data":
+        return num_items // tp_size * tp_size
+    return num_items
+
+
+def _run_flashinfer_autotune_mm_encoder(runner: "GPUModelRunner") -> None:
+    mm_config = get_flashinfer_mm_encoder_autotune_config(runner.vllm_config)
+    if mm_config is None:
+        return
+
+    from vllm.distributed.parallel_state import get_pp_group
+    from vllm.multimodal.encoder_budget import MultiModalBudget
+
+    if not get_pp_group().is_first_rank:
+        return
+    budget = MultiModalBudget(
+        runner.vllm_config, runner.mm_registry, enable_cache=False
+    )
+
+    if budget.get_encoder_budget() <= 0 or not budget.mm_max_toks_per_item:
+        return
+
+    encoder_runner = cast("GPUModelRunnerV2", runner).model_state.encoder_runner
+    tp_size = runner.vllm_config.parallel_config.tensor_parallel_size
+
+    for modality in budget.mm_max_toks_per_item:
+        num_profile_items = budget.mm_max_items_per_batch[modality]
+        num_items = _flashinfer_mm_encoder_autotune_num_items(
+            num_profile_items,
+            mm_config,
+            tp_size,
+        )
+        if num_items == 0:
+            logger.warning_once(
+                "Skipping FlashInfer autotuning for the %s encoder: the "
+                "profiling budget of %d items is smaller than TP size %d "
+                "and cannot give every rank nonempty work in data mode.",
+                modality,
+                num_profile_items,
+                tp_size,
+            )
+            continue
+        dummy_inputs = budget.get_dummy_encoder_profile_inputs(
+            modality, max_items_per_batch=num_items
+        )
+        logger.info(
+            "Running FlashInfer autotune for the %s encoder with %d items.",
+            modality,
+            len(dummy_inputs),
+        )
+        # Keep FlashInfer's per-op buckets: raw vision token counts can
+        # exceed the budget for projected multimodal embeddings.
+        outputs = encoder_runner.execute_mm_encoder(dummy_inputs)
+        del outputs
+
+
 def _run_flashinfer_autotune_dummy_runs(
     runner: "GPUModelRunner", *, skip_attn: bool = False
 ) -> None:
@@ -612,6 +675,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 autotune_hisparse_flashinfer_attention(runner)
             if not cache_hit:
                 _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
+                _run_flashinfer_autotune_mm_encoder(runner)
             replayssm_autotune_warmup(runner)
             _autotune_kimi_k3_kda_qkvg(runner.get_model())
     finally:
