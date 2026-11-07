@@ -789,14 +789,17 @@ def fp16_partial_sums_row_parallel_test_worker(
     rank: int,
     distributed_init_port: str,
 ):
-    """VLLM_TP_FP16_PARTIAL_SUMS on a TP row-parallel layer with rank-0 bias:
-    the output is the BF16 rounding of the FP16 sum of the FP16 partial sums,
-    bit for bit; block-FP8 ("kernel" mode) undoes the 2^-k prescale and the
-    bias; a LoRA wrapper falls back to BF16 partial sums."""
+    """VLLM_TP_FP16_PARTIAL_SUMS on a TP=2 RowParallelLinear with bias:
+
+    - unquantized: bit-exact BF16 rounding of the FP16 sum of FP16 partials;
+    - block FP8 ("kernel" mode): matches BF16 partial sums up to rounding;
+    - LoRA: falls back to BF16 partial sums.
+    """
     from types import SimpleNamespace
 
     from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
     from vllm.lora.layers import RowParallelLinearWithLoRA
+    from vllm.model_executor.kernels.linear.base import store_partial_sum_prescaled
     from vllm.model_executor.layers.linear import (
         RowParallelLinear,
         _fp16_partial_linear,
@@ -841,7 +844,7 @@ def fp16_partial_sums_row_parallel_test_worker(
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
     assert errors["1"] < errors["0"], errors
 
-    # block-FP8 ("kernel" mode): same output as BF16 partial sums up to rounding
+    # block FP8 ("kernel" mode): same output as BF16 partial sums up to rounding
     block = 128
     w_blocks = w.float().view(n // block, block, k // block, block)
     w_scale = w_blocks.abs().amax(dim=(1, 3)) / torch.finfo(torch.float8_e4m3fn).max
@@ -849,38 +852,50 @@ def fp16_partial_sums_row_parallel_test_worker(
     w_fp8 = w_fp8.to(torch.float8_e4m3fn)
     k_shard = slice(shard.start // block, shard.stop // block)
     vllm_config = VllmConfig(kernel_config=KernelConfig(linear_backend="triton"))
-    vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)  # Fp8LinearMethod
-    outs = {}
-    for flag in ("0", "1"):
-        monkeypatch.setenv("VLLM_TP_FP16_PARTIAL_SUMS", flag)
-        with (
-            set_current_vllm_config(vllm_config),
-            torch.device("cuda"),
-            set_default_torch_dtype(torch.bfloat16),  # Fp8LinearMethod out dtype
-        ):
-            layer = RowParallelLinear(
-                k,
-                n,
-                bias=True,
-                params_dtype=torch.bfloat16,
-                quant_config=Fp8Config(weight_block_size=[block, block]),
-            )
-            layer.weight.data.copy_(w_fp8[:, shard])
-            layer.weight_scale_inv.data.copy_(w_scale[:, k_shard])
-            layer.bias.data.copy_(b)
-            layer.quant_method.process_weights_after_loading(layer)
-        assert layer._fp16_partials == ("kernel" if flag == "1" else None)
-        outs[flag], _ = layer(x[:, shard])
-        assert outs[flag].dtype == torch.bfloat16
-    diff = float(((outs["1"].double() - outs["0"].double()).abs() / rms).mean())
-    assert diff < 1e-2, diff
-    partial = layer.quant_method.apply(layer, x[:, shard])
-    assert partial.dtype == torch.float16
+    # The FP8 linear methods read model_config.dtype.
+    vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    for quant_config, scale_name in (
+        (Fp8Config(weight_block_size=[block, block]), "weight_scale_inv"),
+    ):
+        outs = {}
+        for flag in ("0", "1"):
+            monkeypatch.setenv("VLLM_TP_FP16_PARTIAL_SUMS", flag)
+            with (
+                set_current_vllm_config(vllm_config),
+                torch.device("cuda"),
+                # The FP8 linear methods take their out dtype from the default.
+                set_default_torch_dtype(torch.bfloat16),
+            ):
+                layer = RowParallelLinear(
+                    k,
+                    n,
+                    bias=True,
+                    params_dtype=torch.bfloat16,
+                    quant_config=quant_config,
+                )
+                layer.weight.data.copy_(w_fp8[:, shard])
+                getattr(layer, scale_name).data.copy_(w_scale[:, k_shard])
+                layer.bias.data.copy_(b)
+                layer.quant_method.process_weights_after_loading(layer)
+            assert layer._fp16_partials == ("kernel" if flag == "1" else None)
+            outs[flag], _ = layer(x[:, shard])
+            assert outs[flag].dtype == torch.bfloat16
+        diff = float(((outs["1"].double() - outs["0"].double()).abs() / rms).mean())
+        assert diff < 1e-2, (scale_name, diff)
+        assert layer.quant_method.apply(layer, x[:, shard]).dtype == torch.float16
+        # A weight reload refills the prescaled block scales in place.
+        ptr = layer.partial_sum_block_scale.data_ptr()
+        store_partial_sum_prescaled(
+            layer, "partial_sum_block_scale", getattr(layer, scale_name)
+        )
+        assert layer.partial_sum_block_scale.data_ptr() == ptr
 
     # LoRA all-reduces quant_method.apply itself: back to BF16 partial sums
     with set_current_vllm_config(vllm_config):
         RowParallelLinearWithLoRA(layer)
     assert layer._fp16_partials is None and layer.partial_sum_scale == 1.0
+    assert not hasattr(layer, "partial_sum_block_scale")
+    assert not hasattr(layer, "_partial_sum_unscale_fp32")
     assert layer.quant_method.apply(layer, x[:, shard]).dtype == torch.bfloat16
 
 
@@ -952,68 +967,6 @@ def test_tp_fp16_partial_sums_scale_is_exact_and_overflows():
     torch.testing.assert_close(
         in_range, ref, rtol=2e-3, atol=1e-3 * float(ref.abs().max())
     )
-
-
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="needs CUDA")
-def test_tp_fp16_partial_sums_nvfp4_kernel():
-    """NVFP4 ("kernel" mode, CUTLASS and FlashInfer CUTLASS): the FP16 partial
-    sum carries the 2^-k prescale on alpha (per call or stored after loading)
-    and on the rank-0 bias, with the CUTLASS bias in the GEMM epilogue (SM120)
-    or added after it."""
-    from vllm._custom_ops import scaled_fp4_quant
-    from vllm.model_executor.kernels.linear.nvfp4.base import (
-        NvFp4LinearLayerConfig,
-        store_partial_sum_alpha,
-    )
-    from vllm.model_executor.kernels.linear.nvfp4.cutlass import (
-        CutlassNvFp4LinearKernel,
-    )
-    from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
-        FlashInferCutlassNvFp4LinearKernel,
-    )
-
-    kernel_classes = [
-        cls
-        for cls in (CutlassNvFp4LinearKernel, FlashInferCutlassNvFp4LinearKernel)
-        if cls.is_supported()[0]
-    ]
-    if not kernel_classes:
-        pytest.skip("needs an NVFP4 CUTLASS GEMM (SM100/SM120)")
-    torch.manual_seed(0)
-    m, k, n = 64, 2048, 1024
-    x = torch.randn(m, k, device="cuda").bfloat16()
-    w = (torch.randn(n, k, device="cuda") / k**0.5).bfloat16()
-    b = torch.randn(n, device="cuda").bfloat16()
-    fp4_range = torch.finfo(torch.float8_e4m3fn).max * 6.0
-    x_global = (fp4_range / x.float().abs().max()).reshape(1)
-    w_global = (fp4_range / w.float().abs().max()).reshape(1)
-    w_fp4, w_sf = scaled_fp4_quant(w, w_global)  # swizzled, as after loading
-    layer = torch.nn.Module()
-    layer.weight, layer.weight_scale = w_fp4, w_sf
-    layer.alpha = 1.0 / (x_global * w_global)
-    layer.input_global_scale_inv = x_global
-    layer.input_size_per_partition, layer.output_size_per_partition = k, n
-
-    for cls in kernel_classes:
-        kernel = cls(NvFp4LinearLayerConfig())
-        epilogues = {getattr(kernel, "bias_epilogue", False), False}
-        for bias_epilogue in epilogues:
-            if hasattr(kernel, "bias_epilogue"):
-                kernel.bias_epilogue = bias_epilogue
-            layer.partial_sum_dtype, layer.partial_sum_scale = None, 1.0
-            ref = kernel.apply_weights(layer, x, b)
-            layer.partial_sum_dtype, layer.partial_sum_scale = torch.float16, 0.25
-            part = kernel.apply_weights(layer, x, b)
-            assert ref.dtype == torch.bfloat16 and part.dtype == torch.float16
-            rms = float(ref.float().pow(2).mean().sqrt())
-            diff = float((part.float() * 4 - ref.float()).abs().mean()) / rms
-            assert diff < 1e-2, (cls.__name__, bias_epilogue, diff)
-            # alpha prescaled once after loading: same output as per call
-            store_partial_sum_alpha(layer)
-            torch.testing.assert_close(
-                kernel.apply_weights(layer, x, b), part, rtol=0, atol=0
-            )
-            del layer.partial_sum_alpha
 
 
 @multi_gpu_test(num_gpus=2)

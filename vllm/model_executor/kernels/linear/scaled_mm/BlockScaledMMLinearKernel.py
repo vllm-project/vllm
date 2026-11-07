@@ -16,6 +16,8 @@ from vllm.model_executor.utils import replace_parameter
 from ..base import (
     FP8Params,
     MMLinearKernel,
+    partial_sum_prescaled,
+    store_partial_sum_prescaled,
 )
 from .ScaledMMLinearKernel import FP8ScaledMMLinearLayerConfig
 
@@ -96,15 +98,12 @@ class Fp8BlockScaledMMLinearKernel(
 
         replace_parameter(layer, params.WEIGHT, new_weight.data)
         replace_parameter(layer, params.block_scale_attr, new_weight_scale.data)
-        # FP16 partial sums (VLLM_TP_FP16_PARTIAL_SUMS): store the 2^-k
-        # prescaled block scales once, next to the unscaled ones.
-        scale = getattr(layer, "partial_sum_scale", 1.0)
-        if (
-            self.supports_partial_sum_dtype
-            and getattr(layer, "partial_sum_dtype", None) is not None
-            and scale != 1.0
-        ):
-            layer.partial_sum_block_scale = new_weight_scale.data * scale
+        if self.supports_partial_sum_dtype:
+            store_partial_sum_prescaled(
+                layer,
+                "partial_sum_block_scale",
+                getattr(layer, params.block_scale_attr),
+            )
 
     def apply_weights(
         self,
@@ -113,10 +112,7 @@ class Fp8BlockScaledMMLinearKernel(
         bias: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        # RowParallelLinear may ask for FP16 partial sums (VLLM_TP_FP16_PARTIAL_SUMS)
         out_dtype = self.config.out_dtype
-        if self.supports_partial_sum_dtype:
-            out_dtype = getattr(layer, "partial_sum_dtype", None) or out_dtype
         params = self._get_layer_params(layer)
         weight = params.weight
         weight_scale = params.block_scale
@@ -140,14 +136,18 @@ class Fp8BlockScaledMMLinearKernel(
                 input_scale if input_scale is not None else input_2d.new_empty(1)
             )
 
-        partial_sum_scale = 1.0
-        if out_dtype != self.config.out_dtype:
-            partial_sum_scale = getattr(layer, "partial_sum_scale", 1.0)
-            if partial_sum_scale != 1.0:
-                prescaled = getattr(layer, "partial_sum_block_scale", None)
-                weight_scale = (
-                    weight_scale * partial_sum_scale if prescaled is None else prescaled
+        # FP16 partial sums of RowParallelLinear, prescaled by 2^-k.
+        partial_sum_dtype = None
+        if self.supports_partial_sum_dtype:
+            partial_sum_dtype = getattr(layer, "partial_sum_dtype", None)
+        if partial_sum_dtype is not None:
+            out_dtype = partial_sum_dtype
+            if layer.partial_sum_scale != 1.0:
+                weight_scale = partial_sum_prescaled(
+                    layer, "partial_sum_block_scale", weight_scale
                 )
+                if bias is not None:
+                    bias = bias * layer.partial_sum_scale
             output = self.apply_block_scaled_mm_out(
                 A=q_input,
                 B=weight,
@@ -164,8 +164,6 @@ class Fp8BlockScaledMMLinearKernel(
             )
 
         if bias is not None:
-            if partial_sum_scale != 1.0:
-                bias = bias * partial_sum_scale
             output = output + bias.to(output.dtype)
         return output.to(dtype=out_dtype).view(*output_shape)
 

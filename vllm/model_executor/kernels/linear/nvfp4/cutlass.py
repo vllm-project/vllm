@@ -17,12 +17,8 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
-from .base import (
-    NvFp4LinearKernel,
-    NvFp4LinearLayerConfig,
-    partial_sum_alpha,
-    store_partial_sum_alpha,
-)
+from ..base import partial_sum_prescaled, store_partial_sum_prescaled
+from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 
 class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
@@ -55,7 +51,7 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         )
         padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
         replace_parameter(layer, "weight", padded_weight)
-        store_partial_sum_alpha(layer)
+        store_partial_sum_prescaled(layer, "partial_sum_alpha", layer.alpha)
 
     def apply_weights(
         self,
@@ -64,9 +60,7 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        # RowParallelLinear may ask for FP16 partial sums
-        # (VLLM_TP_FP16_PARTIAL_SUMS); the SM100/SM120 kernels write FP16 or BF16.
-        output_dtype = getattr(layer, "partial_sum_dtype", None) or x.dtype
+        output_dtype = x.dtype
         output_shape = [*x.shape[:-1], output_size]
         weights_padding_bytes = nvfp4_weight_padding_bytes(layer)
 
@@ -78,12 +72,15 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
             padded_n=x.shape[-1] + weights_padding_bytes * 2,
         )
 
+        # FP16 partial sums of RowParallelLinear, prescaled by 2^-k.
         alpha = layer.alpha
-        partial_sum_scale = getattr(layer, "partial_sum_scale", 1.0)
-        if output_dtype != x.dtype and partial_sum_scale != 1.0:
-            alpha = partial_sum_alpha(layer)
-            if bias is not None:
-                bias = bias * partial_sum_scale
+        partial_sum_dtype = getattr(layer, "partial_sum_dtype", None)
+        if partial_sum_dtype is not None:
+            output_dtype = partial_sum_dtype
+            if layer.partial_sum_scale != 1.0:
+                alpha = partial_sum_prescaled(layer, "partial_sum_alpha", alpha)
+                if bias is not None:
+                    bias = bias * layer.partial_sum_scale
         if bias is not None:
             bias = bias.to(output_dtype)
 

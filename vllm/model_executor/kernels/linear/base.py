@@ -8,6 +8,29 @@ from typing import Any, ClassVar, Generic, Self, TypeVar
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.utils import refill_derived
+
+
+def store_partial_sum_prescaled(
+    layer: torch.nn.Module, name: str, tensor: torch.Tensor
+) -> None:
+    """With FP16 partial sums, store ``tensor`` times the 2^-k prescale as
+    ``layer.<name>``. A weight reload refills it in place (captured CUDA
+    graphs keep its address)."""
+    if (
+        getattr(layer, "partial_sum_dtype", None) is not None
+        and layer.partial_sum_scale != 1.0
+    ):
+        refill_derived(layer, name, tensor * layer.partial_sum_scale)
+
+
+def partial_sum_prescaled(
+    layer: torch.nn.Module, name: str, tensor: torch.Tensor
+) -> torch.Tensor:
+    """``tensor`` times the 2^-k prescale of FP16 partial sums, from the copy
+    stored after loading if there is one."""
+    stored = getattr(layer, name, None)
+    return tensor * layer.partial_sum_scale if stored is None else stored
 
 
 @dataclass
