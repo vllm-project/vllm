@@ -6,11 +6,27 @@ Records one row per Mooncake RPC (``save_exists``, ``save_put``, ``load_get``,
 ``lookup_exists``) with duration, key/byte counts, status, and failed-key
 count. Exposed to the logger via ``KVConnectorLogging`` and to Prometheus
 via ``MooncakeStorePromMetrics``.
+
+``MooncakeStorePromMetrics`` can also poll the Mooncake master's memory
+gauges (see ``poll_master_metrics``) and export the store usage
+fractions. It polls from the frontend process because connector stats only
+arrive on engine steps: an idle engine would freeze the gauges while leases
+expire and puts land in the store.
+
+The master does not export read-lease memory, so workers report the leases
+it grants them (reads and existence hits) as bytes per expiry second, and the
+frontend sums the seconds that have not passed.
 """
 
+import math
+import threading
+import time
+import urllib.request
 from dataclasses import dataclass
 from statistics import fmean
 from typing import Any
+
+from prometheus_client.parser import text_string_to_metric_families
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -19,6 +35,99 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+# Reserved ``data`` key for lease deltas. It is not an operation.
+LEASES_KEY = "leases"
+
+# Same buckets as vllm:kv_offload_cpu_allocation_size.
+_ALLOCATION_SIZE_BUCKETS = [1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144]
+
+
+# Master gauge name -> snapshot field. processing bytes exist only on masters
+# that publish them; without them ``write_usage`` and ``usage`` are not derived.
+_MASTER_GAUGES = {
+    "master_total_capacity_bytes": "capacity_bytes",
+    "master_allocated_bytes": "allocated_bytes",
+    "master_mem_processing_bytes": "processing_bytes",
+    "master_put_start_discarded_staging_size": "discarded_bytes",
+}
+
+
+def master_usage_fractions(
+    snapshot: dict[str, Any], leased_bytes: int
+) -> dict[str, float]:
+    """Store usage fractions from one master snapshot and the leased bytes.
+
+    ``usage`` counts memory eviction cannot reclaim now: puts in flight, data
+    under a read lease, and displaced replicas awaiting deferred release.
+    ``occupancy`` also counts evictable data.
+    """
+    capacity = float(snapshot.get("capacity_bytes", 0))
+    if capacity <= 0:
+        return {}
+    fractions = {"read_usage": leased_bytes / capacity}
+    if "allocated_bytes" in snapshot:
+        fractions["occupancy"] = snapshot["allocated_bytes"] / capacity
+    processing = snapshot.get("processing_bytes")
+    if processing is not None:
+        fractions["write_usage"] = processing / capacity
+        discarded = snapshot.get("discarded_bytes", 0)
+        fractions["usage"] = (processing + leased_bytes + discarded) / capacity
+    return fractions
+
+
+def parse_master_metrics(text: str) -> dict[str, int]:
+    """Pick the memory gauges out of the master's Prometheus text."""
+    snapshot: dict[str, int] = {}
+    for family in text_string_to_metric_families(text):
+        for sample in family.samples:
+            field = _MASTER_GAUGES.get(sample.name)
+            if field is not None:
+                snapshot[field] = snapshot.get(field, 0) + int(sample.value)
+    return snapshot
+
+
+def poll_master_metrics(url: str) -> dict[str, int] | None:
+    """One snapshot of the master's memory gauges; None if the poll fails."""
+    try:
+        with urllib.request.urlopen(url, timeout=2.0) as r:
+            return parse_master_metrics(r.read().decode())
+    except Exception as e:
+        logger.debug("Mooncake master metrics poll failed: %s", e)
+        return None
+
+
+class LeaseTracker:
+    """Read leases the master granted one worker: key -> (expiry second, bytes).
+
+    ``grant`` returns the change in leased bytes per expiry second. A key
+    leased again before its lease expires moves its bytes to the new expiry.
+    """
+
+    def __init__(self, ttl_s: float):
+        self._ttl_s = ttl_s
+        self._leases: dict[str, tuple[int, int]] = {}
+        self._next_prune = 0.0
+
+    def grant(
+        self, leased: list[tuple[str, int]], now: float | None = None
+    ) -> dict[int, int]:
+        now = time.time() if now is None else now
+        expires_at = math.ceil(now + self._ttl_s)
+        deltas: dict[int, int] = {}
+        for key, nbytes in leased:
+            old = self._leases.get(key)
+            if old is not None and old[0] > now:
+                deltas[old[0]] = deltas.get(old[0], 0) - old[1]
+            self._leases[key] = (expires_at, nbytes)
+            deltas[expires_at] = deltas.get(expires_at, 0) + nbytes
+        if now >= self._next_prune:
+            self._leases = {k: v for k, v in self._leases.items() if v[0] > now}
+            self._next_prune = now + self._ttl_s
+        return deltas
 
 
 def _nearest_rank_percentile(values: list[float], percentile: float) -> float:
@@ -55,7 +164,7 @@ class MooncakeStoreConnectorStats(KVConnectorStats):
     def reduce(self) -> dict[str, int | float]:
         reduced: dict[str, int | float] = {}
         for operation, records in sorted(self.data.items()):
-            if not records:
+            if not records or operation == LEASES_KEY:
                 continue
             durations = [float(record["duration_seconds"]) for record in records]
             reduced[f"{operation}_count"] = len(records)
@@ -75,6 +184,10 @@ class MooncakeStoreConnectorStats(KVConnectorStats):
             reduced[f"{operation}_error_count"] = sum(
                 1 for record in records if record["status"] == "error"
             )
+            if operation == "save_exists":
+                reduced[f"{operation}_existing_keys"] = sum(
+                    int(record.get("num_existing_keys", 0)) for record in records
+                )
         return reduced
 
     def record_operation(
@@ -86,6 +199,7 @@ class MooncakeStoreConnectorStats(KVConnectorStats):
         num_bytes: int = 0,
         status: str = "ok",
         num_failed_keys: int = 0,
+        num_existing_keys: int = 0,
     ) -> None:
         self.data.setdefault(operation, []).append(
             {
@@ -94,8 +208,16 @@ class MooncakeStoreConnectorStats(KVConnectorStats):
                 "num_bytes": num_bytes,
                 "status": status,
                 "num_failed_keys": num_failed_keys,
+                "num_existing_keys": num_existing_keys,
             }
         )
+
+    def record_leases(self, deltas: dict[int, int]) -> None:
+        """Record leased bytes gained (or moved away) per expiry second."""
+        records = self.data.setdefault(LEASES_KEY, [])
+        for expires_at, nbytes in deltas.items():
+            if nbytes:
+                records.append({"expires_at": expires_at, "bytes": nbytes})
 
 
 class MooncakeStorePromMetrics(KVConnectorPromMetrics):
@@ -154,6 +276,85 @@ class MooncakeStorePromMetrics(KVConnectorPromMetrics):
             documentation="Number of Mooncake store keys that failed in operations.",
             labelnames=metric_labelnames,
         )
+        self._histogram_allocation_size = self._histogram_cls(
+            name="vllm:mooncake_store_allocation_size",
+            documentation="Histogram of keys per save_put call, after "
+            "dropping keys the store already holds.",
+            buckets=_ALLOCATION_SIZE_BUCKETS,
+            labelnames=labelnames,
+        )
+        self._counter_existing_keys = self._counter_cls(
+            name="vllm:mooncake_store_save_existing_keys",
+            documentation="Save candidate keys skipped because the store "
+            "already holds them.",
+            labelnames=labelnames,
+        )
+        gauge_docs = {
+            "usage": "Fraction of Mooncake store memory eviction cannot "
+            "reclaim now: puts in flight, data under a read lease, and "
+            "displaced replicas awaiting deferred release.",
+            "write_usage": "Fraction of Mooncake store memory held by puts in flight.",
+            "read_usage": "Fraction of Mooncake store memory under a read lease "
+            "this vLLM instance took, estimated from its reads and existence hits.",
+            "occupancy": "Fraction of Mooncake store memory allocated, "
+            "including evictable data.",
+        }
+        self._usage_gauges = {
+            name: self._gauge_cls(
+                name=f"vllm:mooncake_store_cache_{name}_perc",
+                documentation=doc,
+                labelnames=labelnames,
+                multiprocess_mode="mostrecent",
+            )
+            for name, doc in gauge_docs.items()
+        }
+        # Built only for a configured connector, so the config is present.
+        assert self._kv_transfer_config is not None
+        # e.g. "http://<master-host>:9003/metrics"; unset disables the
+        # store usage gauges.
+        master_metrics_url = self._kv_transfer_config.kv_connector_extra_config.get(
+            "mooncake_master_metrics_url"
+        )
+        # Leased bytes per expiry second, from the workers' lease deltas.
+        self._lease_lock = threading.Lock()
+        self._leased_bytes_by_expiry: dict[int, int] | None = None
+        if master_metrics_url:
+            self._leased_bytes_by_expiry = {}
+            threading.Thread(
+                target=self._poll_master,
+                args=(master_metrics_url,),
+                name="mooncake-master-usage",
+                daemon=True,
+            ).start()
+
+    def _leased_bytes(self) -> int:
+        assert self._leased_bytes_by_expiry is not None
+        now = time.time()
+        with self._lease_lock:
+            buckets = self._leased_bytes_by_expiry
+            for expires_at in [t for t in buckets if t <= now]:
+                del buckets[expires_at]
+            return sum(buckets.values())
+
+    def _poll_master(self, url: str) -> None:
+        warned = False
+        while True:
+            snapshot = poll_master_metrics(url)
+            if snapshot is not None:
+                if "processing_bytes" not in snapshot and not warned:
+                    logger.warning(
+                        "Mooncake master at %s publishes no "
+                        "master_mem_processing_bytes; write_usage and usage "
+                        "are not reported.",
+                        url,
+                    )
+                    warned = True
+                fractions = master_usage_fractions(snapshot, self._leased_bytes())
+                # One store backs every engine, so every engine label gets it.
+                for name, value in fractions.items():
+                    for labelvalues in self.per_engine_labelvalues.values():
+                        self._usage_gauges[name].labels(*labelvalues).set(value)
+            time.sleep(1.0)
 
     def _get_metrics(
         self,
@@ -176,8 +377,19 @@ class MooncakeStorePromMetrics(KVConnectorPromMetrics):
     def observe(self, transfer_stats_data: dict[str, Any] | None, engine_idx: int = 0):
         if not transfer_stats_data:
             return
+        engine_labelvalues = self.per_engine_labelvalues[engine_idx]
         for operation, records in transfer_stats_data.items():
             assert isinstance(records, list)
+            if operation == LEASES_KEY:
+                if self._leased_bytes_by_expiry is not None:
+                    with self._lease_lock:
+                        buckets = self._leased_bytes_by_expiry
+                        for record in records:
+                            expires_at = int(record["expires_at"])
+                            buckets[expires_at] = (
+                                buckets.get(expires_at, 0) + record["bytes"]
+                            )
+                continue
             for record in records:
                 assert isinstance(record, dict)
                 status = str(record["status"])
@@ -187,3 +399,11 @@ class MooncakeStorePromMetrics(KVConnectorPromMetrics):
                 metrics["keys"].inc(int(record["num_keys"]))
                 metrics["bytes"].inc(int(record["num_bytes"]))
                 metrics["failed_keys"].inc(int(record["num_failed_keys"]))
+                if operation == "save_put":
+                    self._histogram_allocation_size.labels(*engine_labelvalues).observe(
+                        int(record["num_keys"])
+                    )
+                elif operation == "save_exists":
+                    self._counter_existing_keys.labels(*engine_labelvalues).inc(
+                        int(record.get("num_existing_keys", 0))
+                    )

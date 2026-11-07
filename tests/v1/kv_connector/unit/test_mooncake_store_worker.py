@@ -917,6 +917,36 @@ def test_store_sending_thread_records_mooncake_metrics():
     assert stats.data["save_put"][0]["status"] == "ok"
 
 
+def test_store_sending_thread_records_existing_keys():
+    store = MagicMock()
+    store.batch_is_exist.return_value = [1, 0]
+    store.batch_put_from_multi_buffers.return_value = [256]
+    thread = _make_store_sending_thread(store)
+    stats = MooncakeStoreConnectorStats()
+    thread._record_operation_cb = stats.record_operation
+
+    _run_store_req(thread, _make_store_req("req-a", [b"a0", b"a1"]))
+
+    assert stats.data["save_exists"][0]["num_keys"] == 2
+    assert stats.data["save_exists"][0]["num_existing_keys"] == 1
+    assert stats.data["save_put"][0]["num_keys"] == 1
+
+
+def test_store_sending_thread_records_leases_for_existing_keys():
+    store = MagicMock()
+    store.batch_is_exist.return_value = [1, 0]
+    store.batch_put_from_multi_buffers.return_value = [256]
+    thread = _make_store_sending_thread(store)
+    leases: list[list[tuple[str, int]]] = []
+    thread._record_leases_cb = leases.append
+
+    _run_store_req(thread, _make_store_req("req-a", [b"a0", b"a1"]))
+    # The first put sizes the group's keys; the next existence hit leases one.
+    _run_store_req(thread, _make_store_req("req-b", [b"b0", b"b1"]))
+
+    assert [[nbytes for _, nbytes in batch] for batch in leases] == [[256]]
+
+
 def test_process_tokens_uses_mask_num_as_start_chunk():
     db = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0),
@@ -2552,6 +2582,20 @@ def test_recv_thread_records_partial_failure_metrics(monkeypatch):
     assert stats.data["load_get"][0]["num_bytes"] == 512
     assert stats.data["load_get"][0]["status"] == "partial_failure"
     assert stats.data["load_get"][0]["num_failed_keys"] == 1
+
+
+def test_recv_thread_records_leases_for_loaded_keys(monkeypatch):
+    monkeypatch.delenv("VLLM_MOONCAKE_STORE_TIER_LOG", raising=False)
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.return_value = [256, -10]
+    thread = _make_store_recving_thread(store, disk_offload_buffer_budget_bytes=None)
+    leases: list[list[tuple[str, int]]] = []
+    thread._record_leases_cb = leases.append
+
+    thread._handle_request(_make_load_req("req-a", [b"a0", b"a1"], token_len=32))
+
+    # Only the key the master returned took a lease.
+    assert [[nbytes for _, nbytes in batch] for batch in leases] == [[256]]
 
 
 def test_recv_thread_uses_ratio_scaled_budget_for_first_pass_split():

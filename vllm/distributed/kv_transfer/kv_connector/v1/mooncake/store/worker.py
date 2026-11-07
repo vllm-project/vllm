@@ -99,7 +99,7 @@ from vllm.v1.kv_cache_interface import (
     group_kernel_blocks,
 )
 
-from .metrics import MooncakeStoreConnectorStats
+from .metrics import LeaseTracker, MooncakeStoreConnectorStats
 
 logger = init_logger(__name__)
 
@@ -442,6 +442,7 @@ class KVTransferThread(threading.Thread):
         name: str,
         record_operation: Callable[..., None] | None = None,
         request_queue: queue.Queue[Any] | None = None,
+        record_leases: Callable[[list[tuple[str, int]]], None] | None = None,
     ):
         super().__init__(daemon=True, name=name)
         self.store = store
@@ -450,6 +451,7 @@ class KVTransferThread(threading.Thread):
         self.tp_rank = tp_rank
         self.token_databases = token_databases
         self._record_operation_cb = record_operation
+        self._record_leases_cb = record_leases
         self.done_task_lock = threading.Lock()
         self.request_queue: queue.Queue[Any] = request_queue or queue.Queue()
         self.finished_requests: set[str] = set()
@@ -496,6 +498,7 @@ class KVTransferThread(threading.Thread):
         num_bytes: int = 0,
         status: str = "ok",
         num_failed_keys: int = 0,
+        num_existing_keys: int = 0,
     ) -> None:
         if self._record_operation_cb is None:
             return
@@ -506,7 +509,13 @@ class KVTransferThread(threading.Thread):
             num_bytes=num_bytes,
             status=status,
             num_failed_keys=num_failed_keys,
+            num_existing_keys=num_existing_keys,
         )
+
+    def _record_leases(self, leased: list[tuple[str, int]]) -> None:
+        """Report (key, bytes) the master just granted a read lease on."""
+        if self._record_leases_cb is not None and leased:
+            self._record_leases_cb(leased)
 
     def update_kv_event(self, events: list[BlockStored]):
         with self.kv_event_lock:
@@ -538,6 +547,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         supports_group_ids: bool = False,
         record_operation: Callable[..., None] | None = None,
         group_participates: Sequence[bool] | None = None,
+        record_leases: Callable[[list[tuple[str, int]]], None] | None = None,
     ):
         super().__init__(
             store,
@@ -547,7 +557,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
             ready_event,
             name="KVCacheStoreSendingThread",
             record_operation=record_operation,
+            record_leases=record_leases,
         )
+        # Bytes of one key per KV cache group, from its latest put; sizes the
+        # leases taken on keys the existence check finds already stored.
+        self._key_bytes_by_group: dict[int, int] = {}
         # Only ranks with identical group bytes may stripe PUTs (e.g., MLA).
         self.group_put_steps = group_put_steps
         self.coord = coord
@@ -791,8 +805,16 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 e,
             )
             return False
-        self._record_operation("save_exists", exists_start, len(keys))
         missing = [i for i, e in enumerate(exists) if e != 1]
+        self._record_operation(
+            "save_exists",
+            exists_start,
+            len(keys),
+            num_existing_keys=len(keys) - len(missing),
+        )
+        self._record_leases(
+            [(key, sum(size)) for key, size, e in zip(keys, sizes, exists) if e == 1]
+        )
         if not missing:
             return True
         keys = [keys[i] for i in missing]
@@ -992,14 +1014,22 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     num_failed_keys=len(keys),
                 )
                 raise
+            missing_indices = [
+                i for i, exists in enumerate(exists_states) if exists != 1
+            ]
             self._record_operation(
                 "save_exists",
                 save_exists_start,
                 len(keys),
+                num_existing_keys=len(keys) - len(missing_indices),
             )
-            missing_indices = [
-                i for i, exists in enumerate(exists_states) if exists != 1
-            ]
+            self._record_leases(
+                [
+                    (key, self._key_bytes_by_group[g_idx])
+                    for key, g_idx, exists in zip(keys, group_indices, exists_states)
+                    if exists == 1 and g_idx in self._key_bytes_by_group
+                ]
+            )
 
             if not missing_indices:
                 save_completed = not missing_source_blocks
@@ -1061,6 +1091,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 )
                 addrs.extend(group_addrs)
                 sizes.extend(group_sizes)
+                self._key_bytes_by_group[g_idx] = max(sum(s) for s in group_sizes)
 
             if current_event is not None:
                 current_event.synchronize()
@@ -1230,6 +1261,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         request_queue: queue.Queue[Any] | None = None,
         group_participates: Sequence[bool] | None = None,
         is_hma_required: bool = False,
+        record_leases: Callable[[list[tuple[str, int]]], None] | None = None,
     ):
         super().__init__(
             store,
@@ -1240,6 +1272,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             name="KVCacheStoreRecvingThread",
             record_operation=record_operation,
             request_queue=request_queue,
+            record_leases=record_leases,
         )
         self.group_participates = (
             list(group_participates)
@@ -1448,6 +1481,13 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     )
                     if value < 0
                 ]
+                self._record_leases(
+                    [
+                        (key, sum(size))
+                        for key, size, value in zip(batch_keys, batch_sizes, res)
+                        if value >= 0
+                    ]
+                )
                 self._record_operation(
                     "load_get",
                     load_get_start,
@@ -1681,6 +1721,9 @@ class MooncakeStoreWorker:
         self.finished_store_req: set[str] = set()
         self._kv_connector_stats_lock = threading.Lock()
         self.kv_connector_stats = MooncakeStoreConnectorStats()
+        self._leases = LeaseTracker(
+            float(extra_config.get("mooncake_kv_lease_ttl_ms", 10000)) / 1000
+        )
 
         self._kv_cache_config = kv_cache_config
         self.token_dbs: list[ChunkedTokenDatabase] = []
@@ -2242,6 +2285,7 @@ class MooncakeStoreWorker:
                 enable_group_semantics=self.enable_group_semantics,
                 supports_group_ids=self._supports_group_ids,
                 record_operation=self._record_kv_connector_operation,
+                record_leases=self._record_leases,
                 group_participates=[
                     group.kv_cache_spec.prefix_cacheable
                     for group in self._kv_cache_groups
@@ -2262,6 +2306,7 @@ class MooncakeStoreWorker:
                 ready_event_recving,
                 disk_offload_buffer_budget_bytes=self.disk_offload_buffer_budget_bytes,
                 record_operation=self._record_kv_connector_operation,
+                record_leases=self._record_leases,
                 request_queue=self.recv_request_queue,
                 group_participates=[
                     group.kv_cache_spec.prefix_cacheable
@@ -2400,6 +2445,7 @@ class MooncakeStoreWorker:
         num_bytes: int = 0,
         status: str = "ok",
         num_failed_keys: int = 0,
+        num_existing_keys: int = 0,
     ) -> None:
         with self._kv_connector_stats_lock:
             self.kv_connector_stats.record_operation(
@@ -2409,7 +2455,12 @@ class MooncakeStoreWorker:
                 num_bytes=num_bytes,
                 status=status,
                 num_failed_keys=num_failed_keys,
+                num_existing_keys=num_existing_keys,
             )
+
+    def _record_leases(self, leased: list[tuple[str, int]]) -> None:
+        with self._kv_connector_stats_lock:
+            self.kv_connector_stats.record_leases(self._leases.grant(leased))
 
     def get_kv_connector_stats(self) -> MooncakeStoreConnectorStats | None:
         with self._kv_connector_stats_lock:
