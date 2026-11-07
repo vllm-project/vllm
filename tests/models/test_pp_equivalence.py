@@ -23,6 +23,7 @@ from vllm.inputs import TokensPrompt
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+from vllm.platforms import current_platform
 
 from ..utils import multi_gpu_test
 from .registry import _TEXT_GENERATION_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
@@ -70,6 +71,13 @@ SPLIT_KV_SHARING: dict[str, tuple[int, str]] = {
     # The reduced config shares the last layer's KV cache with the one before.
     "Gemma4ForCausalLM": (4, "3,1"),
 }
+
+# Sparse MLA backends need Hopper or newer, as in test_initialization.py.
+SPARSE_MLA_ARCHS = (
+    "DeepseekV32ForCausalLM",
+    "Glm5NextForCausalLM",
+    "GlmMoeDsaForCausalLM",
+)
 
 ModelRegistry.fill_model_info_cache()
 # Examples that need remote code are left out until a CI run shows their status.
@@ -134,6 +142,25 @@ class LoaderInWorkers:
     so the load format, into the workers."""
 
 
+def _hf_overrides(hf_config, *, arch: str, num_layers: int):
+    info = HF_EXAMPLE_MODELS.get_hf_info(arch)
+    hf_config = dummy_hf_overrides(
+        hf_config,
+        model_arch=arch,
+        exist_overrides={**info.hf_overrides, **MOE_ON_EVERY_STAGE.get(arch, {})},
+        num_hidden_layers=num_layers,
+    )
+    if arch not in hf_config.architectures:
+        # The example of some text-only classes is a multimodal checkpoint; build
+        # the class under test from its text config.
+        text_config = hf_config.get_text_config()
+        if quant_config := getattr(hf_config, "quantization_config", None):
+            text_config.quantization_config = quant_config
+        hf_config = text_config
+    hf_config.architectures = [arch]
+    return hf_config
+
+
 def _run(
     vllm_runner,
     arch: str,
@@ -143,7 +170,6 @@ def _run(
     perturb_layer: int | None = None,
 ) -> list[dict]:
     info = HF_EXAMPLE_MODELS.get_hf_info(arch)
-    overrides = {**info.hf_overrides, **MOE_ON_EVERY_STAGE.get(arch, {})}
     with vllm_runner(
         info.default,
         revision=info.revision,
@@ -151,12 +177,7 @@ def _run(
         dtype=info.dtype,
         load_format=LOAD_FORMAT,
         model_loader_extra_config={"perturb_layer": perturb_layer},
-        hf_overrides=partial(
-            dummy_hf_overrides,
-            model_arch=arch,
-            exist_overrides=overrides,
-            num_hidden_layers=num_layers,
-        ),
+        hf_overrides=partial(_hf_overrides, arch=arch, num_layers=num_layers),
         pipeline_parallel_size=pp_size,
         enforce_eager=True,
         max_model_len=256,
@@ -169,7 +190,9 @@ def _run(
         worker_extension_cls=f"{__name__}.LoaderInWorkers",
     ) as vllm_model:
         llm = vllm_model.llm
-        vocab_size = min(llm.llm_engine.model_config.get_vocab_size(), 32000)
+        model_config = llm.llm_engine.model_config
+        assert model_config.architecture == arch
+        vocab_size = min(model_config.get_vocab_size(), 32000)
         rng = np.random.default_rng(0)
         params = SamplingParams(
             temperature=0.0,
@@ -218,15 +241,24 @@ def _check_equivalent(vllm_runner, arch: str, pp_size: int) -> None:
     )
 
 
+def _marks(arch: str) -> list[pytest.MarkDecorator]:
+    marks = []
+    if arch in KNOWN_PP_DEFECTS:
+        marks.append(pytest.mark.xfail(strict=True, reason=KNOWN_PP_DEFECTS[arch]))
+    if arch in SPARSE_MLA_ARCHS:
+        marks.append(
+            pytest.mark.skipif(
+                not current_platform.has_device_capability(90),
+                reason="Sparse MLA needs compute capability 9.0 or newer",
+            )
+        )
+    return marks
+
+
 def _params(archs):
     params = skip_unavailable_models(archs, HF_EXAMPLE_MODELS.get_hf_info)
     return [
-        pytest.param(
-            p, marks=pytest.mark.xfail(strict=True, reason=KNOWN_PP_DEFECTS[p])
-        )
-        if isinstance(p, str) and p in KNOWN_PP_DEFECTS
-        else p
-        for p in params
+        pytest.param(p, marks=_marks(p)) if isinstance(p, str) else p for p in params
     ]
 
 
@@ -245,6 +277,7 @@ def test_pp_equivalence_middle_stages(vllm_runner, arch: str):
     _check_equivalent(vllm_runner, arch, 4)
 
 
+@pytest.mark.timeout(CASE_TIMEOUT_S)
 @multi_gpu_test(num_gpus=2)
 def test_pp_equivalence_detects_a_changed_weight(vllm_runner):
     """Negative control: a weight that differs on the last stage must fail."""
@@ -254,12 +287,15 @@ def test_pp_equivalence_detects_a_changed_weight(vllm_runner):
     assert ref != test
 
 
+@pytest.mark.timeout(CASE_TIMEOUT_S)
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("arch", SPLIT_KV_SHARING)
-def test_pp_rejects_split_kv_sharing(vllm_runner, monkeypatch, arch: str):
+def test_pp_rejects_split_kv_sharing(vllm_runner, monkeypatch, capfd, arch: str):
     """A split that separates a layer from the layer whose KV cache it reads must
     fail at startup rather than produce output."""
     num_layers, partition = SPLIT_KV_SHARING[arch]
     monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", partition)
     with pytest.raises(RuntimeError, match="Engine core initialization failed"):
         _run(vllm_runner, arch, 2, num_layers)
+    # The engine error does not carry the cause; the workers log it.
+    assert "Specified KV sharing target layer" in "".join(capfd.readouterr())
