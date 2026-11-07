@@ -15,6 +15,14 @@ from vllm.tracing.utils import TRACE_HEADERS, LoadingSpanAttributes
 
 logger = init_logger(__name__)
 
+# The tracer provider owned by *this* process. The OTel global provider cannot
+# be relied upon: `set_tracer_provider` is once-per-process and its flag is
+# inherited across fork(), so a forked child (EngineCore, workers, API server
+# workers) would silently keep the parent's provider, whose exporter thread
+# does not survive the fork.
+_tracer_provider = None
+_tracer_provider_pid = None
+
 try:
     from opentelemetry import trace
     from opentelemetry.context.context import Context
@@ -26,6 +34,7 @@ try:
     )
     from opentelemetry.propagate import inject
     from opentelemetry.sdk.environment_variables import (
+        OTEL_EXPORTER_OTLP_PROTOCOL,
         OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
     )
     from opentelemetry.sdk.resources import Resource
@@ -83,16 +92,37 @@ def init_otel_tracer(
     trace_provider = TracerProvider(resource=resource)
     span_exporter = get_span_exporter(otlp_traces_endpoint)
     trace_provider.add_span_processor(BatchSpanProcessor(span_exporter))
+
+    global _tracer_provider, _tracer_provider_pid
+    _tracer_provider = trace_provider
+    _tracer_provider_pid = os.getpid()
+    # Best effort so third-party instrumentation sees it too; a no-op after fork.
     set_tracer_provider(trace_provider)
 
     atexit.register(trace_provider.shutdown)
+
+    logger.info(
+        "OTel tracing initialized: endpoint=%s exporter=%s",
+        otlp_traces_endpoint,
+        type(span_exporter).__module__,
+    )
 
     tracer = trace_provider.get_tracer(instrumenting_module_name)
     return tracer
 
 
+def get_tracer(instrumenting_module_name: str) -> Tracer:
+    """Returns a tracer bound to this process' provider."""
+    if _tracer_provider is not None and _tracer_provider_pid == os.getpid():
+        return _tracer_provider.get_tracer(instrumenting_module_name)
+    return trace.get_tracer(instrumenting_module_name)
+
+
 def get_span_exporter(endpoint):
-    protocol = os.environ.get(OTEL_EXPORTER_OTLP_TRACES_PROTOCOL, "grpc")
+    protocol = os.environ.get(
+        OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
+        os.environ.get(OTEL_EXPORTER_OTLP_PROTOCOL, "grpc"),
+    )
     if protocol == "grpc":
         exporter = OTLPGrpcExporter(endpoint=endpoint, insecure=True)
     elif protocol == "http/protobuf":
@@ -146,7 +176,7 @@ def instrument_otel(func, span_name, attributes, record_exception):
 
     @functools.wraps(func)
     async def async_wrapper(*args, **kwargs):
-        tracer = trace.get_tracer(module_name)
+        tracer = get_tracer(module_name)
         ctx = _get_smart_context()
         with (
             tracer.start_as_current_span(
@@ -161,7 +191,7 @@ def instrument_otel(func, span_name, attributes, record_exception):
 
     @functools.wraps(func)
     def sync_wrapper(*args, **kwargs):
-        tracer = trace.get_tracer(module_name)
+        tracer = get_tracer(module_name)
         ctx = _get_smart_context()
         with (
             tracer.start_as_current_span(
@@ -189,7 +219,7 @@ def manual_instrument_otel(
     if not _IS_OTEL_AVAILABLE:
         return
 
-    tracer = trace.get_tracer(__name__)
+    tracer = get_tracer(__name__)
     # Use provided context, or fall back to smart context detection
     ctx = context if context is not None else _get_smart_context()
 
