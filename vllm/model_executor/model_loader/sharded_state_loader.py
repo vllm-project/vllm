@@ -21,6 +21,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     runai_safetensors_weights_iterator,
 )
+from vllm.model_executor.utils import copy_weight_
 from vllm.transformers_utils.s3_utils import glob as s3_glob
 from vllm.transformers_utils.utils import is_s3
 
@@ -241,7 +242,7 @@ class ShardedStateLoader(BaseModelLoader):
                     key,
                     param_shape,
                 )
-            param_data.copy_(tensor)
+            copy_weight_(param_data, tensor)
             state_dict.pop(key)
         counter_after_loading_weights = time.perf_counter()
         logger.info_once(

@@ -11,7 +11,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
-from vllm.model_executor.utils import weights_already_processed
+from vllm.model_executor.utils import copy_weight_, weights_already_processed
 
 from .lifecycle import finish_reload, start_reload
 
@@ -107,7 +107,7 @@ def reload_weights(
         loaded_weights = set()
         for name, loaded_weight in weights_iterator:
             param = get_parameter_for_reload(model, name)  # TODO: buffers?
-            param.copy_(loaded_weight)
+            copy_weight_(param, loaded_weight)
             loaded_weights.add(name)
         # kernel-format weights: hooks rebuild derived state, transform nothing
         with weights_already_processed():
