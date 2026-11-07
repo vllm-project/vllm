@@ -40,16 +40,18 @@ class DecodeConfig:
             reasons.append("does not support expert parallelism")
         if pc.enable_eplb:
             reasons.append("does not support EPLB")
-        if cc.cache_dtype not in ("fp8", "fp8_e4m3"):
-            reasons.append("requires an FP8 KV cache")
+        # The fused launch starts after attention and reads no KV cache, so
+        # either cache format the stock attention serves works.
+        if cc.cache_dtype not in ("fp8", "fp8_e4m3", "nvfp4"):
+            reasons.append("requires an FP8 or NVFP4 KV cache")
         if cc.block_size != 128:
             reasons.append("requires KV cache block size 128")
         if cc.kv_offloading_size is not None:
             reasons.append("does not support KV cache offloading")
 
         index_dtype = config.attention_config.resolve_indexer_kv_dtype("bf16")
-        if index_dtype != "fp8":
-            reasons.append('requires indexer_kv_dtype "fp8"')
+        if index_dtype not in ("fp8", "nvfp4"):
+            reasons.append('requires indexer_kv_dtype "fp8" or "nvfp4"')
         if getattr(config, "lora_config", None) is not None:
             reasons.append("does not support LoRA")
         transfer = getattr(config, "kv_transfer_config", None)
@@ -82,11 +84,13 @@ class DecodeConfig:
         sparse = getattr(text_config, "sparse_attention_config", None) or {}
         layers = text_config.num_hidden_layers
         frequencies = sparse.get("sparse_attention_freq", ())[:layers]
-        sparse_layers = [i for i, enabled in enumerate(frequencies) if enabled]
+        sparse_layers = {i for i, enabled in enumerate(frequencies) if enabled}
+        # The leading dense-FFN layers run the stock path, so their attention
+        # type doesn't matter (MiniMax-M3.1 makes every layer sparse).
         if (
             self.last_layer != layers - 1
             or layers <= self.first_layer
-            or sparse_layers != list(range(self.first_layer, layers))
+            or not sparse_layers.issuperset(range(self.first_layer, layers))
         ):
             reasons.append(
                 f"requires sparse attention on layers {self.first_layer} through "
