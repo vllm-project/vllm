@@ -205,12 +205,21 @@ def test_rocm_mxfp8_linear_preserves_non_cdna4_tiles(monkeypatch, n, k, fallback
         assert rocm_native._select_cfg(num_tokens, n, k) == fallback
 
 
+# A partial N tile with K divisible by 128 but not 256, for the gfx950 large-prefill
+# path (unmasked loads, grouped grid); every serving N and K above are 128/256-aligned.
+PARTIAL_TILE_SHAPES = [("partial_n_k128", 1153, 2176)]
+
+
 @pytest.mark.parametrize(
     "name,n,k",
-    V41_ATTN_SHAPES + M31_TP4_SHAPES + M31_TP2_SHAPES,
+    V41_ATTN_SHAPES + M31_TP4_SHAPES + M31_TP2_SHAPES + PARTIAL_TILE_SHAPES,
     ids=lambda v: str(v),
 )
-@pytest.mark.parametrize("num_tokens", [1, 2, 7, 8, 16, 31, 32, 48, 96, 128, 256, 1024])
+# 1025/3940/4097 leave partial M tiles and a partial final M group on the gfx950
+# large-prefill path; 4096 is whole tiles with 16-wide M groups.
+@pytest.mark.parametrize(
+    "num_tokens", [1, 2, 7, 8, 16, 31, 32, 48, 96, 128, 256, 1024, 1025, 3940, 4096, 4097]
+)
 @torch.inference_mode()
 def test_rocm_mxfp8_linear_matches_dequant_reference(name, n, k, num_tokens):
     """Output is finite and matches an exact MXFP8 GEMM of the same inputs.
