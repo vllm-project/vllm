@@ -329,8 +329,6 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
             )
         ):
             return
-        if not hasattr(self, "_num_attn_layers"):
-            self._build_fused_kv_buffers()
         num_ctx = context_states.shape[0]
         num_layers = self._num_attn_layers
         all_kv_flat = self._project_muse_context_kv(context_states)
@@ -548,23 +546,14 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         model_weights = {}
-        includes_lm_head = False
-        includes_d2t = False
         for name, loaded_weight in weights:
             if name == "t2d":
                 continue
             if name == "d2t":
                 name = "draft_id_to_target_id"
-                includes_d2t = True
             elif "lm_head" not in name:
                 name = "model." + name
-            if "lm_head" in name:
-                includes_lm_head = True
             model_weights[name] = loaded_weight
-        if not includes_lm_head:
-            raise ValueError("Muse Spark DSpark requires its own lm_head")
-        if not includes_d2t:
-            raise ValueError("Muse Spark DSpark requires a d2t vocabulary mapping")
         mapper = WeightsMapper(
             orig_to_new_substr={
                 "model.embed_tokens": None,

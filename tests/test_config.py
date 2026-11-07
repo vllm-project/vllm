@@ -49,7 +49,7 @@ from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
-from vllm.config.utils import get_field
+from vllm.config.utils import get_field, hash_config
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import CpuArchEnum, Platform, PlatformEnum, current_platform
 from vllm.sampling_params import BeamSearchParams
@@ -106,9 +106,9 @@ def test_dspark_adaptive_verification_separates_graph_cache():
     config.method = "dspark"
     config.draft_model_config = None
     config.enable_adaptive_verification = False
-    fixed_hash = config.compute_hash()
+    fixed_hash = hash_config(config)
     config.enable_adaptive_verification = True
-    assert config.compute_hash() != fixed_hash
+    assert hash_config(config) != fixed_hash
 
 
 @pytest.mark.parametrize(
@@ -2161,7 +2161,7 @@ def test_engram_cpu_offload_default():
 def test_engram_config_defaults_to_none():
     config = VllmConfig()
     assert config.engram_config is None
-    assert config.compute_hash()
+    assert hash_config(config)
 
 
 @pytest.mark.parametrize("explicit", [False, True])
@@ -2284,7 +2284,7 @@ def test_engram_hash_tracks_execution_options():
         EngramConfig(cpu_offload=True, dp_shared_memory=True),
         EngramConfig(disk_offload=True),
     ]
-    assert len({config.compute_hash() for config in configs}) == len(configs)
+    assert len({hash_config(config) for config in configs}) == len(configs)
 
 
 @pytest.mark.parametrize("port", [1, 29550, 65535])
@@ -2701,9 +2701,6 @@ def test_disable_sliding_window(model_id_expected):
     assert model_config.max_model_len == expected
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
-)
 def test_get_pooling_config():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
     model_config = ModelConfig(model_id)
@@ -2811,9 +2808,6 @@ def test_get_dense_modules_supports_sentence_transformers_schemas(
     ]
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
-)
 def test_get_pooling_config_from_args():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
     pooler_config = PoolerConfig(seq_pooling_type="CLS", use_activation=False)
@@ -2885,9 +2879,6 @@ def test_is_quantized(model_id, quantized):
     assert model_config.is_quantized == quantized
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
-)
 def test_get_bert_tokenization_sentence_transformer_config():
     model_id = "BAAI/bge-base-en-v1.5"
     bge_model_config = ModelConfig(model_id)
@@ -3000,9 +2991,6 @@ def test_model_class_overrides_registers_target():
         ModelRegistry.models.pop(arch, None)
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(), reason="Encoder Decoder models not supported on ROCm."
-)
 @pytest.mark.parametrize(
     ("model_id", "is_encoder_decoder"),
     [
