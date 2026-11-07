@@ -430,7 +430,12 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         token->LoRA mapping. Reading it is a host-only check (no device sync),
         and under CUDA graphs the branch is frozen at capture time against the
         graph's ``has_lora`` dispatch key, so it stays correct on replay.
+
+        With DP+EP the batch holds every DP rank's tokens, and the local flag
+        does not describe them, so the fast path is not available.
         """
+        if lora_context.local_token_lora_mapping is not None:
+            return False
         meta = getattr(lora_context.punica_wrapper, "token_mapping_meta", None)
         if meta is None:
             return False

@@ -114,6 +114,15 @@ class LoRAKernelMeta:
         """
         self._reset()
 
+        # Refresh the mapping even for a batch without LoRA: with DP+EP the MoE
+        # layer sends this buffer to the other ranks, and a stale one would
+        # apply an earlier batch's adapters to these tokens.
+        num_tokens = token_lora_mapping.size(0)
+        self.token_lora_mapping[num_tokens:].fill_(-1)
+        self.token_lora_mapping[:num_tokens].copy_(
+            token_lora_mapping, non_blocking=True
+        )
+
         # Check and record no-lora case.
         no_lora = torch.all(token_lora_mapping == -1)
         self.no_lora_flag_cpu[0] = no_lora
@@ -121,13 +130,6 @@ class LoRAKernelMeta:
         if no_lora:
             # Early exit. LoRA kernels will not be run.
             return
-
-        num_tokens = token_lora_mapping.size(0)
-
-        # copy token lora mapping
-        self.token_lora_mapping[:num_tokens].copy_(
-            token_lora_mapping, non_blocking=True
-        )
 
         # token_indices_sorted_by_lora_ids
         _, token_indices_sorted_by_lora_ids = torch.sort(

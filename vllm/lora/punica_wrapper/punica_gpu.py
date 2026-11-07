@@ -71,6 +71,17 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             captured_lora_counts=captured_lora_counts,
         )
 
+        # With DP+EP the MoE layer receives every DP rank's tokens together
+        # with their token->slot mapping, while the kernel metadata above
+        # describes only this rank's own batch. The MoE-LoRA kernels then have
+        # to cover every slot: 0..max_loras-1 plus -1 for no-adapter tokens.
+        self._all_slot_ids = torch.tensor(
+            [*range(self.max_loras), -1], dtype=torch.int32, device=device
+        )
+        self._all_slot_count = torch.tensor(
+            [self.max_loras + 1], dtype=torch.int32, device="cpu"
+        )
+
     def update_metadata(
         self,
         mapping: LoRAMapping,
@@ -390,6 +401,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         )
         if token_lora_mapping is None:
             token_lora_mapping = token_lora_mapping_meta
+        else:
+            # The mapping comes from the EP dispatch and covers every DP rank's
+            # tokens, so the align step has to bucket every slot, not just the
+            # ones this rank's own batch activated.
+            lora_ids = self._all_slot_ids
         # Under EP the caller passes local_num_experts but topk_ids carries
         # GLOBAL expert indices. The CUDA kernel uses num_experts to size
         # its bucketing table; with EP we must size by global_num_experts
@@ -483,12 +499,17 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         )
 
         assert no_lora_flag.numel() == 1
-        if no_lora_flag.item():
-            # None of the inputs require LoRA.
-            return
-
         if token_lora_mapping is None:
+            if no_lora_flag.item():
+                # None of the inputs require LoRA.
+                return
             token_lora_mapping = token_lora_mapping_meta
+        else:
+            # The mapping comes from the EP dispatch: tokens gathered from the
+            # other DP ranks may use LoRA even when this rank's own batch does
+            # not, so neither the local no-LoRA flag nor the local active-slot
+            # list describes this batch.
+            lora_ids, num_active_loras = self._all_slot_ids, self._all_slot_count
         fused_moe_lora(
             y,
             x,
