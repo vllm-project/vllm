@@ -14,6 +14,7 @@ from transformers.models.llama4.configuration_llama4 import (
 )
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
+from transformers.models.qwen3_next.configuration_qwen3_next import Qwen3NextConfig
 
 from vllm.config.model import ModelConfig, get_hf_text_config
 from vllm.transformers_utils.model_arch_config_convertor import (
@@ -27,6 +28,7 @@ from vllm.v1.metrics.perf import (
     ExecutionContext,
     FfnMetrics,
     InvalidComponent,
+    LinearAttentionMetrics,
     MLAAttentionMetrics,
     ModelMetrics,
     ParsedArgs,
@@ -99,6 +101,8 @@ def create_mock_vllm_config(
 
     vllm_config.cache_config = SimpleNamespace()
     vllm_config.cache_config.cache_dtype = cache_dtype
+    vllm_config.cache_config.mamba_cache_dtype = "auto"
+    vllm_config.cache_config.mamba_ssm_cache_dtype = "auto"
 
     vllm_config.quant_config = quant_config
 
@@ -1745,6 +1749,119 @@ def test_attention_metrics_per_gpu_layers_sum_to_whole_model():
     )
     per_gpu = metrics.get_num_flops_breakdown(ctx, per_gpu=True)
     whole = metrics.get_num_flops_breakdown(ctx, per_gpu=False)
+
+    for key, value in whole.items():
+        assert per_gpu[key] * pp_size == pytest.approx(value, rel=1e-9)
+
+
+#### Linear Attention (hybrid) Tests ####
+
+
+def _qwen3_next_config() -> Qwen3NextConfig:
+    """32 layers, one full-attention layer every 4: 8 full, 24 Gated DeltaNet."""
+    return Qwen3NextConfig(
+        num_hidden_layers=32,
+        hidden_size=2560,
+        num_attention_heads=16,
+        num_key_value_heads=4,
+        head_dim=256,
+        full_attention_interval=4,
+        linear_num_key_heads=16,
+        linear_num_value_heads=32,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
+        linear_conv_kernel_dim=4,
+    )
+
+
+def test_attention_metrics_excludes_linear_attention_layers():
+    """Linear-attention layers must not be billed as full attention.
+
+    layer_types is read even though the model has no sliding window.
+    """
+    hf_config = _qwen3_next_config()
+    assert hf_config.layer_types.count("linear_attention") == 24
+
+    metrics = AttentionMetrics.from_vllm_config(create_mock_vllm_config(hf_config))
+
+    assert metrics._layer_counts(per_gpu=False) == (8, 8, 0)
+    assert metrics.num_linear_attn_layers == 24
+
+
+def test_model_metrics_includes_linear_attention_for_hybrid():
+    """Hybrid models get a linear_attn component covering the GDN layers."""
+    model_metrics = ModelMetrics(create_mock_vllm_config(_qwen3_next_config()))
+    components = {m.component_type(): m for m in model_metrics.metrics}
+
+    assert "linear_attn" in components
+    assert components["linear_attn"].num_linear_attn_layers == 24
+
+
+def test_model_metrics_excludes_linear_attention_for_dense():
+    """Models without linear-attention layers are unaffected."""
+    hf_config = Qwen3Config(
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_key_value_heads=4,
+        num_hidden_layers=24,
+    )
+    vllm_config = create_mock_vllm_config(hf_config)
+    model_metrics = ModelMetrics(vllm_config)
+
+    assert "linear_attn" not in {m.component_type() for m in model_metrics.metrics}
+    with pytest.raises(InvalidComponent):
+        LinearAttentionMetrics.from_vllm_config(vllm_config)
+    attn = AttentionMetrics.from_vllm_config(vllm_config)
+    assert attn._layer_counts(per_gpu=False) == (24, 24, 0)
+
+
+def test_linear_attention_decode_read_bytes_independent_of_context():
+    """GDN state is fixed size, so decode reads do not grow with context."""
+    metrics = LinearAttentionMetrics.from_vllm_config(
+        create_mock_vllm_config(_qwen3_next_config())
+    )
+
+    short = ExecutionContext()
+    long = ExecutionContext()
+    for _ in range(8):
+        short.add(1, 1024, is_prefill=False)
+        long.add(1, 32768, is_prefill=False)
+
+    assert metrics.get_read_bytes(short) == metrics.get_read_bytes(long)
+    assert metrics.get_write_bytes(short) == metrics.get_write_bytes(long)
+    assert metrics.get_num_flops(short) == metrics.get_num_flops(long)
+
+
+def test_linear_attention_state_bytes_per_request():
+    """Each request reads and writes its conv and recurrent state every step."""
+    metrics = LinearAttentionMetrics.from_vllm_config(
+        create_mock_vllm_config(_qwen3_next_config())
+    )
+    ctx = ExecutionContext()
+    for _ in range(8):
+        ctx.add(1, 8192, is_prefill=False)
+
+    # bfloat16 conv and recurrent state (mamba_*_cache_dtype = "auto")
+    conv_dim = 2 * 16 * 128 + 32 * 128
+    conv_state = conv_dim * (4 - 1) * 2
+    recurrent_state = 32 * 128 * 128 * 2
+    expected = 8 * (conv_state + recurrent_state) * 24
+
+    assert metrics.get_read_bytes_breakdown(ctx, per_gpu=False)["state"] == expected
+    assert metrics.get_write_bytes_breakdown(ctx, per_gpu=False)["state"] == expected
+
+
+def test_linear_attention_per_gpu_layers_sum_to_whole_model():
+    """Per-GPU linear-attention counts times pp_size cover every layer."""
+    pp_size = 2
+    metrics = LinearAttentionMetrics.from_vllm_config(
+        create_mock_vllm_config(_qwen3_next_config(), pipeline_parallel_size=pp_size)
+    )
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=8, context_len=1024, is_prefill=True
+    )
+    per_gpu = metrics.get_read_bytes_breakdown(ctx, per_gpu=True)
+    whole = metrics.get_read_bytes_breakdown(ctx, per_gpu=False)
 
     for key, value in whole.items():
         assert per_gpu[key] * pp_size == pytest.approx(value, rel=1e-9)
