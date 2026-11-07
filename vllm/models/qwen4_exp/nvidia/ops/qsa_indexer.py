@@ -108,7 +108,36 @@ def _qsa_mqa_paged_uniform_kernel(
         )
 
 
-@triton.jit(do_not_specialize=["num_rows", "query_offset"])
+@triton.jit
+def _find_row_tile_request(
+    query_start_loc_ptr,
+    query_base,
+    query_offset,
+    query_end,
+    row_tile,
+    num_requests,
+    TILE_R: tl.constexpr,
+):
+    """Binary search for the request that owns compact row tile ``row_tile``.
+
+    Request ``r`` owns tiles from ``clipped_start(r) // TILE_R + r`` on, where
+    ``clipped_start`` is its first row clamped to the scored window. This is the
+    q-block layout of ``find_seq_idx`` with the window clamp applied first.
+    """
+    left: tl.int32 = 0
+    right = num_requests
+    while left < right:
+        mid = (left + right) // 2
+        start = tl.load(query_start_loc_ptr + mid) - query_base
+        start = tl.minimum(tl.maximum(start, query_offset), query_end) - query_offset
+        if start // TILE_R + mid <= row_tile:
+            left = mid + 1
+        else:
+            right = mid
+    return left - 1
+
+
+@triton.jit(do_not_specialize=["num_rows", "query_offset", "num_requests"])
 def _qsa_mqa_paged_prefill_kernel(
     q_ptr,
     k_cache_ptr,
@@ -125,6 +154,7 @@ def _qsa_mqa_paged_prefill_kernel(
     num_rows,
     query_offset,
     page_table_width,
+    num_requests,
     PAGE_SIZE: tl.constexpr,
     NUM_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
@@ -132,21 +162,40 @@ def _qsa_mqa_paged_prefill_kernel(
     BLOCK_N: tl.constexpr,
     K_TILES: tl.constexpr,
     STAGES: tl.constexpr,
+    COMPACT: tl.constexpr,
 ) -> None:
     num_columns = page_table_width * PAGE_SIZE
     NUM_HEADS_PADDED: tl.constexpr = triton.next_power_of_2(NUM_HEADS)
     # tl.dot requires a reduction dimension of at least 16.
     BLOCK_D: tl.constexpr = max(16, triton.next_power_of_2(HEAD_DIM))
-    request = tl.program_id(0)
     query_base = tl.load(query_start_loc_ptr)
     query_end = query_offset + num_rows
+    if COMPACT:
+        request = _find_row_tile_request(
+            query_start_loc_ptr,
+            query_base,
+            query_offset,
+            query_end,
+            tl.program_id(0),
+            num_requests,
+            TILE_R,
+        )
+    else:
+        request = tl.program_id(0)
     request_start = tl.maximum(
         tl.load(query_start_loc_ptr + request) - query_base, query_offset
     )
     request_end = tl.minimum(
         tl.load(query_start_loc_ptr + request + 1) - query_base, query_end
     )
-    absolute_row_start = request_start + tl.program_id(1) * TILE_R
+    if COMPACT:
+        first_row_tile = (
+            tl.minimum(request_start, query_end) - query_offset
+        ) // TILE_R + request
+        row_tile = tl.program_id(0) - first_row_tile
+    else:
+        row_tile = tl.program_id(1)
+    absolute_row_start = request_start + row_tile * TILE_R
     if absolute_row_start >= request_end:
         return
 
@@ -409,9 +458,17 @@ def _prefill_logits(
         TILE_R, STAGES, num_warps = 64, 2, 4
     BLOCK_N = 64
     K_TILES = 16
+    num_requests = page_table.shape[0]
+    stock_row_tiles = num_requests * triton.cdiv(
+        min(num_queries, max_query_len), TILE_R
+    )
+    # One more tile per request than whole tiles in the window covers every
+    # request's partial tiles; see _find_row_tile_request.
+    compact_row_tiles = num_queries // TILE_R + num_requests
+    compact = compact_row_tiles < stock_row_tiles
     grid = (
-        page_table.shape[0],
-        triton.cdiv(min(num_queries, max_query_len), TILE_R),
+        compact_row_tiles if compact else num_requests,
+        1 if compact else triton.cdiv(min(num_queries, max_query_len), TILE_R),
         triton.cdiv(logits_width, BLOCK_N * K_TILES),
     )
     _qsa_mqa_paged_prefill_kernel[grid](
@@ -428,6 +485,7 @@ def _prefill_logits(
         num_queries,
         query_offset,
         page_table.shape[1],
+        num_requests,
         PAGE_SIZE=k_cache.shape[1],
         NUM_HEADS=q.shape[1],
         HEAD_DIM=q.shape[2],
@@ -435,6 +493,7 @@ def _prefill_logits(
         BLOCK_N=BLOCK_N,
         K_TILES=K_TILES,
         STAGES=STAGES,
+        COMPACT=compact,
         num_warps=num_warps,
     )
     return logits
