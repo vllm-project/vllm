@@ -89,7 +89,7 @@ th {
 | HuggingFace-Blazedit | ✅ | ✅ | `vdaita/edit_5k_char`, `vdaita/edit_10k_char` |
 | HuggingFace-ASR | ✅ | ✅ | `openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`, `ArtificialAnalysis/Earnings22-Cleaned-AA`, `D4nt3/esb-datasets-earnings22-validation-tiny-filtered` |
 | Spec Bench | ✅ | ✅ | `wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl` |
-| SPEED-Bench | ✅ | ✅ | `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py \| python3 -` |
+| SPEED-Bench | ✅ | ✅ | `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Gym/refs/heads/main/benchmarks/speed-bench/prepare.py \| python3 - --format raw` |
 | Custom | ✅ | ✅ | Local file: `data.jsonl` |
 | Custom Audio | ✅ | ✅ | Local file: `audio_data.jsonl` |
 | Custom Image | ✅ | ✅ | Local file: `image_data.jsonl` |
@@ -500,13 +500,14 @@ vllm bench serve \
 First, download the dataset to a folder, using this one liner:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py | python3 -
+curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Gym/refs/heads/main/benchmarks/speed-bench/prepare.py | python3 - --format raw --config all
 ```
 
 The command supports also the following arguments:
 
-- `--config`: download only a subset of the dataset: `qualitative`, `throughput_1k`, `throughput_2k`, `throughput_8k`, `throughput_16k` and `throughput_32k`. By default, it will download all subsets.
-- `--output_dir`: download to a specified folder. By default, it will download to the current directory.
+- `--config`: download only a subset of the dataset: `qualitative`, `throughput_1k`, `throughput_2k`, `throughput_8k`, `throughput_16k`, `throughput_32k` and `throughput_100k`. By default, it will download all subsets.
+- `--output-dir`: download to a specified folder. By default, it will download to the current working directory under the `data/` folder.
+- `--format`: use the `raw` format for vllm bench support. Other formats are for Gym support and do not work with vllm bench.
 
 Start a server with speculative decoding:
 
