@@ -8,6 +8,7 @@ steps:
   no_plugin: true
   source_file_dependencies:
   - csrc/cpu/
+  - tests/kernels/core/test_cpu_float_conversion.py
   - cmake/cpu_extension.cmake
   - CMakeLists.txt
   - vllm/_custom_ops.py
@@ -41,6 +42,7 @@ steps:
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
+      pytest -v -s tests/kernels/core/test_cpu_float_conversion.py
       pytest -x -v -s --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB \
       tests/kernels/attention/test_cpu_attn.py \
       tests/v1/attention/test_group_head_counts.py \

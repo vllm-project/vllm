@@ -10,6 +10,10 @@ inline float bf16_to_float(uint16_t bf16) {
 
 inline uint16_t float_to_bf16(float fp32) {
   uint32_t bits = std::bit_cast<uint32_t>(fp32);
+  if ((bits & 0x7fffffffU) > 0x7f800000U) {
+    return 0x7fc0U;
+  }
+  bits += 0x7fffU + ((bits >> 16) & 1U);
   return static_cast<uint16_t>(bits >> 16);
 }
 

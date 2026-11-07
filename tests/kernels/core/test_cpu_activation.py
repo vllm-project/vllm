@@ -28,6 +28,19 @@ D = [512, 2048]
 SEEDS = [0]
 
 
+@torch.inference_mode()
+def test_cpu_silu_and_mul_bf16_rounds_to_nearest_even() -> None:
+    """Software BF16 stores must round the FP32 activation, not truncate it."""
+    values = torch.full((1, 128), 0.125, dtype=torch.bfloat16)
+    x = torch.cat((values, torch.ones_like(values)), dim=-1)
+    out = torch.empty_like(values)
+
+    torch.ops._C.silu_and_mul(out, x)
+
+    expected = torch.nn.functional.silu(values.float()).to(torch.bfloat16)
+    torch.testing.assert_close(out, expected, atol=0, rtol=0)
+
+
 @pytest.mark.parametrize(
     ("activation_cls", "fn"),
     [
