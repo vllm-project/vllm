@@ -578,17 +578,6 @@ def get_vllm_port() -> int | None:
         raise ValueError(f"VLLM_PORT '{port}' must be a valid integer") from err
 
 
-def get_tp_fp16_partial_sums_shift() -> int:
-    """Get VLLM_TP_FP16_PARTIAL_SUMS_SHIFT, an integer in [0, 14]."""
-    value = os.getenv("VLLM_TP_FP16_PARTIAL_SUMS_SHIFT", "2")
-    if not (value.isascii() and value.isdigit() and 0 <= int(value) <= 14):
-        raise ValueError(
-            f"VLLM_TP_FP16_PARTIAL_SUMS_SHIFT must be an integer in [0, 14], "
-            f"got {value!r}"
-        )
-    return int(value)
-
-
 def _generate_shm_name() -> str:
     import pybase64
 
@@ -2064,14 +2053,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "1"))
     ),
-    # Tensor-parallel row-parallel layers all-reduce FP16 partial sums instead
-    # of BF16 ones; the output is rounded to BF16 once, after the sum.
+    # If set, BF16 row-parallel layers under TP>1 all-reduce FP16 partial sums
+    # and round to BF16 once, after the sum (CUDA only).
     "VLLM_TP_FP16_PARTIAL_SUMS": lambda: bool(
         int(os.getenv("VLLM_TP_FP16_PARTIAL_SUMS", "0"))
     ),
-    # Exact 2^-k prescale of the FP16 partial sums (k in [0, 14]), moving the
-    # FP16 overflow threshold to 65504 * 2^k.
-    "VLLM_TP_FP16_PARTIAL_SUMS_SHIFT": get_tp_fp16_partial_sums_shift,
+    # k in [0, 14]: FP16 partial sums are prescaled by 2^-k (exact), so they
+    # overflow at 65504 * 2^k instead of 65504.
+    "VLLM_TP_FP16_PARTIAL_SUMS_SHIFT": lambda: int(
+        env_with_choices(
+            "VLLM_TP_FP16_PARTIAL_SUMS_SHIFT", "2", [str(k) for k in range(15)]
+        )()
+        or "2"
+    ),
     # Whether to use FlashInfer's single-node PCIe CUDA-IPC all-reduce.
     # This backend has a strict single-stream contract and is opt-in while its
     # integration is being qualified.
