@@ -396,10 +396,12 @@ steps:
   - tests/distributed/test_events
   - tests/distributed/test_symm_mem_allreduce.py
   - tests/distributed/test_multiproc_executor.py
+  - tests/distributed/test_pp_transport.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s distributed/test_pynccl.py
+  - pytest -v -s distributed/test_pp_transport.py
   - pytest -v -s distributed/test_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py
   # test multi-node TP with multiproc executor (simulated on single node)

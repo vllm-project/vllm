@@ -180,6 +180,7 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
+    from vllm.distributed.pp_transport import PPTransport
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -275,6 +276,8 @@ class Worker(WorkerBase):
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
+        # Set by VLLM_PP_TRANSPORT; None sends over NCCL.
+        self._pp_transport: PPTransport | None = None
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -621,6 +624,14 @@ class Worker(WorkerBase):
             logger.info(
                 "Updated engine memory budget after disk fallback: %s GiB",
                 format_gib(self.requested_memory),
+            )
+
+        if envs.VLLM_PP_TRANSPORT != "nccl" and self._pp_transport is None:
+            # After init_device, so memory profiling counts its buffers.
+            from vllm.distributed.pp_transport import create_pp_transport
+
+            self._pp_transport = create_pp_transport(
+                self.vllm_config, self.model_runner.intermediate_tensors
             )
 
         if has_ec_transfer():
@@ -1505,7 +1516,9 @@ class Worker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        if forward_pass and not get_pp_group().is_first_rank:
+        if forward_pass and self._pp_transport and not get_pp_group().is_first_rank:
+            intermediate_tensors = self._pp_transport.recv(get_pp_group())
+        elif forward_pass and not get_pp_group().is_first_rank:
             tensor_dict, comm_handles, comm_postprocess = (
                 get_pp_group().irecv_tensor_dict(
                     all_gather_group=get_tp_group(),
@@ -1540,14 +1553,17 @@ class Worker(WorkerBase):
             and not get_pp_group().is_last_rank
         )
 
-        # Non-blocking send of the intermediate tensors. The metadata handle
-        # is reaped lazily by the GroupCoordinator; the device handles are
-        # waited at the top of the next step.
-        handles = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=get_tp_group(),
-        )
-        self._pp_send_work = handles[1:]
+        if self._pp_transport is not None:
+            self._pp_transport.send(output.tensors, get_pp_group())
+        else:
+            # Non-blocking send of the intermediate tensors. The metadata handle
+            # is reaped lazily by the GroupCoordinator; the device handles are
+            # waited at the top of the next step.
+            handles = get_pp_group().isend_tensor_dict(
+                output.tensors,
+                all_gather_group=get_tp_group(),
+            )
+            self._pp_send_work = handles[1:]
 
         if self.use_v2_model_runner and self.model_runner.is_pooling_model:
             return self.model_runner.pool()  # type: ignore
