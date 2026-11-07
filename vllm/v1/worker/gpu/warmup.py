@@ -423,6 +423,15 @@ def warmup_kernels(
             _warmup_kernels(
                 model_runner, worker_execute_model, worker_sample_tokens, greedy=True
             )
+            # Also warm up greedy sampling with logits processing (e.g.
+            # repetition_penalty), which upcasts logits to FP32 and exercises
+            # the FP32 greedy path without top_k/top_p.
+            _warmup_kernels(
+                model_runner,
+                worker_execute_model,
+                worker_sample_tokens,
+                greedy="with_penalties",
+            )
     finally:
         model_runner.adaptive_verification = adaptive_verification
         if adaptive_sampling:
@@ -441,7 +450,7 @@ def _warmup_kernels(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
-    greedy: bool = False,
+    greedy: bool | str = False,
 ) -> None:
     if model_runner.vllm_config.is_mm_encoder_only:
         return
@@ -515,11 +524,12 @@ def _warmup_kernels(
         pooling_params = PoolingParams(task=pooling_task)
         pooling_params.verify(model_runner.model_config)
     else:
-        sampling_params = (
-            SamplingParams(temperature=0)
-            if greedy
-            else SamplingParams.for_sampler_warmup()
-        )
+        if greedy == "with_penalties":
+            sampling_params = SamplingParams(temperature=0, repetition_penalty=1.1)
+        elif greedy:
+            sampling_params = SamplingParams(temperature=0)
+        else:
+            sampling_params = SamplingParams.for_sampler_warmup()
         pooling_params = None
 
     # Assign distinct block IDs per request per group. 0 null block, start from 1.

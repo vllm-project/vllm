@@ -604,3 +604,22 @@ def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(max_logprobs):
         "prefill" if "_prefill_" in req_id else "decode": value
         for req_id, value in requested.items()
     } == {"prefill": expected, "decode": None}
+
+
+def test_warmup_kernels_exercises_greedy_with_and_without_penalties():
+    """Speculative decoding warmup must exercise both plain greedy sampling
+    (bfloat16 logits) and greedy sampling with repetition_penalty != 1.0
+    (needs_logits_processing=True, which upcasts logits to float32 before
+    calling gumbel_sample)."""
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=NUM_SPEC_STEPS)
+    seen_greedy_modes: list[tuple[float, float]] = []
+
+    def execute_model(scheduler_output) -> None:
+        for new_req in scheduler_output.scheduled_new_reqs:
+            sp = new_req.sampling_params
+            seen_greedy_modes.append((sp.temperature, sp.repetition_penalty))
+
+    warmup_kernels(runner, execute_model, lambda grammar_output=None: None)
+
+    assert (0.0, 1.0) in seen_greedy_modes
+    assert (0.0, 1.1) in seen_greedy_modes

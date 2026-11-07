@@ -51,11 +51,38 @@ def _cuda_gdn_config() -> _QwenGDNWarmupConfig:
 
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA is required")
 def test_qwen_gdn_prefill_warmup_kernels_compile_on_gpu() -> None:
+    import vllm.models.qwen3_5.nvidia.ops.fused_gdn_gated_norm as gated_norm_ops
+    from vllm.models.qwen3_5.nvidia.ops.fused_gdn_gated_norm import (
+        calc_rows_per_block,
+    )
+
     config = _cuda_gdn_config()
     device = torch.device("cuda")
-    _warm_gated_rms_norm_kernel(
-        device, config, max_num_tokens=16, x_dtype=config.conv_dtype
-    )
+    with patch.object(
+        gated_norm_ops,
+        "fused_gdn_gated_rms_norm",
+        wraps=gated_norm_ops.fused_gdn_gated_rms_norm,
+    ) as wrapped_norm:
+        _warm_gated_rms_norm_kernel(
+            device, config, max_num_tokens=16, x_dtype=config.conv_dtype
+        )
+    expected_sigs = {
+        (
+            0 if n == 1 else (1 if n % 16 == 0 else 2),
+            calc_rows_per_block(n, device),
+        )
+        for n in range(1, 17)
+    }
+    observed_sigs = {
+        (
+            0
+            if call.kwargs["x"].shape[0] == 1
+            else (1 if call.kwargs["x"].shape[0] % 16 == 0 else 2),
+            calc_rows_per_block(call.kwargs["x"].shape[0], device),
+        )
+        for call in wrapped_norm.call_args_list
+    }
+    assert observed_sigs == expected_sigs
     _warm_causal_conv1d_fwd_kernel(device, config)
     _warm_fused_post_conv_kernel(device, config)
     _warm_state_gather_scatter_kernels(device, config)
