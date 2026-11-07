@@ -838,6 +838,25 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         )
 
 
+# B200 BF16 threshold anchors; ranges reuse the nearest measured lower top-k.
+MXFP4_QUANTIZE_ONCE_MIN_TOKENS = 58
+MXFP4_TOP2_QUANTIZE_ONCE_MIN_TOKENS = 80
+MXFP4_TOP4_QUANTIZE_ONCE_MIN_TOKENS = 96
+
+
+def _select_mxfp4_input_quantization(m: int, topk: int) -> bool:
+    """Select input quantization using measured power-of-two top-k anchors."""
+    if topk == 1:
+        return False
+    if 2 <= topk < 4:
+        return m >= MXFP4_TOP2_QUANTIZE_ONCE_MIN_TOKENS
+    if 4 <= topk < 8:
+        return m >= MXFP4_TOP4_QUANTIZE_ONCE_MIN_TOKENS
+    if topk >= 8:
+        return m >= MXFP4_QUANTIZE_ONCE_MIN_TOKENS
+    return False
+
+
 def run_cutlass_moe_mxfp4(
     output: torch.Tensor,
     a: torch.Tensor,
@@ -925,15 +944,27 @@ def run_cutlass_moe_mxfp4(
         sorted_expert_ids=sorted_expert_ids,
     )
 
-    a = ops.shuffle_rows(a, a_map)
-    rep_a_fp4, rep_a_blockscale = ops.mxfp4_experts_quant(
-        a,
-        expert_offsets,
-        blockscale_offsets,
-        e,
-        num_topk,
-        sorted_expert_ids,
-    )
+    use_fanout = _select_mxfp4_input_quantization(m, num_topk)
+
+    if use_fanout:
+        rep_a_fp4, rep_a_blockscale = ops.mxfp4_experts_quantize_once_fanout(
+            a,
+            topk_ids,
+            c_map,
+            expert_offsets,
+            blockscale_offsets,
+            e,
+        )
+    else:
+        rep_a_fp4, rep_a_blockscale = ops.mxfp4_experts_quant(
+            a,
+            expert_offsets,
+            blockscale_offsets,
+            e,
+            num_topk,
+            sorted_expert_ids,
+            input_permutation=a_map,
+        )
     c1 = _resize_cache(workspace13, (m * topk, w1_n))
     c2 = _resize_cache(workspace2, (m * topk, n))
     c3 = _resize_cache(workspace13, (m * topk, k))
