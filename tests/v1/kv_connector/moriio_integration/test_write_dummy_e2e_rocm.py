@@ -785,6 +785,24 @@ def _external_hits(server: RemoteOpenAIServer) -> float:
     return sum(sample.value for sample in samples)
 
 
+_MORIIO_SERIES = (
+    "vllm:moriio_xfer_time_seconds_count",
+    "vllm:moriio_xfer_time_seconds_sum",
+    "vllm:moriio_bytes_transferred_sum",
+    "vllm:moriio_num_descriptors_sum",
+    "vllm:moriio_num_failed_transfers_total",
+    "vllm:moriio_num_failed_notifications_total",
+    "vllm:moriio_num_kv_expired_reqs_total",
+)
+
+
+def _moriio_stats(server: RemoteOpenAIServer) -> dict[str, float]:
+    return {
+        name: sum(sample.value for sample in _metric(server, name))
+        for name in _MORIIO_SERIES
+    }
+
+
 @dataclass
 class Reference:
     prompts: list[list[int]]
@@ -944,6 +962,41 @@ def test_heterogeneous_tp_hands_decode_every_prompt_token(case: Case):
         len(top) >= TOP_K and all(math.isfinite(v) for v in top.values())
         for top in tops
     ), f"decode returned non-finite log-probs: {tops}"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT),
+        Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, read_mode=True),
+    ],
+    ids=lambda c: c.id,
+)
+def test_transfer_metrics_are_exported(case: Case):
+    """The instance that moves the KV (prefill in WRITE, decode in READ)
+    exports one transfer per request on /metrics; neither side counts a
+    failure or an expired request."""
+    arch = ARCHS[case.arch]
+    overrides = _arch_overrides(arch)
+    with _pd_pair(arch, overrides, overrides, case) as (proxy_url, prefill, decode):
+        prompts = _prompts(_prompt_lengths(arch, decode))
+        mover, idle = (decode, prefill) if case.read_mode else (prefill, decode)
+        mover_before, idle_before = _moriio_stats(mover), _moriio_stats(idle)
+        for prompt in prompts:
+            _first_step(proxy_url, arch.model, prompt)
+        _wait_for_prefill_blocks_freed(prefill)
+        moved = {k: v - mover_before[k] for k, v in _moriio_stats(mover).items()}
+        idle_delta = {k: v - idle_before[k] for k, v in _moriio_stats(idle).items()}
+    print(f"[metrics] {case.id} mover={moved} idle={idle_delta}")
+
+    assert moved["vllm:moriio_xfer_time_seconds_count"] == len(prompts), moved
+    assert moved["vllm:moriio_xfer_time_seconds_sum"] > 0, moved
+    assert moved["vllm:moriio_bytes_transferred_sum"] > 0, moved
+    assert moved["vllm:moriio_num_descriptors_sum"] > 0, moved
+    assert not any(idle_delta.values()), idle_delta
+    for stats in (moved, idle_delta):
+        for name in _MORIIO_SERIES[4:]:
+            assert stats[name] == 0, (name, stats)
 
 
 @pytest.mark.parametrize("arch_name", sorted(ARCHS))

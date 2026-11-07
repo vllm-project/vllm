@@ -258,6 +258,26 @@ docker run \
     }'
 ```
 
+## Prometheus metrics
+
+The following Prometheus metrics are exported when MoRIIOConnector is active, each with the standard `model_name` and `engine` labels. The same values appear in the periodic `KV Transfer metrics` log line.
+
+| Metric name | Type | Description |
+| ------------- | ------ | ------------- |
+| `vllm:moriio_xfer_time_seconds` | Histogram | Per-request transfer duration (seconds), from posting the first RDMA op to observing completion. |
+| `vllm:moriio_bytes_transferred` | Histogram | Bytes moved per request transfer. |
+| `vllm:moriio_num_descriptors` | Histogram | RDMA descriptors posted per request transfer. |
+| `vllm:moriio_num_failed_transfers` | Counter | Cumulative count of failed or timed-out KV transfers. |
+| `vllm:moriio_num_failed_notifications` | Counter | Cumulative count of release or failure notifications that could not be sent to the peer. |
+| `vllm:moriio_num_kv_expired_reqs` | Counter | Requests whose KV blocks the prefiller freed after `defer_timeout` without a completed transfer (tracked on the P instance). |
+
+!!! note
+    The histograms are populated where the data moves: on the decoder (D) in
+    READ mode and on the prefiller (P) in WRITE mode. In WRITE mode the
+    duration includes the forward pass of later layers, since KV is pushed
+    layer by layer. A WRITE failure is counted on P and again on the D that
+    is told about it.
+
 ## Troubleshooting
 
 ### `availDevices.size() > 0` assertion failure

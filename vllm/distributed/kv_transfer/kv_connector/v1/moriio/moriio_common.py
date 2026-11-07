@@ -115,6 +115,10 @@ class RemoteAllocInfo:
     completion_targets_resolved: bool = False
     completion_notified: bool = False
     transfer_statuses: list[Any] = field(default_factory=list)
+    # Monotonic time of the first WRITE post, and totals posted, for stats.
+    transfer_start: float | None = None
+    transfer_bytes: int = 0
+    transfer_descs: int = 0
     transfer_offsets: dict[
         TransferOffsetsKey,
         tuple[list[int], list[int], list[int]],
