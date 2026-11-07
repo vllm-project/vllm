@@ -51,6 +51,22 @@ When NCCL is too old at runtime, vLLM logs the reason at startup and
 python -c "from vllm.utils.import_utils import deep_ep_v2_unavailable_reason; print(deep_ep_v2_unavailable_reason() or 'deepep_v2 is available')"
 ```
 
+## `ibstat` requirement for multi-node DeepEPv2
+
+Multi-node `deepep_v2` runs `ibstat` (from the `infiniband-diags` package) to
+detect the RDMA bandwidth of the NIC named by `EP_NIC_NAME` (default `mlx5_0`).
+If `ibstat` is missing, or the NIC does not appear in its output, workers log
+`Failed to get RDMA connection speed` and fail with `ZeroDivisionError` in
+`get_theoretical_num_sms()`.
+
+The vLLM Docker images include `infiniband-diags`. For custom images, install
+it inside the container; installing it on the host is not enough:
+
+```bash
+apt-get install -y --no-install-recommends infiniband-diags
+ibstat "${EP_NIC_NAME:-mlx5_0}"  # should report the port Rate
+```
+
 ## Usage
 
 ```bash
