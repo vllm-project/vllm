@@ -10,6 +10,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backends.utils import compute_mm_prefix_ranges
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.mrope import MRoPEPositionState
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
@@ -59,23 +60,43 @@ class DefaultModelState(ModelState):
 
         # Pruner is used for multimodal embedding pruning (EVS).
         self.mm_pruner = maybe_create_mm_pruner(
-            self.model_config, model, self.rope_state, encoder_cache
+            self.model_config,
+            model,
+            self.rope_state,
+            encoder_cache,
+            export_position_state=bool(
+                vllm_config.kv_transfer_config
+                and vllm_config.kv_transfer_config.is_kv_producer
+            ),
         )
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         if self.rope_state is not None:
             assert new_req_data.prefill_token_ids is not None
-            # `prompt_embeds` is a passthrough modality with no grid info, but
-            # M-RoPE assumes per-feature grids. Filter it out.
-            mm_features = [
-                f for f in new_req_data.mm_features if f.modality != "prompt_embeds"
-            ]
-            self.rope_state.init_prefill_positions(
-                req_index,
-                self.model,
-                new_req_data.prefill_token_ids,
-                mm_features=mm_features,
-            )
+            position_state = new_req_data.mrope_position_state
+            if position_state is not None:
+                if any(
+                    len(row) != new_req_data.prompt_len
+                    for row in position_state.positions
+                ):
+                    raise ValueError(
+                        "M-RoPE position state does not match the prompt length"
+                    )
+                self.rope_state.stage_prefill_positions(
+                    req_index, position_state.positions, position_state.delta
+                )
+            else:
+                # `prompt_embeds` is a passthrough modality with no grid info, but
+                # M-RoPE assumes per-feature grids. Filter it out.
+                mm_features = [
+                    f for f in new_req_data.mm_features if f.modality != "prompt_embeds"
+                ]
+                self.rope_state.init_prefill_positions(
+                    req_index,
+                    self.model,
+                    new_req_data.prefill_token_ids,
+                    mm_features=mm_features,
+                )
         if self.prompt_embeds_state is not None:
             self.prompt_embeds_state.add_request(req_index, new_req_data)
 
@@ -88,6 +109,11 @@ class DefaultModelState(ModelState):
             self.rope_state.apply_staged_writes()
         if self.prompt_embeds_state is not None:
             self.prompt_embeds_state.apply_staged_writes()
+
+    def take_mrope_position_states(self) -> dict[str, MRoPEPositionState]:
+        if self.mm_pruner is None:
+            return {}
+        return self.mm_pruner.take_position_states()
 
     def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
         """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""

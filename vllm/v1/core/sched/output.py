@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.multimodal.utils import strip_covered_mm_data
 from vllm.utils.gc_utils import untrack_long_lists
+from vllm.v1.mrope import MRoPEPositionState
 
 if TYPE_CHECKING:
     import numpy as np
@@ -55,6 +56,7 @@ class NewRequestData:
     prefill_token_ids: list[int] | None = None
     # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
     replay_start: int = 0
+    mrope_position_state: MRoPEPositionState | None = None
 
     @classmethod
     def from_request(
@@ -81,6 +83,7 @@ class NewRequestData:
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
             replay_start=request.replay_start,
+            mrope_position_state=request.mrope_position_state,
         )
 
     def __setstate__(self, state: dict) -> None:
@@ -110,7 +113,8 @@ class NewRequestData:
             f"block_ids={self.block_ids},"
             f"num_computed_tokens={self.num_computed_tokens},"
             f"lora_request={self.lora_request},"
-            f"prompt_embeds_shape={prompt_embeds_shape}"
+            f"prompt_embeds_shape={prompt_embeds_shape},"
+            f"mrope_position_state={self.mrope_position_state is not None},"
             ")"
         )
 
@@ -135,7 +139,8 @@ class NewRequestData:
             f"block_ids={self.block_ids},"
             f"num_computed_tokens={self.num_computed_tokens},"
             f"lora_request={self.lora_request},"
-            f"prompt_embeds_shape={prompt_embeds_shape}"
+            f"prompt_embeds_shape={prompt_embeds_shape},"
+            f"mrope_position_state={self.mrope_position_state is not None},"
             ")"
         )
 
