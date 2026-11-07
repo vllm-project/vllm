@@ -544,6 +544,10 @@ def _check_table(
                 layer.weight_scale_inv.weight_loader(
                     layer.weight_scale_inv, loader_scale
                 )
+            if layer.peer_rows:
+                # Peers read this rank's slice as soon as they finish loading.
+                torch.accelerator.synchronize()
+                get_engram_dp_group().barrier()
             # Shared host tables and GPU peer reads look up only local tokens.
             local = layer.dp_size == 1
             assert (layer.peer_rows > 0) == (not cpu_offload and tp_size == 1 and p2p)
