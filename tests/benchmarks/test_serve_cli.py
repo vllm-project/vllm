@@ -5,13 +5,91 @@ import tempfile
 import time
 from pathlib import Path
 
+import aiohttp
 import pytest
 import requests
 import urllib3
+from aiohttp import web
+from aiohttp.test_utils import TestServer
+
+from vllm.benchmarks.lib.endpoint_request_func import (
+    RequestFuncInput,
+    async_request_openai_completions,
+)
 
 from ..utils import RemoteOpenAIServer
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+
+
+@pytest.mark.asyncio
+async def test_bench_serve_sse_metadata():
+    """SSE metadata must preserve real model output and benchmark token counts."""
+    model = "facebook/opt-125m"
+    args = [
+        "--dtype",
+        "float32",
+        "--max-model-len",
+        "256",
+        "--max-num-seqs",
+        "1",
+        "--kv-cache-memory-bytes",
+        "134217728",
+        "--enforce-eager",
+        "--generation-config",
+        "vllm",
+    ]
+    with RemoteOpenAIServer(model, args) as server:
+        prompt = "The capital of France is"
+        async with server.get_async_client() as client:
+            reference = await client.completions.create(
+                model=model,
+                prompt=prompt,
+                max_tokens=8,
+                temperature=0,
+                seed=0,
+                extra_body={"ignore_eos": True},
+            )
+        assert reference.usage is not None
+        async with aiohttp.ClientSession() as session:
+
+            async def proxy(request: web.Request) -> web.StreamResponse:
+                async with session.post(
+                    server.url_for("v1", "completions"), json=await request.json()
+                ) as upstream:
+                    upstream.raise_for_status()
+                    response = web.StreamResponse(
+                        headers={"Content-Type": upstream.headers["Content-Type"]}
+                    )
+                    await response.prepare(request)
+                    await response.write(
+                        b"event: message\nid: 1\nretry: 1000\n: keepalive\n"
+                    )
+                    async for chunk in upstream.content.iter_any():
+                        await response.write(chunk)
+                    await response.write_eof()
+                    return response
+
+            app = web.Application()
+            app.router.add_post("/v1/completions", proxy)
+            async with TestServer(app) as proxy_server:
+                request = RequestFuncInput(
+                    prompt=prompt,
+                    api_url=str(proxy_server.make_url("/v1/completions")),
+                    prompt_len=reference.usage.prompt_tokens,
+                    output_len=8,
+                    model=model,
+                    ignore_eos=True,
+                    extra_body={"temperature": 0, "seed": 0},
+                )
+                output = await async_request_openai_completions(request, session)
+
+        assert output.success, output.error
+        assert output.generated_text == reference.choices[0].text
+        assert output.output_tokens == reference.usage.completion_tokens == 8
+        assert output.prompt_len == reference.usage.prompt_tokens
+        assert output.ttft > 0
+        assert output.latency >= output.ttft
 
 
 def generate_self_signed_cert(cert_dir: Path) -> tuple[Path, Path]:
