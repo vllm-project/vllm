@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -429,6 +430,59 @@ class RMSNormGated(CustomOp):
         return self.forward_cuda(x, z)
 
 
+def _gated_norm_strided_z(
+    x: torch.Tensor,
+    z: torch.Tensor | None,
+    weight: torch.Tensor,
+    eps: float,
+    group_size: int | None,
+    norm_before_gate: bool,
+    activation: str,
+) -> torch.Tensor | None:
+    """Per-head gated RMSNorm that reads a head-contiguous strided ``z`` in place.
+
+    ``z`` is the gate slice of the packed GDN in_proj output, so with more than
+    one token it is not contiguous and ``rmsnorm_fn`` copies it first. Returns
+    None when the inputs don't have that layout.
+    """
+    if (
+        not current_platform.is_rocm()
+        or z is None
+        or x.dim() != 3
+        or z.shape != x.shape
+        or not x.is_contiguous()
+        or z.stride(-1) != 1
+        or z.stride(1) != z.shape[-1]
+        or group_size not in (None, x.shape[-1])
+        or weight.shape != x.shape[-1:]
+        or activation not in ("swish", "silu", "sigmoid")
+    ):
+        return None
+    from vllm.models.qwen3_5.nvidia.ops.fused_gdn_gated_norm import (
+        fused_gdn_gated_rms_norm,
+    )
+    from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
+        calc_rows_per_block,
+    )
+
+    num_tokens, num_heads, head_dim = x.shape
+    out = torch.empty_like(x)
+    fused_gdn_gated_rms_norm(
+        x=x.view(num_tokens, -1),
+        z=z.as_strided((num_tokens, num_heads * head_dim), (z.stride(0), 1)),
+        weight=weight,
+        out=out.view(num_tokens, -1),
+        eps=eps,
+        num_v_heads=num_heads,
+        head_v_dim=head_dim,
+        norm_before_gate=norm_before_gate,
+        activation=activation,
+        # Match rmsnorm_fn's tile for (token, head) rows so outputs are bit-identical.
+        rows_per_block=calc_rows_per_block(num_tokens * num_heads, x.device),
+    )
+    return out
+
+
 def _fla_rms_norm_gated(
     x: torch.Tensor,
     z: torch.Tensor | None,
@@ -442,6 +496,11 @@ def _fla_rms_norm_gated(
         rmsnorm_fn,
     )
 
+    out = _gated_norm_strided_z(
+        x, z, weight, eps, group_size, norm_before_gate, activation
+    )
+    if out is not None:
+        return out
     return rmsnorm_fn(
         x,
         weight,
