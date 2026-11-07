@@ -24,6 +24,7 @@ steps:
   - tests/v1/worker/test_worker_memory_snapshot.py
   - tests/xpu_debug/
   commands:
+    - env | grep -i "META_DATA" || true
     - cd tests
     - pytest -v -s v1/shutdown
 
@@ -47,7 +48,8 @@ steps:
     - pip install py-spy || true
     - cd tests
     - '(while sleep 15; do for p in $$(pgrep -f "^VLLM::Worker" || true); do a=$$(ps -o etimes= -p $$p 2>/dev/null | tr -d " "); if [ -n "$$a" ] && [ "$$a" -gt 90 ]; then echo "=== WATCHDOG pid=$$p age=$${a}s, SIGABRT ==="; kill -ABRT $$p || true; fi; done; done) & WD=$$!; rc=0; pytest -v -s v1/shutdown || rc=$$?; [ $$rc -eq 0 ] && { pytest -v -s v1/shutdown || rc=$$?; }; kill $$WD 2>/dev/null || true; exit $$rc'
-
+    - '(while sleep 15; do for p in $$(pgrep -f "^VLLM::Worker" || true); do a=$$(ps -o etimes= -p $$p 2>/dev/null | tr -d " "); if [ -n "$$a" ] && [ "$$a" -gt 90 ]; then echo "=== WATCHDOG pid=$$p age=$${a}s, SIGABRT ==="; kill -ABRT $$p || true; fi; done; done) & WD=$$!; rc=0; pytest -v -s v1/shutdown || rc=$$?; [ $$rc -eq 0 ] && { pytest -v -s v1/shutdown || rc=$$?; }; kill $$WD 2>/dev/null || true; exit $$rc'
+    
 - label: ":intel: (BMG) [DEBUG] xccl repro - pidfd - 2"
   key: debug-xccl-repro-pidfd-2
   timeout_in_minutes: 60
@@ -67,6 +69,7 @@ steps:
     - env | grep -i "META_DATA" || true
     - pip install py-spy || true
     - cd tests 
+    - '(while sleep 15; do for p in $$(pgrep -f "^VLLM::Worker" || true); do a=$$(ps -o etimes= -p $$p 2>/dev/null | tr -d " "); if [ -n "$$a" ] && [ "$$a" -gt 90 ]; then echo "=== WATCHDOG pid=$$p age=$${a}s, SIGABRT ==="; kill -ABRT $$p || true; fi; done; done) & WD=$$!; rc=0; pytest -v -s v1/shutdown || rc=$$?; [ $$rc -eq 0 ] && { pytest -v -s v1/shutdown || rc=$$?; }; kill $$WD 2>/dev/null || true; exit $$rc'
     - '(while sleep 15; do for p in $$(pgrep -f "^VLLM::Worker" || true); do a=$$(ps -o etimes= -p $$p 2>/dev/null | tr -d " "); if [ -n "$$a" ] && [ "$$a" -gt 90 ]; then echo "=== WATCHDOG pid=$$p age=$${a}s, SIGABRT ==="; kill -ABRT $$p || true; fi; done; done) & WD=$$!; rc=0; pytest -v -s v1/shutdown || rc=$$?; [ $$rc -eq 0 ] && { pytest -v -s v1/shutdown || rc=$$?; }; kill $$WD 2>/dev/null || true; exit $$rc'
 
 - label: ":intel: (BMG) [DEBUG] xccl repro - pidfd - 3"
@@ -89,7 +92,8 @@ steps:
     - pip install py-spy || true
     - cd tests
     - '(while sleep 15; do for p in $$(pgrep -f "^VLLM::Worker" || true); do a=$$(ps -o etimes= -p $$p 2>/dev/null | tr -d " "); if [ -n "$$a" ] && [ "$$a" -gt 90 ]; then echo "=== WATCHDOG pid=$$p age=$${a}s, SIGABRT ==="; kill -ABRT $$p || true; fi; done; done) & WD=$$!; rc=0; pytest -v -s v1/shutdown || rc=$$?; [ $$rc -eq 0 ] && { pytest -v -s v1/shutdown || rc=$$?; }; kill $$WD 2>/dev/null || true; exit $$rc'
-
+    - '(while sleep 15; do for p in $$(pgrep -f "^VLLM::Worker" || true); do a=$$(ps -o etimes= -p $$p 2>/dev/null | tr -d " "); if [ -n "$$a" ] && [ "$$a" -gt 90 ]; then echo "=== WATCHDOG pid=$$p age=$${a}s, SIGABRT ==="; kill -ABRT $$p || true; fi; done; done) & WD=$$!; rc=0; pytest -v -s v1/shutdown || rc=$$?; [ $$rc -eq 0 ] && { pytest -v -s v1/shutdown || rc=$$?; }; kill $$WD 2>/dev/null || true; exit $$rc'
+    
 - label: ":intel: (BMG) [DEBUG] xccl repro - pidfd - 4"
   key: debug-xccl-repro-pidfd-4
   timeout_in_minutes: 60
@@ -108,4 +112,5 @@ steps:
     - uname -r && cat /proc/cmdline
     - env | grep -i "META_DATA" || true
     - cd tests
+    - '(while sleep 15; do for p in $$(pgrep -f "^VLLM::Worker" || true); do a=$$(ps -o etimes= -p $$p 2>/dev/null | tr -d " "); if [ -n "$$a" ] && [ "$$a" -gt 90 ]; then echo "=== WATCHDOG pid=$$p age=$${a}s, SIGABRT ==="; kill -ABRT $$p || true; fi; done; done) & WD=$$!; rc=0; pytest -v -s v1/shutdown || rc=$$?; [ $$rc -eq 0 ] && { pytest -v -s v1/shutdown || rc=$$?; }; kill $$WD 2>/dev/null || true; exit $$rc'
     - '(while sleep 15; do for p in $$(pgrep -f "^VLLM::Worker" || true); do a=$$(ps -o etimes= -p $$p 2>/dev/null | tr -d " "); if [ -n "$$a" ] && [ "$$a" -gt 90 ]; then echo "=== WATCHDOG pid=$$p age=$${a}s, SIGABRT ==="; kill -ABRT $$p || true; fi; done; done) & WD=$$!; rc=0; pytest -v -s v1/shutdown || rc=$$?; [ $$rc -eq 0 ] && { pytest -v -s v1/shutdown || rc=$$?; }; kill $$WD 2>/dev/null || true; exit $$rc'
