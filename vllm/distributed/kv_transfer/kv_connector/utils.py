@@ -229,6 +229,95 @@ def _make_src_and_dst_indices(
     return _to(src_block_ids, src_device), _to(dst_block_ids, dst_device)
 
 
+def _try_copy_kv_blocks_batched(
+    src_kv_caches: dict[str, torch.Tensor],
+    dst_kv_caches: dict[str, torch.Tensor],
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+) -> bool:
+    """Copy blocks between one CUDA device and page-locked host buffers with
+    a single ``swap_blocks_batch`` call. Returns False, leaving the copy to
+    the per-layer path, when the fast path does not apply.
+
+    The per-layer path indexes the host tensor on the CPU, which is slow with
+    the single Torch thread serving uses; ``swap_blocks_batch`` lets the copy
+    engine move each block directly. The host buffers must already be
+    page-locked, e.g. by the NIXL backend when it registers them.
+
+    Each copy moves one dim-0 slice, the slice the per-layer path indexes.
+    Copies within a batch are unordered, so block ids outside
+    ``[0, num_blocks)`` and destination tensors that overlap, such as layers
+    sharing a KV cache, are left to the per-layer path. As with tensor
+    indexing, duplicate destination ids are not supported; callers pass the
+    same unique ids on both sides.
+    """
+    if not current_platform.is_cuda():
+        return False
+    device = None
+    src_ptrs, dst_ptrs, dst_ranges = [], [], []
+    block_bytes = None
+    for layer_name, src in src_kv_caches.items():
+        dst = dst_kv_caches[layer_name]
+        host, gpu = (src, dst) if src.device.type == "cpu" else (dst, src)
+        if device is None:
+            device = gpu.device
+        if (
+            gpu.device != device
+            or device.type != "cuda"
+            or not host.is_pinned()
+            or not src.is_contiguous()
+            or not dst.is_contiguous()
+            or src.shape[1:] != dst.shape[1:]
+            or src.dtype != dst.dtype
+        ):
+            return False
+        layer_block_bytes = src[0].numel() * src.element_size()
+        if block_bytes is None:
+            block_bytes = layer_block_bytes
+        elif layer_block_bytes != block_bytes:
+            return False
+        src_ptrs.append(src.data_ptr())
+        dst_ptrs.append(dst.data_ptr())
+        dst_ranges.append((dst.data_ptr(), dst.data_ptr() + dst.nbytes))
+    if block_bytes is None:
+        return False
+
+    dst_ranges.sort()
+    if any(end > start for (_, end), (start, _) in zip(dst_ranges, dst_ranges[1:])):
+        return False
+    num_src_blocks = min(t.shape[0] for t in src_kv_caches.values())
+    num_dst_blocks = min(t.shape[0] for t in dst_kv_caches.values())
+    if (
+        min(src_block_ids) < 0
+        or max(src_block_ids) >= num_src_blocks
+        or min(dst_block_ids) < 0
+        or max(dst_block_ids) >= num_dst_blocks
+    ):
+        return False
+
+    from vllm import _custom_ops as ops
+
+    def _block_ptrs(base_ptrs: list[int], block_ids: list[int]) -> torch.Tensor:
+        # One pointer per (layer, block), layer-major.
+        bases = torch.tensor(base_ptrs, dtype=torch.int64, device="cpu")[:, None]
+        offsets = torch.tensor(block_ids, dtype=torch.int64, device="cpu")
+        offsets *= block_bytes
+        return (bases + offsets).flatten()
+
+    src_all = _block_ptrs(src_ptrs, src_block_ids)
+    dst_all = _block_ptrs(dst_ptrs, dst_block_ids)
+    sizes = torch.full_like(src_all, block_bytes)
+    # swap_blocks_batch enqueues on the current stream of the current device;
+    # use the stream the per-layer path's ops on these tensors would use.
+    with torch.cuda.device(device):
+        ops.swap_blocks_batch(src_all, dst_all, sizes)
+        # Like the per-layer path, return only once the host buffer is safe
+        # to use: d2h data has landed before it is handed to NIXL, and h2d no
+        # longer reads it when it is reused.
+        torch.cuda.current_stream().synchronize()
+    return True
+
+
 def copy_kv_blocks(
     src_kv_caches: dict[str, torch.Tensor],
     dst_kv_caches: dict[str, torch.Tensor],
@@ -243,6 +332,11 @@ def copy_kv_blocks(
         or not src_block_ids
         or not dst_block_ids
         or len(src_block_ids) != len(dst_block_ids)
+    ):
+        return
+
+    if _try_copy_kv_blocks_batched(
+        src_kv_caches, dst_kv_caches, src_block_ids, dst_block_ids
     ):
         return
 
