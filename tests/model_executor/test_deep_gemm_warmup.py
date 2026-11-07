@@ -189,6 +189,7 @@ def _dsv4_attention(
     is_bmm: bool = True,
     recipe: tuple[int, int, int] | None = (1, 128, 128),
     tma_aligned_scales: bool = False,
+    quantize_o_proj: bool = False,
 ):
     """Minimal stand-in for a DeepSeek-V4 attention layer's o_proj inputs."""
     n_groups, o_lora_rank, d = 2, 128, 256
@@ -203,6 +204,7 @@ def _dsv4_attention(
         wo_a=wo_a,
         _einsum_recipe=recipe,
         _tma_aligned_scales=tma_aligned_scales,
+        _can_quantize_o_proj=quantize_o_proj,
     )
 
 
@@ -286,18 +288,22 @@ def test_fp8_einsum_warmup_matches_runtime_layout(
     monkeypatch.setattr(
         deep_gemm_warmup,
         "fp8_einsum",
-        lambda eq, a, b, out, *, recipe: calls.append((eq, a, b, out, recipe)),
+        lambda eq, a, b, out, *, recipe, use_128x4_sfd_layout: calls.append(
+            (eq, a, b, out, recipe, use_128x4_sfd_layout)
+        ),
     )
     attn = _dsv4_attention(recipe=recipe, tma_aligned_scales=tma_aligned_scales)
     weight, weight_scale = attn.wo_a.weight, attn.wo_a.weight_scale_inv
 
     for _ in range(2):  # the second call is a cache hit
         deep_gemm_warmup._deepgemm_fp8_einsum_warmup(
-            weight, weight_scale, recipe, tma_aligned_scales, max_tokens=3
+            weight, weight_scale, recipe, tma_aligned_scales, False, max_tokens=3
         )
 
     assert len(calls) == 2
-    for num_tokens, (eq, (a, a_scale), b, out, actual_recipe) in zip([1, 3], calls):
+    for num_tokens, (eq, (a, a_scale), b, out, actual_recipe, sfd) in zip(
+        [1, 3], calls
+    ):
         aligned_t = deep_gemm_warmup.get_tma_aligned_size(num_tokens, 4)
         assert eq == "bhr,hdr->bhd"
         # fused_inv_rope_fp8_quant output: [T, G, D] over a [G, T, D] buffer.
@@ -309,20 +315,79 @@ def test_fp8_einsum_warmup_matches_runtime_layout(
         assert a_scale.stride() == (1, scale_inner * aligned_t, aligned_t)
         assert b[0] is weight and b[1] is weight_scale
         assert out.shape == (num_tokens, 2, 128) and out.dtype == torch.bfloat16
-        assert actual_recipe == recipe
+        assert actual_recipe == recipe and sfd is False
+
+
+def test_fp8_einsum_data_reports_the_quantized_o_proj_variant() -> None:
+    bf16_out = deep_gemm_warmup._fp8_einsum_warmup_data(_dsv4_attention())
+    fp8_out = deep_gemm_warmup._fp8_einsum_warmup_data(
+        _dsv4_attention(
+            recipe=(1, 1, 32), tma_aligned_scales=True, quantize_o_proj=True
+        )
+    )
+    assert bf16_out is not None and fp8_out is not None
+    assert bf16_out[4] is False and fp8_out[4] is True
+    # The two variants are different kernels, so they must not share a key.
+    assert deep_gemm_warmup._get_fp8_einsum_warmup_key(
+        *bf16_out
+    ) != deep_gemm_warmup._get_fp8_einsum_warmup_key(*fp8_out)
+
+
+def test_fp8_einsum_warmup_matches_quantized_o_proj_layout(
+    monkeypatch, clear_fp8_einsum_warmup_cache
+) -> None:
+    """DSv4.1 mega attention takes an FP8 (out, scale) pair in the 128x4 layout."""
+    monkeypatch.setattr(
+        deep_gemm_warmup, "_get_fp8_einsum_m_values", lambda weight, max_tokens: [200]
+    )
+    calls = []
+    monkeypatch.setattr(
+        deep_gemm_warmup,
+        "fp8_einsum",
+        lambda eq, a, b, out, *, recipe, use_128x4_sfd_layout: calls.append(
+            (out, use_128x4_sfd_layout)
+        ),
+    )
+    attn = _dsv4_attention(
+        recipe=(1, 1, 32), tma_aligned_scales=True, quantize_o_proj=True
+    )
+
+    data = deep_gemm_warmup._fp8_einsum_warmup_data(attn)
+    assert data is not None
+    weight, weight_scale, recipe, tma_aligned_scales, quantize_output = data
+
+    deep_gemm_warmup._deepgemm_fp8_einsum_warmup(
+        weight,
+        weight_scale,
+        recipe,
+        tma_aligned_scales,
+        quantize_output,
+        max_tokens=200,
+    )
+
+    ((out, use_128x4_sfd_layout),) = calls
+    assert use_128x4_sfd_layout is True
+    z, z_scale = out
+    n_groups, o_lora_rank = 2, 128
+    assert z.shape == (200, n_groups, o_lora_rank)
+    assert z.dtype == torch.float8_e4m3fn
+    # DeepGEMM asserts d.stride(0) == o_lora_rank on the permuted output.
+    assert z.permute(1, 0, 2).stride(0) == o_lora_rank
+    assert z_scale.shape == (2, n_groups * o_lora_rank // 128, 128)
+    assert z_scale.dtype == torch.int32 and z_scale.is_contiguous()
 
 
 def test_count_warmup_iterations_counts_each_fp8_einsum_shape_once(
     monkeypatch, clear_fp8_einsum_warmup_cache
 ) -> None:
     layers = [_dsv4_attention(), _dsv4_attention()]  # e.g. two decoder layers
-    monkeypatch.setattr(
-        deep_gemm_warmup,
-        "_fp8_einsum_warmup_data",
-        lambda m: (m.wo_a.weight, m.wo_a.weight_scale_inv, m._einsum_recipe, False)
-        if hasattr(m, "wo_a")
-        else None,
-    )
+
+    def fake_data(m):
+        if not hasattr(m, "wo_a"):
+            return None
+        return (m.wo_a.weight, m.wo_a.weight_scale_inv, m._einsum_recipe, False, False)
+
+    monkeypatch.setattr(deep_gemm_warmup, "_fp8_einsum_warmup_data", fake_data)
     monkeypatch.setattr(deep_gemm_warmup, "_deep_gemm_linear_data", lambda m: None)
     monkeypatch.setattr(
         deep_gemm_warmup, "_fused_moe_grouped_gemm_may_use_deep_gemm", lambda m: False

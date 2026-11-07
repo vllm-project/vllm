@@ -247,10 +247,11 @@ FP8_EINSUM_BLOCK_M_GRANULARITY = 16
 
 def _fp8_einsum_warmup_data(
     module: torch.nn.Module,
-) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int, int], bool] | None:
-    """Return ``(wo_a weight, wo_a scale, einsum recipe, tma_aligned_scales)`` for
-    a DeepSeek-V4 attention layer whose o_proj runs ``fp8_einsum`` (see
-    ``deep_gemm_fp8_o_proj``), else None.
+) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int, int], bool, bool] | None:
+    """Return ``(wo_a weight, wo_a scale, einsum recipe, tma_aligned_scales,
+    quantize_output)`` for a DeepSeek-V4 or V4.1 attention layer whose o_proj
+    runs ``fp8_einsum`` (see ``deep_gemm_fp8_o_proj`` and V4.1 mega attention),
+    else None.
 
     ``wo_a`` is an ``is_bmm`` linear: its DeepGEMM kernel skips the
     ``fp8_gemm_nt`` warmup provider because the layer runs through
@@ -273,6 +274,9 @@ def _fp8_einsum_warmup_data(
         weight_scale,
         tuple(recipe),
         bool(getattr(module, "_tma_aligned_scales", False)),
+        # A V4.1 mega-attention layer feeds wo_b MXFP8 directly, which is a
+        # different einsum kernel; the flag is fixed for the layer's lifetime.
+        bool(getattr(module, "_can_quantize_o_proj", False)),
     )
 
 
@@ -281,8 +285,15 @@ def _get_fp8_einsum_warmup_key(
     weight_scale: torch.Tensor,
     recipe: tuple[int, int, int],
     tma_aligned_scales: bool,
+    quantize_output: bool,
 ) -> tuple:
-    return (weight.size(), weight_scale.dtype, recipe, tma_aligned_scales)
+    return (
+        weight.size(),
+        weight_scale.dtype,
+        recipe,
+        tma_aligned_scales,
+        quantize_output,
+    )
 
 
 def _get_fp8_einsum_m_values(weight: torch.Tensor, max_tokens: int) -> list[int]:
@@ -312,10 +323,13 @@ def _deepgemm_fp8_einsum_warmup(
     weight_scale: torch.Tensor,
     recipe: tuple[int, int, int],
     tma_aligned_scales: bool,
+    quantize_output: bool,
     max_tokens: int,
     pbar: tqdm | None = None,
 ):
-    key = _get_fp8_einsum_warmup_key(weight, weight_scale, recipe, tma_aligned_scales)
+    key = _get_fp8_einsum_warmup_key(
+        weight, weight_scale, recipe, tma_aligned_scales, quantize_output
+    )
     if key in FP8_EINSUM_WARMUP_CACHE:
         return
 
@@ -344,11 +358,28 @@ def _deepgemm_fp8_einsum_warmup(
             )
             .transpose(0, 1)
         )
-        out = torch.empty(
-            (num_tokens, n_groups, o_lora_rank), device=device, dtype=torch.bfloat16
+        out: torch.Tensor | tuple[torch.Tensor, torch.Tensor] = torch.empty(
+            (num_tokens, n_groups, o_lora_rank),
+            device=device,
+            dtype=torch.float8_e4m3fn if quantize_output else torch.bfloat16,
         )
+        if quantize_output:
+            # The 128x4 SFD layout the FP8-output epilogue writes.
+            out = (
+                out,
+                torch.empty(
+                    (cdiv(num_tokens, 128), n_groups * o_lora_rank // 128, 128),
+                    device=device,
+                    dtype=torch.int32,
+                ),
+            )
         fp8_einsum(
-            "bhr,hdr->bhd", (a, a_scale), (weight, weight_scale), out, recipe=recipe
+            "bhr,hdr->bhd",
+            (a, a_scale),
+            (weight, weight_scale),
+            out,
+            recipe=recipe,
+            use_128x4_sfd_layout=quantize_output,
         )
         if pbar is not None:
             pbar.update(1)
