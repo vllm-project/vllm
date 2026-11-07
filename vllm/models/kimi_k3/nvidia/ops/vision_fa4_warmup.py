@@ -34,7 +34,7 @@ class KimiK3VisionFA4WarmupConfig:
 class _FA4WarmupProbe:
     batch_size: int
     max_seqlen: int
-    dispatch_key: tuple[int, bool, int | None]
+    dispatch_key: tuple[int, bool, int | None, bool]
 
 
 def _combine_log_max_splits(head_dim: int, num_splits: int) -> int:
@@ -50,7 +50,7 @@ def _get_dispatch(
     batch_size: int,
     max_seqlen: int,
     num_sms: int,
-) -> tuple[int, bool, int | None]:
+) -> tuple[int, bool, int | None, bool]:
     # These are the shape-dependent fields in FA4's forward and combine
     # compile keys for noncausal varlen MHA. Compile units still pass
     # num_splits=0 so the production selector makes the final decision.
@@ -73,7 +73,8 @@ def _get_dispatch(
     combine_key = (
         _combine_log_max_splits(config.head_dim, num_splits) if is_split_kv else None
     )
-    return q_stage, is_split_kv, combine_key
+    is_static_persistent = max_seqlen <= effective_q_tile and not is_split_kv
+    return q_stage, is_split_kv, combine_key, is_static_persistent
 
 
 def _get_warmup_probes(
@@ -84,7 +85,7 @@ def _get_warmup_probes(
     if config.max_batch_size <= 0 or config.max_seqlen <= 0:
         return ()
 
-    probes: dict[tuple[int, bool, int | None], _FA4WarmupProbe] = {}
+    probes: dict[tuple[int, bool, int | None, bool], _FA4WarmupProbe] = {}
 
     def add_probe(batch_size: int, max_seqlen: int) -> None:
         dispatch_key = _get_dispatch(
@@ -103,6 +104,9 @@ def _get_warmup_probes(
     add_probe(batch_size=1, max_seqlen=1)
     if config.max_seqlen > _FA4_TILE_SIZE:
         add_probe(batch_size=1, max_seqlen=_FA4_TILE_SIZE + 1)
+    if config.max_seqlen > 2 * _FA4_TILE_SIZE:
+        # FA4 changes its persistent scheduling specialization past one Q tile.
+        add_probe(batch_size=1, max_seqlen=2 * _FA4_TILE_SIZE + 1)
 
     max_n_blocks = math.ceil(config.max_seqlen / _FA4_TILE_SIZE)
     for num_n_blocks in range(5, max_n_blocks + 1):
