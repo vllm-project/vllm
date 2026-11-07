@@ -13,7 +13,7 @@ from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 _MAX_TOPK_BLOCK = 1024
 
 
-@triton.jit
+@triton.jit(do_not_specialize_on_alignment=["topk"])
 def _topk_log_softmax_kernel(
     output_ptr,
     logits_ptr,
