@@ -648,6 +648,12 @@ class Qwen3_5ModelArchConfigConvertor(ModelArchConfigConvertorBase):
                 hf_config.decision_config = get_hf_file_to_dict(
                     "decision_config.json", model_path, revision
                 )
+                # prefix_bidir attention reads each request's state and question
+                # blocks as PrefixLM ranges, so it needs backends that take them.
+                if (hf_config.decision_config or {}).get(
+                    "attention_mode"
+                ) == "prefix_bidir":
+                    hf_config.is_mm_prefix_lm = True
         super().__init__(hf_config, hf_text_config, revision)
 
 
