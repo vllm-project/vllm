@@ -18,7 +18,7 @@ if not torch.cpu._is_amx_tile_supported():
 
 torch.cpu._init_amx()
 
-from vllm import _custom_ops as ops  # noqa: E402
+from vllm import _cpu_ops as ops  # noqa: E402
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 from vllm.v1.attention.backends.mla.amx_mla import (  # noqa: E402
     AMXMLAImpl,

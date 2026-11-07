@@ -908,6 +908,7 @@ class precompiled_wheel_utils:
         "CMakeLists.txt",
         "pyproject.toml",
         "vllm/_custom_ops.py",
+        "vllm/_cpu_ops.py",
     )
     # Changes here are usually harmless for an older wheel.
     WHEEL_WARNING_PATHS = ("rust", "setup.py")
