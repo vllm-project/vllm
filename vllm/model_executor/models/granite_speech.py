@@ -72,7 +72,12 @@ from .interfaces import (
     SupportsPP,
     SupportsTranscription,
 )
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 
 # NOTE lang support is based on what is written here:
 # https://huggingface.co/ibm-granite/granite-speech-3.3-2b
@@ -158,9 +163,7 @@ class GraniteSpeechMultiModalProcessor(
         feature_extractor = processor.audio_processor
         vocab = tokenizer.get_vocab()
 
-        # Use getattr with default to be compatible with transformers<4.48
-        audio_token = getattr(processor, "audio_token", "<|audio|>")
-        audio_token_id = vocab[audio_token]
+        audio_token_id = vocab[processor.audio_token]
 
         def get_replacement(item_idx: int):
             audios = mm_items.get_items("audio", AudioProcessorItems)
@@ -221,8 +224,7 @@ class GraniteSpeechDummyInputsBuilder(
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_audios = mm_counts.get("audio", 0)
         hf_processor = self.info.get_hf_processor()
-        audio_token = getattr(hf_processor, "audio_token", "<|audio|>")
-        return audio_token * num_audios
+        return hf_processor.audio_token * num_audios
 
 
 ### QFormer Projector
@@ -570,6 +572,11 @@ class GraniteSpeechForConditionalGeneration(
         ],
     }
 
+    # Checkpoints saved by Transformers v5 nest the text model one level deeper
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"language_model.model.model.": "language_model.model."}
+    )
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
@@ -846,7 +853,7 @@ class GraniteSpeechForConditionalGeneration(
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix in multimodal models."""

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vllm.entrypoints.chat_utils import _parse_chat_message_content
+from vllm.renderers.chat_utils import parse_chat_message_content
 
 HEADER = (
     "x-anthropic-billing-header: cc_version=2.1.220.300; "
@@ -17,7 +17,7 @@ HEADER = (
 def _parse(message, content_format="openai"):
     tracker = MagicMock()
     tracker.create_parser.return_value.mm_placeholder_storage.return_value = {}
-    return _parse_chat_message_content(
+    return parse_chat_message_content(
         message, tracker, content_format, interleave_strings=False
     )
 

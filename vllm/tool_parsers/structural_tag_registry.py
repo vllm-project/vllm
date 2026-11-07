@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, TypeAlias
 
-from openai.types.responses import FunctionTool
+from openai.types.responses import CustomTool, FunctionTool, ToolChoiceCustom
 from openai.types.responses.response import ToolChoice as ResponsesToolChoice
 from openai.types.responses.tool import Tool as ResponsesTool
 from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
@@ -39,7 +39,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
-from vllm.tool_parsers.utils import get_function_tools, require_function_tools
+from vllm.tool_parsers.utils import (
+    custom_tool_parameters,
+    get_function_tools,
+    require_function_tools,
+)
 
 ToolChoice: TypeAlias = (
     Literal["none", "auto", "required"]
@@ -79,7 +83,7 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
     }
 )
 VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
-    {"glm_4_7", "hermes", "hy_v4", "kimi_k3", "plamo3"}
+    {"glm_4_7", "hermes", "hy_v4", "kimi_k3", "longcat", "plamo3"}
 )
 SUPPORTED_STRUCTURAL_TAG_MODELS = (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
@@ -287,6 +291,11 @@ def _dump_tool_for_xgrammar(
         if tool.strict is not None:
             function["strict"] = tool.strict
         return {"type": "function", "function": function}
+    if isinstance(tool, CustomTool):
+        function = {"name": tool.name, "parameters": custom_tool_parameters()}
+        if tool.description is not None:
+            function["description"] = tool.description
+        return {"type": "function", "function": function}
     dumped_tool = tool.model_dump(mode="json", exclude_none=True)
     if isinstance(tool, ChatCompletionToolsParam):
         return dumped_tool
@@ -306,7 +315,7 @@ def _dump_tool_choice_for_xgrammar(
     if isinstance(tool_choice, ChatCompletionNamedToolChoiceParam):
         return tool_choice.model_dump(mode="json", exclude_none=True)
 
-    if isinstance(tool_choice, ToolChoiceFunction):
+    if isinstance(tool_choice, (ToolChoiceFunction, ToolChoiceCustom)):
         return {
             "type": "function",
             "function": {"name": tool_choice.name},
@@ -346,15 +355,19 @@ def get_function_parameters(function) -> dict[str, Any] | bool:
     return function.parameters if function.parameters is not None else True
 
 
-def _hermes_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
+def _hermes_tool_tags(
+    tools: list[FunctionToolParam],
+    start_tag: str,
+    end_tag: str,
+) -> list[TagFormat]:
     arguments_field_prefix = '", "arguments": '
     formats = [
         # <tool_call>
         # {"name": "t1", "arguments": {"q": "v"}}
         # </tool_call>
-        ('<tool_call>\n{"name": "', "}\n</tool_call>"),
+        (start_tag + '\n{"name": "', "}\n" + end_tag),
         # <tool_call>{"name": "t1", "arguments": {"q": "v"}}</tool_call>
-        ('<tool_call>{"name": "', "}</tool_call>"),
+        (start_tag + '{"name": "', "}" + end_tag),
     ]
 
     return [
@@ -370,6 +383,36 @@ def _hermes_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
     ]
 
 
+def _hermes_style_structural_tag(
+    tools: list[FunctionToolParam],
+    tool_choice: SimplifiedToolChoice,
+    start_tag: str,
+    end_tag: str,
+) -> StructuralTag:
+    tags = _hermes_tool_tags(tools, start_tag, end_tag)
+    if tool_choice == "auto":
+        suffix_tag = (
+            TriggeredTagsFormat(triggers=[start_tag], tags=tags)
+            if tags
+            else AnyTextFormat()
+        )
+    elif tool_choice == "forced":
+        suffix_tag = TagsWithSeparatorFormat(
+            tags=tags,
+            separator="",
+            at_least_one=True,
+            stop_after_first=True,
+        )
+    else:
+        suffix_tag = TagsWithSeparatorFormat(
+            tags=tags,
+            separator="",
+            at_least_one=True,
+        )
+
+    return StructuralTag(format=suffix_tag)
+
+
 @register_vllm_structural_tag("hermes")
 def get_hermes_structural_tag(
     tools: list[FunctionToolParam],
@@ -379,31 +422,23 @@ def get_hermes_structural_tag(
     token_suffix: str = "",
 ) -> StructuralTag:
     del builtin_tools, reasoning, token_suffix
+    return _hermes_style_structural_tag(
+        tools, tool_choice, "<tool_call>", "</tool_call>"
+    )
 
-    tool_call_trigger = "<tool_call>"
 
-    if tool_choice == "auto":
-        tags = _hermes_tool_tags(tools)
-        suffix_tag = (
-            TriggeredTagsFormat(triggers=[tool_call_trigger], tags=tags)
-            if tags
-            else AnyTextFormat()
-        )
-    elif tool_choice == "forced":
-        suffix_tag = TagsWithSeparatorFormat(
-            tags=_hermes_tool_tags(tools),
-            separator="",
-            at_least_one=True,
-            stop_after_first=True,
-        )
-    else:
-        suffix_tag = TagsWithSeparatorFormat(
-            tags=_hermes_tool_tags(tools),
-            separator="",
-            at_least_one=True,
-        )
-
-    return StructuralTag(format=suffix_tag)
+@register_vllm_structural_tag("longcat")
+def get_longcat_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+    token_suffix: str = "",
+) -> StructuralTag:
+    del builtin_tools, reasoning, token_suffix
+    return _hermes_style_structural_tag(
+        tools, tool_choice, "<longcat_tool_call>", "</longcat_tool_call>"
+    )
 
 
 def _minimax_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
@@ -973,6 +1008,14 @@ _GLM_4_7_VALUE_EXCLUDES = [
 ]
 
 
+# Only scalar values are pinned as bare JSON. Array and object values stay raw
+# text: a JSON grammar there admits only JSON escapes after a backslash, so text
+# the model writes with bare backslashes (a Windows path) is forced into escapes
+# the model gives near-zero probability. The parser keeps the raw text when such
+# a value is not valid JSON.
+_GLM_4_7_JSON_SCALAR_TYPES = frozenset({"integer", "number", "boolean", "null"})
+
+
 def _glm_4_7_value_format(prop: dict[str, Any]) -> Any:
     if "enum" in prop:
         values = [
@@ -981,16 +1024,11 @@ def _glm_4_7_value_format(prop: dict[str, Any]) -> Any:
         ]
         return values[0] if len(values) == 1 else OrFormat(elements=values)
     prop_type = prop.get("type")
-    if isinstance(prop_type, list):
-        formats = [
-            _glm_4_7_value_format({"type": t}) for t in prop_type if t != "string"
-        ]
-        if "string" in prop_type:
-            formats.append(AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES))
-        return formats[0] if len(formats) == 1 else OrFormat(elements=formats)
-    if prop_type in (None, "string"):
+    types = prop_type if isinstance(prop_type, list) else [prop_type]
+    if not types or not all(t in _GLM_4_7_JSON_SCALAR_TYPES for t in types):
         return AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES)
-    return JSONSchemaFormat(json_schema={"type": prop_type})
+    formats = [JSONSchemaFormat(json_schema={"type": t}) for t in types]
+    return formats[0] if len(formats) == 1 else OrFormat(elements=formats)
 
 
 def _glm_4_7_plain_properties(params: dict[str, Any]) -> dict[str, Any] | None:
@@ -1010,7 +1048,7 @@ def _glm_4_7_plain_properties(params: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _glm_4_7_tool_tag(tool: FunctionToolParam) -> TagFormat:
-    """Shallow tag for a non-strict tool: keys and basic value types pinned."""
+    """Shallow tag for a non-strict tool: keys and scalar value types pinned."""
     properties = _glm_4_7_plain_properties(tool.function.parameters or {})
     if properties is None:
         return TagFormat(

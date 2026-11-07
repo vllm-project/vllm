@@ -39,15 +39,17 @@ from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
 )
 from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
     Qwen3OmniMoeProcessor,
+    Qwen3OmniMoeProcessorKwargs,
 )
 from transformers.models.whisper import WhisperFeatureExtractor
 from typing_extensions import TypeVar
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.inputs import PromptType, TextPrompt
+from vllm.inputs import MultiModalDataDict, PromptType, TextPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
@@ -72,7 +74,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import AudioProcessorItems, MultiModalDataItems
+from vllm.multimodal.parse import AudioProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing.processor import (
     BaseProcessingInfo,
     HFMultiModalInputs,
@@ -83,6 +85,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.utils import copy_mm_embedding_modality
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -361,7 +364,8 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         embed_dim = config.d_model
         self.num_mel_bins = config.num_mel_bins
-        self.max_source_positions = config.max_source_positions
+        # Transformers-format Qwen3-ASR checkpoints do not set this
+        self.max_source_positions = getattr(config, "max_source_positions", 1500)
         self.n_window = config.n_window
         self.n_window_infer = config.n_window_infer
         self.conv_chunksize = config.conv_chunksize
@@ -1158,13 +1162,6 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
         )
 
 
-class Qwen3OmniMoeThinkerMultiModalDataParser(Qwen2_5OmniThinkerMultiModalDataParser):
-    # Keep the existing raw-media fallback for vision inputs.
-    embedding_fields = {
-        "audio": Qwen2_5OmniThinkerMultiModalDataParser.embedding_fields["audio"],
-    }
-
-
 class Qwen3OmniMoeThinkerProcessingInfo(
     Qwen2AudioProcessingInfo, Qwen2_5_VLProcessingInfo
 ):
@@ -1191,7 +1188,7 @@ class Qwen3OmniMoeThinkerProcessingInfo(
         return feature_extractor
 
     def get_data_parser(self):
-        return Qwen3OmniMoeThinkerMultiModalDataParser(
+        return Qwen2_5OmniThinkerMultiModalDataParser(
             spatial_merge_size=self.get_hf_config().vision_config.spatial_merge_size,
             target_sr=self.get_feature_extractor().sampling_rate,
             target_channels=self.get_target_channels(),
@@ -1201,6 +1198,53 @@ class Qwen3OmniMoeThinkerProcessingInfo(
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
+
+    def get_video_size_with_most_features(self) -> ImageSize:
+        processor = self.get_hf_processor()
+        merged_kwargs = self.ctx.get_merged_mm_kwargs({})
+        if merged_kwargs.keys() & {"size", "min_pixels", "max_pixels"}:
+            video_size = self._get_vision_size(
+                merged_kwargs, default_size=processor.video_processor.size
+            )
+        else:
+            video_size = processor._merge_kwargs(
+                Qwen3OmniMoeProcessorKwargs,
+                tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
+                **merged_kwargs,
+            )["videos_kwargs"]["size"]
+        return self.get_image_size_with_most_features(
+            max_pixels=video_size["longest_edge"]
+        )
+
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        max_frames_per_video: int | None = None,
+    ) -> int:
+        video_processor = self.get_hf_processor().video_processor
+        temporal_patch_size = video_processor.temporal_patch_size
+        target_size = self.get_video_size_with_most_features()
+        tokens_per_step = self.get_num_video_tokens(
+            image_width=target_size.width,
+            image_height=target_size.height,
+            num_frames=temporal_patch_size,
+            image_processor=video_processor,
+            mm_kwargs={},
+        )
+        num_videos = max(mm_counts.get("video", 0), 1)
+        num_steps = max(seq_len // num_videos // tokens_per_step, 1)
+        num_frames = num_steps * temporal_patch_size
+        if max_frames_per_video is not None:
+            num_frames = min(num_frames, max_frames_per_video)
+        return num_frames
+
+    def get_max_video_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        return seq_len
 
     def get_mm_max_tokens_per_item(
         self,
@@ -1236,9 +1280,29 @@ class Qwen3OmniMoeThinkerProcessingInfo(
         return mm_max_tokens
 
 
-Qwen3OmniMoeThinkerDummyInputsBuilder = Qwen2_5OmniThinkerDummyInputsBuilder[
-    Qwen3OmniMoeThinkerProcessingInfo
-]
+class Qwen3OmniMoeThinkerDummyInputsBuilder(
+    Qwen2_5OmniThinkerDummyInputsBuilder[Qwen3OmniMoeThinkerProcessingInfo]
+):
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: MultiModalDummyOptions,
+    ) -> MultiModalDataDict:
+        target_size = self.info.get_video_size_with_most_features()
+        return {
+            **super().get_dummy_mm_data(seq_len, {**mm_counts, "video": 0}, mm_options),
+            "video": self._get_dummy_videos(
+                width=target_size.width,
+                height=target_size.height,
+                num_frames=self.info.get_num_frames_with_most_features(
+                    seq_len, mm_counts
+                ),
+                num_videos=mm_counts.get("video", 0),
+                overrides=mm_options.get("video"),
+            ),
+        }
+
 
 _I = TypeVar("_I", bound=BaseProcessingInfo, default=Qwen3OmniMoeThinkerProcessingInfo)
 
@@ -1498,8 +1562,12 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
 
             audio_in_video_item_idx += 1
 
+            # Match the fps the processor used, as HF and the mrope positions do.
+            processed_second_per_grid_ts = out_mm_data.get("second_per_grid_ts")
             second_per_grid_ts = hf_processor_mm_kwargs.get("second_per_grid_ts", None)
-            if second_per_grid_ts:
+            if isinstance(processed_second_per_grid_ts, torch.Tensor):
+                video_second_per_grid_t = processed_second_per_grid_ts[item_idx].item()
+            elif second_per_grid_ts:
                 video_second_per_grid_t = second_per_grid_ts[item_idx]
             else:
                 video_second_per_grid_t = 2.0
@@ -1904,7 +1972,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                     embeddings_main, embeddings_multiscale = torch.split(
                         embeddings, [visual_dim, multi_dim], dim=-1
                     )
-                    multimodal_embeddings[index] = embeddings_main
+                    multimodal_embeddings[index] = copy_mm_embedding_modality(
+                        embeddings, embeddings_main
+                    )
                     multimodal_embeddings_multiscale.append(embeddings_multiscale)
                     if not is_interleaved:
                         current_positions = mm_positions[

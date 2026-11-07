@@ -315,8 +315,9 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         dtype: torch.dtype,
         mrope_section: list[int] | None = None,
         mrope_interleaved: bool = False,
-        # YaRN parameters.
         *,
+        positions_factor: int = 4,
+        # YaRN parameters.
         scaling_factor: float | None = None,
         beta_fast: int = 32,
         beta_slow: int = 1,
@@ -345,8 +346,9 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
 
         # In Qwen2.5-VL, the maximum index value is related to the duration of
         # the input video. We enlarge max_position_embeddings to 4 times to get
-        # a larger the cos and sin cache.
-        self.cache_max_position_num = max_position_embeddings * 4
+        # a larger the cos and sin cache. Models whose positions never exceed
+        # the token count pass `positions_factor=1`.
+        self.cache_max_position_num = max_position_embeddings * positions_factor
         super().__init__(
             head_size,
             rotary_dim,
@@ -434,38 +436,18 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
-    def forward_cuda(
+    def _forward_text_rope(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor | None = None,
-        offsets: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        assert positions.ndim == 1 or positions.ndim == 2
-        assert key is not None
-
+        key: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         cos_sin_cache = self._match_cos_sin_cache_dtype(query)
         num_tokens = positions.shape[-1]
         cos_sin = cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
         query_shape = query.shape
         key_shape = key.shape
-        if positions.ndim == 2:
-            assert self.mrope_section
-
-            q, k = triton_mrope(
-                query,
-                key,
-                cos,
-                sin,
-                self.mrope_section,
-                self.head_size,
-                self.rotary_dim,
-                self.mrope_interleaved,
-                self.is_neox_style,
-            )
-
-            return q.reshape(query_shape), k.reshape(key_shape)
 
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., : self.rotary_dim]
@@ -487,6 +469,40 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         )
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
+
+    def forward_cuda(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        assert positions.ndim == 1 or positions.ndim == 2
+        assert key is not None
+
+        if positions.ndim == 2:
+            assert self.mrope_section
+            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+            cos_sin = cos_sin_cache[positions]
+            cos, sin = cos_sin.chunk(2, dim=-1)
+            query_shape = query.shape
+            key_shape = key.shape
+
+            q, k = triton_mrope(
+                query,
+                key,
+                cos,
+                sin,
+                self.mrope_section,
+                self.head_size,
+                self.rotary_dim,
+                self.mrope_interleaved,
+                self.is_neox_style,
+            )
+
+            return q.reshape(query_shape), k.reshape(key_shape)
+
+        return self._forward_text_rope(positions, query, key)
 
     def forward_hip(
         self,
@@ -534,6 +550,26 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return self.forward_cuda(positions, query, key, offsets)
+        if positions.ndim == 2:
+            assert key is not None
+            assert self.mrope_section is not None
+            import vllm._xpu_ops  # noqa: F401
+
+            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+            torch.ops._xpu_C.multimodal_rotary_embedding(
+                positions,
+                query,
+                key,
+                self.head_size,
+                cos_sin_cache,
+                self.is_neox_style,
+                self.mrope_section,
+                self.mrope_interleaved,
+            )
+            return query, key
+        assert positions.ndim == 1
+        assert key is not None
+        return self._forward_text_rope(positions, query, key)
 
     @staticmethod
     def get_next_input_positions(

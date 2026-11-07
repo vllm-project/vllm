@@ -31,6 +31,8 @@ class KVEventsConfig:
     buffer_steps: int = 10_000
     """The number of steps to cache for replay endpoint. Will only save
     events from the last N steps for the replay endpoint.
+
+    The replay socket's send high-water mark is 2 * (buffer_steps + 1).
     """
 
     hwm: int = 100_000
