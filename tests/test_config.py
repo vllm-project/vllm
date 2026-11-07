@@ -4768,6 +4768,11 @@ def test_hc_sp_model_support(enabled, supported, cuda_alike, tp_size, pp_size, e
             return_value=cuda_alike,
         ),
         patch.object(ModelRegistry, "is_hc_sp_supported_model", return_value=supported),
+        patch.object(
+            ModelRegistry,
+            "is_hc_sp_with_pp_supported_model",
+            return_value=False,
+        ),
         patch.object(ModelRegistry, "is_pp_supported_model", return_value=True),
     ):
         if error:

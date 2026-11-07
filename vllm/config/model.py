@@ -1569,7 +1569,12 @@ class ModelConfig:
                 raise ValueError("--enable-hc-sp currently requires CUDA or ROCm")
             if not self.registry.is_hc_sp_supported_model(self.architectures, self):
                 raise ValueError("--enable-hc-sp is not supported for this model")
-            if parallel_config.pipeline_parallel_size != 1:
+            if (
+                parallel_config.pipeline_parallel_size != 1
+                and not self.registry.is_hc_sp_with_pp_supported_model(
+                    self.architectures, self
+                )
+            ):
                 raise ValueError("--enable-hc-sp requires PP=1")
 
         total_num_attention_heads = self.model_arch_config.total_num_attention_heads

@@ -50,6 +50,7 @@ from .interfaces import (
     is_hybrid,
     requires_raw_input_tokens,
     supports_hc_sp,
+    supports_hc_sp_with_pp,
     supports_kv_cache_grouping,
     supports_lora,
     supports_multimodal,
@@ -955,6 +956,7 @@ class _ModelInfo:
     supports_pp: bool
     supports_lora: bool
     supports_hc_sp: bool
+    supports_hc_sp_with_pp: bool
     has_inner_state: bool
     is_attention_free: bool
     is_hybrid: bool
@@ -991,6 +993,7 @@ class _ModelInfo:
             supports_pp=supports_pp(model),
             supports_lora=supports_lora(model),
             supports_hc_sp=supports_hc_sp(model),
+            supports_hc_sp_with_pp=supports_hc_sp_with_pp(model),
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
@@ -1590,6 +1593,15 @@ class _ModelRegistry:
         """Check support for HC SP without changing MoE parallelism."""
         model_info, _ = self.inspect_model_cls(architectures, model_config)
         return model_info.supports_hc_sp
+
+    def is_hc_sp_with_pp_supported_model(
+        self,
+        architectures: str | list[str],
+        model_config: ModelConfig,
+    ) -> bool:
+        """Check support for combining HC sequence and pipeline parallelism."""
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.supports_hc_sp_with_pp
 
     def model_has_inner_state(
         self,

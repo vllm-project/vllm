@@ -346,7 +346,6 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         current_step_idx = spec_step_idx % self.num_mtp_layers
         full_num_tokens = positions.shape[-1]
         if self.use_hc_sequence_parallel:
-            # SP requires PP=1, so the first-rank branch sets prev_block_output.
             assert prev_block_output is not None
             if (
                 self.use_sequence_parallel
@@ -419,6 +418,8 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
 
 
 class Qwen4ExpMTP(nn.Module, SupportsHCSP, SupportsPP, Qwen4ExpMixtureOfExperts):
+    supports_hc_sp_with_pp = True
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
