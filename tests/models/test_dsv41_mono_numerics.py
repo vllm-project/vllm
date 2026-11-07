@@ -397,10 +397,9 @@ def _check_layers(rank: int, tp: int, device) -> None:
     # the tuned builds' reference (``MonoBuild.generic``): at TP2 the ratio-2
     # steps take the tuned paths, 12 rows the small-width ones, 36 a partial
     # last token tile; their outputs must match the generic builds' bit for bit.
-    # Only TP2 has tuned builds, so only TP2 makes the reference.
     generic = (
         DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device, generic=True)
-        if tp == 2
+        if runner.build(1, 2).tuned_front
         else None
     )
     gw, bias = moe.gate.weight.float(), moe.gate.e_score_correction_bias.float()
@@ -518,7 +517,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
         swa_of = {}
         runs = (
             (generic, runner)
-            if generic is not None and runner.tuned(M, ratio)
+            if generic is not None and runner.build(M, ratio).tuned_front
             else (runner,)
         )
         for r in runs:
@@ -531,8 +530,9 @@ def _check_layers(rank: int, tp: int, device) -> None:
                 topk_indices=s["topk"], comp_cache=s["comp_cache"],
                 comp_block_table=s["comp_block_table"],
             )  # fmt: skip
-            off = scratch_layout(M, tp, tuned=r.tuned(M, ratio))["normed"][0]
-            normed = r.scratch(M, r.tuned(M, ratio))[off : off + M * HIDDEN * 2]
+            b = r.build(M, ratio)
+            off = scratch_layout(M, tp, tuned=b.tuned, front=b.tuned_front)["normed"][0]
+            normed = r.scratch(M, b.tuned, b.tuned_front)[off : off + M * HIDDEN * 2]
             mid = (r.res_mid, r.post_a, r.comb_a, r.pre_a)
             res_of[r] = [t.clone() for t in (*o, normed, *(t[:M] for t in mid))]
             swa_of[r] = s["swa_cache"].clone()
