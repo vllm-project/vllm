@@ -931,6 +931,10 @@ compressed-tensors==0.17.0 \
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
+conch-triton-kernels==1.3 \
+    --hash=sha256:75c7b1342687b30d6b725edbce9e0deb24b55398a9f383af10e15b3cf667269c \
+    --hash=sha256:bbbdbbcc2ea5650f582a00d9c9ad9ca65b822a64b3cf41856c5e83efcdbe7cea
+    # via -r requirements/test/cuda.in
 contourpy==1.3.0 \
     --hash=sha256:00ccd0dbaad6d804ab259820fa7cb0b8036bda0686ef844d24125d8287178ce0 \
     --hash=sha256:0be4d8425bfa755e0fd76ee1e019636ccc7c29f77a7c86b4328a9eb6a26d0639 \
@@ -3777,6 +3781,7 @@ numpy==2.2.6 \
     #   accelerate
     #   albumentations
     #   bm25s
+    #   conch-triton-kernels
     #   contourpy
     #   datasets
     #   decord
@@ -6964,6 +6969,9 @@ torch==2.14.0+cu130 \
 torch-abi-audit==0.0.1 \
     --hash=sha256:2024a9cde3cb6c3794b82030da7768fae23735ab214fa6eccc791495e2b73594 \
     --hash=sha256:adc0e46217c924841ad1f0d0debdc111d170185bedba2e150a8a59c4d80b8f08
+    # via -r requirements/test/cuda.in
+torchao==0.18.0+cu130 \
+    --hash=sha256:b5b6b2822e3a6bc28975b8287874964ba025cc99991b0fa8bc284b2420339c78
     # via -r requirements/test/cuda.in
 torchaudio==2.11.0+cu130 \
     --hash=sha256:04aadf807c27df785c6e3463e70bb1a657ed2d1a16b5578114c9fdf7e8c1ac10 \

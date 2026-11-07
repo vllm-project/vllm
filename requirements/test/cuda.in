@@ -45,6 +45,8 @@ schemathesis>=4.0.0 # Required for openai schema test.
 # quantization
 buildkite-test-collector==0.1.9
 torch-abi-audit # CI check for PyTorch stable ABI compliance
+torchao==0.18.0 # required for quantization tests
+conch-triton-kernels==1.3 # required for quantization tests
 
 genai_perf>=0.0.8
 tritonclient>=2.51.0
