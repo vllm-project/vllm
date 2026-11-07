@@ -317,6 +317,64 @@ def test_region_pull_ignores_allocation_padding(
 
 
 @pytest.mark.cpu_test
+def test_position_mapped_pull_builds_pair_descriptors(region_pull_worker):
+    """Alias pairs build one descriptor per page, under the right regions."""
+    worker = region_pull_worker
+    worker.num_regions = 3
+    worker.dst_region_num_blocks = {"P": [100, 100], "D": [100, 100, 100]}
+    worker.dst_region_mem_types = {"P": ["VRAM", "VRAM"]}
+    worker.pp_size = 1
+    worker.pcp_size = 1
+    # Two layers in separate groups share one decoder region; the prefill
+    # side still holds one region per layer.
+    worker._dst_pairs = {
+        "P": SimpleNamespace(
+            remote=[0, 1],
+            local=[2, 2],
+            group=[0, 1],
+            remote_regions=[0, 1],
+            partner=[2, 2],
+            groups_match=False,
+            layer_groups_match=True,
+            remote_ssm_regions=None,
+        )
+    }
+    worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+        remote_tp_size=4,
+        remote_dcp_size=1,
+        remote_block_size=64,
+        remote_physical_blocks_per_logical=1,
+    )
+    meta = ReqMeta(
+        local_block_ids=((10, 11), (12, 13)),
+        local_physical_block_ids=((10, 11), (12, 13)),
+        tp_size=1,
+        local_block_positions=(
+            ((0, 10), (1, 11)),
+            ((0, 12), (1, 13)),
+        ),
+        local_required_positions=((0, 1), (0, 1)),
+        remote=RemoteMeta(
+            block_ids=((40, 41), (50, 51)),
+            engine_id="P",
+            request_id="p-req",
+            host="localhost",
+            port=1,
+            block_positions=(
+                ((0, 40), (1, 41)),
+                ((0, 50), (1, 51)),
+            ),
+        ),
+    )
+
+    worker._read_blocks_for_req("request", meta)
+
+    read = worker._read_blocks_mixed.call_args.kwargs
+    assert read["local_block_descs_ids"].tolist() == [210, 211, 212, 213]
+    assert read["remote_block_descs_ids"].tolist() == [40, 41, 150, 151]
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize("num_pages", [0, 3, 19])
 @pytest.mark.parametrize("region_groups", [(0, 1), (1, 0, 1)])
 def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
