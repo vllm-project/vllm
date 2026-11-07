@@ -109,6 +109,18 @@ def test_h12_query_is_tile_padded_to_h16():
     torch.testing.assert_close(padded_q[:, 12:], q[:, :4])
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_h96_query_is_tile_padded_to_h128(dtype):
+    # DCP8 at TP8 gathers 96 heads; the cprr asm decode runs at 128.
+    q = torch.randn(5, 96, QK_HEAD_DIM).to(dtype)
+
+    padded_q = AiterMLAHelper.get_mla_padded_q(96, q, target_heads=128)
+
+    expected = torch.cat([q, q[:, :32]], dim=1)
+    assert padded_q.is_contiguous()
+    assert torch.equal(padded_q.view(torch.uint8), expected.view(torch.uint8))
+
+
 def test_h6_tp16_query_is_padded_to_h16():
     # TP16 puts 6 heads/rank. The old append-only padding produced cat(6, 6) =
     # 12 heads and broke the asm kernel; tile-and-slice must reach exactly 16.
