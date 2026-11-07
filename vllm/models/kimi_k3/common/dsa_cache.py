@@ -10,6 +10,7 @@ import torch
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.sparse_attn_indexer import MXFP4_BLOCK_SIZE
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
@@ -22,7 +23,11 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadataBuilder,
     dsa_indexer_uses_fp4,
 )
-from vllm.v1.kv_cache_interface import MLAAttentionSpec, get_kv_quant_mode
+from vllm.v1.kv_cache_interface import (
+    DS_MLA_STATE_CONTENT_BYTES,
+    MLAAttentionSpec,
+    get_kv_quant_mode,
+)
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 
@@ -72,6 +77,11 @@ class KimiK3IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             raise NotImplementedError("Kimi-K3.1 packed DSA caches with PCP")
         # The K3.1 key format, validated as KimiK3DSAIndexer selects it.
         self.indexer_uses_fp4 = kimi_k3_indexer_uses_fp4(self.vllm_config)
+        if self.indexer_uses_fp4 and current_platform.is_rocm():
+            self._needs_global_row_bounds = self.dcp_world_size > 1
+            # The FP4 prefill op always splits a chunk's query rows over the
+            # DCP ranks, so the chunk planner gets the same per-rank budget.
+            self._rowshard_dcp_prefill = self._needs_global_row_bounds
         self.slot_mapping_buffer = torch.zeros(
             self.vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.int64,
@@ -101,6 +111,17 @@ class KimiK3IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             replace(common_attn_metadata, slot_mapping=slot_mapping),
             fast_build,
         )
+        if self.indexer_uses_fp4 and current_platform.is_rocm() and metadata.prefill:
+            from vllm.models.kimi_k3.amd.ops.fp4_indexer_prefill import (
+                prepare_prefill_metadata,
+            )
+
+            metadata.prefill = prepare_prefill_metadata(
+                metadata.prefill,
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.cp_kv_cache_interleave_size,
+            )
         return metadata
 
 
@@ -169,6 +190,7 @@ def dense_mla_draft_bytes_per_token(vllm_config: VllmConfig) -> int:
         dtype=kv_cache_dtype_str_to_dtype(cache_dtype, draft_model_config),
         cache_dtype_str=cache_dtype,
         kv_quant_mode=get_kv_quant_mode(cache_dtype),
+        state_content_bytes=DS_MLA_STATE_CONTENT_BYTES.get(cache_dtype),
     ).page_size_bytes
     return draft_config.num_hidden_layers * page
 

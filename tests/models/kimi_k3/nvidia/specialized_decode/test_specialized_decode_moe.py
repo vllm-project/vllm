@@ -523,6 +523,42 @@ def test_routed_experts_match_trtllm_gen(tp, batch):
     assert mismatches == 0, f"{mismatches} of {total} expert outputs differ"
 
 
+@pytest.mark.parametrize("batch,grid", [(80, 144), (200, 132)])
+def test_wide_experts_on_fewer_ctas_match_trtllm_gen(batch, grid, monkeypatch):
+    """The wide engine runs one CTA per SM, at most ``WIDE_GRID`` (every CTA must be
+    resident). On a smaller grid, as on GPUs with fewer SMs, every expert row still
+    equals the stock trtllm-gen row bit for bit, over consecutive calls."""
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.moe import (
+        experts_runtime as er,
+    )
+
+    monkeypatch.setattr(er, "WIDE_GRID", grid)
+    intermediate = real = 384
+    weights = selection_experts(intermediate, real)
+    w13, w2, s13, s2 = weights
+    experts = er.PersistentExperts(w13.view(torch.uint8), s13, w2.view(torch.uint8), s2)
+    dev = torch.device("cuda", torch.accelerator.current_device_index())
+    sms = torch.cuda.get_device_properties(dev).multi_processor_count
+    assert experts.grid_for(batch) == min(grid, sms)
+    out = torch.empty(batch * TOPK, HIDDEN, dtype=torch.bfloat16, device=dev)
+    experts.prepare(batch, er.scratch(8, dev, wide=True), out)
+    gen = torch.Generator(device="cuda").manual_seed(900 + batch)
+    for _ in range(2):
+        x = exact_latent(batch, gen)
+        ids = torch.stack(
+            [
+                torch.randperm(EXPERTS, generator=gen, device="cuda")[:TOPK]
+                for _ in range(batch)
+            ]
+        ).int()
+        experts.run(x, ids)
+        want = stock_expert_rows(weights, x, intermediate)
+        got = out.view(batch, TOPK, HIDDEN)
+        assert torch.equal(
+            got.view(torch.int16), want.unsqueeze(1).expand_as(got).view(torch.int16)
+        )
+
+
 @pytest.mark.parametrize("batch", [5, 8, 20, 60])
 def test_routed_experts_prefetch_ahead_is_exact(batch):
     """Experts prepared ``ahead`` (their producers L2-prefetch a table of next
