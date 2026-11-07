@@ -21,12 +21,17 @@ from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
     HummingFP8ScaledMMLinearKernel,
+    HummingLinearKernel,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
+    MarlinLinearKernel,
+    MPLinearLayerConfig,
     ScaledMMLinearKernel,
     TritonInt8ScaledMMLinearKernel,
     _get_linear_backend,
+    _prefer_humming_for_int4_g128,
     _resolve_backend_kernels,
+    choose_mp_linear_kernel,
     init_fp8_linear_kernel,
     init_int8_linear_kernel,
     register_linear_kernel,
@@ -37,7 +42,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
 )
-from vllm.platforms import PlatformEnum
+from vllm.platforms import PlatformEnum, current_platform
+from vllm.scalar_type import scalar_types
 
 pytestmark = pytest.mark.cpu_test
 
@@ -422,3 +428,87 @@ def test_humming_priority_only_reorders_humming_and_marlin(possible_kernels):
     del names[humming]
     assert names == [k.__name__ for k in original if "Humming" not in k.__name__]
     assert kernels == original
+
+
+@pytest.mark.parametrize(
+    "weight_type,group_size,zero_points,act_type,expected",
+    [
+        (scalar_types.uint4b8, 128, False, torch.bfloat16, True),
+        (scalar_types.uint4, 128, True, torch.bfloat16, False),
+        (scalar_types.uint4b8, 32, False, torch.bfloat16, False),
+        (scalar_types.uint8b128, 128, False, torch.bfloat16, False),
+        (scalar_types.uint4b8, 128, False, torch.float16, False),
+    ],
+)
+def test_humming_priority_int4_g128(
+    weight_type, group_size, zero_points, act_type, expected
+):
+    """On SM12x, Humming moves directly ahead of Marlin only for int4 symmetric
+    group-128 weights with bf16 activations. No other kernel moves, other devices
+    are unchanged and a single forced backend is kept."""
+    kernels = _POSSIBLE_KERNELS[PlatformEnum.CUDA]
+    original = list(kernels)
+    config = MPLinearLayerConfig(
+        full_weight_shape=(5120, 5120),
+        partition_weight_shape=(5120, 5120),
+        weight_type=weight_type,
+        act_type=act_type,
+        group_size=group_size,
+        zero_points=zero_points,
+    )
+
+    for capability in (90, 100, 103):
+        assert _prefer_humming_for_int4_g128(kernels, config, capability) == original
+    for forced in ([MarlinLinearKernel], [HummingLinearKernel]):
+        assert _prefer_humming_for_int4_g128(forced, config, 120) == forced
+    for capability in (120, 121):
+        reordered = _prefer_humming_for_int4_g128(kernels, config, capability)
+        assert kernels == original
+        names = [k.__name__ for k in reordered]
+        humming = names.index("HummingLinearKernel")
+        marlin = names.index("MarlinLinearKernel")
+        assert (humming == marlin - 1) == expected
+        if not expected:
+            assert reordered == original
+        del names[humming]
+        assert names == [
+            k.__name__ for k in original if k.__name__ != "HummingLinearKernel"
+        ]
+
+
+@pytest.mark.parametrize(
+    "compute_capability,linear_backend,expected_kernel",
+    [
+        (120, "auto", HummingLinearKernel),
+        (121, "auto", HummingLinearKernel),
+        (121, "marlin", MarlinLinearKernel),
+    ],
+)
+def test_choose_mp_linear_kernel_int4_g128_sm12x(
+    compute_capability, linear_backend, expected_kernel
+):
+    config = MPLinearLayerConfig(
+        full_weight_shape=(5120, 5120),
+        partition_weight_shape=(5120, 5120),
+        weight_type=scalar_types.uint4b8,
+        act_type=torch.bfloat16,
+        group_size=128,
+        zero_points=False,
+    )
+    vllm_config = VllmConfig(kernel_config=KernelConfig(linear_backend=linear_backend))
+
+    with (
+        patch.dict(
+            _POSSIBLE_KERNELS,
+            {current_platform._enum: [MarlinLinearKernel, HummingLinearKernel]},
+        ),
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch(
+            "vllm.model_executor.kernels.linear.mixed_precision.humming.has_humming",
+            return_value=True,
+        ),
+        set_current_vllm_config(vllm_config),
+    ):
+        chosen = choose_mp_linear_kernel(config, compute_capability)
+
+    assert chosen is expected_kernel
