@@ -25,6 +25,9 @@ from vllm.v1.watermarking.prfs.philox import (
 from vllm.v1.watermarking.prfs.philox import (
     _UINT32_MASK as _UINT32_MASK_VALUE,
 )
+from vllm.v1.watermarking.prfs.philox import (
+    _philox_context_state as _philox_context_state_torch,
+)
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
 
 if HAS_TRITON:
@@ -43,7 +46,7 @@ _CONTEXT_DOMAIN = (
 _TOKEN_DOMAIN = tl.constexpr(_TOKEN_DOMAIN_VALUE) if HAS_TRITON else _TOKEN_DOMAIN_VALUE
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["key_0_value", "key_1_value"])
 def _repeated_context_mask_kernel(
     output_ptr,
     all_token_ids_ptr,
@@ -62,6 +65,11 @@ def _repeated_context_mask_kernel(
     steps_ptr,
     steps_stride,
     enabled_ptr,
+    key_0_value,
+    key_1_value,
+    uncommitted_ring_ptr,
+    uncommitted_ring_stride,
+    uncommitted_state_ptr,
     CONTEXT_WIDTH: tl.constexpr,
     NUM_SPECULATIVE_STEPS: tl.constexpr,
     MAX_HISTORY: tl.constexpr,
@@ -70,8 +78,11 @@ def _repeated_context_mask_kernel(
     HAS_HISTORY_OFFSETS: tl.constexpr,
     SPECULATIVE_CONTEXTS: tl.constexpr,
     DRAFT_CONTEXTS: tl.constexpr,
+    UNCOMMITTED_CONTEXTS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
+    key_0 = key_0_value.to(tl.uint32)
+    key_1 = key_1_value.to(tl.uint32)
     row = tl.program_id(0).to(tl.int64)
     req_idx = tl.load(req_indices_ptr + row).to(tl.int64)
     if req_idx < 0:
@@ -186,6 +197,22 @@ def _repeated_context_mask_kernel(
                 )
                 matches &= context_token == prior_token
             repeated |= matches
+
+        if UNCOMMITTED_CONTEXTS:
+            context_word, _, _, _ = _philox_context_state(
+                contexts_ptr + row * context_stride, key_0, key_1, CONTEXT_WIDTH
+            )
+            context_word = context_word.to(tl.int32)
+            num_recorded = tl.load(uncommitted_state_ptr + req_idx * 2 + 1)
+            for ring_start in tl.range(0, num_recorded, BLOCK):
+                ring_pos = ring_start + offsets
+                recorded = tl.load(
+                    uncommitted_ring_ptr + req_idx * uncommitted_ring_stride + ring_pos,
+                    mask=ring_pos < num_recorded,
+                    other=0,
+                )
+                matches = (ring_pos < num_recorded) & (recorded == context_word)
+                repeated |= tl.max(matches.to(tl.int32), axis=0)
 
         for context_offset in range(CONTEXT_WIDTH):
             context_token = tl.load(
@@ -354,6 +381,11 @@ def repeated_context_mask(
         None,
         0,
         None,
+        0,
+        0,
+        None,
+        0,
+        None,
         CONTEXT_WIDTH=contexts.shape[-1],
         NUM_SPECULATIVE_STEPS=num_speculative_steps,
         MAX_HISTORY=0 if max_history is None else max_history,
@@ -362,6 +394,7 @@ def repeated_context_mask(
         HAS_HISTORY_OFFSETS=history_offsets is not None,
         SPECULATIVE_CONTEXTS=local_positions is not None,
         DRAFT_CONTEXTS=False,
+        UNCOMMITTED_CONTEXTS=False,
         BLOCK=512,
     )
     return repeated
@@ -378,6 +411,9 @@ def draft_watermarking_mask(
     enabled: torch.Tensor,
     max_history: int | None,
     include_prompt: bool,
+    draft_key: int = 0,
+    uncommitted_ring: torch.Tensor | None = None,
+    uncommitted_state: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if contexts.device.type == "cpu":
         repeated = repeated_context_mask(
@@ -400,6 +436,20 @@ def draft_watermarking_mask(
         ).any(dim=-1)
         if include_prompt:
             repeated |= (contexts < 0).any(dim=-1)
+        if uncommitted_ring is not None:
+            assert uncommitted_state is not None
+            slots = req_indices.clamp_min(0).to(torch.int64)
+            recorded = torch.arange(uncommitted_ring.shape[1]).unsqueeze(
+                0
+            ) < uncommitted_state[slots, 1].unsqueeze(1)
+            repeated |= (
+                (
+                    uncommitted_ring[slots]
+                    == _context_words(draft_key, contexts).unsqueeze(1)
+                )
+                & recorded
+                & (req_indices >= 0).unsqueeze(1)
+            ).any(dim=-1)
         row_indices = torch.arange(len(contexts))
         prior_contexts.index_put_((row_indices, steps), contexts)
         return enabled & ~repeated
@@ -428,6 +478,11 @@ def draft_watermarking_mask(
         steps,
         steps.stride(0),
         enabled,
+        draft_key & _UINT32_MASK_VALUE,
+        draft_key >> 32,
+        uncommitted_ring,
+        0 if uncommitted_ring is None else uncommitted_ring.stride(0),
+        uncommitted_state,
         NUM_SPECULATIVE_STEPS=prior_contexts.shape[1],
         CONTEXT_WIDTH=contexts.shape[1],
         MAX_HISTORY=0 if max_history is None else max_history,
@@ -436,6 +491,7 @@ def draft_watermarking_mask(
         HAS_HISTORY_OFFSETS=True,
         SPECULATIVE_CONTEXTS=False,
         DRAFT_CONTEXTS=True,
+        UNCOMMITTED_CONTEXTS=uncommitted_ring is not None,
         BLOCK=512,
     )
     return active
@@ -506,6 +562,131 @@ def _philox_context_state(
             key_1,
         )
     return state_0, state_1, state_2, state_3
+
+
+def _context_words(key: int, contexts: torch.Tensor) -> torch.Tensor:
+    """First word of the Philox context state, as an int32 ring entry."""
+    prefix_shape = contexts.shape[:-1]
+    key_0 = torch.full(
+        prefix_shape,
+        key & _UINT32_MASK_VALUE,
+        dtype=torch.int64,
+        device=contexts.device,
+    )
+    key_1 = torch.full(
+        prefix_shape, key >> 32, dtype=torch.int64, device=contexts.device
+    )
+    state_0, _, _, _ = _philox_context_state_torch(key_0, key_1, contexts)
+    return state_0.to(torch.int32)
+
+
+@triton.jit(do_not_specialize=["key_0_value", "key_1_value"])
+def _append_uncommitted_contexts_kernel(
+    ring_ptr,
+    ring_stride,
+    state_ptr,
+    contexts_ptr,
+    context_stride,
+    idx_mapping_ptr,
+    cu_num_logits_ptr,
+    num_sampled_ptr,
+    key_0_value,
+    key_1_value,
+    CONTEXT_WIDTH: tl.constexpr,
+    CONTEXT_POW2: tl.constexpr,
+    CAPACITY: tl.constexpr,
+):
+    key_0 = key_0_value.to(tl.uint32)
+    key_1 = key_1_value.to(tl.uint32)
+    req = tl.program_id(0)
+    first_row = tl.load(cu_num_logits_ptr + req)
+    num_draft = tl.load(cu_num_logits_ptr + req + 1) - first_row - 1
+    num_accepted = tl.load(num_sampled_ptr + req) - 1
+    slot = tl.load(idx_mapping_ptr + req).to(tl.int64)
+    head = tl.load(state_ptr + slot * 2)
+    num_recorded = tl.load(state_ptr + slot * 2 + 1)
+    context_offsets = tl.arange(0, CONTEXT_POW2)
+    for row in range(first_row + num_accepted + 1, first_row + num_draft):
+        contexts_row_ptr = contexts_ptr + tl.cast(row, tl.int64) * context_stride
+        context = tl.load(
+            contexts_row_ptr + context_offsets,
+            mask=context_offsets < CONTEXT_WIDTH,
+            other=0,
+        )
+        is_valid = tl.min(context, axis=0) >= 0
+        context_word, _, _, _ = _philox_context_state(
+            contexts_row_ptr, key_0, key_1, CONTEXT_WIDTH
+        )
+        tl.store(
+            ring_ptr + slot * ring_stride + head,
+            context_word.to(tl.int32),
+            mask=is_valid,
+        )
+        head = tl.where(is_valid, (head + 1) % CAPACITY, head)
+        num_recorded = tl.where(
+            is_valid, tl.minimum(num_recorded + 1, CAPACITY), num_recorded
+        )
+    tl.store(state_ptr + slot * 2, head)
+    tl.store(state_ptr + slot * 2 + 1, num_recorded)
+
+
+def append_uncommitted_contexts(
+    ring: torch.Tensor,
+    state: torch.Tensor,
+    contexts: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_sampled: torch.Tensor,
+    draft_key: int,
+) -> None:
+    """Record the contexts of the drafts that block verification did not commit.
+
+    Block verification cuts a block using every draft, so the draft-key noise at
+    the contexts of rejected drafts is observed but never committed. Each
+    context is stored in `ring[slot]` as its Philox context word under the draft
+    key, with `state[slot] = (next write index, entries held)`. The draft
+    sampler samples a recorded context without the watermark. A word collision
+    only skips watermarking at one more context, so it cannot distort the output.
+
+    Verification row `i` of a request holds the context that precedes draft
+    `i + 1`. With `num_sampled - 1` accepted drafts, rows
+    `num_sampled .. num_draft - 1` hold the contexts of the rejected drafts after
+    the first one. The row `num_sampled - 1` context belongs to the committed
+    resample, so it is not recorded. Contexts with start padding are never
+    noised, so they are not recorded either.
+    """
+    if contexts.device.type == "cpu":
+        words = _context_words(draft_key, contexts)
+        capacity = ring.shape[1]
+        for req, slot_tensor in enumerate(idx_mapping):
+            slot = int(slot_tensor)
+            first_row = int(cu_num_logits[req])
+            num_draft = int(cu_num_logits[req + 1]) - first_row - 1
+            for row in range(first_row + int(num_sampled[req]), first_row + num_draft):
+                if (contexts[row] < 0).any():
+                    continue
+                head, num_recorded = (int(x) for x in state[slot])
+                ring[slot, head] = words[row]
+                state[slot, 0] = (head + 1) % capacity
+                state[slot, 1] = min(num_recorded + 1, capacity)
+        return
+
+    _append_uncommitted_contexts_kernel[(len(idx_mapping),)](
+        ring,
+        ring.stride(0),
+        state,
+        contexts,
+        contexts.stride(0),
+        idx_mapping,
+        cu_num_logits,
+        num_sampled,
+        draft_key & _UINT32_MASK_VALUE,
+        draft_key >> 32,
+        CONTEXT_WIDTH=contexts.shape[-1],
+        CONTEXT_POW2=triton.next_power_of_2(contexts.shape[-1]),
+        CAPACITY=ring.shape[1],
+        num_warps=1,
+    )
 
 
 @triton.jit
@@ -817,7 +998,7 @@ def philox_gumbel_sample(
     return local_argmax.gather(dim=-1, index=max_block_index).view(-1)
 
 
-@triton.jit(do_not_specialize=["step"])
+@triton.jit(do_not_specialize=["step", "key_0_value", "key_1_value"])
 def _draft_step_kernel(
     sampled_ptr,
     sampled_stride,
@@ -839,16 +1020,24 @@ def _draft_step_kernel(
     prior_contexts_ptr,
     prior_contexts_stride_0,
     prior_contexts_stride_1,
+    key_0_value,
+    key_1_value,
+    uncommitted_ring_ptr,
+    uncommitted_ring_stride,
+    uncommitted_state_ptr,
     CONTEXT_WIDTH: tl.constexpr,
     NUM_SPECULATIVE_STEPS: tl.constexpr,
     MAX_HISTORY: tl.constexpr,
     INCLUDE_PROMPT: tl.constexpr,
     DEDUPLICATE: tl.constexpr,
+    UNCOMMITTED_CONTEXTS: tl.constexpr,
     SAMPLE: tl.constexpr,
     PREPARE_NEXT: tl.constexpr,
     BLOCKS_POW2: tl.constexpr,
 ):
     """Finish draft step `step` (if SAMPLE) and build the next step's skip mask."""
+    key_0 = key_0_value.to(tl.uint32)
+    key_1 = key_1_value.to(tl.uint32)
     row = tl.program_id(0).to(tl.int64)
     contexts_row_ptr = contexts_ptr + row * context_stride
     if SAMPLE:
@@ -913,6 +1102,11 @@ def _draft_step_kernel(
                 next_steps_ptr,
                 1,
                 skip_mask_ptr,
+                key_0,
+                key_1,
+                uncommitted_ring_ptr,
+                uncommitted_ring_stride,
+                uncommitted_state_ptr,
                 CONTEXT_WIDTH=CONTEXT_WIDTH,
                 NUM_SPECULATIVE_STEPS=NUM_SPECULATIVE_STEPS,
                 MAX_HISTORY=MAX_HISTORY,
@@ -921,6 +1115,7 @@ def _draft_step_kernel(
                 HAS_HISTORY_OFFSETS=True,
                 SPECULATIVE_CONTEXTS=False,
                 DRAFT_CONTEXTS=True,
+                UNCOMMITTED_CONTEXTS=UNCOMMITTED_CONTEXTS,
                 BLOCK=512,
             )
             tl.debug_barrier()
@@ -949,6 +1144,8 @@ def draft_philox_gumbel_sample(
     deduplicate: bool,
     max_history: int | None,
     include_prompt: bool,
+    uncommitted_ring: torch.Tensor | None = None,
+    uncommitted_state: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Sample `num_steps` draft steps flattened as (request, step), in step order.
 
@@ -1009,11 +1206,17 @@ def draft_philox_gumbel_sample(
             prior_contexts,
             prior_contexts.stride(0),
             prior_contexts.stride(1),
+            key & _UINT32_MASK_VALUE,
+            key >> 32,
+            uncommitted_ring,
+            0 if uncommitted_ring is None else uncommitted_ring.stride(0),
+            uncommitted_state,
             CONTEXT_WIDTH=contexts.shape[-1],
             NUM_SPECULATIVE_STEPS=prior_contexts.shape[1],
             MAX_HISTORY=0 if max_history is None else max_history,
             INCLUDE_PROMPT=include_prompt,
             DEDUPLICATE=deduplicate,
+            UNCOMMITTED_CONTEXTS=deduplicate and uncommitted_ring is not None,
             SAMPLE=step >= 0,
             PREPARE_NEXT=step + 1 < num_steps,
             BLOCKS_POW2=triton.next_power_of_2(max(num_blocks, contexts.shape[-1])),

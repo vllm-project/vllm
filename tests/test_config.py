@@ -4389,7 +4389,7 @@ def test_dual_key_gumbel_rejects_unsupported_speculative_method():
     ("overrides", "match"),
     [
         ({"rejection_sample_method": "synthetic"}, "rejection_sample_method"),
-        ({"rejection_sample_method": "block"}, "rejection_sample_method"),
+        ({"rejection_sample_method": "fly"}, "rejection_sample_method"),
         ({"parallel_drafting": True}, "Parallel speculative drafting"),
     ],
 )
@@ -4407,6 +4407,22 @@ def test_dual_key_gumbel_rejects_incompatible_speculative_modes(overrides, match
 
     with pytest.raises(ValueError, match=match):
         config._check_supports_watermarking()
+
+
+@pytest.mark.parametrize("rejection_sample_method", ["standard", "block"])
+def test_dual_key_gumbel_accepts_standard_and_block_rejection_sampling(
+    rejection_sample_method,
+):
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    config.speculative_config = fake_speculative_config(
+        method="mtp",
+        draft_sample_method="probabilistic",
+        rejection_sample_method=rejection_sample_method,
+        parallel_drafting=False,
+    )
+
+    assert config._check_supports_watermarking()
 
 
 def test_gumbel_watermark_disables_beam_search_watermarking(caplog_vllm):
