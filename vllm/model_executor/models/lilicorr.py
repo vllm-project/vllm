@@ -14,15 +14,10 @@ from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import (
-    LinearBase,
     ReplicatedLinear,
-    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMethod
-from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Static
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.utils import refill_derived
 from vllm.v1.worker.gpu.spec_decode.lilicorr.config import LiLiCorrSpeculatorConfig
 
@@ -499,29 +494,6 @@ class LiLiCorrForCausalLM(DFlashQwen3ForCausalLM):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        quantized_metadata: set[str] = set()
-        for name, module in self.named_modules():
-            name = name.removeprefix("model.")
-            if not isinstance(module, (LinearBase, ParallelLMHead)) or isinstance(
-                module.quant_method, UnquantizedLinearMethod
-            ):
-                continue
-            required = {"weight", "bias"}
-            method = module.quant_method
-            if (
-                isinstance(method, ModelOptLinearMethod)
-                and method.spec.weight == kNvfp4Static
-            ):
-                # NVFP4 scales are trained checkpoint data. Only W4A16's
-                # deprecated, unused input_scale may be absent.
-                required.update(("weight_scale", "weight_scale_2"))
-                if method.spec.activation is not None:
-                    required.add("input_scale")
-            quantized_metadata.update(
-                f"{name}.{parameter}"
-                for parameter, _ in module.named_parameters(recurse=False)
-                if parameter not in required
-            )
         head_weights: list[tuple[str, torch.Tensor]] = []
 
         def normalized_weights():

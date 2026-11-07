@@ -659,14 +659,6 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
         return index_q, index_k, index_z, gate
 
 
-def _fused_qkv_indexer_weights(module: nn.Module) -> set[str]:
-    return {
-        f"{name}.weight" if name else "weight"
-        for name, submodule in module.named_modules()
-        if isinstance(submodule, Step5FusedQKVIndexerLinear)
-    }
-
-
 class Step5SparseIndexerIndexTPLinear(ColumnParallelLinear):
     """Sparse-indexer linear sharded by its own tensor-parallel size."""
 
@@ -2405,8 +2397,4 @@ class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             orig_to_new_prefix={prefix: None for prefix in skip_prefixes}
         )
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(weights, mapper=mapper)
-        loaded_params.update(
-            f"model.{name}" for name in _fused_qkv_indexer_weights(self.model)
-        )
-        return loaded_params
+        return loader.load_weights(weights, mapper=mapper)

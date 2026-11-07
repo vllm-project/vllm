@@ -101,8 +101,8 @@ initial loading and direct weight updates share one path. `approx_value` tensors
 layers that the model does not build (other pipeline stages, MTP layers) are
 passed through to the model's loader, which skips them like any other weight
 it does not own. Explicitly named constants are always consumed, and dropped
-when their layer is built elsewhere. Loading fails if a local substituted
-expert has no constant.
+when their layer is built elsewhere. A local substituted expert with no
+constant keeps its initial NaN.
 
 Direct `load_weights` updates may change individual constants. Layerwise
 reloads (`reload_weights` in checkpoint format) are rejected, and the model

@@ -20,7 +20,6 @@ a dedicated refactor diff to keep this AMD-enablement change NVIDIA-untouched.
 from collections.abc import Iterable
 from typing import NamedTuple
 
-import regex as re
 import torch
 import torch.nn as nn
 from transformers import PreTrainedConfig
@@ -320,11 +319,6 @@ class MiniMaxM3MTP(nn.Module):
         return self.logits_processor(
             self.lm_head, mtp_layer.final_layernorm(hidden_states)
         )
-
-    def _get_mtp_layer_idx_from_weight_name(self, name: str) -> int | None:
-        """Return the MTP layer index in *.mtp.layers.{idx}.*, else None."""
-        match = re.search(r"\.mtp\.layers\.(\d+)\.", name)
-        return int(match.group(1)) if match else None
 
     def _map_checkpoint_name(self, name: str) -> str | None:
         """Map a full checkpoint key to this MTP module's parameter name.

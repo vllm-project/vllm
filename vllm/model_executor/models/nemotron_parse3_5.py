@@ -859,8 +859,8 @@ class RadioMBartPrefixForCausalLM(nn.Module, SupportsMultiModal, SupportsEagle3)
 
         radio_loaded = self.encoder.model_encoder.load_weights(radio_weights)
 
-        # SO400M has no LayerScale in the reference model, but the shared InternViT
-        # implementation materializes identity parameters the checkpoint omits.
+        # The shared InternViT implementation materializes LayerScale parameters
+        # that checkpoints of encoders without LayerScale (SO400M) omit.
         radio_loaded.update(
             name
             for name, _ in self.encoder.model_encoder.named_parameters()
