@@ -183,7 +183,131 @@ FORCE_INLINE void gemm_micro_rvv_fma_Mx8_Ku4(
 }
 
 // ============================================================================
-// Macro kernel: dispatch M tiles of {8,4,2,1}, step N by 8
+// Micro kernel: Mx16 tile (two adjacent 8-column groups), K unrolled by 4
+// ============================================================================
+//
+// Same scalar-broadcast A form as the Mx8 kernel, but each row keeps TWO
+// independent m2 accumulators, accl<i> over output columns [0,8) and acch<i>
+// over [8,16).  For the narrow-M shapes that dominate decode and GQA
+// (m_size <= 4) this:
+//   * gives the out-of-order core 2 independent vfmacc.vf chains per row
+//     instead of 1, which is what hides the loop-carried accumulator latency,
+//     and
+//   * amortizes each scalar A load over two broadcasts instead of one, halving
+//     the flw -> vfmacc.vf pressure, and
+//   * makes the tile consume a full 64-byte B row instead of half of it.
+//
+// The two independent chains are the operative effect, not the wider access:
+// a variant that keeps the same accumulator shape but issues a single
+// 16-element LMUL_512 B load instead of two m2 loads was measured to be no
+// faster, and a variant with one LMUL_512 accumulator per row (i.e. one chain)
+// was clearly slower.  Widening a register does not create an independent
+// dependency chain -- it just makes one chain longer.  Measured on VLEN=128:
+// M=1/K=256 1.49-1.56x, M=2/K=256 1.34-1.43x versus this Mx8 baseline.
+//
+// The per-output-element FP32 accumulation order is unchanged (k still ascends
+// in steps of one), so results are bit-identical to the Mx8 kernel.
+//
+// Register budget (VLEN=128, LMUL_256 = m2 = 2 registers per accumulator):
+//   M=4: 8 accumulators (16 regs) + 2 B vectors (4 regs) <= 32 regs
+//   M=8 would need 32 accumulator registers, so it keeps using the Mx8 tile.
+
+template <int32_t M, typename kv_cache_t>
+FORCE_INLINE void gemm_micro_rvv_fma_Mx16_Ku4(
+    const float* __restrict A,       // [M x K]
+    const kv_cache_t* __restrict B,  // [K x 16]
+    float* __restrict C,             // [M x 16]
+    int64_t lda, int64_t ldb, int64_t ldc, int32_t K, bool accumulate) {
+  static_assert(1 <= M && M <= 4, "M must be in [1,4] for the 16-column tile");
+
+  constexpr size_t vl = 8;
+
+  #define ROWS4_APPLY(OP) OP(0) OP(1) OP(2) OP(3)
+  #define IF_M4(i) if constexpr (M > (i))
+
+  #define DECL_A4(i) const float* a##i = A + (i) * lda;
+  ROWS4_APPLY(DECL_A4)
+  #undef DECL_A4
+
+  // accl<i> accumulates output columns [0, 8) of row i, acch<i> the columns
+  // [8, 16); both stay in the same k order as the Mx8 kernel.
+  #define DECL_ACC4(i) fixed_fp32x8_t accl##i, acch##i;
+  ROWS4_APPLY(DECL_ACC4)
+  #undef DECL_ACC4
+
+  #define INIT_ACC4(i)                                                        \
+    IF_M4(i) {                                                                \
+      if (accumulate) {                                                       \
+        accl##i = RVVI(__riscv_vle32_v_f32, LMUL_256)(C + (i) * ldc, vl);     \
+        acch##i = RVVI(__riscv_vle32_v_f32, LMUL_256)(C + (i) * ldc + 8, vl); \
+      } else {                                                                \
+        accl##i = RVVI(__riscv_vfmv_v_f_f32, LMUL_256)(0.f, vl);              \
+        acch##i = RVVI(__riscv_vfmv_v_f_f32, LMUL_256)(0.f, vl);              \
+      }                                                                       \
+    }
+  ROWS4_APPLY(INIT_ACC4)
+  #undef INIT_ACC4
+
+  int32_t k = 0;
+
+  for (; k + 3 < K; k += 4) {
+  #define STEP16_ROW(i, KOFF)                          \
+    IF_M4(i) {                                         \
+      accl##i = RVVI(__riscv_vfmacc_vf_f32, LMUL_256)( \
+          accl##i, *(a##i + k + (KOFF)), blo, vl);     \
+      acch##i = RVVI(__riscv_vfmacc_vf_f32, LMUL_256)( \
+          acch##i, *(a##i + k + (KOFF)), bhi, vl);     \
+    }
+  #define STEP16(KOFF)                                                         \
+    {                                                                          \
+      const fixed_fp32x8_t blo =                                               \
+          load_row8_B_as_f32<kv_cache_t>(B + (int64_t)(k + (KOFF)) * ldb);     \
+      const fixed_fp32x8_t bhi =                                               \
+          load_row8_B_as_f32<kv_cache_t>(B + (int64_t)(k + (KOFF)) * ldb + 8); \
+      STEP16_ROW(0, KOFF)                                                      \
+      STEP16_ROW(1, KOFF)                                                      \
+      STEP16_ROW(2, KOFF)                                                      \
+      STEP16_ROW(3, KOFF)                                                      \
+    }
+
+    STEP16(0)
+    STEP16(1)
+    STEP16(2)
+    STEP16(3)
+  #undef STEP16
+  #undef STEP16_ROW
+  }
+
+  for (; k < K; ++k) {
+    const fixed_fp32x8_t blo =
+        load_row8_B_as_f32<kv_cache_t>(B + (int64_t)k * ldb);
+    const fixed_fp32x8_t bhi =
+        load_row8_B_as_f32<kv_cache_t>(B + (int64_t)k * ldb + 8);
+  #define TAIL16_ROW(i)                                                     \
+    IF_M4(i) {                                                              \
+      accl##i = RVVI(__riscv_vfmacc_vf_f32, LMUL_256)(accl##i, *(a##i + k), \
+                                                      blo, vl);             \
+      acch##i = RVVI(__riscv_vfmacc_vf_f32, LMUL_256)(acch##i, *(a##i + k), \
+                                                      bhi, vl);             \
+    }
+    ROWS4_APPLY(TAIL16_ROW)
+  #undef TAIL16_ROW
+  }
+
+  #define STORE16_ROW(i)                                                   \
+    IF_M4(i) {                                                             \
+      RVVI(__riscv_vse32_v_f32, LMUL_256)(C + (i) * ldc, accl##i, vl);     \
+      RVVI(__riscv_vse32_v_f32, LMUL_256)(C + (i) * ldc + 8, acch##i, vl); \
+    }
+  ROWS4_APPLY(STORE16_ROW)
+  #undef STORE16_ROW
+
+  #undef ROWS4_APPLY
+  #undef IF_M4
+}
+
+// ============================================================================
+// Macro kernel: dispatch M tiles of {8,4,2,1}; narrow M tiles step N by 16
 // ============================================================================
 
 template <int32_t N, typename kv_cache_t>
@@ -194,10 +318,39 @@ FORCE_INLINE void gemm_macro_rvv_fma_Mx8_Ku4(const float* __restrict A,
                                              int64_t ldb, int64_t ldc,
                                              bool accumulate) {
   static_assert(N % 8 == 0, "N must be a multiple of 8");
+  constexpr bool has_wide_tile = (N % 16 == 0);
   for (int32_t m = 0; m < M;) {
     int32_t mb = (M - m >= 8) ? 8 : (M - m >= 4) ? 4 : (M - m >= 2) ? 2 : 1;
     const float* Ab = A + m * lda;
     float* Cb = C + m * ldc;
+
+    if constexpr (has_wide_tile) {
+      // Narrow M tiles use the 16-column kernel: it needs at most 4 rows and
+      // halves the A-slice scalar load count while doubling the independent
+      // accumulator chains (see gemm_micro_rvv_fma_Mx16_Ku4).
+      if (mb <= 4) {
+        for (int32_t n = 0; n < N; n += 16) {
+          const kv_cache_t* Bn = B + n;
+          float* Cn = Cb + n;
+          switch (mb) {
+            case 4:
+              gemm_micro_rvv_fma_Mx16_Ku4<4, kv_cache_t>(Ab, Bn, Cn, lda, ldb,
+                                                         ldc, K, accumulate);
+              break;
+            case 2:
+              gemm_micro_rvv_fma_Mx16_Ku4<2, kv_cache_t>(Ab, Bn, Cn, lda, ldb,
+                                                         ldc, K, accumulate);
+              break;
+            default:
+              gemm_micro_rvv_fma_Mx16_Ku4<1, kv_cache_t>(Ab, Bn, Cn, lda, ldb,
+                                                         ldc, K, accumulate);
+              break;
+          }
+        }
+        m += mb;
+        continue;
+      }
+    }
 
     for (int32_t n = 0; n < N; n += 8) {
       const kv_cache_t* Bn = B + n;
