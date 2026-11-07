@@ -26,6 +26,10 @@ low-batch kernels where they apply:
   overwrite.
 - The sparse MLA reuses the step's sparse-index tables and runs on persistent
   KV counters (``sparse_mla``).
+
+``wo_b``'s output is TP-partial: the next boundary reduces it. The DSpark
+draft's stock layers reduce ``wo_b`` themselves, so for them the step projects
+without that all-reduce.
 """
 
 from collections.abc import Callable
@@ -163,7 +167,7 @@ class AttentionStep:
                 wo_b_proj=self._wo_b_pinned,
                 early_trigger=step.rows <= WIDE_LOW_LATENCY_MAX_ROWS,
             )
-        return attn._o_proj(out, positions)
+        return dsv41_o_proj(attn, out, positions, wo_b_proj=self._wo_b_partial)
 
     def _input_projections(
         self,
@@ -270,15 +274,16 @@ class AttentionStep:
         """
         attn = self.attn
         indexer, compressor = attn.indexer, attn.compressor
+        # Only layers with an indexer or a compressor read them; the DSpark
+        # draft's sliding-window layers have neither, nor aux streams.
         streams = attn.aux_stream_list
-        assert streams is not None
         start, latent_ready, index_k_done, index_q_done = self._events
         start.record()
         index_q: torch.Tensor | None = None
         index_q_scale: torch.Tensor | None = None
         index_weights: torch.Tensor | None = None
         if indexer is not None:
-            assert indexer_weights is not None
+            assert indexer_weights is not None and streams is not None
             with torch.cuda.stream(streams[2]):
                 start.wait()
                 index_q_pre = indexer._wq_b_proj(qr, qr_scale)
@@ -293,7 +298,7 @@ class AttentionStep:
                 index_q_done.record()
         latent = None
         if compressor is not None:
-            assert kv_score is not None
+            assert kv_score is not None and streams is not None
             # After the kv_score GEMM, which ran on this stream.
             with torch.cuda.stream(streams[0]):
                 start.wait()
@@ -392,12 +397,22 @@ class AttentionStep:
         low-latency MXFP8 GEMM."""
         wo_b = self.attn.wo_b
         if self.publisher is not None:
-            return self.publisher(wo_b, z)
+            return self.publisher(wo_b, z, fallback=self._wo_b_partial)
         out = low_latency_mm(wo_b, z) if self.wo_b_mxfp8 else None
-        return out if out is not None else self.attn._wo_b_proj(z)
+        return out if out is not None else self._wo_b_partial(z)
 
     def _wo_b_pinned(self, z: torch.Tensor | QuantizedActivation) -> torch.Tensor:
         """``wo_b`` above ``LOW_BATCH_MAX_ROWS`` rows: on the wide low-latency
         or the pinned ``cute-dsl`` GEMM where one runs."""
         out = wide_or_pinned_mm(self.attn.wo_b, z)
-        return out if out is not None else self.attn._wo_b_proj(z)
+        return out if out is not None else self._wo_b_partial(z)
+
+    def _wo_b_partial(self, z: torch.Tensor | QuantizedActivation) -> torch.Tensor:
+        """``wo_b``'s TP-partial output, which the next boundary reduces: the
+        layer's own projection, or for a ``wo_b`` that reduces its output (the
+        DSpark draft's stock layers) the projection without that all-reduce."""
+        wo_b = self.attn.wo_b
+        if not wo_b.reduce_results:
+            return self.attn._wo_b_proj(z)
+        assert wo_b.quant_method is not None
+        return wo_b.quant_method.apply(wo_b, z, None)
