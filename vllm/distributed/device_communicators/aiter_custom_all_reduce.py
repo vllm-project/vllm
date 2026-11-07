@@ -8,6 +8,8 @@ the fused allreduce+RMSNorm path share a single AITER instance with its IPC buff
 
 """
 
+from typing import Any
+
 import torch
 from torch.distributed import ProcessGroup
 
@@ -24,6 +26,28 @@ class AiterCustomAllreduce:
     def effective_max_size(cls) -> int:
         """Max input byte size eligible for AITER custom allreduce."""
         return cls.MAX_SIZE // 2
+
+    @classmethod
+    def fused_rms_max_size(
+        cls,
+        hidden_dim: int,
+        dtype: torch.dtype,
+        qr_comm: Any | None,
+    ) -> int:
+        """Max input byte size eligible for fusing all-reduce with RMSNorm.
+
+        The fused FlyDSL QuickReduce + RMSNorm kernel stages through the
+        QuickReduce workspace, not this class's IPC pool, so that is the limit
+        wherever the kernel can run.
+        """
+        pool = cls.effective_max_size()
+        if (
+            qr_comm is None
+            or getattr(qr_comm, "disabled", True)
+            or not qr_comm.supports_fused_rmsnorm(hidden_dim, dtype)
+        ):
+            return pool
+        return max(pool, qr_comm.qr_max_size)
 
     def __init__(
         self,
