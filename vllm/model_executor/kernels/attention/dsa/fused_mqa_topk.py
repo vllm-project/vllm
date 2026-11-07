@@ -3,11 +3,12 @@
 """Fused FP8 MQA-logits + top-k prefill selection.
 
 SM100 family: the single-launch ``torch.ops._C.fused_mqa_topk_prefill``.
-SM90: FlashTopK (https://github.com/Tencent-Hunyuan/FlashTopK), when the optional
-``flashtopk`` package is installed.
+SM90: FlashTopK (https://github.com/Tencent-Hunyuan/FlashTopK), vendored into
+vllm.third_party by cmake/external_projects/flashtopk.cmake.
 """
 
 import functools
+import importlib
 from types import ModuleType
 
 import torch
@@ -66,14 +67,16 @@ def _sm_count(index: int) -> int:
 
 @functools.cache
 def _flashtopk() -> ModuleType | None:
-    """The FlashTopK package on SM90, else None (not installed, or another GPU)."""
+    """FlashTopK on SM90, else None: an installed ``flashtopk`` (to override the
+    pinned version), then the copy vendored in vllm.third_party."""
     if not (current_platform.is_cuda() and current_platform.is_device_capability(90)):
         return None
-    try:
-        import flashtopk
-    except ImportError:
-        return None
-    return flashtopk
+    for name in ("flashtopk", "vllm.third_party.flashtopk"):
+        try:
+            return importlib.import_module(name)
+        except ImportError:
+            continue
+    return None
 
 
 @functools.cache

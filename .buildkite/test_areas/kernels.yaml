@@ -669,6 +669,21 @@ steps:
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
     - pytest -v -s quantization/test_cutlass_w4a16.py
 
+- label: ":nvidia: (H100) Fused MQA Top-k Kernels"
+  key: kernels-fused-mqa-topk-test-h100
+  timeout_in_minutes: 20
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - cmake/external_projects/flashtopk.cmake
+  - vllm/model_executor/kernels/attention/dsa/fused_mqa_topk.py
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/models/glm5next/nvidia/sparse_indexer.py
+  - tests/kernels/attention/test_fused_mqa_topk.py
+  commands:
+    # SM90: fused_mqa_topk through the vendored FlashTopK.
+    - pytest -v -s kernels/attention/test_fused_mqa_topk.py
+
 - label: ":nvidia: (B200) MiniMax-M3 Attention Kernels"
   key: kernels-minimax-m3-attention-b200
   automatic_shard: true

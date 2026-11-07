@@ -474,6 +474,17 @@ class cmake_build_ext(build_ext):
                     dirs_exist_ok=True,
                 )
 
+            flashtopk_build = os.path.join(
+                self.build_lib, "vllm", "third_party", "flashtopk"
+            )
+            if os.path.exists(flashtopk_build):
+                print(f"Copying {flashtopk_build} to vllm/third_party/flashtopk")
+                shutil.copytree(
+                    flashtopk_build,
+                    "vllm/third_party/flashtopk",
+                    dirs_exist_ok=True,
+                )
+
 
 class precompiled_build_ext(build_ext):
     """Disables extension building when using precompiled binaries."""
@@ -1154,6 +1165,7 @@ class precompiled_wheel_utils:
                 deep_gemm_regex = re.compile(r"vllm/third_party/deep_gemm/.*")
                 fmha_sm100_regex = re.compile(r"vllm/third_party/fmha_sm100/.*")
                 tml_fa4_regex = re.compile(r"vllm/third_party/tml_fa4/.*")
+                flashtopk_regex = re.compile(r"vllm/third_party/flashtopk/.*")
                 file_members = []
                 for member in wheel.filelist:
                     if member.filename in exact_members:
@@ -1180,6 +1192,7 @@ class precompiled_wheel_utils:
                         or flashmla_regex.match(member.filename)
                         or deep_gemm_regex.match(member.filename)
                         or tml_fa4_regex.match(member.filename)
+                        or flashtopk_regex.match(member.filename)
                         or fmha_sm100_regex.match(member.filename)
                     ):
                         file_members.append(member)
@@ -1599,6 +1612,8 @@ if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm.fmha_sm100", optional=True))
     # tml-fa4 is copied into an isolated vllm.third_party package.
     ext_modules.append(CMakeExtension(name="vllm.tml_fa4", optional=True))
+    # FlashTopK is a Python/CuTe-DSL package installed into vllm.third_party.
+    ext_modules.append(CMakeExtension(name="vllm.flashtopk", optional=True))
 
 if _is_cpu():
     import platform
@@ -1635,6 +1650,8 @@ package_data = {
         # Built-in multimodal chat template fallbacks (registry.py)
         "transformers_utils/chat_templates/*.jinja",
         "third_party/flash_linear_attention/LICENSE",
+        "third_party/flashtopk/LICENSE",
+        "third_party/flashtopk/NOTICE",
         # DeepGEMM JIT include headers (vendored via cmake)
         "third_party/deep_gemm/include/**/*.cuh",
         "third_party/deep_gemm/include/**/*.h",
