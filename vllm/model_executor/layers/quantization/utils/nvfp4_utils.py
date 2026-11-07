@@ -364,7 +364,11 @@ def apply_fused_global_scale_ratio(
     out: torch.Tensor, ratio: torch.Tensor | None
 ) -> torch.Tensor:
     """Multiply each output column by its shard's global-scale ratio (see
-    fused_global_scale_ratio); a no-op when the shards share one."""
+    fused_global_scale_ratio); a no-op when the shards share one.
+
+    In place on the GEMM output: the product is computed in fp32 (the ratio's
+    dtype) and rounded once to the output dtype, without an fp32 copy of the
+    output."""
     if ratio is None:
         return out
-    return (out.float() * ratio).to(out.dtype)
+    return out.mul_(ratio)

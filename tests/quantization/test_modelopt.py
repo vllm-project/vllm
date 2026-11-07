@@ -1848,3 +1848,13 @@ def test_fused_global_scale_ratio_warns_when_widths_do_not_match():
     assert kept.item() == 1.0
     assert ratio is None
     log.warning_once.assert_called_once()
+
+
+def test_ratio_is_applied_in_place_with_one_fp32_rounding():
+    torch.manual_seed(0)
+    out = torch.randn(4, 6).to(torch.bfloat16)
+    ratio = torch.tensor([0.3, 0.3, 0.3, 1.0, 1.0, 1.0])
+    expected = (out.float() * ratio).to(torch.bfloat16)
+    result = apply_fused_global_scale_ratio(out, ratio)
+    assert result.data_ptr() == out.data_ptr()
+    assert torch.equal(result, expected)
