@@ -347,8 +347,8 @@ def test_decode_weights_staged_after_loading(
     Loaders that bypass ``weight_loader`` (e.g. ``--load-format dummy``) left
     them uninitialized, so decode could read NaN. Loading runs with grad mode
     on, so the copies must also stay out of autograd. A kernel-format reload
-    overwrites the weights in place without the post-load hook, so the copies
-    must be re-staged at the addresses captured graphs read.
+    overwrites the weights in place and reruns the post-load hook, which must
+    re-stage the copies at the addresses captured graphs read.
     """
     _requires_kernel()
     from tests.v1.attention.utils import create_vllm_config
