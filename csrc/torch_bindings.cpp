@@ -654,6 +654,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor workspace, int k, int max_seq_len) -> ()");
 #endif
 
+#ifdef VLLM_ENABLE_TOPP_CUTOFFS_LSE
+  // Exact top-p cutoffs and kept log-sum-exps of bf16 logits (SM90+).
+  ops.def(
+      "topp_cutoffs_lse(Tensor logits, Tensor expanded_idx_mapping, "
+      "Tensor temperature, Tensor top_p, Tensor! thresh, Tensor! lse, "
+      "int cluster_size, int force_fallback) -> ()");
+#endif
+
   // Activation ops
   ops.def(
       "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, Tensor! "
@@ -938,6 +946,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("persistent_topk", TORCH_BOX(&persistent_topk));
 #ifdef VLLM_ENABLE_COOPERATIVE_TOPK
   ops.impl("cooperative_topk", TORCH_BOX(&cooperative_topk));
+#endif
+#ifdef VLLM_ENABLE_TOPP_CUTOFFS_LSE
+  ops.impl("topp_cutoffs_lse", TORCH_BOX(&topp_cutoffs_lse));
 #endif
 
   // Activation kernels (shared CUDA/ROCm)

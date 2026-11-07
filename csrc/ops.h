@@ -551,6 +551,15 @@ void cooperative_topk(const torch::stable::Tensor& logits,
                       int64_t max_seq_len);
 #endif
 
+#ifdef VLLM_ENABLE_TOPP_CUTOFFS_LSE
+void topp_cutoffs_lse(const torch::stable::Tensor& logits,
+                      const torch::stable::Tensor& expanded_idx_mapping,
+                      const torch::stable::Tensor& temperature,
+                      const torch::stable::Tensor& top_p,
+                      torch::stable::Tensor& thresh, torch::stable::Tensor& lse,
+                      int64_t cluster_size, int64_t force_fallback);
+#endif
+
 void selective_scan_fwd(
     const torch::stable::Tensor& u, const torch::stable::Tensor& delta,
     const torch::stable::Tensor& A, const torch::stable::Tensor& B,

@@ -3589,6 +3589,57 @@ def top_k_per_row_decode(
     )
 
 
+def has_topp_cutoffs_lse() -> bool:
+    return hasattr(torch.ops._C, "topp_cutoffs_lse")
+
+
+def topp_cutoffs_lse(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    top_p: torch.Tensor,
+    cluster_size: int = 0,
+    force_fallback: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Exact top-p cutoffs and kept log-sum-exps of bf16 logits (SM90+).
+
+    The kernel scales logits as x / T rounded to nearest; kernels that read the
+    logits later must scale the same way for ``lse`` to match them.
+
+    Args:
+        logits: [num_rows, vocab_size] bf16 raw logits with unit vocab stride.
+        expanded_idx_mapping: [num_rows] int64 request index of each row, as the
+            model runner builds it.
+        temperature: [max_num_reqs] fp32; 0 marks a greedy request.
+        top_p: [max_num_reqs] fp32.
+        cluster_size: CTAs per row (1, 2, 4, 8 or 16); 0 picks the fastest
+            for the batch size and vocabulary.
+        force_fallback: resolve every row with the precise fixed-point path
+            (1) or the fp64 path (2), for testing.
+
+    Returns:
+        thresh: [num_rows] fp32. Keep logits >= thresh, ties included; -inf keeps
+            every token (greedy rows, top_p >= 1, no finite logit).
+        lse: [num_rows] fp64 log-sum-exp of x / T over the kept tokens; NaN for
+            greedy rows.
+
+    """
+    num_rows = logits.shape[0]
+    thresh = torch.empty(num_rows, dtype=torch.float32, device=logits.device)
+    lse = torch.empty(num_rows, dtype=torch.float64, device=logits.device)
+    torch.ops._C.topp_cutoffs_lse(
+        logits,
+        expanded_idx_mapping,
+        temperature,
+        top_p,
+        thresh,
+        lse,
+        cluster_size,
+        force_fallback,
+    )
+    return thresh, lse
+
+
 def cp_gather_indexer_k_quant_cache(
     kv_cache: torch.Tensor,
     dst_k: torch.Tensor,
