@@ -425,9 +425,7 @@ def _build_attention_metadata(
 
     # Build slot mapping
     slot_mapping_list = []
-    for i, (q_len, kv_len, num_blocks) in enumerate(
-        zip(q_lens, kv_lens, num_blocks_per_req)
-    ):
+    for i, (q_len, kv_len, _) in enumerate(zip(q_lens, kv_lens, num_blocks_per_req)):
         context_len = kv_len - q_len
         for j in range(q_len):
             token_kv_idx = context_len + j
