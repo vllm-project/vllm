@@ -629,7 +629,9 @@ class DeepseekV4DecoderLayer(nn.Module):
             ),
             requires_grad=False,
         )
-        self.hc_attn_fn_broadcast: torch.Tensor | None = None
+        self.register_buffer("hc_attn_fn_broadcast", None, persistent=False)
+        self._vllm_derived_buffers = {"hc_attn_fn_broadcast"}
+        self._hc_broadcast_enabled = False
         self.hc_ffn_fn = nn.Parameter(
             torch.empty(
                 (mix_hc, hc_dim),
@@ -665,6 +667,10 @@ class DeepseekV4DecoderLayer(nn.Module):
             ),
             requires_grad=False,
         )
+        # Batch-invariant alignment uses the same explicit pre/block/post
+        # sequence as the training implementation and the mature AMD path.
+        # The default rollout path keeps the fused implementation.
+        self.use_fused_mhc = not envs.VLLM_BATCH_INVARIANT
 
         if vllm_config.kernel_config.enable_jit_warmup:
             from vllm.model_executor.kernels.mhc.tilelang_kernels import (
@@ -713,6 +719,86 @@ class DeepseekV4DecoderLayer(nn.Module):
                 hc_mult=self.hc_mult,
             )
 
+    def _forward_unfused_post_pre(
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        input_ids: torch.Tensor | None,
+        mega_gate_metadata: MegaGateRoutingMetadata | None,
+    ) -> tuple[torch.Tensor, None, None, None]:
+        attn_norm_weight = self.attn_norm.weight.data
+        attn_norm_eps = self.attn_norm.variance_epsilon
+        residual = x
+        if x.dim() == 2:
+            assert self.hc_attn_fn_broadcast is not None
+            residual, post, comb, x = mhc_pre_broadcast_tilelang(
+                x,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+                norm_weight=attn_norm_weight,
+                norm_eps=attn_norm_eps,
+                fn_broadcast=self.hc_attn_fn_broadcast,
+            )
+        else:
+            post, comb, x = mhc_pre_tilelang(
+                x,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+                norm_weight=attn_norm_weight,
+                norm_eps=attn_norm_eps,
+            )
+
+        if self.use_sequence_parallel:
+            x = sp_all_gather(x)[: positions.shape[0]]
+        x = self.attn(positions, x, None)
+        if self.use_sequence_parallel:
+            x = sp_reduce_scatter(x)
+        x = mhc_post_tilelang(x, residual, post, comb)
+
+        residual = x
+        post, comb, x = mhc_pre_tilelang(
+            x,
+            self.hc_ffn_fn,
+            self.hc_ffn_scale,
+            self.hc_ffn_base,
+            self.rms_norm_eps,
+            self.hc_eps,
+            self.hc_eps,
+            self.hc_post_alpha,
+            self.hc_sinkhorn_iters,
+            norm_weight=self.ffn_norm.weight.data,
+            norm_eps=self.ffn_norm.variance_epsilon,
+        )
+        x = self.ffn(x, input_ids, mega_gate_metadata)
+        x = mhc_post_tilelang(x, residual, post, comb)
+        return x, None, None, None
+
+    @torch.no_grad()
+    def _refresh_hc_broadcast(self) -> None:
+        broadcast = (
+            self.hc_attn_fn.detach().view(-1, self.hc_mult, self.hidden_size).sum(dim=1)
+        )
+        if self.hc_attn_fn_broadcast is None:
+            self.hc_attn_fn_broadcast = broadcast
+        else:
+            self.hc_attn_fn_broadcast.copy_(broadcast)
+
+    def post_weights_reload(self) -> None:
+        if self._hc_broadcast_enabled:
+            self._refresh_hc_broadcast()
+
     def forward(
         self,
         x: torch.Tensor,
@@ -723,10 +809,17 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
         mega_gate_metadata: MegaGateRoutingMetadata | None = None,
         reuse_residual: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """With ``reuse_residual``, the caller hands ``residual`` over and the
-        unfused mHC post/pre writes the next residual into its storage. A first
-        layer that starts from ``residual = x`` never overwrites ``x``."""
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        """Reuse residual storage on the fused path when requested."""
+        if not self.use_fused_mhc:
+            return self._forward_unfused_post_pre(
+                x, positions, input_ids, mega_gate_metadata
+            )
         fused_post_pre = (
             mhc_fused_post_pre_tilelang_reuse_residual
             if reuse_residual
@@ -1014,16 +1107,18 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 reuse_residual=True,
             )
             if idx + 1 in self.aux_hidden_state_layers:
-                # Reconstruct the aux hidden state for draft models
-                aux_recon = mhc_post_tilelang(
-                    hidden_states, residual, post_mix, res_mix
+                # The unfused BI path already returns reconstructed streams.
+                aux_recon = (
+                    mhc_post_tilelang(hidden_states, residual, post_mix, res_mix)
+                    if layer.use_fused_mhc
+                    else hidden_states
                 )
                 aux_hidden_state = aux_recon.mean(dim=1)
                 if self.use_sequence_parallel:
                     aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
                 aux_hidden_states.append(aux_hidden_state)
                 final_aux_recon = aux_recon
-        if layer is not None:
+        if layer is not None and layer.use_fused_mhc:
             # Reuse if the last layer was captured as an aux hidden state
             if self.end_layer in self.aux_hidden_state_layers:
                 hidden_states = final_aux_recon
@@ -1222,15 +1317,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             return
         layer = self.layers[self.start_layer]
         if isinstance(layer, DeepseekV4DecoderLayer):
-            broadcast = (
-                layer.hc_attn_fn.detach()
-                .view(-1, layer.hc_mult, layer.hidden_size)
-                .sum(dim=1)
-            )
-            if layer.hc_attn_fn_broadcast is None:
-                layer.hc_attn_fn_broadcast = broadcast
-            else:
-                layer.hc_attn_fn_broadcast.copy_(broadcast)
+            layer._hc_broadcast_enabled = True
+            layer._refresh_hc_broadcast()
 
 
 def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
