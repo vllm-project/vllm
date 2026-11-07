@@ -256,6 +256,10 @@ class DeepseekSparseSWAMetadata:
     flashinfer_sparse_index_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = field(
         default_factory=dict
     )
+    # Per-step union indices for packed speculative decode, keyed by source.
+    packed_decode_cache: dict[Any, tuple[torch.Tensor, ...]] = field(
+        default_factory=dict
+    )
 
     def get_prefill_chunk_plan(
         self,
@@ -907,6 +911,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         metadata.tile_sched_c1a = tile_sched[_LAYER_TYPE_C1A]
         metadata.tile_sched_c2a = tile_sched[_LAYER_TYPE_C2A]
         metadata.flashinfer_sparse_index_cache.clear()
+        metadata.packed_decode_cache.clear()
 
     def build_tile_scheduler(
         self, num_decode_tokens: int
