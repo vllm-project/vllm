@@ -217,6 +217,13 @@ class PrepareUniformDecodeKernel(
 
 class DeepseekV32IndexerBackend(AttentionBackend):
     @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # The indexer's batch-invariant per-row top-k
+        # (indexer_topk.top_k_per_row_batch_invariant) is deterministic per
+        # row. Lanes without BI-gated indexer calls must override to False.
+        return current_platform.is_cuda()
+
+    @classmethod
     def supports_pcp(cls) -> bool:
         return True
 
@@ -247,6 +254,13 @@ class DeepseekV32IndexerBackend(AttentionBackend):
 
 
 class Glm5NextIndexerBackend(DeepseekV32IndexerBackend):
+    # The kpool indexer path (fused/per-row top-k without BI gating) is not
+    # batch invariant; today the KpoolTail storage backend already blocks BI
+    # at startup, but do not rely on that coupling here.
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return False
+
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         if kv_cache_spec is not None:
@@ -261,6 +275,10 @@ class Glm5NextIndexerBackend(DeepseekV32IndexerBackend):
 
 class KpoolTailBackend(DeepseekV32IndexerBackend):
     """Storage-only backend for the GLM-5.3-Flash kpool tail cache."""
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return False
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
@@ -284,6 +302,10 @@ class KpoolTailBackend(DeepseekV32IndexerBackend):
 
 
 class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return False
+
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
         # ROCm runs adaptive verification through the per-token flattened
@@ -310,6 +332,10 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 
 
 class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return False
+
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V41_INDEXER"

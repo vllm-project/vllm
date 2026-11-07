@@ -38,9 +38,11 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
 )
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
+    SparseIndexerTopk,
     deep_select_topk,
     get_indexer_topk,
     is_deep_select_supported,
+    top_k_per_row_batch_invariant,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
@@ -525,6 +527,7 @@ def sparse_attn_indexer(
     attn_metadata = forward_context.attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
+    bi = envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda()
 
     if candidate_blocks is not None:
         # Candidate blocks are request-local; the DCP-sharded logits layout
@@ -534,21 +537,28 @@ def sparse_attn_indexer(
         )
         assert candidate_block_size > 0
 
-    fused_mqa_topk = use_fused_mqa_topk(
-        query_shape=q_quant.shape[1:],
-        topk=topk_tokens,
-        fp4_cache=use_fp4_cache,
-        full_context=use_pcp or dcp_world_size == 1,
-        candidate_selection=candidate_blocks is not None,
+    # The fused top-k writes indices in its own launch-dependent order; the
+    # batch-invariant top-k replaces it below.
+    fused_mqa_topk = (
+        use_fused_mqa_topk(
+            query_shape=q_quant.shape[1:],
+            topk=topk_tokens,
+            fp4_cache=use_fp4_cache,
+            full_context=use_pcp or dcp_world_size == 1,
+            candidate_selection=candidate_blocks is not None,
+        )
+        and not bi
     )
 
     # DeepSelect ranks BF16 decode logits directly; other top-k backends and
-    # the DCP merge read an FP32 copy.
-    fp32_decode_logits = topk_backend != "deep_select" or dcp_world_size != 1
+    # the DCP merge read an FP32 copy. Batch invariance scores decode rows
+    # exactly like prefill rows, which starts from the FP32 copy.
+    fp32_decode_logits = topk_backend != "deep_select" or dcp_world_size != 1 or bi
 
     decode_budget = envs.VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB * 1024 * 1024
     chunk_decode = (
         decode_budget > 0
+        and not bi
         and current_platform.is_device_capability_family(100)
         and not use_pcp
         and dcp_world_size == 1
@@ -889,6 +899,7 @@ def sparse_attn_indexer(
                         # fp32 copy; fp32 logits keep the per-row top-k.
                         use_deep_select = (
                             topk_backend == "deep_select"
+                            and not bi
                             and logits.dtype == torch.bfloat16
                             and dcp_world_size == 1
                             and is_deep_select_supported(logits, topk_tokens)
@@ -924,6 +935,13 @@ def sparse_attn_indexer(
                             topk_tokens,
                             end=row_ends,
                             output_idx=topk_indices[rows],
+                        )
+                    elif bi:
+                        assert row_starts is None, (
+                            "batch-invariant top-k expects zero-based rows"
+                        )
+                        top_k_per_row_batch_invariant(
+                            logits, row_ends, topk_indices[rows], topk_tokens
                         )
                     else:
                         ops.top_k_per_row_prefill(
@@ -1138,16 +1156,28 @@ def sparse_attn_indexer(
                 )
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        # The backend comes from the layer (config is only readable at model
-        # construction); dispatchers are cached per backend.
-        get_indexer_topk(topk_backend)(
-            logits,
-            seq_lens,
-            next_n,
-            topk_indices,
-            topk_tokens,
-            attn_metadata_narrowed.max_seq_len,
-        )
+        if bi:
+            # Same deterministic per-row top-k as prefill: identical row
+            # content selects an identical set in an identical order whatever
+            # the surrounding batch looks like.
+            assert dcp_world_size == 1, (
+                "batch-invariant indexer decode is not supported with DCP"
+            )
+            row_ends = SparseIndexerTopk._row_ends(
+                seq_lens, next_n, logits.shape[0]
+            ).contiguous()
+            top_k_per_row_batch_invariant(logits, row_ends, topk_indices, topk_tokens)
+        else:
+            # The backend comes from the layer (config is only readable at
+            # model construction); dispatchers are cached per backend.
+            get_indexer_topk(topk_backend)(
+                logits,
+                seq_lens,
+                next_n,
+                topk_indices,
+                topk_tokens,
+                attn_metadata_narrowed.max_seq_len,
+            )
 
         if decode_metadata.global_seq_lens is not None:
             _merge_dcp_topk_global(

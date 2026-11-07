@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
@@ -200,6 +201,13 @@ class FlashMLASparseBackend(AttentionBackend):
         return True
 
     @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # bf16-cache prefill and decode kernels are bitwise invariant across
+        # batch composition; the quantized-cache restriction lives in
+        # supports_combination.
+        return current_platform.is_cuda()
+
+    @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability.major in [9, 10]
 
@@ -216,6 +224,16 @@ class FlashMLASparseBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
+        ):
+            return (
+                "batch invariance requires an unquantized KV cache: the "
+                "FlashMLA fp8/nvfp4 sparse decode kernel's split plan "
+                "depends on the batch shape; rerun with "
+                "--kv-cache-dtype bfloat16"
+            )
         if head_size == 512:
             # GLM5Next NoPE (qk_rope_head_dim == 0, kv_lora_rank == 512) has
             # head_size 512 and is served here on SM90, either by the direct
@@ -943,13 +961,55 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 return_valid_counts=True,
             )
 
-        attn_out, lse = self._bf16_flash_mla_kernel(
-            q,
-            kv_rows,
-            topk_indices,
-            topk_length,
-            actual_num_heads,
-        )
+        bi_row_bounds = None
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and not uses_host_cache
+            and self.dcp_world_size == 1
+        ):
+            prefill_meta = attn_metadata.prefill
+            bi_row_bounds = self._bi_request_row_bounds(
+                attn_metadata.num_decodes,
+                attn_metadata.num_decode_tokens,
+                prefill_meta.query_lens_cpu if prefill_meta is not None else None,
+                q.shape[0],
+            )
+            if not bi_row_bounds:
+                # Falling back to a single launch is not batch invariant;
+                # this only happens on layouts the bounds cannot describe.
+                logger.warning_once(
+                    "VLLM_BATCH_INVARIANT: cannot split this batch's rows per "
+                    "request for the sparse MQA kernel; results may depend on "
+                    "the batch composition."
+                )
+
+        if bi_row_bounds:
+            # Batch invariance: the bf16 sparse kernel's per-row arithmetic
+            # depends on the surrounding launch (a row at a positive offset
+            # next to heavily-loaded rows reduces differently than the same
+            # row at offset 0, measured on SM100). One launch per request
+            # keeps every request's rows at offset 0, making the result a
+            # function of the request alone.
+            parts = [
+                self._bf16_flash_mla_kernel(
+                    q[s:e],
+                    kv_rows,
+                    topk_indices[s:e],
+                    topk_length[s:e],
+                    actual_num_heads,
+                )
+                for s, e in bi_row_bounds
+            ]
+            attn_out = torch.cat([p[0] for p in parts])
+            lse = torch.cat([p[1] for p in parts])
+        else:
+            attn_out, lse = self._bf16_flash_mla_kernel(
+                q,
+                kv_rows,
+                topk_indices,
+                topk_length,
+                actual_num_heads,
+            )
         if self.need_to_return_lse_for_decode:
             # The kernel returns (0, +inf) for rows where this rank owns none
             # of the selected tokens; (0, -inf) is the identity element of the
@@ -961,6 +1021,38 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if decode_out is None:
             return attn_out, lse
         return torch.cat([decode_out, attn_out], dim=0), None
+
+    @staticmethod
+    def _bi_request_row_bounds(
+        num_decodes: int,
+        num_decode_tokens: int,
+        query_lens_cpu: torch.Tensor | None,
+        num_rows: int,
+    ) -> list[tuple[int, int]]:
+        """Per-request [start, end) row ranges for per-request kernel launches.
+
+        Decode rows come first (one range per decode request), followed by
+        each prefill request's query rows. Returns an empty list when the
+        row layout cannot be derived.
+        """
+        bounds: list[tuple[int, int]] = []
+        if num_decodes > 0:
+            assert num_decode_tokens % num_decodes == 0, (
+                "batch-invariant sparse decode needs uniform decode requests"
+            )
+            rows_per_decode = num_decode_tokens // num_decodes
+            for i in range(num_decodes):
+                start = i * rows_per_decode
+                bounds.append((start, start + rows_per_decode))
+        if query_lens_cpu is not None:
+            offset = num_decode_tokens
+            for q_len in query_lens_cpu.tolist():
+                if q_len > 0:
+                    bounds.append((offset, offset + q_len))
+                    offset += q_len
+        if sum(e - s for s, e in bounds) != num_rows:
+            return []
+        return bounds
 
     def _gather_prefill_chunk(
         self,
@@ -1489,6 +1581,15 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         topk_indices = self.topk_indices_buffer[
             topk_start : topk_start + num_actual_toks
         ]
+        if envs.VLLM_BATCH_INVARIANT:
+            # Canonicalize whatever the producer emitted: ascending index
+            # order with the -1 padding at the row tail, so the sparse
+            # kernels reduce in a fixed order.
+            big = torch.iinfo(topk_indices.dtype).max
+            keyed = torch.sort(
+                torch.where(topk_indices < 0, big, topk_indices), dim=-1
+            ).values
+            topk_indices = torch.where(keyed == big, -1, keyed)
 
         use_fp8_cache = self.kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
 

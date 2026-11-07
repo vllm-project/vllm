@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import (
@@ -138,6 +139,10 @@ def _is_masked_mha_available(
 def _use_dense_mha_prefill(
     vllm_config: "VllmConfig", prefill_max_seq_len: int, topk_tokens: int
 ) -> bool:
+    # Batch invariance: the dense route must never depend on the batch's
+    # longest prefill, so every prefill row runs the sparse MQA kernel.
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
     attention_config = vllm_config.attention_config
     return (
         attention_config.hisparse_config is None
@@ -729,6 +734,12 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         )
 
         self.init_topk_indices_buffer(indexer, topk_indices_buffer)
+        if envs.VLLM_BATCH_INVARIANT:
+            logger.info_once(
+                "VLLM_BATCH_INVARIANT: sparse MLA prefill runs on the sparse "
+                "MQA kernel; short-prompt prefill trades speed for batch "
+                "invariance."
+            )
         self.index_group: SparseMLAIndexGroup | None = None
         self.index_group_index = 0
         if index_group_builder is None and self.topk_indices_buffer is not None:
@@ -817,6 +828,13 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         num_tokens = q[0].shape[0] if isinstance(q, tuple) else q.shape[0]
         topk_start = attn_metadata.topk_start
         topk = self.topk_indices_buffer[topk_start : topk_start + num_tokens]
+        if envs.VLLM_BATCH_INVARIANT:
+            # Canonicalize whatever the producer emitted: ascending index
+            # order with the -1 padding at the row tail, so the sparse
+            # kernels reduce in a fixed order.
+            big = torch.iinfo(topk.dtype).max
+            keyed = torch.sort(torch.where(topk < 0, big, topk), dim=-1).values
+            topk = torch.where(keyed == big, -1, keyed)
         num_decode_tokens = attn_metadata.num_decode_tokens
         block_size = attn_metadata.block_size
         index_group = self.index_group
