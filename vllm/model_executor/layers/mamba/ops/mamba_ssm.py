@@ -5,7 +5,6 @@
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/selective_state_update.py
 
 import functools
-import json
 import os
 from contextlib import contextmanager
 from typing import Any
@@ -17,6 +16,11 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.model_executor.warmup.triton_autotune import (
+    atomic_write_json,
+    get_autotune_cache_dir,
+    read_config_json,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.platform_utils import get_device_name_as_file_name
@@ -87,22 +91,24 @@ def get_ssm_configs(
             os.path.join(user_defined_config_folder, json_file_name)
         )
 
+    # Configs tuned at startup by --kernel-config.enable_triton_autotune
+    config_file_paths.append(
+        get_ssm_autotune_config_file_path(headdim, dstate, cache_dtype)
+    )
     # Bundled default
     config_file_paths.append(os.path.join(_CONFIGS_DIR, json_file_name))
 
     for path in config_file_paths:
-        if os.path.exists(path):
-            with open(path) as f:
-                logger.info_once(
-                    "Using SSM config from %s for selective_state_update.",
-                    path,
-                    scope="global",
-                )
-                raw = json.load(f)
-                if isinstance(raw, dict):
-                    # triton_version included in the config file only for reference
-                    raw.pop("triton_version", None)
-                    return {int(k): v for k, v in raw.items() if k.isdigit()}
+        raw = read_config_json(path)
+        if raw is not None:
+            logger.info_once(
+                "Using SSM config from %s for selective_state_update.",
+                path,
+                scope="global",
+            )
+            # triton_version included in the config file only for reference
+            raw.pop("triton_version", None)
+            return {int(k): v for k, v in raw.items() if k.isdigit()}
 
     logger.warning_once(
         "Using default Mamba SSU config. Performance might be sub-optimal! "
@@ -189,6 +195,42 @@ def try_get_optimal_ssm_config(
     return _try_get_optimal_ssm_config_cached(
         headdim, dstate, batch, nheads, cache_dtype, is_blackwell
     )
+
+
+def get_ssm_autotune_config_file_path(
+    headdim: int, dstate: int, cache_dtype: str
+) -> str:
+    cache_dtype = _canonical_cache_dtype(cache_dtype)
+    return os.path.join(
+        get_autotune_cache_dir("mamba_ssu"),
+        get_ssm_config_file_name(headdim, dstate, cache_dtype, get_ssm_device_name()),
+    )
+
+
+def load_ssm_autotune_configs(
+    headdim: int, dstate: int, cache_dtype: str
+) -> dict[int, dict[str, int]]:
+    path = get_ssm_autotune_config_file_path(headdim, dstate, cache_dtype)
+    raw = read_config_json(path)
+    if raw is None:
+        return {}
+    return {int(k): v for k, v in raw.items() if k.isdigit()}
+
+
+def save_ssm_configs(
+    headdim: int, dstate: int, cache_dtype: str, configs: dict[int, dict[str, int]]
+) -> str:
+    path = get_ssm_autotune_config_file_path(headdim, dstate, cache_dtype)
+    atomic_write_json(
+        path,
+        {
+            "triton_version": getattr(triton, "__version__", "unknown"),
+            **{str(k): v for k, v in sorted(configs.items())},
+        },
+    )
+    get_ssm_configs.cache_clear()
+    _try_get_optimal_ssm_config_cached.cache_clear()
+    return path
 
 
 if TRITON3:
