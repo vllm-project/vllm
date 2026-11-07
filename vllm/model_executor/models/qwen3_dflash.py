@@ -535,6 +535,15 @@ class DFlashQwen3Model(nn.Module):
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
         )
+        self._init_context_kv_proj()
+
+    def _init_context_kv_proj(self) -> None:
+        """Set ``_context_kv_proj`` from the layers this module actually built.
+
+        Subclasses that skip this constructor and build their own layers
+        (``MuseSparkDSparkModel``) call this after ``self.layers`` exists.
+        ``load_weights`` reads the attribute either way.
+        """
         layers_attn = [getattr(layer, "self_attn", None) for layer in self.layers]
         self._context_kv_proj: ReplicatedLinear | None = None
         if all(_is_mxfp8_linear(getattr(a, "qkv_proj", None)) for a in layers_attn):

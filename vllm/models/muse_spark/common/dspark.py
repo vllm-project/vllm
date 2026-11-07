@@ -172,9 +172,6 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         prefix: str = "",
     ) -> None:
         nn.Module.__init__(self)
-        # DFlashQwen3Model.__init__ is skipped: its load_weights reads this
-        # (the MXFP8 context K/V projection, which these BF16 layers lack).
-        self._context_kv_proj = None
         # derived from the weights after loading, refilled in place on reloads
         self._stacked_kv_weight: torch.Tensor
         assert vllm_config.speculative_config is not None
@@ -278,6 +275,11 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
                 bias=True,
                 with_markov=config.confidence_head_with_markov,
             )
+        # This class builds Muse layers instead of running DFlashQwen3Model's
+        # constructor. The context-KV projection still has to be initialized
+        # from those layers; load_weights reads it. For the BF16 draft this
+        # stays None. An MXFP8 draft gets the parent's fused projection.
+        self._init_context_kv_proj()
         # Under the specialized decode, the draft's fused forward, built once
         # the weights are loaded (process_weights_after_loading).
         self.specialized_decode = specialized
