@@ -668,6 +668,9 @@ class MooncakeXferMetadata(
     kernel_block_size: int = 0
     recv_timeout_s: float = 0.0
     protocol_version: int = 0
+    # Per-request token counts assigned to this connector by D's scheduler.
+    # Independent of layout caching; zero means a release-only notification.
+    req_num_external_tokens: dict[ReqId, int] = msgspec.field(default_factory=dict)
 
     @property
     def worker_key(self) -> WorkerKey:
@@ -751,6 +754,7 @@ class PullReqMeta:
     # A failure is sticky; still settle later peer results before releasing
     # destination blocks to prevent write-after-free from delayed peer writes.
     failed: bool = False
+    num_external_tokens: int = 0
 
 
 @dataclass
@@ -784,6 +788,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         local_block_ids: list[list[int]],
         kv_transfer_params: dict[str, Any],
         load_remote_cache: bool = True,
+        num_external_tokens: int = 0,
     ):
         transfer_id = kv_transfer_params["transfer_id"]
         if load_remote_cache:
@@ -794,6 +799,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
                 remote_engine_id=remote_engine_id,
                 remote_bootstrap_addr=kv_transfer_params["remote_bootstrap_addr"],
                 transfer_id=transfer_id,
+                num_external_tokens=num_external_tokens,
             )
         else:
             self.reqs_to_send[request_id] = (transfer_id, local_block_ids)
@@ -827,34 +833,10 @@ def _validate_layerwise_config(
         )
     assert transfer.engine_id is not None
     parallel = vllm_config.parallel_config
+    if role == KVConnectorRole.WORKER and parallel.prefill_context_parallel_size > 1:
+        transfer.engine_id = get_pcp_group().broadcast_object(transfer.engine_id, src=0)
     if parallel.decode_context_parallel_size != 1:
-        raise ValueError("Layerwise requires DCP1")
-    if parallel.prefill_context_parallel_size > 1:
-        if transfer.get_from_extra_config("pcp_cache_mode", None) != "replicated":
-            raise ValueError("PCP requires explicit pcp_cache_mode=replicated")
-        if any(
-            spec.dcp_sharded
-            for group in kv_cache_config.transfer_groups
-            for spec in iter_layer_specs(group.kv_cache_spec)
-        ):
-            raise ValueError("PCP-sharded cache cannot be sent as a replica")
-        if role == KVConnectorRole.WORKER:
-            transfer.engine_id = get_pcp_group().broadcast_object(
-                transfer.engine_id, src=0
-            )
-    groups = kv_cache_config.transfer_groups
-    if not groups:
-        raise ValueError("Layerwise requires transfer groups")
-    for spec in (
-        spec for group in groups for spec in iter_layer_specs(group.kv_cache_spec)
-    ):
-        if not isinstance(
-            spec,
-            (FullAttentionSpec, SlidingWindowSpec, MambaSpec, CircularBufferSpec),
-        ):
-            raise ValueError("Layerwise requires full-attention KV specs")
-        if getattr(spec, "attention_chunk_size", None) is not None:
-            raise ValueError("Chunked-local attention is not yet supported")
+        raise ValueError("Layerwise does not support DCP now.")
 
 
 @dataclass(frozen=True)
@@ -864,7 +846,7 @@ class _BlockSlice:
     end_tokens: int
 
 
-def _map_pending_blocks(
+def _build_pending_block_slice(
     source: Sequence[int],
     destination: Sequence[int],
     *,
@@ -873,14 +855,27 @@ def _map_pending_blocks(
     sent: int | None,
     block_size: int,
     final: bool,
+    token_start: int | None = None,
 ) -> _BlockSlice | None:
-    """Map an uncached D suffix without discarding P logical positions."""
+    """Build the ready, unsent block slice and validate the D suffix offset."""
     if not destination:
         return None
     target = (token_end + block_size - 1) // block_size
     offset = target - len(destination)
     if offset < 0:
         raise ValueError("D requests more blocks than the handoff contains")
+    if token_start is not None:
+        if not 0 <= token_start <= token_end:
+            raise ValueError("D transfer start is outside the P handoff range")
+        if token_start % block_size:
+            raise ValueError("D transfer start must align to the cache block size")
+        start_block = token_start // block_size
+        if start_block != offset:
+            raise ValueError(
+                "D external token count disagrees with destination blocks: "
+                f"token start block={start_block}, block-table start={offset}"
+            )
+        offset = start_block
     end = min(target, (available + (block_size - 1 if final else 0)) // block_size)
     start = offset if sent is None else sent // block_size
     if end <= start:
@@ -892,7 +887,7 @@ def _map_pending_blocks(
     return _BlockSlice(src, dst, end * block_size)
 
 
-def _map_window_blocks(
+def _build_window_block_slice(
     source: Sequence[int],
     destination: Sequence[int],
     *,
@@ -916,7 +911,7 @@ def _map_window_blocks(
     return _BlockSlice(tuple(src), tuple(dst), target * block_size)
 
 
-def _map_state_blocks(
+def _build_state_block_slice(
     source: Sequence[int],
     destination: Sequence[int],
     *,
@@ -1478,7 +1473,7 @@ class MooncakeConnectorScheduler:
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[ReqId, tuple[Request, list[list[int]]]] = {}
+        self._reqs_need_recv: dict[ReqId, tuple[Request, list[list[int]], int]] = {}
         self._reqs_need_send: dict[ReqId, tuple[Request, list[list[int]]]] = {}
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
@@ -1669,9 +1664,8 @@ class MooncakeConnectorScheduler:
                 p in params
                 for p in ("remote_engine_id", "remote_bootstrap_addr", "transfer_id")
             ):
-                # If remote_blocks and num_external_tokens = 0, we have
-                # a full prefix cache hit on the D worker. We need to call
-                # send_notif in _read_blocks to free the memory on the P.
+                # Zero means no load, including when MultiConnector chose
+                # another connector. Still notify P to release its blocks.
                 unhashed_block_ids = (
                     blocks.get_unhashed_block_ids_all_groups()
                     if num_external_tokens > 0
@@ -1679,7 +1673,11 @@ class MooncakeConnectorScheduler:
                 )
                 local_block_ids = self.get_sw_clipped_blocks(unhashed_block_ids)
                 # Get unhashed blocks to pull from remote.
-                self._reqs_need_recv[request.request_id] = (request, local_block_ids)
+                self._reqs_need_recv[request.request_id] = (
+                    request,
+                    local_block_ids,
+                    num_external_tokens,
+                )
                 if not any(local_block_ids):
                     # This pull only releases P's blocks and never reaches
                     # finished_recving, so stop renewing the lease now.
@@ -1711,12 +1709,14 @@ class MooncakeConnectorScheduler:
 
         # Loop through scheduled reqs and convert to PullReqMeta.
         if not self.is_kv_producer:
-            for req_id, (req, block_ids) in self._reqs_need_recv.items():
+            for req_id, pending_recv in self._reqs_need_recv.items():
+                req, block_ids, num_external_tokens = pending_recv
                 assert req.kv_transfer_params is not None
                 meta.add_new_req(
                     request_id=req_id,
                     local_block_ids=block_ids,
                     kv_transfer_params=req.kv_transfer_params,
+                    num_external_tokens=num_external_tokens,
                 )
             self._reqs_need_recv.clear()
 
@@ -1782,7 +1782,7 @@ class MooncakeConnectorScheduler:
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.
             assert not self.is_kv_producer
-            self._reqs_need_recv[request.request_id] = (request, [])
+            self._reqs_need_recv[request.request_id] = (request, [], 0)
             params["do_remote_prefill"] = False
             return False, None
 
@@ -3860,6 +3860,10 @@ class MooncakeConnectorWorker:
             meta.registered_row_offsets = self.region_row_offsets
         if self._layerwise:
             meta.protocol_version = 1
+            meta.req_num_external_tokens = {
+                req_id: pull_meta.num_external_tokens
+                for req_id, pull_meta in pull_metas.items()
+            }
             meta.remote_engine_id = self.engine_id
             meta.remote_pp_rank = self.pp_rank
             meta.remote_pcp_rank = self.pcp_rank
@@ -4393,6 +4397,9 @@ class MooncakeConnectorWorker:
         remote_group_block_ids = remote_block_ids[remote_group_index]
         if not remote_group_block_ids:
             return None
+        num_external_tokens = meta.req_num_external_tokens[destination.remote_req_id]
+        # P's prompt already reflects any Mamba/bounded-replay truncation.
+        token_start = state.num_prompt_tokens - num_external_tokens
         spec = self._layer_specs[kv_cache_name]
         block_size = spec.block_size
         layer_index = self._layer_index_by_name[kv_cache_name]
@@ -4410,14 +4417,14 @@ class MooncakeConnectorWorker:
             return None
         block_mapping: _BlockSlice | None
         if is_state:
-            block_mapping = _map_state_blocks(
+            block_mapping = _build_state_block_slice(
                 state.block_ids[local_group_index],
                 remote_group_block_ids,
                 token_end=state.num_prompt_tokens,
                 null_block=NULL_BLOCK_ID,
             )
         elif is_window:
-            block_mapping = _map_window_blocks(
+            block_mapping = _build_window_block_slice(
                 state.block_ids[local_group_index],
                 remote_group_block_ids,
                 token_end=state.num_prompt_tokens,
@@ -4425,7 +4432,7 @@ class MooncakeConnectorWorker:
                 null_block=NULL_BLOCK_ID,
             )
         else:
-            block_mapping = _map_pending_blocks(
+            block_mapping = _build_pending_block_slice(
                 state.block_ids[local_group_index],
                 remote_group_block_ids,
                 token_end=state.num_prompt_tokens,
@@ -4433,6 +4440,7 @@ class MooncakeConnectorWorker:
                 sent=sent_tokens,
                 block_size=block_size,
                 final=final_layer_ready,
+                token_start=token_start,
             )
         if block_mapping is None:
             return None
