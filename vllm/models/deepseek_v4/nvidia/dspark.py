@@ -53,6 +53,7 @@ from vllm.models.common.ops.sequence_parallel import (
 )
 from vllm.models.deepseek_v4.common.eplb_util import collect_moe_layers
 from vllm.models.deepseek_v4.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
+from vllm.models.deepseek_v4.common.spec_decode import duplicate_context_wkv_weights
 
 from .model import (
     DeepseekV4DecoderLayer,
@@ -69,24 +70,6 @@ logger = init_logger(__name__)
 # MoE expert scale suffix differs by expert dtype (mirrors deepseek_v4 loaders):
 # fp4 experts register ``.weight_scale``; block-fp8 experts ``.weight_scale_inv``.
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.w[123]\.scale$")
-_CONTEXT_WKV_RE = re.compile(r"^mtp\.(\d+)\.attn\.wkv\.(.+)$")
-
-
-def _duplicate_context_wkv_weights(
-    weights: Iterable[tuple[str, torch.Tensor]], num_layers: int
-) -> Iterable[tuple[str, torch.Tensor]]:
-    """Load every draft layer's WKV into the cross-layer projection."""
-    for name, weight in weights:
-        yield name, weight
-        match = _CONTEXT_WKV_RE.fullmatch(name)
-        if match is None:
-            continue
-        layer_idx = int(match.group(1))
-        if layer_idx >= num_layers:
-            continue
-        stacked_weight = weight.detach()
-        stacked_weight.shard_id = layer_idx
-        yield f"context_wkv_proj.{match.group(2)}", stacked_weight
 
 
 class DSparkDeepseekV4Model(nn.Module):
@@ -489,7 +472,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
         loaded_params: set[str] = set()
         loaded_confidence_head = False
 
-        weights = _duplicate_context_wkv_weights(weights, len(self.model.layers))
+        weights = duplicate_context_wkv_weights(weights, len(self.model.layers))
         for name, loaded_weight in weights:
             mapped = self._remap_dspark_name(name)
             if mapped is None:

@@ -26,7 +26,10 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -46,6 +49,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
+from vllm.models.deepseek_v4.common.spec_decode import duplicate_context_wkv_weights
 
 from .model import (
     DeepseekV4DecoderLayer,
@@ -119,6 +123,15 @@ class DSparkDeepseekV4Model(nn.Module):
                 for i in range(self.num_dspark_layers)
             ]
         )
+        self.context_wkv_proj = MergedColumnParallelLinear(
+            config.hidden_size,
+            [config.head_dim] * self.num_dspark_layers,
+            bias=False,
+            return_bias=False,
+            quant_config=vllm_config.quant_config,
+            prefix=maybe_prefix(prefix, "context_wkv_proj"),
+            disable_tp=True,
+        )
 
         # Heads: final norm, and the Markov + confidence heads.
         # Loaded from the "final" MTP layer weights (mtp.*) in the target
@@ -171,15 +184,16 @@ class DSparkDeepseekV4Model(nn.Module):
         place draft layers in different groups). ``None`` (or a ``None`` entry)
         runs the projection to reserve workspace but writes nothing (profiling).
         """
-        for i, layer in enumerate(self.layers):
+        all_kv = self.context_wkv_proj(main_x).view(
+            main_x.shape[0], self.num_dspark_layers, self.config.head_dim
+        )
+        for i, (layer, kv) in enumerate(
+            zip(self.layers, all_kv.unbind(1), strict=True)
+        ):
             slot_mapping = (
                 None if context_slot_mappings is None else context_slot_mappings[i]
             )
             attn = layer.attn
-            # Optimized DSV4 MLA path: wkv part of the fused wq_a|wkv projection
-            # (q_lora part discarded), then RoPE/quant/insert via the fused op.
-            qr_kv, _ = attn.fused_wqa_wkv(main_x)
-            kv = qr_kv[..., attn.q_lora_rank :]
             kv = attn.kv_norm(kv)
             if slot_mapping is None:
                 continue
@@ -443,6 +457,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         loaded_params: set[str] = set()
         loaded_confidence_head = False
 
+        weights = duplicate_context_wkv_weights(weights, len(self.model.layers))
         for name, loaded_weight in weights:
             mapped = self._remap_dspark_name(name)
             if mapped is None:
@@ -465,6 +480,12 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 loaded_weight = DeepseekV4Model._pad_shared_expert_weight(
                     self.quant_config, name, loaded_weight
                 )
+
+            if name.startswith("model.context_wkv_proj."):
+                param = params_dict[name]
+                param.weight_loader(param, loaded_weight, loaded_weight.shard_id)
+                loaded_params.add(name)
+                continue
 
             # E8M0 expert scales: keep raw exponent bytes.
             if ".experts." in name:
@@ -527,6 +548,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         Returns None for non-mtp weights (owned by the target model).
         """
+        if name.startswith("context_wkv_proj."):
+            return f"model.{name}"
         m = re.match(r"mtp\.(\d+)\.(.*)", name)
         if m is None:
             return None
