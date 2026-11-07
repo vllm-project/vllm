@@ -212,6 +212,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
                 self.tokenizer.added_token_ids = added_token_ids = {
                     tid: tok.content
                     for tid, tok in self.tokenizer.get_added_tokens_decoder().items()
+                    if tok.special
                 }
 
             if added_token_ids:
