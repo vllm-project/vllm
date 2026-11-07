@@ -243,6 +243,19 @@ class TestVllmXargs:
         }
 
 
+class TestMinTokens:
+    def test_min_tokens_reaches_sampling_params(self):
+        converted = _convert(
+            _make_request([{"role": "user", "content": "Hi"}], min_tokens=16)
+        )
+        sampling_params = converted.to_sampling_params(
+            max_tokens=converted.max_completion_tokens or 0,
+            default_sampling_params={},
+        )
+
+        assert sampling_params.min_tokens == 16
+
+
 # ======================================================================
 # tool_result content handling
 # ======================================================================

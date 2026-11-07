@@ -29,6 +29,10 @@ We currently support the following OpenAI APIs:
 
 - Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)
 
+`/v1/messages` also accepts `min_tokens` (default `0`), the minimum number of
+tokens to generate before EOS or `stop_sequences` can end the response. It must
+not exceed `max_tokens`.
+
 ## Cohere APIs
 
 - [Cohere Embed API](../../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
