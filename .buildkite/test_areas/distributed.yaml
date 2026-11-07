@@ -865,7 +865,7 @@ steps:
 - label: ":nvidia: (B200) Distributed Preload with Mooncake Store"
   key: preload-mooncake-store-2xb200
   timeout_in_minutes: 20
-  working_dir: "/vllm-workspace"
+  working_dir: "/vllm-workspace/tests"
   device: b200-k8s
   num_devices: 2
   source_file_dependencies:
@@ -873,25 +873,11 @@ steps:
   - vllm/model_executor/model_loader/weight_cache/
   - vllm/distributed/mooncake_store.py
   - tests/model_executor/model_loader/test_weight_cache.py
-  - requirements/kv_connectors.txt
+  - requirements/test/kv_connectors_cuda.txt
+  - .buildkite/scripts/check-kv-connectors.sh
   env:
     VLLM_HOST_IP: "127.0.0.1"
   commands:
-  # Mooncake is not baked into the test image; install it here like the
-  # Mooncake EC E2E step does.
-  - uv venv --system-site-packages --python 3.12 .venv
-  - |
-    uv pip install --python .venv/bin/python "$(.venv/bin/python - <<'PY'
-    from pathlib import Path
-    import torch
-
-    requirement = next(
-        line for line in Path("requirements/kv_connectors.txt").read_text().splitlines()
-        if line.startswith("mooncake-transfer-engine ")
-    )
-    if torch.version.cuda.split(".")[0] == "13":
-        requirement = requirement.replace("mooncake-transfer-engine", "mooncake-transfer-engine-cuda13")
-    print(requirement)
-    PY
-    )"
-  - .venv/bin/python -m pytest -v -s tests/model_executor/model_loader/test_weight_cache.py::test_mooncake_warmup_cache_store_e2e
+  # Mooncake ships in the CI image (hash-locked); verify, never install.
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
+  - pytest -v -s model_executor/model_loader/test_weight_cache.py::test_mooncake_warmup_cache_store_e2e
