@@ -220,6 +220,15 @@ class ConstantExpertSubstitution(nn.Module):
             )
         row.copy_(loaded_weight)
 
+    def validate_loaded_values(self, prefix: str) -> None:
+        missing_rows = torch.isnan(self.values).any(dim=1).nonzero().flatten().tolist()
+        if missing_rows:
+            missing = [self.substituted_expert_ids[row] for row in missing_rows]
+            raise ValueError(
+                f"{prefix} is missing approx_value for {len(missing)} "
+                f"expert(s), first missing expert IDs: {missing[:8]}"
+            )
+
     def transform_routes(
         self,
         hidden_states: torch.Tensor,

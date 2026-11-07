@@ -97,6 +97,13 @@ def as_expert_substitution_model(model_cls: type[_T], model_config: Any) -> type
                 loaded.update(loaded_substitutions)
             return loaded
 
+        def process_weights_after_loading(self) -> None:
+            for param_name, substitution in self._expert_substitutions.values():
+                substitution.validate_loaded_values(param_name)
+            finalize = getattr(super(), "process_weights_after_loading", None)
+            if finalize is not None:
+                finalize()
+
     ExpertSubstitutionModel.__name__ = model_cls.__name__
     ExpertSubstitutionModel.__qualname__ = model_cls.__qualname__
     return ExpertSubstitutionModel
