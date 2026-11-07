@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
@@ -72,6 +73,7 @@ class PCPManager:
         dcp_rank: int = 0,
         cp_interleave: int = 1,
         moe_gathers_tokens: bool = False,
+        use_local_kv_slot_mappings: bool = False,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
@@ -80,6 +82,7 @@ class PCPManager:
         self.dcp_rank = dcp_rank
         self.cp_interleave = cp_interleave
         self.shard_decode_requests = shard_decode_requests
+        self.use_local_kv_slot_mappings = use_local_kv_slot_mappings
 
         self._global_batch: InputBatch | None = None
         self._local_batch: InputBatch | None = None
@@ -788,6 +791,8 @@ class PCPManager:
     def get_dummy_slot_mappings(self, num_tokens: int) -> torch.Tensor:
         assert self._gathered_kv_slot_mappings is not None
         self._gathered_kv_slot_mappings.fill_(PAD_SLOT_ID)
+        if self.use_local_kv_slot_mappings:
+            return self._gathered_kv_slot_mappings[:, :num_tokens]
         return self._gathered_kv_slot_mappings[:, : num_tokens * self.pcp_world_size]
 
     def _convert_to_gathered_slot_mappings(
@@ -796,6 +801,12 @@ class PCPManager:
         assert self._padded_gather_idx is not None
         assert self._gathered_kv_write_mask is not None
         padded_gather_idx = self._padded_gather_idx
+        write_mask = self._gathered_kv_write_mask
+        if self.use_local_kv_slot_mappings:
+            padded_tokens = padded_gather_idx.shape[0] // self.pcp_world_size
+            start = self.pcp_rank * padded_tokens
+            padded_gather_idx = padded_gather_idx[start : start + padded_tokens]
+            write_mask = write_mask[start : start + padded_tokens]
         num_expanded_tokens = padded_gather_idx.shape[0]
         if self._gathered_kv_slot_mappings is None:
             self._gathered_kv_slot_mappings = global_batch_slot_mappings.new_empty(
@@ -811,7 +822,7 @@ class PCPManager:
             out=gathered_kv_slot_mappings,
         )
         torch.where(
-            self._gathered_kv_write_mask.unsqueeze(0),
+            write_mask.unsqueeze(0),
             gathered_kv_slot_mappings,
             self._pad_slot_id,
             out=gathered_kv_slot_mappings,
@@ -929,4 +940,5 @@ def maybe_build_pcp_manager(
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
         # Without EP all2all kernels, MoERunner all-gathers PCP tokens to route.
         moe_gathers_tokens=not parallel_config.enable_expert_parallel,
+        use_local_kv_slot_mappings=envs.VLLM_USE_PCP_DIRECT_KV,
     )

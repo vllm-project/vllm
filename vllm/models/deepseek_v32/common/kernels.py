@@ -92,12 +92,17 @@ def _fp8_quant_and_cache_write(
     MX_SCALE: tl.constexpr,
     FP8_MAX: tl.constexpr,
     USE_FNUZ: tl.constexpr,
+    peer_ptrs,
+    cache_offset_bytes,
+    KV_REPLICA_WORLD_SIZE: tl.constexpr,
 ):
     k_fp8, scale = _fp8_ue8m0_quantize(vals, FP8_MAX, USE_FNUZ)
 
     block_idx = slot_idx // cache_block_size
     block_offset = slot_idx % cache_block_size
     block_start = block_idx * cache_block_stride
+    data_off = block_start + block_offset * HEAD_DIM + offsets
+    scale_elem_off = (block_start + cache_block_size * HEAD_DIM + block_offset * 4) // 4
 
     # Shuffled layout: [blk/BLOCK_TILE, HEAD_DIM/HEAD_TILE, BLOCK_TILE, HEAD_TILE],
     # so one contiguous run holds BLOCK_TILE tokens x HEAD_TILE bytes and the
@@ -112,11 +117,21 @@ def _fp8_quant_and_cache_write(
     else:
         value_off = block_offset * HEAD_DIM + offsets
 
-    tl.store(kv_cache_ptr + block_start + value_off, k_fp8, mask=mask)
-    scale_byte_off = block_start + cache_block_size * HEAD_DIM + block_offset * 4
+    data_off = block_start + value_off
     if MX_SCALE:
         scale = pack_ue8m0_x4(scale)
-    tl.store(kv_cache_scale_ptr + scale_byte_off // 4, scale)
+    if KV_REPLICA_WORLD_SIZE == 1:
+        tl.store(kv_cache_ptr + data_off, k_fp8, mask=mask)
+        tl.store(kv_cache_scale_ptr + scale_elem_off, scale)
+        return
+    ptrs = peer_ptrs.to(tl.uint64).to(tl.pointer_type(tl.uint64))
+    for peer in tl.static_range(0, KV_REPLICA_WORLD_SIZE):
+        base = tl.load(ptrs + peer).to(tl.pointer_type(tl.uint8)) + cache_offset_bytes
+        tl.store(base.to(tl.pointer_type(tl.float8e4nv)) + data_off, k_fp8, mask=mask)
+        if MX_SCALE:
+            tl.store(base.to(tl.pointer_type(tl.int32)) + scale_elem_off, scale)
+        else:
+            tl.store(base.to(tl.pointer_type(tl.float32)) + scale_elem_off, scale)
 
 
 @triton.jit
@@ -200,6 +215,11 @@ def _fused_norm_rope_kernel(
     USE_PDL: tl.constexpr,
     FP8_MAX: tl.constexpr,
     USE_FNUZ: tl.constexpr,
+    mla_peer_ptrs,
+    mla_cache_offset_bytes,
+    indexer_peer_ptrs,
+    indexer_cache_offset_bytes,
+    KV_REPLICA_WORLD_SIZE: tl.constexpr,
 ):
     tok_idx = tl.program_id(0).to(tl.int64)
     pid = tl.program_id(1)
@@ -372,40 +392,87 @@ def _fused_norm_rope_kernel(
                 tile_scale = tl.maximum(tile_amax * (1.0 / FP8_MAX), 1e-4)
                 tile_scale = tl.math.exp2(tl.math.ceil(tl.math.log2(tile_scale)))
                 kv_c_fp8 = tl.reshape((kv_2d / tile_scale).to(fp8_dtype), (KV_DIM,))
-                tl.store(mla_cache_ptr + byte_base + kv_block, kv_c_fp8)
                 tile_off = tl.arange(0, MLA_NUM_TILES)
-                tl.store(
-                    mla_cache_ds_scale_ptr + byte_base // 4 + KV_DIM // 4 + tile_off,
-                    tl.reshape(tile_scale, (MLA_NUM_TILES,)),
-                )
-                rope_dst = mla_cache_ds_rope_ptr + byte_base // 2 + (KV_DIM // 2 + 8)
-                tl.store(rope_dst + dim_off * 2, r1.to(tl.bfloat16))
-                tl.store(rope_dst + dim_off * 2 + 1, r2.to(tl.bfloat16))
+                tile_scales = tl.reshape(tile_scale, (MLA_NUM_TILES,))
+                if KV_REPLICA_WORLD_SIZE == 1:
+                    tl.store(mla_cache_ptr + byte_base + kv_block, kv_c_fp8)
+                    tl.store(
+                        mla_cache_ds_scale_ptr
+                        + byte_base // 4
+                        + KV_DIM // 4
+                        + tile_off,
+                        tile_scales,
+                    )
+                    rope_dst = (
+                        mla_cache_ds_rope_ptr + byte_base // 2 + (KV_DIM // 2 + 8)
+                    )
+                    tl.store(rope_dst + dim_off * 2, r1.to(tl.bfloat16))
+                    tl.store(rope_dst + dim_off * 2 + 1, r2.to(tl.bfloat16))
+                else:
+                    ptrs = mla_peer_ptrs.to(tl.uint64).to(tl.pointer_type(tl.uint64))
+
+                    for peer in tl.static_range(0, KV_REPLICA_WORLD_SIZE):
+                        base = tl.load(ptrs + peer).to(tl.pointer_type(tl.uint8))
+                        base += mla_cache_offset_bytes
+                        tl.store(
+                            base.to(tl.pointer_type(tl.float8e4nv))
+                            + byte_base
+                            + kv_block,
+                            kv_c_fp8,
+                        )
+                        tl.store(
+                            base.to(tl.pointer_type(tl.float32))
+                            + byte_base // 4
+                            + KV_DIM // 4
+                            + tile_off,
+                            tile_scales,
+                        )
+                        rope_dst = (
+                            base.to(tl.pointer_type(tl.bfloat16))
+                            + byte_base // 2
+                            + (KV_DIM // 2 + 8)
+                        )
+                        tl.store(rope_dst + dim_off * 2, r1.to(tl.bfloat16))
+                        tl.store(rope_dst + dim_off * 2 + 1, r2.to(tl.bfloat16))
                 return
 
-            dst = (
-                mla_cache_ptr
-                + mla_block_idx * mla_cache_block_stride
+            dst_off = (
+                mla_block_idx * mla_cache_block_stride
                 + mla_block_off * mla_cache_entry_stride
             )
-            # kv_c_normed (KV_DIM elements)
             if MLA_CACHE_FP8:
                 scale = 1.0
                 if not SKIP_MLA_SCALE:
                     scale = tl.load(mla_cache_scale_ptr)
-                    kv_c_fp8 = (kv_c.to(tl.float32) / scale).to(fp8_dtype)
-                else:
-                    kv_c_fp8 = kv_c.to(tl.float32).to(fp8_dtype)
-                tl.store(dst + kv_block, kv_c_fp8)
+                kv_c_store = (kv_c.to(tl.float32) / scale).to(fp8_dtype)
+                r1_store = (r1 / scale).to(fp8_dtype)
+                r2_store = (r2 / scale).to(fp8_dtype)
             else:
-                tl.store(dst + kv_block, kv_c)
-            # k_pe_roped (from registers, interleaved layout)
-            if MLA_CACHE_FP8:
-                tl.store(dst + KV_DIM + dim_off * 2, (r1 / scale).to(fp8_dtype))
-                tl.store(dst + KV_DIM + dim_off * 2 + 1, (r2 / scale).to(fp8_dtype))
+                kv_c_store = kv_c
+                r1_store = r1
+                r2_store = r2
+
+            if KV_REPLICA_WORLD_SIZE == 1:
+                dst = mla_cache_ptr + dst_off
+                tl.store(dst + kv_block, kv_c_store)
+                tl.store(dst + KV_DIM + dim_off * 2, r1_store)
+                tl.store(dst + KV_DIM + dim_off * 2 + 1, r2_store)
             else:
-                tl.store(dst + KV_DIM + dim_off * 2, r1)
-                tl.store(dst + KV_DIM + dim_off * 2 + 1, r2)
+                ptrs = mla_peer_ptrs.to(tl.uint64).to(tl.pointer_type(tl.uint64))
+
+                for peer in tl.static_range(0, KV_REPLICA_WORLD_SIZE):
+                    base = tl.load(ptrs + peer).to(tl.pointer_type(tl.uint8))
+                    base += mla_cache_offset_bytes
+                    if MLA_CACHE_FP8:
+                        dst = base.to(tl.pointer_type(tl.float8e4nv)) + dst_off
+                    else:
+                        dst = (
+                            base.to(tl.pointer_type(mla_cache_ptr.dtype.element_ty))
+                            + dst_off
+                        )
+                    tl.store(dst + kv_block, kv_c_store)
+                    tl.store(dst + KV_DIM + dim_off * 2, r1_store)
+                    tl.store(dst + KV_DIM + dim_off * 2 + 1, r2_store)
     elif pid == 0:
         if not HAS_INDEXER:
             # Shared layer: no indexer K to process.
@@ -512,6 +579,9 @@ def _fused_norm_rope_kernel(
                 INDEXER_CACHE_MX_SCALE,
                 FP8_MAX,
                 USE_FNUZ,
+                indexer_peer_ptrs,
+                indexer_cache_offset_bytes,
+                KV_REPLICA_WORLD_SIZE,
             )
 
 
@@ -546,6 +616,11 @@ def fused_norm_rope(
     k_pe_out: torch.Tensor | None = None,
     index_k_out: torch.Tensor | None = None,
     skip_scale: bool = False,
+    mla_peer_ptrs: int | None = None,
+    mla_cache_offset_bytes: int = 0,
+    indexer_peer_ptrs: int | None = None,
+    indexer_cache_offset_bytes: int = 0,
+    kv_replica_world_size: int = 1,
 ) -> torch.Tensor:
     assert positions.ndim == 1
     assert q_c.ndim == 2
@@ -649,6 +724,28 @@ def fused_norm_rope(
 
     if q_c_out is None:
         q_c_out = torch.empty_like(q_c)
+
+    if kv_replica_world_size < 1:
+        raise ValueError(
+            f"kv_replica_world_size must be >= 1, got {kv_replica_world_size}"
+        )
+
+    mla_peer_ptrs = int(mla_peer_ptrs or 0)
+    indexer_peer_ptrs = int(indexer_peer_ptrs or 0)
+
+    if kv_replica_world_size > 1:
+        if mla_peer_ptrs == 0:
+            raise ValueError("mla_peer_ptrs is required for replicated direct KV")
+
+        if mla_cache_offset_bytes < 0:
+            raise ValueError("mla_cache_offset_bytes must be non-negative")
+
+        if has_indexer and indexer_k_cache is not None and indexer_peer_ptrs == 0:
+            raise ValueError("indexer_peer_ptrs is required for replicated direct KV")
+
+        if indexer_cache_offset_bytes < 0:
+            raise ValueError("indexer_cache_offset_bytes must be non-negative")
+
     kv_c_out_stride = 0
     k_pe_out_stride = 0
     index_k_out_stride = 0
@@ -661,7 +758,8 @@ def fused_norm_rope(
     if index_k_out is not None:
         assert index_k_out.shape == index_k.shape
         index_k_out_stride = index_k_out.stride(0)
-    use_pdl = current_platform.is_arch_support_pdl()
+    # Publication must wait for every cache-store CTA to finish.
+    use_pdl = current_platform.is_arch_support_pdl() and kv_replica_world_size == 1
     pdl_kwargs = (
         {"USE_PDL": use_pdl, "launch_pdl": True} if use_pdl else {"USE_PDL": use_pdl}
     )
@@ -739,6 +837,11 @@ def fused_norm_rope(
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
         FP8_MAX=_FP8_MAX,
         USE_FNUZ=_USE_FNUZ,
+        mla_peer_ptrs=mla_peer_ptrs,
+        mla_cache_offset_bytes=mla_cache_offset_bytes,
+        indexer_peer_ptrs=indexer_peer_ptrs,
+        indexer_cache_offset_bytes=indexer_cache_offset_bytes,
+        KV_REPLICA_WORLD_SIZE=kv_replica_world_size,
         **pdl_kwargs,
     )
     return q_c_out
