@@ -19,10 +19,23 @@ from vllm.models.qwen4_exp.nvidia.qsa_indexer import apply_qsa_rope
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
+DEVICE_TYPE = current_platform.device_type
+
 requires_qsa_kernels = pytest.mark.skipif(
-    not current_platform.is_cuda() or not HAS_TRITON,
-    reason="QSA kernels require CUDA and Triton",
+    not (current_platform.is_cuda() or current_platform.is_xpu()) or not HAS_TRITON,
+    reason="QSA kernels require CUDA or XPU and Triton",
 )
+
+
+def _gemma_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    if current_platform.is_cuda():
+        from flashinfer.norm import gemma_rmsnorm
+
+        return gemma_rmsnorm(x, weight, eps)
+    xf = x.float()
+    xf = xf * torch.rsqrt(xf.pow(2).mean(dim=-1, keepdim=True) + eps)
+    return (xf * (1.0 + weight.float())).to(x.dtype)
+
 
 HQ, D = 4, 128
 CR = 4
@@ -52,12 +65,15 @@ def assert_fp8_within_one_ulp(actual: torch.Tensor, expected: torch.Tensor) -> N
     # e4m3 is sign-magnitude, so within a sign the uint8 code order matches the
     # value order and one ulp is one code step. The two paths' intermediates
     # differ in the pooling accumulation order, which at denormal magnitudes
-    # (absolute grid step 2^-9) shows up as up to 2 code steps.
+    # (absolute grid step 2^-9) shows up as up to 2 code steps. On XPU the fused
+    # kernel lands up to 4 code steps (2^-7) away for an occasional element near
+    # the bottom of the e4m3 range (about 2% of random draws, one element each).
+    abs_tol = 2**-7 if current_platform.is_xpu() else 2**-8
     code_diff = (
         actual.view(torch.uint8).int() - expected.view(torch.uint8).int()
     ).abs()
     abs_diff = (actual.float() - expected.float()).abs()
-    assert bool(((code_diff <= 1) | (abs_diff <= 2**-8)).all())
+    assert bool(((code_diff <= 1) | (abs_diff <= abs_tol)).all())
 
 
 def _make_main_inputs(num_tokens: int, fp8_cache: bool) -> dict:
@@ -69,18 +85,20 @@ def _make_main_inputs(num_tokens: int, fp8_cache: bool) -> dict:
         MAIN_PAGE,
         2 * MAIN_D,
         dtype=torch.uint8 if fp8_cache else torch.bfloat16,
-        device="cuda",
+        device=DEVICE_TYPE,
     ).transpose(1, 2)
-    slots = torch.randperm(num_blocks * MAIN_PAGE, device="cuda")[:num_tokens]
+    slots = torch.randperm(num_blocks * MAIN_PAGE, device=DEVICE_TYPE)[:num_tokens]
     slots[-1] = -1
-    norm_weights = torch.randn(2, MAIN_D, dtype=torch.bfloat16, device="cuda") * 0.2
+    norm_weights = (
+        torch.randn(2, MAIN_D, dtype=torch.bfloat16, device=DEVICE_TYPE) * 0.2
+    )
     qkv_width = 2 * (MAIN_HQ + MAIN_HK) * MAIN_D
     return dict(
         main_qkv=torch.randn(
             num_tokens,
             qkv_width + (HQ + 1) * D,
             dtype=torch.bfloat16,
-            device="cuda",
+            device=DEVICE_TYPE,
         )[:, :qkv_width],
         main_q_norm_weight=norm_weights[0],
         main_k_norm_weight=norm_weights[1],
@@ -128,8 +146,8 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
         value_cache,
         main["main_slot_mapping"],
         "fp8" if fp8_cache else "auto",
-        torch.tensor(main["main_k_scale"], device="cuda"),
-        torch.tensor(main["main_v_scale"], device="cuda"),
+        torch.tensor(main["main_k_scale"], device=DEVICE_TYPE),
+        torch.tensor(main["main_v_scale"], device=DEVICE_TYPE),
     )
     torch.testing.assert_close(q_out.flatten(1), q, rtol=RTOL, atol=ATOL)
     assert torch.equal(gate_out.flatten(1), gate)
@@ -174,11 +192,9 @@ def test_qsa_fused_prepare_matches_unfused(
     query_lens,
     history_lens,
 ) -> None:
-    from flashinfer.norm import gemma_rmsnorm
-
     from vllm.model_executor.layers.rotary_embedding import get_rope
 
-    device = "cuda"
+    device = DEVICE_TYPE
     rope_params = {
         "partial_rotary_factor": 0.25,
         "rope_theta": 10000000,
@@ -354,7 +370,7 @@ def test_qsa_fused_prepare_matches_unfused(
     _check_main_outputs(main, main_q_out, main_gate_out, rope, positions)
 
     unfused_query = projected_qk[:, : HQ * D].reshape(num_tokens, HQ, D)
-    unfused_query = gemma_rmsnorm(
+    unfused_query = _gemma_rmsnorm(
         unfused_query.reshape(-1, D), q_weight, EPS
     ).reshape_as(unfused_query)
     unfused_query = apply_qsa_rope(rope, positions, unfused_query)
@@ -377,7 +393,7 @@ def test_qsa_fused_prepare_matches_unfused(
         CR,
         rope_positions,
     )
-    compressed_rows = gemma_rmsnorm(pooled.reshape(-1, D), k_weight, EPS).reshape(
+    compressed_rows = _gemma_rmsnorm(pooled.reshape(-1, D), k_weight, EPS).reshape(
         -1, 1, D
     )
     group_positions = (
