@@ -168,8 +168,7 @@ def write_kv_config(path: Path, spec: RunSpec, fs_dir: Path) -> None:
     path.write_text(json.dumps(config, indent=2))
 
 
-def start_vllm(log_path: Path) -> int:
-    config_file = log_path.with_name(log_path.name.replace("_vllm", "_config"))
+def start_vllm(config_path: Path, log_path: Path) -> int:
     env = dict(os.environ, PYTHON_HASH_SEED="0")
     cmd = [
         "vllm",
@@ -178,7 +177,7 @@ def start_vllm(log_path: Path) -> int:
         "--tensor-parallel-size",
         str(TP_SIZE),
         "--kv-transfer-config",
-        config_file.read_text(),
+        config_path.read_text(),
         "--enable-prefix-caching",
         "--no-disable-hybrid-kv-cache-manager",
         "--port",
@@ -278,9 +277,10 @@ def run_one(spec: RunSpec, fs_dir: Path, session_dir: Path) -> dict:
     print("  [1/5] Cleanup...")
     cleanup(fs_dir)
     print("  [2/5] Writing KV transfer config...")
-    write_kv_config(run_dir / "kv_transfer_config.json", spec, fs_dir)
+    config_path = run_dir / "kv_transfer_config.json"
+    write_kv_config(config_path, spec, fs_dir)
     print("  [3/5] Starting vLLM server...")
-    pid = start_vllm(vllm_log)
+    pid = start_vllm(config_path, vllm_log)
     wait_for_vllm(pid, vllm_log)
     print("  [4/5] Running guidellm benchmark...")
     result = {"spec": asdict(spec), "status": "ok", **run_guidellm(spec, guidellm_log)}
