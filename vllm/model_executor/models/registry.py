@@ -785,6 +785,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "GlmForCausalLM": ("transformers", "TransformersForCausalLM"),
     "GPTBigCodeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "GPTNeoXForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "GRTForCausalLM": ("transformers", "TransformersForCausalLM"),
     "HunYuanDenseV1ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "HunYuanMoEV1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "Jais2ForCausalLM": ("transformers", "TransformersForCausalLM"),
