@@ -8,7 +8,9 @@ min_acceptance_length: 1.0
 expect_prefix_cache_hits: true
 env:
   VLLM_USE_V2_MODEL_RUNNER: "1"
-# 327 divides each 5232-token page and preserves the shared 654-token boundary.
+# --block-size 16 keeps the derived hybrid attention/mamba page at 16*327 = 5232
+# tokens (the 64-token default block size rounds it to 64*82 = 5248), so 327
+# divides each page and preserves the shared 654-token few-shot boundary.
 server_args: >-
   --enforce-eager
   --max-model-len 4096
@@ -21,6 +23,7 @@ server_args: >-
   --mamba-cache-philox-rounds 5
   --use-replayssm
   --replayssm-buffer-len 16
+  --block-size 16
   --enable-prefix-caching
   --prefix-match-unit 327
   --mamba-cache-mode align
