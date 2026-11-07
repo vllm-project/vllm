@@ -15,6 +15,7 @@ def _bf16_mla_sparse_kernel(
     out_ptr,
     softmax_lse_ptr,
     max_logits_ptr,
+    attn_sink_ptr,
     seq_q,
     seq_kv,
     h_q,
@@ -41,6 +42,7 @@ def _bf16_mla_sparse_kernel(
     BLOCK_DMODEL: tl.constexpr,  # block size for dim_nope
     BLOCK_DPE: tl.constexpr,  # block size for positional embedding
     LOGE2: tl.constexpr,
+    HAS_ATTN_SINK: tl.constexpr,
 ):
     cur_q = tl.program_id(0)
     cur_head_id = tl.program_id(1)
@@ -151,12 +153,24 @@ def _bf16_mla_sparse_kernel(
         e_sum = e_sum * re_scale + tl.sum(p, 1)
         e_max = n_e_max
 
+    max_logits = e_max * LOGE2
+    # calculate lse (over the selected keys only, sink excluded)
+    lse = max_logits + tl.log2(e_sum) * LOGE2
+
+    if HAS_ATTN_SINK:
+        # Extra logit in the softmax denominator with no value; e_max/e_sum are
+        # in the log2 domain and LOGE2 = ln 2, so sink / LOGE2 = sink * log2(e).
+        sink = tl.load(attn_sink_ptr + cur_head, mask=mask_h, other=float("-inf"))
+        sink2 = sink / LOGE2
+        m_final = tl.maximum(e_max, sink2)
+        sink_scale = tl.exp2(e_max - m_final)
+        acc *= sink_scale[:, None]
+        e_sum = e_sum * sink_scale + tl.exp2(sink2 - m_final)
+        # A row with no valid key and a -inf sink has e_sum == 0; avoid 0/0.
+        e_sum = tl.where(e_sum == 0.0, 1.0, e_sum)
+
     # rescaling
     acc /= e_sum[:, None]
-
-    max_logits = e_max * LOGE2
-    # calculate lse
-    lse = max_logits + tl.log2(e_sum) * LOGE2
 
     # write output
     offs_o = (
@@ -184,6 +198,7 @@ def triton_bf16_mla_sparse_interface(
     sm_scale: float,
     d_v: int = 512,
     block_dpe: int = 64,
+    attn_sink: torch.Tensor | None = None,  # [num_heads_q] fp32
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Out : [num_tokens, num_heads_q, d_v]
     max_logits : [num_tokens, num_heads_q]
@@ -198,6 +213,13 @@ def triton_bf16_mla_sparse_interface(
         block_dpe: Size of positional embedding portion of dim_qk.
             Set to 0 when q/kv contain only the nope latent (e.g. DSv4
             prefill where RoPE is not split out).
+        attn_sink: Optional per-head fp32 sink logit added to the softmax
+            denominator (DSv4). It must be on ``q``'s device, contiguous and
+            at least ``num_heads_q`` long (extra padded entries are ignored).
+            ``-inf`` entries are a no-op. The returned ``softmax_lse`` and
+            ``max_logits`` are over the selected keys only and exclude the
+            sink, so do not merge them with other partial results as if they
+            included it.
 
     """
     num_tokens, num_heads_q, dim_qk = q.shape
@@ -237,6 +259,17 @@ def triton_bf16_mla_sparse_interface(
         (num_tokens, num_heads_q), dtype=torch.float32, device=q.device
     )
 
+    if attn_sink is not None:
+        if attn_sink.dtype != torch.float32:
+            raise TypeError(f"attn_sink must be float32, got {attn_sink.dtype}")
+        if attn_sink.dim() != 1 or attn_sink.shape[0] < num_heads_q:
+            raise ValueError(
+                f"attn_sink must be 1-D with at least {num_heads_q} entries, "
+                f"got shape {tuple(attn_sink.shape)}"
+            )
+        if attn_sink.device != q.device or not attn_sink.is_contiguous():
+            raise ValueError("attn_sink must be contiguous and on q's device")
+
     k = kv
     v = kv[..., :d_v]
 
@@ -248,6 +281,7 @@ def triton_bf16_mla_sparse_interface(
         out_ptr=out,
         softmax_lse_ptr=softmax_lse,
         max_logits_ptr=max_logits,
+        attn_sink_ptr=attn_sink,
         seq_q=num_tokens,
         seq_kv=kv.shape[0],
         h_q=num_heads_q,
@@ -274,6 +308,7 @@ def triton_bf16_mla_sparse_interface(
         BLOCK_DMODEL=BLOCK_DMODEL,
         BLOCK_DPE=BLOCK_DPE,
         LOGE2=LOGE2,
+        HAS_ATTN_SINK=attn_sink is not None,
     )
 
     return out, max_logits, softmax_lse

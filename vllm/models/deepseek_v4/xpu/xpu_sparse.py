@@ -364,5 +364,6 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
                 sm_scale=self.scale,
                 d_v=q.shape[-1],
                 block_dpe=0,
+                attn_sink=self.attn_sink,
             )
             output[query_start:query_end] = out
