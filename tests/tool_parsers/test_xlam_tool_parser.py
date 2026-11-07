@@ -114,6 +114,7 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
         "single_tool_with_json_code_block",
         "single_tool_with_tool_calls_tag",
         "single_tool_with_tool_call_xml_tags",
+        "single_tool_dict_with_tool_call_xml_tags",
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
@@ -218,6 +219,24 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
                 )
             ],
             "I'll help you check the weather.",
+        ),
+        (
+            """<tool_call>{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}</tool_call>""",  # noqa: E501
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_current_weather",
+                        arguments=json.dumps(
+                            {
+                                "city": "Dallas",
+                                "state": "TX",
+                                "unit": "fahrenheit",
+                            }
+                        ),
+                    )
+                )
+            ],
+            "",
         ),
     ],
 )
