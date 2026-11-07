@@ -1838,8 +1838,6 @@ def _parallel_worker(
             # Independent test configs can change top_k and num_experts, unlike
             # the layers sharing a one-sided manager in a single model.
             if test_config.backend == "flashinfer_nvlink_one_sided":
-                from flashinfer.comm.trtllm_moe_alltoall import MoeAlltoAll
-
                 from vllm.distributed.device_communicators.all2all import (
                     FlashInferNVLinkOneSidedManager,
                 )
@@ -1851,8 +1849,6 @@ def _parallel_worker(
                 if manager is not None:
                     assert isinstance(manager, FlashInferNVLinkOneSidedManager)
                     manager.cleanup()
-                # Run cached tensor deleters before their JIT library unloads.
-                MoeAlltoAll._WORKSPACE_CACHE.clear()
             # DeepEP managers are not reliably reusable across many subtests in
             # a single worker process. Tear them down after each DeepEP case so
             # later subtests do not inherit stale communication state. Skip this

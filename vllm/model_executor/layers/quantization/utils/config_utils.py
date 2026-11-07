@@ -84,9 +84,10 @@ def _get_effective_quant_keys(
         _, _, _, quant_spec, method_cls = target
         if method_cls in (None, UnquantizedLinearMethod):
             return None, None
-        # NOTE: The online shorthands' `QuantSpec` (`_ONLINE_SHORTHANDS` in
-        # quantization.py) do not define the activation key: use the method's.
-        return quant_spec.weight, getattr(method_cls, "activation_quant_key", None)
+        # `resolve_quant_method_cls` returns the spec with its resolved
+        # activation key: the user override when explicit, else the method's
+        # default.
+        return quant_spec.weight, quant_spec.activation
     return get_checkpoint_quant_keys(quant_config, prefix, layer_type)
 
 

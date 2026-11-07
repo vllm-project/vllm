@@ -68,6 +68,9 @@ class ParseContext(BaseModel):
     ) = "none"
     parallel_tool_calls: bool | None = True
     include_reasoning: bool = True
+    return_tokens_as_token_ids: bool | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     chat_template_kwargs: dict[str, JsonValue] = Field(default_factory=dict)
     """Template kwargs with the render server's defaults already applied,
     without the API server only entries a handler keeps out of the engine."""
@@ -720,10 +723,8 @@ class DerenderChatRequest(BaseModel):
     """
 
     prompt_tokens: int | None = None
-    """Prompt token count for usage; defaults to 0 if omitted.
-
-    GenerateResponse carries only output tokens; the caller already has
-    len(GenerateRequest.token_ids) from the render step.
+    """Prompt token count for usage. If omitted, falls back to
+    `generate_response.usage.prompt_tokens`, then to 0.
     """
 
     prompt_token_ids: list[NonNegativeInt] | None = None
@@ -768,7 +769,8 @@ class DerenderCompletionRequest(BaseModel):
     list[GenerateRequest] returned by /v1/completions/render."""
 
     prompt_tokens: list[int] | None = None
-    """One prompt token count per response; each defaults to 0 if omitted.
+    """One prompt token count per response. If omitted, each falls back to
+    that response's `usage.prompt_tokens`, then to 0.
 
     If provided, len(prompt_tokens) must equal len(generate_responses).
     """
@@ -818,7 +820,7 @@ class DerenderStreamState(BaseModel):
     Two separate sets of fields support two different streaming modes:
 
     - For plain streaming (no parser configured including the completions path):
-      `prev_tokens`, `prefix_offset` and `read_offset` maintain a bounded incremental
+      `prev_token_ids`, `prefix_offset` and `read_offset` maintain a bounded incremental
       decoding window. This requires O(window) transport and O(delta) computation
       per chunk.
     - For parser enabled chat streaming: `output_token_ids`, `output_chunk_lens`,
@@ -834,10 +836,11 @@ class DerenderStreamState(BaseModel):
     The detokenization strategy carries the incremental decode offsets
     directly rather than re-sending the whole token history each chunk.
     `detokenize_incrementally` only ever reads the trailing token window
-    `prev_tokens[prefix_offset:]`, so we carry just that tail plus the two
-    offsets. Each chunk resumes exactly where the last one stopped, including
-    any partially processed multi-byte character (tracked by `read_offset`),
-    then trims and rebases the window so it never grows with generation length.
+    from `prefix_offset`, so we carry just that tail, as ids because pieces may
+    be raw bytes, plus the two offsets. Each chunk resumes exactly where the
+    last one stopped, including any partially processed multi-byte character
+    (tracked by `read_offset`), then trims and rebases the window so it never
+    grows with generation length.
 
     Performance:
     - Compute per chunk is O(delta). One `detokenize_incrementally` call per
@@ -847,8 +850,9 @@ class DerenderStreamState(BaseModel):
       O(n) rather than the O(n^2) a full history round trip would incur.
     """
 
-    prev_tokens: list[str] = Field(default_factory=list)
-    """Trailing decode window. Token strings from `prefix_offset` onward.
+    prev_token_ids: list[NonNegativeInt] = Field(default_factory=list)
+    """Trailing decode window. Token ids from `prefix_offset` onward, excluding
+    ids that `skip_special_tokens` drops.
 
     Bounded, trimmed and rebased each chunk to the tail
     `detokenize_incrementally` still reads, so it does not grow with the
@@ -856,20 +860,22 @@ class DerenderStreamState(BaseModel):
     """
 
     prefix_offset: int = Field(default=0, ge=0)
-    """Prefix offset into `prev_tokens` for incremental detokenization."""
+    """Prefix offset into `prev_token_ids` for incremental detokenization."""
 
     read_offset: int = Field(default=0, ge=0)
-    """Read offset into `prev_tokens` for incremental detokenization."""
+    """Read offset into `prev_token_ids` for incremental detokenization."""
 
-    @field_validator("prev_tokens")
+    @field_validator("prev_token_ids")
     @classmethod
-    def _bound_prev_tokens(cls, v: list[str]) -> list[str]:
+    def _bound_prev_token_ids(cls, v: list[int]) -> list[int]:
         # INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET is small (5) and the trimmed
         # window is O(offset). A generous limit rejects unusually large or malformed
         # payloads without restricting legitimate multi-byte sequences.
         limit = 1024
         if len(v) > limit:
-            raise ValueError(f"prev_tokens length ({len(v)}) exceeds maximum ({limit})")
+            raise ValueError(
+                f"prev_token_ids length ({len(v)}) exceeds maximum ({limit})"
+            )
         return v
 
     role_sent: bool = False

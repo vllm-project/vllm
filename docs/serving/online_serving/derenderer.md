@@ -124,6 +124,8 @@ The server keeps no state between calls. Everything the next call needs is in `s
 
 `/inference/v1/generate` returns `GenerateLogProbs` with integer `token_id`s (the generate server has no tokenizer), and derender turns those into `ChatCompletionLogProbs` / `CompletionLogProbs`, filling `token` and `bytes` from the tokenizer with the usual U+FFFD byte-fallback correction. Generate returns every top-k candidate the engine produced; derender keeps the ones the coupled endpoint would, with the same helpers: the first `top_logprobs` on chat (all of them for `top_logprobs=-1`) and the first `logprobs + 1` on completions (all of them for `logprobs=-1`). It reads those values from `chat_request` / `completion_request`, so without the original request, or with one that does not ask for logprobs, it returns every candidate. Requests that use `logprob_token_ids` get no output logprobs from generate (their `sampling_params.logprobs` is unset), so derender has none to return for them either. Streaming derender does the same per chunk on both the plain detokenization path and the parser path (see [Streaming state and logprobs](#streaming-state-and-logprobs)). As on `/v1/chat/completions`, a request with `include_reasoning: false` and a parser configured gets no logprobs at all, batch or streaming, since the decoded logprob tokens would reveal the hidden reasoning.
 
+For both chat and completion derender, `return_tokens_as_token_ids` in `chat_request` / `completion_request` takes precedence over the answering render server's `--return-tokens-as-token-ids`. `true` returns `token_id:N` logprob tokens (`bytes: null` in the chat shape); explicit `false` returns decoded strings even when the server flag is enabled. An omitted or `null` value, or no original request, uses the render server's flag. This applies to full responses and streaming chunks, including top logprobs. It does not change decoded message content or completion text, or the suppression of logprobs when reasoning is hidden.
+
 ## Streaming cost
 
 Streaming derender threads a client carried `stream_state` across per-chunk calls instead of keeping session state on the server.
@@ -141,7 +143,7 @@ When a tool or reasoning parser is configured, parser internal state (buffered m
 
 ## Streaming state and logprobs
 
-Streaming derender is stateless on the server side: all mutable state lives in the client-carried `stream_state` (`DerenderStreamState`), passed back on every per-chunk call. Besides the bounded incremental detokenization window (`prev_tokens`, `prefix_offset`, `read_offset`), `role_sent`, and the parser path's replay fields (see [Streaming cost](#streaming-cost)), the state carries two fields for logprob handling:
+Streaming derender is stateless on the server side: all mutable state lives in the client-carried `stream_state` (`DerenderStreamState`), passed back on every per-chunk call. Besides the bounded incremental detokenization window (`prev_token_ids`, `prefix_offset`, `read_offset`), `role_sent`, and the parser path's replay fields (see [Streaming cost](#streaming-cost)), the state carries two fields for logprob handling:
 
 - `logprob_context_token_ids`: the trailing sampled token IDs (at most 4) from previous chunks, used to seed byte-fallback (U+FFFD) correction so multi-byte characters whose tokens split across chunk boundaries still resolve to real strings
 - `logprob_text_offset`: the cumulative emitted text length, so `text_offset` in completion streaming logprobs stays absolute across chunks instead of restarting at 0

@@ -109,6 +109,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
             MoEActivation.SILU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUSTEP,
+            MoEActivation.GELU_TANH,
         )
 
     @staticmethod
@@ -182,6 +183,8 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
             return 1
         if activation == MoEActivation.SILU:
             return 2
+        if activation == MoEActivation.GELU_TANH:
+            return 3
         raise ValueError(f"Unsupported activation '{activation}'")
 
     def apply(
