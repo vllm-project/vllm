@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The warmup must cover every specialization the sampler will launch.
 
-``_philox_gumbel_kernel`` is keyed on the Philox key halves, on the logits
-dtype (model dtype when the sampler passes logits through, fp32 when logits
-processing copies them) and on whether a skip mask is passed, so a missing
-combination leaves a request paying the compile this module exists to remove.
+Watermark kernels are keyed on the logits dtype (model dtype when the sampler
+passes logits through, fp32 when logits processing copies them), on whether a
+skip mask is passed and on algorithm arguments such as the Philox key, so a
+missing combination leaves a request paying the compile this module exists to
+remove. The warmup samples through the sampler's watermarker: the cpu tests
+check which samples it requests, the CUDA tests which kernels those launch.
 """
 
 import logging
@@ -20,19 +22,26 @@ from vllm.platforms import current_platform
 from vllm.v1.watermarking.factory import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.spec_decode import create_speculative_target_watermarker
+from vllm.v1.watermarking.synthid import _STREAM_DOMAIN as SYNTHID_STREAM
+from vllm.v1.watermarking.synthid import SynthIDWatermarker
+from vllm.v1.watermarking.watermarker import WatermarkSample
 
 MASTER_KEY = 20250910
 KEY_A = derive_watermark_key(MASTER_KEY, b"key_a")
 KEY_B = derive_watermark_key(MASTER_KEY, b"key_b")
+
+requires_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="watermark kernels launch only on CUDA"
+)
 
 
 @pytest.fixture(autouse=True)
 def cuda_alike_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     """The warmup returns early off CUDA, so pin the platform it reads.
 
-    Everything here runs on the fake worker's cpu device; without this the
-    tests below would pass only on a CUDA-alike host and silently warm nothing
-    anywhere else.
+    The sampling tests run on the fake worker's cpu device; without this they
+    would pass only on a CUDA-alike host and silently warm nothing anywhere
+    else.
     """
     monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
 
@@ -63,6 +72,7 @@ def _worker(
     speculative: bool = False,
     use_fp64_gumbel: bool = False,
     with_sampler: bool = True,
+    device: str = "cpu",
 ) -> SimpleNamespace:
     sampler = (
         _sampler(watermark_config, speculative, use_fp64_gumbel)
@@ -70,7 +80,7 @@ def _worker(
         else None
     )
     return SimpleNamespace(
-        device=torch.device("cpu"),
+        device=torch.device(device),
         model_runner=SimpleNamespace(sampler=sampler),
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(
@@ -82,16 +92,53 @@ def _worker(
     )
 
 
+def _capture_samples(
+    monkeypatch: pytest.MonkeyPatch, worker: SimpleNamespace
+) -> list[dict]:
+    calls: list[dict] = []
+
+    def fake_sample(logits, contexts, random_sampler=None, skip_mask=None):
+        calls.append(
+            {
+                "logits": logits,
+                "contexts": contexts,
+                "random_sampler": random_sampler,
+                "skip_mask": skip_mask,
+            }
+        )
+        return WatermarkSample(torch.zeros(logits.shape[0], dtype=torch.int64), logits)
+
+    monkeypatch.setattr(worker.model_runner.sampler.watermarker, "sample", fake_sample)
+    return calls
+
+
 def _capture_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
     calls: list[dict] = []
 
     def fake_philox_gumbel_sample(logits, contexts, key, **kwargs):
         calls.append({"logits": logits, "contexts": contexts, "key": key, **kwargs})
-        return torch.zeros(logits.shape[0], dtype=torch.int64)
+        return torch.zeros(logits.shape[0], dtype=torch.int64, device=logits.device)
 
     monkeypatch.setattr(
         "vllm.v1.worker.gpu.sample.watermark.philox_gumbel_sample",
         fake_philox_gumbel_sample,
+    )
+    return calls
+
+
+def _capture_synthid_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    calls: list[dict] = []
+
+    def fake_synthid_sample(logits, contexts, key, depth, *args, **kwargs):
+        calls.append(
+            {"logits": logits, "contexts": contexts, "key": key, "depth": depth}
+            | kwargs
+        )
+        return torch.zeros(logits.shape[0], dtype=torch.int64, device=logits.device)
+
+    monkeypatch.setattr(SynthIDWatermarker, "_use_fused", lambda self, logits: True)
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.sample.synthid.synthid_sample", fake_synthid_sample
     )
     return calls
 
@@ -106,47 +153,134 @@ def _variants(calls: list[dict]) -> set[tuple[int, torch.dtype, bool]]:
 def test_no_warmup_without_a_watermark_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = _capture_calls(monkeypatch)
-    watermark_sample_warmup(_worker(None))
+    worker = _worker(WatermarkConfig(key=MASTER_KEY))
+    calls = _capture_samples(monkeypatch, worker)
+    worker.vllm_config.watermark_config = None
+    watermark_sample_warmup(worker)
 
     assert calls == []
 
 
 def test_no_warmup_without_a_watermarked_sampler(
-    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A rank that does not sample launches nothing to warm.
 
     Only the final pipeline stage of a generative model holds a
     ``GPUWatermarkSampler``; on any other rank the kernel is never launched.
     """
-    calls = _capture_calls(monkeypatch)
-    watermark_sample_warmup(
-        _worker(WatermarkConfig(key=MASTER_KEY), with_sampler=False)
-    )
+    with caplog.at_level(logging.INFO):
+        watermark_sample_warmup(
+            _worker(WatermarkConfig(key=MASTER_KEY), with_sampler=False)
+        )
 
-    assert calls == []
+    assert "Warming up watermark sampler" not in caplog.text
 
 
 def test_no_warmup_off_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``GumbelWatermarker`` launches the kernel only on a CUDA-alike device.
+    """Watermarkers launch their kernels only on a CUDA-alike device.
 
     Elsewhere -- an XPU worker inherits ``kernel_warmup`` from the CUDA worker
     -- the sampler takes the torch path, so warming would compile a kernel
     nothing launches.
     """
-    calls = _capture_calls(monkeypatch)
+    worker = _worker(WatermarkConfig(key=MASTER_KEY))
+    calls = _capture_samples(monkeypatch, worker)
     monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: False)
-    watermark_sample_warmup(_worker(WatermarkConfig(key=MASTER_KEY)))
+    watermark_sample_warmup(worker)
 
     assert calls == []
 
 
+@pytest.mark.parametrize("algorithm", ["gumbel", "dual_key_gumbel", "synthid_text"])
+@pytest.mark.parametrize("deduplicate_contexts", ["single_turn", "none"])
+def test_samples_every_reachable_dtype(
+    monkeypatch: pytest.MonkeyPatch,
+    algorithm: str,
+    deduplicate_contexts: str,
+) -> None:
+    """The sampler passes a skip mask on every watermarked step.
+
+    Only the logits dtype varies, so each dtype is warmed once.
+    """
+    worker = _worker(
+        WatermarkConfig(
+            key=MASTER_KEY,
+            algorithm=algorithm,
+            deduplicate_contexts=deduplicate_contexts,
+        )
+    )
+    calls = _capture_samples(monkeypatch, worker)
+    watermark_sample_warmup(worker)
+
+    dtypes = [call["logits"].dtype for call in calls]
+    assert all(call["skip_mask"] is not None for call in calls)
+    assert set(dtypes) == {torch.bfloat16, torch.float32}
+    assert len(dtypes) == len(set(dtypes))
+
+
+def test_warmup_argument_dtypes_match_the_runtime_buffers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Contexts are int32, the sampling state int64 indices and fp32 temperatures.
+
+    ``GPUWatermarkSampler._get_contexts`` gathers from the int32 request-state
+    token ids, ``expanded_idx_mapping``/``positions``/``seeds`` are int64 and
+    ``SamplingStates.temperature`` is fp32; warming other dtypes compiles
+    specializations no engine launches.
+    """
+    worker = _worker(WatermarkConfig(key=MASTER_KEY, context_width=3))
+    calls = _capture_samples(monkeypatch, worker)
+    watermark_sample_warmup(worker)
+
+    assert calls
+    for call in calls:
+        num_tokens = call["logits"].shape[0]
+        random_sampler = call["random_sampler"]
+        assert call["contexts"].dtype == torch.int32
+        assert call["contexts"].shape == (num_tokens, 3)
+        assert call["skip_mask"].dtype == torch.bool
+        assert random_sampler.expanded_idx_mapping.dtype == torch.int64
+        assert random_sampler.positions.dtype == torch.int64
+        assert random_sampler.seeds.dtype == torch.int64
+        assert random_sampler.temperatures.dtype == torch.float32
+
+
+@pytest.mark.parametrize("use_fp64_gumbel", [False, True])
+def test_random_sampler_follows_the_samplers_fp64_setting(
+    monkeypatch: pytest.MonkeyPatch, use_fp64_gumbel: bool
+) -> None:
+    worker = _worker(WatermarkConfig(key=MASTER_KEY), use_fp64_gumbel=use_fp64_gumbel)
+    calls = _capture_samples(monkeypatch, worker)
+    watermark_sample_warmup(worker)
+
+    assert calls
+    for call in calls:
+        assert call["random_sampler"].use_fp64 is use_fp64_gumbel
+
+
+def test_warmup_failure_does_not_abort_startup(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def failing_sample(*args, **kwargs):
+        raise RuntimeError("no triton")
+
+    worker = _worker(WatermarkConfig(key=MASTER_KEY))
+    monkeypatch.setattr(
+        worker.model_runner.sampler.watermarker, "sample", failing_sample
+    )
+    with caplog.at_level(logging.WARNING):
+        watermark_sample_warmup(worker)
+
+    assert "Skipping watermark sampler warmup." in caplog.text
+
+
+@requires_cuda
 def test_single_key_warms_both_logits_dtypes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _capture_calls(monkeypatch)
-    watermark_sample_warmup(_worker(WatermarkConfig(key=MASTER_KEY)))
+    watermark_sample_warmup(_worker(WatermarkConfig(key=MASTER_KEY), device="cuda"))
 
     assert _variants(calls) == {
         (MASTER_KEY, torch.bfloat16, True),
@@ -155,6 +289,7 @@ def test_single_key_warms_both_logits_dtypes(
     assert len(calls) == len(_variants(calls))
 
 
+@requires_cuda
 def test_dual_key_warms_both_derived_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     """``DualKeyGumbelWatermarker.sample`` launches the kernel once per key.
 
@@ -163,7 +298,10 @@ def test_dual_key_warms_both_derived_keys(monkeypatch: pytest.MonkeyPatch) -> No
     """
     calls = _capture_calls(monkeypatch)
     watermark_sample_warmup(
-        _worker(WatermarkConfig(key=MASTER_KEY, algorithm="dual_key_gumbel"))
+        _worker(
+            WatermarkConfig(key=MASTER_KEY, algorithm="dual_key_gumbel"),
+            device="cuda",
+        )
     )
 
     assert _variants(calls) == {
@@ -174,6 +312,7 @@ def test_dual_key_warms_both_derived_keys(monkeypatch: pytest.MonkeyPatch) -> No
     }
 
 
+@requires_cuda
 @pytest.mark.parametrize("alpha,key", [(0.0, KEY_A), (1.0, KEY_B)])
 def test_dual_key_alpha_bounds_warm_one_key(
     monkeypatch: pytest.MonkeyPatch, alpha: float, key: int
@@ -181,7 +320,8 @@ def test_dual_key_alpha_bounds_warm_one_key(
     calls = _capture_calls(monkeypatch)
     watermark_sample_warmup(
         _worker(
-            WatermarkConfig(key=MASTER_KEY, algorithm="dual_key_gumbel", alpha=alpha)
+            WatermarkConfig(key=MASTER_KEY, algorithm="dual_key_gumbel", alpha=alpha),
+            device="cuda",
         )
     )
 
@@ -191,6 +331,7 @@ def test_dual_key_alpha_bounds_warm_one_key(
     }
 
 
+@requires_cuda
 def test_speculative_config_warms_the_target_role_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -204,6 +345,7 @@ def test_speculative_config_warms_the_target_role_only(
         _worker(
             WatermarkConfig(key=MASTER_KEY, algorithm="dual_key_gumbel"),
             speculative=True,
+            device="cuda",
         )
     )
 
@@ -213,88 +355,38 @@ def test_speculative_config_warms_the_target_role_only(
     }
 
 
-def test_dedup_none_also_warms_the_mask_free_specialization(
+@pytest.mark.parametrize("deduplicate_contexts", ["single_turn", "none"])
+def test_synthid_warms_every_reachable_specialization(
     monkeypatch: pytest.MonkeyPatch,
+    deduplicate_contexts: str,
 ) -> None:
-    """Without deduplication an all-watermarked batch passes no skip mask.
+    """``SynthIDWatermarker.sample`` launches its fused kernels.
 
-    A later batch mixing in an opted-out request passes one, so both
-    specializations are reachable and both must be warmed.
+    It passes the configured key, depth and SynthID-Text Philox stream, the
+    model-dtype or fp32 logits and the sampler's skip mask, so the warmup has
+    to compile the same combinations.
     """
-    calls = _capture_calls(monkeypatch)
-    watermark_sample_warmup(
-        _worker(WatermarkConfig(key=MASTER_KEY, deduplicate_contexts="none"))
-    )
-
-    assert _variants(calls) == {
-        (MASTER_KEY, torch.bfloat16, True),
-        (MASTER_KEY, torch.float32, True),
-        (MASTER_KEY, torch.bfloat16, False),
-        (MASTER_KEY, torch.float32, False),
-    }
-    for call in calls:
-        if call.get("skip_mask") is None:
-            assert "temperatures" not in call
-
-
-def test_warmup_argument_dtypes_match_the_runtime_buffers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Contexts are int32, the sampling state int64 indices and fp32 temperatures.
-
-    ``GPUWatermarkSampler._get_contexts`` gathers from the int32 request-state
-    token ids, ``expanded_idx_mapping``/``positions``/``seeds`` are int64 and
-    ``SamplingStates.temperature`` is fp32; warming other dtypes compiles
-    specializations no engine launches.
-    """
-    calls = _capture_calls(monkeypatch)
-    watermark_sample_warmup(_worker(WatermarkConfig(key=MASTER_KEY, context_width=3)))
-
-    assert calls
-    for call in calls:
-        num_tokens = call["logits"].shape[0]
-        assert call["contexts"].dtype == torch.int32
-        assert call["contexts"].shape == (num_tokens, 3)
-        assert call["skip_mask"].dtype == torch.bool
-        assert call["expanded_idx_mapping"].dtype == torch.int64
-        assert call["positions"].dtype == torch.int64
-        assert call["seeds"].dtype == torch.int64
-        assert call["temperatures"].dtype == torch.float32
-
-
-def test_use_fp64_follows_the_path_that_forwards_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Only the mixed path forwards the sampler's ``use_fp64_gumbel``.
-
-    ``GumbelWatermarker._sample_watermarked`` launches the mask-free variant
-    with the ``use_fp64=False`` default, so warming it with fp64 would compile
-    a specialization the engine never launches and miss the one it does.
-    """
-    calls = _capture_calls(monkeypatch)
+    gumbel_calls = _capture_calls(monkeypatch)
+    calls = _capture_synthid_calls(monkeypatch)
     watermark_sample_warmup(
         _worker(
-            WatermarkConfig(key=MASTER_KEY, deduplicate_contexts="none"),
-            use_fp64_gumbel=True,
+            WatermarkConfig(
+                key=MASTER_KEY,
+                algorithm="synthid_text",
+                context_width=3,
+                depth=24,
+                deduplicate_contexts=deduplicate_contexts,
+            )
         )
     )
 
-    assert calls
+    assert gumbel_calls == []
+    assert all(call["skip_mask"] is not None for call in calls)
+    assert {call["logits"].dtype for call in calls} == {torch.bfloat16, torch.float32}
+    assert len(calls) == 2
     for call in calls:
-        assert call["use_fp64"] is (call.get("skip_mask") is not None)
-
-
-def test_warmup_failure_does_not_abort_startup(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    def failing_philox_gumbel_sample(*args, **kwargs):
-        raise RuntimeError("no triton")
-
-    monkeypatch.setattr(
-        "vllm.v1.worker.gpu.sample.watermark.philox_gumbel_sample",
-        failing_philox_gumbel_sample,
-    )
-    with caplog.at_level(logging.WARNING):
-        watermark_sample_warmup(_worker(WatermarkConfig(key=MASTER_KEY)))
-
-    assert "Skipping watermark sampler warmup." in caplog.text
+        assert call["key"] == MASTER_KEY
+        assert call["depth"] == 24
+        assert call["stream"] == SYNTHID_STREAM
+        assert call["contexts"].dtype == torch.int32
+        assert call["contexts"].shape == (call["logits"].shape[0], 3)

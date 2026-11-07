@@ -6,21 +6,35 @@ import pytest
 from vllm import SamplingParams
 from vllm.platforms import current_platform
 from vllm.v1.metrics.reader import Counter
-from vllm.v1.watermarking import GumbelWatermarkDetector
+from vllm.v1.watermarking import GumbelWatermarkDetector, SynthIDWatermarkDetector
 
 
 @pytest.mark.parametrize("enforce", [False, True])
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
 )
-def test_llm_generated_sequence_is_watermarked(vllm_runner, enforce):
+@pytest.mark.parametrize(
+    ("algorithm", "detector_cls", "recorded_p_value"),
+    [
+        ("gumbel", GumbelWatermarkDetector, 2.68e-29),
+        # Loose bound (1e-6 after the x10 tolerance) that holds across seeds/paths.
+        ("synthid_text", SynthIDWatermarkDetector, 1e-7),
+    ],
+)
+def test_llm_generated_sequence_is_watermarked(
+    vllm_runner, algorithm, detector_cls, recorded_p_value, enforce
+):
     """Engine-level watermarking must produce tokens the detector recognizes."""
     watermark_config = {"key": 42, "context_width": 4}
-    detector = GumbelWatermarkDetector(**watermark_config)
+    detector = detector_cls(**watermark_config)
 
     runner = vllm_runner(
         "facebook/opt-125m",
-        watermark_config={**watermark_config, "enforce": enforce},
+        watermark_config={
+            "algorithm": algorithm,
+            **watermark_config,
+            "enforce": enforce,
+        },
         seed=0,
         enforce_eager=True,
         max_model_len=512,
@@ -61,7 +75,6 @@ def test_llm_generated_sequence_is_watermarked(vllm_runner, enforce):
     result_no_wm = detector.detect(list(output_no_wm[0].outputs[0].token_ids))
 
     assert result_use_wm.is_watermarked, result_use_wm
-    recorded_p_value = 2.68e-29
     assert result_use_wm.p_value < recorded_p_value * 10  # tolerance
 
     assert result_no_wm.is_watermarked == enforce, result_no_wm
