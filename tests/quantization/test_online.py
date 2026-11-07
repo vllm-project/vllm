@@ -308,6 +308,10 @@ def test_online_mxfp4_activation_key_is_honoured_or_rejected(
         assert computed_key == activation_quant_key
 
 
+@pytest.mark.skipif(
+    current_platform.is_xpu(),
+    reason="MXFP4 linear kernels on XPU only support dynamic activation.",
+)
 def test_online_hadamard_target_wraps_resolved_method(default_vllm_config) -> None:
     """`hadamard_size` on a `targets` spec wraps the method built with the
     resolved activation key in `InputHadamardLinearMethod`."""
@@ -1824,7 +1828,8 @@ def test_nvfp4_one_sided_sizes_dispatched_activations(
         raise RuntimeError("dispatch layout verified before allocation")
 
     monkeypatch.setattr(
-        nvfp4_oracle, "maybe_make_prepare_finalize", check_dispatch_layout
+        "vllm.model_executor.layers.fused_moe.oracle.base.maybe_make_prepare_finalize",
+        check_dispatch_layout,
     )
     with pytest.raises(
         RuntimeError, match="dispatch layout verified before allocation"

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Low-level CUDA/HIP memory helpers: pinning and batch DMA transfers."""
+"""Low-level CUDA/HIP batch DMA transfers."""
 
 import ctypes
 from typing import Any, NamedTuple
@@ -19,25 +19,6 @@ logger = init_logger(__name__)
 # be read early, only safe for a stable source (e.g. pinned host memory).
 CU_MEMCPY_SRC_ACCESS_ORDER_STREAM = 1
 CU_MEMCPY_SRC_ACCESS_ORDER_ANY = 3
-
-
-def pin_tensor(tensor: torch.Tensor) -> None:
-    """Pin a CPU tensor via cudaHostRegister.
-
-    This bypasses PyTorch's CUDACachingHostAllocator which rounds
-    every ``pin_memory=True`` allocation up to the next power of 2
-    (e.g. 100 GB becomes 128 GB).
-    """
-    err = torch.cuda.cudart().cudaHostRegister(tensor.data_ptr(), tensor.nbytes, 0)
-    if err.value != 0:
-        raise RuntimeError(f"cudaHostRegister failed: {err}")
-
-
-def unpin_tensor(tensor: torch.Tensor) -> None:
-    """Release host registration after all transfers drain."""
-    err = torch.cuda.cudart().cudaHostUnregister(tensor.data_ptr())
-    if err.value != 0:
-        raise RuntimeError(f"cudaHostUnregister failed: {err}")
 
 
 class _CUmemLocation(ctypes.Structure):

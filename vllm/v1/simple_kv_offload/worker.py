@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side handler for SimpleCPUOffloadConnector."""
 
+import mmap
 from typing import TYPE_CHECKING
 
 import torch
@@ -9,10 +10,15 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.host_memory import (
+    host_registration_ranges,
+    pin_tensor,
+    unpin_tensor,
+)
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
-from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
+from vllm.v1.simple_kv_offload.host_buffer import alloc_host_buffer
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
@@ -40,6 +46,7 @@ class SimpleCPUOffloadWorker:
         use_page_cache: bool = False,
         num_cpu_blocks: int | None = None,
         max_load_slots: int = 8,
+        cpu_hugepage_size: int | None = None,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -52,6 +59,7 @@ class SimpleCPUOffloadWorker:
         self.hybrid_mode = kv_offload_backend == "hybrid"
         self.disk_mode = kv_offload_backend in ("disk", "hybrid")
         self.max_load_slots = max_load_slots
+        self.cpu_hugepage_size = cpu_hugepage_size
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
@@ -256,17 +264,7 @@ class SimpleCPUOffloadWorker:
                 "Pinned memory not available. CPU offload performance may be degraded."
             )
 
-        self.cpu_kv_caches = {}
-        for name, gpu_tensor in unique_gpu_caches.items():
-            cpu_shape = (self.num_cpu_blocks,) + gpu_tensor.shape[1:]
-            # Allocate non-pinned first, then pin via cudaHostRegister to
-            # bypass PyTorch's CUDACachingHostAllocator which rounds up to
-            # the next power of 2 (e.g. 100 GB -> 128 GB).
-            # CPU blocks are loaded only after a completed GPU-to-CPU store.
-            tensor = torch.empty(cpu_shape, dtype=gpu_tensor.dtype, device="cpu")
-            if pin_memory:
-                pin_tensor(tensor)
-            self.cpu_kv_caches[name] = tensor
+        self.cpu_kv_caches = self._alloc_cpu_caches(unique_gpu_caches, pin_memory)
 
         self._backend = DmaCopyBackend()
         self._backend.init(
@@ -276,6 +274,40 @@ class SimpleCPUOffloadWorker:
             self.load_stream,
             self.store_stream,
         )
+
+    def _alloc_cpu_caches(
+        self, unique_gpu_caches: dict[str, torch.Tensor], pin_memory: bool
+    ) -> dict[str, torch.Tensor]:
+        """Carve per-layer caches out of one mapping, pinned in bounded chunks."""
+        layer_bytes = [
+            self.num_cpu_blocks * t[0].nbytes for t in unique_gpu_caches.values()
+        ]
+        buf = alloc_host_buffer(sum(layer_bytes), self.cpu_hugepage_size)
+
+        cpu_kv_caches = {}
+        offset = 0
+        for size, (name, gpu_tensor) in zip(layer_bytes, unique_gpu_caches.items()):
+            cpu_shape = (self.num_cpu_blocks,) + gpu_tensor.shape[1:]
+            view = buf[offset : offset + size].view(gpu_tensor.dtype)
+            cpu_kv_caches[name] = view.view(cpu_shape)
+            offset += size
+        if pin_memory:
+            registered = []
+            try:
+                for start, end in host_registration_ranges(
+                    layer_bytes,
+                    self.num_cpu_blocks,
+                    buf.nbytes,
+                    page_size=self.cpu_hugepage_size or mmap.PAGESIZE,
+                ):
+                    tensor = buf[start:end]
+                    pin_tensor(tensor)
+                    registered.append(tensor)
+            except Exception:
+                for tensor in reversed(registered):
+                    unpin_tensor(tensor)
+                raise
+        return cpu_kv_caches
 
     def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:
         self._connector_metadata = metadata

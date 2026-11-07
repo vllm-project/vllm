@@ -26,6 +26,7 @@ from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.simple_kv_offload.host_buffer import parse_hugepage_size
 from vllm.v1.simple_kv_offload.manager import (
     BoundaryStoreStats,
     SimpleCPUOffloadScheduler,
@@ -179,6 +180,9 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                     "Hybrid requires eager offload, O_DIRECT, one GPU and "
                     "one full-attention group"
                 )
+        cpu_hugepage_size = parse_hugepage_size(
+            extra_config.get("cpu_hugepage_block_size")
+        )
 
         if disk_mode:
             if disk_path is None:
@@ -188,6 +192,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             if disk_capacity_bytes <= 0:
                 raise ValueError(
                     'kv_offload_backend="disk" requires disk_capacity_bytes > 0.'
+                )
+            if cpu_hugepage_size is not None:
+                raise ValueError(
+                    'cpu_hugepage_block_size applies only to kv_offload_backend="cpu".'
                 )
         else:
             ignored = [k for k in _DISK_ONLY_KEYS if k in extra_config]
@@ -261,6 +269,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 use_page_cache=use_page_cache,
                 num_cpu_blocks=num_cpu_blocks,
                 max_load_slots=max_load_slots,
+                cpu_hugepage_size=cpu_hugepage_size,
             )
 
     # --- Worker-side methods ---
