@@ -5,12 +5,22 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
 from openai import OpenAI
-from openai_harmony import Message, ToolDescription, ToolNamespaceConfig
+from openai_harmony import (
+    HarmonyEncodingName,
+    Message,
+    Role,
+    SystemContent,
+    ToolDescription,
+    ToolNamespaceConfig,
+    load_harmony_encoding,
+)
+from pydantic import BaseModel, create_model
 
 import vllm.entrypoints.mcp.tool_server as tool_server_module
 from tests.utils import RemoteOpenAIServer
@@ -44,6 +54,34 @@ _PYTHON_TOOL_INSTRUCTION = (
 )
 
 
+class SearchFilter(BaseModel):
+    department: str
+
+
+def _render_mcp_tool_schema(schema: dict) -> str:
+    from mcp.types import ListToolsResult, Tool
+
+    result = post_process_tools_description(
+        ListToolsResult(tools=[Tool(name="search", input_schema=schema)])
+    )
+    namespace = ToolNamespaceConfig(
+        name="browser",
+        description="Search tools",
+        tools=[
+            ToolDescription.new(
+                name="search",
+                description="Search by value",
+                parameters=result.tools[0].input_schema,
+            )
+        ],
+    )
+    message = Message.from_role_and_content(
+        Role.SYSTEM, SystemContent.new().with_tools(namespace)
+    )
+    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    return encoding.decode(encoding.render(message))
+
+
 @pytest.mark.asyncio
 async def test_init_tool_server_without_configuration():
     args = SimpleNamespace(tool_server=None)
@@ -72,6 +110,87 @@ class TestMCPToolServerUnit:
     so we only test None and specific tool filtering here.
     See responses/test_serving_responses.py for "*" normalization tests.
     """
+
+    @pytest.mark.parametrize(
+        ("annotation", "expected"),
+        [
+            pytest.param(
+                SearchFilter | None, ("department: string",), id="nested-model"
+            ),
+            pytest.param(
+                Literal["department", "company"] | None,
+                ('value?: "department" | "company"',),
+                id="enum",
+            ),
+            pytest.param(list[str] | None, ("value?: string[]",), id="array"),
+            pytest.param(
+                SearchFilter | str | None,
+                ("department: string", "| string"),
+                id="model-or-string",
+            ),
+        ],
+    )
+    def test_nullable_tool_schema_preserves_rendered_arguments(
+        self, annotation, expected
+    ):
+        """Nullable MCP arguments must retain their shape in the model's prompt."""
+        arguments = create_model("SearchArguments", value=(annotation, None))
+        rendered = _render_mcp_tool_schema(arguments.model_json_schema())
+        for text in expected:
+            assert text in rendered, rendered
+
+    def test_conflicting_nullable_constraints_keep_type_information(self):
+        rendered = _render_mcp_tool_schema(
+            {
+                "type": "object",
+                "properties": {
+                    "value": {
+                        "anyOf": [
+                            {"type": "string", "enum": ["a", "b"]},
+                            {"type": "null"},
+                        ],
+                        "enum": ["a", "c"],
+                    }
+                },
+            }
+        )
+        assert "value?: string" in rendered
+
+    @pytest.mark.parametrize(
+        ("definition", "properties", "expected_counts"),
+        [
+            pytest.param(
+                {"name": {"type": "string"}, "next": {"$ref": "#/$defs/Filter~1~0"}},
+                {"value": {"$ref": "#/$defs/Filter~1~0"}},
+                {"name?: string": 1, "next?: any": 1},
+                id="recursive-reference",
+            ),
+            pytest.param(
+                {"title": {"type": "string"}, "default": {"type": "boolean"}},
+                {name: {"$ref": "#/$defs/Filter~1~0"} for name in ("first", "second")},
+                {
+                    "first?: {": 1,
+                    "second?: {": 1,
+                    "title?: string": 2,
+                    "default?: boolean": 2,
+                },
+                id="repeated-escaped-reference",
+            ),
+        ],
+    )
+    def test_tool_schema_references_preserve_rendered_properties(
+        self, definition, properties, expected_counts
+    ):
+        """Expand sibling refs independently and stop recursive definitions."""
+        rendered = _render_mcp_tool_schema(
+            {
+                "type": "object",
+                "$defs": {"Filter/~": {"type": "object", "properties": definition}},
+                "properties": properties,
+            }
+        )
+        for text, count in expected_counts.items():
+            assert rendered.count(text) == count
 
     def test_get_tool_description(self):
         pytest.importorskip("mcp")
