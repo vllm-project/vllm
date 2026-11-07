@@ -23,3 +23,15 @@ for module_name in module_names:
 
 import vllm  # noqa
 import vllm.config  # noqa
+
+# Resolving config defaults must not import the allreduce fusion pass module:
+# it eagerly imports `flashinfer.comm`, whose import initializes CUDA in the
+# API server process and makes vLLM force the `spawn` multiprocessing method.
+from vllm.config.compilation import PassConfig  # noqa
+
+PassConfig().flashinfer_max_size(2)
+_FUSION_PASS = "vllm.compilation.passes.fusion.allreduce_rms_fusion"
+assert _FUSION_PASS not in sys.modules, (
+    "PassConfig.flashinfer_max_size() imported the allreduce fusion pass "
+    "module, which initializes CUDA as an import side effect"
+)
