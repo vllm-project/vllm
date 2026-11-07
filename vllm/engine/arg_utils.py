@@ -961,6 +961,38 @@ class EngineArgs:
                         tokenizer_id,
                         self.tokenizer,
                     )
+            spec_revision = (
+                self.speculative_config.get("revision")
+                if isinstance(self.speculative_config, dict)
+                else None
+            )
+            if self.spec_model is not None and not is_cloud_storage(self.spec_model):
+                spec_model_id = self.spec_model
+                self.spec_model = get_model_path(self.spec_model, spec_revision)
+                if spec_model_id is not self.spec_model:
+                    logger.info(
+                        "HF_HUB_OFFLINE is True, replace spec_model_id [%s] "
+                        "to spec_model_path [%s]",
+                        spec_model_id,
+                        self.spec_model,
+                    )
+            if (
+                isinstance(self.speculative_config, dict)
+                and "model" in self.speculative_config
+                and self.speculative_config["model"] is not None
+                and not is_cloud_storage(self.speculative_config["model"])
+            ):
+                spec_model_id = self.speculative_config["model"]
+                self.speculative_config["model"] = get_model_path(
+                    spec_model_id, spec_revision
+                )
+                if spec_model_id is not self.speculative_config["model"]:
+                    logger.info(
+                        "HF_HUB_OFFLINE is True, replace speculative_config['model'] "
+                        "[%s] to spec_model_path [%s]",
+                        spec_model_id,
+                        self.speculative_config["model"],
+                    )
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
