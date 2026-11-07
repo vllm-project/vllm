@@ -131,10 +131,10 @@ generation.
 ## Speculative decoding
 
 Watermarking requires speculative decoding to use probabilistic draft sampling,
-standard rejection sampling, and a model-based method (`dflash`, `dspark`,
-`eagle`, `eagle3`, or `mtp`). Parallel drafting is supported only by `dflash`
-and `dspark`. DFlash drafters with a candidate head (`DFlash2DraftModel`,
-`LiLiCorrDraftModel`) are not supported.
+standard or block rejection sampling, and a model-based method (`dflash`,
+`dspark`, `eagle`, `eagle3`, or `mtp`). Parallel drafting is supported only by
+`dflash` and `dspark`. DFlash drafters with a candidate head
+(`DFlash2DraftModel`, `LiLiCorrDraftModel`) are not supported.
 
 A watermarking algorithm without native speculative-decoding support is
 rejected before model loading. Set
@@ -222,6 +222,15 @@ of `alpha`: draft tokens use key A, while rejection recovery and bonus tokens
 use key B. The ordinary target-to-draft probability-ratio test remains unchanged,
 implementing [SynthID-Text Supplementary Algorithm
 6](https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41586-024-08025-4/MediaObjects/41586_2024_8025_MOESM1_ESM.pdf).
+With `"rejection_sample_method": "block"`, block verification replaces the
+per-token test and recovery samples the block residual. The key roles are the
+same. Block verification observes key A noise at the contexts of rejected drafts
+without committing it, so the drafter skips those contexts and a few positions
+are not watermarked. In our evaluation, detection with block verification was
+within -1 to +3 percentage points of standard verification.
+`deduplicate_block_contexts_max_history` sets how many verification steps per
+request are remembered, using 4 bytes per remembered context. It defaults to
+`deduplicate_contexts_max_history`, or 8,192 when that is `null`.
 
 Select `dual_key_gumbel` together with probabilistic drafting:
 

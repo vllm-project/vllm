@@ -57,9 +57,13 @@ class DraftWatermarker:
         all_token_ids: torch.Tensor,
         prompt_lens: torch.Tensor,
         total_lens: torch.Tensor,
+        uncommitted_ring: torch.Tensor | None = None,
+        uncommitted_state: torch.Tensor | None = None,
     ) -> None:
         num_reqs = contexts.shape[0]
         state = self.state
+        state.uncommitted_ring = uncommitted_ring
+        state.uncommitted_state = uncommitted_state
         state.contexts[:num_reqs].copy_(contexts)
         state.enabled[:num_reqs].copy_(enabled)
         state.all_token_ids = all_token_ids
@@ -99,6 +103,11 @@ class DraftWatermarker:
             enabled,
             state.deduplicate_contexts_max_history,
             include_prompt=state.deduplicate_contexts == "all",
+            draft_key=(
+                0 if state.uncommitted_ring is None else _philox_key(self.watermarker)
+            ),
+            uncommitted_ring=state.uncommitted_ring,
+            uncommitted_state=state.uncommitted_state,
         )
         return steps, enabled
 
@@ -294,6 +303,18 @@ def speculative_target_watermark_key(
     return _resolve_watermark_key(
         create_speculative_target_watermarker(create_watermarker(watermark_config))
     )
+
+
+def speculative_draft_watermark_key(
+    watermark_config: WatermarkConfig | None,
+) -> int | None:
+    """Resolve the Philox draft key, or None if the algorithm has no draft key."""
+    if watermark_config is None:
+        return None
+    watermarker = create_watermarker(watermark_config)
+    if not isinstance(watermarker, SupportsSpeculativeDecoding):
+        return None
+    return _philox_key(watermarker.draft_watermarker)
 
 
 def watermarked_rejection_sample(

@@ -6,27 +6,33 @@ from typing import Literal
 import numpy as np
 import torch
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.watermarking.watermarker import RandomSampler, Watermarker
-from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
+from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.watermark import repeated_context_mask
 
 logger = init_logger(__name__)
+
+_DEFAULT_BLOCK_CONTEXTS_MAX_HISTORY = 8192
 
 
 class GPUWatermarkSampler(Sampler):
     def __init__(
         self,
         watermarker: Watermarker,
+        vllm_config: VllmConfig,
         *args,
         deduplicate_contexts: Literal["none", "single_turn", "all"] = "single_turn",
         deduplicate_contexts_max_history: int | None = 8192,
+        deduplicate_block_contexts_max_history: int | None = None,
+        draft_key: int | None = None,
         **kwargs,
     ) -> None:
-        super().__init__(*args, **kwargs)
+        super().__init__(vllm_config, *args, **kwargs)
         self.watermarker = watermarker
         self.deduplicate_contexts = deduplicate_contexts
         self.deduplicate_contexts_max_history = deduplicate_contexts_max_history
@@ -36,9 +42,41 @@ class GPUWatermarkSampler(Sampler):
         self.watermarking.np.fill(True)
         self.watermarking.copy_to_uva()
 
+        # Block verification observes draft-key noise at the contexts of rejected
+        # drafts without committing it, see append_uncommitted_contexts. A
+        # verification step adds at most num_speculative_tokens - 1 such contexts.
+        self.draft_key = draft_key
+        self.uncommitted_ring: torch.Tensor | None = None
+        self.uncommitted_state: StagedWriteTensor | None = None
+        speculative_config = vllm_config.speculative_config
+        if (
+            draft_key is not None
+            and deduplicate_contexts != "none"
+            and speculative_config is not None
+            and speculative_config.rejection_sample_method == "block"
+            and speculative_config.num_speculative_tokens > 1
+        ):
+            device = self.watermarking.gpu.device
+            max_steps = (
+                deduplicate_block_contexts_max_history
+                or deduplicate_contexts_max_history
+                or _DEFAULT_BLOCK_CONTEXTS_MAX_HISTORY
+            )
+            self.uncommitted_ring = torch.zeros(
+                self.sampling_states.max_num_reqs,
+                max_steps * (speculative_config.num_speculative_tokens - 1),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.uncommitted_state = StagedWriteTensor(
+                (self.sampling_states.max_num_reqs, 2), dtype=torch.int32, device=device
+            )
+
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         super().add_request(req_idx, sampling_params)
         self.watermarking.np[req_idx] = sampling_params.watermarking
+        if self.uncommitted_state is not None:
+            self.uncommitted_state.stage_write(req_idx, 0, [0, 0])
         if sampling_params.watermarking and sampling_params.temperature == 0:
             logger.warning_once(
                 "Watermarking is enabled, but greedy decoding "
@@ -49,6 +87,8 @@ class GPUWatermarkSampler(Sampler):
     def apply_staged_writes(self) -> None:
         super().apply_staged_writes()
         self.watermarking.copy_to_uva()
+        if self.uncommitted_state is not None:
+            self.uncommitted_state.apply_write()
 
     def _sample_random(
         self,

@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+from statistics import NormalDist
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 
+from vllm.config.watermarking import derive_watermark_key
 from vllm.v1.spec_decode.fly import compute_fly_entropy
 from vllm.v1.watermarking import GumbelWatermarker
 from vllm.v1.watermarking.spec_decode import watermarked_rejection_sample
@@ -1691,6 +1693,420 @@ def test_watermarked_recovery_is_unchanged_by_fp64_gumbel():
         rtol=0,
         atol=0,
     )
+
+
+def _dual_key_inputs(
+    target_logits: torch.Tensor,
+    draft_logits: torch.Tensor,
+    num_speculative_steps: int,
+    num_trials: int,
+    key_a: int,
+    *,
+    one_hot_draft: bool = False,
+    seed_offset: int = 0,
+    context_width: int = 4,
+) -> tuple[dict, torch.Tensor]:
+    """Rejection sampler inputs whose drafts were sampled with key A.
+
+    Each trial starts from a random prefix, so every verified row has a context
+    of its own and a fixed key still gives independent draws across trials.
+    The logits are one vector shared by all positions, or one row per position:
+    [num_speculative_steps + 1, vocab] for the target and
+    [num_speculative_steps, vocab] for the draft.
+    """
+    steps = num_speculative_steps
+    inputs = _build_rejection_sample_inputs(
+        target_logits.view(-1, target_logits.shape[-1])[0],
+        draft_logits.view(-1, draft_logits.shape[-1])[0],
+        steps,
+        temperature=1.0,
+        num_trials=num_trials,
+    )
+    if target_logits.ndim == 2:
+        vocab_size = target_logits.shape[-1]
+        inputs["target_logits"] = (
+            target_logits.unsqueeze(0)
+            .expand(num_trials, -1, -1)
+            .reshape(-1, vocab_size)
+        ).contiguous()
+        inputs["draft_logits"] = (
+            draft_logits.unsqueeze(0).expand(num_trials, -1, -1).contiguous()
+        )
+    else:
+        draft_logits = draft_logits.expand(steps, -1)
+    history = torch.randint(
+        0, 2**31, (num_trials, context_width), dtype=torch.int64, device="cuda"
+    )
+    for step in range(steps):
+        draft_token = philox_gumbel_sample(
+            draft_logits[step].unsqueeze(0).expand(num_trials, -1).contiguous(),
+            history[:, -context_width:].contiguous(),
+            key_a,
+        )
+        history = torch.cat([history, draft_token.unsqueeze(1)], dim=1)
+    inputs["draft_sampled"].view(num_trials, steps + 1)[:, 1:] = history[
+        :, context_width:
+    ]
+    inputs["seed"] += seed_offset
+    if one_hot_draft:
+        inputs["draft_logits"] = None
+    contexts = torch.stack(
+        [history[:, i : i + context_width] for i in range(steps + 1)],
+        dim=1,
+    ).reshape(-1, context_width)
+    return inputs, contexts
+
+
+def _keyed_rejection_sample(
+    inputs: dict,
+    contexts: torch.Tensor | None,
+    key_b: int | None,
+    *,
+    use_block_verification: bool,
+    num_speculative_steps: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Verify with key B for recovery and bonus tokens, or unwatermarked."""
+    kwargs = {}
+    if key_b is not None:
+        num_trials = inputs["idx_mapping"].shape[0]
+        kwargs = dict(
+            contexts=contexts,
+            watermarking=torch.ones(num_trials, dtype=torch.bool, device="cuda"),
+            watermark_key=key_b,
+        )
+    return _rejection_sample(
+        **inputs,
+        num_speculative_steps=num_speculative_steps,
+        use_block_verification=use_block_verification,
+        **kwargs,
+    )
+
+
+def _peaked_logits(vocab_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Target and correlated draft logits where drafts are often accepted."""
+    target_logits = torch.randn(vocab_size, device="cuda")
+    target_logits[:2] += 10.0
+    draft_logits = target_logits + 0.5 * torch.randn(vocab_size, device="cuda")
+    return target_logits, draft_logits
+
+
+def _chi_square_statistic_and_critical_value(
+    tokens: torch.Tensor, probs: torch.Tensor, alpha: float
+) -> tuple[float, float]:
+    counts = torch.bincount(tokens, minlength=probs.numel()).double()
+    expected = probs.double() * counts.sum()
+    assert expected.min() >= 5
+    statistic = ((counts - expected) ** 2 / expected).sum().item()
+    df = probs.numel() - 1
+    # Wilson-Hilferty approximation of the chi-squared upper quantile.
+    z = NormalDist().inv_cdf(1 - alpha)
+    critical_value = df * (1 - 2 / (9 * df) + z * math.sqrt(2 / (9 * df))) ** 3
+    return statistic, critical_value
+
+
+@pytest.mark.parametrize("one_hot_draft", [False, True])
+@pytest.mark.parametrize("use_block_verification", [False, True])
+def test_watermarked_rejection_sample_preserves_target_distribution(
+    use_block_verification: bool, one_hot_draft: bool
+):
+    # The goodness-of-fit check fails on a correct sampler with probability
+    # alpha, assuming independent draws. The seed makes the run deterministic.
+    alpha = 1e-4
+    torch.manual_seed(0)
+    num_speculative_steps = 3
+    num_keys = 16
+    num_trials = 4096
+    target_logits = torch.tensor(
+        [2.0, 1.0, 0.5, 0.0, -0.5, -1.0, -1.5, -2.0], device="cuda"
+    )
+    draft_logits = target_logits.flip(0)
+    target_probs = torch.softmax(target_logits, dim=0)
+    draft_probs = torch.softmax(draft_logits, dim=0)
+
+    # Only the first token of each block is checked: its law is the target's.
+    # Later tokens are cut off by acceptance, so pooling them is biased.
+    first_tokens = []
+    for key_index in range(num_keys):
+        master_key = 1000 + key_index
+        inputs, contexts = _dual_key_inputs(
+            target_logits,
+            draft_logits,
+            num_speculative_steps,
+            num_trials,
+            derive_watermark_key(master_key, b"key_a"),
+            one_hot_draft=one_hot_draft,
+            seed_offset=key_index * num_trials,
+        )
+        sampled, _ = _keyed_rejection_sample(
+            inputs,
+            contexts,
+            derive_watermark_key(master_key, b"key_b"),
+            use_block_verification=use_block_verification,
+            num_speculative_steps=num_speculative_steps,
+        )
+        first_tokens.append(sampled[:, 0])
+    first_tokens = torch.cat(first_tokens)
+
+    statistic, critical_value = _chi_square_statistic_and_critical_value(
+        first_tokens, target_probs, alpha
+    )
+    assert statistic < critical_value, (
+        f"chi2={statistic:.1f} >= {critical_value:.1f} "
+        f"(alpha={alpha}, df={target_probs.numel() - 1})"
+    )
+    # The draft distribution is far from the target, so the same test must
+    # reject it.
+    statistic, critical_value = _chi_square_statistic_and_critical_value(
+        first_tokens, draft_probs, alpha
+    )
+    assert statistic > critical_value
+
+
+def _complete_blocks_with_target_samples(
+    sampled: torch.Tensor,
+    num_sampled: torch.Tensor,
+    target_probs: torch.Tensor,
+    *,
+    resample_from_target: bool = False,
+) -> torch.Tensor:
+    """Tokens of each block, with positions past the emitted ones drawn from p_j.
+
+    The target is a product of per-position laws, so the completed block must
+    follow it exactly. With resample_from_target, the recovery token is replaced
+    by a plain target sample, which is the residual-skipping bug.
+    """
+    num_blocks = sampled.shape[0]
+    width = target_probs.shape[0]
+    tau = num_sampled.long() - 1
+    positions = torch.arange(width, device=sampled.device)[None]
+    fresh = torch.stack(
+        [
+            torch.multinomial(target_probs[j].expand(num_blocks, -1), 1).squeeze(1)
+            for j in range(width)
+        ],
+        dim=1,
+    )
+    keep = positions <= tau[:, None]
+    if resample_from_target:
+        keep &= (positions != tau[:, None]) | (tau == width - 1)[:, None]
+    return torch.where(keep, sampled[:, :width], fresh)
+
+
+@pytest.mark.parametrize("num_speculative_steps", [2, 3])
+@pytest.mark.parametrize("one_hot_draft", [False, True])
+@pytest.mark.parametrize("use_block_verification", [False, True])
+def test_watermarked_rejection_sample_preserves_joint_block_distribution(
+    use_block_verification: bool, one_hot_draft: bool, num_speculative_steps: int
+):
+    alpha = 1e-4
+    torch.manual_seed(0)
+    steps = num_speculative_steps
+    num_keys = 16
+    num_trials = 4096
+    target_probs = torch.tensor(
+        [[0.5, 0.3, 0.2], [0.2, 0.3, 0.5], [0.3, 0.4, 0.3], [0.4, 0.2, 0.4]],
+        device="cuda",
+    )[: steps + 1]
+    draft_probs = torch.tensor(
+        [[0.2, 0.3, 0.5], [0.5, 0.2, 0.3], [0.3, 0.3, 0.4]], device="cuda"
+    )[:steps]
+    vocab_size = target_probs.shape[1]
+
+    blocks = []
+    skipped_residual_blocks = []
+    for key_index in range(num_keys):
+        master_key = 2000 + key_index
+        inputs, contexts = _dual_key_inputs(
+            target_probs.log(),
+            draft_probs.log(),
+            steps,
+            num_trials,
+            derive_watermark_key(master_key, b"key_a"),
+            one_hot_draft=one_hot_draft,
+            seed_offset=key_index * num_trials,
+        )
+        sampled, num_sampled = _keyed_rejection_sample(
+            inputs,
+            contexts,
+            derive_watermark_key(master_key, b"key_b"),
+            use_block_verification=use_block_verification,
+            num_speculative_steps=steps,
+        )
+        blocks.append(
+            _complete_blocks_with_target_samples(sampled, num_sampled, target_probs)
+        )
+        skipped_residual_blocks.append(
+            _complete_blocks_with_target_samples(
+                sampled, num_sampled, target_probs, resample_from_target=True
+            )
+        )
+
+    joint_probs = torch.ones(1, device="cuda")
+    for position_probs in target_probs:
+        joint_probs = (position_probs[:, None] * joint_probs[None]).reshape(-1)
+    place_values = vocab_size ** torch.arange(steps + 1, device="cuda")
+
+    def check(blocks: list[torch.Tensor]) -> tuple[float, float]:
+        cells = (torch.cat(blocks) * place_values).sum(dim=1)
+        return _chi_square_statistic_and_critical_value(cells, joint_probs, alpha)
+
+    # The joint law of the block must be the product of the target laws, not
+    # only the law of its first token.
+    statistic, critical_value = check(blocks)
+    assert statistic < critical_value, (
+        f"chi2={statistic:.1f} >= {critical_value:.1f} "
+        f"(alpha={alpha}, df={joint_probs.numel() - 1})"
+    )
+    statistic, critical_value = check(skipped_residual_blocks)
+    assert statistic > critical_value
+
+
+def _block_recovery_logits(
+    inputs: dict, num_sampled: torch.Tensor, num_speculative_steps: int
+) -> torch.Tensor:
+    """Block-verification recovery or bonus logits at each request's last row."""
+    steps = num_speculative_steps
+    num_trials = num_sampled.shape[0]
+    rows = torch.arange(num_trials, device=num_sampled.device)
+    tau = num_sampled.long() - 1
+    is_bonus = (tau == steps).unsqueeze(-1)
+    target_logits = inputs["target_logits"].view(num_trials, steps + 1, -1).float()
+    bonus_logits = target_logits[rows, tau]
+    draft_tokens = inputs["draft_sampled"].view(num_trials, steps + 1)[:, 1:]
+    rejected = draft_tokens[rows, tau.clamp_max(steps - 1)]
+
+    if inputs["draft_logits"] is None:
+        # One-hot draft: the target with the rejected draft token removed.
+        one_hot = torch.arange(bonus_logits.shape[-1], device=bonus_logits.device)
+        masked = torch.where(
+            one_hot[None] == rejected[:, None], float("-inf"), bonus_logits
+        )
+        return torch.where(is_bonus, bonus_logits, masked)
+
+    target_log_probs = torch.log_softmax(target_logits, dim=-1)
+    draft_log_probs = torch.log_softmax(inputs["draft_logits"].float(), dim=-1)
+    # log p_i, the running min(1, product of target/draft ratios) of the drafts.
+    log_p = torch.zeros(num_trials, steps + 1, device=bonus_logits.device)
+    for i in range(steps):
+        token = draft_tokens[:, i]
+        log_ratio = target_log_probs[rows, i, token] - draft_log_probs[rows, i, token]
+        log_p[:, i + 1] = (log_p[:, i] + log_ratio).clamp_max(0.0)
+    # log(max(p_tau * M_b - M_s, 0)), up to the normalizer.
+    scaled_target = target_log_probs[rows, tau] + log_p[rows, tau].unsqueeze(-1)
+    ratio = torch.exp(draft_log_probs[rows, tau.clamp_max(steps - 1)] - scaled_target)
+    residual = torch.where(
+        ratio < 1,
+        scaled_target + torch.log1p(-ratio.clamp_max(1)),
+        float("-inf"),
+    )
+    return torch.where(is_bonus, bonus_logits, residual)
+
+
+@pytest.mark.parametrize("one_hot_draft", [False, True])
+def test_block_verification_watermark_key_roles(one_hot_draft: bool):
+    torch.manual_seed(5)
+    steps = 3
+    num_trials = 256
+    key_a = derive_watermark_key(7, b"key_a")
+    key_b = derive_watermark_key(7, b"key_b")
+    target_logits, draft_logits = _peaked_logits(1024)
+    inputs, contexts = _dual_key_inputs(
+        target_logits,
+        draft_logits,
+        steps,
+        num_trials,
+        key_a,
+        one_hot_draft=one_hot_draft,
+    )
+
+    sampled, num_sampled = _keyed_rejection_sample(
+        inputs,
+        contexts,
+        key_b,
+        use_block_verification=True,
+        num_speculative_steps=steps,
+    )
+
+    rows = torch.arange(num_trials, device="cuda")
+    tau = num_sampled.long() - 1
+    # Every case must occur: reject at once, reject mid-block, accept the block.
+    assert (tau == 0).any() and ((tau > 0) & (tau < steps)).any()
+    assert (tau == steps).any()
+
+    row_contexts = contexts.view(num_trials, steps + 1, -1)
+    draft_logits_rows = draft_logits.unsqueeze(0).expand(num_trials, -1).contiguous()
+    key_a_drafts = torch.stack(
+        [
+            philox_gumbel_sample(draft_logits_rows, row_contexts[:, i], key_a)
+            for i in range(steps)
+        ],
+        dim=1,
+    )
+    drafts = inputs["draft_sampled"].view(num_trials, steps + 1)[:, 1:]
+    torch.testing.assert_close(drafts, key_a_drafts, rtol=0, atol=0)
+    accepted = torch.arange(steps, device="cuda")[None] < tau.unsqueeze(1)
+    torch.testing.assert_close(sampled[:, :steps][accepted], drafts[accepted])
+
+    recovery_logits = _block_recovery_logits(inputs, num_sampled, steps)
+    resample_contexts = row_contexts[rows, tau]
+    recovered = sampled[rows, tau]
+    torch.testing.assert_close(
+        recovered,
+        philox_gumbel_sample(recovery_logits, resample_contexts, key_b),
+        rtol=0,
+        atol=0,
+    )
+    # The draw is keyed: key A on the same logits and contexts picks other tokens.
+    assert (
+        philox_gumbel_sample(recovery_logits, resample_contexts, key_a) != recovered
+    ).any()
+
+
+@pytest.mark.parametrize("one_hot_draft", [False, True])
+@pytest.mark.parametrize("use_block_verification", [False, True])
+def test_watermark_key_does_not_change_acceptance(
+    use_block_verification: bool, one_hot_draft: bool
+):
+    torch.manual_seed(9)
+    steps = 3
+    num_trials = 256
+    target_logits, draft_logits = _peaked_logits(1024)
+    inputs, contexts = _dual_key_inputs(
+        target_logits,
+        draft_logits,
+        steps,
+        num_trials,
+        derive_watermark_key(7, b"key_a"),
+        one_hot_draft=one_hot_draft,
+    )
+    kwargs = dict(
+        use_block_verification=use_block_verification, num_speculative_steps=steps
+    )
+    stock_sampled, stock_num_sampled = _keyed_rejection_sample(
+        inputs, None, None, **kwargs
+    )
+    tau = stock_num_sampled.long() - 1
+    assert ((tau > 0) & (tau < steps)).any() and (tau == 0).any()
+
+    accepted = torch.arange(steps, device="cuda")[None] < tau.unsqueeze(1)
+    recovered = []
+    for key in (1, 2, 3):
+        sampled, num_sampled = _keyed_rejection_sample(
+            inputs,
+            contexts,
+            derive_watermark_key(key, b"key_b"),
+            **kwargs,
+        )
+        torch.testing.assert_close(num_sampled, stock_num_sampled, rtol=0, atol=0)
+        torch.testing.assert_close(
+            sampled[:, :steps][accepted],
+            stock_sampled[:, :steps][accepted],
+            rtol=0,
+            atol=0,
+        )
+        recovered.append(sampled[torch.arange(num_trials, device="cuda"), tau])
+    assert (recovered[0] != recovered[1]).any()
+    assert (recovered[1] != recovered[2]).any()
 
 
 def _position_owned_rows(

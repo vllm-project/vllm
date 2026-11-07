@@ -1440,10 +1440,10 @@ class VllmConfig:
                     "Speculative decoding with watermarking requires "
                     "draft_sample_method='probabilistic'."
                 )
-            if speculative_config.rejection_sample_method != "standard":
+            if speculative_config.rejection_sample_method not in ("standard", "block"):
                 raise ValueError(
                     "Speculative decoding with watermarking requires "
-                    "rejection_sample_method='standard'."
+                    "rejection_sample_method='standard' or 'block'."
                 )
             if (
                 speculative_config.parallel_drafting

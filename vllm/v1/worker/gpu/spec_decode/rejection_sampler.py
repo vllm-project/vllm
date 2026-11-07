@@ -20,6 +20,7 @@ from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.gpu.sample.watermark import append_uncommitted_contexts
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
@@ -275,6 +276,9 @@ class RejectionSampler:
             expanded_local_pos,
             seq_lens_upper_bound_np,
         )
+        watermarking_kwargs = self._watermarking_kwargs(
+            draft_sampled, expanded_idx_mapping, expanded_local_pos
+        )
         sampled, num_sampled = rejection_sample(
             processed_logits,
             draft_logits,
@@ -296,10 +300,23 @@ class RejectionSampler:
             skip_masked_vocab_blocks=bool(
                 np.any(self.sampler.may_mask_logits[idx_mapping_np])
             ),
-            **self._watermarking_kwargs(
-                draft_sampled, expanded_idx_mapping, expanded_local_pos
-            ),
+            **watermarking_kwargs,
         )
+        if (
+            isinstance(self.sampler, GPUWatermarkSampler)
+            and self.sampler.uncommitted_ring is not None
+        ):
+            assert self.sampler.uncommitted_state is not None
+            assert self.sampler.draft_key is not None
+            append_uncommitted_contexts(
+                self.sampler.uncommitted_ring,
+                self.sampler.uncommitted_state.gpu,
+                watermarking_kwargs["contexts"],
+                idx_mapping,
+                cu_num_logits,
+                num_sampled,
+                self.sampler.draft_key,
+            )
         if self.sampler.trace_replay_state is not None:
             self.sampler.trace_replay_state.apply_trace_to_verified(
                 sampled, num_sampled, draft_sampled, cu_num_logits, idx_mapping
