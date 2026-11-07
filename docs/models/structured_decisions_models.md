@@ -393,3 +393,8 @@ vllm serve LiquidAI/d1-3B
   letters.
 - When each request carries one question over a state that changes from
   request to request, `--disable-prefix-caching` lowers latency.
+
+### Laya
+
+[Laya](laya.md) is served through `/classify`, with checkpoint-specific option
+markers and a separate action head. See its preparation and serving guide.
