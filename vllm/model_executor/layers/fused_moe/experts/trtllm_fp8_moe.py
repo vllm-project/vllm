@@ -452,7 +452,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
     def supports_precomputed_routing(self) -> bool:
         return self.quant_config.block_shape is not None
 
-    def apply_routed(
+    def apply_precomputed_routing(
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,

@@ -1136,10 +1136,10 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         return False
 
     def supports_precomputed_routing(self) -> bool:
-        """Whether ``apply_routed`` is implemented."""
+        """Whether ``apply_precomputed_routing`` is implemented."""
         return False
 
-    def apply_routed(
+    def apply_precomputed_routing(
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
@@ -1806,7 +1806,7 @@ class FusedMoEKernelMonolithicImpl:
             quant_config=self.fused_experts.quant_config,
             defer_input_quant=self.fused_experts.expects_unquantized_inputs,
         )
-        fused_out = self.fused_experts.apply_routed(
+        fused_out = self.fused_experts.apply_precomputed_routing(
             hidden_states=a1q,
             w1=w1,
             w2=w2,

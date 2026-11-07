@@ -1316,7 +1316,7 @@ def test_trtllm_fp8_monolithic_routed_skips_padding(
             quant_config=quant_config,
             defer_input_quant=experts.expects_unquantized_inputs,
         )
-        routed = experts.apply_routed(
+        routed = experts.apply_precomputed_routing(
             hidden_states=a1q,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
