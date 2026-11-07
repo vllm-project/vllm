@@ -52,6 +52,7 @@ from vllm.model_executor.layers.mhc import (
     hc_expand,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -1289,6 +1290,10 @@ class Glm5NextForConditionalGeneration(
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
         )
+        if isinstance(vllm_config.quant_config, Fp8Config):
+            # modules_to_not_convert names text-model modules ("model.layers.N..."),
+            # which sit under "language_model." here
+            vllm_config.quant_config.ignored_layers_match_mode = "suffix"
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Glm5NextVisionTransformer(
