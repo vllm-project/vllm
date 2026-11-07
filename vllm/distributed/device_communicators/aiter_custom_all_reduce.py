@@ -44,6 +44,7 @@ class AiterCustomAllreduce:
         if not register_graph_buffers:
             kwargs["enable_register_for_capturing"] = False
         self._impl = _AiterCustomAllreduce(group, device, max_size=max_size, **kwargs)
+        self._register_graph_buffers = register_graph_buffers
 
     @property
     def aiter_ca(self):
@@ -52,6 +53,19 @@ class AiterCustomAllreduce:
     @property
     def disabled(self) -> bool:
         return self._impl.disabled
+
+    @property
+    def registers_graph_buffers(self) -> bool:
+        """Whether graph capture registers its inputs once expandable segments
+        are off, which AITER decides when capture begins from v0.1.26."""
+        from vllm.platforms.rocm import on_gfx1250
+
+        return (
+            self._register_graph_buffers
+            and not self.disabled
+            and not on_gfx1250()
+            and getattr(type(self._impl), "defers_capture_registration", False)
+        )
 
     def should_custom_ar(self, inp: torch.Tensor) -> bool:
         return self._impl.should_custom_ar(inp)
@@ -67,6 +81,9 @@ class AiterCustomAllreduce:
 
     def custom_all_gather(self, inp: torch.Tensor, dim: int = 0) -> torch.Tensor | None:
         return self._impl.custom_all_gather(inp, dim=dim)
+
+    def all_gather_unreg(self, inp: torch.Tensor, dim: int = 0) -> torch.Tensor:
+        return self._impl.all_gather_unreg(inp, dim=dim)
 
     def custom_reduce_scatter(
         self, inp: torch.Tensor, out: torch.Tensor, dim: int = 0

@@ -4,7 +4,7 @@
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, TypeAlias
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import torch
 
@@ -20,9 +20,17 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
 logger = init_logger(__name__)
 
 ConvStateLayoutType = Literal["SD", "DS"]
+
+
+def mamba_state_alignment(vllm_config: "VllmConfig") -> int:
+    # FlashInfer loads state and ring caches with 16-byte cp.async instructions.
+    return 16 if vllm_config.use_flashinfer_replayssm else 1
 
 
 @functools.lru_cache
@@ -147,15 +155,6 @@ class MambaStateDtypeCalculator:
                 f"got {mamba_ssm_cache_dtype}"
             )
         return (conv_state_dtype, recurrent_state_dtype)
-
-    @classmethod
-    def append_kda_recoverssm_record(
-        cls,
-        base_dtypes: tuple[torch.dtype, ...],
-        model_dtype: ModelDType | torch.dtype,
-    ) -> tuple[torch.dtype, ...]:
-        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
-        return (*base_dtypes, torch.float32, activation_dtype)
 
 
 class MambaStateShapeCalculator:
@@ -326,27 +325,6 @@ class MambaStateShapeCalculator:
         )
         recurrent_state_shape = (divide(num_heads, tp_world_size), head_dim, head_dim)
         return (conv_state_shape, recurrent_state_shape)
-
-    @classmethod
-    def append_kda_recoverssm_record(
-        cls,
-        base_shapes: tuple[tuple[int, int], tuple[int, int, int]],
-        num_heads: int,
-        head_dim: int,
-        tp_world_size: int,
-        spec_query_len: int,
-    ) -> tuple[
-        tuple[int, int],
-        tuple[int, int, int],
-        tuple[int, int, int],
-        tuple[int, int, int],
-    ]:
-        local_num_heads = divide(num_heads, tp_world_size)
-        return (
-            *base_shapes,
-            (local_num_heads, spec_query_len, head_dim),
-            (local_num_heads, spec_query_len, 2 * head_dim),
-        )
 
 
 @dataclass

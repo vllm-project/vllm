@@ -682,6 +682,7 @@ class SpecDecodeBaseProposer:
         # (i.e., not the first proposal).
         if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
+        common_attn_metadata.invalidate_cached_layout()
 
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."
@@ -810,6 +811,8 @@ class SpecDecodeBaseProposer:
 
         if common_attn_metadata.seq_lens_cpu_upper_bound is not None:
             common_attn_metadata.seq_lens_cpu_upper_bound += 1
+        # seq_lens was advanced in place by the kernel above.
+        common_attn_metadata.invalidate_cached_layout()
 
         return positions
 
@@ -1007,6 +1010,9 @@ class SpecDecodeBaseProposer:
                 {
                     "DeepSeekMTPModel",
                     "DeepseekV32MTPModel",
+                    "Glm4MoeMTPModel",
+                    "Glm4MoeLiteMTPModel",
+                    "GlmOcrMTPModel",
                     "Glm5NextMTPModel",
                     "KimiK3MTPModel",
                 }.intersection(architectures)
@@ -1379,6 +1385,7 @@ class SpecDecodeBaseProposer:
             elif self.get_model_name(target_model) in (
                 "KimiK25ForConditionalGeneration",
                 "KimiK3ForConditionalGeneration",
+                "KimiK31ForConditionalGeneration",
             ):
                 self.model.config.image_token_index = (
                     target_model.config.media_placeholder_token_id
@@ -1481,9 +1488,9 @@ class SpecDecodeBaseProposer:
                 # width check does not apply to them.
                 draft_embed = self.model.model.embed_tokens
                 # Guard with isinstance so non-Tensor weights (e.g. in tests)
-                # are not affected — mirrors the weight-equality check above.
+                # and drafts built without an embedding are not affected.
                 if isinstance(target_embed_tokens.weight, torch.Tensor) and isinstance(
-                    draft_embed.weight, torch.Tensor
+                    getattr(draft_embed, "weight", None), torch.Tensor
                 ):
                     target_dim = target_embed_tokens.weight.shape[-1]
                     draft_dim = draft_embed.weight.shape[-1]
