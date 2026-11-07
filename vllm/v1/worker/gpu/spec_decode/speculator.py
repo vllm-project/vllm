@@ -42,7 +42,7 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, prepare_kernel_block_sizes
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -388,11 +388,17 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
+        # Draft layers share KV cache groups with the target. Select kernel block
+        # sizes from the target's backends, which the cache was allocated with,
+        # so draft decode steps read it with the same page size.
         self.attn_groups, self.attn_cg_support, _ = init_attn_backend(
             kv_cache_config,
             self.attn_vllm_config,
             self.device,
             active_layer_names=self.draft_attn_layer_names,
+            kernel_block_sizes=prepare_kernel_block_sizes(
+                kv_cache_config, target_attn_groups
+            ),
         )
         self.block_tables = block_tables
         # The target model runner's buffers and attention groups. Draft
