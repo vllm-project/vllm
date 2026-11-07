@@ -87,7 +87,12 @@ def import_plugin(plugin_path: str) -> ModuleType | None:
     """
     try:
         return importlib.import_module(plugin_path)
-    except ModuleNotFoundError:
+    except ModuleNotFoundError as exc:
+        if exc.name is not None and not (
+            plugin_path == exc.name or plugin_path.startswith(f"{exc.name}.")
+        ):
+            logger.exception("Failed to load module '%s'.", plugin_path)
+            return None
         module_name = os.path.splitext(os.path.basename(plugin_path))[0]
         try:
             return import_from_path(module_name, plugin_path)
