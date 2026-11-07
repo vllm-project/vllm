@@ -66,11 +66,9 @@
             {#-- Handle arguments as list (positional) or dict (named) --#}
             {#-- Named arguments (dict) --#}
             {%- if tool_call.arguments is iterable and tool_call.arguments is mapping -%}
-                {%- set first = true -%}
                 {%- for key, val in tool_call.arguments.items() -%}
-                    {%- if not first %}, {% endif -%}
+                    {%- if not loop.first %}, {% endif -%}
                     {{ key }}={{ val | tojson }}
-                    {%- set first = false -%}
                 {%- endfor -%}
             {#-- Positional arguments (list) --#}
             {%- elif tool_call.arguments is iterable -%}
