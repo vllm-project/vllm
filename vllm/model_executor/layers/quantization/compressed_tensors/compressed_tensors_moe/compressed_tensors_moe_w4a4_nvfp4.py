@@ -206,6 +206,10 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
         set_weight_attrs(w2_input_scale, extra_weight_attrs)
+        if self.use_a16:
+            # NVFP4A16 exports write no input scales and no backend reads them.
+            for param in (w13_input_scale, w2_input_scale):
+                set_weight_attrs(param, {"optional_in_checkpoint": True})
 
     def dequantize_weight(
         self, layer: torch.nn.Module

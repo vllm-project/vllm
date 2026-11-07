@@ -1055,6 +1055,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             weight_loader=weight_loader,
         )
         layer.register_parameter("w2_input_scale", w2_input_scale)
+        if self.use_a16:
+            # Weight-only: no backend reads them and weight-only exports do
+            # not write them; they stay registered for exports that do.
+            for param in (w13_input_scale, w2_input_scale):
+                set_weight_attrs(param, {"optional_in_checkpoint": True})
 
         # Keep dummy scales positive and gate/up global scales identical.
         for param, value in (
@@ -2652,9 +2657,10 @@ class _DropInputScale(FormatScheme):
 
     def extra_weights(self, layer, shapes, ctx, wl) -> None:
         data = torch.full((shapes.num_partitions,), torch.nan)
-        layer.register_parameter(
-            "input_scale", PerTensorScaleParameter(data=data, weight_loader=wl)
-        )
+        param = PerTensorScaleParameter(data=data, weight_loader=wl)
+        # Genuine W4A16 exports do not write it.
+        set_weight_attrs(param, {"optional_in_checkpoint": True})
+        layer.register_parameter("input_scale", param)
 
     def post_process(self, layer) -> None:
         scale = getattr(layer, "input_scale", None)
