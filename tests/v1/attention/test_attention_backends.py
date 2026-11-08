@@ -1410,14 +1410,12 @@ def test_flashinfer_varlen_cudagraph_capability(
         speculative_config=SimpleNamespace(
             enable_adaptive_verification=adaptive,
             num_speculative_tokens=7,
-            parallel_drafting=True,
             max_num_new_slots_for_drafting=0,
         )
         if adaptive is not None
         else None,
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
         model_config=SimpleNamespace(get_num_attention_heads=lambda _: 32),
-        use_v2_model_runner=True,
     )
     monkeypatch.setattr(fi, "can_use_trtllm_attention", lambda *_, **__: True)
     monkeypatch.setattr(fi.current_platform, "has_device_capability", lambda _: True)
@@ -1448,25 +1446,16 @@ def test_flashinfer_varlen_cudagraph_capability(
 
 
 @pytest.mark.parametrize(
-    "use_v2_model_runner,parallel_drafting,drafting_slots,expected",
+    "num_speculative_tokens,drafting_slots,expected",
     [
-        (True, None, 0, 1),
-        (True, False, 0, 8),
-        (True, True, 0, 8),
-        (False, False, 0, 8),
-        (False, True, 0, 15),
+        (None, 0, 1),
+        (7, 0, 8),
         # Standalone draft model: its prefill adds a correction token.
-        (True, False, 1, 9),
-        (False, False, 1, 8),
-        # V1 parallel drafting does not also add the drafting slots.
-        (False, True, 7, 15),
+        (7, 1, 9),
     ],
 )
-def test_spec_as_decode_width_follows_model_runner(
-    use_v2_model_runner, parallel_drafting, drafting_slots, expected
-):
-    """V2 widens decode requests by the drafter's extra slots; V1 only for its
-    parallel drafter."""
+def test_spec_as_decode_width(num_speculative_tokens, drafting_slots, expected):
+    """Decode requests are verification requests plus the drafter's extra slots."""
 
     class Builder(AttentionMetadataBuilder):
         def __init__(self, vllm_config):
@@ -1477,14 +1466,12 @@ def test_spec_as_decode_width_follows_model_runner(
 
     config = SimpleNamespace(
         speculative_config=None
-        if parallel_drafting is None
+        if num_speculative_tokens is None
         else SimpleNamespace(
-            num_speculative_tokens=7,
-            parallel_drafting=parallel_drafting,
+            num_speculative_tokens=num_speculative_tokens,
             max_num_new_slots_for_drafting=drafting_slots,
         ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        use_v2_model_runner=use_v2_model_runner,
     )
     assert max_decode_query_len(config) == expected
     builder = Builder(config)
@@ -1542,7 +1529,6 @@ def test_flashinfer_varlen_decode_graph_replays_changed_layout(
     from vllm.v1.attention.backends.utils import PerLayerParameters
 
     set_random_seed(0)
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     block_size = 16
     dtype = torch.bfloat16
     LlamaConfig(
@@ -1568,7 +1554,6 @@ def test_flashinfer_varlen_decode_graph_replays_changed_layout(
     config.speculative_config = SimpleNamespace(
         num_speculative_tokens=7,
         enable_adaptive_verification=True,
-        parallel_drafting=False,
         max_num_new_slots_for_drafting=0,
     )
     spec = create_standard_kv_cache_spec(config)
