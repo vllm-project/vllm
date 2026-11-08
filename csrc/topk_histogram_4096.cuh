@@ -11,25 +11,7 @@
 #include <cstdint>
 #include <type_traits>
 
-// These kernels are written for 32-lane warps. On wave64 each half of a
-// wavefront acts as one such warp, so ballots and shuffles stay per half.
-#ifdef USE_ROCM
-  #define TOPK_BALLOT_SYNC(mask, pred) \
-    ((void)(mask), static_cast<uint32_t>(__ballot(pred) >> (__lane_id() & 32)))
-  #define TOPK_SHFL_SYNC(mask, var, src) __shfl(var, src, 32)
-  #define TOPK_SHFL_UP_SYNC(mask, var, delta) __shfl_up(var, delta, 32)
-  #define TOPK_SHFL_DOWN_SYNC(mask, var, delta) __shfl_down(var, delta, 32)
-  #define TOPK_SHFL_XOR_SYNC(mask, var, lane_mask) \
-    __shfl_xor(var, lane_mask, 32)
-#else
-  #define TOPK_BALLOT_SYNC(mask, pred) __ballot_sync(mask, pred)
-  #define TOPK_SHFL_SYNC(mask, var, src) __shfl_sync(mask, var, src)
-  #define TOPK_SHFL_UP_SYNC(mask, var, delta) __shfl_up_sync(mask, var, delta)
-  #define TOPK_SHFL_DOWN_SYNC(mask, var, delta) \
-    __shfl_down_sync(mask, var, delta)
-  #define TOPK_SHFL_XOR_SYNC(mask, var, lane_mask) \
-    __shfl_xor_sync(mask, var, lane_mask)
-#endif
+#include "core/cuda_compat.h"
 
 namespace vllm {
 namespace topk_histogram_4096 {
@@ -39,6 +21,8 @@ constexpr uint32_t RADIX = 256;
 constexpr uint32_t kMaxTies = 1024;
 static_assert(kMaxTies <= kBlockSize,
               "tie_handle requires kMaxTies <= kBlockSize");
+// These kernels are written for 32-lane warps. On wave64 each half of a
+// wavefront acts as one such warp, so ballots and shuffles stay per half.
 constexpr uint32_t kWarpSize = 32;
 constexpr uint32_t kNumWarps = kBlockSize / kWarpSize;
 
@@ -230,7 +214,7 @@ __device__ __forceinline__ uint32_t warp_inclusive_sum(uint32_t lane,
                                                        uint32_t v) {
 #pragma unroll
   for (uint32_t o = 1; o < 32; o *= 2) {
-    uint32_t n = TOPK_SHFL_UP_SYNC(0xFFFFFFFF, v, o);
+    uint32_t n = VLLM_SHFL_UP_SYNC_WIDTH(v, o, kWarpSize);
     if (lane >= o) v += n;
   }
   return v;
@@ -249,7 +233,7 @@ __device__ __forceinline__ uint32_t warp_reduce_sum_full(uint32_t v) {
 #else
   #pragma unroll
   for (uint32_t mask = kWarpSize >> 1; mask > 0; mask >>= 1) {
-    v += TOPK_SHFL_XOR_SYNC(0xFFFFFFFF, v, mask);
+    v += VLLM_SHFL_XOR_SYNC_WIDTH(v, mask, kWarpSize);
   }
   return v;
 #endif
@@ -262,7 +246,7 @@ __device__ __forceinline__ uint32_t warp_reduce_or_full(uint32_t v) {
 #else
   #pragma unroll
   for (uint32_t mask = kWarpSize >> 1; mask > 0; mask >>= 1) {
-    v |= TOPK_SHFL_XOR_SYNC(0xFFFFFFFF, v, mask);
+    v |= VLLM_SHFL_XOR_SYNC_WIDTH(v, mask, kWarpSize);
   }
   return v;
 #endif
@@ -733,7 +717,7 @@ __device__ void histogram_4096_topk(const InT* __restrict__ scores,
     const bool pred =
         is_greater(tie, target);  // compare all ties against target
     const auto rank = static_cast<uint32_t>(
-        __popc(TOPK_BALLOT_SYNC(mask, pred)));  // count how many are greater
+        __popc(VLLM_BALLOT_SYNC_32(mask, pred)));  // count how many are greater
     if (lane_id == 0 && rank < topk_remain) {
       output[num_above + rank] = target.idx;  // place at correct position
     }
@@ -750,18 +734,18 @@ __device__ void histogram_4096_topk(const InT* __restrict__ scores,
     if (warp_id < num_ties) {
       const auto target = smem->tie_buffer[warp_id];
       const auto r0 =
-          __popc(TOPK_BALLOT_SYNC(0xFFFFFFFF, is_greater(tie0, target)));
+          __popc(VLLM_BALLOT_SYNC_32(0xFFFFFFFF, is_greater(tie0, target)));
       const auto r1 =
-          __popc(TOPK_BALLOT_SYNC(0xFFFFFFFF, is_greater(tie1, target)));
+          __popc(VLLM_BALLOT_SYNC_32(0xFFFFFFFF, is_greater(tie1, target)));
       if (lane_id == 0 && r0 + r1 < topk_remain)
         output[num_above + r0 + r1] = target.idx;
     }
     if (warp1 < num_ties) {
       const auto target = smem->tie_buffer[warp1];
       const auto r0 =
-          __popc(TOPK_BALLOT_SYNC(0xFFFFFFFF, is_greater(tie0, target)));
+          __popc(VLLM_BALLOT_SYNC_32(0xFFFFFFFF, is_greater(tie0, target)));
       const auto r1 =
-          __popc(TOPK_BALLOT_SYNC(0xFFFFFFFF, is_greater(tie1, target)));
+          __popc(VLLM_BALLOT_SYNC_32(0xFFFFFFFF, is_greater(tie1, target)));
       if (lane_id == 0 && r0 + r1 < topk_remain)
         output[num_above + r0 + r1] = target.idx;
     }

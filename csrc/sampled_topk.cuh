@@ -115,12 +115,12 @@ __device__ uint32_t threshold(Storage& s, const InT* row, int count, int rank) {
 }
 
 __device__ __forceinline__ int reserve(bool hit, int* counter) {
-  const uint32_t mask = TOPK_BALLOT_SYNC(0xffffffffu, hit);
+  const uint32_t mask = VLLM_BALLOT_SYNC_32(0xffffffffu, hit);
   if (mask == 0) return 0;
   const int lane = threadIdx.x & 31;
   int base = 0;
   if (lane == 0) base = atomicAdd(counter, __popc(mask));
-  base = TOPK_SHFL_SYNC(0xffffffffu, base, 0);
+  base = VLLM_SHFL_SYNC_WIDTH(base, 0, 32);
   return base + __popc(mask & ((1u << lane) - 1));
 }
 
@@ -248,13 +248,13 @@ __global__ void __launch_bounds__(kThreads)
     int inclusive = hits;
 #pragma unroll
     for (int delta = 1; delta < 32; delta *= 2) {
-      const int previous = TOPK_SHFL_UP_SYNC(0xffffffffu, inclusive, delta);
+      const int previous = VLLM_SHFL_UP_SYNC_WIDTH(inclusive, delta, 32);
       if (lane >= delta) inclusive += previous;
     }
-    const int total = TOPK_SHFL_SYNC(0xffffffffu, inclusive, 31);
+    const int total = VLLM_SHFL_SYNC_WIDTH(inclusive, 31, 32);
     int warp_base = 0;
     if (lane == 31 && total != 0) warp_base = atomicAdd(&s.count, total);
-    warp_base = TOPK_SHFL_SYNC(0xffffffffu, warp_base, 31);
+    warp_base = VLLM_SHFL_SYNC_WIDTH(warp_base, 31, 32);
     int offset = warp_base + inclusive - hits;
 #pragma unroll
     for (int j = 0; j < kItems; ++j) {

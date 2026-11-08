@@ -565,7 +565,7 @@ __device__ void radix_topk(const InT* __restrict__ row_input,
     if (shared_ordered[i] > ordered_pivot) my_gt_count++;
   }
   for (int offset = 16; offset > 0; offset /= 2) {
-    my_gt_count += TOPK_SHFL_DOWN_SYNC(0xffffffff, my_gt_count, offset);
+    my_gt_count += VLLM_SHFL_DOWN_SYNC_WIDTH(my_gt_count, offset, 32);
   }
   if (tx % 32 == 0 && my_gt_count > 0) {
     atomicAdd(&suffix_sum[0], my_gt_count);
