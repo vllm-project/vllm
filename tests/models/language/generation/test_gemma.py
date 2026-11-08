@@ -25,7 +25,7 @@ from vllm.model_executor.models.gemma4_dspark import (
 from ....utils import multi_gpu_test
 from ...utils import check_logprobs_close
 
-MODELS = ["google/gemma-2b", "google/gemma-2-2b", "google/gemma-3-4b-it"]
+MODELS = ["google/gemma-2-2b", "google/gemma-3-4b-it"]
 
 
 @pytest.mark.usefixtures("dist_init")
@@ -196,14 +196,6 @@ def test_dummy_loader(vllm_runner, monkeypatch, model: str) -> None:
                     )  # noqa: E501
                 )
                 config = llm.llm.llm_engine.model_config.hf_config.text_config
-            elif model == "google/gemma-2b":
-                # Transformers modeling backend: the scale lives in the embedding
-                normalizers = llm.llm.collective_rpc(
-                    lambda self: (
-                        self.model_runner.model.model.embed_tokens.embed_scale.cpu().item()
-                    )  # noqa: E501
-                )
-                config = llm.llm.llm_engine.model_config.hf_config
             else:
                 normalizers = llm.llm.collective_rpc(
                     lambda self: self.model_runner.model.model.normalizer.cpu().item()

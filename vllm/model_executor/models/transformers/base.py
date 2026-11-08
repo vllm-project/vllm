@@ -712,10 +712,7 @@ class Base(
         # In encoder models, the attention layers will have `is_causal=False`
         is_encoder = lambda module: not getattr(module, "is_causal", True)
         has_encoder = lambda model: any(is_encoder(m) for m in model.modules())
-        # vLLM does not support encoder-decoder models, so if any encoder layer is
-        # found in a text only model, we assume the whole model is an encoder model.
-        # A VLM's text model (e.g. PaliGemma's) may be bidirectional over the
-        # multimodal prefix, which `Attention` handles.
+        # A VLM's text model may be bidirectional over the multimodal prefix
         if has_encoder(self.model) and not self.model_config.is_multimodal_model:
             return EncoderOnlyAttention
         if self.model_config.use_mla:
