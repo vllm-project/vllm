@@ -785,12 +785,13 @@ def test_sparse_attn_prefill_head_dim_wide_out_keeps_rope_rows() -> None:
     torch.testing.assert_close(dest, expected, atol=2e-2, rtol=2e-2)
 
 
+@pytest.mark.parametrize("with_sink", [True, False])
 @pytest.mark.parametrize(
     ("num_queries", "on_gfx950", "expected"),
     [(1023, True, False), (1024, True, True), (1024, False, False)],
 )
 def test_aiter_sparse_prefill_opus_selection(
-    num_queries: int, on_gfx950: bool, expected: bool
+    num_queries: int, on_gfx950: bool, expected: bool, with_sink: bool
 ) -> None:
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
         _can_use_aiter_sparse_prefill_opus,
@@ -799,7 +800,9 @@ def test_aiter_sparse_prefill_opus_selection(
     device = torch.device("cuda")
     q = torch.empty(num_queries, 16, HEAD_DIM, dtype=torch.bfloat16, device=device)
     kv = torch.empty(num_queries, HEAD_DIM, dtype=torch.bfloat16, device=device)
-    attn_sink = torch.empty(16, dtype=torch.float32, device=device)
+    attn_sink = (
+        torch.empty(16, dtype=torch.float32, device=device) if with_sink else None
+    )
     output = torch.empty_like(q)
 
     assert (
@@ -835,16 +838,25 @@ def test_aiter_sparse_prefill_opus_selection_rejects_incompatible_inputs() -> No
     assert not _can_use_aiter_sparse_prefill_opus(
         q.cpu(), kv.cpu(), attn_sink.cpu(), output.cpu(), on_gfx950=True
     )
+    narrow_q = torch.empty(1024, 16, 256, dtype=q.dtype, device=device)
+    assert not _can_use_aiter_sparse_prefill_opus(
+        narrow_q,
+        torch.empty(1024, 256, dtype=q.dtype, device=device),
+        attn_sink,
+        torch.empty_like(narrow_q),
+        on_gfx950=True,
+    )
 
 
-def test_sparse_attn_prefill_aiter_opus_routing(monkeypatch) -> None:
+@pytest.mark.parametrize("with_sink", [True, False])
+def test_sparse_attn_prefill_aiter_opus_routing(monkeypatch, with_sink: bool) -> None:
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
     q = torch.empty(2, 1, HEAD_DIM, dtype=torch.bfloat16)
     kv = torch.empty(2, 1, HEAD_DIM, dtype=torch.bfloat16)
     indices = torch.tensor([[0], [1]], dtype=torch.int32)
     topk_length = torch.ones(2, dtype=torch.int32)
-    attn_sink = torch.empty(1, dtype=torch.float32)
+    attn_sink = torch.empty(1, dtype=torch.float32) if with_sink else None
     output = torch.empty_like(q)
     opus_calls = 0
 
@@ -855,11 +867,12 @@ def test_sparse_attn_prefill_aiter_opus_routing(monkeypatch) -> None:
         assert args[3].dtype == torch.int32
         assert args[5].numel() == 0
         assert torch.count_nonzero(args[6]) == 0
+        assert (args[7] is None) is not with_sink
         out.zero_()
         return out
 
     monkeypatch.setattr(mod, "_can_use_aiter_sparse_prefill_opus", lambda *args: True)
-    monkeypatch.setattr(mod, "_get_aiter_sparse_prefill_opus", lambda: fake_opus)
+    monkeypatch.setattr(mod, "_get_aiter_sparse_prefill_opus", lambda **_: fake_opus)
     monkeypatch.setattr(
         mod,
         "build_ragged_indices_from_dense",
@@ -914,7 +927,7 @@ def test_sparse_attn_prefill_preserves_dense_triton_fallback(monkeypatch) -> Non
         return out
 
     monkeypatch.setattr(mod, "_can_use_aiter_sparse_prefill_opus", lambda *args: True)
-    monkeypatch.setattr(mod, "_get_aiter_sparse_prefill_opus", lambda: None)
+    monkeypatch.setattr(mod, "_get_aiter_sparse_prefill_opus", lambda **_: None)
     monkeypatch.setattr(mod, "_can_use_aiter_pa_prefill_sparse", lambda *args: False)
     monkeypatch.setattr(mod, "_rocm_sparse_attn_prefill_triton", fake_dense_fallback)
     monkeypatch.setattr(
@@ -1047,13 +1060,16 @@ def test_sparse_attn_prefill_routes_gfx942_pa_prefill_sparse(
 
 
 @requires_gfx950
+@pytest.mark.parametrize("with_sink", [True, False])
 @torch.inference_mode()
-def test_sparse_attn_prefill_ragged_aiter_opus(monkeypatch) -> None:
-    opus_mod = pytest.importorskip("aiter.ops.pa_sparse_prefill_opus")
+def test_sparse_attn_prefill_ragged_aiter_opus(monkeypatch, with_sink: bool) -> None:
+    opus_mod = pytest.importorskip("aiter.ops.mla_sparse_prefill")
+    if not hasattr(opus_mod, "mla_sparse_prefill"):
+        pytest.skip("AITER < 0.1.28 has no mla_sparse_prefill")
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
     monkeypatch.setattr(
-        mod, "_get_aiter_sparse_prefill_opus", lambda: opus_mod.pa_sparse_prefill_opus
+        mod, "_get_aiter_sparse_prefill_opus", lambda **_: opus_mod.mla_sparse_prefill
     )
 
     device = torch.device("cuda")
@@ -1072,6 +1088,8 @@ def test_sparse_attn_prefill_ragged_aiter_opus(monkeypatch) -> None:
     )
     kv = torch.randn(num_queries, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
     rows = [list(range(query_idx + 1)) for query_idx in range(num_queries)]
+    # An empty row must give zeros, not NaN, with or without a sink.
+    rows[3] = []
     indices = torch.tensor(
         [index for row in rows for index in row], dtype=torch.int32, device=device
     )
@@ -1084,8 +1102,10 @@ def test_sparse_attn_prefill_ragged_aiter_opus(monkeypatch) -> None:
         dtype=torch.int32,
         device=device,
     )
-    attn_sink = torch.linspace(
-        -0.25, 0.25, num_heads, dtype=torch.float32, device=device
+    attn_sink = (
+        torch.linspace(-0.25, 0.25, num_heads, dtype=torch.float32, device=device)
+        if with_sink
+        else None
     )
     output = torch.empty_like(q)
     scale = HEAD_DIM**-0.5

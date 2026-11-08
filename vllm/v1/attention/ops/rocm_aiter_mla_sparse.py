@@ -46,17 +46,27 @@ FP8_DTYPE = current_platform.fp8_dtype()
 
 
 @functools.cache
-def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
+def _get_aiter_sparse_prefill_opus(
+    no_sink: bool = False,
+) -> Callable[..., torch.Tensor] | None:
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.is_mla_enabled():
         return None
     try:
-        from aiter.ops.pa_sparse_prefill_opus import pa_sparse_prefill_opus
+        # AITER >= 0.1.28; also takes attn_sink=None.
+        from aiter.ops.mla_sparse_prefill import mla_sparse_prefill as opus
     except ImportError:
-        return None
+        if no_sink:
+            return None
+        try:
+            from aiter.ops.pa_sparse_prefill_opus import (
+                pa_sparse_prefill_opus as opus,
+            )
+        except ImportError:
+            return None
     logger.info_once("Using AITER OPUS for large sparse MLA prefill on gfx950")
-    return pa_sparse_prefill_opus
+    return opus
 
 
 # Conservative perf gate, not a correctness bound: OPUS is correct for any query
@@ -3823,6 +3833,8 @@ def _can_use_aiter_sparse_prefill_opus(
         and q.shape[0] >= _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES
         and q.is_cuda
         and output.shape == q.shape
+        # The only head width OPUS is compiled for.
+        and q.shape[-1] == 512
         and kv.shape[-1] == q.shape[-1]
         and q.dtype in (torch.bfloat16, torch.float16)
         and kv.dtype == q.dtype
@@ -3832,10 +3844,14 @@ def _can_use_aiter_sparse_prefill_opus(
         and q.stride(-1) == 1
         and kv.stride(-1) == 1
         and output.stride() == q.stride()
-        and attn_sink is not None
-        and attn_sink.shape == (q.shape[1],)
-        and attn_sink.dtype == torch.float32
-        and attn_sink.device == q.device
+        and (
+            attn_sink is None
+            or (
+                attn_sink.shape == (q.shape[1],)
+                and attn_sink.dtype == torch.float32
+                and attn_sink.device == q.device
+            )
+        )
     )
 
 
@@ -3845,18 +3861,18 @@ def _rocm_sparse_attn_prefill_ragged_aiter_opus(
     indices: torch.Tensor,
     indptr: torch.Tensor,
     scale: float,
-    attn_sink: torch.Tensor,
+    attn_sink: torch.Tensor | None,
     output: torch.Tensor,
 ) -> bool:
-    pa_sparse_prefill_opus = _get_aiter_sparse_prefill_opus()
-    if pa_sparse_prefill_opus is None:
+    sparse_prefill_opus = _get_aiter_sparse_prefill_opus(no_sink=attn_sink is None)
+    if sparse_prefill_opus is None:
         return False
 
     indices = _as_int32_contiguous_1d(indices)
     indptr = _as_int32_contiguous_1d(indptr)
     empty_indices = indices[:0]
     empty_indptr = torch.zeros_like(indptr)
-    pa_sparse_prefill_opus(
+    sparse_prefill_opus(
         q,
         kv,
         indices,
@@ -3864,7 +3880,7 @@ def _rocm_sparse_attn_prefill_ragged_aiter_opus(
         kv[:1],
         empty_indices,
         empty_indptr,
-        attn_sink.contiguous(),
+        None if attn_sink is None else attn_sink.contiguous(),
         float(scale),
         out=output,
     )
@@ -4645,7 +4661,7 @@ def rocm_sparse_attn_prefill(
     opus_attn_sink = None if attn_sink is None else attn_sink[: q.shape[1]]
     if (
         _can_use_aiter_sparse_prefill_opus(q, kv.squeeze(1), opus_attn_sink, output)
-        and _get_aiter_sparse_prefill_opus() is not None
+        and _get_aiter_sparse_prefill_opus(no_sink=opus_attn_sink is None) is not None
     ):
         if ragged_indices is None or ragged_indptr is None:
             assert indices is not None
@@ -4657,7 +4673,6 @@ def rocm_sparse_attn_prefill(
                 else (indices_2d >= 0).sum(dim=-1, dtype=torch.int32),
                 num_rows=kv.shape[0],
             )
-        assert opus_attn_sink is not None
         if _rocm_sparse_attn_prefill_ragged_aiter_opus(
             q=q,
             kv=kv.squeeze(1),
