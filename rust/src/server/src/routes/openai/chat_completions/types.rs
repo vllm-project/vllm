@@ -70,7 +70,6 @@ pub struct ChatCompletionRequest {
     pub max_completion_tokens: Option<u32>,
 
     /// How many chat completion choices to generate for each input message
-    #[validate(range(min = 1, max = 10))]
     pub n: Option<u32>,
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based
@@ -426,6 +425,9 @@ pub(super) struct ChatCompletionMessage {
     pub content: Option<String>,
     // OpenAI fields the Rust frontend never produces; always `None`.
     pub refusal: Option<String>,
+    /// Omitted rather than `null`, like Python: the OpenAI spec types it as an
+    /// array, not nullable.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Value>,
     pub audio: Option<Value>,
     pub function_call: Option<FunctionCallResponse>,
@@ -443,6 +445,8 @@ pub(super) struct ChatCompletionStreamResponse {
     pub choices: Vec<ChatCompletionStreamChoice>,
     pub usage: Option<Usage>,
     pub metrics: Option<StreamPerRequestMetrics>,
+    /// Set only on the last chunk.
+    pub system_fingerprint: Option<String>,
     /// Set only on the first chunk.
     #[serde(flatten)]
     pub prompt: Option<ChatCompletionStreamPrompt>,
@@ -458,6 +462,7 @@ impl ChatCompletionStreamResponse {
             choices: Vec::new(),
             usage: None,
             metrics: None,
+            system_fingerprint: None,
             prompt: None,
             kv_transfer_params: None,
         }
