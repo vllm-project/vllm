@@ -69,6 +69,14 @@ class NoSignalServer(uvicorn.Server):
         self._accept_tasks: set[asyncio.Task] = set()
         self._connecting = 0
         self.startup_complete = asyncio.Event()
+        self._exit_after_startup = False
+
+    def request_exit(self) -> None:
+        """Request HTTP exit once startup can reach Uvicorn's shutdown path."""
+        if self.startup_complete.is_set():
+            self.should_exit = True
+        else:
+            self._exit_after_startup = True
 
     @contextlib.contextmanager
     def capture_signals(self) -> Generator[None, None, None]:
@@ -89,6 +97,9 @@ class NoSignalServer(uvicorn.Server):
             await self._startup(sockets)
         finally:
             self.startup_complete.set()
+            if self._exit_after_startup:
+                # Older Uvicorn skips shutdown if startup returns with this set.
+                asyncio.get_running_loop().call_soon(self.request_exit)
 
     async def _startup(self, sockets: list[socket.socket] | None) -> None:
         if not (self.peer_loads and sockets):
@@ -359,7 +370,10 @@ def terminate_if_errored(server: uvicorn.Server, engine: EngineClient):
         envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH or engine.should_keep_api_server_alive
     )
     if not keep_alive and engine_errored:
-        server.should_exit = True
+        if isinstance(server, NoSignalServer):
+            server.request_exit()
+        else:
+            server.should_exit = True
 
 
 def create_server_socket(

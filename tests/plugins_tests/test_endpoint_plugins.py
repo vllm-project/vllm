@@ -769,6 +769,48 @@ async def test_watchdog_exit_stops_plugins_without_engine_shutdown(
 
 
 @pytest.mark.asyncio
+async def test_watchdog_during_start_stops_plugins_and_closes_listener(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Engine death during startup still reaches HTTP and plugin cleanup."""
+    events: list[str] = []
+    engine = _ServingEngineClient(events)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class _Starting(DummyAdminEndpointPlugin):
+        name = "plugin"
+
+        async def start(self, state: State) -> None:
+            await super().start(state)
+            entered.set()
+            await release.wait()
+
+    async with _serving(monkeypatch, [_Starting(events)], engine) as (
+        state,
+        serve_task,
+        url,
+    ):
+        try:
+            async with asyncio.timeout(_TIMEOUT_S):
+                await entered.wait()
+            engine.errored = True
+            engine.is_running = False
+            # Repeated watchdog observations must remain one exit request.
+            terminate_if_errored(state.server, engine)
+            terminate_if_errored(state.server, engine)
+            release.set()
+            await _wait_closed(serve_task)
+            with pytest.raises(httpx.ConnectError):
+                await _health(url)
+            assert events == ["start:plugin", "stop:plugin"]
+        finally:
+            release.set()
+            if state.server.started and "stop:plugin" not in events:
+                await state.server.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_stop_failures_do_not_skip_peers_or_native_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -863,6 +905,16 @@ async def test_cancelled_lifespan_shutdown_still_stops_remaining_plugins(
     remaining plugins and native cleanup have run, then re-raised."""
     events: list[str] = []
     entered = asyncio.Event()
+    peer_entered = asyncio.Event()
+    release_peer = asyncio.Event()
+
+    class _AwaitingPeer(DummyAdminEndpointPlugin):
+        name = "first"
+
+        async def stop(self, state: State) -> None:
+            peer_entered.set()
+            await release_peer.wait()
+            await super().stop(state)
 
     class _Blocking(DummyAdminEndpointPlugin):
         name = "blocking"
@@ -875,7 +927,7 @@ async def test_cancelled_lifespan_shutdown_still_stops_remaining_plugins(
                 self.events.append(f"stop:{self.name}:cancelled")
                 raise
 
-    plugins = [_dummy("first", events), _Blocking(events), _dummy("last", events)]
+    plugins = [_AwaitingPeer(events), _Blocking(events), _dummy("last", events)]
     native = _NativeServing(events)
     app = await _build_plugin_app(monkeypatch, plugins, None, native)
 
@@ -887,6 +939,9 @@ async def test_cancelled_lifespan_shutdown_still_stops_remaining_plugins(
     async with asyncio.timeout(_TIMEOUT_S):
         await entered.wait()
     task.cancel()
+    async with asyncio.timeout(_TIMEOUT_S):
+        await peer_entered.wait()
+    release_peer.set()
     with pytest.raises(asyncio.CancelledError):
         async with asyncio.timeout(_TIMEOUT_S):
             await task
