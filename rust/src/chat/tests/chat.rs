@@ -1200,6 +1200,7 @@ async fn chat_stream_parses_tool_calls_automatically() {
             ChatEvent::BlockStart { .. }
             | ChatEvent::BlockDelta { .. }
             | ChatEvent::BlockEnd { .. } => {}
+            ChatEvent::ToolCallAbort { .. } => panic!("unexpected aborted call"),
         }
     }
 

@@ -412,7 +412,6 @@ async fn chat_completion_chunk_stream(
         created,
         response_model,
     ));
-    let mut saw_tool_calls = false;
     // `LogprobsDelta` is emitted after all chat events for one decoded update.
     // If that update contains hidden reasoning, including delimiter-only block
     // starts or ends, omit its token metadata as well as its visible delta.
@@ -546,7 +545,6 @@ async fn chat_completion_chunk_stream(
             }
             Ok(ChatEvent::ToolCallStart { index, id, name }) => {
                 let tool_index = index as u32;
-                saw_tool_calls = true;
                 debug!(
                     tool_call_id = %id,
                     tool_call_name = %name,
@@ -569,7 +567,7 @@ async fn chat_completion_chunk_stream(
                     yield_chunk!(tool_call_arguments_chunk(&envelope, tool_index, delta));
                 }
             }
-            Ok(ChatEvent::ToolCallEnd { .. }) => {
+            Ok(ChatEvent::ToolCallEnd { .. } | ChatEvent::ToolCallAbort { .. }) => {
                 debug!("ending current tool call");
             }
             Ok(ChatEvent::Done {
@@ -610,7 +608,7 @@ async fn chat_completion_chunk_stream(
                 match final_chunk(
                     &envelope,
                     finish_reason,
-                    saw_tool_calls && !is_named_tool_choice,
+                    message.tool_calls().next().is_some() && !is_named_tool_choice,
                     kv_transfer_params.map(|value| *value),
                     weight_versions.filter(|_| return_weight_versions),
                 ) {
@@ -1820,6 +1818,11 @@ mod tests {
 
     #[tokio::test]
     async fn chunk_stream_preserves_tool_call_index_and_omits_id_from_arguments_delta() {
+        let call = AssistantToolCall {
+            id: "call_1".to_string(),
+            name: "get_weather".to_string(),
+            arguments: r#"{"city":"Paris"}"#.to_string(),
+        };
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
                 prompt_token_ids: vec![].into(),
@@ -1827,23 +1830,21 @@ mod tests {
             }),
             Ok(ChatEvent::ToolCallStart {
                 index: 3,
-                id: "call_1".to_string(),
-                name: "get_weather".to_string(),
+                id: call.id.clone(),
+                name: call.name.clone(),
             }),
             Ok(ChatEvent::ToolCallArgumentsDelta {
                 index: 3,
-                delta: r#"{"city":"Paris"}"#.to_string(),
+                delta: call.arguments.clone(),
             }),
             Ok(ChatEvent::ToolCallEnd {
                 index: 3,
-                call: AssistantToolCall {
-                    id: "call_1".to_string(),
-                    name: "get_weather".to_string(),
-                    arguments: r#"{"city":"Paris"}"#.to_string(),
-                },
+                call: call.clone(),
             }),
             Ok(ChatEvent::Done {
-                message: Default::default(),
+                message: vllm_chat::AssistantMessage {
+                    content: vec![AssistantContentBlock::ToolCall(call)],
+                },
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
                 spec_decode_metrics: None,
@@ -1889,6 +1890,10 @@ mod tests {
         assert_eq!(
             chunks[2].choices[0].delta.tool_calls.as_ref().unwrap()[0].id,
             None
+        );
+        assert_eq!(
+            chunks.last().unwrap().choices[0].finish_reason.as_deref(),
+            Some("tool_calls")
         );
     }
 

@@ -52,6 +52,10 @@ pub(crate) enum AssistantEvent {
     /// A delta for the arguments of the currently open tool call. Must follow a
     /// `ToolCallStart`.
     ToolCallArgumentsDelta { delta: String },
+    /// Final arguments after the parser accepts the complete call.
+    ToolCallEnd { arguments: String },
+    /// The open call ended before the parser could accept it.
+    ToolCallAbort,
     Done {
         usage: ChatTokenUsage,
         timestamps: RequestTimestamps,

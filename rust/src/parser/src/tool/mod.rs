@@ -82,6 +82,11 @@ pub enum ToolParserEvent {
     Text(String),
     /// A tool-call update extracted from assistant text.
     ToolCall(ToolCallDelta),
+    /// A complete call with its final arguments.
+    ToolCallEnd {
+        tool_index: usize,
+        arguments: String,
+    },
 }
 
 /// Result of advancing tool parsing with one assistant-text input.
@@ -118,7 +123,7 @@ impl ToolParserOutput {
             .iter()
             .filter_map(|event| match event {
                 ToolParserEvent::Text(text) => Some(text.as_str()),
-                ToolParserEvent::ToolCall(_) => None,
+                ToolParserEvent::ToolCall(_) | ToolParserEvent::ToolCallEnd { .. } => None,
             })
             .collect()
     }
@@ -128,7 +133,7 @@ impl ToolParserOutput {
         self.events
             .iter()
             .filter_map(|event| match event {
-                ToolParserEvent::Text(_) => None,
+                ToolParserEvent::Text(_) | ToolParserEvent::ToolCallEnd { .. } => None,
                 ToolParserEvent::ToolCall(call) => Some(call),
             })
             .collect()
@@ -143,6 +148,7 @@ impl ToolParserOutput {
             match event {
                 ToolParserEvent::Text(text) => self.push_text(text),
                 ToolParserEvent::ToolCall(call) => self.push_call(call),
+                event @ ToolParserEvent::ToolCallEnd { .. } => self.events.push(event),
             }
         }
     }
@@ -162,7 +168,20 @@ impl ToolParserOutput {
         let mut order = Vec::new();
         let normal_text = self.normal_text();
 
-        for call in self.calls() {
+        for event in &self.events {
+            let call = match event {
+                ToolParserEvent::ToolCall(call) => call,
+                ToolParserEvent::ToolCallEnd {
+                    tool_index,
+                    arguments,
+                } => {
+                    if let Some(call) = merged.get_mut(tool_index) {
+                        call.arguments.clone_from(arguments);
+                    }
+                    continue;
+                }
+                ToolParserEvent::Text(_) => continue,
+            };
             match merged.entry(call.tool_index) {
                 btree_map::Entry::Vacant(entry) => {
                     order.push(call.tool_index);
@@ -189,6 +208,11 @@ impl ToolParserOutput {
 
 /// Incremental parser that extracts tool calls from assistant output.
 pub trait ToolParser: Send {
+    /// Whether each completed call emits a `ToolCallEnd` event.
+    fn reports_tool_call_end(&self) -> bool {
+        false
+    }
+
     /// Construct a boxed parser instance for one request stream.
     ///
     /// `tokenizer` is the model's tokenizer, for parsers that resolve the IDs of

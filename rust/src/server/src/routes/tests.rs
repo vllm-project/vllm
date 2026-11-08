@@ -7874,6 +7874,336 @@ async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn qwen_coder_streams_arguments_before_parameter_closes() {
+    use futures::StreamExt as _;
+
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let (release_close_tx, release_close_rx) = tokio::sync::oneshot::channel();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-qwen-coder-streaming".to_vec(),
+        move |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                let request = decode_add_request(&add);
+                send_outputs(
+                    push,
+                    engine_outputs_for_request(
+                        &request.request_id,
+                        vec![(
+                            token_ids("<tool_call>\n<function=get_weather>\n<parameter=city>Paris"),
+                            None,
+                        )],
+                    ),
+                )
+                .await;
+                release_close_rx.await.expect("release closing tags");
+                let mut closing_tokens = token_ids("</parameter>\n</function>\n</tool_call>");
+                // The terminal stop token is removed before text decoding.
+                closing_tokens.push(UNKNOWN_DECODE_TOKEN_ID);
+                send_outputs(
+                    push,
+                    engine_outputs_for_request(
+                        &request.request_id,
+                        vec![(closing_tokens, Some(EngineCoreFinishReason::Stop))],
+                    ),
+                )
+                .await;
+            })
+        },
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()))
+        .with_tool_call_parser(ParserSelection::Explicit("qwen3_coder".to_string()));
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["test-model".to_string()],
+        chat,
+    )));
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "test-model",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
+                        "tools": [{
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"city": {"type": "string"}}
+                                }
+                            }
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body().into_data_stream();
+    let mut text = String::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = body.next().await {
+            text.push_str(std::str::from_utf8(&chunk.expect("read SSE chunk")).expect("utf8 SSE"));
+            let complete_len = text.rfind("\n\n").map_or(0, |end| end + 2);
+            let payloads = sse_json_payloads(&text[..complete_len]);
+            let arguments: String = payloads
+                .iter()
+                .flat_map(|payload| payload["choices"][0]["delta"]["tool_calls"].as_array())
+                .flatten()
+                .filter_map(|call| call["function"]["arguments"].as_str())
+                .collect();
+            if arguments.contains("Paris") {
+                return;
+            }
+        }
+        panic!("stream ended before argument content arrived");
+    })
+    .await
+    .expect("argument content must reach the client before the engine emits closing tags");
+
+    release_close_tx.send(()).expect("release closing tags");
+    while let Some(chunk) = body.next().await {
+        text.push_str(std::str::from_utf8(&chunk.expect("read SSE chunk")).expect("utf8 SSE"));
+    }
+    engine_task.await.expect("mock engine task");
+
+    let payloads = sse_json_payloads(&text);
+    let calls: Vec<_> = payloads
+        .iter()
+        .flat_map(|payload| payload["choices"][0]["delta"]["tool_calls"].as_array())
+        .flatten()
+        .collect();
+    assert!(calls[0]["id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert_eq!(calls[0]["function"]["name"], "get_weather");
+    assert!(calls.iter().all(|call| call["index"] == 0));
+    assert!(
+        calls
+            .iter()
+            .skip(1)
+            .all(|call| { call.get("id").is_none() && call["function"].get("name").is_none() })
+    );
+    let arguments: String =
+        calls.iter().filter_map(|call| call["function"]["arguments"].as_str()).collect();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&arguments)
+            .unwrap_or_else(|error| panic!("{error}: {text}")),
+        json!({"city": "Paris"}),
+    );
+    assert!(
+        payloads
+            .iter()
+            .any(|payload| payload["choices"][0]["finish_reason"] == "tool_calls")
+    );
+    assert_eq!(sse_data_payloads(&text).last(), Some(&"[DONE]"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn qwen_coder_final_response_requires_complete_calls() {
+    let complete =
+        "<tool_call><function=get_weather><parameter=city>Paris</parameter></function></tool_call>";
+    let truncated =
+        "<tool_call><function=get_weather><parameter=city>Paris</parameter><parameter=note>Par";
+    let malformed =
+        "<tool_call><function=get_weather><parameter=city>Paris\n</function>\n</tool_call>";
+    // Call completion must not reparse a value at the JSON depth limit.
+    let nested = format!("{}0{}", "[".repeat(127), "]".repeat(127));
+    let nested_call = format!(
+        "<tool_call><function=get_weather><parameter=items>{nested}</parameter></function></tool_call>"
+    );
+    let nested_arguments = format!(r#"{{"items":{nested}}}"#);
+    for (name, text, finish, stream, stop, expected) in [
+        (
+            "deep_nested_argument",
+            nested_call.clone(),
+            EngineCoreFinishReason::Stop,
+            false,
+            None,
+            json!({"finish": "tool_calls", "arguments": [&nested_arguments], "content": null}),
+        ),
+        (
+            "deep_nested_argument_stream",
+            nested_call,
+            EngineCoreFinishReason::Stop,
+            true,
+            None,
+            json!({"finish": "tool_calls", "arguments": [&nested_arguments], "content": ""}),
+        ),
+        (
+            "truncated",
+            truncated.to_owned(),
+            EngineCoreFinishReason::Length,
+            false,
+            None,
+            json!({"finish": "length", "arguments": [], "content": null}),
+        ),
+        (
+            "malformed",
+            malformed.to_owned(),
+            EngineCoreFinishReason::Stop,
+            false,
+            None,
+            json!({"finish": "stop", "arguments": [], "content": "\n</tool_call>"}),
+        ),
+        (
+            "malformed_stream",
+            malformed.to_owned(),
+            EngineCoreFinishReason::Stop,
+            true,
+            None,
+            json!({"finish": "stop", "arguments": [r#"{"city":"Paris\n</function>"#], "content": "\n</tool_call>"}),
+        ),
+        (
+            "complete_before_malformed",
+            format!("{complete}{malformed}"),
+            EngineCoreFinishReason::Stop,
+            false,
+            None,
+            json!({"finish": "tool_calls", "arguments": [r#"{"city":"Paris"}"#], "content": "\n</tool_call>"}),
+        ),
+        (
+            "complete_before_malformed_stream",
+            format!("{complete}{malformed}"),
+            EngineCoreFinishReason::Stop,
+            true,
+            None,
+            json!({"finish": "tool_calls", "arguments": [r#"{"city":"Paris"}{"city":"Paris\n</function>"#], "content": "\n</tool_call>"}),
+        ),
+        (
+            "complete_before_truncated",
+            format!("{complete}\n<tool_call><function="),
+            EngineCoreFinishReason::Length,
+            false,
+            None,
+            json!({"finish": "length", "arguments": [r#"{"city":"Paris"}"#], "content": null}),
+        ),
+        (
+            "repeated_parameter",
+            "<tool_call><function=get_weather><parameter=city>Paris</parameter><parameter=city>NYC</parameter></function></tool_call>".to_owned(),
+            EngineCoreFinishReason::Stop,
+            false,
+            None,
+            json!({"finish": "tool_calls", "arguments": [r#"{"city":"NYC"}"#], "content": null}),
+        ),
+        (
+            "truncated_stream",
+            truncated.to_owned(),
+            EngineCoreFinishReason::Length,
+            true,
+            None,
+            json!({"finish": "length", "arguments": [r#"{"city":"Paris","note":"Par"#], "content": ""}),
+        ),
+        (
+            "stop_strips_outer_marker",
+            complete.to_owned(),
+            EngineCoreFinishReason::Stop,
+            false,
+            Some("</tool_call>"),
+            json!({"finish": "tool_calls", "arguments": [r#"{"city":"Paris"}"#], "content": null}),
+        ),
+        (
+            "stop_strips_outer_marker_stream",
+            complete.to_owned(),
+            EngineCoreFinishReason::Stop,
+            true,
+            Some("</tool_call>"),
+            json!({"finish": "tool_calls", "arguments": [r#"{"city":"Paris"}"#], "content": ""}),
+        ),
+    ] {
+        let mut tokens = token_ids(&text);
+        if finish == EngineCoreFinishReason::Stop {
+            tokens.push(UNKNOWN_DECODE_TOKEN_ID);
+        }
+        let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+            b"engine-qwen-call-completion",
+            vec![(tokens, Some(finish))],
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let chat = chat.with_tool_call_parser(ParserSelection::Explicit("qwen3_coder".to_string()));
+        let mut app = build_router(Arc::new(AppState::new(vec!["test-model".to_owned()], chat)));
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "test-model",
+                            "stream": stream,
+                            "stop": stop,
+                            "messages": [{"role": "user", "content": "Get the weather."}],
+                            "tools": [{"type": "function", "function": {
+                                "name": "get_weather",
+                                "parameters": {"type": "object", "properties": {
+                                    "city": {"type": "string"}, "note": {"type": "string"},
+                                    "items": {"type": "array"}
+                                }}
+                            }}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{name}");
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        engine_task.await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        let actual = if stream {
+            let chunks = sse_json_payloads(&body);
+            let arguments: String = chunks
+                .iter()
+                .flat_map(|chunk| chunk["choices"][0]["delta"]["tool_calls"].as_array())
+                .flatten()
+                .filter_map(|call| call["function"]["arguments"].as_str())
+                .collect();
+            let finish = chunks
+                .iter()
+                .find_map(|chunk| chunk["choices"][0]["finish_reason"].as_str())
+                .unwrap_or_else(|| panic!("{name}: no finish reason in {body}"));
+            let content: String = chunks.iter()
+                .filter_map(|chunk| chunk["choices"][0]["delta"]["content"].as_str()).collect();
+            json!({"finish": finish, "arguments": [arguments], "content": content})
+        } else {
+            let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let choice = &response["choices"][0];
+            let arguments: Vec<_> = choice["message"]["tool_calls"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|call| call["function"]["arguments"].clone())
+                .collect();
+            json!({"finish": choice["finish_reason"], "arguments": arguments, "content": choice["message"]["content"]})
+        };
+        assert_eq!(actual, expected, "{name}: {body}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn named_tool_choice_uses_stop_finish_reason() {
     for stream in [false, true] {
         let (app, engine_task) = test_app_with_backend_and_stream_output_specs(

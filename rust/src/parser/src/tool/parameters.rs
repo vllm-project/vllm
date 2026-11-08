@@ -121,6 +121,13 @@ impl ToolSchemas {
         converted
     }
 
+    /// Whether a parameter is unambiguously a string, so its value can stream.
+    pub(crate) fn is_string_param(&self, function_name: &str, name: &str) -> bool {
+        self.tools.get(function_name).is_some_and(|schema| {
+            matches!(schema.parameter_type(name), Some(JsonParamType::String))
+        })
+    }
+
     /// Convert one parameter value for one named tool.
     pub(crate) fn convert_param_with_schema<P>(
         &self,
@@ -157,13 +164,15 @@ impl ToolSchema {
     /// the value fails to convert, this falls back to returning the raw
     /// string as a JSON string value, or object-like JSON for structured input.
     fn convert(&self, name: &str, input: ParamInput) -> Value {
+        convert_with_optional_schema(self.parameter_type(name).as_ref(), &input)
+    }
+
+    fn parameter_type(&self, name: &str) -> Option<JsonParamType<'_>> {
         let root = SchemaRoot::new(&self.parameters);
-        let param_type = root
-            .resolved()
+        root.resolved()
             .get("properties")
             .and_then(|properties| properties.get(name))
-            .and_then(|schema| JsonParamType::from_schema(&root, schema));
-        convert_with_optional_schema(param_type.as_ref(), &input)
+            .and_then(|schema| JsonParamType::from_schema(&root, schema))
     }
 }
 
