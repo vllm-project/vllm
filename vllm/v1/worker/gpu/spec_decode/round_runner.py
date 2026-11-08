@@ -127,11 +127,11 @@ class SpecRound:
         """Run with the engine core's ``resources`` and bind the spec kernels
         to ``layers``."""
         self.resources = resources
+        layout = None
         if resources.max_branching == 1:
             # Chains (perhaps lowered to): batches keep the chain layout.
             self.rows = None
-        layout = None
-        if resources.max_branching > 1:
+        else:
             layout = PlanLayout(self.max_num_tokens, self.max_rows, self.device)
         ctx = KernelContext(
             device=self.device,
