@@ -121,6 +121,24 @@ the current step's authorization from `bind_rows`. As with `StateSlotRows`,
 this is a contract with a trusted model, not memory protection: tensors
 already returned are not revoked.
 
+### Memory contributors
+
+When the KV cache budget is derived from memory profiling, what a model
+allocates in `prepare_execution_memory` is counted before the remaining budget
+is divided into state pages, so a model option that enlarges it, such as the
+number of graphs a model captures, leaves fewer pages. A model declares such
+options in the spec's `memory_contributors`, a tuple of distinct, nonempty
+strings that is empty by default. The names are diagnostic only: they are not
+part of the layout, the `schema_id` or spec equality, and core does not measure
+what each one consumed. Specs merged across layers must still declare the same
+names. When the state pages do not fit, core names them
+alongside its usual advice, so the user learns which model settings compete
+with the state pages.
+
+The spec carries the names because it is the one model-supplied record that
+reaches both the engine core's KV cache planning and the worker's KV cache
+allocation.
+
 ### Startup and shutdown criteria
 
 - **M1.** `run_mixed_prefill_decode_warmup` returns `False` without calling
@@ -159,6 +177,21 @@ already returned are not revoked.
 - **M6.** `pool_layout` reports the data address, shape, strides and dtype of
   the tensors that `startup_pool_access` and `bind_rows` expose for the same
   bindings, and the snapshot holds no tensor or bindings reference.
+- **M7.** When KV cache planning rejects a persistent-state layout because its
+  budget holds fewer than two pages (the null page and one slot), whether
+  through the capacity check or through fitting `max_model_len` automatically,
+  or because `num_gpu_blocks_override` exceeds the budget, the `ValueError`
+  names every memory contributor of the spec. Without contributors the
+  message is as before.
+- **M8.** When a KV cache allocation in `initialize_kv_cache` raises for a
+  persistent-state layout, including when the device runs out of memory, the
+  runner re-raises the same exception object with a note (`add_note`) naming
+  every memory contributor, and that call reaches neither
+  `initialize_state_slots` nor the model state's `initialize_kv_cache`.
+  Without contributors the exception propagates unchanged. The note appears in
+  the logged traceback, not in `str(exception)`; the multiprocess executor
+  sends a worker's error to the engine as a string, so there the names appear
+  only in the worker's log.
 
 ## Release fence
 

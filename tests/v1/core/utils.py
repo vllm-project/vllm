@@ -428,7 +428,7 @@ def get_kv_cache_configs(
     )
 
 
-def create_state_spec():
+def create_state_spec(**spec_kwargs):
     from vllm.v1.kv_cache_interface import (
         PersistentStateDescriptor,
         PersistentStateSpec,
@@ -441,4 +441,5 @@ def create_state_spec():
             PersistentStateDescriptor("count", (2,), torch.int64, 16, 16, torch.zeros),
         ),
         page_size_bytes=32,
+        **spec_kwargs,
     )

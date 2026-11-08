@@ -61,7 +61,9 @@ logger = init_logger(__name__)
 AUTO_FIT_SHORT_MAX_MODEL_LEN = 8192
 
 
-def _more_kv_cache_memory_hint(vllm_config: VllmConfig) -> str:
+def _more_kv_cache_memory_hint(
+    vllm_config: VllmConfig, kv_cache_groups: Iterable[KVCacheGroupSpec] = ()
+) -> str:
     """How the user can make room for the KV cache, for error messages."""
     if vllm_config.cache_config.enable_extensible_kv_cache:
         return (
@@ -69,10 +71,36 @@ def _more_kv_cache_memory_hint(vllm_config: VllmConfig) -> str:
             "the model and its activations; decrease `max_model_len` or "
             "`max_num_seqs`, or the model needs a device with more memory."
         )
-    return (
+    hint = (
         "Try increasing `gpu_memory_utilization` when initializing the engine "
         "(this flag also controls CPU memory reservation on the CPU backend, "
         "despite its name)."
+    )
+    if contributors := describe_memory_contributors(kv_cache_groups):
+        hint += f" {contributors}"
+    return hint
+
+
+def describe_memory_contributors(kv_cache_groups: Iterable[KVCacheGroupSpec]) -> str:
+    """Name the options a persistent-state model says also use device memory.
+
+    Returns an empty string when the groups declare none.
+    """
+    from vllm.v1.kv_cache_interface import PersistentStateSpec
+
+    names = [
+        name
+        for group in kv_cache_groups
+        if isinstance(group.kv_cache_spec, PersistentStateSpec)
+        for name in group.kv_cache_spec.memory_contributors
+    ]
+    if not names:
+        return ""
+    return (
+        "The model reports that these options also use device memory; "
+        "reducing their memory use may leave more for persistent-state pages: "
+        + ", ".join(f"`{name}`" for name in names)
+        + "."
     )
 
 
@@ -1414,7 +1442,10 @@ def _auto_fit_max_model_len(
             "take (fewer or smaller capture sizes in the compilation config), "
             "or use more GPUs."
             if after_warmup
-            else _more_kv_cache_memory_hint(vllm_config)
+            else _more_kv_cache_memory_hint(
+                vllm_config,
+                (g for groups in projected_groups_per_worker for g in groups),
+            )
         )
         raise ValueError(
             "Cannot auto-fit max_model_len: not enough GPU memory available "
@@ -1615,10 +1646,13 @@ def get_kv_cache_configs(
                 get_max_num_blocks(vllm_config, groups) is not None
                 and override * bytes_per_block > avail_mem
             ):
-                raise ValueError(
+                message = (
                     f"num_gpu_blocks_override={override} exceeds the KV budget "
                     f"of {avail_mem // bytes_per_block} blocks"
                 )
+                if contributors := describe_memory_contributors(groups):
+                    message += f". {contributors}"
+                raise ValueError(message)
             logger.info(
                 "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
                 avail_mem // bytes_per_block,
@@ -1653,7 +1687,7 @@ def get_kv_cache_configs(
             partial(_max_memory_usage_bytes_from_groups, builder, vllm_config, groups),
             vllm_config.model_config.max_model_len,
             partial(_estimate_max_model_len_from_groups, builder, vllm_config, groups),
-            _more_kv_cache_memory_hint(vllm_config),
+            _more_kv_cache_memory_hint(vllm_config, groups),
         )
 
     kv_cache_configs: list[KVCacheConfig] = []

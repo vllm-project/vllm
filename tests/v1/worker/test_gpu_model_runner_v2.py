@@ -705,6 +705,59 @@ def _initialized_state_runner(monkeypatch, model_state, **kwargs):
     return runner
 
 
+_CONTRIBUTORS = ("first_example_option", "second_example_option")
+
+
+@pytest.mark.parametrize("is_profiling", [True, False], ids=["profiling", "serving"])
+@pytest.mark.parametrize("contributors", [_CONTRIBUTORS, ()], ids=["named", "none"])
+@pytest.mark.parametrize(
+    "failure", [torch.OutOfMemoryError, RuntimeError], ids=["oom", "raise"]
+)
+def test_state_kv_allocation_failure_names_memory_contributors(
+    monkeypatch, contributors, failure, is_profiling
+):
+    """A failed state allocation keeps its exception and notes the contributors.
+
+    The allocation precedes every model-state hook, so core attributes it, and
+    neither hook runs for the failing call.
+    """
+    import traceback
+
+    from tests.v1.core.utils import create_state_spec, get_kv_cache_configs
+
+    config = _state_only_config(monkeypatch)
+    spec = create_state_spec(memory_contributors=contributors)
+    plan = get_kv_cache_configs(config, [{"state": spec}], [96])[0]
+    calls = []
+
+    class _ModelState(_StateOnlyModelState):
+        def initialize_state_slots(self, bindings):
+            calls.append("initialize_state_slots")
+
+        def initialize_kv_cache(self, cache_config, block_tables):
+            calls.append("initialize_kv_cache")
+
+    error = failure("injected allocation failure")
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(model_runner_module, "init_kv_cache", fail)
+    runner = _state_only_runner(monkeypatch, config, _ModelState())
+    with pytest.raises(failure) as raised:
+        runner.initialize_kv_cache(plan, is_profiling=is_profiling)
+    assert raised.value is error
+    assert str(error) == "injected allocation failure"
+    assert calls == []
+    notes = "".join(getattr(error, "__notes__", []))
+    formatted = "".join(traceback.format_exception(error))
+    if not contributors:
+        assert not hasattr(error, "__notes__")
+    for name in _CONTRIBUTORS:
+        assert (name in notes) == bool(contributors)
+        assert (name in formatted) == bool(contributors)
+
+
 def test_state_only_cache_reaches_mrv2_initialization(monkeypatch):
     """Real MRv2 initialization exposes typed per-slot views from core allocation."""
     from tests.v1.core.utils import create_state_spec

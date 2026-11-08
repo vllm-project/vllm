@@ -1583,6 +1583,9 @@ class PersistentStateSpec(KVCacheSpec):
     persistence_class: str
     schema_id: str = field(compare=True)
     _page_size_bytes: int = field(compare=True, repr=False)
+    # Model options that also consume device memory, named in capacity errors.
+    # Diagnostic only: not part of the layout, the schema or equality.
+    memory_contributors: tuple[str, ...] = field(default=(), compare=False)
 
     def __init__(
         self,
@@ -1592,8 +1595,10 @@ class PersistentStateSpec(KVCacheSpec):
         block_size: int = 1,
         state_name: str,
         persistence_class: str = "resident",
+        memory_contributors: Sequence[str] = (),
     ) -> None:
         descriptor_tuple = tuple(descriptors)
+        contributors = self._validate_memory_contributors(memory_contributors)
         if block_size != 1:
             raise ValueError("persistent state requires block_size=1")
         if not state_name:
@@ -1607,6 +1612,7 @@ class PersistentStateSpec(KVCacheSpec):
         object.__setattr__(self, "state_name", state_name)
         object.__setattr__(self, "persistence_class", persistence_class)
         object.__setattr__(self, "_page_size_bytes", page_size_bytes)
+        object.__setattr__(self, "memory_contributors", contributors)
         object.__setattr__(
             self,
             "schema_id",
@@ -1617,6 +1623,21 @@ class PersistentStateSpec(KVCacheSpec):
                 persistence_class,
             ),
         )
+
+    @staticmethod
+    def _validate_memory_contributors(names: Sequence[str]) -> tuple[str, ...]:
+        if isinstance(names, str):
+            raise TypeError("persistent-state memory contributors must not be a str")
+        contributors = tuple(names)
+        if not all(isinstance(name, str) for name in contributors):
+            raise TypeError("persistent-state memory contributor names must be str")
+        if not all(contributors):
+            raise ValueError(
+                "persistent-state memory contributor names must be nonempty"
+            )
+        if len(set(contributors)) != len(contributors):
+            raise ValueError("persistent-state memory contributor names must be unique")
+        return contributors
 
     @staticmethod
     def _validate_layout(
@@ -1756,7 +1777,10 @@ class PersistentStateSpec(KVCacheSpec):
     def merge(cls, specs: list[PersistentStateSpec]) -> PersistentStateSpec:
         # The spec is immutable; sharing it keeps the initializer objects, whose
         # copies (e.g. of a functools.partial) would not compare equal.
-        if any(spec != specs[0] for spec in specs[1:]):
+        if any(
+            spec != specs[0] or spec.memory_contributors != specs[0].memory_contributors
+            for spec in specs[1:]
+        ):
             raise AssertionError("All persistent-state layers must be the same.")
         return specs[0]
 

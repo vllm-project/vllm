@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import importlib
+import os
 from collections.abc import Callable
 from dataclasses import replace
 from types import SimpleNamespace
@@ -2650,6 +2651,114 @@ def test_persistent_state_budget_override_cannot_manufacture_capacity():
     config.cache_config.num_gpu_blocks_override = 4
     with pytest.raises(ValueError, match="KV budget"):
         get_kv_cache_configs(config, [{"state": create_state_spec()}], [96])
+
+
+_CONTRIBUTORS = ("first_example_option", "second_example_option")
+
+
+def _state_rejection(spec, budget_pages, override, auto_fit):
+    from tests.v1.core.utils import create_scheduler
+
+    config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
+    config.cache_config.kv_cache_layout = "LBNHC"
+    config.cache_config.num_gpu_blocks_override = override
+    if auto_fit:
+        config.model_config.original_max_model_len = -1
+    budget = int(budget_pages * spec.page_size_bytes)
+    with pytest.raises(ValueError) as rejected:
+        get_kv_cache_configs(config, [{"state": spec}], [budget])
+    return str(rejected.value)
+
+
+@pytest.mark.parametrize("contributors", [_CONTRIBUTORS, ()], ids=["named", "none"])
+@pytest.mark.parametrize(
+    ("budget_pages", "override", "auto_fit", "kind"),
+    [
+        (0, None, False, "No available memory"),
+        (1, None, False, "No available memory"),
+        (1.5, None, False, "To serve at least one request"),
+        (3, 4, False, "exceeds the KV budget"),
+        (1, None, True, "Cannot auto-fit"),
+        (1.5, None, True, "Cannot auto-fit"),
+    ],
+    ids=["no-page", "one-page", "fractional", "override", "auto-fit", "auto-fit-frac"],
+)
+def test_persistent_state_rejection_names_memory_contributors(
+    contributors, budget_pages, override, auto_fit, kind
+):
+    """A rejected state budget names the options the model says consume memory.
+
+    Fewer than two pages cannot hold the null page and one slot, and four pages
+    exceed a three-page budget. The names are inserted into the message the
+    rejection gives without them, which keeps its advice.
+    """
+    from tests.v1.core.utils import create_state_spec
+
+    baseline = _state_rejection(create_state_spec(), budget_pages, override, auto_fit)
+    message = _state_rejection(
+        create_state_spec(memory_contributors=contributors),
+        budget_pages,
+        override,
+        auto_fit,
+    )
+    assert kind in baseline
+    if not override:
+        assert "gpu_memory_utilization" in baseline
+    if not contributors:
+        assert message == baseline
+        return
+    prefix = len(os.path.commonprefix([baseline, message]))
+    suffix = len(os.path.commonprefix([baseline[::-1], message[::-1]]))
+    assert prefix + suffix >= len(baseline)
+    inserted = message[prefix : len(message) - min(suffix, len(baseline) - prefix)]
+    for name in _CONTRIBUTORS:
+        assert name in inserted
+
+
+def test_persistent_state_memory_contributors_are_diagnostic():
+    """Contributors survive planning and copying without changing identity."""
+    from tests.v1.core.utils import create_scheduler, create_state_spec
+    from vllm.v1.kv_cache_interface import PersistentStateSpec
+
+    base = create_state_spec()
+    named = create_state_spec(memory_contributors=_CONTRIBUTORS)
+    assert base.memory_contributors == ()
+    assert create_state_spec(memory_contributors=()).memory_contributors == ()
+    assert named.memory_contributors == _CONTRIBUTORS
+    assert named == base and hash(named) == hash(base)
+    assert named.schema_id == base.schema_id
+    # deepcopy rebuilds the frozen spec through __reduce_ex__, as pickle does.
+    moved = copy.deepcopy(named)
+    assert moved.memory_contributors == _CONTRIBUTORS
+    assert moved == named and moved.schema_id == named.schema_id
+    merged = PersistentStateSpec.merge([named, copy.deepcopy(named)])
+    assert merged.memory_contributors == _CONTRIBUTORS
+    with pytest.raises(AssertionError):
+        PersistentStateSpec.merge([named, base])
+
+    config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
+    config.cache_config.kv_cache_layout = "LBNHC"
+    planned = get_kv_cache_configs(config, [{"state": named}], [4096])[0]
+    planned_spec = planned.kv_cache_groups[0].kv_cache_spec
+    assert planned_spec.memory_contributors == _CONTRIBUTORS
+
+
+@pytest.mark.parametrize(
+    ("contributors", "error"),
+    [
+        (("",), ValueError),
+        (("same", "same"), ValueError),
+        ((1,), TypeError),
+        ("first_example_option", TypeError),
+        ("", TypeError),
+    ],
+    ids=["empty-name", "duplicate", "not-str", "bare-str", "empty-bare-str"],
+)
+def test_persistent_state_memory_contributors_validated(contributors, error):
+    from tests.v1.core.utils import create_state_spec
+
+    with pytest.raises(error, match="memory contributor"):
+        create_state_spec(memory_contributors=contributors)
 
 
 @pytest.mark.parametrize(

@@ -19,8 +19,8 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
-from collections.abc import Iterable
-from contextlib import AbstractContextManager
+from collections.abc import Iterable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any, NamedTuple
@@ -73,9 +73,11 @@ from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
+from vllm.v1.core.kv_cache_planning import describe_memory_contributors
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
+    KVCacheGroupSpec,
     MambaSpec,
     PersistentStateSpec,
     SlidingWindowSpec,
@@ -199,6 +201,23 @@ from vllm.v1.worker.utils import (
 from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
 
 logger = init_logger(__name__)
+
+
+@contextmanager
+def _note_memory_contributors(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> Iterator[None]:
+    """Note a persistent-state model's memory contributors on a failure.
+
+    The KV cache allocation precedes every model-state hook, so core names the
+    options the model says also consume device memory.
+    """
+    try:
+        yield
+    except Exception as e:
+        if contributors := describe_memory_contributors(kv_cache_groups):
+            e.add_note(contributors)
+        raise
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -843,7 +862,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             allocate_fn = self.extensible_kv_cache.allocate
 
         # Capture warmup providers that depend on allocated KV-cache strides.
-        with self.jit_warmup_registry.activate():
+        with (
+            self.jit_warmup_registry.activate(),
+            _note_memory_contributors(state_groups),
+        ):
             kv_caches_dict = init_kv_cache(
                 self.compilation_config.static_forward_context,
                 self.kv_cache_config,
