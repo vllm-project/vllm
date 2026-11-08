@@ -240,12 +240,11 @@ def test_layout_matches_reference(kind, seed):
 
 
 def _spec_round(max_branching):
-    """A SpecRound over 4 requests of up to 4 rows; it plans when it branches.
-    The memory profile runs before the spec kernels are bound, so the layers
-    run their own chain kernels: set_resources lays out the trees."""
+    """A SpecRound over 4 requests of up to 4 rows. The memory profile runs
+    before the spec kernels are bound, so the layers run their own chain
+    kernels: set_resources lays out the trees."""
     resources = SpecResources(capture_rows=(4,), max_branching=max_branching)
-    plans = max_branching > 1
-    spec_round = SpecRound(None, resources, 4, 16, 3, DEVICE, plans=plans)  # type: ignore[arg-type]
+    spec_round = SpecRound(None, resources, 4, 16, 3, DEVICE)  # type: ignore[arg-type]
     buffers = InputBuffers(4, 16, DEVICE)
     spec_round.kernels = KernelRegistry()
     spec_round.set_resources(resources, buffers, [])
