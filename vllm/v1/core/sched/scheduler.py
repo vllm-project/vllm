@@ -329,6 +329,9 @@ class Scheduler(SchedulerInterface):
         # The speculator's config (it lives in the workers) answers the
         # per-step candidate budget here; see SpeculatorConfig.candidate_budget.
         self.speculator_config: SpeculatorConfig | None = None
+        # Whether that budget can differ from num_speculative_tokens + 1; if
+        # not, schedule() keeps main's fixed draft count without asking.
+        self.candidate_budget_varies = False
         self.pads_new_decode_rows = False
         # The drafts each running request verifies this step: the previous
         # step's num_spec_tokens_to_schedule. A padded new decode matches them.
@@ -349,6 +352,14 @@ class Scheduler(SchedulerInterface):
             # to the model's layers, else the declared ones. KV slots stay
             # declared.
             self.spec_resources = spec_resources or resources
+            from vllm.v1.worker.gpu.spec_decode import speculator_config
+
+            self.candidate_budget_varies = (
+                type(self.speculator_config).candidate_budget
+                is not speculator_config.SpeculatorConfig.candidate_budget
+                or speculative_config.uses_dynamic_speculative_decoding()
+                or self.spec_resources.max_rows <= self.num_spec_tokens
+            )
             # As on main, not under a Dynamic SD schedule.
             self.pads_new_decode_rows = (
                 not speculative_config.uses_dynamic_speculative_decoding()
@@ -1776,7 +1787,7 @@ class Scheduler(SchedulerInterface):
         # The drafts proposed after this step take at most `budget` rows per
         # request (the root included) when they are verified.
         num_spec_tokens_to_schedule = self.num_spec_tokens
-        if self.speculator_config is not None and len(num_scheduled_tokens) > 0:
+        if self.candidate_budget_varies and len(num_scheduled_tokens) > 0:
             # Chosen after this step's allocation, which reserved the
             # drafter's full lookahead, so any budget can be proposed now.
             budget = self._candidate_budget(len(num_scheduled_tokens))

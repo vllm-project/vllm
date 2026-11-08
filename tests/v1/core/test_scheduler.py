@@ -3073,7 +3073,7 @@ def test_spec_decode_padding_first_decode_step(budget):
     )
     num_spec = 3
     if budget is not None:
-        scheduler.speculator_config.candidate_budget = lambda view: budget
+        _set_candidate_budget(scheduler, lambda view: budget)
         num_spec = budget - 1
     # Two identical 33-token prompts: 2 full blocks (32 tokens) get cached, so a
     # second identical request hits num_computed == num_prompt_tokens - 1.
@@ -8775,6 +8775,32 @@ def test_cpu_encoder_input_updates_preserve_shm_handles(use_v2_model_runner):
     assert request.mm_features[0].data is handle
 
 
+def _set_candidate_budget(scheduler, candidate_budget):
+    """Patch a varying candidate budget onto a built scheduler."""
+    scheduler.speculator_config.candidate_budget = candidate_budget
+    scheduler.candidate_budget_varies = True
+
+
+def test_fixed_candidate_budget_is_never_asked():
+    """A speculator whose budget cannot vary schedules K drafts, as on main,
+    without calling candidate_budget."""
+    scheduler = create_scheduler(num_speculative_tokens=3, max_num_batched_tokens=64)
+    assert not scheduler.candidate_budget_varies
+
+    def candidate_budget(view):
+        raise AssertionError("candidate_budget called on the fixed path")
+
+    scheduler.speculator_config.candidate_budget = candidate_budget
+    for request in create_requests(2, num_tokens=8, max_tokens=8):
+        scheduler.add_request(request)
+    for _ in range(2):
+        output = scheduler.schedule()
+        assert output.num_spec_tokens_to_schedule == 3
+        scheduler.update_from_output(
+            output, runner_output(list(output.num_scheduled_tokens))
+        )
+
+
 def _budget_steps(budget, num_requests: int = 2, num_steps: int = 2):
     """(num_spec_tokens_to_schedule, skip_drafts, views) per step, for decode
     requests under a fixed candidate budget."""
@@ -8786,7 +8812,7 @@ def _budget_steps(budget, num_requests: int = 2, num_steps: int = 2):
         views.append(view)
         return budget
 
-    scheduler.speculator_config.candidate_budget = candidate_budget
+    _set_candidate_budget(scheduler, candidate_budget)
     for request in create_requests(num_requests, num_tokens=8, max_tokens=8):
         scheduler.add_request(request)
     steps = []
@@ -8831,7 +8857,7 @@ def test_candidate_budget_is_not_asked_without_scheduled_requests():
         views.append(view)
         return 4
 
-    scheduler.speculator_config.candidate_budget = candidate_budget
+    _set_candidate_budget(scheduler, candidate_budget)
     scheduler.schedule()
     assert views == []
 
@@ -8870,7 +8896,7 @@ def _scheduler_steps(
         views.append(view)
         return next(budget_iter)
 
-    scheduler.speculator_config.candidate_budget = candidate_budget
+    _set_candidate_budget(scheduler, candidate_budget)
     for request in create_requests(2, num_tokens=8, max_tokens=64):
         scheduler.add_request(request)
     manager = scheduler.kv_cache_manager
@@ -8945,7 +8971,7 @@ def _run_budget_policy(
         return asked[len(outputs)]
 
     scheduler.schedule = recording_schedule
-    scheduler.speculator_config.candidate_budget = candidate_budget
+    _set_candidate_budget(scheduler, candidate_budget)
     for request in create_requests(2, num_tokens=8, max_tokens=120, ignore_eos=True):
         scheduler.add_request(request)
     rng = random.Random(seed)
@@ -9078,3 +9104,5 @@ def test_scheduler_takes_effective_spec_resources():
         scheduler_cls=partial(Scheduler, spec_resources=effective),  # type: ignore[arg-type]
     )
     assert scheduler.spec_resources is effective
+    # Fewer rows than K + 1 cap the budget each step.
+    assert scheduler.candidate_budget_varies
