@@ -133,6 +133,12 @@ class ModelState(ABC):
         """Hook run after the KV cache tensors are allocated and bound."""
         return None
 
+    def rebind_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        """Hook run after an extensible KV cache commits its final size and the
+        runner re-binds every view at the same addresses with the final block
+        count. CUDA graphs captured before stay valid."""
+        return None
+
     def capture_inner_cudagraphs(
         self,
         input_buffers: InputBuffers,

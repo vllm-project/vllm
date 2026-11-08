@@ -9,8 +9,8 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 class KimiK3ModelState(MambaHybridModelState):
     """Builds the specialized decode once the weights are loaded, and prepares it
-    for every bound KV cache (the CUDA-graph memory-profiling cache, then the real
-    one)."""
+    for every bound KV cache (the CUDA-graph memory-profiling cache, the real one,
+    then its views at the final size of an extensible KV cache)."""
 
     def __init__(self, vllm_config, model, encoder_cache, device):
         super().__init__(vllm_config, model, encoder_cache, device)
@@ -22,6 +22,13 @@ class KimiK3ModelState(MambaHybridModelState):
 
     def initialize_kv_cache(self, kv_cache_config, block_tables):
         super().initialize_kv_cache(kv_cache_config, block_tables)
+        self._prepare_kv()
+
+    def rebind_kv_cache(self, kv_cache_config):
+        super().rebind_kv_cache(kv_cache_config)
+        self._prepare_kv()
+
+    def _prepare_kv(self) -> None:
         decode = self.language_model.specialized_decode
         if decode is not None:
             decode.prepare_kv()

@@ -401,6 +401,51 @@ def test_engine_pads_segments_without_a_connector(
     assert all(offset % granule == 0 for offset in offsets)
 
 
+def _rebound_and_final_views(worker):
+    runner = worker.model_runner
+    final = {
+        name: (view.data_ptr(), view.numel())
+        for name, view in runner.kv_caches_by_layer.items()
+    }
+    rebound = getattr(runner.model_state, "rebound", [])
+    return rebound, (worker.cache_config.num_gpu_blocks, final)
+
+
+@requires_cuda
+def test_engine_rebinds_model_state_to_extended_views(
+    vmm, vllm_runner, enable_pickle, monkeypatch
+):
+    """Model states that keep the views bound at initialize_kv_cache (e.g.
+    Kimi-K3's specialized decode) are told once the final size re-binds them."""
+    from vllm.v1.worker.gpu.model_states.interface import ModelState
+
+    def rebind_kv_cache(self, kv_cache_config):
+        layers = self.vllm_config.compilation_config.static_forward_context
+        views = {
+            name: (layers[name].kv_cache.data_ptr(), layers[name].kv_cache.numel())
+            for group in kv_cache_config.kv_cache_groups
+            for name in group.layer_names
+        }
+        self.rebound = [
+            *getattr(self, "rebound", []),
+            (kv_cache_config.num_blocks, views),
+        ]
+
+    # In process, so that the worker's model state sees the patch.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    # Pinned: views are rebuilt for block-compact layouts only.
+    monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", KVCacheLayout.LBHNC.name)
+    monkeypatch.setattr(ModelState, "rebind_kv_cache", rebind_kv_cache)
+    with vllm_runner(
+        "Qwen/Qwen3-0.6B",
+        enforce_eager=True,
+        max_model_len=256,
+        enable_extensible_kv_cache=True,
+    ) as runner:
+        ((rebound, final),) = runner.llm.collective_rpc(_rebound_and_final_views)
+    assert rebound == [final]
+
+
 @requires_cuda
 @pytest.mark.parametrize("num_layers", [28, 85])
 def test_block_outermost_views_have_mapped_memory_past_their_start(vmm, num_layers):

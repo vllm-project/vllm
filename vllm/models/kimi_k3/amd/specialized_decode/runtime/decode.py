@@ -200,7 +200,8 @@ class SpecializedDecode:
 
     def prepare_kv(self) -> None:
         """Checks and binds the KDA states and MLA caches vLLM just bound (the
-        CUDA-graph memory profiling cache, then the real one)."""
+        CUDA-graph memory profiling cache, the real one, then its views at the
+        final size of an extensible KV cache)."""
         self._kv = None
         if self._kv_key() is None:
             return
@@ -245,7 +246,7 @@ class SpecializedDecode:
         if self._kv_key() != self._kv:
             raise RuntimeError(
                 "Kimi-K3 specialized decode: the KV cache was re-bound without "
-                "prepare_kv (ModelState.initialize_kv_cache)"
+                "prepare_kv (ModelState.initialize_kv_cache, rebind_kv_cache)"
             )
         return Step(width, md, kernels)
 
