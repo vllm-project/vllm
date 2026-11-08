@@ -934,6 +934,9 @@ class _FlakyAsyncClient:
         return response
 
 
+@pytest.mark.xfail(
+    strict=True, reason="Patches the wrong httpx module; fixed by #63122"
+)
 @pytest.mark.asyncio
 async def test_register_worker_retries_on_read_timeout(monkeypatch):
     """A slow rank-0 bootstrap response must be retried, not treated as fatal."""
@@ -953,6 +956,9 @@ async def test_register_worker_retries_on_read_timeout(monkeypatch):
     assert len(calls) == 3
 
 
+@pytest.mark.xfail(
+    strict=True, reason="Patches the wrong httpx module; fixed by #63122"
+)
 @pytest.mark.asyncio
 async def test_register_worker_raises_after_max_attempts(monkeypatch):
     """Terminal registration failure must raise, not loop forever."""
