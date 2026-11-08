@@ -22,6 +22,14 @@ flowchart LR
     CPU <--> SN["..."]
 ```
 
+## GPU KV cache pressure
+
+Async KV loads reserve GPU KV space for their remaining prompt and speculative
+decoding margin. New admissions and running requests leave that space available
+until the loaded request resumes. Under KV cache pressure, running requests can
+be preempted to preserve this reservation. Async loads require room for their
+full prompt even when `scheduler_reserve_full_isl` is disabled.
+
 ## Per-request load control
 
 Individual requests can cap how many tokens are loaded from offloaded storage

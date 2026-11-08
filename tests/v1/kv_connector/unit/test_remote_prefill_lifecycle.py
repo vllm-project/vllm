@@ -856,7 +856,8 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
     assert outputs[0].finish_reason == FinishReason.LENGTH
 
 
-def test_async_load_reserves_blocks_for_inflight():
+@pytest.mark.parametrize("reserve_full_isl", [False, True])
+def test_async_load_reserves_blocks_for_inflight(reserve_full_isl):
     """A second async KV-connector load is not admitted if its initial
     allocation would consume blocks reserved for an already in-flight sequence.
 
@@ -866,6 +867,7 @@ def test_async_load_reserves_blocks_for_inflight():
     held back in WAITING (holding no blocks) rather than wedging req_a.
     """
     vllm_config = create_vllm_config()
+    vllm_config.scheduler_config.scheduler_reserve_full_isl = reserve_full_isl
     BLOCK_SIZE = vllm_config.cache_config.block_size
     scheduler = create_scheduler(vllm_config, num_blocks=8)  # usable = 7
 
@@ -902,6 +904,112 @@ def test_async_load_reserves_blocks_for_inflight():
     ].req_to_blocks
     assert req_a.request_id in req_to_blocks
     assert req_b.request_id not in req_to_blocks
+
+
+@pytest.mark.parametrize("num_spec_tokens", [None, 3])
+def test_local_admission_preserves_parked_load_tails(num_spec_tokens):
+    """Local work must leave parked loads enough space to resume and finish."""
+    config = create_vllm_config(num_speculative_tokens=num_spec_tokens)
+    block_size = config.cache_config.block_size
+    scheduler = create_scheduler(config, num_blocks=11)
+    remote = [
+        create_request(
+            request_id=i,
+            block_size=block_size,
+            num_tokens=4 * block_size,
+            do_remote_prefill=True,
+            max_tokens=1,
+        )
+        for i in (1, 2)
+    ]
+    for request in remote:
+        scheduler.add_request(request)
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        return_value=(block_size, True),
+    ):
+        scheduler.schedule()
+
+    local = create_request(request_id=3, num_tokens=4 * block_size, max_tokens=1)
+    scheduler.add_request(local)
+    output = scheduler.schedule()
+    assert not output.num_scheduled_tokens
+    assert not any(scheduler.kv_cache_manager.get_block_ids(local.request_id))
+
+    scheduler.update_from_output(
+        output,
+        create_model_runner_output(
+            [], finished_recving={request.request_id for request in remote}
+        ),
+    )
+    finished: set[str] = set()
+    for _ in range(8):
+        output = scheduler.schedule()
+        result = scheduler.update_from_output(
+            output, create_model_runner_output(list(scheduler.running))
+        )
+        for client_output in result.values():
+            finished.update(
+                item.request_id
+                for item in client_output.outputs
+                if item.finish_reason is not None
+            )
+        if not scheduler.has_requests():
+            break
+    assert finished == {request.request_id for request in [*remote, local]}
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)
+
+
+def test_decode_growth_preserves_parked_load_tail():
+    """Decode is preemptible; an unfinished async transfer's tail is not."""
+    config = create_vllm_config()
+    block_size = config.cache_config.block_size
+    scheduler = create_scheduler(config, num_blocks=7)
+    running = create_request(num_tokens=block_size, max_tokens=100)
+    scheduler.add_request(running)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, create_model_runner_output([running]))
+
+    remote = create_request(
+        num_tokens=4 * block_size, do_remote_prefill=True, max_tokens=1
+    )
+    scheduler.add_request(remote)
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        return_value=(block_size, True),
+    ):
+        output = scheduler.schedule()
+    scheduler.update_from_output(output, create_model_runner_output([running]))
+    assert remote.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    for _ in range(2 * block_size):
+        output = scheduler.schedule()
+        scheduler.update_from_output(
+            output, create_model_runner_output(list(scheduler.running))
+        )
+        if running.status == RequestStatus.PREEMPTED:
+            break
+    assert running.status == RequestStatus.PREEMPTED
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() >= 3
+
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        create_model_runner_output(
+            list(scheduler.running), finished_recving={remote.request_id}
+        ),
+    )
+    output = scheduler.schedule()
+    assert remote.request_id in output.num_scheduled_tokens
+    scheduler.update_from_output(
+        output, create_model_runner_output(list(scheduler.running))
+    )
+    scheduler.finish_requests(running.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)
 
 
 def test_async_loads_both_admitted_when_pool_fits():

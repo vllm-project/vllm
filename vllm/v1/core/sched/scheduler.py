@@ -498,7 +498,7 @@ class Scheduler(SchedulerInterface):
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
-        # Remaining-block reservations of in-flight prefills gate async loads.
+        # Remaining-block reservations of in-flight prefills gate admissions.
         # Parked async KV loads can number thousands, so theirs are cached until
         # they are scheduled; prefill chunks are few and summed on demand.
         self._inflight_prefills: set[Request] = set()
@@ -931,6 +931,10 @@ class Scheduler(SchedulerInterface):
                         request,
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
+                        # Parked transfers cannot release their prefix blocks.
+                        reserved_blocks=self._inflight_prefill_reserved_blocks(
+                            parked_only=True
+                        ),
                     )
 
                     if new_blocks is not None:
@@ -1479,17 +1483,16 @@ class Scheduler(SchedulerInterface):
                         for i in encoder_inputs_to_schedule
                     )
 
-                reserved_blocks = 0
+                reserved_blocks = self._inflight_prefill_reserved_blocks(
+                    exclude=request, parked_only=not load_kv_async
+                )
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
                     # only if it fits in (free - other in-flight reservations)
                     # plus its own spec decode step blocks, to avoid deadlock and
                     # predictable preemptions.
-                    reserved_blocks = (
-                        self._inflight_prefill_reserved_blocks()
-                        + self._spec_decode_step_blocks
-                    )
+                    reserved_blocks += self._spec_decode_step_blocks
 
                 # Replayed tokens are already counted in the adopted hit; a
                 # chunk that ends inside the replayed range needs no new slots.
@@ -1508,7 +1511,9 @@ class Scheduler(SchedulerInterface):
                         else ()
                     ),
                     num_encoder_tokens=num_encoder_tokens,
-                    full_sequence_must_fit=self.scheduler_reserve_full_isl,
+                    full_sequence_must_fit=(
+                        self.scheduler_reserve_full_isl or load_kv_async
+                    ),
                     reserved_blocks=reserved_blocks,
                     has_scheduled_reqs=bool(self.running),
                 )
@@ -3563,10 +3568,20 @@ class Scheduler(SchedulerInterface):
                 kv_fetch_stages[request] = stage
                 self._kv_fetch_counts[stage] += 1
 
-    def _inflight_prefill_reserved_blocks(self) -> int:
+    def _inflight_prefill_reserved_blocks(
+        self, exclude: Request | None = None, *, parked_only: bool = False
+    ) -> int:
         """Num blocks in-flight prefills still need to finish (their reservation)."""
-        return self._parked_reserved_blocks + sum(
-            self._request_remaining_blocks(req) for req in self._inflight_prefills
+        if parked_only and self.connector is None:
+            return 0
+        reserved = self._parked_reserved_blocks
+        if exclude is not None:
+            reserved -= self._parked_reservations.get(exclude, 0)
+        return reserved + sum(
+            self._request_remaining_blocks(req)
+            for req in self._inflight_prefills
+            if req is not exclude
+            and (not parked_only or req.status != RequestStatus.RUNNING)
         )
 
     def _reserve_parked(self, request: Request) -> None:

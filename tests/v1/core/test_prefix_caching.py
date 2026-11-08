@@ -5728,11 +5728,13 @@ def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
     )
 
 
-@pytest.mark.parametrize(("reserved_blocks", "fits"), [(4, True), (10, False)])
-def test_full_sequence_admission_reserves_device_blocks_for_immediate_chunk(
+@pytest.mark.parametrize(
+    ("reserved_blocks", "fits"), [(2, True), (3, False), (10, False)]
+)
+def test_full_sequence_admission_preserves_reserved_device_blocks(
     reserved_blocks, fits
 ):
-    """Reservations constrain the current allocation, not the entire prompt."""
+    """The full prompt must fit alongside other requests' reserved tails."""
     block_size = 16
     config = KVCacheConfig(
         num_blocks=11,  # Ten usable blocks after the null block.
