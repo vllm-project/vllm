@@ -230,7 +230,6 @@ class AdaptiveVerificationManager:
         req_states: "RequestState",
         query_start_loc: torch.Tensor,
         num_bonus_tokens: int,
-        max_total_logits: int,
         copy_admitted_drafts_to_host: bool = False,
     ):
         self.req_states = req_states
@@ -239,10 +238,6 @@ class AdaptiveVerificationManager:
         self._copy_stream = torch.cuda.Stream(device)
 
         self.num_bonus_tokens = num_bonus_tokens
-        # Rejection sampling verifies logits in one contiguous chunk; the
-        # chunked path indexes by scheduled (untrimmed) offsets and cannot
-        # address the compacted layout, so the budget must fit one chunk.
-        self._max_total_logits = max_total_logits
         self.query_start_loc = query_start_loc
         self.cost_tables: tuple[np.ndarray, np.ndarray] | None = None
         # Largest cudagraph-captured token count; above it nothing pads.
@@ -264,14 +259,15 @@ class AdaptiveVerificationManager:
         self._num_non_draft_tokens = torch.empty_like(query_start_loc[:-1])
         self._cu_num_logits = torch.empty_like(query_start_loc)
 
-        # Batch-sharded sampling sizes its all-to-all from host counts, so it
-        # needs the admitted split on the host.
+        # Batch-sharded sampling sizes its all-to-all from host counts, and
+        # chunked rejection sampling cuts chunks at request boundaries, so both
+        # need the admitted split on the host.
         self._copy_admitted_drafts_to_host = copy_admitted_drafts_to_host
-        if copy_admitted_drafts_to_host:
-            self._admitted_drafts_cpu = torch.empty(
-                max_num_reqs, dtype=torch.int32, pin_memory=True
-            )
-            self._admitted_drafts_event = torch.cuda.Event(blocking=True)
+        self._verification_chunked = False
+        self._admitted_drafts_cpu = torch.empty(
+            max_num_reqs, dtype=torch.int32, pin_memory=True
+        )
+        self._admitted_drafts_event = torch.cuda.Event(blocking=True)
 
         # Two D2H slots preserve stale inputs for budget selection.
         self._stale_confidences = [
@@ -400,8 +396,13 @@ class AdaptiveVerificationManager:
         self,
         num_tokens_per_req: dict[str, int],
         draft_tokens: dict[str, list[int]],
+        max_total_logits: int | None,
     ) -> int:
         """Token count once the draft budget is trimmed to fit.
+
+        max_total_logits bounds one rejection-sampling chunk (None: unchunked).
+        A budget whose logits overflow one chunk has the admitted draft counts
+        copied to the host, where the chunks are cut at request boundaries.
 
         Stashes the chosen budget in ``_batch_budget`` for the compaction and
         reallocation that follow in the same step.
@@ -429,10 +430,7 @@ class AdaptiveVerificationManager:
         valid = steps[None, :] < scheduled_drafts[:, None]
         scores = np.sort(survival_probability[valid])[::-1]
         num_non_draft_tokens_total = int(num_non_draft_tokens.sum())
-        max_draft_budget = min(
-            int(scheduled_drafts.sum()),
-            max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens),
-        )
+        max_draft_budget = int(scheduled_drafts.sum())
         scores = scores[:max_draft_budget]
         draft_cost_ms, verify_cost_ms = self.cost_tables
         num_sampling_requests = np.count_nonzero(
@@ -459,6 +457,10 @@ class AdaptiveVerificationManager:
             for req_id, num_tokens in zip(req_ids, num_non_draft_tokens, strict=True)
         }
         draft_budget = int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
+        self._verification_chunked = (
+            max_total_logits is not None
+            and num_reqs * self.num_bonus_tokens + draft_budget > max_total_logits
+        )
         self._batch_budget = (
             num_drafts_per_req,
             num_non_draft_tokens_per_req,
@@ -509,8 +511,9 @@ class AdaptiveVerificationManager:
     def reallocate_drafts(
         self, req_ids: list[str], idx_mapping: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, int, AdmittedDraftCounts | None]:
-        """The admitted draft counts are None unless copy_admitted_drafts_to_host
-        is set and the budget binds; otherwise the host counts are already exact.
+        """The admitted draft counts are None unless the budget binds and either
+        copy_admitted_drafts_to_host is set or verification is chunked; otherwise
+        the host counts are already exact or not needed.
         """
         batch_budget, self._batch_budget = self._batch_budget, None
         assert batch_budget is not None
@@ -562,7 +565,7 @@ class AdaptiveVerificationManager:
         self.query_start_loc[num_reqs + 1 :].fill_(num_tokens)
 
         admitted_drafts = None
-        if self._copy_admitted_drafts_to_host and (
+        if (self._copy_admitted_drafts_to_host or self._verification_chunked) and (
             0 < draft_budget < int(scheduled_drafts.sum())
         ):
             admitted_cpu = self._admitted_drafts_cpu[:num_reqs]
@@ -589,7 +592,6 @@ def maybe_create_adaptive_verification_manager(
     req_states: "RequestState",
     query_start_loc: torch.Tensor,
     num_bonus_tokens: int,
-    max_total_logits: int,
     vllm_config: "VllmConfig",
     target_layer_names: set[str] | None = None,
     additional_attn_cg_support: tuple[AttentionCGSupport, str | None] | None = None,
@@ -641,6 +643,5 @@ def maybe_create_adaptive_verification_manager(
         req_states,
         query_start_loc,
         num_bonus_tokens,
-        max_total_logits=max_total_logits,
         copy_admitted_drafts_to_host=copy_admitted_drafts_to_host,
     )

@@ -366,6 +366,8 @@ class BatchSharder:
             cu_num_logits_np=local_cu_num_logits_np,
             num_draft_tokens=num_draft_tokens,
             num_draft_tokens_per_req=num_draft_tokens_per_req,
+            # local_cu_num_logits_np already follows the admitted counts.
+            num_admitted_draft_tokens=None,
         )
         local_grammar_output = None
         if grammar_output is not None:
