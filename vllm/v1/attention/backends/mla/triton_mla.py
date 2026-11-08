@@ -100,12 +100,16 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
         # forward_mqa flattens each request's block to query_len decode rows,
         # and query_len is bounded by the reorder threshold. DCP all-gathers
         # the query heads before forward_mqa.
+        self._reserve_attn_logits_workspace()
+
+    def _reserve_attn_logits_workspace(self) -> None:
         _reserve_attn_logits_workspace(
-            vllm_config,
-            vllm_config.scheduler_config.max_num_seqs * self.reorder_batch_threshold,
+            self.vllm_config,
+            self.vllm_config.scheduler_config.max_num_seqs
+            * self.reorder_batch_threshold,
             self.num_heads * self.dcp_world_size,
             self.mla_dims.kv_lora_rank,
-            get_kv_cache_spec_sliding_window(kv_cache_spec),
+            get_kv_cache_spec_sliding_window(self.kv_cache_spec),
         )
 
     def update_draft_decode_metadata(self, _metadata: MLACommonMetadata) -> None:

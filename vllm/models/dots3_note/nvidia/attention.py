@@ -27,6 +27,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
     CommonAttentionMetadata,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
     FlashAttnMLASparseBackend,
@@ -496,6 +497,21 @@ class Dots3NoteTritonMLAImpl(TritonMLAImpl):
         # forward_mqa runs _forward_swa_mqa, which never reaches the split-KV
         # Triton decode kernels.
         return
+
+    def reserve_workspace(self) -> None:
+        if not is_workspace_manager_initialized():
+            return
+        vllm_config = self._vllm_config
+        batch = vllm_config.scheduler_config.max_num_seqs
+        max_query_len = max_decode_query_len(vllm_config)
+        gather_len = (self.sliding_window + max_query_len - 1 + 7) // 8 * 8
+        current_workspace_manager().get_simultaneous(
+            (
+                (batch, gather_len, self.head_size),
+                vllm_config.model_config.dtype,
+            ),
+            ((batch, gather_len), torch.bool),
+        )
 
     def _forward_swa_mqa(
         self,

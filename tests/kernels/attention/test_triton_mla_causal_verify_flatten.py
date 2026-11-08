@@ -238,11 +238,17 @@ def test_workspace_reservation_is_sized_by_the_sliding_window():
         sliding_window=window,
     )
 
-    def builder_init(self, *args):
+    def builder_init(self, kv_cache_spec, _layer_names, vllm_config, _device):
+        self.kv_cache_spec = kv_cache_spec
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
         self.dcp_world_size = 1
         self.reorder_batch_threshold = 1
         self.num_heads = NUM_HEADS
-        self.mla_dims = SimpleNamespace(kv_lora_rank=KV_LORA_RANK)
+        self.mla_dims = SimpleNamespace(
+            kv_lora_rank=KV_LORA_RANK,
+            qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+        )
 
     impl = _make_impl()
     impl.num_heads = NUM_HEADS
@@ -267,3 +273,68 @@ def test_workspace_reservation_is_sized_by_the_sliding_window():
     assert expected < _compute_num_kv_splits(max_model_len, sm_count)
     reserved = [call.args[0][0][2] for call in workspace.get_simultaneous.mock_calls]
     assert reserved == [expected, expected]
+
+
+def test_dots3_note_swa_workspace_reservation():
+    """Dots3Note SWA decode gathers (batch, gather_len, head_size) and a bool
+    mask rather than split-KV logits. Both the builder and impl must reserve
+    those exact SWA gather buffers so neither memory profiling nor post-lock
+    decode mismatches the runtime workspace."""
+    from vllm.models.dots3_note.nvidia.attention import (
+        Dots3NoteMLAMetadataBuilder,
+        Dots3NoteTritonMLAImpl,
+    )
+
+    window, max_num_seqs, query_len = 2048, 8, 2
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=1 << 20, dtype=torch.bfloat16),
+        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
+    )
+    spec = SlidingWindowMLASpec(
+        block_size=PAGE_SIZE,
+        num_kv_heads=1,
+        head_size=HEAD_SIZE,
+        dtype=torch.bfloat16,
+        sliding_window=window,
+    )
+
+    def builder_init(self, kv_cache_spec, _layer_names, vllm_config, _device):
+        self.kv_cache_spec = kv_cache_spec
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.dcp_world_size = 1
+        self.reorder_batch_threshold = query_len
+        self.num_heads = NUM_HEADS
+        self.mla_dims = SimpleNamespace(
+            kv_lora_rank=KV_LORA_RANK,
+            qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+        )
+
+    impl = object.__new__(Dots3NoteTritonMLAImpl)
+    impl.head_size = HEAD_SIZE
+    impl.sliding_window = window
+    impl._vllm_config = vllm_config
+
+    workspace = MagicMock()
+    dots3_attn = "vllm.models.dots3_note.nvidia.attention"
+    triton_mla = "vllm.v1.attention.backends.mla.triton_mla"
+    with (
+        patch(f"{dots3_attn}.is_workspace_manager_initialized", return_value=True),
+        patch(f"{dots3_attn}.current_workspace_manager", return_value=workspace),
+        patch(f"{dots3_attn}.max_decode_query_len", return_value=query_len),
+        patch(f"{triton_mla}.is_workspace_manager_initialized", return_value=True),
+        patch(f"{triton_mla}.current_workspace_manager", return_value=workspace),
+        patch.object(MLACommonMetadataBuilder, "__init__", builder_init),
+    ):
+        Dots3NoteMLAMetadataBuilder(spec, ["layer0"], vllm_config, "cpu")
+        impl.reserve_workspace()
+
+    gather_len = (window + query_len - 1 + 7) // 8 * 8
+    expected_args = (
+        ((max_num_seqs, gather_len, HEAD_SIZE), torch.bfloat16),
+        ((max_num_seqs, gather_len), torch.bool),
+    )
+    assert [call.args for call in workspace.get_simultaneous.mock_calls] == [
+        expected_args,
+        expected_args,
+    ]
