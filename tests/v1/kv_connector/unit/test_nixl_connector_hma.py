@@ -146,7 +146,7 @@ def test_position_mapped_alias_pull_uses_logical_pages():
         ),
     )
     pairs = SimpleNamespace(
-        local=[7, 7], remote=[0, 1], group=[0, 1], layer_groups_match=True
+        local=[7, 7], remote=[0, 1], group=[0, 1], remote_group=[0, 1]
     )
     plan = SimpleNamespace(all_source_ranks=(0,))
     remote_info = _position_remote_info()
@@ -180,7 +180,7 @@ def test_position_mapped_alias_pull_follows_positions_not_order():
             block_positions=(((3, 40), (4, 41), (5, 42), (6, 43)),),
         ),
     )
-    pairs = SimpleNamespace(local=[0], remote=[0], group=[0], layer_groups_match=True)
+    pairs = SimpleNamespace(local=[0], remote=[0], group=[0], remote_group=[0])
     plan = SimpleNamespace(all_source_ranks=(0,))
 
     (spec,) = worker._build_position_read_specs(
@@ -213,7 +213,7 @@ def test_position_mapped_alias_pull_rejects_conflicting_sources():
     # Two layers, both aliasing local region 7 but holding different pages on
     # the prefill side.
     pairs = SimpleNamespace(
-        local=[7, 7], remote=[0, 1], group=[0, 0], layer_groups_match=True
+        local=[7, 7], remote=[0, 1], group=[0, 0], remote_group=[0, 0]
     )
     plan = SimpleNamespace(all_source_ranks=(0,))
 
@@ -335,7 +335,7 @@ def test_position_mapped_pull_builds_pair_descriptors(region_pull_worker):
             remote_regions=[0, 1],
             partner=[2, 2],
             groups_match=False,
-            layer_groups_match=True,
+            remote_group=[0, 1],
             remote_ssm_regions=None,
         )
     }

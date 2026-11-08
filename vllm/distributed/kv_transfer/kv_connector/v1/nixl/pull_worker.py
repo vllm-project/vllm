@@ -549,11 +549,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             raise NotImplementedError(
                 "Position-mapped NIXL pulls require a device-resident producer"
             )
-        if not pairs.layer_groups_match:
-            raise NotImplementedError(
-                "Position-mapped NIXL pulls require every layer to stay in its "
-                "cache group on both sides"
-            )
         if len(meta.local_block_positions) != len(
             self.kv_cache_config.transfer_groups
         ) or len(meta.local_required_positions) != len(meta.local_block_positions):
@@ -564,38 +559,44 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_positions = [dict(group) for group in meta.local_block_positions]
         remote_positions = [dict(group) for group in meta.remote.block_positions]
         required = [sorted(set(group)) for group in meta.local_required_positions]
+        remote_groups = pairs.remote_group or pairs.group
         sources: dict[tuple[int, int, int], tuple[int, int]] = {}
         pair_infos: list[tuple[int, int, list[int], list[int]]] = []
-        for local_region, remote_region, group in zip(
-            pairs.local, pairs.remote, pairs.group, strict=True
+        for local_region, remote_region, local_group, remote_group in zip(
+            pairs.local, pairs.remote, pairs.group, remote_groups, strict=True
         ):
-            if not 0 <= group < len(required):
+            if not 0 <= local_group < len(required):
                 raise NotImplementedError(
                     "Position-mapped NIXL pulls cannot transfer a cache group "
                     "without block positions"
                 )
+            if not 0 <= remote_group < len(remote_positions):
+                raise NotImplementedError(
+                    "Position-mapped NIXL pulls cannot transfer a remote cache "
+                    "group without block positions"
+                )
             local_blocks: list[int] = []
             remote_blocks: list[int] = []
-            for position in required[group]:
-                local_block = local_positions[group].get(position)
+            for position in required[local_group]:
+                local_block = local_positions[local_group].get(position)
                 if local_block is None:
                     raise RuntimeError(
                         f"Local KV has no page at logical position {position}"
                     )
-                remote_block = remote_positions[group].get(position)
+                remote_block = remote_positions[remote_group].get(position)
                 if remote_block is None:
                     raise RuntimeError(
                         "Prefill KV does not cover logical page "
-                        f"{position} of cache group {group}"
+                        f"{position} of remote cache group {remote_group}"
                     )
-                key = (local_region, group, local_block)
+                key = (local_region, local_group, local_block)
                 source = (remote_region, remote_block)
                 known = sources.get(key)
                 if known is None:
                     sources[key] = source
                 elif known != source:
                     raise NotImplementedError(
-                        f"Local KV page {local_block} of cache group {group} "
+                        f"Local KV page {local_block} of cache group {local_group} "
                         f"aliases remote regions {known[0]} and {remote_region}; "
                         "the connector needs an explicit sharing relation to "
                         "choose between them"

@@ -762,11 +762,13 @@ def region_pairs_by_index(
     )
 
     regions = list(range(num_regions))
+    groups = list(groups) if groups is not None else [0] * num_regions
     return _RegionPairs(
         remote=regions,
         local=regions,
-        group=list(groups) if groups is not None else [0] * num_regions,
+        group=groups,
         remote_regions=regions,
         partner=regions,
         groups_match=groups_match,
+        remote_group=list(groups),
     )
