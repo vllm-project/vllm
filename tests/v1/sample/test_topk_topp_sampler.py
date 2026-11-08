@@ -949,6 +949,104 @@ class TestTritonTopkTopp:
         num_kept_ties = kept_ties.sum(dim=-1, keepdim=True)
         assert torch.equal(kept_ties, torch.arange(num_ties) < num_kept_ties)
 
+    @staticmethod
+    def _exact_cut(logits, k, p):
+        """Top-k with ties to the lowest index, then top-p over the survivors."""
+        out = torch.full_like(logits, float("-inf"))
+        vals, idx = torch.sort(logits.double(), dim=-1, descending=True, stable=True)
+        for r in range(logits.shape[0]):
+            v, i = vals[r, : int(k[r])], idx[r, : int(k[r])]
+            keep = torch.ones_like(v, dtype=torch.bool)
+            if p is not None and float(p[r]) < 1.0:
+                prob = torch.softmax(v, 0)
+                keep = torch.cumsum(prob, 0) - prob < float(p[r])
+            out[r, i[keep]] = logits[r, i[keep]]
+        return out
+
+    @staticmethod
+    def _tied_topp_cut(rows: int, vocab_size: int) -> torch.Tensor:
+        logits = torch.full((rows, vocab_size), -30.0)
+        logits[:, 5:65:3] = 0.5
+        logits[:, [9000, 70000, 140000]] = torch.tensor([2.0, 1.5, 1.0])
+        return logits
+
+    @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="GPU-only path")
+    @pytest.mark.parametrize("use_p", [True, False])
+    def test_split_topk_matches_exact_cut(self, use_p: bool):
+        """The split top-k pipeline keeps exactly the sort-based cut."""
+        from vllm.v1.sample.ops.topk_topp_triton import _apply_topk_split
+
+        logits = torch.randn(8, 151936, generator=self.generator) * 4
+        logits = logits.bfloat16().float()
+        logits[3, ::997] = torch.topk(logits[3], 20).values[-1]
+        logits[4] = self._tied_topp_cut(1, 151936)[0]
+        logits[5, 7] = 150.0
+        logits[6] = float("-inf")
+        logits[6, [0, 7, 300]] = torch.tensor([1.0, 3.0, 2.0])
+        logits[7] = float("nan")
+        k = torch.tensor([1, 64, 17, 20, 20, 20, 20, 20], dtype=torch.int32)
+        p = torch.tensor([0.9, 0.999999, 1e-6, 0.95, 0.5, 1.0, 0.95, 0.95])
+        p = p if use_p else None
+
+        out = logits.clone()
+        _apply_topk_split(out, k, p, 64, float("-inf"))
+        expected = self._exact_cut(logits[:7], k[:7], None if p is None else p[:7])
+        assert torch.equal(out[:7], expected)
+        assert torch.isneginf(out[7]).all()
+
+    @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="GPU-only path")
+    def test_split_topk_supported_matches_architecture(self):
+        """Production dispatch is on for CDNA 3 and 4 only."""
+        import vllm.v1.sample.ops.topk_topp_triton as tt
+
+        if not current_platform.is_rocm():
+            assert not tt._topk_split_supported()
+            return
+        from vllm.platforms.rocm import get_cdna_version
+
+        assert tt._topk_split_supported() == (get_cdna_version() in (3, 4))
+
+    @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="GPU-only path")
+    @pytest.mark.parametrize(
+        "rows,max_top_k,vocab_size,taken",
+        [
+            (1, 20, 151936, True),
+            (5, 64, 151936, False),
+            (2, None, 151936, False),
+            (2, 20, 149999, False),
+        ],
+    )
+    def test_split_topk_dispatch(self, rows, max_top_k, vocab_size, taken, monkeypatch):
+        """Gated shapes run the split kernels and give the exact cut."""
+        import vllm.v1.sample.ops.topk_topp_triton as tt
+
+        monkeypatch.setattr(tt, "_topk_split_supported", lambda: True)
+        calls = 0
+        run_split = tt._apply_topk_split
+
+        def counting_split(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return run_split(*args, **kwargs)
+
+        monkeypatch.setattr(tt, "_apply_topk_split", counting_split)
+
+        logits = self._tied_topp_cut(rows, vocab_size)
+        k = torch.full((rows,), 20, dtype=torch.int32)
+        p = torch.full((rows,), 0.5)
+        mono = tt.apply_top_k_top_p_triton(
+            logits.clone(), k, p, has_topp_only_rows=False
+        )
+        exact = self._exact_cut(logits, k, p)
+        assert not torch.equal(mono, exact), "input must tell the two paths apart"
+        assert calls == 0, "an unknown max_top_k must not reach the split"
+
+        out = tt.apply_top_k_top_p_triton(
+            logits.clone(), k, p, has_topp_only_rows=False, max_top_k=max_top_k
+        )
+        assert calls == int(taken), "the gate did not pick the expected path"
+        assert torch.equal(out, exact if taken else mono)
+
 
 # =============================================================================
 # FlashInfer top-k/top-p robustness tests
