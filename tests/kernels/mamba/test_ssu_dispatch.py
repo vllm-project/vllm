@@ -85,6 +85,7 @@ def _replayssm_mixer(kv_cache, ring_start, committed, A):
         replayssm_buffer_len=16,
         A=A,
         mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+        use_flashinfer_replayssm=True,
     )
 
 
