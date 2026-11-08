@@ -407,7 +407,7 @@ LOOP_MESSAGES = [
 
 @pytest.fixture(scope="module")
 def loop_break_server():
-    """A Qwen3-0.6B server on Model Runner V2 with loop breaking on."""
+    """A Qwen3-0.6B server with loop breaking on."""
     args = [
         "--reasoning-parser",
         "qwen3",
@@ -420,9 +420,7 @@ def loop_break_server():
         "0.2",
         "--no-async-scheduling",
     ]
-    with RemoteOpenAIServer(
-        MODEL_NAME, args, env_dict={"VLLM_USE_V2_MODEL_RUNNER": "1"}
-    ) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
