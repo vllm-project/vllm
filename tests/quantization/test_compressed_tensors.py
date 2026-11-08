@@ -48,7 +48,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
+    should_ignore_layer,
 )
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -705,6 +707,118 @@ def test_get_scheme_dict_returns_none_on_no_match():
         layer_name="model.layers.0.unmatched_layer",
     )
     assert result is None
+
+
+def test_apply_vllm_mapper_rewrites_regex_literals_and_keeps_fusion():
+    """Prefix, substring, and suffix rules apply to re: targets.
+
+    Stacked q/k/v maps stay on concrete paths. Class names and kv-cache
+    field names are left alone.
+    """
+    gate = {"weights": "gate"}
+    attn = {"weights": "attn"}
+    linear = {"weights": "linear"}
+    config = CompressedTensorsConfig(
+        target_scheme_map={
+            "Linear": linear,
+            r"re:^model\.layers\.\d+\.mlp\.fc1\.gate\Z": gate,
+            r"re:.*self_attn\..*": attn,
+            r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z": {"weights": "q"},
+        },
+        ignore=[
+            "multi_modal_projector.linear_1",
+            r"re:^multi_modal_projector\.linear_\d+\Z",
+            r"re:^model\.layers\.\d+\.mlp\.gate\Z",
+            r"re:^model\.layers\.\d+\.ffn\.gate\.bias\Z",
+            r"re:^mtp\.layers\.\d+\Z",
+        ],
+        quant_format="pack-quantized",
+        kv_cache_scheme={
+            "type": "float",
+            "num_bits": 8,
+            "strategy": "tensor",
+            "symmetric": True,
+        },
+    )
+    mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "multi_modal_projector.": "vision_tower.multi_modal_projector.",
+        },
+        orig_to_new_substr={
+            ".mlp.fc1.": ".fc1.",
+            ".mlp.fc2.": ".fc2.",
+            ".shared_experts.w2": ".shared_experts.down_proj",
+            "mtp.": None,
+        },
+        orig_to_new_suffix={
+            ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
+        },
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        },
+    )
+    config.apply_vllm_mapper(mapper)
+
+    assert config.target_scheme_map["Linear"] is linear
+    assert config.target_scheme_map[r"re:.*self_attn\..*"] is attn
+    assert (
+        config.target_scheme_map[r"re:^model\.layers\.\d+\.fc1\.gate\Z"] is gate
+    )
+    # Stacked fusion is not written into regex targets.
+    assert (
+        r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z" in config.target_scheme_map
+    )
+    assert config.kv_cache_scheme == {
+        "type": "float",
+        "num_bits": 8,
+        "strategy": "tensor",
+        "symmetric": True,
+    }
+    assert "vision_tower.multi_modal_projector.linear_1" in config.ignore
+    assert r"re:^vision_tower\.multi_modal_projector\.linear_\d+\Z" in config.ignore
+    assert r"re:^model\.layers\.\d+\.mlp\.gate\Z" in config.ignore
+    assert (
+        r"re:^model\.layers\.\d+\.ffn\.gate\.e_score_correction_bias\Z"
+        in config.ignore
+    )
+    assert r"re:^mtp\.layers\.\d+\Z" not in config.ignore
+    assert should_ignore_layer(
+        "vision_tower.multi_modal_projector.linear_3",
+        ignore=config.ignore,
+    )
+    assert should_ignore_layer(
+        "model.layers.2.ffn.gate.e_score_correction_bias",
+        ignore=config.ignore,
+    )
+    assert not should_ignore_layer(
+        "model.layers.2.ffn.gate.bias",
+        ignore=config.ignore,
+    )
+
+    stacked = CompressedTensorsConfig(
+        target_scheme_map={
+            "model.layers.0.self_attn.q_proj": {"weights": "q"},
+            r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z": {"weights": "q"},
+        },
+        ignore=[],
+        quant_format="pack-quantized",
+    )
+    stacked.apply_vllm_mapper(
+        WeightsMapper(orig_to_new_stacked={".q_proj": (".qkv_proj", "q")})
+    )
+    assert "model.layers.0.self_attn.qkv_proj" in stacked.target_scheme_map
+    assert r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z" in stacked.target_scheme_map
+
+    anchored = CompressedTensorsConfig(
+        target_scheme_map={r"re:^layers\.\d+\.mlp\.gate\Z": {"weights": "g"}},
+        ignore=["layers.1.mlp.gate"],
+        quant_format="pack-quantized",
+    )
+    anchored.apply_vllm_mapper(WeightsMapper(orig_to_new_prefix={"": "model."}))
+    assert r"re:^model\.layers\.\d+\.mlp\.gate\Z" in anchored.target_scheme_map
+    assert anchored.ignore == ["model.layers.1.mlp.gate"]
 
 
 # Test constants for activation quantization
