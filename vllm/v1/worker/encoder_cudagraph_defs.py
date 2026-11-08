@@ -82,7 +82,9 @@ class EncoderCudaGraphConfig:
     )
     """Optional per-buffer replay padding/copy logic.
     If absent for a key, the manager zeros the capture buffer and slice-copies
-    the replay buffer into it."""
+    the replay buffer into it. A padding logic must write the whole capture
+    buffer: budgets share buffers, so rows it leaves untouched may hold another
+    budget's data."""
 
     max_frames_per_video: int = 1
     """Maximum number of frames per video.

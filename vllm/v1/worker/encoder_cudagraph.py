@@ -198,6 +198,9 @@ class EncoderCudaGraphManager:
         self._shared_output_buffers: dict[
             tuple[str, CaptureAxisKeys], torch.Tensor
         ] = {}
+        # Input keys whose shared buffer smaller budgets view. Other budgets'
+        # captures overwrite it, so replay must refill these keys.
+        self._shared_input_keys: dict[tuple[str, CaptureAxisKeys], set[str]] = {}
         self.graph_hits = 0
         self.graph_misses = 0
         self.log_stats_interval = 100
@@ -290,6 +293,7 @@ class EncoderCudaGraphManager:
         self.graph_pool = None
         self._shared_input_buffers.clear()
         self._shared_output_buffers.clear()
+        self._shared_input_keys.clear()
 
     def capture(self, graph_pool: Any):
         """Capture CUDA graphs for every configured path and token budget."""
@@ -355,19 +359,14 @@ class EncoderCudaGraphManager:
 
         For each probe buffer that is a row-prefix of its shared counterpart
         (same trailing dims and dtype, no more rows), copy the probe contents
-        into the shared buffer and return the prefix view instead. 0-dim
-        buffers with matching dtype are shared wholesale. Anything else
-        keeps its own per-budget allocation.
+        into the shared buffer and return the prefix view instead. Anything
+        else, including 0-dim buffers (which hold per-budget values and save
+        no memory when shared), keeps its own per-budget allocation.
         """
         values = dict(probe)
         for key, buf in probe.items():
             full = shared.get(key)
-            if full is None:
-                continue
-            if buf.ndim == 0:
-                if full.ndim == 0 and full.dtype == buf.dtype:
-                    full.copy_(buf)
-                    values[key] = full
+            if full is None or buf.ndim == 0:
                 continue
             if (
                 full.ndim == buf.ndim
@@ -422,6 +421,11 @@ class EncoderCudaGraphManager:
             self._shared_input_buffers[share_key] = values
         else:
             values = self._share_prefix_compatible(capture_inputs.values, shared)
+            self._shared_input_keys.setdefault(share_key, set()).update(
+                key
+                for key, buf in values.items()
+                if buf is not capture_inputs.values[key]
+            )
 
         with torch.inference_mode():
             output = self.model.encoder_cudagraph_forward({**values}, path=path)
@@ -546,9 +550,16 @@ class EncoderCudaGraphManager:
         )
 
         # Copy replay values into the buffers recorded for this path.
+        shared_keys = self._shared_input_keys.get((path, graph_meta.axis_keys), ())
         for key, buf in graph_meta.input_buffers.items():
             src = replay.values.get(key)
             if src is None:
+                if key in shared_keys:
+                    raise RuntimeError(
+                        f"Encoder CUDA graph buffer {key!r} is shared across "
+                        "token budgets, so its capture-time contents may come "
+                        "from another budget; replay must provide its values."
+                    )
                 continue
             if src.ndim == 0:
                 buf.copy_(src)
