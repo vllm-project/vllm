@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import math
 import os
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -186,6 +185,17 @@ _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
 _ARCHITECTURE_TO_MODEL_TYPE: dict[str, str] = {
     "LongcatFlashForCausalLM": "longcat_flash",
     "LongcatFlashNgramForCausalLM": "longcat_flash",
+}
+
+# Architectures whose remote code was upstreamed to Transformers. Their checkpoints
+# still carry an `auto_map`, which would take precedence over Transformers'
+# implementation under `trust_remote_code`
+_UPSTREAMED_ARCHITECTURES: set[str] = {
+    "InternLM3ForCausalLM",
+    "IQuestCoderForCausalLM",
+    "TeleChat2ForCausalLM",
+    "TeleChat3ForCausalLM",
+    "TelechatForCausalLM",
 }
 
 _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
@@ -400,6 +410,7 @@ class HFConfigParser(ConfigParserBase):
                 "qwen2_5_vl_visual", Qwen2_5_VLVisionConfig, exist_ok=True
             )
 
+        architecture = (config_dict.get("architectures") or [None])[0]
         rope_parameters = config_dict.get("rope_parameters") or {}
         if model_type == "gemma4_text" and "full_attention" in rope_parameters:
             from transformers import Gemma4TextConfig
@@ -446,6 +457,14 @@ class HFConfigParser(ConfigParserBase):
 
             kwargs.setdefault("name_or_path", str(model))
             config = CONFIG_MAPPING[model_type].from_dict(config_dict, **kwargs)
+        elif (
+            architecture in _UPSTREAMED_ARCHITECTURES
+            and model_type in transformers.CONFIG_MAPPING
+        ):
+            config_dict.pop("auto_map", None)
+            kwargs.setdefault("name_or_path", str(model))
+            config_class = transformers.CONFIG_MAPPING[model_type]
+            config = config_class.from_dict(config_dict, **kwargs)
         elif model_type in _SPECULATIVE_DECODING_CONFIGS:
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(
@@ -680,14 +699,6 @@ def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
                 )
             rope_parameters["rope_type"] = "default"
             logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
-        elif rope_parameters["rope_type"] == "telechat3-yarn":
-            # TeleChat3 is YaRN with 0.07 in place of YaRN's 0.1 attention
-            # scaling coefficient. Precompute it so the config is plain YaRN.
-            factor = rope_parameters["factor"]
-            rope_parameters["rope_type"] = "yarn"
-            rope_parameters["attention_factor"] = 0.07 * math.log(factor) + 1.0
-            rope_parameters.pop("type", None)
-            logger.warning("Replacing rope_type 'telechat3-yarn' with 'yarn'")
 
     # Handle nested rope_parameters in interleaved sliding attention models
     if is_rope_parameters_nested(rope_parameters):

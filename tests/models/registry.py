@@ -361,10 +361,20 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "internlm/internlm2-chat-7b", trust_remote_code=True
     ),
     "InternLM3ForCausalLM": _HfExamplesInfo(
-        "internlm/internlm3-8b-instruct", trust_remote_code=True
+        "internlm/internlm3-8b-instruct",
+        trust_remote_code=True,
+        min_transformers_version="5.23.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/50477"
+        },
     ),
     "IQuestCoderForCausalLM": _HfExamplesInfo(
-        "IQuestLab/IQuest-Coder-V1-40B-Instruct", trust_remote_code=True
+        "IQuestLab/IQuest-Coder-V1-40B-Instruct",
+        trust_remote_code=True,
+        min_transformers_version="5.23.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/50477"
+        },
     ),
     "IQuestLoopCoderForCausalLM": _HfExamplesInfo(
         "IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct", trust_remote_code=True
@@ -591,10 +601,28 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
     ),
     "TeleChat2ForCausalLM": _HfExamplesInfo(
-        "Tele-AI/TeleChat2-3B", trust_remote_code=True
+        "Tele-AI/TeleChat2-3B",
+        trust_remote_code=True,
+        min_transformers_version="5.23.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/50477"
+        },
+    ),
+    "TelechatForCausalLM": _HfExamplesInfo(
+        "Tele-AI/telechat-7B",
+        trust_remote_code=True,
+        min_transformers_version="5.23.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/50477"
+        },
     ),
     "TeleChat3ForCausalLM": _HfExamplesInfo(
-        "Tele-AI/TeleChat3-36B-Thinking", trust_remote_code=True
+        "Tele-AI/TeleChat3-36B-Thinking",
+        trust_remote_code=True,
+        min_transformers_version="5.23.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/50477"
+        },
     ),
     "TeleFLMForCausalLM": _HfExamplesInfo(
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True

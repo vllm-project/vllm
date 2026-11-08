@@ -6,12 +6,12 @@ only get the `eos_token_id` from the tokenizer as defined by
 """
 
 import json
-import math
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
+import transformers
 from transformers import PreTrainedConfig
 
 from vllm.config.model import ModelConfig
@@ -71,6 +71,38 @@ def test_gemma4_dspark_rope_config_preserves_parameters(tmp_path, layout):
         assert set(config.rope_parameters) == set(per_layer)
 
 
+@pytest.mark.skipif(
+    not hasattr(transformers, "TeleChatConfig"),
+    reason="Needs https://github.com/huggingface/transformers/pull/50477",
+)
+def test_upstreamed_architecture_ignores_remote_code(tmp_path):
+    """Checkpoints of upstreamed models keep their stale `auto_map`.
+
+    With `trust_remote_code=True` it must not win over Transformers' own
+    implementation (the module it names does not even exist here).
+    """
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "telechat",
+                "architectures": ["TeleChat2ForCausalLM"],
+                "auto_map": {
+                    "AutoConfig": "configuration_telechat2.Telechat2Config",
+                    "AutoModelForCausalLM": "modeling_telechat2.Telechat2ForCausalLM",
+                },
+                "n_layer": 2,
+                "n_head": 4,
+                "hidden_size": 64,
+                "ffn_hidden_size": 128,
+            }
+        )
+    )
+    _, config = config_module.HFConfigParser().parse(tmp_path, trust_remote_code=True)
+    assert isinstance(config, transformers.TeleChatConfig)
+    assert getattr(config, "auto_map", None) is None
+    assert config.num_hidden_layers == 2
+
+
 def test_patch_legacy_rope_type_preserves_nope_layers():
     """NoPE layers stay disabled while later RoPE layers are normalized."""
     rope_parameters = {
@@ -90,31 +122,6 @@ def test_patch_legacy_rope_type_preserves_nope_layers():
             "rope_type": "default",
             "mrope_section": [24, 20, 20],
         },
-    }
-
-
-def test_patch_legacy_rope_type_normalizes_telechat3_yarn():
-    """TeleChat3's RoPE is YaRN with 0.07 in place of the usual 0.1.
-
-    Encoding that as a precomputed attention_factor keeps the config
-    plain YaRN, which Transformers and every "yarn" guard understand.
-    `mscale` cannot express it: Transformers only applies mscale when
-    mscale_all_dim is also truthy.
-    """
-    rope_parameters = {
-        "type": "telechat3-yarn",
-        "rope_type": "telechat3-yarn",
-        "factor": 4.0,
-        "original_max_position_embeddings": 8192,
-    }
-
-    patch_legacy_rope_type(rope_parameters)
-
-    assert rope_parameters == {
-        "rope_type": "yarn",
-        "factor": 4.0,
-        "original_max_position_embeddings": 8192,
-        "attention_factor": pytest.approx(0.07 * math.log(4.0) + 1.0),
     }
 
 
