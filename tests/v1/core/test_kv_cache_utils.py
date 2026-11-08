@@ -41,6 +41,7 @@ from vllm.multimodal.inputs import (
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
     get_kv_cache_groups,
@@ -767,6 +768,44 @@ def test_free_kv_cache_block_queue_get_all_free_blocks():
     # Append a block back and check again
     queue.append(block_to_remove)
     assert queue.get_all_free_blocks() == blocks[1:2] + blocks[3:] + [block_to_remove]
+
+
+def test_free_kv_cache_block_queue_scramble(monkeypatch):
+    def block_ids(seed: str | None) -> list[int]:
+        if seed is None:
+            monkeypatch.delenv("VLLM_KV_SCRAMBLE_BLOCKS", raising=False)
+        else:
+            monkeypatch.setenv("VLLM_KV_SCRAMBLE_BLOCKS", seed)
+        blocks = [KVCacheBlock(block_id=i) for i in range(64)]
+        queue = FreeKVCacheBlockQueue(blocks)
+        # The caller's list stays indexable by block_id.
+        assert [b.block_id for b in blocks] == list(range(64))
+        return [b.block_id for b in queue.get_all_free_blocks()]
+
+    # Unset or 0: disabled, preserve the original block_id order.
+    assert block_ids(None) == list(range(64))
+    assert block_ids("0") == list(range(64))
+
+    # Enabled (nonzero seed): same set of blocks, but reordered.
+    scrambled = block_ids("1")
+    assert sorted(scrambled) == list(range(64))
+    assert scrambled != list(range(64))
+    # Block 0 is popped first, as the null block.
+    assert scrambled[0] == 0
+
+    # Reproducible: same seed -> same permutation; different seed -> different.
+    assert block_ids("1") == scrambled
+    assert block_ids("2") != scrambled
+
+
+def test_block_pool_scramble_env(monkeypatch):
+    monkeypatch.setenv("VLLM_KV_SCRAMBLE_BLOCKS", "1")
+    pool = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=16)
+    assert pool.null_block.block_id == 0
+    assert all(block.block_id == i for i, block in enumerate(pool.blocks))
+    free_ids = [b.block_id for b in pool.free_block_queue.get_all_free_blocks()]
+    assert sorted(free_ids) == list(range(1, 64))
+    assert free_ids != list(range(1, 64))
 
 
 def test_generate_block_hash_extra_keys():

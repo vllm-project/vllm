@@ -314,6 +314,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_GC_DEBUG: str = ""
     VLLM_DEBUG_WORKSPACE: bool = False
+    VLLM_KV_SCRAMBLE_BLOCKS: int = 0
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
     VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES: int = 0
@@ -2198,6 +2199,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Debug workspace allocations.
     # logging of workspace resize operations.
     "VLLM_DEBUG_WORKSPACE": lambda: bool(int(os.getenv("VLLM_DEBUG_WORKSPACE", "0"))),
+    # Dev only: scramble the KV free-block order once at startup so requests receive
+    # physically non-contiguous blocks from the first allocation, reproducing worst-case
+    # allocation (a state the server eventually reaches). Useful for PD KV-transfer cost
+    # benchmarking, and for tests to catch bugs that only show once a request's blocks
+    # are not contiguous. 0 (or unset) = disabled; set to a nonzero integer to enable,
+    # using that value as the shuffle seed for reproducibility.
+    "VLLM_KV_SCRAMBLE_BLOCKS": lambda: int(os.getenv("VLLM_KV_SCRAMBLE_BLOCKS", "0")),
     # Disables parallel execution of shared_experts via separate cuda stream
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: bool(
         int(os.getenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0"))
@@ -2495,6 +2503,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_DP_MASTER_PORT",
         "VLLM_NIXL_SIDE_CHANNEL_HOST",
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
+        "VLLM_KV_SCRAMBLE_BLOCKS",
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
         "VLLM_RAY_BUNDLE_INDICES",

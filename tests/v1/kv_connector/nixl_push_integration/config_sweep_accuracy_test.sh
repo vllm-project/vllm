@@ -7,6 +7,12 @@ set -euo pipefail
 SCRIPT="v1/kv_connector/nixl_integration/run_accuracy_test.sh"
 IMPORT_CANARY="v1/kv_connector/nixl_integration/test_nixl_imports.py"
 
+# Scramble the KV free-block order (dev-only VLLM_KV_SCRAMBLE_BLOCKS) so that
+# every request gets non-contiguous blocks from the start, as on a long-running
+# server; contiguous blocks can hide KV-transfer indexing bugs. Set it to 0 to
+# run on the unscrambled pool.
+export VLLM_KV_SCRAMBLE_BLOCKS=${VLLM_KV_SCRAMBLE_BLOCKS:-1}
+
 echo "=== Running NIXL import canary ==="
 python3 -m pytest -s -x "${IMPORT_CANARY}"
 
