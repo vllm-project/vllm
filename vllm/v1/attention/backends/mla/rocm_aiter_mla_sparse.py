@@ -364,6 +364,11 @@ def generate_sparse_seqlen_triton(
     return out
 
 
+_PCP_DCP_BF16_KV_REASON = (
+    "PCP with DCP requires an fp8 KV cache; BF16 gives wrong outputs"
+)
+
+
 class ROCMAiterMLASparseBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -462,13 +467,13 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
         )
         # The DCP merge needs an LSE, which the sink and RoPE-free BF16
         # (Triton) paths do not return.
-        rope_free_bf16 = head_size == 512 and not (kv_cache_dtype or "").startswith(
-            "fp8"
-        )
-        if use_dcp and (has_sink or rope_free_bf16):
+        fp8_kv = (kv_cache_dtype or "").startswith("fp8")
+        if use_dcp and (has_sink or (head_size == 512 and not fp8_kv)):
             invalid_reasons.append(
                 "DCP not supported with attention sinks or a RoPE-free BF16 KV cache"
             )
+        if use_pcp and use_dcp and not fp8_kv:
+            invalid_reasons.append(_PCP_DCP_BF16_KV_REASON)
         return invalid_reasons
 
 
@@ -1014,6 +1019,8 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
 
         self.pcp_dcp_kv_gather = self.pcp_world_size > 1 and self.dcp_world_size > 1
         if self.pcp_dcp_kv_gather:
+            if not kv_cache_dtype.startswith("fp8"):
+                raise ValueError(_PCP_DCP_BF16_KV_REASON)
             shard_rows = _pcp_dcp_shard_rows(vllm_config)
             row_bytes = head_size * (1 if kv_cache_dtype.startswith("fp8") else 2)
             self.pcp_dcp_workspace_specs = (
@@ -1122,6 +1129,9 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     q.shape[1],
                 ).reshape(-1)
             kv = kv_c_and_k_pe_cache.view(-1, 1, q.shape[-1])
+            if kv_indptr is None:
+                kv_indptr = attn_metadata.paged_kv_indptr
+                kv_indices = attn_metadata.paged_kv_indices
             decode_num_splits = (
                 rocm_sparse_decode_bf16_num_splits(
                     num_tokens,
@@ -1141,8 +1151,8 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     rope_head_dim=q.shape[-1] - self.kv_lora_rank,
                     attn_sink=triton_sinks,
                     output=output,
-                    ragged_indices=attn_metadata.paged_kv_indices,
-                    ragged_indptr=attn_metadata.paged_kv_indptr,
+                    ragged_indices=kv_indices,
+                    ragged_indptr=kv_indptr,
                     num_splits=decode_num_splits,
                 )
             else:
@@ -1157,8 +1167,8 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     rope_head_dim=q.shape[-1] - self.kv_lora_rank,
                     attn_sink=triton_sinks,
                     output=output,
-                    ragged_indices=attn_metadata.paged_kv_indices,
-                    ragged_indptr=attn_metadata.paged_kv_indptr,
+                    ragged_indices=kv_indices,
+                    ragged_indptr=kv_indptr,
                 )
             output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
             return output, None
@@ -1254,16 +1264,18 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     reduce_partial_map=attn_metadata.reduce_partial_map,
                 )
 
+            assert attn_metadata.qo_indptr is not None
+            assert attn_metadata.paged_kv_last_page_len is not None
             rocm_aiter_ops.mla_decode_fwd(
                 q,
                 kv_c_and_k_pe_cache,
                 output,
                 self.scale,
-                attn_metadata.qo_indptr,
+                attn_metadata.qo_indptr[: kv_indptr.shape[0]],
                 1,
-                attn_metadata.paged_kv_indptr,
-                attn_metadata.paged_kv_indices,
-                attn_metadata.paged_kv_last_page_len,
+                kv_indptr,
+                kv_indices,
+                attn_metadata.paged_kv_last_page_len[: kv_indptr.shape[0] - 1],
                 **mla_kwargs,
             )
             lse = None
@@ -1431,10 +1443,11 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         attn_metadata: ROCMAiterMLASparseMetadata,
         indices: torch.Tensor,
         counts: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        need_lse: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Attend each row's first ``counts`` slots of ``indices`` in ``kv_rows``."""
         kv_indices, kv_indptr = build_ragged_indices_from_dense(indices, counts)
-        output, lse = self._forward_mla(
+        return self._forward_mla(
             layer,
             AiterMLAHelper.get_mla_padded_q(q.shape[1], q),
             kv_rows.unsqueeze(1),
@@ -1442,10 +1455,8 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             kv_indptr=kv_indptr,
             kv_indices=kv_indices,
             num_heads=q.shape[1],
-            need_lse=True,
+            need_lse=need_lse,
         )
-        assert lse is not None
-        return output, lse
 
     def _forward_dcp(
         self,
@@ -1549,5 +1560,6 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             attn_metadata,
             indices,
             counts,
+            need_lse=False,
         )
         return output

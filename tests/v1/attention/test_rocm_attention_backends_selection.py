@@ -737,6 +737,30 @@ def test_sparse_mla_backend_dcp_support(selected_backend, use_dcp, has_sink):
     )
 
 
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "bfloat16", "fp8"])
+def test_sparse_mla_backend_pcp_dcp_requires_fp8_kv(kv_cache_dtype):
+    """PCP+DCP with a BF16 KV cache produces wrong outputs, so reject it."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    selector_config = AttentionSelectorConfig(
+        head_size=576,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=kv_cache_dtype,
+        block_size=16,
+        use_mla=True,
+        use_sparse=True,
+        use_pcp=True,
+        use_dcp=True,
+    )
+    if kv_cache_dtype != "fp8":
+        with pytest.raises(ValueError, match="requires an fp8 KV cache"):
+            RocmPlatform.get_attn_backend_cls(None, selector_config)
+        return
+    assert RocmPlatform.get_attn_backend_cls(None, selector_config) == (
+        AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
+    )
+
+
 @pytest.mark.parametrize("use_dcp", [False, True])
 @pytest.mark.parametrize(
     "selected_backend, head_size, kv_cache_dtype",
