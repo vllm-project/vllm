@@ -52,6 +52,7 @@ class Granite20bFCToolParser(ToolParser):
         self.bot_token = "<function_call>"
         self.tool_start_token = self.bot_token
         self.tool_call_regex = re.compile(r"<function_call>\s*")
+        self.streamed_content_len = 0
 
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
@@ -126,15 +127,19 @@ class Granite20bFCToolParser(ToolParser):
             for n in range(min(len(current_text), len(self.bot_token) - 1), 0, -1):
                 if self.bot_token.startswith(current_text[-n:]):
                     safe_len = len(current_text) - n
-                    prev_len = len(previous_text)
-                    if safe_len > prev_len:
-                        return DeltaMessage(content=current_text[prev_len:safe_len])
+                    if safe_len > self.streamed_content_len:
+                        delta = current_text[self.streamed_content_len:safe_len]
+                        self.streamed_content_len = safe_len
+                        return DeltaMessage(content=delta)
                     return None
-            return DeltaMessage(content=delta_text)
+            delta = current_text[self.streamed_content_len:]
+            self.streamed_content_len = len(current_text)
+            return DeltaMessage(content=delta)
 
         content_delta = None
-        if bot_pos > len(previous_text):
-            content_delta = current_text[len(previous_text) : bot_pos]
+        if bot_pos > self.streamed_content_len:
+            content_delta = current_text[self.streamed_content_len : bot_pos]
+            self.streamed_content_len = bot_pos
 
         tool_text = current_text[bot_pos:]
 

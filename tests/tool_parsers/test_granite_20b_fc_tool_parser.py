@@ -7,6 +7,8 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from tests.tool_parsers.utils import run_tool_extraction_streaming
+from vllm.tool_parsers import ToolParserManager
 
 
 class TestGranite20bFcToolParser(ToolParserTests):
@@ -70,3 +72,14 @@ class TestGranite20bFcToolParser(ToolParserTests):
             xfail_streaming={},
             xfail_nonstreaming={},
         )
+
+
+def test_streaming_partial_marker_as_plain_text(default_tokenizer):
+    """A prefix of <function_call> that turns out to be plain text must still
+    be streamed to the client instead of being dropped.
+    """
+    parser = ToolParserManager.get_tool_parser("granite-20b-fc")(default_tokenizer)
+    deltas = ["Use ", "<func", "tion> to call"]
+    reconstructor = run_tool_extraction_streaming(parser, deltas)
+    assert reconstructor.other_content == "Use <function> to call"
+    assert reconstructor.tool_calls == []
