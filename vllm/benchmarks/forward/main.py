@@ -130,11 +130,13 @@ def _make_engine_args(args: argparse.Namespace, cases: list[BenchCase]):
     if engine_args.max_num_batched_tokens is None:
         # Prefix hits may replay up to a window more per request.
         engine_args.max_num_batched_tokens = max(
-            8192,
-            *(
-                c.num_tokens + 1024 * sum(r.prefix_hit for r in c.requests)
+            (
+                c.num_tokens
+                + sum(r.num_draft_tokens for r in c.requests)
+                + 1024 * sum(r.prefix_hit for r in c.requests)
                 for c in cases
             ),
+            default=1,
         )
     return engine_args
 

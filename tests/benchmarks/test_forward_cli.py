@@ -14,11 +14,12 @@ import torch
 from vllm.benchmarks.forward.batch import build_batch
 from vllm.benchmarks.forward.capture import write_input_ids
 from vllm.benchmarks.forward.kv_init import touched_kv_views, zero_kv_blocks
-from vllm.benchmarks.forward.main import run_case
+from vllm.benchmarks.forward.main import _make_engine_args, add_cli_args, run_case
 from vllm.benchmarks.forward.profile import summarize
 from vllm.benchmarks.forward.routing import RoutingFixture, zipf_topk_ids
 from vllm.benchmarks.forward.shapes import jitter_kv_lens, parse_case
 from vllm.platforms import current_platform
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.attention.backends.mla.cpu_mla import CPUMLABackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, MLAAttentionSpec
@@ -570,6 +571,54 @@ def test_jitter_kv_lens():
     assert jitter_kv_lens(case, 0, 2048, 0) == case
     with pytest.raises(ValueError, match="KV length"):
         jitter_kv_lens(case, 0, 1000, 0)
+
+
+def _forward_engine_args(*argv):
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    args = parser.parse_args(["--model", "bench-model", *argv])
+    return _make_engine_args(args, [parse_case(c) for c in args.case])
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("prefill=4096", 4096),
+        ("hit=2048@10240", 3072),
+        ("decode=32*1@8192", 32),
+        ("verify=16*6@4096:5", 176),
+    ],
+)
+def test_forward_derives_batched_tokens_from_case(case, expected):
+    """Default budget covers query, draft and prefix-replay tokens of a case."""
+    assert _forward_engine_args("--case", case).max_num_batched_tokens == expected
+
+
+def test_forward_derives_batched_tokens_for_decode_verify_set():
+    """A 432-query-token set with 360 draft tokens needs 792, not the 8192 floor."""
+    cases = [
+        "decode4k=72*1@4096",
+        "verify4k=72*6@4096:5",
+        "decode16k=48*1@16384",
+        "verify16k=48*6@16384:5",
+        "decode32k=24*1@32768",
+        "verify32k=24*6@32768:5",
+    ]
+    argv = [item for case in cases for item in ("--case", case)]
+    assert _forward_engine_args(*argv).max_num_batched_tokens == 792
+
+
+def test_forward_keeps_explicit_batched_tokens():
+    """An explicit user budget wins over the derived one."""
+    engine_args = _forward_engine_args(
+        "--max-num-batched-tokens", "1234", "--case", "verify=16*6@4096:5"
+    )
+    assert engine_args.max_num_batched_tokens == 1234
+
+
+def test_forward_derives_positive_budget_without_cases():
+    """An empty case list still yields a legal positive budget."""
+    assert _forward_engine_args("--max-num-seqs", "1").max_num_batched_tokens == 1
 
 
 def test_bench_packed_kv_blocks():
