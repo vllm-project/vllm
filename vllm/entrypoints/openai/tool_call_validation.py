@@ -64,7 +64,15 @@ def validate_responses_tool_call_ids(
         for item in items:
             item_type = _get(item, "type")
             role = _get(item, "role")
-            if role == "assistant":
+            if item_type in ("function_call", "custom_tool_call"):
+                call_id = _get(item, field)
+                if call_id:
+                    call_ids.add(call_id)
+            elif item_type in ("function_call_output", "custom_tool_call_output"):
+                result_id = _get(item, field)
+                if not result_id or result_id not in call_ids:
+                    raise _invalid_tool_result(field, result_id)
+            elif role == "assistant":
                 for tool_call in _get(item, "tool_calls", ()) or ():
                     call_id = _get(tool_call, "id")
                     if call_id:
@@ -73,14 +81,6 @@ def validate_responses_tool_call_ids(
                 result_id = _get(item, "tool_call_id")
                 if not result_id or result_id not in call_ids:
                     raise _invalid_tool_result("tool_call_id", result_id)
-            elif item_type in ("function_call", "custom_tool_call"):
-                call_id = _get(item, field)
-                if call_id:
-                    call_ids.add(call_id)
-            elif item_type in ("function_call_output", "custom_tool_call_output"):
-                result_id = _get(item, field)
-                if not result_id or result_id not in call_ids:
-                    raise _invalid_tool_result(field, result_id)
 
     visit(previous_outputs)
     visit(input_items)

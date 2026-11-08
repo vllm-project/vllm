@@ -176,6 +176,20 @@ def test_responses_chat_messages_reject_orphan_tool_result():
         )
 
 
+def test_responses_orphan_output_with_role_metadata_is_rejected():
+    with pytest.raises(VLLMValidationError) as exc_info:
+        validate_responses_tool_call_ids(
+            input_items=[
+                {
+                    "type": "function_call_output",
+                    "role": "assistant",
+                    "call_id": "call_unknown",
+                }
+            ]
+        )
+    assert exc_info.value.parameter == "call_id"
+
+
 @pytest.mark.asyncio
 async def test_chat_renderer_rejects_orphan_result_before_preprocessing():
     renderer = OnlineRenderer.__new__(OnlineRenderer)
