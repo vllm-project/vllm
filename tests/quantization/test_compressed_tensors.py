@@ -816,6 +816,69 @@ def test_apply_vllm_mapper_rewrites_regex_literals_and_keeps_fusion():
     assert anchored.ignore == ["model.layers.1.mlp.gate"]
 
 
+def test_apply_vllm_mapper_consolidates_ignore_after_rename():
+    """Concrete ignore names are renamed, then folded.
+
+    The regex uses the vLLM path. One leftover name stays a literal. A
+    diagonal is not widened to the missing corners. An existing regex stays
+    where it is.
+    """
+    config = CompressedTensorsConfig(
+        target_scheme_map={"Linear": {"weights": "linear"}},
+        ignore=[
+            "model.layers.0.mlp.fc1.gate",
+            "model.layers.1.mlp.fc1.gate",
+            "multi_modal_projector.0.linear",
+            "multi_modal_projector.1.linear",
+            "model.layers.0.mlp.down_proj",
+            "re:.*mtp.*",
+        ],
+        quant_format="pack-quantized",
+    )
+    config.apply_vllm_mapper(
+        WeightsMapper(
+            orig_to_new_prefix={
+                "multi_modal_projector.": "vision_tower.multi_modal_projector.",
+            },
+            orig_to_new_substr={".mlp.fc1.": ".fc1."},
+        )
+    )
+    assert config.ignore == [
+        r"re:^model\.layers\.(?:0|1)\.fc1\.gate\Z",
+        r"re:^vision_tower\.multi_modal_projector\.(?:0|1)\.linear\Z",
+        "model.layers.0.mlp.down_proj",
+        "re:.*mtp.*",
+    ]
+
+    diagonal = CompressedTensorsConfig(
+        target_scheme_map={"Linear": {"weights": "linear"}},
+        ignore=[
+            "layers.0.experts.0.gate",
+            "layers.1.experts.1.gate",
+        ],
+        quant_format="pack-quantized",
+    )
+    diagonal.apply_vllm_mapper(WeightsMapper(orig_to_new_prefix={"": "model."}))
+    assert diagonal.ignore == [
+        (
+            "re:^(?:model\\.layers\\.0\\.experts\\.0\\.gate"
+            "|model\\.layers\\.1\\.experts\\.1\\.gate)\\Z"
+        )
+    ]
+
+    rectangle = CompressedTensorsConfig(
+        target_scheme_map={"Linear": {"weights": "linear"}},
+        ignore=[
+            f"layers.{layer}.experts.{expert}.gate"
+            for layer in range(2)
+            for expert in range(2)
+        ],
+        quant_format="pack-quantized",
+    )
+    rectangle.apply_vllm_mapper(WeightsMapper(orig_to_new_prefix={"": "model."}))
+    assert rectangle.ignore == [r"re:^model\.layers\.(?:0|1)\.experts\.(?:0|1)\.gate\Z"]
+
+
 # Test constants for activation quantization
 _STATIC_SYM_INT8_ACT = QuantizationArgs(
     num_bits=8,
