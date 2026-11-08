@@ -651,6 +651,14 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         w13_input_scale = layer.w13_input_scale
         w2_input_scale = layer.w2_input_scale
 
+        if current_platform.is_fp8_fnuz() and w13.dtype == torch.float8_e4m3fn:
+            w13, w13_scale, w13_input_scale = normalize_e4m3fn_to_e4m3fnuz(
+                w13, w13_scale, w13_input_scale
+            )
+            w2, w2_scale, w2_input_scale = normalize_e4m3fn_to_e4m3fnuz(
+                w2, w2_scale, w2_input_scale
+            )
+
         # Per tensor kernels require single activation scale. Use the max.
         w13_input_scale, w2_input_scale = process_fp8_input_tensor_strategy_moe(
             w13_input_scale,
