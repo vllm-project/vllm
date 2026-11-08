@@ -99,7 +99,7 @@ class ParseContext(BaseModel):
     history_tool_call_cnt: int = Field(default=0, ge=0)
     """Tool calls already in the rendered conversation, for sequential IDs."""
     citation_sources: list[CitationSourceEntry] | None = Field(
-        default=None, exclude_if=lambda v: v is None
+        default=None, exclude_if=lambda v: not v
     )
     """JSON-safe citation source map for grounded Cohere requests.
 

@@ -546,7 +546,7 @@ def _derenderer_without_hf_tokenizer():
 
 
 def test_derender_text_choices_installs_citation_sources_and_finalizes(monkeypatch):
-    """citation_sources reach the parser before parse; finalize_message runs."""
+    """citation_sources reach the parser before parse; real finalize runs."""
     from vllm.entrypoints.cohere.cohere_chat_message import (
         Citation,
         CitationSource,
@@ -555,6 +555,7 @@ def test_derender_text_choices_installs_citation_sources_and_finalizes(monkeypat
     from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
         CitationSourceEntry,
     )
+    from vllm.renderers.cohere import CohereRenderer
 
     derenderer = _derenderer_without_hf_tokenizer()
     parser = MagicMock()
@@ -568,12 +569,9 @@ def test_derender_text_choices_installs_citation_sources_and_finalizes(monkeypat
         )
     ]
     monkeypatch.setattr(derenderer, "parser", MagicMock(return_value=parser))
+    # Call the real Cohere override so deleting it fails this test.
     derenderer.renderer.finalize_message.side_effect = lambda p, message: (
-        CohereChatMessage(
-            role=message.role,
-            content=message.content,
-            citations=p.last_unary_citations,
-        )
+        CohereRenderer.finalize_message(derenderer.renderer, p, message)
     )
     sources = [
         CitationSourceEntry(
