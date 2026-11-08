@@ -1380,6 +1380,168 @@ def test_default_cudagraph_capture_size_still_clamped_by_token_budget():
     assert 544 not in compilation_config.cudagraph_capture_sizes
 
 
+QWEN3_5_MOE = "Qwen3_5MoeForConditionalGeneration"
+
+
+def _qwen3_5_capture_sizes(
+    monkeypatch,
+    arch: str = QWEN3_5_MOE,
+    breakable: str | None = None,
+    is_cuda: bool = True,
+    sm100: bool = False,
+    mode: CUDAGraphMode = CUDAGraphMode.FULL_AND_PIECEWISE,
+    max_num_seqs: int = 256,
+    num_speculative_tokens: int = 0,
+    max_num_batched_tokens: int = 8192,
+    **kwargs,
+) -> CompilationConfig:
+    """Resolves breakable CUDA graphs as `VllmConfig.__post_init__` does, from
+    `VLLM_USE_BREAKABLE_CUDAGRAPH` if `breakable` is set and from the
+    architecture otherwise, then the capture sizes."""
+    if breakable is None:
+        monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", breakable)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: is_cuda)
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability_family",
+        lambda family, device_id=0: sm100 and family == 100,
+    )
+    compilation_config = CompilationConfig(cudagraph_mode=mode, **kwargs)
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=max_num_seqs,
+        num_speculative_tokens=num_speculative_tokens,
+        max_num_batched_tokens=max_num_batched_tokens,
+        compilation_config=compilation_config,
+    )
+    config.model_config.architectures = [arch]
+    config._uses_breakable_cudagraph_by_default = lambda: (
+        VllmConfig._uses_breakable_cudagraph_by_default(config)
+    )
+    VllmConfig._maybe_enable_breakable_cudagraph(config)
+    VllmConfig._set_cudagraph_sizes(config)
+    # A resolved config resolves to itself again.
+    resolved = {f: getattr(compilation_config, f) for f in _CAPTURE_SIZE_FIELDS}
+    VllmConfig._set_cudagraph_sizes(config)
+    assert resolved == {f: getattr(compilation_config, f) for f in _CAPTURE_SIZE_FIELDS}
+    return compilation_config
+
+
+@pytest.mark.parametrize(
+    ("breakable", "arch", "max_num_seqs", "max_num_batched_tokens", "expected"),
+    [
+        # Qwen3.5 on breakable CUDA graphs, enabled by default or by
+        # VLLM_USE_BREAKABLE_CUDAGRAPH=1, adds the coarse prefill grid above 512.
+        (None, QWEN3_5_MOE, 256, 8192, list(range(576, 2049, 64))),
+        ("1", QWEN3_5_MOE, 256, 8192, list(range(576, 2049, 64))),
+        # ... clamped by the token budget.
+        (None, QWEN3_5_MOE, 256, 1024, list(range(576, 1025, 64))),
+        # Without breakable CUDA graphs the default stops at 512.
+        ("0", QWEN3_5_MOE, 256, 8192, []),
+        # A ceiling lowered by a small max_num_seqs is left alone.
+        (None, QWEN3_5_MOE, 8, 8192, []),
+        # Other breakable architectures keep the default ceiling.
+        ("1", "DeepseekV41ForCausalLM", 256, 8192, []),
+    ],
+)
+def test_qwen3_5_breakable_default_adds_prefill_capture_sizes(
+    monkeypatch, breakable, arch, max_num_seqs, max_num_batched_tokens, expected
+):
+    compilation_config = _qwen3_5_capture_sizes(
+        monkeypatch,
+        arch=arch,
+        breakable=breakable,
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+    )
+    prefill = compilation_config.prefill_cudagraph_capture_token_sizes
+    assert [size for size in prefill if size > 512] == expected
+    # The prefill sizes up to the default ceiling are unchanged.
+    token_grid_max = min(max_num_seqs * 2, 512)
+    token_grid = [1, 2, 4] + list(range(8, min(token_grid_max + 1, 256), 8))
+    token_grid += list(range(256, token_grid_max + 1, 16))
+    assert [size for size in prefill if size <= 512] == sorted(
+        set(token_grid) | ({max_num_seqs} if max_num_seqs <= token_grid_max else set())
+    )
+    assert compilation_config.max_prefill_cudagraph_capture_tokens == prefill[-1]
+    assert compilation_config.max_cudagraph_capture_size == max(
+        compilation_config.cudagraph_capture_sizes
+    )
+
+
+@pytest.mark.parametrize("num_speculative_tokens", [0, 2])
+def test_qwen3_5_prefill_capture_sizes_leave_decode_sizes_alone(
+    monkeypatch, num_speculative_tokens
+):
+    """The added sizes are prefill graphs only: the decode request counts match
+    an architecture without them."""
+    kwargs = dict(max_num_seqs=512, num_speculative_tokens=num_speculative_tokens)
+    qwen = _qwen3_5_capture_sizes(monkeypatch, **kwargs)
+    other = _qwen3_5_capture_sizes(monkeypatch, arch="DeepseekV41ForCausalLM", **kwargs)
+    assert [
+        size for size in qwen.prefill_cudagraph_capture_token_sizes if size > 512
+    ] == list(range(576, 2049, 64))
+    assert (
+        qwen.decode_cudagraph_capture_request_sizes
+        == other.decode_cudagraph_capture_request_sizes
+    )
+    assert (
+        qwen.max_decode_cudagraph_capture_requests
+        == other.max_decode_cudagraph_capture_requests
+    )
+
+
+@pytest.mark.parametrize(
+    ("is_cuda", "mode", "kwargs"),
+    [
+        # Qwen3.5 moves to breakable CUDA graphs on NVIDIA only.
+        (False, CUDAGraphMode.FULL_AND_PIECEWISE, {}),
+        # No piecewise graphs to run prefills in.
+        (True, CUDAGraphMode.FULL, {}),
+        # Explicit sizes, with the deprecated or the prefill fields, stay as set.
+        (True, CUDAGraphMode.FULL_AND_PIECEWISE, {"max_cudagraph_capture_size": 256}),
+        (
+            True,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            {"max_prefill_cudagraph_capture_tokens": 1024},
+        ),
+        (
+            True,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            {"prefill_cudagraph_capture_token_sizes": [1, 8, 512]},
+        ),
+    ],
+)
+def test_qwen3_5_prefill_capture_sizes_only_by_default(
+    monkeypatch, is_cuda, mode, kwargs
+):
+    qwen = _qwen3_5_capture_sizes(monkeypatch, is_cuda=is_cuda, mode=mode, **kwargs)
+    other = _qwen3_5_capture_sizes(
+        monkeypatch,
+        arch="DeepseekV41ForCausalLM",
+        is_cuda=is_cuda,
+        mode=mode,
+        **kwargs,
+    )
+    assert {f: getattr(qwen, f) for f in _CAPTURE_SIZE_FIELDS} == {
+        f: getattr(other, f) for f in _CAPTURE_SIZE_FIELDS
+    }
+    assert 576 not in qwen.prefill_cudagraph_capture_token_sizes
+
+
+def test_qwen3_5_prefill_capture_sizes_keep_the_sm100_default(monkeypatch):
+    """On SM100 the default prefill grid already reaches 8192 tokens."""
+    qwen = _qwen3_5_capture_sizes(monkeypatch, sm100=True)
+    other = _qwen3_5_capture_sizes(
+        monkeypatch, arch="DeepseekV41ForCausalLM", sm100=True
+    )
+    assert {f: getattr(qwen, f) for f in _CAPTURE_SIZE_FIELDS} == {
+        f: getattr(other, f) for f in _CAPTURE_SIZE_FIELDS
+    }
+    assert qwen.max_prefill_cudagraph_capture_tokens == 8192
+
+
 @pytest.mark.skipif(
     not current_platform.support_static_graph_mode(),
     reason="Skip if static graph mode is not supported",

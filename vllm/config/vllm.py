@@ -96,6 +96,10 @@ _QWEN3_5_ARCHITECTURES = frozenset(
     }
 )
 
+# Prefill capture sizes added above the default 512-token ceiling for Qwen3.5
+# on breakable CUDA graphs: every 64 tokens up to 2048.
+_QWEN3_5_PREFILL_CAPTURE_SIZES = tuple(range(576, 2049, 64))
+
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
         "AliceAIForCausalLM",
@@ -2639,6 +2643,26 @@ class VllmConfig:
             )
         else:
             prefill_sizes = list(shared_sizes)
+            if (
+                not legacy_sizes
+                and current_platform.is_cuda()
+                and compilation_config.use_breakable_cudagraph
+                and compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+                and shared_max == 512
+                and set(self.model_config.architectures) & _QWEN3_5_ARCHITECTURES
+            ):
+                # Breakable CUDA graphs run attention eagerly between the
+                # captured segments, so prefill-sized batches capture like any
+                # other size. Qwen3.5 on NVIDIA also skips torch.compile, so a
+                # prefill above the default ceiling would launch every op from
+                # Python instead. A coarse grid keeps the extra capture time and
+                # graph memory small. A ceiling lowered by a small max_num_seqs
+                # is left alone.
+                prefill_sizes += [
+                    size
+                    for size in _QWEN3_5_PREFILL_CAPTURE_SIZES
+                    if size <= max_num_tokens
+                ]
 
         if decode_sizes is not None:
             decode_sizes = explicit(
