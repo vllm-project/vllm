@@ -343,7 +343,7 @@ class Scheduler(SchedulerInterface):
             )
             if resources.max_rows > self.num_spec_tokens + 1:
                 raise ValueError(
-                    f"SpecResources.capture_rows ({resources.capture_rows}) must "
+                    f"SpecResources.max_rows ({resources.max_rows}) must "
                     "be at most num_speculative_tokens + 1 "
                     f"({self.num_spec_tokens + 1}): KV slots and the runner's "
                     "buffers are sized from num_speculative_tokens."

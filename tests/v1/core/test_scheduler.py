@@ -9088,6 +9088,19 @@ def test_scheduler_keeps_static_spec_blocks(case):
             )
 
 
+def test_scheduler_rejects_spec_resources_beyond_k(monkeypatch):
+    """Declared resources may not run more rows than num_speculative_tokens + 1:
+    KV slots and buffers are sized from K."""
+    from vllm.v1.spec_decode.resources import SpecResources
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
+
+    monkeypatch.setattr(
+        SpeculatorConfig, "resources", lambda self, n: SpecResources(capture_rows=(5,))
+    )
+    with pytest.raises(ValueError, match=r"SpecResources.max_rows \(5\)"):
+        create_scheduler(num_speculative_tokens=3)
+
+
 def test_scheduler_takes_effective_spec_resources():
     """The engine core passes a branching speculator's effective resources at
     construction; without them the scheduler runs with the declared ones."""
