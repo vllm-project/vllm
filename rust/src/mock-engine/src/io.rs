@@ -57,14 +57,20 @@ fn decode_request(message: ZmqMessage) -> Result<EngineInput> {
     if frames.is_empty() {
         bail!("empty engine request message");
     }
-    if frames.len() != 2 {
-        bail!("invalid frame count for engine request: {}", frames.len());
-    }
-
     let request_type_frame = frames[0].as_ref();
     let Some(request_type) = EngineCoreRequestType::from_frame(request_type_frame) else {
         bail!("unknown engine request type: {:?}", request_type_frame);
     };
+    // Add requests carry large tensors (e.g. long prompt token ids) in trailing
+    // auxiliary frames. The mock only reads their shapes from the payload, so
+    // the auxiliary frames are left unresolved.
+    let valid_frame_count = match request_type {
+        EngineCoreRequestType::Add => frames.len() >= 2,
+        _ => frames.len() == 2,
+    };
+    if !valid_frame_count {
+        bail!("invalid frame count for engine request: {}", frames.len());
+    }
 
     let input = match request_type {
         EngineCoreRequestType::Add => {

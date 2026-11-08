@@ -162,6 +162,36 @@ async fn chunk_size_clips_final_output_to_max_tokens() {
     shutdown_mock(client, shutdown, task).await;
 }
 
+/// Long prompts arrive with their token ids in an auxiliary ZMQ frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn long_prompt_in_auxiliary_frame_is_served() {
+    let ipc = IpcNamespace::new().expect("ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let (client, shutdown, task) = connect_with_mock(handshake_address, 1, 1).await;
+    let request = EngineCoreRequest {
+        prompt_token_ids: Some((0..1_000).collect::<Vec<u32>>().into()),
+        ..sample_request("req-long", 1)
+    };
+    let mut stream = timeout(Duration::from_secs(5), async {
+        client.call(request).await.expect("call").into_outputs()
+    })
+    .await
+    .expect("call timeout");
+
+    let output = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("output timeout")
+        .expect("output")
+        .expect("output ok");
+    assert_eq!(output.finish_reason, Some(EngineCoreFinishReason::Length));
+    assert_eq!(
+        output.prefill_stats.as_ref().map(|stats| stats.num_prompt_tokens),
+        Some(1_000)
+    );
+
+    shutdown_mock(client, shutdown, task).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn abort_cancels_active_request_and_emits_terminal_output() {
     let ipc = IpcNamespace::new().expect("ipc namespace");
