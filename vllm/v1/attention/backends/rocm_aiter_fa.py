@@ -904,8 +904,8 @@ class AiterFlashAttentionBackend(AttentionBackend):
         """Validate the block size the ROCm gather kernels require, and under
         the shuffle layout publish K and V as two head slots.
 
-        The shuffle read/write kernels rearrange a whole ``head_size x
-        block_size`` tile per side, so each side needs its own contiguous run
+        The shuffle read/write kernels rearrange a whole `head_size x
+        block_size` tile per side, so each side needs its own contiguous run
         in the page. Packed into the content dim they interleave per token
         instead, which no layout can undo.
         """

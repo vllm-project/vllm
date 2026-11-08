@@ -156,7 +156,7 @@ def _problem(
     kv_cache_dtype, counts, heads, k_scale, q_scale, seed, *, holes=False, blocks=None
 ):
     """Rows of local physical indices (compacted prefix, or with -1 holes
-    inside the prefix when ``holes``) over live packed rows; entries past each
+    inside the prefix when `holes`) over live packed rows; entries past each
     row's length name poisoned rows."""
     g = torch.Generator(device="cuda").manual_seed(seed)
     dev = torch.device("cuda")
@@ -261,7 +261,7 @@ def test_prims_ts_without_lse(kv_cache_dtype):
 @pytest.mark.parametrize("exact", [False, True])
 def test_prims_ts_cuda_graph_replay(kv_cache_dtype, rows, exact):
     """Plan in an eager warmup, capture, then replay on new inputs written in
-    place (as decode graphs are replayed). ``exact``: the graph size is a
+    place (as decode graphs are replayed). `exact`: the graph size is a
     planned capacity (as _prims_ts_row_buckets plans every graph size), else
     the call runs on the next larger capacity."""
     k_scale = 0.5 if kv_cache_dtype == "fp8" else 1.0
@@ -479,13 +479,13 @@ def test_select_kernel():
 
 
 def _f_pad_query_heads(query, heads):
-    """The zero head pad as the trtllm-gen call did it before (``F.pad``)."""
+    """The zero head pad as the trtllm-gen call did it before (`F.pad`)."""
     return torch.nn.functional.pad(query, (0, 0, 0, heads - query.shape[1]))
 
 
 def _masked_fill_dcp_partials(topk):
-    """trtllm-gen's empty-row guard before: an ``all(topk == -1)`` reduction,
-    then full ``masked_fill``s of the output and LSE views."""
+    """trtllm-gen's empty-row guard before: an `all(topk == -1)` reduction,
+    then full `masked_fill`s of the output and LSE views."""
 
     def finish(out, lse, counts):
         empty = (topk == -1).all(dim=-1)

@@ -180,7 +180,7 @@ def build_shardq_metadata(
     metadata: SparseMLACommonMetadata,
     device: torch.device,
 ) -> ShardQMetadata | None:
-    """This step's ShardQ, with ``metadata`` narrowed to this rank's tokens,
+    """This step's ShardQ, with `metadata` narrowed to this rank's tokens,
     or None."""
     split = build_shardq_split(common_attn_metadata, vllm_config)
     if split is None:

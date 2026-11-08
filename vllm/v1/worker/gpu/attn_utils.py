@@ -65,9 +65,9 @@ class AttentionCGSupportInfo:
     def narrow(
         self, support: AttentionCGSupport, backend: str | None
     ) -> "AttentionCGSupportInfo":
-        """Return an info tightened by ``support`` if it is more restrictive.
+        """Return an info tightened by `support` if it is more restrictive.
 
-        Lets attention groups built outside ``init_attn_backend`` (e.g.
+        Lets attention groups built outside `init_attn_backend` (e.g.
         encoder-only layers) contribute to the runner's cudagraph decision.
         """
         if support.value < self.min_cg_support.value:
@@ -207,9 +207,9 @@ def init_attn_backend(
     maps_slot_mapping: bool = False,
     slot_mapped_layers: Collection[str] = (),
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
-    """``maps_slot_mapping``: the caller maps every slot mapping it builds to
+    """`maps_slot_mapping`: the caller maps every slot mapping it builds to
     kernel blocks (AttentionGroup.map_to_kernel_slot_mapping); or only for the
-    ``slot_mapped_layers``, which another runner (a speculator) writes."""
+    `slot_mapped_layers`, which another runner (a speculator) writes."""
     # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
 
