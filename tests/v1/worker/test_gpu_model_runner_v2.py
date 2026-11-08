@@ -79,7 +79,8 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):
         global_batch=global_batch,
         restore_for_sampling=restore_for_sampling,
     )
-    pp_receive = Mock(return_value=False)
+    pp_receive = Mock(return_value=None)
+    runner.aux_output_connector = None
     runner.pp_handler = SimpleNamespace(receive=pp_receive)
     postprocess_num_computed_tokens = Mock()
     monkeypatch.setattr(

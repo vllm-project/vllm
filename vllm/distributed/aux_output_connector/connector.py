@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.outputs import ModelRunnerOutput
     from vllm.v1.request import Request
 
 
@@ -64,6 +65,39 @@ class AuxRequestOutput:
         assert row_counts, "auxiliary output has no artifact rows"
         assert len(row_counts) == 1, "auxiliary output artifact row counts differ"
         return row_counts.pop()
+
+
+class AuxOutputAggregator:
+    """Concatenate the PP stages' auxiliary outputs along the layer axis."""
+
+    def __init__(self, stage_ranks: Sequence[int]) -> None:
+        # The first rank of each PP stage, in stage order.
+        self.stage_ranks = stage_ranks
+
+    def aggregate(
+        self, outputs: list[ModelRunnerOutput | None], output_rank: int
+    ) -> ModelRunnerOutput | None:
+        output = outputs[output_rank]
+        if output is None or not output.aux_output_connector_output:
+            return output
+        stage_outputs: list[dict[str, AuxRequestOutput]] = []
+        for rank in self.stage_ranks:
+            stage_output = outputs[rank]
+            assert stage_output is not None
+            assert stage_output.aux_output_connector_output is not None
+            stage_outputs.append(stage_output.aux_output_connector_output)
+        combined: dict[str, AuxRequestOutput] = {}
+        for request_id, request_output in output.aux_output_connector_output.items():
+            stage_rows: list[np.ndarray] = []
+            for stage_payload in stage_outputs:
+                rows = stage_payload[request_id].routed_rows
+                assert rows is not None
+                stage_rows.append(rows)
+            combined[request_id] = AuxRequestOutput(
+                request_output.token_start, np.concatenate(stage_rows, axis=1)
+            )
+        output.aux_output_connector_output = combined
+        return output
 
 
 class AuxOutputSchedulerConnector:
