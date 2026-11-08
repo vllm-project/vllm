@@ -889,7 +889,10 @@ def invoke_fused_moe_triton_kernel(
         and block_shape is not None
         and all(block_shape)
         and current_platform.is_cuda()
-        and current_platform.is_device_capability(90)
+        and (
+            current_platform.is_device_capability_family(90)
+            or current_platform.is_device_capability_family(100)
+        )
         and B.device.type == "cuda"
         and B.is_contiguous()
         and B.size(1) % config["BLOCK_SIZE_N"] == 0
