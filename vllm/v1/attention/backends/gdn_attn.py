@@ -173,7 +173,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         self.gdn_prefill_backend: Literal[
-            "triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl"
+            "triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl", "hip"
         ]
         _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
         self._check_chunk_metadata_override(type(self), self.gdn_prefill_backend)
@@ -198,16 +198,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
         # update_block_table() keeps the source group's batch-level FULL graph
-        # buffers, so only MRV2, which also reuses metadata at capture, may use
-        # it.
+        # buffers, which is safe because the runner reuses metadata at capture.
         self.supports_update_block_table = (
-            vllm_config.use_v2_model_runner
-            and device.type == "cuda"
+            device.type in ("cuda", "xpu")
             # Not isinstance: KDA's RecoverSSM/checkpoint metadata is per group.
             and type(self) is GDNAttentionMetadataBuilder
         )
         if self.supports_update_block_table:
-            # Opts into MRV2's CUDA-only aligned-index precompute.
+            # Opts into MRV2's aligned-index precompute.
             self.mamba_aligned_state_indices: torch.Tensor | None = None
 
         self.decode_cudagraph_max_bs: int = (

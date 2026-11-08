@@ -4,11 +4,11 @@
 
 The MiniMax-M3-preview config selects a single set of branches:
     * qk_norm_type == "per_head"
-    * hidden_act == "swigluoai"
+    * SwiGLU-OAI MLPs (Transformers reports hidden_act as "silu")
     * use_gemma_norm == True  -> Gemma-style RMSNorm everywhere
     * attention_output_gate == False
     * scoring_func == "sigmoid" with a routing-bias correction term
-    * sparse_attention_config present -> a subset of layers run the extra
+    * "minimax_m3_sparse" layer_types -> a subset of layers run the extra
       "index" attention branch.
 """
 
@@ -190,21 +190,12 @@ def _supports_qkv_fused_epilogue(attn: "MiniMaxM3SparseAttention") -> bool:
 
 def _sparse_attention_layer_ids(config: PreTrainedConfig) -> set[int]:
     """Layer ids whose attention runs the extra sparse "index" branch."""
-    cfg = getattr(config, "sparse_attention_config", None)
-    if not cfg:
-        return set()
-    freq = cfg.get("sparse_attention_freq")
-    if freq is None:
-        return set()
-    return {i for i, f in enumerate(freq) if f != 0}
+    return {i for i, t in enumerate(config.layer_types) if t == "minimax_m3_sparse"}
 
 
 def _is_moe_layer(config: PreTrainedConfig, layer_id: int) -> bool:
     """Whether this layer's MLP is a sparse MoE block (vs a dense MLP)."""
-    moe_layer_freq = getattr(config, "moe_layer_freq", None)
-    if moe_layer_freq is None:
-        return True
-    return moe_layer_freq[layer_id] != 0
+    return config.mlp_layer_types[layer_id] == "sparse"
 
 
 def _use_mega_moe(vllm_config: VllmConfig) -> bool:
@@ -241,8 +232,7 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
         return False
     parallel_config = vllm_config.parallel_config
     return (
-        parallel_config.pipeline_parallel_size == 1
-        and parallel_config.enable_expert_parallel
+        parallel_config.enable_expert_parallel
         and parallel_config.tensor_parallel_size > 1
     )
 
@@ -449,7 +439,8 @@ class MiniMaxM3MLP(nn.Module):
             config.hidden_size,
             bias=False,
             quant_config=quant_config,
-            reduce_results=reduce_results,
+            # Under SP the forward reduce-scatters the output itself.
+            reduce_results=reduce_results and not use_sequence_parallel,
             disable_tp=disable_tp,
             prefix=f"{prefix}.down_proj",
         )
@@ -458,16 +449,11 @@ class MiniMaxM3MLP(nn.Module):
             if use_sequence_parallel and run_gemm_rs
             else None
         )
-        if config.hidden_act != "swigluoai":
-            raise ValueError(
-                f"Unsupported activation: {config.hidden_act}. "
-                "Only swigluoai is supported."
-            )
-        # gate * sigmoid(alpha * gate) * (up + beta), with both halves clamped.
+        # gate * sigmoid(alpha * gate) * (up + 1), with both halves clamped.
         self.act_fn = SiluAndMulWithClamp(
             swiglu_limit=config.swiglu_limit,
             alpha=config.swiglu_alpha,
-            beta=config.swiglu_beta,
+            beta=1.0,
         )
         from vllm.models.minimax_m3.nvidia.ops import dense_gemm1_mxfp8
 
@@ -518,11 +504,11 @@ class MiniMaxM3MoE(nn.Module):
         reduce_results: bool = True,
         prefix: str = "",
         use_mega_moe: bool = False,
-        input_is_sequence_sharded: bool = False,
+        use_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.input_is_sequence_sharded = input_is_sequence_sharded
+        self.use_sequence_parallel = use_sequence_parallel
         if self.tp_size > config.num_local_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
@@ -531,22 +517,14 @@ class MiniMaxM3MoE(nn.Module):
 
         self.use_mega_moe = use_mega_moe
         self.reduce_results = reduce_results
-        self.scoring_func = config.scoring_func
         self.top_k = config.num_experts_per_tok
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
-        self.n_shared_experts = getattr(config, "n_shared_experts", None)
 
         # Sigmoid routing uses a per-expert score-correction bias for selection.
-        self.use_routing_bias = getattr(config, "use_routing_bias", False)
-        if self.use_routing_bias:
-            self.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.num_local_experts, dtype=torch.float32)
-            )
-            self.e_score_correction_bias.weight_loader = (
-                MiniMaxM3MoE.ebias_weight_loader
-            )
-        else:
-            self.e_score_correction_bias = None
+        self.e_score_correction_bias = nn.Parameter(
+            torch.zeros(config.num_local_experts, dtype=torch.float32)
+        )
+        self.e_score_correction_bias.weight_loader = MiniMaxM3MoE.ebias_weight_loader
 
         # Router weights are stored in fp32; GateLinear upcasts the bf16
         # activations and computes the gate in fp32 (fp32 router logits).
@@ -564,21 +542,20 @@ class MiniMaxM3MoE(nn.Module):
             self._init_mega_moe_experts(config, quant_config, prefix)
             return
 
-        if self.n_shared_experts:
-            self.shared_experts = MiniMaxM3MLP(
-                config=config,
-                intermediate_size=config.intermediate_size * self.n_shared_experts,
-                quant_config=quant_config,
-                reduce_results=False,
-                prefix=f"{prefix}.shared_experts",
-            )
+        self.shared_experts = MiniMaxM3MLP(
+            config=config,
+            intermediate_size=config.intermediate_size,
+            quant_config=quant_config,
+            reduce_results=False,
+            prefix=f"{prefix}.shared_experts",
+        )
 
         self.experts = FusedMoEFactory(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
-            scoring_func=config.scoring_func,
+            scoring_func="sigmoid",
             e_score_correction_bias=self.e_score_correction_bias,
             renormalize=True,
             # w13 (gate_up_proj) is loaded packed via MergedColumnParallelLinear
@@ -587,7 +564,7 @@ class MiniMaxM3MoE(nn.Module):
             activation="swigluoai_uninterleave",
             swiglu_limit=config.swiglu_limit,
             swiglu_alpha=config.swiglu_alpha,
-            swiglu_beta=config.swiglu_beta,
+            swiglu_beta=1.0,
             routed_scaling_factor=self.routed_scaling_factor,
             router_logits_dtype=self.gate.out_dtype,
             # The NVFP4 routed experts are QAT'd with a per-token FC1 input
@@ -606,32 +583,26 @@ class MiniMaxM3MoE(nn.Module):
         quant_config: QuantizationConfig | None,
         prefix: str,
     ) -> None:
-        if config.hidden_act != "swigluoai":
-            raise ValueError(
-                f"MiniMax M3 MegaMoE requires swigluoai, got {config.hidden_act}."
-            )
         # Replicated hidden states are sharded here, so each rank routes only
         # its own tokens through the EP-wide kernel.
         self.shard_replicated_input = (
-            self.tp_size > 1 and not self.input_is_sequence_sharded
+            self.tp_size > 1 and not self.use_sequence_parallel
         )
 
         def replicated_shared_experts() -> MiniMaxM3MLP:
             # Replicated, so the kernel can fuse it.
             return MiniMaxM3MLP(
                 config=config,
-                intermediate_size=config.intermediate_size * self.n_shared_experts,
+                intermediate_size=config.intermediate_size,
                 quant_config=quant_config,
                 reduce_results=False,
                 disable_tp=True,
                 prefix=f"{prefix}.shared_experts",
             )
 
-        shared_experts = None
-        if self.n_shared_experts:
-            # Only describes the weights: a fused layer allocates its own.
-            with torch.device("meta"):
-                shared_experts = replicated_shared_experts()
+        # Only describes the weights: a fused layer allocates its own.
+        with torch.device("meta"):
+            shared_experts = replicated_shared_experts()
         ep_group = get_ep_group()
         num_experts = config.num_local_experts
         if num_experts % ep_group.world_size != 0:
@@ -652,13 +623,13 @@ class MiniMaxM3MoE(nn.Module):
                 "swiglu",
                 clamp=config.swiglu_limit,
                 alpha=config.swiglu_alpha,
-                beta=config.swiglu_beta,
+                beta=1.0,
             ),
             weight_format=MEGA_MOE_NVFP4,
             shared_experts=shared_experts,
             prefix=f"{prefix}.experts",
         )
-        if shared_experts is not None and not self.experts.has_fused_shared_experts:
+        if not self.experts.has_fused_shared_experts:
             self.shared_experts = replicated_shared_experts()
 
     @staticmethod
@@ -756,10 +727,8 @@ class MiniMaxM3MoE(nn.Module):
         topk_weights, topk_ids = fused_topk_bias(
             hidden_states=hidden_states,
             gating_output=router_logits,
-            scoring_func=self.scoring_func,
-            e_score_correction_bias=self.e_score_correction_bias.data
-            if self.e_score_correction_bias is not None
-            else None,
+            scoring_func="sigmoid",
+            e_score_correction_bias=self.e_score_correction_bias.data,
             topk=self.top_k,
             renormalize=True,
             routed_scaling_factor=self.routed_scaling_factor,
@@ -835,10 +804,7 @@ class MiniMaxM3Attention(nn.Module):
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=config.max_position_embeddings,
-            rope_parameters={
-                "rope_theta": config.rope_theta,
-                "partial_rotary_factor": config.partial_rotary_factor,
-            },
+            rope_parameters=config.rope_parameters,
         )
 
         self.attn = Attention(
@@ -925,12 +891,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.scaling = self.head_dim**-0.5
 
         # Sparse "index" branch dims. index_q has the same head count as the KV
-        # heads (sparse_num_index_heads == num_key_value_heads), so it shards
+        # heads (index_n_heads == num_key_value_heads), so it shards
         # identically -- including replication when tp_size > num_key_value_heads.
-        sparse_cfg = config.sparse_attention_config
-        self.total_idx_heads = sparse_cfg["sparse_num_index_heads"]
+        self.total_idx_heads = config.index_n_heads
         self.num_idx_heads = self.num_kv_heads
-        self.idx_head_dim = sparse_cfg["sparse_index_dim"]
+        self.idx_head_dim = config.index_head_dim
         self.index_q_size = self.num_idx_heads * self.idx_head_dim
 
         # Single fused projection: q, k, v, index_q, index_k in one GEMM.
@@ -971,10 +936,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=config.max_position_embeddings,
-            rope_parameters={
-                "rope_theta": config.rope_theta,
-                "partial_rotary_factor": config.partial_rotary_factor,
-            },
+            rope_parameters=config.rope_parameters,
         )
 
         self.index_q_norm = MiniMAXGemmaRMSNorm(
@@ -1014,7 +976,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # picking Triton vs MSA off its cache dtype. impl is AttentionImplBase
         # (broader than the AttentionImpl that AttentionLayerBase annotates).
         self.attn_backend, impl_cls = select_main_backend_and_impl_cls(
-            topk_blocks=sparse_cfg["sparse_topk_blocks"],
+            topk_blocks=config.index_topk_blocks,
             kv_cache_dtype=self.kv_cache_dtype,
             num_kv_heads=self.num_kv_heads,
         )
@@ -1024,8 +986,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             self.scaling,
             self.num_kv_heads,
             kv_cache_dtype=self.kv_cache_dtype,
-            topk_blocks=sparse_cfg["sparse_topk_blocks"],
-            sparse_block_size=sparse_cfg["sparse_block_size"],
+            topk_blocks=config.index_topk_blocks,
+            sparse_block_size=config.index_block_size,
             msa_decode_backend=(
                 vllm_config.attention_config.minimax_m3_msa_decode_backend
             ),
@@ -1034,14 +996,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.indexer = MiniMaxM3Indexer(
             num_kv_heads=self.num_kv_heads,
             scale=self.scaling,
-            topk_blocks=sparse_cfg["sparse_topk_blocks"],
-            sparse_block_size=sparse_cfg["sparse_block_size"],
+            topk_blocks=config.index_topk_blocks,
+            sparse_block_size=config.index_block_size,
             num_index_heads=self.num_idx_heads,
             index_head_dim=self.idx_head_dim,
             prefix=self.layer_name,
-            init_blocks=sparse_cfg.get("sparse_init_block", 0),
-            local_blocks=sparse_cfg.get("sparse_local_block", 0),
-            score_type=sparse_cfg.get("sparse_score_type", "max"),
+            local_blocks=config.index_local_blocks,
             cache_config=cache_config,
             indexer_kv_dtype=self.indexer_kv_dtype,
             topk_indices_buffer=topk_indices_buffer,
@@ -1342,7 +1302,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 reduce_results=reduce_results,
                 prefix=f"{prefix}.block_sparse_moe",
                 use_mega_moe=use_mega_moe,
-                input_is_sequence_sharded=self.use_sequence_parallel,
+                use_sequence_parallel=self.use_sequence_parallel,
             )
         else:
             self.mlp = MiniMaxM3MLP(
@@ -1395,8 +1355,11 @@ class MiniMaxM3DecoderLayer(nn.Module):
             )
         else:
             # MXFP8 output when qkv_proj consumes it (checked per call: LoRA
-            # wrappers installed after construction change the key).
-            mxfp8 = _consumes_mxfp8_128x4(self.self_attn.qkv_proj)
+            # wrappers installed after construction change the key), but not
+            # under sequence parallelism, which all-gathers the norm output.
+            mxfp8 = not self.use_sequence_parallel and _consumes_mxfp8_128x4(
+                self.self_attn.qkv_proj
+            )
             if residual is None:
                 residual = hidden_states
                 hidden_states = self.input_layernorm(hidden_states, mxfp8=mxfp8)
@@ -1479,10 +1442,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # top-k output survives cudagraph capture/replay. Token-major
         # [total_q, num_index_heads, topk] so the indexer writes its native
         # [token, head, topk] top-k; the attend transposes to [H, tokens, topk].
-        sparse_cfg = getattr(config, "sparse_attention_config", None)
-        if sparse_cfg is not None:
+        if _sparse_attention_layer_ids(config):
             tp_size = get_tensor_model_parallel_world_size()
-            num_index_heads = max(1, sparse_cfg["sparse_num_index_heads"] // tp_size)
+            num_index_heads = max(1, config.index_n_heads // tp_size)
             # Pad tokens to a multiple of 4 so the buffer head stride stays
             # int4-aligned for build_k2q_csr's vectorised int4 loads.
             max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -1490,7 +1452,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             self.topk_indices_buffer = torch.empty(
                 padded_num_tokens,
                 num_index_heads,
-                sparse_cfg["sparse_topk_blocks"],
+                config.index_topk_blocks,
                 dtype=torch.int32,
             )
         else:
@@ -1606,6 +1568,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                     hidden_states,
                 )
             hidden_states = sp_shard(hidden_states)
+            if residual is not None:
+                residual = sp_shard(residual)
 
         remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
@@ -1634,6 +1598,14 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             self._maybe_add_hidden_state(
                 aux_hidden_states, self.end_layer, hidden_states, residual
             )
+            if self.use_sequence_parallel:
+                # PP transport expects tensors replicated across TP ranks.
+                hidden_size = hidden_states.shape[-1]
+                packed = torch.cat([hidden_states, residual, *aux_hidden_states], -1)
+                packed = sp_all_gather(packed)[:num_tokens]
+                hidden_states, residual, *aux_hidden_states = packed.split(
+                    hidden_size, dim=-1
+                )
             return IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
@@ -1912,9 +1884,8 @@ class MiniMaxM3SparseForConditionalGeneration(
         projector_hidden_size = getattr(config, "projector_hidden_size", None)
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
-            vision_config = config.vision_config
             self.vision_tower = MiniMaxVLVisionModel(
-                config=PreTrainedConfig.from_dict(vision_config),
+                config=config.vision_config,
                 text_hidden_size=text_hidden_size,
                 projector_hidden_size=projector_hidden_size,
                 quant_config=self.quant_config,
