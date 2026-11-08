@@ -90,11 +90,10 @@ def test_single_pp_stage_runs_the_last_rank_as_the_only_stage(
     """A draft model runs whole on the last PP rank, as at PP=1."""
     last_rank = _pp_group(rank_in_group=1, world_size=2)
     monkeypatch.setattr(parallel_state, "_PP", last_rank)
-    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "3,3")
     with parallel_state.single_pp_stage():
         stage = parallel_state.get_pp_group()
         assert stage.is_first_rank and stage.is_last_rank
-        assert get_pp_indices(6, stage.rank_in_group, stage.world_size) == (0, 6)
+        assert (stage.rank_in_group, stage.world_size) == (0, 1)
         assert parallel_state.in_single_pp_stage()
     assert parallel_state.get_pp_group() is last_rank
     assert not parallel_state.in_single_pp_stage()

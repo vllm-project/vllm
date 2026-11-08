@@ -214,6 +214,10 @@ vllm serve <target-model> \
   `target_parallel_config`, `draft_parallel_config`, and `draft_load_config`
   are populated by vLLM and are not intended to be set by users.
 
+## Speculative Decoding with Pipeline Parallelism
+
+With pipeline parallelism (`pipeline_parallel_size > 1`), the draft model runs as a whole model on the last pipeline stage, as it would at `pipeline_parallel_size=1`. A custom `VLLM_PP_LAYER_PARTITION` applies only to the target model.
+
 ## Lossless guarantees of Speculative Decoding
 
 In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of
