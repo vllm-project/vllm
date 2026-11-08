@@ -15,7 +15,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
-from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.block_table import BlockTables, make_slot_mappings
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -93,11 +93,10 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             target_input_buffers,
             target_attn_groups,
         )
-        self.expanded_slot_mappings = torch.empty(
+        self.expanded_slot_mappings = make_slot_mappings(
             block_tables.num_kv_cache_groups,
             self.max_num_tokens + self.max_num_reqs,
-            dtype=torch.int64,
-            device=self.device,
+            self.device,
         )
 
     def _prefill_capture_slot_mappings(self) -> torch.Tensor:

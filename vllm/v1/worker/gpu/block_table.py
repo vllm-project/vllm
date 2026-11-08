@@ -5,6 +5,7 @@ from collections.abc import Iterable
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import (
     FusedStagedWriter,
@@ -12,6 +13,22 @@ from vllm.v1.worker.gpu.buffer_utils import (
     UvaBackedTensor,
     _load_ptr,
 )
+
+
+def make_slot_mappings(
+    num_groups: int, num_tokens: int, device: torch.device
+) -> torch.Tensor:
+    """Allocate a [num_groups, num_tokens] int64 slot-mapping buffer.
+
+    Each group's row is handed to attention as its own tensor, and some
+    kernels assume an aligned base address (DeepSeek-V4's CuTe DSL compressor
+    requires 64 bytes). Pad the row stride so every row starts 128-byte
+    aligned whatever num_tokens is.
+    """
+    buffer = torch.zeros(
+        num_groups, round_up(num_tokens, 16), dtype=torch.int64, device=device
+    )
+    return buffer[:, :num_tokens]
 
 
 class BlockTables:
@@ -87,11 +104,8 @@ class BlockTables:
         ]
         self._num_dirty_rows = 0
 
-        self.slot_mappings = torch.zeros(
-            self.num_kv_cache_groups,
-            self.max_num_batched_tokens,
-            dtype=torch.int64,
-            device=self.device,
+        self.slot_mappings = make_slot_mappings(
+            self.num_kv_cache_groups, self.max_num_batched_tokens, self.device
         )
 
         self.init_block_table_layout_tensors()

@@ -18,7 +18,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
-from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.block_table import BlockTables, make_slot_mappings
 from vllm.v1.worker.gpu.cp_utils import cp_local_slot
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -279,11 +279,8 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.draft_kv_cache_group_id = self.draft_kv_cache_group_ids[0]
 
         # Per-group context slot buffers for the precompute (one row per group).
-        self._context_slot_mappings = torch.zeros(
-            len(self.draft_kv_cache_group_ids),
-            self.max_num_tokens,
-            dtype=torch.int64,
-            device=self.device,
+        self._context_slot_mappings = make_slot_mappings(
+            len(self.draft_kv_cache_group_ids), self.max_num_tokens, self.device
         )
 
         # Map each draft decoder layer to the index (within draft_kv_cache_group_ids)
