@@ -148,7 +148,7 @@ def _engine(vllm_runner, num_spec: int, max_num_seqs: int, **kwargs):
         max_num_seqs=max_num_seqs,
         gpu_memory_utilization=0.15,
         # extend_kv_cache re-binds the KV views without prepare_kv, which
-        # plan() rejects in eager steps (#66357)
+        # plan() rejects in eager steps (#66370)
         enable_extensible_kv_cache=False,
         attention_config={"mla_prefill_backend": "ROCM_AITER_FA"},
         speculative_config={
