@@ -5,45 +5,48 @@ default_stages:
   - pre-commit # Run locally
   - manual # Run in CI
 exclude: 'vllm/third_party/.*|vllm/models/kimi_k3/nvidia/ops/third_party/.*|vllm/models/kimi_k3/amd/ops/third_party/.*'
+# Revs are frozen to commit SHAs, bump them with `pre-commit autoupdate --freeze [--repo <url>]`
 repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: v0.14.0
+  rev: f368fb366ff7f2f808dd324b83a6d32267799e19  # frozen: v0.17.2
   hooks:
   - id: ruff-check
     args: [--output-format, github, --fix]
   - id: ruff-format
+    types_or: [python, pyi, jupyter]
 - repo: https://github.com/crate-ci/typos
-  rev: v1.43.5
+  rev: 9023c1f779400877cafdd98052113fc777e2cfdc  # frozen: v1.51.1
   hooks:
   - id: typos
     args: [--force-exclude]
 - repo: https://github.com/pre-commit/mirrors-clang-format
-  rev: v21.1.2
+  rev: 98ad4ddb9c057de2f5b9e93e44e6db959807d68c  # frozen: v23.1.3
   hooks:
   - id: clang-format
     exclude: 'csrc/moe/topk_softmax_kernels.cu|vllm/third_party/.*'
     types_or: [c++, cuda]
     args: [--style=file, --verbose]
 - repo: https://github.com/DavidAnson/markdownlint-cli2
-  rev: v0.21.0
+  rev: 341e2a331ba578029e66c2e01183e7a6b5ca9ab4  # frozen: v0.24.0
   hooks:
   - id: markdownlint-cli2
-    language_version: lts
+    language_version: 24.22.1 # Node 26 (current lts) needs libatomic, which the CI runners lack
     args: [--config, tools/pre_commit/.markdownlint.yaml, --fix]
 - repo: https://github.com/rhysd/actionlint
-  rev: v1.7.7
+  rev: 914e7df21a07ef503a81201c76d2b11c789d3fca  # frozen: v1.7.12
   hooks:
   - id: actionlint
 - repo: https://github.com/shellcheck-py/shellcheck-py
-  rev: 745eface02aef23e168a8afb6b5737818efbea95 # v0.11.0.1
+  rev: a6564f5d57444e123433a5c9af733e3975c77229  # frozen: v0.11.0.1-1
   hooks:
   - id: shellcheck
     args: ["-s", "bash", "--format=gcc", "--rcfile=tools/pre_commit/.shellcheckrc"]
 - repo: https://github.com/astral-sh/uv-pre-commit
-  rev: 0.11.1
+  rev: 46787482b9fb2003c56e0f7592e312ef381829d9  # frozen: 0.13.6
   hooks:
     - id: pip-compile
       args: [
+        --generate-hashes,
         requirements/test/cuda.in,
         -c, requirements/cuda.txt,
         -o, requirements/test/cuda.txt,
@@ -52,11 +55,32 @@ repos:
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
-      files: ^requirements/(common|cuda|test/cuda)\.(in|txt)$
+      files: ^(requirements/(common|cuda|test/cuda)\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
+    - id: pip-compile
+      alias: pip-compile-kv-connectors
+      name: pip-compile-kv-connectors
+      args: [
+        requirements/test/kv_connectors_cuda.in,
+        -c, requirements/cuda.txt,
+        -c, requirements/test/cuda.txt,
+        -o, requirements/test/kv_connectors_cuda.txt,
+        --override, requirements/test/kv_connectors_cuda.overrides,
+        --generate-hashes,
+        # nixl pulls both CUDA variants; the CUDA 13 image keeps only nixl-cu13.
+        --no-emit-package, nixl-cu12,
+        # The image pins NCCL itself (NCCL_VERSION + UV_OVERRIDE).
+        --no-emit-package, nvidia-nccl-cu13,
+        --index-strategy, unsafe-best-match,
+        --torch-backend, cu130,
+        --python-platform, x86_64-manylinux_2_28,
+        --python-version, "3.12",
+      ]
+      files: ^requirements/(common|cuda|test/(cuda|kv_connectors_cuda))\.(in|txt|overrides)$
     - id: pip-compile
       alias: pip-compile-rocm
       name: pip-compile-rocm
       args: [
+        --generate-hashes,
         requirements/test/rocm.in,
         -c, requirements/rocm.txt,
         -o, requirements/test/rocm.txt,
@@ -74,6 +98,7 @@ repos:
         --no-emit-package, cupy-cuda12x,
         # nvidia packages (unsuffixed / unified naming)
         --no-emit-package, nvidia-cublas,
+        --no-emit-package, nvidia-cuda-cccl,
         --no-emit-package, nvidia-cuda-cupti,
         --no-emit-package, nvidia-cuda-nvrtc,
         --no-emit-package, nvidia-cuda-runtime,
@@ -121,11 +146,12 @@ repos:
         --no-emit-package, nvidia-nvshmem-cu13,
         --no-emit-package, nvidia-nvtx-cu13,
       ]
-      files: ^requirements/(common|rocm|test/rocm)\.(in|txt)$
+      files: ^(requirements/(common|rocm|test/rocm)\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
     - id: pip-compile
       alias: pip-compile-xpu
       name: pip-compile-xpu
       args: [
+        --generate-hashes,
         requirements/test/xpu.in,
         -c, requirements/xpu.txt,
         -o, requirements/test/xpu.txt,
@@ -133,11 +159,12 @@ repos:
         --python-platform, x86_64-manylinux_2_39,
         --python-version, "3.12",
       ]
-      files: ^requirements/(common|xpu|test/xpu)\.(in|txt)$
+      files: ^(requirements/(common|xpu|test/xpu)\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
     - id: pip-compile
       alias: pip-compile-cpu
       name: pip-compile-cpu
       args: [
+        --generate-hashes,
         requirements/test/cuda.in,
         -o, requirements/test/cpu.txt,
         --index-strategy, unsafe-best-match,
@@ -145,25 +172,32 @@ repos:
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
-      files: ^requirements/(common|cpu|test/(cuda|cpu))\.(in|txt)$
+      files: ^(requirements/(common|cpu|test/(cuda|cpu))\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
       exclude: ^requirements/test/cuda\.txt$
     - id: pip-compile
       alias: pip-compile-docs
       name: pip-compile-docs
       args: [
+        --generate-hashes,
         requirements/docs.in,
         -o, requirements/docs.txt,
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
-      files: ^requirements/docs\.(in|txt)$
+      files: ^(requirements/docs\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
 - repo: https://github.com/pre-commit/pre-commit-hooks
-  rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c
+  rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
   hooks:
   - id: check-json
     files: ^\.buildkite/.*\.json$
 - repo: local
   hooks:
+  - id: check-github-actions-pins
+    name: Check GitHub Actions use immutable references
+    language: python
+    entry: python tools/pre_commit/check_github_actions_pins.py
+    files: ^(\.github/workflows/.*\.ya?ml|.*/action\.ya?ml)$
+    additional_dependencies: [PyYAML, regex]
   - id: format-torch-nightly-test
     name: reformat test/nightly-torch.txt to be in sync with test/cuda.in
     language: python
@@ -277,6 +311,13 @@ repos:
     files: ^docker/(Dockerfile|versions\.json)$
     pass_filenames: false
     additional_dependencies: [dockerfile-parse]
+  - id: check-kv-connector-lock
+    name: Check the CI KV connector lock matches requirements/kv_connectors.txt
+    entry: python tools/kv_connector_lock.py align
+    language: python
+    files: ^(requirements/(kv_connectors\.txt|test/kv_connectors_cuda\.(in|txt))|tools/kv_connector_lock\.py)$
+    pass_filenames: false
+    additional_dependencies: [packaging]
   - id: check-dockerignore-tracked
     name: Check .dockerignore does not exclude tracked files
     entry: python tools/pre_commit/check_dockerignore_tracked.py

@@ -44,7 +44,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.sequence import IntermediateTensors
+from vllm.v1.worker.gpu.spec_decode.gemma4.config import Gemma4MTPSpeculatorConfig
 
 from .gemma4 import Gemma4MLP, _get_text_config
 from .utils import (
@@ -218,7 +220,7 @@ class Gemma4MTPAttention(nn.Module):
         )
 
         # kv_sharing_target_layer_name is set after model construction
-        # by Gemma4Proposer._setup_gemma4_kv_sharing().
+        # by Gemma4Speculator._setup_gemma4_kv_sharing().
         self.is_kv_shared_layer = True
         self.attn = Attention(
             self.num_heads,
@@ -446,6 +448,9 @@ class Gemma4MTP(nn.Module):
     hidden-state feedback buffer.
     """
 
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = Gemma4MTPSpeculatorConfig
+
     has_own_lm_head = True
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -516,7 +521,7 @@ class Gemma4MTP(nn.Module):
         draft_cfg = speculative_config.draft_model_config
         gen_cfg = draft_cfg.try_get_generation_config()
         self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
-        # Materialized on-device in load_weights: compute_logits runs under CUDA
+        # Materialized on-device after loading: compute_logits runs under CUDA
         # graph capture in the V2 speculator, where indexing with a Python list
         # would issue an unpinned H2D copy (illegal during capture).
         self._suppress_idx: torch.Tensor | None = None
@@ -546,6 +551,9 @@ class Gemma4MTP(nn.Module):
     def _get_full_lm_head_weight(self) -> torch.Tensor:
         if self._stable_full_lm_head_weight is not None:
             return self._stable_full_lm_head_weight
+        return self._gather_full_lm_head_weight()
+
+    def _gather_full_lm_head_weight(self) -> torch.Tensor:
         assert self.masked_embedding is not None
         lm_head_weight = self.lm_head.weight
         tp_size = get_tensor_model_parallel_world_size()
@@ -557,7 +565,6 @@ class Gemma4MTP(nn.Module):
         lm_head_weight = lm_head_weight[: self.masked_embedding.vocab_size]
         if tp_size > 1:
             lm_head_weight = lm_head_weight.contiguous()
-            self._stable_full_lm_head_weight = lm_head_weight
         return lm_head_weight
 
     def compute_logits(
@@ -588,13 +595,23 @@ class Gemma4MTP(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        self._stable_full_lm_head_weight = None
         loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        if self._suppress_token_ids:
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        # Built here, outside inference mode, and refilled in place on reload.
+        if (
+            self.masked_embedding is not None
+            and get_tensor_model_parallel_world_size() > 1
+        ):
+            refill_derived(
+                self,
+                "_stable_full_lm_head_weight",
+                self._gather_full_lm_head_weight(),
+            )
+        if self._suppress_token_ids and self._suppress_idx is None:
             self._suppress_idx = torch.tensor(
                 self._suppress_token_ids,
                 dtype=torch.long,
                 device=next(self.parameters()).device,
             )
-        return loaded

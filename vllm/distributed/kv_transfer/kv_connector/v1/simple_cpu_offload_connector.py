@@ -25,6 +25,7 @@ from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.simple_kv_offload.host_buffer import parse_hugepage_size
 from vllm.v1.simple_kv_offload.manager import (
     BoundaryStoreStats,
     OffloadIOStats,
@@ -42,6 +43,7 @@ from vllm.v1.simple_kv_offload.worker import (
 )
 
 if TYPE_CHECKING:
+    from vllm.config import KVTransferConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.attention.backend import AttentionMetadata
     from vllm.v1.core.block_pool import BlockPool
@@ -80,6 +82,12 @@ def _find_simple_cpu_offload_connector(
 
 class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
     """CPU KV cache offloading with custom kernel transfers and BlockPool LRU."""
+
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        return True
 
     @property
     def requires_kv_delivery(self) -> bool:
@@ -145,6 +153,9 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         )
         disk_buffer_slots = max(1, int(extra_config.get("disk_buffer_slots", 2)))
         use_page_cache = bool(extra_config.get("use_page_cache", False))
+        cpu_hugepage_size = parse_hugepage_size(
+            extra_config.get("cpu_hugepage_block_size")
+        )
 
         if disk_mode:
             if disk_path is None:
@@ -154,6 +165,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             if disk_capacity_bytes <= 0:
                 raise ValueError(
                     'kv_offload_backend="disk" requires disk_capacity_bytes > 0.'
+                )
+            if cpu_hugepage_size is not None:
+                raise ValueError(
+                    'cpu_hugepage_block_size applies only to kv_offload_backend="cpu".'
                 )
         else:
             ignored = [k for k in _DISK_ONLY_KEYS if k in extra_config]
@@ -225,6 +240,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 disk_buffer_slots=disk_buffer_slots,
                 use_page_cache=use_page_cache,
                 num_cpu_blocks=num_cpu_blocks,
+                cpu_hugepage_size=cpu_hugepage_size,
             )
 
     # --- Worker-side methods ---
