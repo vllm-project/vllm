@@ -495,6 +495,36 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
     assert src_spec.block_indices == [0, 0]
 
 
+def test_partial_tail_store_skips_ambiguous_boundaries():
+    """Several retained boundaries for one request must not kill the engine."""
+    scheduler = _make_partial_tail_scheduler()
+    _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    req_status.group_states[0].block_ids[:] = [11, 12]
+    req_status.group_states[1].block_ids[:] = [0, 21]
+    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    # Two partial-tail boundaries (28 and 20) for the same request: the
+    # producer offered every boundary it cached, so the hand-off no longer
+    # identifies one partial tail.
+    output = SimpleNamespace(
+        kv_connector_block_state=KVConnectorBlockState(
+            req_ids=set(),
+            resolve_block_ids={}.__getitem__,
+            boundary_state_offloads={"req": [(1, 99, 28), (1, 98, 20)]},
+        )
+    )
+    jobs = scheduler._build_partial_tail_store_jobs(output)
+
+    # Neither boundary produces a partial-tail job; no store was prepared and
+    # no job state was left behind.
+    assert jobs == {}
+    _as_mock(scheduler.manager.prepare_store).assert_not_called()
+    assert scheduler._jobs == {}
+
+
 def test_aligned_boundary_store_maps_sparse_group_id_to_dense_transfer_slot():
     scheduler = _make_partial_tail_scheduler()
     indexer_config = scheduler.config.kv_group_configs[1]

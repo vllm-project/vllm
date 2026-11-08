@@ -1803,7 +1803,20 @@ class OffloadingConnectorScheduler:
                 # EAGLE tail in the GPU prefix cache; skip the store.
                 continue
             boundaries = {boundary for _, _, boundary in entries}
-            assert len(boundaries) == 1
+            if len(boundaries) != 1:
+                # The producer offers every retained boundary it cached, so a
+                # single step can hand over several for one request. A
+                # partial-tail job stores all groups at one boundary, so an
+                # ambiguous hand-off cannot be stored. Skip it instead of
+                # terminating the engine: the state is recomputable and only
+                # the offload hit is lost.
+                logger.warning_once(
+                    "Skipping partial-tail store for request %s: expected a "
+                    "single boundary, got %s",
+                    req_id,
+                    tuple(sorted(boundaries)),
+                )
+                continue
             boundary = boundaries.pop()
             req = req_status.req
             group_states = {
