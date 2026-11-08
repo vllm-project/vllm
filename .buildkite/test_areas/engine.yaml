@@ -213,7 +213,6 @@ steps:
   source_file_dependencies:
     - tests/v1/e2e/test_replayssm_decode.py
     - tests/kernels/mamba/test_ssu_dispatch.py
-    - tests/kernels/mamba/test_gdn_replayssm.py
     - vllm/v1/core/sched/scheduler.py
     - vllm/v1/worker/utils.py
     - vllm/v1/kv_cache_interface.py
@@ -229,7 +228,6 @@ steps:
     - vllm/v1/worker/extensible_kv_cache.py
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/
-    - vllm/v1/worker/gpu_model_runner.py
     - vllm/v1/worker/gpu_worker.py
   commands:
     - VLLM_TEST_REQUIRE_REPLAYSSM=1 pytest -v -s v1/e2e/test_replayssm_decode.py
@@ -238,7 +236,6 @@ steps:
       kernels/mamba/test_ssu_dispatch.py::test_replayssm_materializes_only_accepted_boundary_with_compacted_rows
       kernels/mamba/test_ssu_dispatch.py::test_replayssm_postprocess_commits_staged_transition
       kernels/mamba/test_ssu_dispatch.py::test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers
-      kernels/mamba/test_gdn_replayssm.py
   mirror:
     amd:
       automatic_shard: true
@@ -308,7 +305,6 @@ steps:
   source_file_dependencies:
     - vllm/v1/attention/backends/utils.py
     - vllm/v1/core/
-    - vllm/v1/worker/gpu_model_runner.py
     - tests/v1/e2e/test_hybrid_chunked_prefill.py
   commands:
     - pytest -v -s v1/e2e/test_hybrid_chunked_prefill.py

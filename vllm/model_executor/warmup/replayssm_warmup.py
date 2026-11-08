@@ -14,7 +14,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 )
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -35,17 +35,12 @@ def _replayssm_autotune_kwargs(
         return None
     from vllm.v1.worker.extensible_kv_cache import num_committable_kv_blocks
 
-    v2_runner: Any = runner
-    query_len = (
-        v2_runner.decode_query_len
-        if config.use_v2_model_runner
-        else runner.uniform_decode_query_len
-    )
+    query_len = runner.decode_query_len
     # Block 0 is the null block; the dummy slots must be committed memory.
     max_num_reqs = min(
         runner.scheduler_config.max_num_seqs,
         runner.max_num_tokens // query_len,
-        num_committable_kv_blocks(v2_runner) - 1,
+        num_committable_kv_blocks(runner) - 1,
     )
     if max_num_reqs <= 0:
         logger.warning_once(
@@ -58,15 +53,8 @@ def _replayssm_autotune_kwargs(
         **max_token_prefill_kwargs,
         "num_tokens": max_num_reqs * query_len,
         "uniform_decode": True,
+        "valid_dummy_state_slots": True,
     }
-    if config.use_v2_model_runner:
-        decode_kwargs["valid_dummy_state_slots"] = True
-    else:
-        decode_kwargs.update(
-            allow_microbatching=False,
-            force_attention=True,
-            profile_seq_lens=query_len + 1,
-        )
     return max_num_reqs, decode_kwargs
 
 
@@ -78,12 +66,13 @@ def _temporary_replayssm_autotune_state(
     prepare_dummy_block_tables: bool = True,
 ) -> Iterator[None]:
     """Run FlashInfer ReplaySSM dummy steps, then restore the touched state."""
+    from vllm.model_executor.layers.mamba.abstract import MambaBase
+
     reset_tensors: list[torch.Tensor] = []
     reset_trackers: dict[int, torch.Tensor] = {}
     for module in runner.get_model().modules():
-        if not getattr(module, "use_flashinfer_replayssm", False):
+        if not isinstance(module, MambaBase) or not module.use_flashinfer_replayssm:
             continue
-        assert module.replayssm_buffer_len is not None
         ring_start = module._replayssm_ring_start
         prev_num_accepted = module._replayssm_prev_num_accepted
         for tensor in module.kv_cache:
@@ -95,30 +84,11 @@ def _temporary_replayssm_autotune_state(
             if tensor.numel():
                 reset_trackers.setdefault(tensor.data_ptr(), tensor)
 
-    v2_runner: Any = runner
-    block_tables = saved_block_ids = None
-    if prepare_dummy_block_tables and not runner.vllm_config.use_v2_model_runner:
-        block_tables = runner.input_batch.block_table.block_tables
-        saved_block_ids = tuple(
-            block_table.block_table.np[:max_num_reqs, 0].copy()
-            for block_table in block_tables
-        )
-        dummy_block_ids = range(1, max_num_reqs + 1)
-        for block_table in block_tables:
-            block_table.block_table.np[:max_num_reqs, 0] = dummy_block_ids
-        runner.input_batch.block_table.commit_block_table(max_num_reqs)
-
     try:
         yield
     finally:
         if prepare_dummy_block_tables:
-            if runner.vllm_config.use_v2_model_runner:
-                v2_runner.block_tables.get_dummy_block_tables(max_num_reqs)
-            else:
-                assert block_tables is not None and saved_block_ids is not None
-                for block_table, block_ids in zip(block_tables, saved_block_ids):
-                    block_table.block_table.np[:max_num_reqs, 0] = block_ids
-                runner.input_batch.block_table.commit_block_table(max_num_reqs)
+            runner.block_tables.get_dummy_block_tables(max_num_reqs)
         for tensor in reset_tensors:
             tensor[1 : max_num_reqs + 1].zero_()
         for tensor in reset_trackers.values():
@@ -135,8 +105,7 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
         num_committable_kv_blocks,
     )
 
-    v2_runner: Any = runner
-    num_slots = min(num_committable_kv_blocks(v2_runner) - 1, 2)
+    num_slots = min(num_committable_kv_blocks(runner) - 1, 2)
     if num_slots <= 0:
         return
 
@@ -144,7 +113,6 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
     from vllm.v1.kv_cache_interface import MambaSpec
     from vllm.v1.worker.replayssm_utils import ReplaySSMModelContext
 
-    use_v2 = config.use_v2_model_runner
     grouped = []
     for group_id, group in enumerate(runner.kv_cache_config.kv_cache_groups):
         spec = group.kv_cache_spec
@@ -161,11 +129,7 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
         ]
         if not mixers:
             continue
-        table = (
-            v2_runner.block_tables.input_block_tables[group_id]
-            if use_v2
-            else runner.input_batch.block_table[group_id].get_device_tensor(1)
-        )
+        table = runner.block_tables.input_block_tables[group_id]
         # Match the runtime stride without changing its block-table contents.
         scratch_table = torch.empty_strided(
             (1, 2), table.stride(), dtype=table.dtype, device=table.device
@@ -179,7 +143,7 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
     if not grouped:
         return
 
-    ensure_kv_cache_blocks(v2_runner, 1 + num_slots)
+    ensure_kv_cache_blocks(runner, 1 + num_slots)
     with _temporary_replayssm_autotune_state(
         runner, num_slots, prepare_dummy_block_tables=False
     ):
@@ -194,12 +158,8 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
         device = grouped[0][2].device
         align = grouped[0][1].mamba_cache_mode == "align"
         block_size = grouped[0][1].block_size
-        query_len = (
-            v2_runner.decode_query_len if use_v2 else runner.uniform_decode_query_len
-        )
-        idx_mapping = (
-            torch.zeros(1, dtype=torch.int64, device=device) if use_v2 else None
-        )
+        query_len = runner.decode_query_len
+        idx_mapping = torch.zeros(1, dtype=torch.int64, device=device)
         live_cols = torch.ones(1, dtype=torch.int32, device=device) if align else None
         if align:
             context.reset_new_slots(
@@ -211,18 +171,18 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
         context.postprocess(
             idx_mapping=idx_mapping,
             query_metadata=torch.tensor(
-                [0, query_len] if use_v2 else [query_len],
+                [0, query_len],
                 dtype=torch.int32,
                 device=device,
             ),
-            query_metadata_is_cumulative=use_v2,
+            query_metadata_is_cumulative=True,
             num_computed_tokens=torch.full(
                 (1,),
-                block_size if use_v2 else block_size - 1,
+                block_size,
                 dtype=torch.int32,
                 device=device,
             ),
-            num_computed_is_post_step=use_v2,
+            num_computed_is_post_step=True,
             num_accepted_tokens=torch.ones(1, dtype=torch.int32, device=device),
             is_prefilling=torch.zeros(1, dtype=torch.bool, device=device),
             live_cols=live_cols,
@@ -243,8 +203,7 @@ def replayssm_autotune_warmup(runner: "GPUModelRunner") -> None:
     if autotune is None:
         return
     max_num_reqs, decode_kwargs = autotune
-    v2_runner: Any = runner
-    ensure_kv_cache_blocks(v2_runner, 1 + max_num_reqs)
+    ensure_kv_cache_blocks(runner, 1 + max_num_reqs)
     with _temporary_replayssm_autotune_state(runner, max_num_reqs):
         runner._dummy_run(**decode_kwargs)
 
@@ -252,10 +211,10 @@ def replayssm_autotune_warmup(runner: "GPUModelRunner") -> None:
 def _warm_gdn_replayssm_materializer(
     runner: "GPUModelRunner", max_num_reqs: int
 ) -> None:
-    """Compile each distinct GDN prefix-materializer specialization.
+    """Compile the GDN prefix materializer for each current cache layout.
 
-    FlashInfer keys this kernel on the state and ring shapes and strides, so
-    one call per distinct layout compiles every variant the model uses.
+    FlashInfer specializes on state and ring shapes and strides. A later
+    pool-capacity change can require another compilation.
     """
     from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
     from vllm.model_executor.layers.mamba.gdn.replayssm import (
@@ -295,8 +254,7 @@ def _warm_gdn_replayssm_materializer(
 
 
 def gdn_replayssm_warmup(runner: "GPUModelRunner") -> None:
-    """Run one uniform decode step per captured graph size, plus the
-    materializer, so FlashInfer compiles before serving."""
+    """Warm captured GDN decode sizes and current materializer layouts."""
     config = runner.vllm_config
     if not config.is_gdn_replayssm_enabled():
         return
@@ -305,53 +263,39 @@ def gdn_replayssm_warmup(runner: "GPUModelRunner") -> None:
         num_committable_kv_blocks,
     )
 
-    v2_runner: Any = runner
     query_len = config.num_speculative_tokens + 1
     assert query_len <= gdn_replayssm_executed_width(config.num_speculative_tokens)
     max_num_reqs = min(
         runner.scheduler_config.max_num_seqs,
-        runner.max_num_tokens // query_len,
-        num_committable_kv_blocks(v2_runner) - 1,
+        num_committable_kv_blocks(runner) - 1,
     )
     if max_num_reqs <= 0:
         raise ValueError(
             "FlashInfer GDN ReplaySSM warmup requires a non-padding state slot"
         )
-    if config.use_v2_model_runner:
-        manager = v2_runner.cudagraph_manager
-        capture_reqs = {
-            desc.num_reqs
-            for descs in manager._capture_descs.values()
-            for desc in descs
-            if desc.uniform_token_count == query_len
-            and desc.num_reqs is not None
-            and 0 < desc.num_reqs <= max_num_reqs
-        }
-    else:
-        capture_reqs = {
-            size // query_len
-            for size in runner.cudagraph_batch_sizes
-            if size % query_len == 0 and 0 < size // query_len <= max_num_reqs
-        }
-    if not capture_reqs:
-        capture_reqs.add(max_num_reqs)
+    max_decode_reqs = min(max_num_reqs, runner.max_num_tokens // query_len)
+    manager = runner.cudagraph_manager
+    assert manager is not None
+    capture_reqs = {
+        desc.num_reqs
+        for descs in manager._capture_descs.values()
+        for desc in descs
+        if desc.uniform_token_count == query_len
+        and desc.num_reqs is not None
+        and 0 < desc.num_reqs <= max_decode_reqs
+    }
+    if not capture_reqs and max_decode_reqs > 0:
+        capture_reqs.add(max_decode_reqs)
 
     decode_kwargs: dict[str, Any] = {
         "uniform_decode": True,
         "skip_eplb": True,
         "is_profile": True,
         "randomize_inputs": True,
+        "valid_dummy_state_slots": True,
     }
-    if config.use_v2_model_runner:
-        decode_kwargs["valid_dummy_state_slots"] = True
-    else:
-        decode_kwargs.update(
-            allow_microbatching=False,
-            force_attention=True,
-            profile_seq_lens=query_len + 1,
-        )
-    ensure_kv_cache_blocks(v2_runner, 1 + max_num_reqs)
-    with _temporary_replayssm_autotune_state(runner, max_num_reqs):
+    ensure_kv_cache_blocks(runner, 1 + max_decode_reqs)
+    with _temporary_replayssm_autotune_state(runner, max_decode_reqs):
         for num_reqs in sorted(capture_reqs):
             runner._dummy_run(num_tokens=num_reqs * query_len, **decode_kwargs)
         if config.cache_config.mamba_cache_mode == "align":

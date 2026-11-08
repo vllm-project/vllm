@@ -205,7 +205,6 @@ def _reconstruct_replayssm_state(
 @torch.inference_mode()
 def test_gdn_replayssm_output_and_accepted_state(width, query_len, accepted):
     """Check nonzero outputs and accepted state through replay, wrap, and flush."""
-    pytest.importorskip("flashinfer.gdn_kernels.gdn_replay_mtp_umma")
     device, dtype = torch.device("cuda"), torch.bfloat16
     generator = torch.Generator(device=device).manual_seed(20260909 + width)
     ring_slots = 32
