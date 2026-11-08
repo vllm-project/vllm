@@ -244,7 +244,7 @@ guide: |
   - **CUDA graph / Mamba cache size error:** reduce `--max-cudagraph-capture-size`
     (default 512). See [vLLM PR #34571](https://github.com/vllm-project/vllm/pull/34571).
   - **Disable reasoning:** add `--default-chat-template-kwargs '{"enable_thinking": false}'`.
-  - **Prefix Caching (Mamba):** currently experimental in "align" mode.
+  - **Prefix Caching (Mamba):** currently experimental.
 
   ## References
 

@@ -55,11 +55,11 @@ vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
     --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 ```
 
-`--enable-prefix-caching` selects Mamba cache mode `align`. To use ReplaySSM without prefix caching, replace this flag with `--no-enable-prefix-caching`. This selects mode `none`. To disable speculative decoding, remove `--speculative-config`.
+`--enable-prefix-caching` also caches Mamba states at block boundaries. To use ReplaySSM without prefix caching, replace this flag with `--no-enable-prefix-caching`. To disable speculative decoding, remove `--speculative-config`.
 
 FlashInfer ReplaySSM has these limits:
 
-- `align` requires BF16 model inputs for its replay rings. The SSM state dtype is independent. The example uses FP16 state with stochastic rounding.
+- Prefix caching requires BF16 model inputs for its replay rings. The SSM state dtype is independent. The example uses FP16 state with stochastic rounding.
 - The logical replay buffer cannot exceed 16 tokens. For speculative decoding, it must contain at least `1 + num_speculative_tokens` tokens.
 - Pipeline parallelism, microbatching, and KV connectors are not supported.
 

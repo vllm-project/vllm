@@ -443,7 +443,7 @@ guide: |
   **Configuration tips**
 
   - **Disable Reasoning**: Add `--reasoning-parser qwen3 --default-chat-template-kwargs '{"enable_thinking": false}'` to disable reasoning mode via command-line parameters.
-  - **Prefix Caching**: Prefix caching for Mamba cache "align" mode is currently experimental.
+  - **Prefix Caching**: Prefix caching for Mamba layers is currently experimental.
   - **Multi-token Prediction**: MTP-1 reduces per-token latency but degrades throughput under high concurrency because speculative tokens consume KV cache capacity. Adjust `num_speculative_tokens` (1-5) based on your use case.
   - **Encoder Data Parallelism**: `--mm-encoder-tp-mode data` deploys the vision encoder in a data-parallel fashion. This consumes additional memory and may require adjustment of `--gpu-memory-utilization`.
   ## References

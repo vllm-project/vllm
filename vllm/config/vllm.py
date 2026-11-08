@@ -3620,8 +3620,9 @@ class VllmConfig:
                 and self.model_config.dtype != torch.bfloat16
             ):
                 raise ValueError(
-                    "FlashInfer ReplaySSM align requires bfloat16 model inputs "
-                    "for its replay rings; SSM state cache dtype is independent"
+                    "FlashInfer ReplaySSM with prefix caching requires bfloat16 "
+                    "model inputs for its replay rings; SSM state cache dtype is "
+                    "independent"
                 )
             if self.parallel_config.use_ubatching:
                 raise ValueError("FlashInfer ReplaySSM does not support microbatching")
