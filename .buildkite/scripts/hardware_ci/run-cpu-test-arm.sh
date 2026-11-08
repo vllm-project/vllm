@@ -38,15 +38,30 @@ print_packages() {
     pip list"
 }
 
-kernel_tests() {
+# Shard sizes are balanced from per-test timings on main: the n=64128 cases
+# of test_onednn.py alone take about 13 minutes.
+kernel_tests_0() {
   set -e
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
-    pytest -x -v -s tests/kernels/test_onednn.py
+    pytest -x -v -s tests/kernels/test_onednn.py -k 64128
+    pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py"
+}
+
+kernel_tests_1() {
+  set -e
+  docker exec "$CONTAINER_NAME" bash -c "
+    set -e
+    pytest -x -v -s tests/kernels/test_onednn.py -k 'not 64128'
     pytest -x -v -s tests/kernels/test_cpu_fused_sampling.py
     pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
-    pytest -x -v -s tests/kernels/core/test_cpu_activation.py
-    pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
+    pytest -x -v -s tests/kernels/core/test_cpu_activation.py"
+}
+
+kernel_tests_2() {
+  set -e
+  docker exec "$CONTAINER_NAME" bash -c "
+    set -e
     pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
     pytest -x -v -s tests/kernels/moe/test_cpu_int4_moe.py
     pytest -x -v -s tests/kernels/mamba/test_cpu_short_conv.py
@@ -113,11 +128,9 @@ serving_tests() {
 
 print_packages
 export CONTAINER_NAME
-export -f kernel_tests model_tests serving_tests
+export -f kernel_tests_0 kernel_tests_1 kernel_tests_2 model_tests serving_tests
 case "$SHARD_ID" in
-  # The kernel shard contains several large parametrized suites and can exceed
-  # 30 minutes on otherwise healthy Arm runners.
-  0) timeout 60m bash -c kernel_tests ;;
-  1) timeout 30m bash -c model_tests ;;
-  2) timeout 30m bash -c serving_tests ;;
+  0) timeout 30m bash -c kernel_tests_0 ;;
+  1) timeout 30m bash -c kernel_tests_1 ;;
+  2) timeout 30m bash -c "set -e; kernel_tests_2; model_tests; serving_tests" ;;
 esac
