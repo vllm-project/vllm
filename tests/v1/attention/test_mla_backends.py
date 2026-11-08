@@ -57,8 +57,8 @@ from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MLAAttentionSpec,
+    get_block_table_width,
 )
-from vllm.v1.worker.block_table import get_block_table_width
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.CUTLASS_MLA,
@@ -356,6 +356,7 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     layer.is_aiter_triton_fp8_bmm_enabled = False
     layer.is_amx_bmm_enabled = False
     layer.dcp_q_replicate = False
+    layer.dcp_manager = None
     layer.quant_config = None
     layer.layer_name = "test"
     layer.act_dtype = torch.float32
@@ -1862,7 +1863,7 @@ def _run_backend_correctness(
 
     kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
 
-    for i, backend in enumerate(backends_to_test):
+    for _ in backends_to_test:
         all_sdpa_outputs.append([])
 
     for i in range(batch_size):
@@ -1909,7 +1910,7 @@ def _run_backend_correctness(
         # pipeline (MHA-style). This ensures the reference implementation
         # matches each backend's actual decode/prefill pipeline path.
         is_decode = []
-        for backend_idx, backend in enumerate(backends_to_test):
+        for backend in backends_to_test:
             builder_cls, _ = try_get_attention_backend(backend)
             if is_spec_decode_test:
                 query_len_support = getattr(
@@ -2014,7 +2015,7 @@ def _run_backend_correctness(
         sdpa_out_i_prefill = sdpa_out_i_prefill.transpose(1, 2).squeeze(0)
         sdpa_out_i_prefill = sdpa_out_i_prefill.flatten(start_dim=-2)
 
-        for backend_idx, backend in enumerate(backends_to_test):
+        for backend_idx in range(len(backends_to_test)):
             if is_decode[backend_idx]:
                 all_sdpa_outputs[backend_idx].append(sdpa_out_i_decode)
             else:
@@ -2119,7 +2120,7 @@ def _run_backend_correctness(
         # tokens is off by up to ~2**-4 of max|V| (~4 here).
         rtol, atol = 2**-4, 3e-1
     failures = []
-    for backend_idx, backend_name in enumerate(backends_to_test):
+    for backend_name in backends_to_test:
         # Skip backends that don't support spec decode for spec decode tests
         if is_spec_decode_test and backend_name not in SPEC_DECODE_BACKENDS:
             continue

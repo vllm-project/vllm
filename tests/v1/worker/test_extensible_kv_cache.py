@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig, VllmConfig
+from vllm.platforms.interface import Platform
 from vllm.utils.vmm_driver import vmm_unavailable_reason
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import (
@@ -198,6 +199,11 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
     monkeypatch.setattr(accelerator, "synchronize", lambda *args: None)
     monkeypatch.setattr(accelerator, "empty_cache", lambda: None)
     monkeypatch.setattr(accelerator, "get_memory_info", lambda *args: (6 * gib, 0))
+    monkeypatch.setattr(
+        extensible_kv_cache.current_platform,
+        "free_device_memory",
+        Platform.free_device_memory,
+    )
     monkeypatch.setattr(accelerator, "memory_reserved", lambda *args: 2 * gib)
     monkeypatch.setattr(
         extensible_kv_cache, "measure_kv_cache_bytes", lambda **kwargs: 5 * gib
@@ -248,6 +254,11 @@ def test_measured_sizing_counts_reclaimable_memory_on_integrated_gpu(monkeypatch
     # cudaMemGetInfo: 10 GiB free of 120; the OS has 100 GiB available.
     monkeypatch.setattr(
         accelerator, "get_memory_info", lambda *args: (10 * gib, 120 * gib)
+    )
+    monkeypatch.setattr(
+        extensible_kv_cache.current_platform,
+        "free_device_memory",
+        Platform.free_device_memory,
     )
     from vllm.utils import mem_utils
 

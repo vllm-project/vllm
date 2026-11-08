@@ -97,7 +97,7 @@ TOOL_NAME_TO_MCP_SERVER_LABEL: Final[dict[str, str]] = {
 def _resolve_mcp_name_label(recipient: str) -> tuple[str, str]:
     """Resolve MCP tool name and server label from a recipient string.
 
-    - ``mcp.*`` recipients: strip prefix, use the bare name as both
+    - `mcp.*` recipients: strip prefix, use the bare name as both
       name and server_label.
     - Everything else: use the recipient as the name and look up the
       server_label in TOOL_NAME_TO_MCP_SERVER_LABEL.
@@ -134,7 +134,7 @@ def is_mcp_tool_by_namespace(
 ) -> bool:
     """Determine if a tool call is an MCP tool based on recipient prefix.
 
-    Inverse of :func:`is_function_recipient` — everything that is not
+    Inverse of `is_function_recipient` — everything that is not
     a function call is an MCP tool.
     """
     if recipient is None:

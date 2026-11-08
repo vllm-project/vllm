@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax-M3.1 DSpark drafter kernels (``vllm/models/minimax_m3/amd/mono/drafter``).
+"""MiniMax-M3.1 DSpark drafter kernels (`vllm/models/minimax_m3/amd/mono/drafter`).
 
 - Deployment checks that need no GPU: the kernels are built for 7 query rows a
   request at TP4 on gfx950, and any other deployment, or a ROCm install without
   FlyDSL, keeps the stock draft layers.
-- TP4 numerics on four gfx950 GPUs: ``DrafterRunner`` against the ops of the
+- TP4 numerics on four gfx950 GPUs: `DrafterRunner` against the ops of the
   stock draft layers (vLLM's MXFP8 linear, the Gemma norms,
   fused_minimax_m3_qknorm_rope_kv_insert, Triton unified attention non-causal
   within the query block over a 4096-key window, NCCL all-reduces) on random

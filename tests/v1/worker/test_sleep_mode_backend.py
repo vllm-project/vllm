@@ -3,8 +3,8 @@
 """CPU-only unit tests for the sleep-mode backend abstraction (RFC #34303).
 
 These cover the registry/factory contract and capability flags. They do not
-touch CUDA - the ``cumem`` suspend/resume path is exercised end-to-end on GPU
-in ``tests/basic_correctness/memory/``.
+touch CUDA - the `cumem` suspend/resume path is exercised end-to-end on GPU
+in `tests/basic_correctness/memory/`.
 """
 
 import pytest
