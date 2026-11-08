@@ -205,6 +205,12 @@ def build_offloading_config(
 
     canonical_layout = bool(extra_config.get("canonical_layout", False))
 
+    kv_identity = None
+    if extra_config.get("enforce_kv_identity", False):
+        kv_identity = vllm_config.cache_config.kv_identity
+        if kv_identity is None:
+            raise ValueError("enforce_kv_identity requires the engine's KV identity.")
+
     # Only canonical pages can be parallelism-invariant: they are
     # topology-free, so every config whose mappings derive portable, group by
     # group, qualifies; certification happens per layer at registration and
@@ -282,6 +288,7 @@ def build_offloading_config(
             name=vllm_config.model_config.model,
             dtype=str(cache_dtype).removeprefix("torch."),
             max_model_len=vllm_config.model_config.max_model_len,
+            kv_identity=kv_identity,
         ),
         cache=OffloadingCacheConfig(
             tokens_per_hash=tokens_per_hash,

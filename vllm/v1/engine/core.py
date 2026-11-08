@@ -110,6 +110,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
     is_full_attention_spec,
 )
+from vllm.v1.kv_identity import compute_kv_identity
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -269,6 +270,18 @@ class EngineCore:
         # environment variable overrides after this point)
         enable_envs_cache()
 
+    def _set_kv_identity(self, vllm_config: VllmConfig) -> None:
+        checkpoint_digests: list[dict[str, str] | None] = self.collective_rpc(
+            "get_checkpoint_digest"
+        )
+        identity = compute_kv_identity(vllm_config, checkpoint_digests)
+        vllm_config.cache_config.kv_identity = identity.digest
+        vllm_config.cache_config.kv_identity_components = identity.components
+        self.collective_rpc(
+            "set_kv_identity", args=(identity.digest, identity.components)
+        )
+        logger.info("KV identity: %s %s", identity.digest, identity.components)
+
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
@@ -401,6 +414,8 @@ class EngineCore:
             kv_cache_config.hash_block_size = hash_block_size
             kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
 
+        # Before the KV connectors start, which check it.
+        self._set_kv_identity(vllm_config)
         self.model_executor.initialize_from_config(kv_cache_configs)
         compilation_times = []
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
@@ -2154,6 +2169,8 @@ class EngineCoreProc(EngineCore):
             ),
             prefix_hash_config=self.prefix_hash_config,
             cache_config_info=self.vllm_config.cache_config.metrics_info(),
+            kv_identity=self.vllm_config.cache_config.kv_identity,
+            kv_identity_components=self.vllm_config.cache_config.kv_identity_components,
             config_hash=self._config_hash(),
             enable_expert_parallel=parallel_config.enable_expert_parallel,
         )

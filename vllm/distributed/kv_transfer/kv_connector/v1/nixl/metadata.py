@@ -163,6 +163,8 @@ def compute_nixl_compatibility_hash(
     - Attention backend
     - EAGLE/MTP configuration that affects transferred state
     - Transfer mode (push vs pull)
+    - The KV identity, with `enforce_kv_identity` in the connector's extra
+      config
 
     The transfer mode is included because the push (WRITE) and pull (READ)
     connectors use incompatible transfer protocols; a push connector and a
@@ -204,6 +206,13 @@ def compute_nixl_compatibility_hash(
         # push (WRITE) and pull (READ) connectors are protocol-incompatible
         "transfer_mode": transfer_mode,
     }
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is not None and kv_transfer_config.get_from_extra_config(
+        "enforce_kv_identity", False
+    ):
+        if cache_config.kv_identity is None:
+            raise ValueError("enforce_kv_identity requires the engine's KV identity.")
+        factors["kv_identity"] = cache_config.kv_identity
 
     compat_hash = hash_factors(factors)
     logger.debug(

@@ -107,6 +107,11 @@ class EngineCoreClient(ABC):
         """KV-event publisher config of each ready engine, keyed by DP rank."""
         return {}
 
+    def get_kv_identities(self) -> dict[int, dict[str, Any]]:
+        """KV identity and its components of each ready engine, keyed by DP
+        rank."""
+        return {}
+
     @staticmethod
     def make_client(
         multiprocess_mode: bool,
@@ -650,6 +655,7 @@ class MPClient(EngineCoreClient):
         self._renderer: BaseRenderer | None = renderer
         self._effective_attention_block_sizes: set[int | None] = set()
         self._kv_event_sources: dict[int, KVEventsConfig] = {}
+        self._kv_identities: dict[int, dict[str, Any]] = {}
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -936,6 +942,14 @@ class MPClient(EngineCoreClient):
             self._kv_event_sources[response.data_parallel_rank] = (
                 response.kv_events_config
             )
+        if response.kv_identity is not None:
+            self._kv_identities[response.data_parallel_rank] = {
+                "kv_identity": response.kv_identity,
+                "components": response.kv_identity_components,
+            }
+            if cache_config.kv_identity is None:
+                cache_config.kv_identity = response.kv_identity
+                cache_config.kv_identity_components = response.kv_identity_components
 
         parallel_config = vllm_config.parallel_config
         if response.coord_store_port:
@@ -958,6 +972,9 @@ class MPClient(EngineCoreClient):
 
     def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
         return dict(self._kv_event_sources)
+
+    def get_kv_identities(self) -> dict[int, dict[str, Any]]:
+        return dict(self._kv_identities)
 
 
 def _process_utility_output(
@@ -2204,6 +2221,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self.engine_ranks_managed = self.engine_ranks_managed[:new_data_parallel_size]
         for rank in range(new_data_parallel_size, cur_data_parallel_size):
             self._kv_event_sources.pop(rank, None)
+            self._kv_identities.pop(rank, None)
         removed_dp_size = cur_data_parallel_size - new_data_parallel_size
         eep_mode = self._eep_commit_pause_mode()
         pause_modes = [eep_mode] * new_data_parallel_size + ["abort"] * removed_dp_size

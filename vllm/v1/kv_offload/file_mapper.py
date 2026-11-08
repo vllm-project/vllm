@@ -38,6 +38,7 @@ class FileMapper:
         parallel_agnostic: bool = False,
         replicated_layout: bool = False,
         canonical_format: str | None = None,
+        kv_identity: str | None = None,
     ):
         """Initialize the file mapper. Each worker constructs its own, but
         `config.json` is shared across workers since rank lives outside the hash.
@@ -71,6 +72,9 @@ class FileMapper:
         # identity participates in the storage namespace.
         if canonical_format is not None:
             self.fields["canonical_format"] = canonical_format
+        # Only written when set so existing deployments' paths are unchanged.
+        if kv_identity is not None:
+            self.fields["kv_identity"] = kv_identity
         self.base_path: str = self._compute_base_path(root_dir, self.fields)
 
     @classmethod
@@ -113,6 +117,7 @@ class FileMapper:
             ),
             replicated_layout=(parallel_agnostic and config.replicated_layout),
             canonical_format=canonical_format,
+            kv_identity=config.model.kv_identity,
         )
 
     def get_file_name(self, key: OffloadKey) -> str:

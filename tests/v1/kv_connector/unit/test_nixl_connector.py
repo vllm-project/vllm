@@ -4712,6 +4712,25 @@ def test_transfer_mode_changes_compatibility_hash():
 
 
 @pytest.mark.skip_global_cleanup
+def test_kv_identity_in_compatibility_hash_when_enforced():
+    """Engines whose KV identities differ fail the handshake only with
+    enforce_kv_identity, which needs the identity to be known."""
+
+    def compat_hash(kv_identity: str | None, enforce: bool) -> str:
+        config = create_vllm_config(
+            kv_connector_extra_config={"enforce_kv_identity": enforce}
+        )
+        config.cache_config.kv_identity = kv_identity
+        return compute_nixl_compatibility_hash(config, "FLASH_ATTN")
+
+    assert compat_hash("a", enforce=False) == compat_hash("b", enforce=False)
+    assert compat_hash("a", enforce=True) != compat_hash("b", enforce=True)
+    assert compat_hash("a", enforce=True) == compat_hash("a", enforce=True)
+    with pytest.raises(ValueError, match="enforce_kv_identity"):
+        compat_hash(None, enforce=True)
+
+
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("mode", ["pull", "push"])
 @pytest.mark.parametrize(
     "tp_size,pcp_size,dcp_size,transfer_tp_size",

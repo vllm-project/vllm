@@ -359,6 +359,17 @@ class CacheConfig:
     cache_hit_alignment_tokens: int | None = field(default=None, init=False)
     """Token granularity at which prefix-cache hits land: `hash_block_size`
     with partial hash hits, otherwise the scheduler block size."""
+    kv_identity: str | None = field(default=None, init=False)
+    """Digest of the weights, configuration and code that compute the KV
+    cache. Engines with equal values compute the same KV bytes for the same
+    token ids, up to floating-point rounding order."""
+    kv_identity_components: dict[str, str] | None = field(default=None, init=False)
+    """The parts `kv_identity` is computed from, to name a mismatch's cause."""
+    kv_identity_hash_local_weights: bool = False
+    """Hash checkpoint files outside the Hugging Face cache for the KV
+    identity. One worker hashes them in the background while the weights
+    load. Otherwise such checkpoints are identified by their path and
+    revision, which cannot tell two checkpoints at the same path apart."""
 
     kv_sharing_fast_prefill: bool = False
     """In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
@@ -440,6 +451,9 @@ class CacheConfig:
             "kv_cache_max_concurrency",
             "hash_block_size",
             "cache_hit_alignment_tokens",
+            "kv_identity",
+            "kv_identity_components",
+            "kv_identity_hash_local_weights",
             # Feature toggles not impacting compiled graph shape
             "kv_sharing_fast_prefill",
             "swa_bounded_replay",
@@ -452,7 +466,11 @@ class CacheConfig:
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
         # metrics info
-        return {key: str(value) for key, value in self.__dict__.items()}
+        return {
+            key: str(value)
+            for key, value in self.__dict__.items()
+            if key != "kv_identity_components"
+        }
 
     _block_size_resolved: bool = field(default=False, init=False)
     """Guard against pydantic re-running _apply_block_size_default."""

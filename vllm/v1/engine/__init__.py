@@ -154,6 +154,9 @@ class EngineCoreReadyResponse:
     # `CacheConfig.metrics_info()` after initialization, the labels of the
     # frontend's `vllm:cache_config_info`.
     cache_config_info: dict[str, str] | None = None
+    # `CacheConfig.kv_identity` and its components after initialization.
+    kv_identity: str | None = None
+    kv_identity_components: dict[str, str] | None = None
     # `system_fingerprint` inputs for frontends without a VllmConfig (the Rust
     # frontend): `hash_config()` of the engine's initialized config (None if
     # hashing failed) and whether expert parallelism is enabled.

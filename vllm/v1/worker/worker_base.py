@@ -95,6 +95,8 @@ class WorkerBase:
         # Device and model state
         self.device: torch.device | None = None
         self.model_runner: nn.Module | None = None
+        # Set by load_model for the KV identity; see vllm.v1.kv_identity.
+        self.checkpoint_digest: dict[str, str] | None = None
 
         # IR op priority and torch-wrap state are constant for the worker's
         # lifetime.
@@ -174,6 +176,13 @@ class WorkerBase:
 
     def get_model(self) -> nn.Module:
         raise NotImplementedError
+
+    def get_checkpoint_digest(self) -> dict[str, str] | None:
+        return self.checkpoint_digest
+
+    def set_kv_identity(self, digest: str, components: dict[str, str]) -> None:
+        self.cache_config.kv_identity = digest
+        self.cache_config.kv_identity_components = components
 
     def supports_draft_weight_updates(self) -> bool:
         """Whether this worker can update its configured speculative model."""

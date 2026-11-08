@@ -809,6 +809,26 @@ def test_model_config_carries_the_longest_request():
     assert offloading_config.model.max_model_len == 32768
 
 
+@pytest.mark.parametrize("enforce", [False, True])
+def test_model_config_carries_kv_identity_when_enforced(enforce: bool):
+    """With enforce_kv_identity, tiers namespace and fingerprint their KV by
+    the engine's identity; without it, existing namespaces are unchanged."""
+    vllm_config = _make_vllm_config(extra_config={"enforce_kv_identity": enforce})
+    vllm_config.cache_config.kv_identity = "abc"
+
+    offloading_config = build_offloading_config(vllm_config, _make_kv_cache_config())
+
+    assert offloading_config.model.kv_identity == ("abc" if enforce else None)
+
+
+def test_enforced_kv_identity_must_be_known():
+    vllm_config = _make_vllm_config(extra_config={"enforce_kv_identity": True})
+    vllm_config.cache_config.kv_identity = None
+
+    with pytest.raises(ValueError, match="enforce_kv_identity"):
+        build_offloading_config(vllm_config, _make_kv_cache_config())
+
+
 def test_preserves_data_parallel_config():
     config = _make_vllm_config()
     config.parallel_config.data_parallel_index = 2

@@ -72,6 +72,10 @@ class EngineClient(ABC):
         """KV-event publisher config of each engine, keyed by DP rank."""
         return {}
 
+    def get_kv_identities(self) -> dict[int, dict[str, Any]]:
+        """KV identity and its components of each engine, keyed by DP rank."""
+        return {}
+
     def check_admission(  # noqa: B027
         self, n: int = 1, request_id: str | None = None
     ) -> None:
