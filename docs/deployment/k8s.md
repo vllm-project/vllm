@@ -25,6 +25,8 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 - [vllm-project/AIBrix](integrations/aibrix.md)
 - [vllm-project/production-stack](integrations/production-stack.md)
 
+For the Python HTTP API server, use `/ready` for readiness probes and `/health` for liveness probes. `/ready` checks engine health, loaded [endpoint plugins](../design/endpoint_plugins.md#readiness-probes), and whether this API-server process is draining. `/health` retains its existing engine-health behavior. Existing manifests keep their behavior until their readiness probes are reconfigured. These routes do not aggregate deployment-wide readiness or detect generation stalls; DP-supervisor and gRPC probes retain their separate semantics.
+
 ## Deployment with CPUs
 
 !!! note
@@ -249,7 +251,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
                 periodSeconds: 10
               readinessProbe:
                 httpGet:
-                  path: /health
+                  path: /ready
                   port: 8000
                 initialDelaySeconds: 60
                 periodSeconds: 5

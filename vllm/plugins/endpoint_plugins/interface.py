@@ -29,6 +29,7 @@ either exclude `"render"` from `required_tasks` or check for `None` in
 """
 
 import asyncio
+import time
 from argparse import Namespace
 from copy import copy
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -121,6 +122,35 @@ class SupportsStop(Protocol):
         ...
 
 
+@runtime_checkable
+class SupportsReady(Protocol):
+    """Optional synchronous endpoint plugin readiness capability."""
+
+    def ready(self, state: State) -> bool:
+        """Return whether this process can accept new plugin work owners."""
+        ...
+
+
+@runtime_checkable
+class SupportsDrain(Protocol):
+    """Optional endpoint plugin session drain capability."""
+
+    async def drain(self, state: State, timeout: float) -> None:
+        """Settle accepted work before engine shutdown, within `timeout` seconds.
+
+        The server sets `state.draining` before calling any drain hook. Plugin
+        admission paths must reject new work owners, including new sessions on
+        existing connections, while allowing accepted owners to submit final
+        engine work. On completion, error or cancellation, settle or abort and
+        await all owned work so it cannot submit later engine requests. The
+        server does not track plugin sessions or provide an abort hook.
+
+        Hooks run concurrently under a shared deadline. Cancellation cleanup
+        remains cooperative and unbounded; `stop` runs after it settles.
+        """
+        ...
+
+
 def attach_endpoint_plugins(
     app: FastAPI, supported_tasks: tuple["SupportedTask", ...]
 ) -> None:
@@ -187,6 +217,7 @@ async def init_endpoint_plugins_state(
     engine (see `init_render_app_state`). Plugins must handle a `None`
     `engine_client` themselves (see `EndpointPlugin.init_state`).
     """
+    state.draining = False
     for plugin in getattr(state, "endpoint_plugins", []):
         await plugin.init_state(engine_client, state, args)
 
@@ -201,8 +232,60 @@ async def start_endpoint_plugins(state: State) -> None:
         started.append(plugin)
 
 
+def endpoint_plugins_ready(state: State) -> bool:
+    """Check every loaded readiness provider; a missing predicate is ready."""
+    plugins: list[EndpointPlugin] = getattr(state, "endpoint_plugins", [])
+    for plugin in plugins:
+        if isinstance(plugin, SupportsReady):
+            try:
+                if not plugin.ready(state):
+                    return False
+            except Exception:
+                logger.exception("Endpoint plugin %s readiness failed", plugin.name)
+                return False
+    return True
+
+
+async def drain_endpoint_plugins(state: State, deadline: float) -> None:
+    """Close plugin admission and drain concurrently against a monotonic deadline."""
+    state.draining = True
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return
+
+    async def drain(plugin: SupportsDrain, name: str) -> None:
+        try:
+            await plugin.drain(state, max(0.0, deadline - time.monotonic()))
+        except Exception:
+            logger.exception("Endpoint plugin %s failed to drain", name)
+
+    try:
+        async with asyncio.timeout(remaining), asyncio.TaskGroup() as group:
+            plugins: list[EndpointPlugin] = getattr(
+                state, "started_endpoint_plugins", []
+            )
+            for plugin in plugins:
+                if isinstance(plugin, SupportsDrain):
+                    group.create_task(drain(plugin, plugin.name))
+    except TimeoutError:
+        logger.warning("Endpoint plugin drain deadline expired")
+
+
 async def stop_endpoint_plugins(state: State) -> None:
     """Stop eligible plugins once in reverse order, deferring cancellation."""
+    shutdown_task = getattr(state, "shutdown_task", None)
+    if shutdown_task is not None and not shutdown_task.done():
+        # Do not interrupt cancellation cleanup already in progress.
+        if not shutdown_task.cancelling():
+            shutdown_task.cancel()
+        while not shutdown_task.done():
+            try:
+                await asyncio.shield(shutdown_task)
+            except asyncio.CancelledError:
+                # Repeated lifespan cancellations must not release session owners.
+                pass
+            except Exception:
+                logger.exception("Endpoint plugin shutdown failed")
     started: list[EndpointPlugin] = getattr(state, "started_endpoint_plugins", [])
     while started:
         plugin = started.pop()

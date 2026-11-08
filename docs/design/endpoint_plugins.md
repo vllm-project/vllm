@@ -84,7 +84,7 @@ The server awaits `start(state)` during lifespan startup, after `init_state` and
 
 On shutdown, the server awaits each eligible `stop(state)` once in reverse order before deleting app state. An exception or cancellation from a stop hook does not skip other plugins or native serving cleanup. Cancellation of the lifespan task is re-raised after cleanup. Stop hooks must settle their owned background work; cleanup is cooperative and has no hard deadline.
 
-The existing shutdown order stops the engine before HTTP shutdown and plugin cleanup. **A stop hook cannot rely on a running engine.** These hooks do not drain accepted plugin sessions before engine shutdown. The API server's `/health` behavior is unchanged.
+The server stops the engine before HTTP shutdown and plugin cleanup. **A stop hook cannot rely on a running engine.** Use the optional drain capability below to settle accepted plugin work before engine shutdown. The API server's `/health` behavior is unchanged.
 
 For example, this subclass acquires and closes an HTTP client used by its routes:
 
@@ -113,6 +113,38 @@ The assignments let a static type checker validate the hook signatures. Runtime 
 ### Requesting process shutdown
 
 `serve_http` exposes the synchronous callback `state.request_shutdown()` before startup hooks run. Call it on the server's event loop to request the same process-local shutdown as SIGINT or SIGTERM. Repeated calls are idempotent. It is available to hooks and route handlers, but not during `init_state`; it does not request deployment-wide shutdown. A startup hook that calls it must still finish or release its partial resources and raise.
+
+## Optional readiness and draining
+
+[`SupportsReady`][vllm.plugins.endpoint_plugins.interface.SupportsReady] and [`SupportsDrain`][vllm.plugins.endpoint_plugins.interface.SupportsDrain] are independent capabilities. A plugin can implement either, both, or neither, independently of `start` and `stop`:
+
+```python
+class SupportsReady(Protocol):
+    def ready(self, state: State) -> bool: ...
+
+class SupportsDrain(Protocol):
+    async def drain(self, state: State, timeout: float) -> None: ...
+```
+
+Plugin authors can assign an instance to `SupportsReady` or `SupportsDrain` in a type-checked module, as in the startup example above, to check signatures. Runtime checks only detect capability members.
+
+### Readiness probes
+
+The Python HTTP API server exposes `/ready` for engine health, plugin readiness and drain state. It returns 503 if `state.draining` is true, the engine raises `EngineDeadError`, or any loaded plugin's synchronous `ready(state)` returns false or raises an ordinary exception. Other engine health errors propagate as 500, matching `/health`. A plugin without `ready` is ready by default. Render servers check draining and plugins without an engine health check. The server checks draining both before and after awaiting engine health.
+
+Use `/ready` for Kubernetes readiness and retain `/health` for liveness. `/health`, including SageMaker `/ping`, retains its existing engine-health behavior; plugin unreadiness and draining do not change it. Existing deployments keep their behavior until their readiness probes are reconfigured. See [Kubernetes deployment](../deployment/k8s.md).
+
+These checks describe the built-in routes. Plugins retain their existing ability to override `/ready` or `/health`. Readiness applies to this API-server process; it does not aggregate across workers or change DP-supervisor or gRPC probes, and it does not detect generation stalls.
+
+### Draining accepted work
+
+On SIGINT, SIGTERM or `state.request_shutdown()`, the server sets `state.draining = True` before awaiting any plugin. Each plugin must check that flag in its admission paths and reject **new work owners**, including new sessions on existing connections. Already accepted owners may continue submitting final engine requests. Native realtime admission is a separate concern; plugin hooks do not close it.
+
+The server runs eligible plugins' `drain(state, timeout)` hooks concurrently before engine shutdown. Eligibility follows startup: a plugin is eligible once its startup completes, or once startup reaches its position if it has no `start` hook. Each drain receives the remaining seconds from one monotonic deadline based on `--shutdown-timeout`. Ordinary drain errors are logged independently so healthy peers can finish. On completion, error or cancellation, a plugin must settle or abort and await its owned work before returning or raising. Core does not maintain a plugin session registry or provide an abort hook.
+
+The engine receives the deadline's remaining allowance, which may be zero if plugin drains consume it. There is no reserved engine allowance. With `--shutdown-timeout 0` (the default), the server sets draining, skips drain hooks and proceeds with immediate engine shutdown and plugin cleanup. The CPU-only render server uses the same configured timeout for plugin drains.
+
+Before any `stop` hook, the server cancels and awaits a live shutdown task, including its drain cancellation cleanup. This also applies to watchdog exit and startup rollback. Cancellation of the lifespan task is deferred until plugin and native serving cleanup finish. Cancellation cleanup and `stop` remain cooperative and unbounded; the drain deadline is **not a hard process-exit bound**.
 
 ## Registering the entry point
 

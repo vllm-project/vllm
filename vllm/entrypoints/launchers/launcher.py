@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import signal
 import socket
+import time
 from collections.abc import Generator, MutableSequence
 from functools import partial
 from typing import Any
@@ -24,6 +25,7 @@ from vllm.entrypoints.common.startup import (
 )
 from vllm.entrypoints.launchers.utils.ssl import SSLCertRefresher
 from vllm.logger import init_logger
+from vllm.plugins.endpoint_plugins.interface import drain_endpoint_plugins
 from vllm.tracing import instrument
 from vllm.utils.network_utils import find_process_using_port, is_valid_ipv6_address
 from vllm.utils.system_utils import set_ulimit
@@ -271,18 +273,27 @@ async def serve_http(
     async def handle_shutdown() -> None:
         await shutdown_event.wait()
 
+        vllm_config = (
+            engine_client.vllm_config
+            if engine_client is not None
+            else getattr(app.state, "vllm_config", None)
+        )
+        timeout = vllm_config.shutdown_timeout if vllm_config is not None else 0
+        deadline = time.monotonic() + timeout
+        await drain_endpoint_plugins(app.state, deadline)
+
         if engine_client is not None:
-            timeout = engine_client.vllm_config.shutdown_timeout
             mode = "abort" if timeout == 0 else "drain"
+            remaining = max(0.0, deadline - time.monotonic())
 
             logger.info(
                 "[shutdown] API server: stopping engine client mode=%s timeout=%ss",
                 mode,
-                timeout,
+                remaining,
             )
 
             await loop.run_in_executor(
-                None, partial(engine_client.shutdown, timeout=timeout)
+                None, partial(engine_client.shutdown, timeout=remaining)
             )
             logger.info_once("[shutdown] API server: engine client stopped")
 
@@ -300,6 +311,7 @@ async def serve_http(
         loop.add_signal_handler(signal.SIGINT, request_shutdown)
         loop.add_signal_handler(signal.SIGTERM, request_shutdown)
         shutdown_task = loop.create_task(handle_shutdown())
+        app.state.shutdown_task = shutdown_task
 
         await server_task
         return dummy_shutdown()
