@@ -74,6 +74,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -1252,11 +1253,20 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """
+        # Scales default to 1.0 here, so only a configured scheme means calibrated.
+        fnuz_factor = (
+            2.0
+            if current_platform.is_fp8_fnuz()
+            and is_quantized_kv_cache(layer.kv_cache_dtype)
+            and self.quant_config.kv_cache_scheme is not None
+            else 1.0
+        )
+
         # Buffers, not Parameters: updates don't rewrite them, so level-2 sleep
         # must keep them. ATTN_HEAD changes shape.
-        layer.register_buffer("_k_scale", layer.k_scale.detach())
-        layer.register_buffer("_v_scale", layer.v_scale.detach())
-        layer.register_buffer("_q_scale", layer.q_scale.detach())
+        layer.register_buffer("_k_scale", layer.k_scale.detach() * fnuz_factor)
+        layer.register_buffer("_v_scale", layer.v_scale.detach() * fnuz_factor)
+        layer.register_buffer("_q_scale", layer.q_scale.detach() * fnuz_factor)
 
         # Set the _float variants that the attention backend uses.
         def _to_scalar(tensor: torch.Tensor) -> float:
@@ -1265,9 +1275,9 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 return tensor.max().item()
             return tensor.item()
 
-        layer._k_scale_float = _to_scalar(layer.k_scale)
-        layer._v_scale_float = _to_scalar(layer.v_scale)
-        layer._q_scale_float = _to_scalar(layer.q_scale)
+        layer._k_scale_float = _to_scalar(layer._k_scale)
+        layer._v_scale_float = _to_scalar(layer._v_scale)
+        layer._q_scale_float = _to_scalar(layer._q_scale)
 
         # Sync host (cpu) scale copies read by AITER fused kernels.
         layer._k_scale_cpu.fill_(layer._k_scale_float)

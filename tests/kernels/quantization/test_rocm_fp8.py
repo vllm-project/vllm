@@ -229,6 +229,49 @@ def test_rocm_fp8_env_overrides(env_name, raw_value, expected, monkeypatch):
         assert getattr(envs, env_name) is expected
 
 
+@pytest.mark.parametrize("is_fnuz", [False, True])
+@pytest.mark.parametrize("has_scheme", [False, True])
+def test_compressed_tensors_kv_scales_fnuz_doubling(monkeypatch, is_fnuz, has_scheme):
+    """compressed-tensors KV scales double on fnuz only for a configured scheme."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.attention.attention import (
+        set_default_quant_scales,
+    )
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+        CompressedTensorsKVCacheMethod,
+    )
+
+    monkeypatch.setattr(current_platform, "is_fp8_fnuz", lambda: is_fnuz)
+
+    scheme = (
+        {"type": "float", "num_bits": 8, "strategy": "tensor", "symmetric": True}
+        if has_scheme
+        else None
+    )
+    method = CompressedTensorsKVCacheMethod(SimpleNamespace(kv_cache_scheme=scheme))
+
+    layer = torch.nn.Module()
+    set_default_quant_scales(layer, register_buffer=True)
+    layer.kv_cache_dtype = "fp8"
+    layer.num_kv_heads = 1
+    method.create_weights(layer)
+    for name in ("k_scale", "v_scale", "q_scale"):
+        getattr(layer, name).data.fill_(0.3)
+
+    method.process_weights_after_loading(layer)
+
+    expected = 0.6 if (is_fnuz and has_scheme) else 0.3
+    assert layer._k_scale_float == pytest.approx(expected)
+    assert layer._v_scale_float == pytest.approx(expected)
+    assert layer._q_scale_float == pytest.approx(expected)
+    assert layer._k_scale_cpu.item() == pytest.approx(expected)
+
+    # Sleep/wake re-enters this hook, so the factor must not compound.
+    method.process_weights_after_loading(layer)
+    assert layer._k_scale_float == pytest.approx(expected)
+
+
 @fp8_only
 def test_maybe_pad_fp8_weight_respects_env(monkeypatch):
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
