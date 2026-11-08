@@ -131,7 +131,7 @@ class Probe(D.MonoProbe):
         layer = self._decoder_layers()[PROBE_LAYER]
         self._router_in: list[torch.Tensor] = []
         r = mono_decode._runner
-        epoch = [None if r is None else int(r.epoch[0])]
+        epoch: list[int | None] = [None if r is None else int(r.epoch[0])]
 
         def ffn(module, args, kwargs):
             x = args[0] if args else kwargs["hidden_states"]
@@ -139,6 +139,7 @@ class Probe(D.MonoProbe):
                 self._router_in.append(x.float().cpu())
 
         def logits(module, args):
+            assert r is not None  # registered only when the layer runs mono
             if int(r.epoch[0]) == epoch[0]:  # the prefill
                 return
             epoch[0] = int(r.epoch[0])

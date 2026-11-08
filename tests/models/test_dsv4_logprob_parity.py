@@ -164,7 +164,7 @@ def forced(vllm_runner):
         pytest.skip(f"needs {D.TP} GPUs")
     pytest.importorskip("flydsl")
     runs: dict = {}
-    reqs = _requests()
+    prompts, traces = _requests()
     with pytest.MonkeyPatch.context() as mp:
         for k, v in ENV.items():
             mp.setenv(k, v)
@@ -172,7 +172,7 @@ def forced(vllm_runner):
         def run(mono: bool, **kw):
             key = (mono, *sorted(kw.items()))
             if key not in runs:
-                runs[key] = _arm(vllm_runner, *reqs, mono, **kw)
+                runs[key] = _arm(vllm_runner, prompts, traces, mono, **kw)
             return runs[key]
 
         yield run
