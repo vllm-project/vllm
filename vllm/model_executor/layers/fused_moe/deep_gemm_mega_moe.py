@@ -652,6 +652,11 @@ class DeepGemmMegaMoEExperts(nn.Module):
                     activation=self.activation.name,
                 )
             self._symm_buffers[key] = symm_buffer
+            # DeepGEMM measures the SM locality-domain map that MegaMoE reads through
+            # an MPS helper process, which stays alive until released. vLLM
+            # localizes no weights, so cache the map and stop the helper now.
+            if hasattr(deep_gemm, "destroy_localizer"):
+                deep_gemm.destroy_localizer()
         return symm_buffer
 
     def get_block_m(self, num_tokens: int) -> int:
