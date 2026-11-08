@@ -976,6 +976,8 @@ def test_inproc_sleep_drains_before_keeping_connector_cache(reset_connector):
     """Keeping the connector's cache steps the in-process engine until its
     pending work, such as connector stores, is done; a reset does not step."""
     core = object.__new__(EngineCore)
+    core._checkpoint_state = CheckpointState.RUNNING
+    core._kv_cache_reclaimable = False
     core.model_executor = MagicMock()
     core.model_executor.vllm_config.cache_config.enable_extensible_kv_cache = False
     core.scheduler = MagicMock()
