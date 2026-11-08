@@ -135,13 +135,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
-        # Computed on the main stream: the copy stream only carries copies
-        # (see new_d2h_stream). Retained like the tensors above: the copy
-        # stream reads it after this method returns, and a freed block would
-        # be handed back to the main stream and overwritten meanwhile.
-        self._has_fault_gpu: torch.Tensor | None = (
-            get_ep_all2all_manager().query_fault() if check_ep_fault else None
-        )
+        self._has_fault_gpu: torch.Tensor | None = None
+        if check_ep_fault:
+            # Computed on the main stream: the copy stream only carries copies.
+            self._has_fault_gpu = get_ep_all2all_manager().query_fault()
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
