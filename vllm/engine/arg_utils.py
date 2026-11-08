@@ -134,7 +134,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
 from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.v1.worker.gpu.sample.logits_processor.interface import LogitsProcessor
 from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
@@ -459,7 +459,7 @@ _LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
 
 
 _MAMBA_CACHE_MODE_DEPRECATION_MESSAGE = (
-    "--mamba-cache-mode is deprecated and will be removed in v0.33.0. "
+    "--mamba-cache-mode is deprecated and will be removed in v0.34.0. "
     "It has no effect: Mamba prefix caching follows --enable-prefix-caching."
 )
 
@@ -610,8 +610,9 @@ class EngineArgs:
     offload_num_in_group: int = PrefetchOffloadConfig.offload_num_in_group
     offload_prefetch_step: int = PrefetchOffloadConfig.offload_prefetch_step
     offload_params: set[str] = get_field(PrefetchOffloadConfig, "offload_params")
-    gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
+    gpu_memory_utilization: float | None = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
+    enable_extensible_kv_cache: bool | None = CacheConfig.enable_extensible_kv_cache
     max_num_batched_tokens: int | None = None
     max_num_scheduled_tokens: int | None = None
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
@@ -620,6 +621,7 @@ class EngineArgs:
     )
     max_num_seqs: int | None = None
     max_num_active_seqs: int | None = SchedulerConfig.max_num_active_seqs
+    max_num_inflight_kv_loads: int | None = SchedulerConfig.max_num_inflight_kv_loads
     max_num_queued_reqs: int | None = None
     max_num_queued_tokens: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
@@ -714,6 +716,10 @@ class EngineArgs:
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
+    cache_aware_admission_window: int = SchedulerConfig.cache_aware_admission_window
+    cache_aware_admission_threshold: float = (
+        SchedulerConfig.cache_aware_admission_threshold
+    )
 
     watermark: float = SchedulerConfig.watermark
 
@@ -835,6 +841,7 @@ class EngineArgs:
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     pt_load_map_location: str | dict[str, str] = LoadConfig.pt_load_map_location
+    shuffle_safetensors_files: bool = LoadConfig.shuffle_safetensors_files
 
     logits_processors: list[str | type[LogitsProcessor]] | None = (
         ModelConfig.logits_processors
@@ -870,7 +877,7 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: (
-        Literal["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl"] | None
+        Literal["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl", "hip"] | None
     ) = None
     kda_prefill_backend: (
         Literal["auto", "triton", "flashkda", "flashinfer", "fused"] | None
@@ -1106,6 +1113,10 @@ class EngineArgs:
         load_group.add_argument("--use-tqdm-on-load", **load_kwargs["use_tqdm_on_load"])
         load_group.add_argument(
             "--pt-load-map-location", **load_kwargs["pt_load_map_location"]
+        )
+        load_group.add_argument(
+            "--shuffle-safetensors-files",
+            **load_kwargs["shuffle_safetensors_files"],
         )
 
         # Attention arguments
@@ -1397,6 +1408,10 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--kv-cache-memory-bytes", **cache_kwargs["kv_cache_memory_bytes"]
+        )
+        cache_group.add_argument(
+            "--enable-extensible-kv-cache",
+            **cache_kwargs["enable_extensible_kv_cache"],
         )
         cache_group.add_argument("--kv-cache-dtype", **cache_kwargs["cache_dtype"])
         cache_group.add_argument(
@@ -1766,6 +1781,10 @@ class EngineArgs:
             **scheduler_kwargs["max_num_active_seqs"],
         )
         scheduler_group.add_argument(
+            "--max-num-inflight-kv-loads",
+            **scheduler_kwargs["max_num_inflight_kv_loads"],
+        )
+        scheduler_group.add_argument(
             "--max-num-queued-reqs", **scheduler_kwargs["max_num_queued_reqs"]
         )
         scheduler_group.add_argument(
@@ -1806,6 +1825,14 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--prefill-schedule-interval",
             **scheduler_kwargs["prefill_schedule_interval"],
+        )
+        scheduler_group.add_argument(
+            "--cache-aware-admission-window",
+            **scheduler_kwargs["cache_aware_admission_window"],
+        )
+        scheduler_group.add_argument(
+            "--cache-aware-admission-threshold",
+            **scheduler_kwargs["cache_aware_admission_threshold"],
         )
         scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
@@ -1951,7 +1978,7 @@ class EngineArgs:
         parser.add_argument(
             "--gdn-prefill-backend",
             dest="gdn_prefill_backend",
-            choices=["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl"],
+            choices=["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl", "hip"],
             default=None,
             help="Select GDN prefill backend.",
         )
@@ -2100,6 +2127,7 @@ class EngineArgs:
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
             pt_load_map_location=self.pt_load_map_location,
+            shuffle_safetensors_files=self.shuffle_safetensors_files,
         )
 
     def create_speculative_config(
@@ -2313,6 +2341,7 @@ class EngineArgs:
             block_size=self.block_size,  # type: ignore[arg-type]
             gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
+            enable_extensible_kv_cache=self.enable_extensible_kv_cache,  # type: ignore[arg-type]
             cache_dtype=resolved_cache_dtype,  # type: ignore[arg-type]
             is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
@@ -2666,6 +2695,7 @@ class EngineArgs:
             max_num_scheduled_tokens=self.max_num_scheduled_tokens,
             max_num_seqs=self.max_num_seqs,
             max_num_active_seqs=self.max_num_active_seqs,
+            max_num_inflight_kv_loads=self.max_num_inflight_kv_loads,
             max_num_queued_reqs=self.max_num_queued_reqs,
             max_num_queued_tokens=self.max_num_queued_tokens,
             max_model_len=model_config.max_model_len,
@@ -2682,6 +2712,8 @@ class EngineArgs:
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
+            cache_aware_admission_window=self.cache_aware_admission_window,
+            cache_aware_admission_threshold=self.cache_aware_admission_threshold,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,

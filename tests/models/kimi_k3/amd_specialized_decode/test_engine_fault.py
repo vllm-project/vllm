@@ -15,8 +15,8 @@ import requests
 from tests.models.kimi_k3.amd_specialized_decode.test_numerics import needs_gfx950
 from tests.utils import RemoteOpenAIServer, multi_gpu_test
 
-MODEL = "riverclouds/Kimi-K3-8L-dummy"
-DRAFT = "riverclouds/Kimi-K3-DSpark-for-8L-dummy"
+MODEL = "vllm-project/Kimi-K3-8L-dummy"
+DRAFT = "vllm-project/Kimi-K3-DSpark-for-8L-dummy"
 STALLED = 3
 FAULT_EPOCH = 256  # a mono decode step well past warm-up and capture
 STARTUP_TIMEOUT = 1800
@@ -118,9 +118,10 @@ def test_a_stalled_rank_stops_the_engine(tmp_path):
         "PYTHONPATH": os.pathsep.join(
             filter(None, [str(site), os.getenv("PYTHONPATH")])
         ),
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_ROCM_USE_AITER": "1",
         "VLLM_ROCM_AITER_MLA_ASM_PADDING": "asm",
+        # M1 runs W_UK / W_UV as AITER's MXFP4 bmms, off by default
+        "VLLM_ROCM_USE_AITER_FP4BMM": "1",
     }
     body = {
         "model": MODEL,

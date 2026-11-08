@@ -7,7 +7,7 @@ import signal
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Generator, Sequence, Sized
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from enum import IntEnum
@@ -24,6 +24,8 @@ import zmq
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
+from vllm.config.utils import hash_config
+from vllm.config.watermarking import warn_watermarking_override
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
@@ -54,12 +56,15 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.kv_cache_planning import (
+    finalize_extensible_kv_cache,
     get_global_kv_cache_groups,
     get_kv_cache_configs,
 )
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
+    frontend_block_hashes,
     generate_scheduler_kv_cache_config,
     get_request_block_hasher,
     init_none_hash,
@@ -81,6 +86,7 @@ from vllm.v1.engine import (
     EngineCoreRequestType,
     FinishReason,
     PauseMode,
+    PrefixHashConfig,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
@@ -127,6 +133,7 @@ class EngineCore:
     # object.__new__.
     _checkpoint_state = CheckpointState.RUNNING
     _checkpoint_error: str | None = None
+    _kv_cache_reclaimable = False
 
     def __init__(
         self,
@@ -224,6 +231,8 @@ class EngineCore:
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
+        # Lets frontends hash prompt blocks; see EngineCoreRequest.block_hashes.
+        self.prefix_hash_config: PrefixHashConfig | None = None
         if vllm_config.cache_config.enable_prefix_caching or kv_connector is not None:
             caching_hash_fn = get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo
@@ -234,6 +243,12 @@ class EngineCore:
                 hash_block_size,
                 caching_hash_fn,
                 vllm_config.num_hash_lookahead_tokens,
+            )
+            self.prefix_hash_config = PrefixHashConfig(
+                hash_algo=vllm_config.cache_config.prefix_caching_hash_algo,
+                hash_block_size=hash_block_size,
+                none_hash=kv_cache_utils.NONE_HASH,
+                num_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
             )
 
         self.step_fn = (
@@ -290,6 +305,12 @@ class EngineCore:
         # capture full cudagraphs initialize a minimal KV cache during it.
         # Attention-free models resolve the default so layout reads never precede
         # resolution.
+        if vllm_config.cache_config.enable_extensible_kv_cache:
+            # Disable it, everywhere, where it cannot be used.
+            executor = self.model_executor
+            reason = executor.extensible_kv_cache_unsupported_reason(kv_cache_specs)
+            if reason is not None:
+                executor.disable_extensible_kv_cache(reason)
         layout = resolve_kv_cache_layout(
             vllm_config,
             self.model_executor.get_supported_kv_cache_layouts(),
@@ -356,6 +377,10 @@ class EngineCore:
                 if participating
                 else [g.kv_cache_spec.block_size for g in kv_cache_groups]
             )
+        # With an extensible KV cache, `num_blocks` is the reserved capacity
+        # until the post-warmup measurement below.
+        extensible = vllm_config.cache_config.enable_extensible_kv_cache
+        if kv_cache_groups and not extensible:
             update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
 
         vllm_config.validate_block_size()
@@ -377,6 +402,22 @@ class EngineCore:
             kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
 
         self.model_executor.initialize_from_config(kv_cache_configs)
+        compilation_times = []
+        if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            compilation_times = self.model_executor.compile_or_warm_up_model()
+        if extensible:
+            num_blocks = finalize_extensible_kv_cache(
+                vllm_config,
+                kv_cache_configs,
+                scheduler_kv_cache_config,
+                compilation_times,
+            )
+            max_model_len = vllm_config.model_config.max_model_len
+            if max_model_len != max_model_len_after:
+                self.collective_rpc("update_max_model_len", args=(max_model_len,))
+            self.model_executor.extend_kv_cache(num_blocks)
+        # Under the extensible KV cache, workers create the connector in
+        # `extend_kv_cache`, so ask for its block count only afterwards.
         kv_transfer_config = vllm_config.kv_transfer_config
         if (
             kv_transfer_config is not None
@@ -392,8 +433,6 @@ class EngineCore:
             vllm_config.cache_config.simple_cpu_offload_num_blocks = (
                 aligned_num_cpu_blocks
             )
-        if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-            self.model_executor.compile_or_warm_up_model()
 
         elapsed = time.time() - start
         compile_time = vllm_config.compilation_config.compilation_time
@@ -688,7 +727,7 @@ class EngineCore:
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
         ):
-            model_output = future.result()
+            model_output = self._wait_for_output(future)
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
 
@@ -702,6 +741,10 @@ class EngineCore:
         self._attach_weight_version(engine_core_outputs)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+
+    def _wait_for_output(self, future: Future[Any]) -> Any:
+        """Block until a step's model output is ready."""
+        return future.result()
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -787,7 +830,7 @@ class EngineCore:
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
         ):
-            model_output = future.result()
+            model_output = self._wait_for_output(future)
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
                 # call failed - raise that exception.
@@ -951,7 +994,7 @@ class EngineCore:
         self.reset_mm_cache()
         self.reset_encoder_cache()
 
-    def _finish_pause(self, clear_cache: bool) -> None:
+    def _finish_pause(self, clear_cache: bool, reset_connector: bool) -> None:
         # The drain of a checkpoint prepare is complete. A failure leaves the
         # engine FAILED instead of serving, as nothing waits on this pause.
         preparing = self._checkpoint_state == CheckpointState.PREPARING
@@ -960,7 +1003,8 @@ class EngineCore:
             # the last dummy batch an idle DP rank launches.
             self.model_executor.collective_rpc("synchronize_device")
             if clear_cache:
-                self._reset_caches()
+                self._reset_caches(reset_connector=reset_connector)
+                self._set_kv_cache_reclaimable(True)
             if preparing:
                 self.release_kv_cache_memory()
                 self.collective_rpc("checkpoint_prepare")
@@ -972,7 +1016,10 @@ class EngineCore:
             self._fail_checkpoint(e)
 
     def pause_scheduler(
-        self, mode: PauseMode = "abort", clear_cache: bool = True
+        self,
+        mode: PauseMode = "abort",
+        clear_cache: bool = True,
+        reset_connector: bool = True,
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
@@ -986,6 +1033,9 @@ class EngineCore:
           optionally clear caches, then complete the returned Future.
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
+
+        ``reset_connector`` decides whether clearing caches also resets the
+        KV connector's cache.
         """
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
@@ -997,7 +1047,16 @@ class EngineCore:
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
-        self._finish_pause(clear_cache)
+        if clear_cache and not reset_connector:
+            # Pending connector stores still read the KV cache that a sleep
+            # discards. Step until they finish, as EngineCoreProc does before
+            # it completes a pause.
+            while self.scheduler.has_requests() or self.batch_queue:
+                _, model_executed = self.step_fn()
+                self.post_step(model_executed)
+                if not model_executed:
+                    time.sleep(0.001)
+        self._finish_pause(clear_cache, reset_connector)
 
         return None
 
@@ -1008,15 +1067,32 @@ class EngineCore:
                 f"Cannot resume scheduling while the checkpoint state is "
                 f"{self._checkpoint_state}"
             )
+        self._set_kv_cache_reclaimable(False)
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
         if self._checkpoint_state == CheckpointState.RESTORING:
             self._checkpoint_state = CheckpointState.RUNNING
+
+    def _set_kv_cache_reclaimable(self, reclaimable: bool) -> None:
+        """Tell the workers whether their extensible KV cache holds nothing to
+        keep, as from a pause that cleared it until the resume, so that a weight
+        reload may borrow its memory."""
+        if reclaimable == self._kv_cache_reclaimable:
+            return
+        self._kv_cache_reclaimable = reclaimable
+        executor = self.model_executor
+        if executor.vllm_config.cache_config.enable_extensible_kv_cache:
+            executor.collective_rpc("set_kv_cache_reclaimable", args=(reclaimable,))
 
     def is_scheduler_paused(self) -> bool:
         """Return whether the scheduler is in any pause state."""
         return self.scheduler.pause_state != PauseState.UNPAUSED
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None | Future:
+    def sleep(
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        reset_connector: bool = True,
+    ) -> None | Future:
         """Put the engine to sleep at the specified level.
 
         Args:
@@ -1024,9 +1100,11 @@ class EngineCore:
                 - Level 0: Pause scheduling only. Requests are still accepted
                            but not processed. No GPU memory changes.
                 - Level 1: Offload model weights to CPU, discard KV cache.
-                - Level 2: Discard all GPU memory.
+                - Level 2: Discard model parameters and KV cache.
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
+            reset_connector: Also reset the KV connector's cache; see
+                ``LLM.sleep``.
 
         """
         if self._checkpoint_state != CheckpointState.RUNNING:
@@ -1035,7 +1113,11 @@ class EngineCore:
             )
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
-        pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
+        pause_future = self.pause_scheduler(
+            mode=mode,
+            clear_cache=clear_prefix_cache,
+            reset_connector=reset_connector,
+        )
         if level < 1:
             return pause_future
 
@@ -1089,10 +1171,10 @@ class EngineCore:
             self.resume_scheduler()
         return fully_awake
 
-    def release_kv_cache_memory(self) -> None:
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         """Discard KV cache physical memory. Requires a completed pause
         and all executor memory to be resident. Kept requests are recomputed
-        after wake-up.
+        after wake-up. ``reset_connector`` is as for ``sleep``.
         """
         if not (
             self.is_scheduler_paused()
@@ -1106,7 +1188,7 @@ class EngineCore:
             raise RuntimeError(
                 "release_kv_cache_memory() requires all executor memory to be resident"
             )
-        self._reset_caches()
+        self._reset_caches(reset_connector=reset_connector)
         self.model_executor.discard(("kv_cache",))
 
     def checkpoint_state(self) -> tuple[CheckpointState, str | None]:
@@ -1120,6 +1202,14 @@ class EngineCore:
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
         return self.is_scheduler_paused() or self.model_executor.is_sleeping
+
+    def is_inference_ready(self) -> bool:
+        """Whether the engine can accept and process new requests: it is not
+        paused (including for a checkpoint) or asleep, and no weight update has
+        left the weights incomplete."""
+        return not self.is_sleeping() and not any(
+            self.collective_rpc("has_incomplete_weight_update")
+        )
 
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
@@ -1179,7 +1269,25 @@ class EngineCore:
                 request.mm_features
             )
 
-        req = Request.from_engine_core_request(request, self.request_block_hasher)
+        watermark_config = self.vllm_config.watermark_config
+        params = request.sampling_params
+        # Greedy decoding and trace replay cannot be watermarked; leave their
+        # flag as the frontend resolved it.
+        if (
+            watermark_config
+            and watermark_config.enforce
+            and params
+            and params.temperature != 0
+            and params.trace_decode_token_ids is None
+        ):
+            if params.watermarking is False:
+                warn_watermarking_override()
+            params.watermarking = True
+
+        frontend_hashes = frontend_block_hashes(request, self.prefix_hash_config)
+        req = Request.from_engine_core_request(
+            request, self.request_block_hasher, frontend_hashes
+        )
         if req.use_structured_output:
             # Note on thread safety: no race condition.
             # `grammar_init` is only invoked in input processing thread. For
@@ -1204,6 +1312,19 @@ class EngineShutdownState(IntEnum):
     SHUTTING_DOWN = 2
 
 
+# Input types that EngineCoreProc handles while waiting for a step's output.
+# Others are deferred until the step completes.
+_INPUTS_HANDLED_DURING_STEP = (
+    EngineCoreRequestType.ADD,
+    EngineCoreRequestType.ABORT,
+    EngineCoreRequestType.EXECUTOR_FAILED,
+    EngineCoreRequestType.WAKEUP,
+)
+# While waiting for a step's output, how long to busy-poll for new inputs
+# before falling back to a blocking wait for the output.
+_INPUT_SPIN_DURATION_S = 1.0
+
+
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
@@ -1225,6 +1346,9 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
+        # Inputs taken from input_queue while waiting for a step's output that
+        # must not be handled until the step completes (see _wait_for_output).
+        self._deferred_inputs = deque[tuple[EngineCoreRequestType, Any]]()
 
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b"")
@@ -1430,8 +1554,8 @@ class EngineCoreProc(EngineCore):
             }
             # Include config hash for DP configuration validation
             if vllm_config.parallel_config.data_parallel_size > 1:
-                ready_msg["parallel_config_hash"] = (
-                    vllm_config.parallel_config.compute_hash()
+                ready_msg["parallel_config_hash"] = hash_config(
+                    vllm_config.parallel_config
                 )
             if vllm_config.parallel_config.enable_elastic_ep:
                 ready_msg["coord_store_port"] = (
@@ -1695,6 +1819,10 @@ class EngineCoreProc(EngineCore):
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
+        # Inputs deferred during the last step precede anything still queued.
+        while self._deferred_inputs:
+            self._handle_client_request(*self._deferred_inputs.popleft())
+
         waited = False
         while not self.has_work() and self.is_running():
             # Notify callbacks waiting for engine to become idle.
@@ -1796,6 +1924,35 @@ class EngineCoreProc(EngineCore):
             return False
 
         return True
+
+    def _wait_for_output(self, future: Future[Any]) -> Any:
+        """Wait for a step's model output, meanwhile handling new requests and
+        aborts as they arrive."""
+        poll: Callable[[], bool] | None = getattr(future, "poll", None)
+        wait_briefly: Callable[[Sized, float], None] | None = getattr(
+            future, "wait_briefly", None
+        )
+        if poll is not None and wait_briefly is not None:
+            pending_inputs = self.input_queue.queue
+            spin_deadline = time.monotonic() + _INPUT_SPIN_DURATION_S
+            while not self._deferred_inputs and not poll():
+                if pending_inputs:
+                    req = self.input_queue.get_nowait()
+                    # Some kinds of request must wait until the step completes.
+                    if req[0] in _INPUTS_HANDLED_DURING_STEP:
+                        self._handle_client_request(*req)
+                    else:
+                        self._deferred_inputs.append(req)
+                elif time.monotonic() < spin_deadline:
+                    # Spin on something cheaper than poll(), to leave the GIL
+                    # free more of the time for the input and output threads.
+                    wait_briefly(pending_inputs, spin_deadline)
+                else:
+                    # Long-running step: stop busy-looping and block until the
+                    # output arrives. Later inputs are handled after the step.
+                    break
+
+        return future.result()
 
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
@@ -1929,6 +2086,15 @@ class EngineCoreProc(EngineCore):
                 "to send. Please report this issue."
             )
 
+    def _config_hash(self) -> str | None:
+        """`hash_config()` of the initialized config, the hash part of a
+        frontend's `system_fingerprint`. Like the frontend, never fail startup
+        over the fingerprint."""
+        try:
+            return hash_config(self.vllm_config)
+        except Exception:
+            return None
+
     def _make_ready_response(self) -> EngineCoreReadyResponse:
         parallel_config = self.vllm_config.parallel_config
         scheduler_config = self.vllm_config.scheduler_config
@@ -1986,6 +2152,10 @@ class EngineCoreProc(EngineCore):
                 if envs.VLLM_SERVER_DEV_MODE
                 else None
             ),
+            prefix_hash_config=self.prefix_hash_config,
+            cache_config_info=self.vllm_config.cache_config.metrics_info(),
+            config_hash=self._config_hash(),
+            enable_expert_parallel=parallel_config.enable_expert_parallel,
         )
 
     def process_input_sockets(
@@ -2237,7 +2407,10 @@ class EngineCoreProc(EngineCore):
         )
 
     def pause_scheduler(
-        self, mode: PauseMode = "abort", clear_cache: bool = True
+        self,
+        mode: PauseMode = "abort",
+        clear_cache: bool = True,
+        reset_connector: bool = True,
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
@@ -2257,7 +2430,7 @@ class EngineCoreProc(EngineCore):
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
             try:
-                engine._finish_pause(clear_cache)
+                engine._finish_pause(clear_cache, reset_connector)
             except Exception as e:
                 future.set_exception(e)
             else:
@@ -2273,7 +2446,7 @@ class EngineCoreProc(EngineCore):
         self.scheduler.set_pause_state(pause_state)
 
         if self._pause_complete():
-            self._finish_pause(clear_cache)
+            self._finish_pause(clear_cache, reset_connector)
             return None
 
         future = Future[Any]()
@@ -2828,12 +3001,12 @@ class EngineCoreActorMixin:
         # To bypass 2, we need to also set
         # RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES, but vLLM workers created
         # thereafter would have CUDA_VISIBLE_DEVICES set, which is sticky:
-        # https://github.com/ray-project/ray/blob/e752fc319ddedd9779a0989b6d3613909bad75c9/python/ray/_private/worker.py#L456 # noqa: E501
+        # https://github.com/ray-project/ray/blob/e752fc319ddedd9779a0989b6d3613909bad75c9/python/ray/_private/worker.py#L456
         # This is problematic because when the vLLM worker (a Ray actor)
         # executes a task, it indexes into the sticky CUDA_VISIBLE_DEVICES
         # rather than directly using the GPU ID, potentially resulting in
         # index out of bounds error. See:
-        # https://github.com/ray-project/ray/pull/40461/files#diff-31e8159767361e4bc259b6d9883d9c0d5e5db780fcea4a52ead4ee3ee4a59a78R1860 # noqa: E501
+        # https://github.com/ray-project/ray/pull/40461/files#diff-31e8159767361e4bc259b6d9883d9c0d5e5db780fcea4a52ead4ee3ee4a59a78R1860
         # and get_accelerator_ids_for_accelerator_resource() in worker.py
         # of ray.
         self._set_visible_devices(vllm_config, local_dp_rank)

@@ -162,7 +162,12 @@ class MiMoVisionAttention(nn.Module):
             if use_data_parallel
             else parallel_state.get_tensor_model_parallel_world_size()
         )
-        self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
+        # Data parallel runs the whole encoder on every rank, so the rank has to
+        # collapse with the size: otherwise the per-head slices below start past
+        # the end of the head range on ranks > 0.
+        self.tp_rank = (
+            0 if use_data_parallel else parallel_state.get_tensor_model_parallel_rank()
+        )
 
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -1124,7 +1129,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                     full.extend(ts_ids)
                     is_embed_mask.extend([False] * len(ts_ids))
                     # Vision tokens for all frames in this group
-                    for f in range(frames_per_group):
+                    for _ in range(frames_per_group):
                         full.append(vision_start_id)
                         is_embed_mask.append(False)
                         full.extend([video_pad_id] * n_per_grid)
@@ -1229,6 +1234,8 @@ class MiMoV2OmniDummyInputsBuilder(BaseDummyInputsBuilder[MiMoV2OmniProcessingIn
 class MiMoV2OmniForCausalLM(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant, SupportsEagle3
 ):
+    supports_encoder_tp_data = True
+
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
