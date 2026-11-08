@@ -201,19 +201,22 @@ pub fn generate_random_dataset(
             .collect();
         Ok(result)
     } else {
-        // Default path: decode tokens to text, re-encode,
-        // truncate to target length, decode again. Sends text prompts for maximum
+        // Default path: decode tokens to text and re-encode until the prompt
+        // is exactly the target length. A decode/encode round trip can merge
+        // tokens, so truncating alone leaves some prompts short; pad them
+        // like Python's `gen_prompt_decode_to_target_len`.
         let result: Vec<SampleRequest> = token_sequences
             .into_par_iter()
             .enumerate()
             .map(|(i, tokens)| {
-                let target = target_lens[i];
-                // decode → encode → truncate → decode
-                let prompt_text = tokenizer.decode(&tokens, true)?;
-                let mut re_encoded = tokenizer.encode(&prompt_text, false)?;
-                re_encoded.truncate(target);
-                let prompt = tokenizer.decode(&re_encoded, true)?;
-                let prompt_len = re_encoded.len();
+                let (prompt, adjusted) = gen_prompt_decode_to_target_len(
+                    tokenizer,
+                    &tokens,
+                    target_lens[i],
+                    false,
+                    allowed_ref,
+                )?;
+                let prompt_len = adjusted.len();
                 Ok(SampleRequest {
                     prompt: Arc::from(prompt),
                     prompt_len,
@@ -493,5 +496,52 @@ mod tests {
             re_encoded.len(),
             re_re_encoded.len()
         );
+    }
+
+    /// Text prompts must re-encode to exactly the target length. Truncating
+    /// after one round trip used to leave some prompts short when the round
+    /// trip merged tokens.
+    #[tokio::test]
+    #[ignore]
+    async fn test_text_prompts_hit_target_len() {
+        let tokenizer = tokenizer::load_tokenizer("Qwen/Qwen2.5-0.5B", false, None).await;
+        let tokenizer = match tokenizer {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("Skipping text prompt length test (tokenizer unavailable): {e}");
+                return;
+            }
+        };
+
+        let target_len = 128;
+        let requests = generate_random_dataset(
+            &tokenizer,
+            200,
+            target_len,
+            4,
+            0,
+            RangeRatio {
+                input: 0.0,
+                output: 0.0,
+            },
+            0.0,
+            0.0,
+            0,
+            "text-len-test-",
+            false,
+            1,
+        )
+        .unwrap();
+
+        for (i, req) in requests.iter().enumerate() {
+            let encoded = tokenizer.encode(&req.prompt, false).unwrap();
+            assert_eq!(
+                encoded.len(),
+                target_len,
+                "Request {i}: prompt re-encodes to {} tokens, expected {target_len}",
+                encoded.len()
+            );
+            assert_eq!(req.prompt_len, target_len);
+        }
     }
 }
