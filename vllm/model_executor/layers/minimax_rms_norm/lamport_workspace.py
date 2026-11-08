@@ -10,6 +10,7 @@ import sys
 import threading
 
 import torch
+from torch.distributed import ProcessGroup
 
 try:
     from cuda.bindings import runtime as cudart
@@ -80,7 +81,13 @@ class IpcBuffer:
     so that every rank holds a valid device pointer to every other rank's buffer.
     """
 
-    def __init__(self, rank: int, world_size: int, size: int, process_group=None):
+    def __init__(
+        self,
+        rank: int,
+        world_size: int,
+        size: int,
+        process_group: ProcessGroup | None = None,
+    ):
         self.rank = rank
         self.world_size = world_size
         self.peer_ptrs: list[int] = [0] * world_size
@@ -182,7 +189,13 @@ class LamportWorkspace:
 
     """
 
-    def __init__(self, rank: int, world_size: int, comm_size: int, process_group=None):
+    def __init__(
+        self,
+        rank: int,
+        world_size: int,
+        comm_size: int,
+        process_group: ProcessGroup | None = None,
+    ):
         assert world_size >= 2, "Lamport workspace requires at least 2 ranks"
         assert comm_size > 0, "comm_size must be positive"
 
@@ -278,7 +291,7 @@ def get_allreduce_workspace(
     world_size: int,
     comm_size: int | None = None,
     max_tokens: int = 16384,
-    process_group=None,
+    process_group: ProcessGroup | None = None,
 ) -> torch.Tensor:
     """Return a cached workspace tensor for the given (rank, world_size) pair.
 
