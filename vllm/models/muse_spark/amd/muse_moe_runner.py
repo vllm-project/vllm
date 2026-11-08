@@ -531,7 +531,7 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
             activation=activation,
             expert_mask=expert_map,
             quant_config=self.quant_config,
-            quant_method=self._AITER_QUANT_METHOD,
+            quant_type=self._AITER_QUANT_TYPE,
             moe_config=self.moe_config,
             a1q_scale=a1q_scale,
             num_local_tokens=num_local_tokens,
@@ -587,15 +587,6 @@ class MuseSparkQuarkW8A8Fp8FusedMoE(QuarkW8A8Fp8MoEMethod):
             post_expert_norm_fn=post_expert_norm_fn,
         )
 
-    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        loaded_slots = getattr(layer, "_quark_expert_loaded_slots", None)
-        if loaded_slots is not None:
-            _validate_quark_expert_weights(
-                loaded_slots, layer.moe_config.num_logical_experts
-            )
-            del layer._quark_expert_loaded_slots
-        super().process_weights_after_loading(layer)
-
 
 class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
     """Quark W4A4 method using route-preserving stock AITER experts."""
@@ -638,15 +629,6 @@ class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
             },
             post_expert_norm_fn=post_expert_norm_fn,
         )
-
-    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        loaded_slots = getattr(layer, "_quark_expert_loaded_slots", None)
-        if loaded_slots is not None:
-            _validate_quark_expert_weights(
-                loaded_slots, layer.moe_config.num_logical_experts
-            )
-            del layer._quark_expert_loaded_slots
-        super().process_weights_after_loading(layer)
 
 
 def _quantize_experts_to_mxfp4(
@@ -757,70 +739,6 @@ def _quark_expert_weight_slot(name: str) -> tuple[str, str, int] | None:
     return param_name, shard_id, int(parts[0])
 
 
-def _expected_quark_expert_weight_slots(
-    num_experts: int,
-) -> set[tuple[str, str, int]]:
-    return {
-        (param_name, shard_id, expert_id)
-        for expert_id in range(num_experts)
-        for param_name, shard_id in (
-            ("w13_weight", "w1"),
-            ("w13_weight", "w3"),
-            ("w2_weight", "w2"),
-            ("w13_weight_scale", "w1"),
-            ("w13_weight_scale", "w3"),
-            ("w2_weight_scale", "w2"),
-        )
-    }
-
-
-def _track_quark_expert_weights(
-    weights: Iterable[tuple[str, torch.Tensor]],
-    loaded: set[tuple[str, str, int]],
-) -> Iterable[tuple[str, torch.Tensor]]:
-    """Track expert tensors across the loader's independently grouped calls."""
-    for name, tensor in weights:
-        slot = _quark_expert_weight_slot(name)
-        if slot is not None:
-            if slot in loaded:
-                raise ValueError(f"Duplicate MuseSpark1x expert tensor {name!r}.")
-            loaded.add(slot)
-        yield name, tensor
-
-
-def _validate_quark_expert_weights(
-    loaded: set[tuple[str, str, int]],
-    num_experts: int,
-) -> None:
-    expected = _expected_quark_expert_weight_slots(num_experts)
-    missing = expected - loaded
-    if missing:
-        loaded_counts: dict[str, int] = {}
-        for param_name, shard_id, _ in loaded:
-            key = f"{param_name}:{shard_id}"
-            loaded_counts[key] = loaded_counts.get(key, 0) + 1
-        preview = ", ".join(
-            f"{param_name}:{shard_id}:expert{expert_id}"
-            for param_name, shard_id, expert_id in sorted(missing)[:8]
-        )
-        if len(missing) > 8:
-            preview += f", ... ({len(missing)} total)"
-        raise ValueError(
-            "Missing MuseSpark1x Quark expert tensors: "
-            f"{preview}; loaded slot counts: {loaded_counts}"
-        )
-
-    unexpected = loaded - expected
-    if unexpected:
-        preview = ", ".join(
-            f"{param_name}:{shard_id}:expert{expert_id}"
-            for param_name, shard_id, expert_id in sorted(unexpected)[:8]
-        )
-        if len(unexpected) > 8:
-            preview += f", ... ({len(unexpected)} total)"
-        raise ValueError(f"Unexpected MuseSpark1x Quark expert tensors: {preview}")
-
-
 class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
     """MuseSpark routed experts using ROCm BF16, FP8, or MXFP4 methods."""
 
@@ -883,12 +801,7 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
                 yield from RoutedExperts.load_weights(self, per_expert)
             return
 
-        loaded_slots = getattr(self, "_quark_expert_loaded_slots", None)
-        if loaded_slots is None:
-            loaded_slots = set()
-            self._quark_expert_loaded_slots = loaded_slots
-        tracked_weights = _track_quark_expert_weights(weights, loaded_slots)
-        yield from RoutedExperts.load_weights(self, tracked_weights)
+        yield from RoutedExperts.load_weights(self, weights)
 
 
 class MuseMoERunner(MoERunner):
