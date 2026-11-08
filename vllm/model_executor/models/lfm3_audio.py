@@ -14,9 +14,10 @@ import torch
 from torch import nn
 from transformers import BatchFeature, Lfm2Model
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
-from vllm.inputs import MultiModalDataDict
+from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
@@ -31,12 +32,15 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.configs.lfm3_audio import (
     Lfm3AudioConfig,
     Lfm3AudioEncoderConfig,
 )
+from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.processors.lfm3_audio import (
     Lfm3AudioFeatureExtractor,
     Lfm3AudioProcessor,
@@ -49,6 +53,7 @@ from .interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
     SupportsPP,
+    SupportsTranscription,
 )
 from .lfm3 import _short_conv_state_dtype, _short_conv_state_shape
 from .utils import (
@@ -61,6 +66,32 @@ from .utils import (
 # Bounds the profiling run and the encoder cache (one token per 80 ms); the
 # encoder itself is causal with a bounded window, so any length runs.
 MAX_AUDIO_SECONDS = 600
+
+# Transcription requests are split into chunks of this length, matching the
+# ASR evaluation setting of the model card.
+MAX_TRANSCRIPTION_CLIP_SECONDS = 30
+
+# Languages the model card lists for ASR; the system prompt names the language.
+ISO639_1_SUPPORTED_LANGS = {
+    "ar": "Arabic",
+    "da": "Danish",
+    "de": "German",
+    "el": "Greek",
+    "en": "English",
+    "es": "Spanish",
+    "fi": "Finnish",
+    "fr": "French",
+    "he": "Hebrew",
+    "it": "Italian",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "pt": "Portuguese",
+    "sv": "Swedish",
+    "tr": "Turkish",
+    "zh": "Chinese",
+}
 
 
 class Lfm3AudioFeatureInputs(TensorSchema):
@@ -288,8 +319,15 @@ class Lfm3AudioMultiModalProcessor(BaseMultiModalProcessor[Lfm3AudioProcessingIn
     dummy_inputs=Lfm3AudioDummyInputsBuilder,
 )
 class Lfm3AudioForConditionalGeneration(
-    nn.Module, HasInnerState, IsHybrid, SupportsMultiModal, SupportsPP
+    nn.Module,
+    HasInnerState,
+    IsHybrid,
+    SupportsMultiModal,
+    SupportsPP,
+    SupportsTranscription,
 ):
+    supported_languages = ISO639_1_SUPPORTED_LANGS
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # Training-export layout of the hub checkpoints
@@ -339,6 +377,63 @@ class Lfm3AudioForConditionalGeneration(
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc]:
         return MambaStateCopyFuncCalculator.short_conv_state_copy_func()
+
+    @classmethod
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
+        # The model card prompts ASR through the system turn.
+        if stt_params.task_type != "transcribe":
+            raise ValueError(
+                f"Unsupported task type {stt_params.task_type!r}; "
+                f"{cls.__name__} only supports transcription"
+            )
+
+        language = stt_params.language
+        if language is None:
+            system_prompt = "Perform ASR."
+        else:
+            name = cls.supported_languages.get(language) or (
+                cls.get_other_languages()[language].title()
+            )
+            system_prompt = f"Perform ASR in {name}."
+
+        tokenizer = cached_tokenizer_from_config(stt_params.model_config)
+        prompt = tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": cls.get_placeholder_str("audio", 0)},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        return TokensPrompt(
+            prompt_token_ids=cached_encode(tokenizer, prompt, add_special_tokens=False),
+            multi_modal_data={"audio": stt_params.audio},
+        )
+
+    @classmethod
+    def get_speech_to_text_config(
+        cls, model_config: ModelConfig, task_type: Literal["transcribe", "translate"]
+    ) -> SpeechToTextConfig:
+        processor = cached_processor_from_config(
+            model_config, processor_cls=Lfm3AudioProcessor
+        )
+        return SpeechToTextConfig(
+            sample_rate=processor.feature_extractor.sampling_rate,
+            max_audio_clip_s=MAX_TRANSCRIPTION_CLIP_SECONDS,
+        )
+
+    @classmethod
+    def get_num_audio_tokens(
+        cls,
+        audio_duration_s: float,
+        stt_config: SpeechToTextConfig,
+        model_config: ModelConfig,
+    ) -> int | None:
+        extractor = cached_processor_from_config(
+            model_config, processor_cls=Lfm3AudioProcessor
+        ).feature_extractor
+        num_samples = int(audio_duration_s * stt_config.sample_rate)
+        return extractor.num_encoder_tokens(extractor.num_frames(num_samples))
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
