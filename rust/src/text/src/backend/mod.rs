@@ -106,6 +106,13 @@ pub trait TextBackend: Send + Sync {
     /// Return the tokenizer used by this backend.
     fn tokenizer(&self) -> DynTokenizer;
 
+    /// Return whether a real tokenizer is loaded. Under
+    /// `--skip-tokenizer-init` it is not: [`Self::tokenizer`] fails every text
+    /// operation, and requests are served token IDs only.
+    fn has_tokenizer(&self) -> bool {
+        true
+    }
+
     /// Return whether the loaded model is a mixture-of-experts model.
     fn is_moe(&self) -> bool {
         false

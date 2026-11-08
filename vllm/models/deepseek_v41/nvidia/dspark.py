@@ -38,9 +38,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen3_dspark import (
     DSparkConfidenceHead,
@@ -64,6 +61,7 @@ from .model import (
     maybe_init_gemm_rs,
     prepare_mega_gate_routing_metadata,
 )
+from .ops.fused_markov import FusedMarkovSampler
 
 logger = init_logger(__name__)
 
@@ -320,6 +318,25 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
+        # additional_config={"dspark_fused_markov": true} replaces the speculator's loop
+        # when it would sample a full draft-logits cache with plain Gumbel noise.
+        spec_config = vllm_config.speculative_config
+        extra = vllm_config.additional_config
+        if (
+            isinstance(extra, dict)
+            and extra.get("dspark_fused_markov", False)
+            and spec_config.draft_sample_method == "probabilistic"
+            and not spec_config.enable_adaptive_verification
+            and not vllm_config.model_config.use_fp64_gumbel
+            and getattr(vllm_config, "watermark_config", None) is None
+            and not vllm_config.parallel_config.enable_batch_sharded_sampling
+        ):
+            self.sample_sequential = FusedMarkovSampler(
+                vllm_config.scheduler_config.max_num_seqs,
+                self.config.vocab_size,
+                self.config.dspark_markov_rank,
+                self.draft_model_config.dtype,
+            )
 
     # --- Hooks used by the speculator -------------------------------------
 
@@ -426,7 +443,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        loaded_confidence_head = False
 
         weights = _duplicate_context_wkv_weights(weights, len(self.model.layers))
         for name, loaded_weight in weights:
@@ -434,9 +450,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             if mapped is None:
                 continue
             name = mapped
-            if "confidence_head." in name:
-                loaded_confidence_head = True
-
             # ``.scale`` -> per-method scale suffix.
             if name.endswith(".scale"):
                 suffix = (
@@ -512,12 +525,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
-        if (
-            self.model.confidence_head is not None
-            and not loaded_confidence_head
-            and is_mtp_completeness_check_enabled()
-        ):
-            self.model.confidence_head = None
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 

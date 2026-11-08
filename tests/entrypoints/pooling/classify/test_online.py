@@ -10,7 +10,7 @@ from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.classify.protocol import ClassificationResponse
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 
-MODEL_NAME = "jason9693/Qwen2.5-1.5B-apeach"
+MODEL_NAME = "vllm-project/Qwen2.5-1.5B-apeach"
 DTYPE = "float32"  # Use float32 to avoid NaN issue
 input_text = "This product was excellent and exceeded my expectations"
 input_tokens = [1986, 1985, 572, 9073, 323, 33808, 847, 16665]
@@ -166,7 +166,7 @@ def test_truncate_prompt_tokens(server: RemoteOpenAIServer, model_name: str):
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 def test_add_special_tokens(server: RemoteOpenAIServer, model_name: str):
     # The add_special_tokens parameter doesn't seem to be working with this model.
-    # working with papluca/xlm-roberta-base-language-detection
+    # working with vllm-project/xlm-roberta-base-language-detection
     response = requests.post(
         server.url_for("classify"),
         json={"model": model_name, "input": input_text, "add_special_tokens": False},

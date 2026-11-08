@@ -8,14 +8,13 @@ for multi-group caches, staged prefill pages) would otherwise JIT on the first
 prefill longer than top-k regions. Under DP every rank stalls on that rank.
 """
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
@@ -57,7 +56,8 @@ def run_step5_scored_prefill_warmup(worker: "Worker", topk: int) -> bool:
     """Run one mixed step whose prefill row scores more than ``topk`` regions."""
     runner = worker.model_runner
     # One region past "select every region" (top-k x 8 tokens), plus the
-    # decode token of the mixed step.
+    # decode token of the mixed step. The 16-token margin also covers one
+    # correction slot for each of the mixed step's two requests.
     num_tokens = topk * 8 + 17
     if num_tokens > worker.scheduler_config.max_num_batched_tokens or (
         num_tokens > runner.max_model_len
@@ -70,7 +70,7 @@ def run_step5_scored_prefill_warmup(worker: "Worker", topk: int) -> bool:
     logger.info("Warming up Step5 DSA scored prefill with %d tokens.", num_tokens)
     if runner.max_num_reqs >= 2:
         run_mixed_prefill_decode_warmup(
-            cast("GPUModelRunner", runner),
+            runner,
             worker.execute_model,
             worker.sample_tokens,
             num_tokens,
