@@ -12,13 +12,15 @@ from vllm.model_executor.models.diffusion_gemma import (
     DiffusionGemmaRequestStates,
     _compiled_sample_step,
     _concat_logprob_stashes,
+    _denoise_temperature,
     _mask_rows_to_allowed,
+    sample_row_stats_reference,
 )
 from vllm.platforms import current_platform
 from vllm.v1.outputs import LogprobsTensors
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="the sampler state lives on the GPU"
+    not current_platform.is_cuda_alike(), reason="the sampler state lives on the GPU"
 )
 
 CL = 8
@@ -122,9 +124,9 @@ def _denoise_once(
     embed_weight: torch.Tensor | None = None,
     embed_dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """One compiled denoise step over ``slots`` with flat logits, so nothing
+    """One compiled denoise step over `slots` with flat logits, so nothing
     converges by stability or confidence and only the step cap can end it.
-    ``width`` below CL runs the step on [:, :width] views, as the sampler
+    `width` below CL runs the step on [:, :width] views, as the sampler
     does for a narrow tile."""
     n = len(slots)
     device = states.device
@@ -132,8 +134,18 @@ def _denoise_once(
     decode_idx = torch.arange(n, dtype=torch.int64, device=device)
     sampled = torch.zeros(n, CL, dtype=torch.int32, device=device)[:, :width]
     num_sampled = torch.zeros(n, dtype=torch.int32, device=device)
-    _compiled_sample_step(
+    temp = _denoise_temperature(states.step, decode_slots, float(MAX_STEPS), 0.5, 1.0)
+    argmax, sample, entropy, probs = sample_row_stats_reference(
         torch.zeros(n * width, VOCAB, device=device),
+        temp,
+        width,
+        embed_dtype if compute_sc else None,
+    )
+    _compiled_sample_step(
+        sample.view(n, width),
+        argmax.view(n, width),
+        entropy.view(n, width),
+        probs.view(n, width, -1) if probs is not None else None,
         decode_slots,
         decode_idx,
         decode_slots,
@@ -159,9 +171,6 @@ def _denoise_once(
         sampled,
         num_sampled,
         torch.zeros(MAX_REQS, CL, dtype=torch.int64, device=device),
-        max_denoising_steps=float(MAX_STEPS),
-        t_min=0.5,
-        t_max=1.0,
         confidence_threshold=0.1,
         vocab_size=VOCAB,
         CL=width,
@@ -216,6 +225,10 @@ def test_single_step_tile_skips_self_conditioning():
     _denoise_once(states, [0], compute_sc=False)
 
     assert not states.self_conditioning_embeds[0].any()
+
+
+def test_sample_step_is_compiled():
+    assert hasattr(_compiled_sample_step, "_torchdynamo_orig_callable")
 
 
 @pytest.mark.parametrize("stance", ["default", "force_eager"])
@@ -332,6 +345,7 @@ def test_batch_allowed_needs_one_shared_set():
     assert states.batch_allowed([]) is None
 
     shared = states.batch_allowed([0])
+    assert shared is not None
     assert shared.tolist() == [1, 2, 3]
     assert shared.dtype == torch.int64
     assert states.batch_allowed([0, 0]) is shared

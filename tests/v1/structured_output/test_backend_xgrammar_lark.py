@@ -13,6 +13,7 @@ from mistral_common.protocol.instruct.tool_calls import Tool, ToolChoiceEnum
 from transformers import AutoTokenizer
 
 from vllm.config import StructuredOutputsConfig, VllmConfig
+from vllm.config.structured_outputs import StructuredOutputsBackend
 from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -41,7 +42,9 @@ EBNF_GRAMMAR = 'root ::= "id=" [0-9]+'
 
 
 def _validate(
-    grammar: str, backend: str = "xgrammar", tokenizer: object | None = None
+    grammar: str,
+    backend: StructuredOutputsBackend = "xgrammar",
+    tokenizer: object | None = None,
 ) -> StructuredOutputsParams:
     params = SamplingParams(structured_outputs=StructuredOutputsParams(grammar=grammar))
     params._validate_structured_outputs(
@@ -92,6 +95,7 @@ def test_auto_backend_selects_guidance_for_mistral_lark(mode: ToolChoiceEnum):
         json_schema=None,
         parallel_tool_calls=True,
         json_only=False,
+        force_tool_names=False,
     )
     assert _validate(grammar, "auto", tokenizer)._backend == "guidance"
 

@@ -6,7 +6,7 @@
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput};
-use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext};
+use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext, ToolStrictLevel};
 use crate::reasoning::ReasoningParser;
 use crate::tool::{Tool, ToolParser, ToolParserOutput};
 
@@ -33,9 +33,9 @@ impl CombinedParser {
         }
     }
 
-    fn parse_tool(&mut self, content: &str, output: &mut UnifiedParserOutput) -> Result<()> {
+    fn parse_tool(&mut self, content: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
         let Some(tool) = self.tool.as_mut() else {
-            output.push_text(content);
+            output.push_text(content.text);
             return Ok(());
         };
 
@@ -65,7 +65,10 @@ impl UnifiedParser for CombinedParser {
     where
         Self: Sized + 'static,
     {
-        Err(UnifiedParserError::CombinedParserConstructor)
+        Err(UnifiedParserError::NoNamedConstructor {
+            parser: "combined",
+            built_from: "split parser instances",
+        })
     }
 
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
@@ -80,14 +83,29 @@ impl UnifiedParser for CombinedParser {
             || self.tool.as_ref().is_some_and(|parser| parser.preserve_special_tokens())
     }
 
+    fn default_tool_strict_level(&self) -> ToolStrictLevel {
+        self.tool.as_ref().map_or(ToolStrictLevel::Auto, |parser| {
+            parser.default_tool_strict_level()
+        })
+    }
+
     fn build_output_grammar(
         &self,
         ctx: &OutputGrammarContext<'_>,
     ) -> output_grammar::Result<Option<BuiltOutputGrammar>> {
-        let Some(tool) = self.tool.as_ref() else {
+        // Without an active reasoning or tool parser, the request's own
+        // constraint applies unchanged.
+        if self.reasoning.is_none() && self.tool.is_none() {
             return Ok(None);
+        }
+
+        // The tool parser composes the answer constraint into its calls where
+        // it can; without a tool grammar, the answer is the visible language.
+        let calls = match self.tool.as_ref() {
+            Some(tool) => tool.build_visible_format(ctx)?,
+            None => None,
         };
-        let Some(visible) = tool.build_visible_format(ctx)? else {
+        let Some(visible) = calls.or_else(|| ctx.answer.cloned()) else {
             return Ok(None);
         };
         // The reasoning parser may wrap that language with the reasoning phase
@@ -111,19 +129,17 @@ impl UnifiedParser for CombinedParser {
 
     fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
         let Some(reasoning) = self.reasoning.as_mut() else {
-            return self.parse_tool(&delta.text, output);
+            return self.parse_tool(delta, output);
         };
 
         let reasoning_delta = reasoning.push(delta)?;
         if let Some(reasoning) = reasoning_delta.reasoning {
             output.push_reasoning(reasoning);
         }
-        if let Some(content) = reasoning_delta.content {
-            // Content attributions stop at this boundary: the tool parser trait
-            // consumes plain text.
-            if !content.text.is_empty() {
-                self.parse_tool(&content.text, output)?;
-            }
+        if let Some(content) = reasoning_delta.content
+            && !content.text.is_empty()
+        {
+            self.parse_tool(content, output)?;
         }
         Ok(())
     }
@@ -138,7 +154,7 @@ impl UnifiedParser for CombinedParser {
             if let Some(content) = reasoning_delta.content
                 && !content.text.is_empty()
             {
-                self.parse_tool(&content.text, &mut output)?;
+                self.parse_tool(content, &mut output)?;
             }
         }
         output.append(self.flush_tool()?);
@@ -154,7 +170,7 @@ impl UnifiedParser for CombinedParser {
 mod tests {
     use std::sync::Arc;
 
-    use vllm_tokenizer::test_utils::TestTokenizer;
+    use vllm_tokenizer::test_utils::{TestTokenizer, decode_chunks};
     use vllm_tokenizer::{DecodedText, DynTokenizer, TokenAnchor, TokenAttribution, Tokenizer};
     use xgrammar_structural_tag::ToolChoice;
     use xgrammar_structural_tag::builders::ReasoningMode;
@@ -162,7 +178,8 @@ mod tests {
 
     use super::CombinedParser;
     use crate::output_grammar::{
-        GrammarCoverage, OutputGrammarContext, full_format_from_builder_for_test,
+        BuiltOutputGrammar, GrammarCoverage, OutputGrammarContext,
+        full_format_from_builder_for_test,
     };
     use crate::reasoning::{
         DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser, Glm45ReasoningParser,
@@ -173,7 +190,7 @@ mod tests {
     use crate::tool::{
         DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
         Glm47MoeToolParser, KimiK2ToolParser, MinimaxM2ToolParser, Qwen3CoderToolParser,
-        Qwen3XmlToolParser, Tool, ToolParser,
+        Qwen3JsonToolParser, Tool, ToolParser,
     };
     use crate::unified::{UnifiedParser, UnifiedParserEvent, UnifiedParserOutput};
 
@@ -181,6 +198,7 @@ mod tests {
         TestTokenizer::new()
             .with_regular_token("<think>", 256)
             .with_regular_token("</think>", 257)
+            .with_regular_token("｜DSML｜", 258)
     }
 
     fn test_tools() -> Vec<Tool> {
@@ -194,13 +212,14 @@ mod tests {
                 },
             }),
             strict: None,
+            defer_loading: None,
         }]
     }
 
     fn collect(parser: &mut dyn UnifiedParser, chunks: &[&str]) -> UnifiedParserOutput {
         let mut output = UnifiedParserOutput::default();
-        for chunk in chunks {
-            parser.parse_into(DecodedText::unattributed(*chunk), &mut output).unwrap();
+        for chunk in decode_chunks(&tokenizer(), chunks) {
+            parser.parse_into(chunk, &mut output).unwrap();
         }
         output.append(parser.finish().unwrap());
         output
@@ -231,8 +250,9 @@ mod tests {
                     tool_choice: &tool_choice,
                     tool_strict_level: Default::default(),
                     parallel_tool_calls: true,
+                    answer: None,
                 };
-                let tool = T::create(&tools).unwrap();
+                let tool = T::create(&tools, Arc::new(tokenizer())).unwrap();
                 let expected = full_format_from_builder_for_test(
                     tool.structural_tag_builder().unwrap(),
                     &ctx,
@@ -314,7 +334,10 @@ mod tests {
     struct PreserveToolParser;
 
     impl ToolParser for PreserveToolParser {
-        fn create(_tools: &[Tool]) -> crate::tool::Result<Box<dyn ToolParser>>
+        fn create(
+            _tools: &[Tool],
+            _tokenizer: DynTokenizer,
+        ) -> crate::tool::Result<Box<dyn ToolParser>>
         where
             Self: Sized + 'static,
         {
@@ -327,10 +350,10 @@ mod tests {
 
         fn parse_into(
             &mut self,
-            chunk: &str,
+            chunk: DecodedText,
             output: &mut crate::tool::ToolParserOutput,
         ) -> crate::tool::Result<()> {
-            output.push_text(chunk);
+            output.push_text(chunk.text);
             Ok(())
         }
 
@@ -346,7 +369,10 @@ mod tests {
     struct PartialThenErrorToolParser;
 
     impl ToolParser for PartialThenErrorToolParser {
-        fn create(_tools: &[Tool]) -> crate::tool::Result<Box<dyn ToolParser>>
+        fn create(
+            _tools: &[Tool],
+            _tokenizer: DynTokenizer,
+        ) -> crate::tool::Result<Box<dyn ToolParser>>
         where
             Self: Sized + 'static,
         {
@@ -355,7 +381,7 @@ mod tests {
 
         fn parse_into(
             &mut self,
-            _chunk: &str,
+            _chunk: DecodedText,
             output: &mut crate::tool::ToolParserOutput,
         ) -> crate::tool::Result<()> {
             output.push_text("committed");
@@ -376,7 +402,7 @@ mod tests {
     #[test]
     fn combined_parser_emits_reasoning_and_text() {
         let tokenizer = Arc::new(tokenizer());
-        let reasoning = Qwen3ReasoningParser::create(tokenizer).unwrap();
+        let reasoning = Qwen3ReasoningParser::create(tokenizer.clone()).unwrap();
         let mut parser = CombinedParser::new(Some(reasoning), None);
 
         let output = collect(&mut parser, &["<think>work</think>answer"]);
@@ -384,7 +410,9 @@ mod tests {
         assert_eq!(
             output.events,
             vec![
-                UnifiedParserEvent::Reasoning(DecodedText::unattributed("work")),
+                UnifiedParserEvent::Reasoning(
+                    decode_chunks(tokenizer.as_ref(), &["work"]).remove(0)
+                ),
                 UnifiedParserEvent::Text("answer".to_string()),
             ]
         );
@@ -408,9 +436,9 @@ mod tests {
 
         let mut output = UnifiedParserOutput::default();
         for (token_id, text) in [
-            (1, "<think>"),
+            (256, "<think>"),
             (2, "reason"),
-            (3, "</think>"),
+            (257, "</think>"),
             (4, "answer"),
         ] {
             parser.parse_into(chunk(token_id, text), &mut output).unwrap();
@@ -418,7 +446,7 @@ mod tests {
         output.append(parser.finish().unwrap());
 
         // The reasoning tokens keep their attributions through the combined
-        // parser; marker tokens (1 and 3) are dropped with their spans.
+        // parser; marker tokens (256 and 257) are dropped with their spans.
         let reasoning_ids: Vec<u32> = output
             .events
             .iter()
@@ -448,7 +476,7 @@ mod tests {
 
     #[test]
     fn combined_parser_emits_tool_calls_from_visible_content() {
-        let tool = Qwen3XmlToolParser::create(&test_tools()).unwrap();
+        let tool = Qwen3JsonToolParser::create(&test_tools(), Arc::new(tokenizer())).unwrap();
         let mut parser = CombinedParser::new(None, Some(tool));
 
         let output = collect(
@@ -500,7 +528,7 @@ mod tests {
 
     #[test]
     fn split_parser_wrappers_match_builder_full_formats() {
-        assert_builder_parity::<Qwen3ReasoningParser, Qwen3XmlToolParser>("qwen3");
+        assert_builder_parity::<Qwen3ReasoningParser, Qwen3JsonToolParser>("qwen3");
         assert_builder_parity::<Qwen3ReasoningParser, Qwen3CoderToolParser>("qwen3.5");
         assert_builder_parity::<DeepSeekR1ReasoningParser, DeepSeekV3ToolParser>("deepseek-r1");
         assert_builder_parity::<DeepSeekV3ReasoningParser, DeepSeekV31ToolParser>("deepseek-v3.1");
@@ -520,9 +548,10 @@ mod tests {
             tool_choice: &tool_choice,
             tool_strict_level: Default::default(),
             parallel_tool_calls: true,
+            answer: None,
         };
         let reasoning = Qwen3ReasoningParser::create(Arc::new(tokenizer())).unwrap();
-        let tool = Qwen3XmlToolParser::create(&tools).unwrap();
+        let tool = Qwen3JsonToolParser::create(&tools, Arc::new(tokenizer())).unwrap();
         let visible = tool.build_visible_format(&ctx).unwrap().unwrap();
         let mut parser = CombinedParser::new(Some(reasoning), Some(tool));
         parser.initialize(&[]).unwrap();
@@ -549,6 +578,7 @@ mod tests {
             tool_choice: &tool_choice,
             tool_strict_level: Default::default(),
             parallel_tool_calls: true,
+            answer: None,
         };
         let visible = Format::const_string("answer");
 
@@ -582,6 +612,7 @@ mod tests {
             tool_choice: &tool_choice,
             tool_strict_level: Default::default(),
             parallel_tool_calls: true,
+            answer: None,
         };
         let visible = Format::const_string("visible");
 
@@ -618,10 +649,11 @@ mod tests {
             tool_choice: &tool_choice,
             tool_strict_level: Default::default(),
             parallel_tool_calls: true,
+            answer: None,
         };
         let tokenizer = Arc::new(tokenizer());
         let reasoning = Qwen3ReasoningParser::create(tokenizer.clone()).unwrap();
-        let tool = Qwen3XmlToolParser::create(&tools).unwrap();
+        let tool = Qwen3JsonToolParser::create(&tools, tokenizer.clone()).unwrap();
         let mut parser = CombinedParser::new(Some(reasoning), Some(tool));
         parser.initialize(&[]).unwrap();
         let outside = parser.build_output_grammar(&ctx).unwrap().unwrap().format;
@@ -645,5 +677,102 @@ mod tests {
                 "{prompt:?}"
             );
         }
+    }
+
+    fn grammar_ctx<'a>(
+        tools: &'a [Tool],
+        tool_choice: &'a ToolChoice,
+        answer: Option<&'a Format>,
+    ) -> OutputGrammarContext<'a> {
+        OutputGrammarContext {
+            tools,
+            tool_choice,
+            tool_strict_level: Default::default(),
+            parallel_tool_calls: true,
+            answer,
+        }
+    }
+
+    fn qwen3_parser(tools: &[Tool], with_tool: bool) -> CombinedParser {
+        let reasoning = Qwen3ReasoningParser::create(Arc::new(tokenizer())).unwrap();
+        let tool =
+            with_tool.then(|| Qwen3JsonToolParser::create(tools, Arc::new(tokenizer())).unwrap());
+        let mut parser = CombinedParser::new(Some(reasoning), tool);
+        parser.initialize(&[]).unwrap();
+        parser
+    }
+
+    #[test]
+    fn answer_constraint_composes_with_the_tool_choice() {
+        let tools = test_tools();
+        let answer = Format::json_schema(serde_json::json!({ "type": "object" }));
+        let reasoning = |visible| {
+            Format::sequence(vec![
+                Format::optional(Format::sequence(vec![
+                    Format::tag("<think>", Format::any_text(), "</think>"),
+                    Format::const_string("\n\n"),
+                ])),
+                visible,
+            ])
+        };
+        let required = ToolChoice::required();
+        let required_calls = Qwen3JsonToolParser::create(&tools, Arc::new(tokenizer()))
+            .unwrap()
+            .build_visible_format(&grammar_ctx(&tools, &required, None))
+            .unwrap()
+            .unwrap();
+
+        // No callable tool: the answer alone, after the reasoning phase.
+        for (tool_choice, with_tool) in [(ToolChoice::none(), true), (ToolChoice::auto(), false)] {
+            let parser = qwen3_parser(&tools, with_tool);
+            let ctx = grammar_ctx(&tools, &tool_choice, Some(&answer));
+            let actual = parser.build_output_grammar(&ctx).unwrap().unwrap();
+            assert_eq!(actual.coverage, GrammarCoverage::FromTokenZero);
+            assert_eq!(actual.format, reasoning(answer.clone()), "{tool_choice:?}");
+        }
+
+        // `auto`, strict or not, keeps tool calls next to the answer.
+        let parser = qwen3_parser(&tools, true);
+        let auto = ToolChoice::auto();
+        let actual = parser.build_output_grammar(&grammar_ctx(&tools, &auto, Some(&answer)));
+        let expected = Format::or(vec![required_calls, answer.clone()]);
+        assert_eq!(actual.unwrap().unwrap().format, reasoning(expected));
+
+        // A required call ignores the answer constraint.
+        for tool_choice in [ToolChoice::required(), ToolChoice::function("get_weather")] {
+            let with_answer = grammar_ctx(&tools, &tool_choice, Some(&answer));
+            let without = grammar_ctx(&tools, &tool_choice, None);
+            assert_eq!(
+                parser.build_output_grammar(&with_answer).unwrap(),
+                parser.build_output_grammar(&without).unwrap(),
+                "{tool_choice:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn answer_without_a_reasoning_phase_covers_the_final_output() {
+        let tools = test_tools();
+        let answer = Format::regex("[a-z]+");
+        let none = ToolChoice::none();
+        let auto = ToolChoice::auto();
+
+        // Without an active parser, the request keeps its own constraint.
+        let parser = CombinedParser::new(None, None);
+        let ctx = grammar_ctx(&tools, &auto, Some(&answer));
+        assert!(parser.build_output_grammar(&ctx).unwrap().is_none());
+
+        let parser = CombinedParser::new(
+            None,
+            Some(Qwen3JsonToolParser::create(&tools, Arc::new(tokenizer())).unwrap()),
+        );
+        let ctx = grammar_ctx(&tools, &none, Some(&answer));
+        let alone = parser.build_output_grammar(&ctx).unwrap().unwrap();
+        assert_eq!(alone, BuiltOutputGrammar::final_output_only(answer.clone()));
+
+        let ctx = grammar_ctx(&tools, &auto, Some(&answer));
+        let composed = parser.build_output_grammar(&ctx).unwrap().unwrap();
+        assert_eq!(composed.coverage, GrammarCoverage::FinalOutputOnly);
+        assert!(matches!(composed.format, Format::Or(_)));
     }
 }

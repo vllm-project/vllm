@@ -10,12 +10,11 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, Self
 
 import prometheus_client
 import torch
 from pydantic import BaseModel, Field, ValidationError, model_validator
-from typing_extensions import Self
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -52,7 +51,6 @@ _QUANT_WEIGHT_BYTE_SIZE: dict[str, float] = {
     "fp8": 1,
     "fbgemm_fp8": 1,
     "ptpc_fp8": 1,
-    "fp_quant": 1,
     "modelopt": 1,
     "modelopt_mxfp8": 1,
     # FP4 / INT4 methods (0.5 bytes per weight)
@@ -560,21 +558,21 @@ class AttentionMetrics(ComponentMetrics):
         )
 
     def _layer_counts(self, per_gpu: bool) -> tuple[float, float, float]:
-        """Return ``(L, L_full, L_swa)``, the layer counts to bill for.
+        """Return `(L, L_full, L_swa)`, the layer counts to bill for.
 
-        ``L`` counts only softmax-attention layers: linear-attention layers of
-        hybrid models are billed by ``LinearAttentionMetrics`` instead.
+        `L` counts only softmax-attention layers: linear-attention layers of
+        hybrid models are billed by `LinearAttentionMetrics` instead.
 
-        Per-GPU counts divide each global count by ``pp_size`` independently.
-        Deriving the sublayer split after reducing ``L`` instead rounds a
+        Per-GPU counts divide each global count by `pp_size` independently.
+        Deriving the sublayer split after reducing `L` instead rounds a
         minority sublayer away: a 6-layer model with 1 sliding-window layer at
-        ``pp_size=2`` yields ``round(3 * 1 / 6) == 0``, billing all three layers
+        `pp_size=2` yields `round(3 * 1 / 6) == 0`, billing all three layers
         as full attention. Dividing each count separately keeps
-        ``L_full + L_swa == L`` and keeps the per-GPU values summing back to the
+        `L_full + L_swa == L` and keeps the per-GPU values summing back to the
         whole model across stages.
 
         The counts are fractional because these metrics are built from config
-        alone (see ``from_vllm_config``); no pipeline rank is available, so a
+        alone (see `from_vllm_config`); no pipeline rank is available, so a
         per-GPU figure is the average stage rather than a specific one. A model
         whose layers do not divide evenly across stages has no single integer
         answer here.
@@ -596,7 +594,7 @@ class AttentionMetrics(ComponentMetrics):
         """Compute FLOPs breakdown for attention layers.
 
         Accounts for hybrid models by splitting total layers into full-attention
-        (L_full) and sliding-window (L_swa) sublayers. See ``_layer_counts`` for
+        (L_full) and sliding-window (L_swa) sublayers. See `_layer_counts` for
         how those are scaled under pipeline parallelism.
 
         Args:
@@ -650,7 +648,7 @@ class AttentionMetrics(ComponentMetrics):
         """Compute read-memory-traffic breakdown for attention layers.
 
         Splits layers into full-attention and sliding-window sublayers using the
-        same counts as get_num_flops_breakdown; see ``_layer_counts``.
+        same counts as get_num_flops_breakdown; see `_layer_counts`.
 
         Args:
             ctx: Execution context describing the current batch.
@@ -736,7 +734,7 @@ class AttentionMetrics(ComponentMetrics):
         """Calculate write memory traffic for attention layers.
 
         Writes do not depend on the attention window, so only the total layer
-        count is needed; it comes from ``_layer_counts`` so all three breakdowns
+        count is needed; it comes from `_layer_counts` so all three breakdowns
         bill the same number of layers.
         """
         D, q, kv, d = (

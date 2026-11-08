@@ -33,6 +33,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
+    HiSparseHotSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVQuantMode,
@@ -194,7 +195,7 @@ def test_decode_bench_connector_basic():
     assert len(block_ids) == expected_num_blocks
 
     # Verify KV caches were filled with constant value
-    for layer_name, kv_cache in runner.kv_caches.items():
+    for kv_cache in runner.kv_caches.values():
         for block_id in block_ids:
             # Check that the block was filled
             block_data = kv_cache[block_id]
@@ -384,10 +385,10 @@ def test_decode_bench_connector_selects_external_blocks_per_group():
                 # Full external blocks may already be hashed by allocate_slots().
                 KVCacheBlock(
                     block_id=2,
-                    _block_hash=make_block_hash_with_group_id(
+                    block_hash=make_block_hash_with_group_id(
                         BlockHash(b"external-full-block"), 0
                     ),
-                    _block_hash_num_tokens=48,
+                    block_hash_num_tokens=48,
                 ),
                 KVCacheBlock(block_id=3),
             ],
@@ -402,6 +403,61 @@ def test_decode_bench_connector_selects_external_blocks_per_group():
     block_ids_per_group, num_tokens = metadata.reqs_to_fill[request.request_id]
     assert block_ids_per_group == ([2, 3], [4])
     assert num_tokens == num_external_tokens
+
+
+def test_decode_bench_connector_skips_non_transfer_groups():
+    """Groups with enable_kv_transfer=False get no blocks to fill.
+
+    Regression test: HiSparse hot groups opt out of external KV transfer
+    and have a bounded per-request allocation that does not scale with
+    sequence length; the connector applied token-paged block-range math to
+    them and asserted once the sequence outgrew the allocation.
+    """
+    vllm_config = create_vllm_config(
+        block_size=16,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["attention"],
+                FullAttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["hot"],
+                HiSparseHotSpec(block_size=16, page_size=1024, blocks_per_request=2),
+                enable_kv_transfer=False,
+            ),
+        ],
+    )
+    scheduler_connector = DecodeBenchConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+    )
+    num_external_tokens = 48
+    request = create_request(
+        request_id=1, num_tokens=num_external_tokens + 1, block_size=16
+    )
+    blocks = KVCacheBlocks(
+        (
+            [
+                KVCacheBlock(block_id=1),
+                KVCacheBlock(block_id=2),
+                KVCacheBlock(block_id=3),
+            ],
+            [KVCacheBlock(block_id=4), KVCacheBlock(block_id=5)],
+        )
+    )
+    scheduler_connector.update_state_after_alloc(request, blocks, num_external_tokens)
+    metadata = scheduler_connector.build_connector_meta(SchedulerOutput.make_empty())
+    assert isinstance(metadata, DecodeBenchConnectorMetadata)
+    assert metadata.reqs_to_fill == {
+        request.request_id: (([1, 2, 3], []), num_external_tokens)
+    }
 
 
 def test_decode_bench_connector_selects_unaligned_external_block():
@@ -500,7 +556,7 @@ def test_decode_bench_connector_skips_null_padding():
 
 
 def test_decode_bench_connector_uses_per_group_dcp_block_sizes():
-    """DCP scales full-attention blocks but not sliding-window blocks."""
+    """DCP scales target blocks but not the replicated draft's window."""
     block_size = 16
     dcp_world_size = 2
     vllm_config = create_vllm_config(
@@ -515,6 +571,7 @@ def test_decode_bench_connector_uses_per_group_dcp_block_sizes():
         dtype=torch.float32,
     )
     sliding_window = SlidingWindowSpec(
+        dcp_sharded=False,
         block_size=block_size,
         num_kv_heads=1,
         head_size=1,
@@ -657,7 +714,7 @@ def test_decode_bench_connector_large_context():
     assert len(block_ids) == expected_num_blocks
 
     # Verify blocks were filled
-    for layer_name, kv_cache in runner.kv_caches.items():
+    for kv_cache in runner.kv_caches.values():
         for block_id in block_ids:
             block_data = kv_cache[block_id]
             assert torch.allclose(block_data, torch.tensor(0.015))
@@ -777,9 +834,9 @@ def test_decode_bench_connector_concurrent_requests():
     assert len(block_ids_per_group3[0]) == 1  # 1 block
 
     # Verify all blocks are filled in KV cache
-    for req_id, (block_ids_per_group, _) in metadata.reqs_to_fill.items():
+    for block_ids_per_group, _ in metadata.reqs_to_fill.values():
         block_ids = block_ids_per_group[0]
-        for layer_name, kv_cache in runner.kv_caches.items():
+        for kv_cache in runner.kv_caches.values():
             for block_id in block_ids:
                 block_data = kv_cache[block_id]
                 assert torch.allclose(block_data, torch.tensor(0.015))
