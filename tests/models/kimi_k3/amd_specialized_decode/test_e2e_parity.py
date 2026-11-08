@@ -510,12 +510,29 @@ def _check_layers(worker, launches: int) -> None:
     """For the first ``launches`` kernel launches, each stage of the kernels
     against the op vLLM's layer runs for it on the kernel's own input to that
     stage (test_numerics' *_matches_vllm_ops checks, with the engine's
-    modules, weights and KDA states)."""
+    modules, weights and KDA states). Checked launches run the plain K2
+    (``opt=0``, bit-exact to ``K2_OPT``, test_numerics): K2_OPT's sentinel
+    all-reduces re-arm the words they read, leaving no taps."""
+    import dataclasses
+
     from tests.models.kimi_k3.amd_specialized_decode import test_numerics as N
+    from vllm.distributed import get_tp_group
+    from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2_mod
     from vllm.models.kimi_k3.amd.specialized_decode.runtime import layers
 
     decode = _decode(worker)
     decode.layer_errors = []
+    k2_key = layers._k2_key
+
+    def plain_key(*args, **kwargs):
+        return dataclasses.replace(k2_key(*args, **kwargs), opt=0)
+
+    for kernels in decode.kernels.values():
+        for kernel in kernels.values():
+            for b in kernel.builds():
+                if isinstance(b, k2_mod.K2Build):
+                    layers.compile_build(dataclasses.replace(b, opt=0))
+    get_tp_group().barrier()
 
     def wrap(kernel):
         launch = kernel.launch
@@ -545,11 +562,11 @@ def _check_layers(worker, launches: int) -> None:
                 rec["key"] = layers._k2_key(layer_, runner_, core.size(0), reset)
                 return k2(layer_, runner_, core, prefix, blocks, reset)
 
-            layers._k2 = spy
+            layers._k2, layers._k2_key = spy, plain_key
             try:
                 got = launch(step, positions, prefix_sum, block_residual, prefix_delta)
             finally:
-                layers._k2 = k2
+                layers._k2, layers._k2_key = k2, k2_key
             errs = {}
             if kda:
                 ins["after"] = [c[ins["slots"]].clone() for c in kernel.caches()]

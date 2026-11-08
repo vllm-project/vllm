@@ -1950,8 +1950,13 @@ def _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
 
 
 def _k2_taps(runner, key, tag: int) -> dict:
-    """K2's stage outputs of one launch (``tag``'s mailbox pairs, plain rows)."""
+    """K2's stage outputs of one launch (``tag``'s mailbox pairs, plain rows);
+    collective at two-shot widths."""
+    from vllm.distributed import tensor_model_parallel_all_gather
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.back import (
+        two_shot,
+    )
     from vllm.models.kimi_k3.amd.specialized_decode.mono.stages.moe import (
         HIDDEN,
         LAT,
@@ -1976,6 +1981,18 @@ def _k2_taps(runner, key, tag: int) -> dict:
     def plain(name, n):
         return R.words(sc[lay[name][0] :], n, bf)
 
+    def parts(name):
+        """The ranks' bf16 partials [TP, s, HIDDEN] of an all-reduce region;
+        two-shot: a rank holds only its own columns' (the rest its owners'
+        sums), gathered from the owners."""
+        if not two_shot(s):
+            return peer(name, TP * s * HIDDEN // 2, bf).view(TP, s, HIDDEN)
+        p = _peer(runner, s, name)[: TP * s * HIDDEN * 4].view(torch.int32)
+        own = p.view(TP, s, TP, -1, 2)[:, :, runner.rank]
+        stale = (own[..., 1] != tag).sum().item()
+        assert stale == 0, f"{stale} stale pairs in {name}'s own columns"
+        return tensor_model_parallel_all_gather(own[..., 0].contiguous().view(bf))
+
     route = scratch("route", s * 2 * TOPK, torch.int32).view(s, 2, TOPK)
     rlog = peer("rlog", TP * s * (E // TP)).view(TP, s, E // TP)
     if few_rows(s):
@@ -1987,7 +2004,7 @@ def _k2_taps(runner, key, tag: int) -> dict:
     else:
         lat = {"lat": peer("lat", s * LAT // 2, bf).view(s, LAT)}
     return lat | {
-        "ar": peer("ar", TP * s * HIDDEN // 2, bf).view(TP, s, HIDDEN),
+        "ar": parts("ar"),
         "x": plain("xrow", s * HIDDEN).view(s, HIDDEN),
         "rlog": rlog.transpose(0, 1).reshape(s, E),
         "sgu": scratch("sgu", s * SI, bf).view(s, 2 * SI),
@@ -1997,7 +2014,7 @@ def _k2_taps(runner, key, tag: int) -> dict:
         "latr": peer("latr", TP * s * LAT // 2, bf).view(TP, s, LAT),
         "ln": plain("ln", s * LAT).view(s, LAT),
         "shp": plain("shp", s * UP_N).view(s, UP_N),
-        "final": peer("final", TP * s * HIDDEN // 2, bf).view(TP, s, HIDDEN),
+        "final": parts("final"),
     }
 
 
