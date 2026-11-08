@@ -77,6 +77,7 @@ class Qwen4ExpQSAQKVIndexerLinear(MergedColumnParallelLinear):
             params_dtype=qkv_proj.params_dtype,
             quant_config=quant_config,
             prefix=qkv_proj.prefix,
+            disable_tp=qkv_proj.disable_tp,
         )
 
     def _load_shard(
@@ -293,6 +294,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
+        replicate: bool = False,
     ) -> None:
         nn.Module.__init__(self)
         cache_config = vllm_config.cache_config
@@ -325,7 +327,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
 
         self.config = config
         self.hidden_size = int(config.hidden_size)
-        tp_size = get_tensor_model_parallel_world_size()
+        # replicate: every rank holds all Q/KV heads, o_proj output is complete.
+        tp_size = 1 if replicate else get_tensor_model_parallel_world_size()
         self.total_num_heads = int(config.num_attention_heads)
         if self.total_num_heads % tp_size:
             raise ValueError("QSA attention heads must be divisible by TP size")
@@ -358,6 +361,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             bias=False,
             quant_config=model.without_modelopt_fp4(quant_config),
             prefix=f"{prefix}.qkv_proj",
+            disable_tp=replicate,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -366,6 +370,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             reduce_results=reduce_results,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            disable_tp=replicate,
         )
         self.rotary_emb = get_rope(
             head_size=self.head_dim,

@@ -1336,12 +1336,18 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm import envs
         from vllm.platforms import current_platform
 
         Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
         text_config = vllm_config.model_config.hf_text_config
         if text_config.hc_count <= 1:
             raise ValueError("Qwen4Exp requires hc_count > 1")
+        # The ROCm Qwen4Exp model has no replicated-mixer path.
+        if envs.VLLM_QWEN4EXP_REPLICATE_MIXER and current_platform.is_rocm():
+            raise NotImplementedError(
+                "VLLM_QWEN4EXP_REPLICATE_MIXER is not supported on ROCm."
+            )
         parallel_config = vllm_config.parallel_config
         # MoE SP also enables HC SP without the explicit HC flag.
         if (
