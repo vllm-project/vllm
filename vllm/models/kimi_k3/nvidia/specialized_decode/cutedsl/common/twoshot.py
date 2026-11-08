@@ -26,6 +26,7 @@ import torch
 import torch.distributed._symmetric_memory as symm_mem
 from cutlass import Float32, Int32, Int64, Uint32
 
+from ....specialized_decode.symm import multicast_rendezvous, peer_rendezvous
 from .mailbox import rearm
 from .primitives import (
     add_rn,
@@ -53,12 +54,15 @@ class TwoShot:
         bf16 = dict(dtype=torch.bfloat16, device=device)
         self.recv = symm_mem.empty(shape, **bf16)
         self.gather = symm_mem.empty((parities, 1, cap, width), **bf16)
-        handles = [symm_mem.rendezvous(t, group) for t in (self.recv, self.gather)]
+        # recv: peer stores only (no multicast object); gather: multicast stores.
+        recv = peer_rendezvous(self.recv, group)
+        _, self.gather_mc = multicast_rendezvous(
+            self.gather, group, "Kimi K3 two-shot all-reduce"
+        )
         size = self.recv[0].numel() * 2
-        ptrs = handles[0].buffer_ptrs
+        ptrs = recv.buffer_ptrs
         bases = [[int(b) + p * size for b in ptrs] for p in range(parities)]
         self.peers = torch.tensor(bases, dtype=torch.int64, device=device)
-        self.gather_mc = int(handles[1].multicast_ptr or 0)
         if not self.gather_mc:  # views() offsets this address
             raise RuntimeError("Kimi K3 two-shot all-reduce needs multicast memory")
         for t in (self.recv, self.gather):

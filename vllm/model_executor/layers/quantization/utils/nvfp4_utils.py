@@ -295,7 +295,7 @@ def csf_weights_transform(
         pending: dict[str, tuple[str, dict[str, torch.Tensor]]] = {}
         decoded = 0
         for name, tensor in weights:
-            for suffix, (encoding, stream) in suffixes.items():
+            for suffix, (encoding, stream) in suffixes.items():  # noqa: B007
                 if name.endswith(suffix):
                     base = name[: -len(suffix)]
                     break
