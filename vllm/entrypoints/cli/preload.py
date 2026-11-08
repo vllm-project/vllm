@@ -209,6 +209,16 @@ class PreloadSubcommand(CLISubcommand):
             help="Shared secret for daemon-to-daemon requests. The JSON "
             "connection is unencrypted; use a trusted network.",
         )
+        parser.add_argument(
+            "--warmup-cache-stores",
+            type=str,
+            default=None,
+            help="Comma-separated shared store backends mirroring the "
+            "warmup caches (e.g. 'mooncake', connected via "
+            "MOONCAKE_CONFIG_PATH). The local disk cache is always the "
+            "first tier; these add shared tiers that reads fall back to "
+            "and tuned tables are published to.",
+        )
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -317,6 +327,11 @@ class PreloadSubcommand(CLISubcommand):
             )
         }
         _validate_seed_args(args, world_size=world_size, num_groups=len(groups))
+        warmup_cache_stores = [
+            name.strip()
+            for name in (args.warmup_cache_stores or "").split(",")
+            if name.strip()
+        ]
 
         def _seed_endpoint(
             host: str | None, base_port: int | None, offset: int
@@ -357,6 +372,7 @@ class PreloadSubcommand(CLISubcommand):
                             dp_rank,
                             pp_rank,
                             seed_config,
+                            warmup_cache_stores,
                         ),
                         name=(
                             f"vllm-weight-cache-{format_daemon_role(is_draft)}-"

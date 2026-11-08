@@ -30,7 +30,7 @@ def _rows(n: int, k: int, gen: torch.Generator) -> torch.Tensor:
 def _code_steps(a: torch.Tensor, b: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     """Per-element code distance in value order; NaN codes must match exactly.
 
-    ``dtype`` is the value dtype: float8_e4m3fn (E4M3 codes) or bfloat16."""
+    `dtype` is the value dtype: float8_e4m3fn (E4M3 codes) or bfloat16."""
     n = 256 if dtype == torch.float8_e4m3fn else 65536
     int_dtype = torch.uint8 if dtype == torch.float8_e4m3fn else torch.uint16
     codes = torch.arange(n, dtype=torch.int32, device=a.device).to(int_dtype)

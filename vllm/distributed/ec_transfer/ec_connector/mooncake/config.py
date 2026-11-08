@@ -52,9 +52,9 @@ def _positive_float(name: str, value: object) -> float:
 class MooncakeECConfig:
     """Validated settings shared by the Scheduler and Worker roles.
 
-    ``control_port`` is the first TP-shard port after the DP offset;
-    ``control_addr`` targets that shard, which advertises the full topology.
-    ``control_host`` is the address this instance both advertises and binds,
+    `control_port` is the first TP-shard port after the DP offset;
+    `control_addr` targets that shard, which advertises the full topology.
+    `control_host` is the address this instance both advertises and binds,
     so reaching a Consumer means being routed to it rather than finding it on
     every interface.
     """
@@ -106,8 +106,6 @@ class MooncakeECConfig:
                 raise ValueError(
                     "cross_encoder_cache requires an Encoder-only producer"
                 )
-            if not vllm_config.use_v2_model_runner:
-                raise ValueError("cross_encoder_cache requires Model Runner V2")
             if vllm_config.lora_config is not None:
                 raise ValueError("cross_encoder_cache does not support LoRA")
             mm_config = vllm_config.model_config.multimodal_config

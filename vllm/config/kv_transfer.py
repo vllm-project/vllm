@@ -165,24 +165,30 @@ class KVTransferConfig:
             ]
         return any(config.get("custom_mem_pool") for config in configs)
 
+    def _connector_children(self) -> list[dict[str, Any]]:
+        if self.kv_connector == "MultiConnector":
+            return self.kv_connector_extra_config.get("connectors", [])
+        return [{"kv_connector": self.kv_connector}]
+
+    def uses_nixl_on_device_memory(self) -> bool:
+        """Whether NIXL transfers the device KV cache itself, directly or in
+        MultiConnector. With a CPU kv_buffer_device it uses host staging buffers."""
+        return any(
+            (child.get("kv_connector") or "").startswith("Nixl")
+            and child.get("kv_buffer_device", self.kv_buffer_device) != "cpu"
+            for child in self._connector_children()
+        )
+
     def registers_kv_cache_memory(self) -> bool:
         """Whether a connector registers the device KV cache itself with UCX or
-        RDMA (NIXL, Mooncake, MoRIIO, UMBP), directly or in MultiConnector. NIXL with
-        a CPU kv_buffer_device registers only its host staging buffers."""
-        children = [{"kv_connector": self.kv_connector}]
-        if self.kv_connector == "MultiConnector":
-            children = self.kv_connector_extra_config.get("connectors", [])
-        for child in children:
-            name = child.get("kv_connector") or ""
-            if name in _KV_CACHE_REGISTERING_CONNECTORS:
-                return True
-            buffer_device = child.get("kv_buffer_device", self.kv_buffer_device)
-            if name.startswith("Nixl") and buffer_device != "cpu":
-                return True
-        return False
+        RDMA (NIXL, Mooncake, MoRIIO, UMBP), directly or in MultiConnector."""
+        return self.uses_nixl_on_device_memory() or any(
+            child.get("kv_connector") in _KV_CACHE_REGISTERING_CONNECTORS
+            for child in self._connector_children()
+        )
 
     def has_connector(self, connector_name: str) -> bool:
-        """Whether ``connector_name`` is configured, directly or in MultiConnector."""
+        """Whether `connector_name` is configured, directly or in MultiConnector."""
         if self.kv_connector == connector_name:
             return True
         return self.kv_connector == "MultiConnector" and any(
