@@ -137,16 +137,21 @@ def initialize_model(
 
 
 def process_weights_after_loading(
-    model: nn.Module, model_config: ModelConfig, target_device: torch.device
+    model: nn.Module,
+    model_config: ModelConfig,
+    target_device: torch.device,
+    *,
+    reload: bool = False,
 ) -> None:
     """Post-process loaded weights into runtime format.
+
+    `reload` marks a rerun on new weights (direct reload's finish) rather
+    than a cold start; cold-start-only steps are skipped.
 
     Under `weights_already_processed` (weight cache IPC loader), quant
     methods skip tensor transforms and must declare
     `supports_pre_processed_weights`, otherwise this raises `RuntimeError`.
     """
-    # Reclaim memory when an explicit lm_head has been
-    # loaded, but it is identical to the input embeddings.
     from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
     from vllm.model_executor.layers.quantization.online.moe_base import (
         OnlineMoEMethodBase,
@@ -156,7 +161,13 @@ def process_weights_after_loading(
         record_checkpoint_layout,
     )
 
-    maybe_retie_word_embeddings(model, model_config)
+    # Reclaim memory when an explicit lm_head has been
+    # loaded, but it is identical to the input embeddings.
+    # Cold start only: a reload keeps the tying the model started with. Re-tying
+    # would make lm_head the input embeddings, so every later update's lm_head
+    # would be dropped.
+    if not reload:
+        maybe_retie_word_embeddings(model, model_config)
 
     if direct_reload_enabled():
         record_checkpoint_layout(model)  # cold start only; reloads reuse it
