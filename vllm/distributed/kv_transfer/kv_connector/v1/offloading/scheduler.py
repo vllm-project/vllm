@@ -1804,16 +1804,11 @@ class OffloadingConnectorScheduler:
                 continue
             boundaries = {boundary for _, _, boundary in entries}
             if len(boundaries) != 1:
-                # The producer offers every retained boundary it cached, so a
-                # single step can hand over several for one request. A
-                # partial-tail job stores all groups at one boundary, so an
-                # ambiguous hand-off cannot be stored. Skip it instead of
-                # terminating the engine: the state is recomputable and only
-                # the offload hit is lost.
+                # A partial-tail job stores every group at one boundary, so a
+                # hand-off carrying several cannot be stored. Dropping it only
+                # loses the offload hit.
                 logger.warning_once(
-                    "Skipping partial-tail store for request %s: expected a "
-                    "single boundary, got %s",
-                    req_id,
+                    "Skipping partial-tail store: expected one boundary, got %s",
                     tuple(sorted(boundaries)),
                 )
                 continue
