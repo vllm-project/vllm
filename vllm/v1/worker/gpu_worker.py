@@ -415,12 +415,7 @@ class Worker(WorkerBase):
         if current_platform.is_cpu():
             return nullcontext()
 
-        allocator = get_mem_allocator_instance()
-        if tag == "weights":
-            assert allocator.get_current_usage() == 0, (
-                "CuMem allocator can only be used for one instance per process."
-            )
-        return allocator.use_memory_pool(tag=tag)
+        return get_mem_allocator_instance().use_memory_pool(tag=tag)
 
     @contextmanager
     def _scoped_allocator_max_split(self, max_split_size_mb: int):
@@ -551,6 +546,9 @@ class Worker(WorkerBase):
 
             # take current memory snapshot after external weights are ready
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
+            if self.cache_config.enable_extensible_kv_cache:
+                # Read as the final sizing reads the free memory it compares.
+                self.init_free_memory = current_platform.free_device_memory(self.device)
             self.requested_memory = request_memory(
                 init_snapshot, self.cache_config, external_weight_memory
             )
@@ -574,7 +572,8 @@ class Worker(WorkerBase):
             # Scratch holds no state across steps: discard it on sleep.
             alloc_context=lambda: self._maybe_get_memory_pool_context("workspace"),
         )
-        self.model_runner: GPUModelRunner = self._make_model_runner()
+        with self._maybe_get_memory_pool_context(tag="runtime"):
+            self.model_runner: GPUModelRunner = self._make_model_runner()
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
@@ -1225,7 +1224,7 @@ class Worker(WorkerBase):
                     kv_cache,
                     self.vllm_config,
                     self.device,
-                    init_free_memory=self.init_snapshot.free_memory,
+                    init_free_memory=self.init_free_memory,
                     requested_memory=int(self.requested_memory),
                 )
             )

@@ -33,15 +33,15 @@ def _param_stem(shard_id: str) -> str:
 
 
 class OnlineSharedExpertLoader:
-    """Loads the fused shared experts (FSE) of a ``RoutedExperts`` layer with online
+    """Loads the fused shared experts (FSE) of a `RoutedExperts` layer with online
     quantization.
 
     - Staged shared experts: the shared experts are loaded as stored in temporary
-      slots (``online_w{13,2}_weight[_scale]``), dequantized after loading, and
+      slots (`online_w{13,2}_weight[_scale]`), dequantized after loading, and
       quantized into the routed experts slots: with the routed experts when they
-      are requantized, else by ``finalize``.
+      are requantized, else by `finalize`.
     - Unquantized shared experts with pre-quantized routed experts: the shared
-      experts are quantized on arrival by ``quantizer``, and loaded in the routed
+      experts are quantized on arrival by `quantizer`, and loaded in the routed
       experts slots.
     """
 
@@ -126,9 +126,9 @@ class OnlineSharedExpertLoader:
         """Create parameters holding the fused shared experts as stored.
 
         The checkpoint shared experts are loaded as stored into
-        ``online_w{13,2}_weight`` (plus ``online_w{13,2}_weight_scale`` for
+        `online_w{13,2}_weight` (plus `online_w{13,2}_weight_scale` for
         quantized shared experts), which are separate from the routed experts'
-        parameters. They are dequantized by ``dequantize_staging``.
+        parameters. They are dequantized by `dequantize_staging`.
         """
         from vllm.model_executor.layers.quantization.online.base import (
             ONLINE_SHARED_EXPERT_DEQUANTIZERS,
@@ -186,7 +186,7 @@ class OnlineSharedExpertLoader:
     def dequantize_staging(
         self, layer: torch.nn.Module
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return the staged ``(w13, w2)`` shared experts, dequantized if needed."""
+        """Return the staged `(w13, w2)` shared experts, dequantized if needed."""
         w13 = layer.online_w13_weight.data
         w2 = layer.online_w2_weight.data
         if self.stored_key is not None:
@@ -240,7 +240,7 @@ class OnlineSharedExpertLoader:
 
     @staticmethod
     def _staging_param_name(weight_name: str, shard_id: str) -> str | None:
-        """Staging parameter (``online_w{13,2}_weight[_scale]``) of a shared expert
+        """Staging parameter (`online_w{13,2}_weight[_scale]`) of a shared expert
         tensor. They are separate from the routed experts' parameters. None for
         other tensors.
         """
@@ -264,7 +264,7 @@ class OnlineSharedExpertLoader:
         self, mapping: list[tuple[str, str, int, str]]
     ) -> list[tuple[str, str, int, str]]:
         """Point the expert params mapping of the shared experts to the staging
-        parameters, as e.g. ``w13_`` -> ``online_w13_``."""
+        parameters, as e.g. `w13_` -> `online_w13_`."""
         if not self.staging_parameters:
             return mapping
         redirected = []
@@ -288,7 +288,7 @@ class OnlineSharedExpertLoader:
         expert_id: int,
     ) -> tuple[torch.nn.Parameter, int, bool | None]:
         """Prepare the load of a fused shared expert tensor in
-        ``RoutedExperts.weight_loader``.
+        `RoutedExperts.weight_loader`.
 
         Returns:
             The parameter and local expert id to load into, and the load result if

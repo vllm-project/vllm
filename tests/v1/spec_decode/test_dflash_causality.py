@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Config-only DFlash behavior.
 
-``dflash_has_any_non_causal`` decides pre-build whether the draft needs a
+`dflash_has_any_non_causal` decides pre-build whether the draft needs a
 non-causal-capable backend, so its branch table (explicit override, SWA-derived
-per-layer causality, and the no-``layer_types`` fallback) is worth pinning.
+per-layer causality, and the no-`layer_types` fallback) is worth pinning.
 """
 
 from types import SimpleNamespace

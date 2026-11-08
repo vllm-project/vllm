@@ -38,21 +38,21 @@ def _xpress_add_argmax_partial_kernel(
     """Stage 1 of the fused argmax: per (row, vocab chunk) max and its index.
 
     Grid: (ceil(V / BLOCK_V), rows). Each program sums one BLOCK_V-wide chunk of
-    ``base[row] + bias[row]`` in registers and reduces it, so the full [rows, V]
+    `base[row] + bias[row]` in registers and reduces it, so the full [rows, V]
     sum is never stored.
 
     Args:
         base_ptr (tl.tensor): [rows, V] base logits (bf16), row stride
-            ``stride_base_r``.
+            `stride_base_r`.
         bias_ptr (tl.tensor): [rows, V] refiner bias, same layout.
         out_val_ptr (tl.tensor): [rows, num_chunks] fp32 chunk maxima (written).
         out_idx_ptr (tl.tensor): [rows, num_chunks] int64 chunk argmax, in vocab
             ids (written).
         V (int): vocabulary size; the last chunk is masked to it.
-        stride_base_r (int): row stride of ``base_ptr``.
-        stride_bias_r (int): row stride of ``bias_ptr``.
-        stride_ov_r (int): row stride of ``out_val_ptr``.
-        stride_oi_r (int): row stride of ``out_idx_ptr``.
+        stride_base_r (int): row stride of `base_ptr`.
+        stride_bias_r (int): row stride of `bias_ptr`.
+        stride_ov_r (int): row stride of `out_val_ptr`.
+        stride_oi_r (int): row stride of `out_idx_ptr`.
         BLOCK_V: vocab chunk width per program.
 
     """
@@ -95,22 +95,22 @@ def _xpress_latent_kernel(
 
     Grid: (N, R // RC), one program per block and RC latent channels. For every
     slot b it gathers the previous slot's token embedding (slot 0 reads the
-    anchor's predecessor ``am1``), adds the pass-invariant hidden cache, applies
+    anchor's predecessor `am1`), adds the pass-invariant hidden cache, applies
     the folded causal mixer
-    ``u[b] = sum_{j <= b} L[b, j, :] * x[j]``, then a SwiGLU MLP with a
+    `u[b] = sum_{j <= b} L[b, j, :] * x[j]`, then a SwiGLU MLP with a
     residual, and writes the latent for slots 1..B-1 (slot 0 is the anchor and
     is never read out).
 
     Args:
         blk_ptr (tl.tensor): [N, B] int64 current block tokens; slot b reads
-            ``blk[b - 1]``.
+            `blk[b - 1]`.
         am1_ptr (tl.tensor): [N] int64 token preceding each block's anchor.
-        xh_ptr (tl.tensor): [N, B, R] hidden cache, ``down_h(h) ++ down_g(mean h)``
+        xh_ptr (tl.tensor): [N, B, R] hidden cache, `down_h(h) ++ down_g(mean h)`
             projected to R, constant across passes.
         lat_out_ptr (tl.tensor): [N, B - 1, R] latent output (written).
         w1_ptr (tl.tensor): [V, R] token embedding.
         wlat_ptr (tl.tensor): [R, R] embedding-to-latent projection (transposed).
-        mixl_ptr (tl.tensor): [B, B, R] folded mixer ``L * tril + I``, per channel.
+        mixl_ptr (tl.tensor): [B, B, R] folded mixer `L * tril + I`, per channel.
         wg_ptr (tl.tensor): [R, H] SwiGLU gate (transposed).
         wu_ptr (tl.tensor): [R, H] SwiGLU up (transposed).
         wd_ptr (tl.tensor): [H, R] SwiGLU down (transposed).
@@ -124,7 +124,7 @@ def _xpress_latent_kernel(
             RC is small.
         HT: MLP hidden tile size.
         DO_MLP: whether to run the SwiGLU MLP here. False stops after the mixer
-            and hands its output back, so ``xpress_latent_pass`` can run the
+            and hands its output back, so `xpress_latent_pass` can run the
             SwiGLU as GEMMs instead -- see the comment at the MLP loop for why
             that can be faster.
 
@@ -228,13 +228,13 @@ def xpress_latent_pass(
     ht: int = 64,
     num_stages: int | None = None,
 ) -> None:
-    """Run ``_xpress_latent_kernel`` over N blocks; see its docstring for shapes.
+    """Run `_xpress_latent_kernel` over N blocks; see its docstring for shapes.
 
-    The caller follows this with the readout matmul ``lat_out @ W2`` and one of
-    the fused argmax entry points below. ``do_mlp`` runs the SwiGLU MLP in the
-    kernel, else as GEMMs after it on ``wgu_t`` ([R, 2 * H], ``wg_t`` and ``wu_t``
-    side by side). ``kc``, ``rc``, ``ht`` and ``num_stages`` set the kernel's
-    ``KC``, ``RC``, ``HT`` and pipelining depth; None picks the platform default.
+    The caller follows this with the readout matmul `lat_out @ W2` and one of
+    the fused argmax entry points below. `do_mlp` runs the SwiGLU MLP in the
+    kernel, else as GEMMs after it on `wgu_t` ([R, 2 * H], `wg_t` and `wu_t`
+    side by side). `kc`, `rc`, `ht` and `num_stages` set the kernel's
+    `KC`, `RC`, `HT` and pipelining depth; None picks the platform default.
     """
     N, B = blk.shape
     R = xh.shape[-1]
@@ -304,10 +304,10 @@ def _xpress_add_argmax_reduce_to_blk_kernel(
     stride_oi_r,
     BLOCK_N: tl.constexpr,
 ):
-    """Stage 2 of the fused argmax: reduce one row's chunk maxima into ``blk``.
+    """Stage 2 of the fused argmax: reduce one row's chunk maxima into `blk`.
 
-    Grid: (rows,). Row r is slot ``1 + r % (B - 1)`` of block ``r // (B - 1)``;
-    the winner is written to ``blk[n, slot]`` so the next pass reads it in place.
+    Grid: (rows,). Row r is slot `1 + r % (B - 1)` of block `r // (B - 1)`;
+    the winner is written to `blk[n, slot]` so the next pass reads it in place.
     """
     row = tl.program_id(0).to(tl.int64)
     best_val = -float("inf")
@@ -337,7 +337,7 @@ def fused_add_argmax_to_blk(
     blk: torch.Tensor,
     block_v: int = 4096,
 ) -> None:
-    """``blk[n, 1 + b] = argmax_v(base[r, v] + bias[r, v])`` for row r = n * (B-1) + b.
+    """`blk[n, 1 + b] = argmax_v(base[r, v] + bias[r, v])` for row r = n * (B-1) + b.
 
     The [rows, V] sum is never materialized: stage 1 reduces it chunk-wise in
     registers, stage 2 reduces the chunk maxima and scatters the winner into the
@@ -428,7 +428,7 @@ def _xpress_topc_argmax_to_blk_kernel(
 def fused_topc_argmax_to_blk(
     base_c: torch.Tensor, bias_c: torch.Tensor, cand: torch.Tensor, blk: torch.Tensor
 ) -> None:
-    """Run ``_xpress_topc_argmax_to_blk_kernel``; see it for shapes."""
+    """Run `_xpress_topc_argmax_to_blk_kernel`; see it for shapes."""
     N, Bm1, C = base_c.shape
     _xpress_topc_argmax_to_blk_kernel[(N * Bm1,)](
         base_c,

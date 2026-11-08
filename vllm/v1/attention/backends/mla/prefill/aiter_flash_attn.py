@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """AITER FlashAttention backend for MLA prefill (ROCm).
 
-This backend calls ``aiter.flash_attn_varlen_func`` directly, which natively
+This backend calls `aiter.flash_attn_varlen_func` directly, which natively
 supports different q/k and v head dims (qk headdim 192, v headdim 128) without
-padding V, and dispatches to the fast ``aiter::fmha_fwd_`` kernel on
+padding V, and dispatches to the fast `aiter::fmha_fwd_` kernel on
 gfx942/gfx950 (fp16/bf16).
 """
 
