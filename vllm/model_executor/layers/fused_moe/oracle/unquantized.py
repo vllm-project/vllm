@@ -506,6 +506,9 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
     instantiating and calling this class is bit-identical to calling
     the standalone functions. Follow-up PRs may move logic from the
     module-level functions into these methods.
+
+    Priority and selection methods use `self.moe_config` by default. Legacy
+    callers can pass `moe_config` explicitly to override it for one call.
     """
 
     name = "Unquantized"

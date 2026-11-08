@@ -43,6 +43,10 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     Concrete oracles can declare backend priorities and mappings to use the
     default selection flow, or override methods for their selection policy.
     Kernel construction and weight conversion remain per-oracle operations.
+
+    Deployment inputs are supplied at construction and stored as
+    `self.moe_config`, `self.weight_key`, and `self.activation_key`. Priority
+    and selection overrides can read these attributes without per-call inputs.
     """
 
     # Display name for the shared log helpers below; subclasses must set it.
@@ -68,7 +72,11 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         raise NotImplementedError
 
     def get_priority_backends(self) -> list[BackendT]:
-        """Return platform-appropriate backends in priority order."""
+        """Return backends in priority order.
+
+        The default returns a copy of `priority_backends`. Override this method
+        to compute priorities from the instance's deployment inputs.
+        """
         return list(self.priority_backends)
 
     def backend_to_kernel_cls(
@@ -93,7 +101,13 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         )
 
     def select_backend(self) -> tuple[BackendT, type[mk.FusedMoEExperts] | None]:
-        """Choose the first supported backend for this deployment."""
+        """Choose a supported backend for this instance's deployment.
+
+        The requested backend comes from `self.moe_config.moe_backend`;
+        candidate support is checked with `self.weight_key` and
+        `self.activation_key`. Automatic selection follows the order returned
+        by `get_priority_backends()`.
+        """
         available_backends = self.get_priority_backends()
         requested = self.moe_config.moe_backend
         if requested != "auto":
