@@ -383,7 +383,9 @@ VLM_TEST_SETTINGS = {
     "dots_ocr": VLMTestInfo(
         models=["rednote-hilab/dots.ocr"],
         test_type=VLMTestType.IMAGE,
-        prompt_formatter=lambda img_prompt: f"<|user|>{img_prompt}<|endofuser|><|assistant|>",  # noqa: E501
+        prompt_formatter=lambda img_prompt: (
+            f"<|user|>{img_prompt}<|endofuser|><|assistant|>"
+        ),
         img_idx_to_prompt=lambda idx: "<|img|><|imgpad|><|endofimg|>",
         max_model_len=4096,
         max_num_seqs=2,
