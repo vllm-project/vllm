@@ -16,7 +16,7 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 from .op import make_tensor_descriptor
-from .utils import input_guard, is_amd, is_gfx942, is_tma_supported
+from .utils import input_guard, is_amd, is_cdna3, is_tma_supported
 
 FLA_TRIL_PRECISION = os.environ.get("FLA_TRIL_PRECISION", "ieee")
 ALLOWED_TRIL_PRECISIONS = ["ieee", "tf32"] if is_amd else ["ieee", "tf32", "tf32x3"]
@@ -220,7 +220,7 @@ _MERGE_64_STOCK = [
     for num_stages in [2, 3, 4, 5]
 ]
 
-if is_gfx942:
+if is_cdna3:
     _MERGE_64_CONFIGS = [triton.Config({}, num_warps=2, num_stages=5)]
     _MERGE_64_KEY: list[str] = []
 else:

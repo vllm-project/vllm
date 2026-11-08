@@ -18,7 +18,7 @@ from vllm.third_party.flash_linear_attention.ops import (
     wy_fast,
 )
 from vllm.third_party.flash_linear_attention.ops.chunk import chunk_gated_delta_rule
-from vllm.third_party.flash_linear_attention.ops.utils import is_gfx942
+from vllm.third_party.flash_linear_attention.ops.utils import is_cdna3
 
 # kernel label -> (autotuned kernel, gfx942 config list, stock config list)
 KERNELS = {
@@ -121,7 +121,7 @@ def _run(inputs, pins):
     return out.clone(), state.clone()
 
 
-@pytest.mark.skipif(not is_gfx942, reason="gfx942-specific configs")
+@pytest.mark.skipif(not is_cdna3, reason="gfx942-specific configs")
 @pytest.mark.parametrize("shape", list(SHAPES))
 @pytest.mark.parametrize("kernel_name", [*KERNELS, "all"])
 @torch.inference_mode()
@@ -172,7 +172,7 @@ def _kda_inputs(h, device="cuda"):
     )
 
 
-@pytest.mark.skipif(not is_gfx942, reason="gfx942-specific configs")
+@pytest.mark.skipif(not is_cdna3, reason="gfx942-specific configs")
 @pytest.mark.parametrize("kernel_name", [*_KDA_SHARED, "all"])
 @torch.inference_mode()
 def test_gfx942_config_matches_stock_on_kda(kernel_name):
@@ -204,7 +204,7 @@ def test_gfx942_config_matches_stock_on_kda(kernel_name):
 def test_only_gfx942_gets_the_specialised_configs():
     """A future edit must not hand another GPU the gfx942-only configs."""
     for name, (_kernel, gfx, stock) in KERNELS.items():
-        if is_gfx942:
+        if is_cdna3:
             assert len(gfx()) == 1, f"{name}: expected one static gfx942 config"
         else:
             assert gfx() is stock(), f"{name}: non-gfx942 must use the stock list"

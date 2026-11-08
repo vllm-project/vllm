@@ -15,7 +15,7 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 from .op import exp
-from .utils import FLA_CHUNK_SIZE, is_gfx942
+from .utils import FLA_CHUNK_SIZE, is_cdna3
 
 # On RDNA (gfx11xx/gfx12xx) WMMA only
 # accepts 16-bit/int inputs, so a widened (e.g. fp32) tl.dot is lowered to a
@@ -34,7 +34,7 @@ _KKT_STOCK = [
     for num_stages in [2, 3, 4]
 ]
 
-if is_gfx942:
+if is_cdna3:
     _KKT_CONFIGS = [
         triton.Config(
             {"BK": 128, "matrix_instr_nonkdim": 16, "waves_per_eu": 0},

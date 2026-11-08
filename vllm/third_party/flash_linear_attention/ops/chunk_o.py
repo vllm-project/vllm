@@ -19,7 +19,7 @@ from .op import exp
 from .utils import (
     FLA_CHUNK_SIZE,
     check_shared_mem,
-    is_gfx942,
+    is_cdna3,
     is_nvidia_hopper,
 )
 
@@ -34,7 +34,7 @@ _FWD_O_STOCK = [
     for num_stages in [2, 3, 4]
 ]
 
-if is_gfx942:
+if is_cdna3:
     _FWD_O_CONFIGS = [
         triton.Config(
             {"BK": 64, "BV": 128, "matrix_instr_nonkdim": 16, "waves_per_eu": 2},

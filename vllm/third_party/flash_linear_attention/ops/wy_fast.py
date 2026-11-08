@@ -14,7 +14,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
-from .utils import is_gfx942
+from .utils import is_cdna3
 
 _WU_STOCK = [
     triton.Config({}, num_warps=num_warps, num_stages=num_stages)
@@ -22,7 +22,7 @@ _WU_STOCK = [
     for num_stages in [2, 3, 4]
 ]
 
-if is_gfx942:
+if is_cdna3:
     _WU_CONFIGS = [
         triton.Config(
             {"matrix_instr_nonkdim": 16, "waves_per_eu": 2},

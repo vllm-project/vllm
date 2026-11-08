@@ -152,11 +152,11 @@ is_nvidia_hopper = is_nvidia and (
     "NVIDIA H" in torch.cuda.get_device_name(0)
     or torch.cuda.get_device_capability()[0] >= 9
 )
-is_gfx942 = False
+is_cdna3 = False
 if is_amd:
-    from vllm.platforms.rocm import on_gfx942
+    from vllm.platforms.rocm import get_cdna_version
 
-    is_gfx942 = on_gfx942()
+    is_cdna3 = get_cdna_version() == 3
 use_cuda_graph = is_nvidia and os.environ.get("FLA_USE_CUDA_GRAPH", "0") == "1"
 is_gather_supported = hasattr(triton.language, "gather")
 is_tma_supported = (

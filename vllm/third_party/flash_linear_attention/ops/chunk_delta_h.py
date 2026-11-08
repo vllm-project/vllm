@@ -14,7 +14,7 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
 from .op import exp, exp2
-from .utils import FLA_CHUNK_SIZE, is_gfx942, use_cuda_graph
+from .utils import FLA_CHUNK_SIZE, is_cdna3, use_cuda_graph
 
 NUM_WARPS = [2, 4, 8, 16]
 # Triton's AMD backend fails to lower this kernel with num_stages=4.
@@ -27,7 +27,7 @@ _FWD_H_STOCK = [
     for BV in [32, 64]
 ]
 
-if is_gfx942:
+if is_cdna3:
     _FWD_H_CONFIGS = [
         triton.Config(
             {"BV": 32, "matrix_instr_nonkdim": 16, "waves_per_eu": 2},
