@@ -382,8 +382,11 @@ class CacheConfig:
     gpu_memory_utilization. However, users may want to manually specify
     the kv cache memory size. kv_cache_memory_bytes allows more fine-grain
     control of how much memory gets used when compared with using
-    gpu_memory_utilization. Note that kv_cache_memory_bytes
-    (when not-None) ignores gpu_memory_utilization"""
+    gpu_memory_utilization. On CUDA and ROCm, a nonzero kv_cache_memory_bytes
+    ignores gpu_memory_utilization, including its startup free-memory check.
+    None or zero uses automatic sizing. The explicit cache, model weights,
+    and other runtime allocations must still fit in the available device
+    memory."""
 
     enable_extensible_kv_cache: bool = Field(default=None)  # type: ignore[assignment]
     """Reserve the KV cache address range with device virtual memory and commit
