@@ -1438,7 +1438,9 @@ def instanttensor_weights_iterator(
         # Entering here only in unit tests where the world group is not initialized.
         process_group = None
     else:
-        process_group = world_group.device_group if world_group.world_size > 1 else None
+        # Other pipeline stages do not load a model built as a single stage.
+        distributed = world_group.world_size > 1 and not in_single_pp_stage()
+        process_group = world_group.device_group if distributed else None
 
     gpu_weight_names: list[str] = []
     cpu_weights: dict[str, list[str]] = {}

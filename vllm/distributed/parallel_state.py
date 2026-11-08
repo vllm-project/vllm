@@ -1664,15 +1664,14 @@ def single_pp_stage() -> Iterator[None]:
     contains only this rank. Speculative decoding runs the draft model whole on
     the last PP rank: built and run in this context, model code that reads its
     stage from the PP group behaves as at PP=1. The view does not support PP
-    communication.
+    communication. Without a PP group (unit tests), the context does nothing.
     """
     global _PP_SINGLE_STAGE
-    pp_group = get_pp_group()
-    if pp_group.world_size == 1:
+    if _PP is None or get_pp_group().world_size == 1:
         yield
         return
-    view = copy.copy(pp_group)
-    view.ranks = [pp_group.rank]
+    view = copy.copy(_PP)
+    view.ranks = [_PP.rank]
     view.world_size = 1
     view.rank_in_group = 0
     _PP_SINGLE_STAGE = view

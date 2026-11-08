@@ -380,14 +380,6 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
     with (
         patch.object(dspark_utils, "replace", side_effect=fake_replace),
         patch(
-            "vllm.v1.worker.gpu.spec_decode.eagle.utils.get_pp_group",
-            return_value=SimpleNamespace(world_size=1),
-        ),
-        patch(
-            "vllm.v1.worker.gpu.spec_decode.utils.get_pp_group",
-            return_value=SimpleNamespace(world_size=1),
-        ),
-        patch(
             "vllm.compilation.backends.set_model_tag",
             return_value=nullcontext(),
         ),
