@@ -1,0 +1,146 @@
+meta:
+  title: "Mellum2-12B-A2.5B-Thinking"
+  slug: "mellum2-12b-a2.5b-thinking"
+  provider: "JetBrains"
+  description: "JetBrains' reasoning-augmented code MoE (12B total / 2.5B active) that emits explicit <think> chains for debugging, planning, and agentic coding"
+  date_added: 2026-06-02
+  date_updated: 2026-06-02
+  tasks:
+    - text
+  performance_headline: "69.9 LiveCodeBench v6, 58.4 AIME — fits on a single GPU"
+  related_recipes:
+    - "JetBrains/Mellum2-12B-A2.5B-Instruct"
+  hardware:
+    h200: verified
+
+model:
+  model_id: "JetBrains/Mellum2-12B-A2.5B-Thinking"
+  min_vllm_version: "0.23.0"
+  architecture: moe
+  parameter_count: "12B"
+  active_parameters: "2.5B"
+  context_length: 131072
+  base_args:
+    - "--max-model-len"
+    - "131072"
+  base_env: {}
+
+features:
+  reasoning:
+    description: "Parse the model's <think>...</think> reasoning blocks (Qwen3-style parser)"
+    args:
+      - "--reasoning-parser"
+      - "qwen3"
+  tool_calling:
+    description: "Hermes tool-call parser for function calling"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "hermes"
+
+  spec_decoding:
+    description: "DFlash speculative decoding with an externally trained draft model; the served checkpoint is unchanged."
+    args:
+      - "--speculative-config"
+      - '{"model": "RedHatAI/Mellum2-12B-A2.5B-Thinking-speculator.dflash", "num_speculative_tokens": 7, "method": "dflash"}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 29
+    description: "Native bfloat16 weights; fits comfortably on a single H200/H100/A100"
+
+  fp8:
+    model_id: "RedHatAI/Mellum2-12B-A2.5B-Thinking-FP8-Dynamic"
+    precision: fp8
+    vram_minimum_gb: 15
+    description: "RedHatAI FP8 (E4M3) with dynamic per-token activation quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  nvfp4:
+    model_id: "RedHatAI/Mellum2-12B-A2.5B-Thinking-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 8
+    description: "RedHatAI NVFP4 quantization"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  [Mellum2-12B-A2.5B-Thinking](https://huggingface.co/JetBrains/Mellum2-12B-A2.5B-Thinking)
+  is JetBrains' reasoning-augmented code assistant. It uses a Mixture-of-Experts architecture
+  with 64 experts (8 activated per token) — 12B total parameters, 2.5B active — combining
+  sliding-window and full-attention layers for a 131,072-token context. The model emits its
+  chain-of-thought inside `<think>...</think>` blocks before the final answer, making it
+  suited to complex debugging, multi-step planning, and agentic workflows. For direct,
+  low-latency answers without reasoning traces, use the
+  [Instruct](https://huggingface.co/JetBrains/Mellum2-12B-A2.5B-Instruct) variant instead.
+
+  ## Prerequisites
+
+  - Hardware: a single H200, H100, or A100 (~29 GB at bf16) is plenty
+  - vLLM **nightly** — `MellumForCausalLM` support landed after v0.22.0 and is not yet in a
+    stable release. Install the nightly wheels until the next tagged release ships.
+
+  ### Install vLLM (nightly)
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --extra-index-url https://wheels.vllm.ai/nightly
+  ```
+
+  ## Launch command
+
+  ```bash
+  # With reasoning (recommended for the Thinking checkpoint)
+  vllm serve JetBrains/Mellum2-12B-A2.5B-Thinking \
+    --max-model-len 131072 \
+    --reasoning-parser qwen3
+
+  # Add tool calling
+  vllm serve JetBrains/Mellum2-12B-A2.5B-Thinking \
+    --max-model-len 131072 \
+    --reasoning-parser qwen3 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes
+  ```
+
+  ## Client usage
+
+  JetBrains recommends sampling at `temperature=0.6`, `top_p=0.95`, `top_k=20` for the
+  Thinking checkpoint.
+
+  ```python
+  from openai import OpenAI
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+  resp = client.chat.completions.create(
+      model="JetBrains/Mellum2-12B-A2.5B-Thinking",
+      messages=[{"role": "user", "content": "Is 1024 a power of 2? Explain your reasoning."}],
+      max_tokens=81920,
+      temperature=0.6,
+      top_p=0.95,
+      extra_body={"top_k": 20},
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ## References
+
+  - [Model card](https://huggingface.co/JetBrains/Mellum2-12B-A2.5B-Thinking)
+  - [vLLM support PR #43992](https://github.com/vllm-project/vllm/pull/43992)
+  - [Mellum2 Technical Report](https://arxiv.org/abs/2605.31268)

@@ -10,7 +10,8 @@ sites dispatch to the override without any core-side decoration.
 
 import sys
 import types
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 
 import pytest
 
@@ -139,24 +140,193 @@ def test_override_owner_launch_goes_through_impl(_fake_module: Any) -> None:
     assert launched == [(1, 2, 0, 8)]
 
 
+def test_override_forwards_grid_to_kernel_like_impl(_fake_module: Any) -> None:
+    """A Triton-kernel override takes over the launch natively via __getitem__.
+
+    The override mirrors a real ``@triton.jit`` kernel: it binds the grid
+    in ``__getitem__`` and is launched by keyword under the original
+    kernel's parameter names, which the KernelOverride forwards unchanged.
+    """
+    seen: list[Any] = []
+
+    class NpuKernel:
+        def __getitem__(self, grid: Any) -> Any:
+            seen.append(grid)
+
+            def launch(
+                output_ptr,
+                input_ptr,
+                replace_from,
+                MAX_NUM_TOKENS=None,  # noqa: ARG001
+            ):
+                return ("launched", output_ptr, input_ptr, replace_from)
+
+            return launch
+
+    register_kernels(
+        {
+            "vllm.tests.fake_kernel_home.expand_kernel": cast(
+                Callable[..., Any], NpuKernel()
+            ),
+        }
+    )
+    overridden = _fake_module.expand_kernel
+    assert overridden[(8,)](output_ptr=1, input_ptr=2, replace_from=0) == (
+        "launched",
+        1,
+        2,
+        0,
+    )
+    assert seen == [(8,)]
+
+
+def test_override_plain_impl_never_sees_grid(_fake_module: Any) -> None:
+    """Plain-callable implementations keep receiving launch args without grid."""
+    calls: list[Any] = []
+
+    def cpu_impl(output_ptr, input_ptr, replace_from, MAX_NUM_TOKENS=None):
+        calls.append((output_ptr, input_ptr, replace_from, MAX_NUM_TOKENS))
+        return "cpu"
+
+    register_kernels(
+        {
+            "vllm.tests.fake_kernel_home.expand_kernel": cpu_impl,
+        }
+    )
+    overridden = _fake_module.expand_kernel
+    assert overridden[(4,)](output_ptr=1, input_ptr=2, replace_from=0) == "cpu"
+    assert calls == [(1, 2, 0, None)]
+
+
+def test_override_delegates_warmup_to_impl(_fake_module: Any) -> None:
+    """JIT warmup of an overridden kernel warms the implementation."""
+    warmed: list[Any] = []
+
+    class FakeNpuKernel:
+        arg_names = ("output_ptr", "input_ptr", "replace_from", "MAX_NUM_TOKENS")
+
+        def __getitem__(self, grid: Any) -> Any:
+            return lambda *args: None
+
+        def warmup(self, grid=None, **kwargs: Any) -> None:
+            warmed.append((grid, kwargs))
+
+    register_kernels(
+        {
+            "vllm.tests.fake_kernel_home.expand_kernel": cast(
+                Callable[..., Any], FakeNpuKernel()
+            ),
+        }
+    )
+    overridden = _fake_module.expand_kernel
+    assert overridden.warmup(grid=(1,), MAX_NUM_TOKENS=8) is None
+    assert warmed == [((1,), {"MAX_NUM_TOKENS": 8})]
+
+
+def test_override_warmup_noop_without_impl_warmup(_fake_module: Any) -> None:
+    """Plain-callable overrides have no Triton kernel to warm up."""
+    calls: list[Any] = []
+
+    def cpu_impl(output_ptr, input_ptr, replace_from, MAX_NUM_TOKENS=None):
+        calls.append((output_ptr, input_ptr, replace_from, MAX_NUM_TOKENS))
+        return "cpu"
+
+    register_kernels(
+        {
+            "vllm.tests.fake_kernel_home.expand_kernel": cpu_impl,
+        }
+    )
+    overridden = _fake_module.expand_kernel
+    assert overridden.warmup(grid=(1,)) is None
+    assert calls == []
+
+
+def test_register_triton_kernel_swaps_raw_for_device_function(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Triton-kernel impls (device functions included) are swapped raw.
+
+    A ``KernelOverride`` is not a Triton JITFunction, so wrapping the
+    callee would break an outer kernel's compilation; a Triton kernel
+    implementation must replace the original by identity in the defining
+    module and in from-import copies, where the inliner looks.
+    """
+    module = types.ModuleType("vllm.tests.fake_device_fn_home")
+
+    class FakeTritonKernel:
+        arg_names = ("a", "b", "BLOCK")
+
+        def __getitem__(self, grid: Any) -> Any:
+            return lambda *args, **kwargs: None
+
+        def run(self, *args: Any, **kwargs: Any) -> Any:
+            return None
+
+        def warmup(self, grid=None, **kwargs: Any) -> None:
+            return None
+
+        def __call__(self, *args: Any, **kwargs: Any) -> Any:
+            return None
+
+    replacement = FakeTritonKernel()
+    original = object()
+    module._device_fn = original  # type: ignore[attr-defined]
+    importer = types.ModuleType("vllm.tests.fake_device_fn_importer")
+    importer._device_fn = original  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setitem(sys.modules, importer.__name__, importer)
+
+    register_kernels(
+        {
+            "vllm.tests.fake_device_fn_home._device_fn": replacement,
+        }
+    )
+
+    assert module._device_fn is replacement  # type: ignore[attr-defined]
+    assert importer._device_fn is replacement  # type: ignore[attr-defined]
+    assert not isinstance(module._device_fn, KernelOverride)
+
+
+def test_register_non_triton_impl_is_wrapped(_fake_module: Any) -> None:
+    """Non-Triton impls (plain callables) still route through KernelOverride."""
+    calls: list[Any] = []
+
+    def cpu_impl(output_ptr, input_ptr, replace_from, MAX_NUM_TOKENS=None):
+        calls.append((output_ptr, input_ptr, replace_from, MAX_NUM_TOKENS))
+        return "cpu"
+
+    register_kernels(
+        {
+            "vllm.tests.fake_kernel_home.expand_kernel": cpu_impl,
+        }
+    )
+    overridden = _fake_module.expand_kernel
+    assert isinstance(overridden, KernelOverride)
+    assert overridden[(4,)](output_ptr=1, input_ptr=2, replace_from=0) == "cpu"
+    assert calls == [(1, 2, 0, None)]
+
+
 def test_register_kernel_auto_imports_defining_module(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Registering a kernel whose defining module is not imported yet must
     import it on the spot and apply the override."""
-    kernel_name = "vllm.v1.sample.rejection_sampler.expand_kernel"
-    module_name = kernel_name.rpartition(".")[0]
+    module_name = "vllm.model_executor.layers.mamba.ops.scatter_states"
+    kernel_name = f"{module_name}._scatter_states_kernel"
     calls: list[tuple[Any, ...]] = []
 
     def cpu_impl(
-        output_ptr,
-        input_ptr,
-        cu_num_tokens_ptr,
-        replace_from,
-        replace_to,
-        MAX_NUM_TOKENS=None,
+        state_ptr,
+        src_ptr,
+        indices_ptr,
+        stride_state_batch,
+        stride_src_batch,
+        stride_indices,
+        row_size=None,
+        BLOCK_SIZE=None,
+        launch_pdl=None,
     ):
-        calls.append((output_ptr, replace_from, MAX_NUM_TOKENS))
+        calls.append((state_ptr, indices_ptr, BLOCK_SIZE))
         return "cpu"
 
     # Ensure the module is NOT imported before registration. Drop it from
@@ -179,22 +349,25 @@ def test_register_kernel_auto_imports_defining_module(
             sys.modules[module_name] = saved
             register_kernels({kernel_name: cpu_impl})
 
-    overridden = saved.expand_kernel
+    overridden = saved._scatter_states_kernel
     assert isinstance(overridden, KernelOverride)
-    overridden[(2,)](
-        output_ptr=1,
-        input_ptr=2,
-        cu_num_tokens_ptr=3,
-        replace_from=0,
-        replace_to=0,
-        MAX_NUM_TOKENS=8,
+    overridden[(2, 1)](
+        state_ptr=1,
+        src_ptr=2,
+        indices_ptr=3,
+        stride_state_batch=4,
+        stride_src_batch=4,
+        stride_indices=1,
+        row_size=4,
+        BLOCK_SIZE=8,
+        launch_pdl=False,
     )
-    assert calls == [(1, 0, 8)]
+    assert calls == [(1, 3, 8)]
     # The warmup owner captured at the fresh import must be patched too
     # (when the module existed before, there are two module generations).
     fresh = sys.modules[module_name]
     if fresh is not saved:
-        assert fresh._expand.kernel is overridden
+        assert fresh.scatter_states.kernel is overridden
 
 
 def test_real_triton_kernel_override_end_to_end() -> None:
@@ -215,7 +388,7 @@ def test_real_triton_kernel_override_end_to_end() -> None:
         return "cpu"
 
     register_kernels({"vllm.tests.real_jit_kernel_home._add_one_kernel": cpu_impl})
-    assert module._add_one_kernel.arg_names == (  # type: ignore[attr-defined]
+    assert module._add_one_kernel.arg_names == (
         "x_ptr",
         "out_ptr",
         "BLOCK",

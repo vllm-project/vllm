@@ -53,6 +53,8 @@ class MoeBuild:
     timeline: bool = field(default=False, metadata={"sym": "tl"})
     # FP4 groups an ug task (``RouteShape.ug_groups``)
     ug_groups: int = 2
+    # a tuned build's paths (``layer.MonoBuild.tuned``)
+    tuned: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,7 @@ class RouteShape:
     # closer together: faster at the draft's widths (40 rows -4 us), slower at
     # the target's (48 rows +3 us; the runners pick)
     ug_groups: int = 2
+    tuned: bool = False  # ``MoeBuild.tuned``
 
     @property
     def dims(self) -> Dims:
@@ -198,13 +201,19 @@ class RouteShape:
 
     @property
     def tile_picks(self) -> int:
-        """A slot's picks at most: a token picks an expert once."""
-        return min(self.tokens, 16)
+        """An ug task's picks at most: a token picks an expert once, and past
+        one token tile a task takes one pick tile of TILE picks."""
+        return min(self.tokens, TILE)
 
     def route_w(self, tab, s, t, k):
         return fx.ptr_load(tab + (t * 2 * self.topk + self.topk + k)).bitcast(
             fx.Float32
         )
+
+    def pick_w(self, tab, p):
+        """The route weight of pick ``p`` (t topk + k), as ``route_w`` reads it."""
+        t = p // self.topk
+        return self.route_w(tab, None, t, p - t * self.topk)
 
     def n_union(self, tab, s):
         return fx.ptr_load(tab + 2 * s * self.topk)
@@ -226,4 +235,6 @@ class RouteShape:
 
 
 def route_shape(key: MoeBuild) -> RouteShape:
-    return RouteShape(key.experts, key.topk, key.tokens, key.tp, key.ug_groups)
+    return RouteShape(
+        key.experts, key.topk, key.tokens, key.tp, key.ug_groups, key.tuned
+    )

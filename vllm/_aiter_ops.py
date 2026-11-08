@@ -223,18 +223,12 @@ def is_aiter_found_and_supported() -> bool:
     return False
 
 
-def is_aiter_found_and_supported_on_rdna4() -> bool:
-    """RDNA4 (gfx12) analog of `is_aiter_found_and_supported()`.
-
-    gfx12 has no aiter CK build, so this deliberately stays off the gfx9
-    `@if_aiter_supported` umbrella; it reports only that aiter's Triton
-    kernels are usable here. Like its gfx9 counterpart it checks platform +
-    arch + library availability and does not check environment variables.
-    """
+def is_aiter_found_and_supported_on_rdna() -> bool:
+    """RDNA (gfx11 + gfx12) analog of `is_aiter_found_and_supported()`."""
     if current_platform.is_rocm() and IS_AITER_FOUND:
-        from vllm.platforms.rocm import on_rdna4
+        from vllm.platforms.rocm import on_rdna
 
-        return on_rdna4()
+        return on_rdna()
     return False
 
 
@@ -535,12 +529,14 @@ def _rocm_aiter_topk_gating_impl(
     renormalize: bool,
     num_shared_experts: int = 0,
     shared_expert_scoring_func: str = "",
+    score_func: str = "softmax",
 ) -> None:
     # Callers pick this op only for launches AITER's topk_gating supports (see
-    # dispatch_topk_softmax_func); everything else goes to topk_softmax.
+    # dispatch_topk_softmax_func/dispatch_topk_sigmoid_func); everything else
+    # goes to topk_softmax (softmax) or vllm_topk_sigmoid (sigmoid).
     from aiter.ops.topk import topk_gating
 
-    # AITER renormalizes the selected softmax mass inside this launch,
+    # AITER renormalizes the selected softmax/sigmoid mass inside this launch,
     # preserving vLLM's `renormalize=True` semantics without a second
     # pointwise kernel, and sigmoids the trailing shared-expert columns.
     topk_gating(
@@ -550,7 +546,7 @@ def _rocm_aiter_topk_gating_impl(
         correction_bias=None,
         need_renorm=renormalize,
         routed_scaling_factor=1.0,
-        score_func="softmax",
+        score_func=score_func,
         num_shared_experts=num_shared_experts,
     )
 
@@ -563,18 +559,9 @@ def _rocm_aiter_topk_gating_fake(
     renormalize: bool,
     num_shared_experts: int = 0,
     shared_expert_scoring_func: str = "",
+    score_func: str = "softmax",
 ) -> None:
     pass
-
-
-def _rocm_aiter_topk_sigmoid_impl(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-) -> None:
-    from aiter import topk_sigmoid
-
-    topk_sigmoid(topk_weights, topk_indices, gating_output)
 
 
 def _rocm_aiter_biased_grouped_topk_impl(
@@ -1170,6 +1157,24 @@ def _rocm_aiter_rmsnorm_fused_dynamic_quant_fake(
     return out, y_scale
 
 
+def _unfused_allreduce_rmsnorm(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    gemma_norm: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from vllm.distributed import tensor_model_parallel_all_reduce
+
+    return torch.ops.vllm_aiter.fused_add_rms_norm(
+        tensor_model_parallel_all_reduce(input_),
+        residual,
+        weight,
+        epsilon,
+        gemma_norm,
+    )
+
+
 def _rocm_aiter_fused_allreduce_rmsnorm_impl(
     input_: torch.Tensor,
     residual: torch.Tensor,
@@ -1187,6 +1192,12 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
 
         device_comm = get_tp_group().device_communicator
         qr_comm = getattr(device_comm, "qr_comm", None)
+        if qr_comm is not None and qr_comm.uses_flydsl_int4(input_):
+            # FlyDSL QuickReduce has no fused RMSNorm kernel yet, so the fusion
+            # is a no-op for these payloads: all-reduce plus a separate RMSNorm.
+            return _unfused_allreduce_rmsnorm(
+                input_, residual, weight, epsilon, gemma_norm
+            )
         hidden_dim = input_.shape[-1]
         row_size = hidden_dim * input_.element_size()
         fused_qr_rmsnorm_ok = (
@@ -1241,15 +1252,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
         gemma_norm=gemma_norm,
     )
     if result is None:
-        from vllm.distributed import tensor_model_parallel_all_reduce
-
-        return torch.ops.vllm_aiter.fused_add_rms_norm(
-            tensor_model_parallel_all_reduce(input_),
-            residual,
-            weight,
-            epsilon,
-            gemma_norm,
-        )
+        return _unfused_allreduce_rmsnorm(input_, residual, weight, epsilon, gemma_norm)
     return result[0], result[1]
 
 
@@ -2102,6 +2105,42 @@ def _sync_aiter_situv2_moe_env() -> None:
 _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN = 64 * 1024
 _GFX950_C4A_NATIVE_MAX_ROWS = 256
 _GFX950_DSV4_NATIVE_MAX_COLUMNS = 1024 * 1024
+_GFX950_DSA_AITER_MIN_PREFILL_SEQ_LEN = 32 * 1024
+
+
+def _flat_sigmoid_bias_topk_is_profitable(
+    gating_output: "torch.Tensor",
+    correction_bias: "torch.Tensor",
+    topk_weights: "torch.Tensor",
+    topk_ids: "torch.Tensor",
+    num_expert_group: int,
+    topk_group: int,
+) -> bool:
+    """Replace the grouped kernel with a register-resident Triton top-k when
+    the grouping eliminates nothing and the call is being captured into a
+    CUDA graph.
+
+    The Triton kernel wins on device time under graph replay but loses eagerly,
+    where it is a Triton launch from Python against a single C++ dispatch --
+    measured at -1.8% to -3.5% end-to-end throughput with --enforce-eager.
+    Stream capture is the test because it holds for every graph vLLM records,
+    FULL and PIECEWISE, under either model runner, while the forward context's
+    cudagraph_runtime_mode reads NONE during the V2 model runner's FULL capture.
+    """
+    from vllm.model_executor.layers.fused_moe.router.rocm_sigmoid_bias_flat_topk import (  # noqa: E501
+        can_use_sigmoid_bias_flat_topk,
+    )
+
+    if not torch.cuda.is_current_stream_capturing():
+        return False
+    return can_use_sigmoid_bias_flat_topk(
+        gating_output,
+        correction_bias,
+        topk_weights,
+        topk_ids,
+        num_expert_group,
+        topk_group,
+    )
 
 
 class rocm_aiter_ops:
@@ -2124,7 +2163,6 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_MHA: Controls MHA ops including flash_attn_varlen.
         VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: Controls Triton unified attention.
         VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
-        VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: Controls FP4 assembly GEMM.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
         VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950).
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
@@ -2196,8 +2234,6 @@ class rocm_aiter_ops:
     _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
     _FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
     _LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
-    # TODO: Consolidate under _LINEAR_ENABLED
-    _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
@@ -2228,7 +2264,6 @@ class rocm_aiter_ops:
         cls._FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
         cls._FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
         cls._LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
-        cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
@@ -2277,20 +2312,20 @@ class rocm_aiter_ops:
 
     @classmethod
     def is_rdna_aiter_enabled(cls) -> bool:
-        """AITER on RDNA4 (gfx12): library present, arch is rdna4, and the user
-        enabled aiter. Only aiter's Triton kernels exist on gfx12 (no CK build),
-        so this deliberately stays off the gfx9/CK `@if_aiter_supported` umbrella
-        and gates only the Triton paths rdna4 uses. The gfx12 analog of
+        """AITER on RDNA: library present, arch is RDNA, and the user enabled
+        aiter. Only aiter's Triton kernels exist on RDNA (no CK build), so this
+        deliberately stays off the gfx9/CK `@if_aiter_supported` umbrella and
+        gates only the Triton paths RDNA uses. The RDNA analog of
         `is_enabled()`."""
         if not current_platform.is_rocm() or not IS_AITER_FOUND:
             return False
-        from vllm.platforms.rocm import on_rdna4
+        from vllm.platforms.rocm import on_rdna
 
-        return on_rdna4() and cls._AITER_ENABLED
+        return on_rdna() and cls._AITER_ENABLED
 
     @classmethod
     def is_rdna_linear_enabled(cls) -> bool:
-        """RDNA4 (gfx12) analog of is_linear_enabled() (aiter Triton blockscale)."""
+        """RDNA analog of is_linear_enabled() (aiter Triton blockscale)."""
         return cls.is_rdna_aiter_enabled() and cls._LINEAR_ENABLED
 
     @classmethod
@@ -2311,10 +2346,11 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_topk_gating_enabled(cls) -> bool:
-        """Use AITER ``topk_gating`` for softmax routing.
+        """Use AITER ``topk_gating`` for softmax and sigmoid routing.
 
         CDNA3 and CDNA4 only (gfx942, gfx950): those are the targets it was
-        measured on. Other AITER targets keep the legacy ``topk_softmax`` launcher.
+        measured on. Other AITER targets keep the legacy ``topk_softmax``
+        launcher (softmax) or the native ``vllm_topk_sigmoid`` (sigmoid).
         """
         from vllm.platforms.rocm import get_cdna_version
 
@@ -2428,6 +2464,29 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_custom_all_reduce_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._CUSTOM_ALL_REDUCE_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def is_flydsl_quick_reduce_available(cls) -> bool:
+        """Whether AITER's FlyDSL INT4 QuickReduce can run here.
+
+        It runs AITER kernels, so VLLM_ROCM_USE_AITER remains the one switch
+        that turns it off. AITER's QuickAllReduceInt4 supports gfx942 and
+        gfx950 only (CDNA 3 and 4); `> 2` would also admit gfx1250.
+        """
+        from vllm.platforms.rocm import get_cdna_version
+
+        return cls._AITER_ENABLED and get_cdna_version() in (3, 4)
+
+    @staticmethod
+    def create_flydsl_quick_all_reduce_int4(
+        *, group: Any, device: Any, rank: int, world_size: int
+    ) -> Any:
+        from aiter.ops.flydsl import QuickAllReduceInt4
+
+        return QuickAllReduceInt4(
+            group=group, device=device, rank=rank, world_size=world_size
+        )
 
     @classmethod
     @if_aiter_supported
@@ -2565,10 +2624,10 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    def is_asm_fp4_gemm_dynamic_quant_enabled(cls) -> bool:
+    def is_asm_fp4_gemm_supported(cls) -> bool:
         from vllm.platforms.rocm import on_gfx950
 
-        return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM and on_gfx950()
+        return cls._AITER_ENABLED and on_gfx950()
 
     @classmethod
     @if_aiter_supported
@@ -2804,8 +2863,8 @@ class rocm_aiter_ops:
         )
 
     @classmethod
-    def is_rdna_gdn_triton_kernels_available(cls) -> bool:
-        """RDNA4 (gfx12) analog of are_gdn_triton_kernels_available()."""
+    def are_rdna_gdn_triton_kernels_available(cls) -> bool:
+        """RDNA analog of are_gdn_triton_kernels_available()."""
         return cls.is_rdna_aiter_enabled() and cls._gdn_triton_kernels_importable()
 
     @classmethod
@@ -2892,11 +2951,24 @@ class rocm_aiter_ops:
         compress_ratio: int,
         num_rows: int,
         max_valid_seq_len: int | None = None,
+        topk_tokens: int | None = None,
     ) -> bool:
         """Whether AITER's sparse indexer top-k beats the in-tree kernel for
         this shape."""
-        if compress_ratio <= 1 or not cls.is_indexer_top_k_enabled():
+        if compress_ratio < 1 or not cls.is_indexer_top_k_enabled():
             return False
+
+        if compress_ratio == 1:
+            # Uncompressed DSA indexer (DeepSeek-V3.2, GLM-5) at k=2048. Decode
+            # graphs cannot see the context length; AITER's long-context win
+            # outweighs its few-us loss on short rows. Prefill only gains once
+            # rows reach 32K tokens.
+            if topk_tokens != 2048:
+                return False
+            return not is_prefill or (
+                max_valid_seq_len is not None
+                and max_valid_seq_len >= _GFX950_DSA_AITER_MIN_PREFILL_SEQ_LEN
+            )
 
         if not is_prefill:
             assert max_valid_seq_len is not None
@@ -2975,16 +3047,16 @@ class rocm_aiter_ops:
         global _OPS_REGISTERED
 
         if not (
-            is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna4()
+            is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna()
         ):
             if not current_platform.is_rocm():
                 return
 
-            from vllm.platforms.rocm import on_gfx11, on_gfx950
+            from vllm.platforms.rocm import on_gfx950
 
-            # This op has self-contained Triton/C++ implementations on gfx11
-            # and gfx950.  Only its optional top-k fast path comes from aiter.
-            if (on_gfx11() or on_gfx950()) and not _OPS_REGISTERED:
+            # This op has self-contained Triton/C++ implementations on gfx950.
+            # Only its optional top-k fast path comes from aiter.
+            if on_gfx950() and not _OPS_REGISTERED:
                 direct_register_custom_op(
                     op_name="rocm_aiter_sparse_attn_indexer",
                     op_func=rocm_aiter_sparse_attn_indexer,
@@ -3025,13 +3097,6 @@ class rocm_aiter_ops:
                 op_func=_rocm_aiter_topk_gating_impl,
                 mutates_args=["topk_weights", "topk_indices"],
                 fake_impl=_rocm_aiter_topk_gating_fake,
-                dispatch_key=current_platform.dispatch_key,
-            )
-
-            direct_register_custom_op(
-                op_name="rocm_aiter_topk_sigmoid",
-                op_func=_rocm_aiter_topk_sigmoid_impl,
-                mutates_args=["topk_weights", "topk_indices"],
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -3613,6 +3678,7 @@ class rocm_aiter_ops:
         renormalize: bool,
         num_shared_experts: int = 0,
         shared_expert_scoring_func: str = "",
+        score_func: str = "softmax",
     ) -> tuple[torch.Tensor, ...]:
         torch.ops.vllm.rocm_aiter_topk_gating(
             topk_weights,
@@ -3622,21 +3688,26 @@ class rocm_aiter_ops:
             renormalize,
             num_shared_experts,
             shared_expert_scoring_func,
+            score_func,
         )
         return topk_weights, topk_indices
 
     @staticmethod
-    def topk_sigmoid(
+    def topk_sigmoid_gating(
         topk_weights: torch.Tensor,
         topk_indices: torch.Tensor,
         token_expert_indices: torch.Tensor,
         gating_output: torch.Tensor,
         renormalize: bool,
     ) -> tuple[torch.Tensor, ...]:
-        torch.ops.vllm.rocm_aiter_topk_sigmoid(
-            topk_weights, topk_indices, gating_output
+        return rocm_aiter_ops.topk_gating(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            score_func="sigmoid",
         )
-        return topk_weights, topk_indices
 
     @staticmethod
     def biased_grouped_topk(
@@ -3651,6 +3722,27 @@ class rocm_aiter_ops:
     ) -> None:
         if correction_bias.dtype != gating_output.dtype:
             correction_bias = correction_bias.to(gating_output.dtype)
+        if _flat_sigmoid_bias_topk_is_profitable(
+            gating_output,
+            correction_bias,
+            topk_weights,
+            topk_ids,
+            num_expert_group,
+            topk_group,
+        ):
+            from vllm.model_executor.layers.fused_moe.router.rocm_sigmoid_bias_flat_topk import (  # noqa: E501
+                sigmoid_bias_flat_topk,
+            )
+
+            sigmoid_bias_flat_topk(
+                gating_output,
+                correction_bias,
+                topk_weights,
+                topk_ids,
+                need_renorm,
+                routed_scaling_factor,
+            )
+            return
         torch.ops.vllm.rocm_aiter_biased_grouped_topk(
             gating_output,
             correction_bias,
@@ -3697,7 +3789,7 @@ class rocm_aiter_ops:
     def triton_sparse_mla_fwd(
         q: torch.Tensor,
         kv_buffer: torch.Tensor,
-        o: torch.Tensor,
+        o: torch.Tensor | None,
         sm_scale: float,
         kv_indptr: torch.Tensor,
         kv_indices: torch.Tensor,
@@ -3710,6 +3802,9 @@ class rocm_aiter_ops:
         extra_kv_indptr: torch.Tensor | None = None,
         extra_kv_indices: torch.Tensor | None = None,
         has_invalid: bool = True,
+        inv_rope_positions: torch.Tensor | None = None,
+        inv_rope_cos_sin_cache: torch.Tensor | None = None,
+        out_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
         """Sparse MLA read straight from the KV cache, for prefill and decode.
 
@@ -3720,10 +3815,13 @@ class rocm_aiter_ops:
         paged fp8_ds_mla) is inferred from kv_buffer and kv_scale. An fp8 q
         must come with its q_scale and runs both dots in fp8. The extra segment
         is DeepSeek V4's second cache: SWA window in kv_buffer, top-k
-        compressed tokens here.
+        compressed tokens here. inv_rope_positions and inv_rope_cos_sin_cache
+        make the store apply the inverse RoPE; out_mxfp8 = (data, scale)
+        replaces o with MXFP8 rows.
         """
         from aiter.ops.triton.attention.sparse_mla import sparse_mla_fwd
 
+        assert (o is None) != (out_mxfp8 is None)
         fp8_q = q.dtype == FP8_DTYPE
         sparse_mla_fwd(
             q,
@@ -3742,6 +3840,9 @@ class rocm_aiter_ops:
             extra_kv=extra_kv_buffer,
             extra_indptr=extra_kv_indptr,
             extra_indices=extra_kv_indices,
+            inv_rope_positions=inv_rope_positions,
+            inv_rope_cos_sin_cache=inv_rope_cos_sin_cache,
+            out_mxfp8=out_mxfp8,
         )
 
     @staticmethod
@@ -4358,6 +4459,20 @@ class rocm_aiter_ops:
                 "GEMM-AFP4WFP4_PRESHUFFLED", n, 2 * k_bytes
             )
         except (AssertionError, ImportError):
+            return False
+
+    @staticmethod
+    @functools.cache
+    def is_asm_fp4_gemm_tuned(n: int, k_bytes: int) -> bool:
+        if not current_platform.is_rocm():
+            return False
+        try:
+            from aiter.ops.gemm_op_a4w4 import get_GEMM_config
+
+            return all(
+                get_GEMM_config(m, n, 2 * k_bytes) is not None for m in (1024, 8192)
+            )
+        except ImportError:
             return False
 
     @staticmethod

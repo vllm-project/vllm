@@ -1,0 +1,215 @@
+meta:
+  title: "GLM-4.6V"
+  slug: "glm-4.6v"
+  provider: "GLM (Z-AI)"
+  description: "GLM-4.6 vision-language MoE model — image-text-to-text with 128K context, native FP8 checkpoint, and expert parallelism"
+  date_added: 2025-12-07
+  date_updated: 2026-04-17
+  tasks:
+    - multimodal
+  performance_headline: "Updated GLM-V series with 128K context length and native FP8"
+  related_recipes: []
+  hardware:
+    h100: verified
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "zai-org/GLM-4.6V"
+  min_vllm_version: "0.12.0"
+  architecture: moe
+  parameter_count: "107B"
+  active_parameters: "12B"
+  context_length: 131072
+  base_args:
+    - "--trust-remote-code"
+    - "--enable-expert-parallel"
+    - "--allowed-local-media-path"
+    - "/"
+    - "--mm-encoder-tp-mode"
+    - "data"
+    - "--mm-processor-cache-type"
+    - "shm"
+  base_env: {}
+
+dependencies:
+  - note: "GLM-V requires Transformers >= 5.0.0 for tokenizer and multimodal config compatibility."
+    command: 'uv pip install "transformers>=5.0.0"'
+
+features:
+  tool_calling:
+    description: "GLM-4.5 tool call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "glm45"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "GLM-4.5 reasoning parser"
+    args:
+      - "--reasoning-parser"
+      - "glm45"
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 257
+    description: "Full precision BF16 — runs on 4xH100/H200"
+  fp8:
+    model_id: "zai-org/GLM-4.6V-FP8"
+    precision: fp8
+    vram_minimum_gb: 128
+    description: "Native FP8 checkpoint with minimal accuracy loss"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides:
+  amd:
+    extra_args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+      - "--allowed-local-media-path"
+      - "/"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      SAFETENSORS_FAST_GPU: "1"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  GLM-4.6V is an updated vision-language MoE model from Z-AI. It supports a 128K
+  context length (vs 64K for GLM-4.5V). Native FP8 is recommended for cost-efficient
+  serving, matching BF16 accuracy to within a small margin.
+
+  ## Prerequisites
+
+  - **vLLM version:** >= 0.12.0
+  - **Hardware:** 4x H100/H200 (BF16 or FP8), or 4x MI300X/MI325X/MI355X with ROCm
+  - **Python:** 3.10+ for NVIDIA; Python 3.12 with ROCm 7.0 and glibc >= 2.35 for AMD ROCm wheels
+
+  ### Install vLLM (NVIDIA)
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### Install vLLM (AMD ROCm)
+
+  ```bash
+  uv venv --python 3.12
+  source .venv/bin/activate
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm
+  uv pip install "transformers>=5.0.0"
+  ```
+
+  ## Launching the Server
+
+  ### Tensor Parallel + Expert Parallel (FP8 on 4 GPUs)
+
+  ```bash
+  vllm serve zai-org/GLM-4.6V-FP8 \
+       --tensor-parallel-size 4 \
+       --tool-call-parser glm45 \
+       --reasoning-parser glm45 \
+       --enable-auto-tool-choice \
+       --enable-expert-parallel \
+       --allowed-local-media-path / \
+       --mm-encoder-tp-mode data \
+       --mm-processor-cache-type shm
+  ```
+
+  ### AMD ROCm (FP8 on 4 GPUs)
+
+  ```bash
+  export SAFETENSORS_FAST_GPU=1
+  export VLLM_ROCM_USE_AITER=1
+
+  vllm serve zai-org/GLM-4.6V-FP8 \
+       --tensor-parallel-size 4 \
+       --tool-call-parser glm45 \
+       --reasoning-parser glm45 \
+       --enable-auto-tool-choice \
+       --enable-expert-parallel \
+       --allowed-local-media-path / \
+       --mm-encoder-tp-mode data \
+       --mm-processor-cache-type shm
+  ```
+
+  ### Tuning Tips
+
+  - `--max-model-len=65536` is a common default; you can push to 131072.
+  - `--max-num-batched-tokens=32768` for prompt-heavy workloads.
+  - `--mm-encoder-tp-mode data` + `--mm-processor-cache-type shm` for efficient vision processing.
+  - Use `uv pip install "transformers>=5.0.0"` before serving GLM-V checkpoints.
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  resp = client.chat.completions.create(
+      model="zai-org/GLM-4.6V-FP8",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}},
+              {"type": "text", "text": "Describe the image."}
+          ]
+      }],
+      max_tokens=512,
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --backend openai-chat \
+    --endpoint /v1/chat/completions \
+    --model zai-org/GLM-4.6V-FP8 \
+    --dataset-name hf \
+    --dataset-path lmarena-ai/VisionArena-Chat \
+    --num-prompts 1000 \
+    --request-rate 20
+  ```
+
+  ## Troubleshooting
+
+  - **Vision encoder overhead:** Prefer `--mm-encoder-tp-mode data` over TP for the encoder.
+  - **Long-context memory:** At 128K context, tune `--max-num-batched-tokens` and
+    `--gpu-memory-utilization` to prevent OOM.
+
+  ## References
+
+  - [Model card](https://huggingface.co/zai-org/GLM-4.6V)
+  - [vLLM multimodal inputs guide](https://docs.vllm.ai/en/latest/features/multimodal_inputs.html)
