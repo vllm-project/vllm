@@ -310,6 +310,35 @@ async def test_stream_options(foscolo, server):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "options, status_code",
+    [
+        ({"stream_include_usage": False, "stream_continuous_usage_stats": False}, 200),
+        ({"stream": False, "stream_include_usage": True}, 400),
+    ],
+    ids=["disabled-options", "stream-false"],
+)
+async def test_stream_options_without_stream(foscolo, server, options, status_code):
+    """Form fields arrive as strings, so `false` must be read as False."""
+    server, model_name = server
+    data = {
+        "model": model_name,
+        "language": "it",
+        "to_language": "en",
+        "temperature": 0.0,
+        **options,
+    }
+    async with httpx.AsyncClient(timeout=30) as http_client:
+        response = await http_client.post(
+            server.url_for("v1/audio/translations"),
+            headers={"Authorization": f"Bearer {server.DUMMY_API_KEY}"},
+            data=data,
+            files={"file": foscolo},
+        )
+    assert response.status_code == status_code, response.text
+
+
+@pytest.mark.asyncio
 async def test_long_audio_request(foscolo, client_and_model):
     client, model_name = client_and_model
     if model_name == "google/gemma-3n-E2B-it":

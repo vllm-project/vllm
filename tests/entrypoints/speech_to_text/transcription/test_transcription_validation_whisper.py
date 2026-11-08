@@ -238,6 +238,33 @@ async def test_stream_options(winning_call, whisper_client):
 
 
 @pytest.mark.asyncio
+async def test_disabled_stream_options_without_stream(mary_had_lamb, whisper_client):
+    """Form fields arrive as strings; an explicit false must not count as set."""
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        temperature=0.0,
+        extra_body=dict(
+            stream_include_usage=False, stream_continuous_usage_stats=False
+        ),
+    )
+    assert "Mary had a little lamb" in transcription.text
+
+
+@pytest.mark.asyncio
+async def test_stream_options_rejected_when_stream_false(mary_had_lamb, whisper_client):
+    with pytest.raises(openai.BadRequestError, match="stream=True"):
+        await whisper_client.audio.transcriptions.create(
+            model=MODEL_NAME,
+            file=mary_had_lamb,
+            language="en",
+            stream=False,
+            extra_body=dict(stream_include_usage=True),
+        )
+
+
+@pytest.mark.asyncio
 async def test_sampling_params(mary_had_lamb, whisper_client):
     """Compare sampling with params and greedy sampling to assert results
     are different when extreme sampling parameters values are picked.
