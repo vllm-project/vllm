@@ -22,8 +22,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
-from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.block_table import get_block_table_width
+from vllm.v1.kv_cache_interface import AttentionSpec, get_block_table_width
 
 
 def request_row_bounds(req_idx: np.ndarray) -> np.ndarray:

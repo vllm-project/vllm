@@ -478,7 +478,7 @@ def get_nvfp4_indexer_decode_cp(
         return None
     tp = get_tensor_model_parallel_world_size()
     text_config = vllm_config.model_config.hf_text_config
-    total_heads = text_config.sparse_attention_config["sparse_num_index_heads"]
+    total_heads = text_config.index_n_heads
     why = None
     if tp not in SUPPORTED_TP_SIZES:
         why = f"tensor parallel size {tp} (needs one of {SUPPORTED_TP_SIZES})"

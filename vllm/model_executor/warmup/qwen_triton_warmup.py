@@ -12,7 +12,7 @@ from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 

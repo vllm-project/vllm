@@ -1397,6 +1397,10 @@ class OffloadingConnectorScheduler:
             )
             return None, False
 
+        if request.resumable and self.use_lookahead_block_hashes:
+            # Core may have recomputed block hashes after preemption.
+            for group_state in req_status.group_states:
+                group_state.offload_keys.clear()
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens
 

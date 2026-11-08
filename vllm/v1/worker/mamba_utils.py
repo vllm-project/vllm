@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
-import itertools
-from collections.abc import Callable
-from typing import Any, NamedTuple
+from typing import Any
 
 import torch
 
-from vllm.config import CacheConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -19,17 +16,13 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.replayssm_utils import (
     ReplaySSMModelContext,
     _reinterpret_u64_as_i64,
@@ -215,13 +208,13 @@ def _copy_mamba_state_block(
 ):
     """Copy one (layer, state-type) mamba state block between block columns.
 
-    Shared copy body of `postprocess_mamba_fused_kernel` and
-    `precopy_mamba_align_fused_kernel`, mirroring the V1 copy specs
-    (`get_conv_copy_spec` / `get_temporal_copy_spec`):
-    - conv state (conv_width > 0): shift the window by `token_bias` tokens,
-      `state[bt[src_col], token_bias:] -> state[bt[dst_col], :conv_width - token_bias]`
-    - temporal state: `token_bias` selects the accepted speculative column,
-      `state[bt[src_col + token_bias]] -> state[bt[dst_col]]`
+    Shared copy body of ``postprocess_mamba_fused_kernel`` and
+    ``precopy_mamba_align_fused_kernel``:
+    - conv state (conv_width > 0): shift the window by ``token_bias`` tokens,
+      ``state[bt[src_col], token_bias:] ->
+      state[bt[dst_col], :conv_width - token_bias]``
+    - temporal state: ``token_bias`` selects the accepted speculative column,
+      ``state[bt[src_col + token_bias]] -> state[bt[dst_col]]``
 
     The caller owns the decision logic (which columns, whether to copy); this
     device function only performs the byte copy for the given metadata slot.
@@ -594,16 +587,16 @@ def precopy_mamba_align_fused_kernel(
 ):
     """Pre-copy mamba "align" state across block boundaries.
 
-    Before the forward pass, copy each request's last SSM/conv state from its previous
-    block column into the new window block column, so the kernels read the initial state
-    from the write-side block as usual (V1 align semantics). Same per-(layer, state)
-    copy semantics as `postprocess_mamba_fused_kernel` (shared `_copy_mamba_state_block`
-    body, i.e. the V1 `preprocess_mamba` copy specs), but driven by the GPU-resident src
+    Before the forward pass, copy each request's last SSM/conv state from its
+    previous block column into the new window block column, so the kernels read
+    the initial state from the write-side block as usual.
+    Same per-(layer, state) copy semantics as ``postprocess_mamba_fused_kernel``
+    (shared ``_copy_mamba_state_block`` body), but driven by the GPU-resident src
     columns so it needs no CPU-GPU sync (async-scheduling safe).
 
-    Grid: (num_reqs, num_states [, TEMPORAL_TILES]). V2 passes a
-    batch-to-state idx_mapping; V1 already stores the staged arrays in batch
-    order and uses HAS_IDX_MAPPING=False.
+    Grid: (num_reqs, num_states [, TEMPORAL_TILES]). The runner passes
+    a batch-to-state idx_mapping; HAS_IDX_MAPPING=False is for arrays already
+    staged in batch order.
     """
     batch_idx = tl.program_id(0)
     state_idx = tl.program_id(1)
@@ -650,40 +643,6 @@ def precopy_mamba_align_fused_kernel(
         CONV_STATE_DIM_FIRST,
         TEMPORAL_TILES,
     )
-
-
-@triton.jit
-def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
-    pid = tl.program_id(0)
-
-    src_ptr = tl.load(src_ptrs + pid)
-    dst_ptr = tl.load(dst_ptrs + pid)
-    size = tl.load(sizes + pid)
-    is_left_overlap = dst_ptr < src_ptr and dst_ptr + size > src_ptr
-
-    offsets = tl.arange(0, BLOCK_SIZE)
-    for i in range(0, size, BLOCK_SIZE):
-        mask = (i + offsets) < size
-
-        curr_src_ptr = (src_ptr + i + offsets).to(tl.pointer_type(tl.uint8))
-        curr_dst_ptr = (dst_ptr + i + offsets).to(tl.pointer_type(tl.uint8))
-
-        data = tl.load(curr_src_ptr, mask=mask)
-        if is_left_overlap:
-            # Preserve each lane's source before a lower-address lane stores
-            # over it. The condition is uniform within the program.
-            tl.debug_barrier()
-        tl.store(curr_dst_ptr, data, mask=mask)
-
-
-def batch_memcpy(src_ptrs, dst_ptrs, sizes):
-    batch = src_ptrs.shape[0]
-    assert dst_ptrs.shape[0] == batch
-    assert sizes.shape[0] == batch
-
-    grid = (batch,)
-    BLOCK_SIZE = 1024
-    batch_memcpy_kernel[grid](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=BLOCK_SIZE)
 
 
 def _get_mamba_spec_for_layer(
@@ -736,54 +695,6 @@ def validate_mamba_state_copy_funcs(
             f"{mamba_spec.mamba_type} declares {len(mamba_spec.shapes)} states, "
             f"but provides {len(state_copy_funcs)} state copy funcs; expected "
             "a non-empty copyable prefix"
-        )
-
-
-@dataclasses.dataclass
-class MambaCopyBuffers:
-    src_ptrs: CpuGpuBuffer
-    dst_ptrs: CpuGpuBuffer
-    sizes: CpuGpuBuffer
-    mamba_group_ids: list[int]
-    mamba_spec: MambaSpec
-    offset: int = 0
-
-    @classmethod
-    def create(
-        cls,
-        max_num_reqs: int,
-        kv_cache_config: KVCacheConfig,
-        copy_funcs: MambaStateCopyFuncsByType,
-        make_buffer: Callable[..., CpuGpuBuffer],
-    ) -> "MambaCopyBuffers":
-        mamba_groups = get_mamba_groups(kv_cache_config)
-        mamba_spec = next(iter(mamba_groups))
-        assert all(
-            spec.block_size == mamba_spec.block_size
-            and spec.num_speculative_blocks == mamba_spec.num_speculative_blocks
-            and spec.mamba_cache_mode == mamba_spec.mamba_cache_mode
-            for spec in mamba_groups
-        ), "all mamba groups must share cache scheduling parameters"
-        mamba_group_ids = get_mamba_group_ids(mamba_groups)
-        entries_per_req = sum(
-            len(
-                copy_funcs[
-                    _get_mamba_spec_for_layer(
-                        kv_cache_config.kv_cache_groups[gid], layer_name
-                    ).mamba_type
-                ]
-            )
-            for gid in mamba_group_ids
-            for layer_name in kv_cache_config.kv_cache_groups[gid].layer_names
-        )
-        n = max_num_reqs * entries_per_req
-
-        return cls(
-            src_ptrs=make_buffer(n, dtype=torch.uint64),
-            dst_ptrs=make_buffer(n, dtype=torch.uint64),
-            sizes=make_buffer(n, dtype=torch.int32),
-            mamba_group_ids=mamba_group_ids,
-            mamba_spec=mamba_spec,
         )
 
 
@@ -858,18 +769,6 @@ class MambaSpecDecodeGPUContext:
     # shape: [num_groups, max_num_reqs, 1 + num_speculative_blocks].
     aligned_state_indices: torch.Tensor | None = None
 
-    # Per-request staging buffers (CPU+GPU mirrors). The runner stages
-    # values into the CPU view in ``_prepare_inputs`` and the fused kernel
-    # reads the GPU side. These only exist when the postprocess kernel is
-    # enabled (spec decode + hybrid, or FlashInfer ReplaySSM prefix caching).
-    mamba_state_idx_buf: CpuGpuBuffer | None = None
-    num_scheduled_tokens_buf: CpuGpuBuffer | None = None
-    num_computed_tokens_buf: CpuGpuBuffer | None = None
-    num_draft_tokens_buf: CpuGpuBuffer | None = None
-    is_prefilling_buf: CpuGpuBuffer | None = None
-    precopy_src_col_buf: CpuGpuBuffer | None = None
-    precopy_token_bias_buf: CpuGpuBuffer | None = None
-
     # Flag to track if metadata has been populated
     is_initialized: bool = False
     # Persistent all-layer ReplaySSM descriptors, populated with the cache
@@ -884,7 +783,6 @@ class MambaSpecDecodeGPUContext:
         copy_funcs: MambaStateCopyFuncsByType,
         forward_context: dict[str, Any],
         device: torch.device,
-        make_buffer: Callable[..., CpuGpuBuffer],
     ) -> "MambaSpecDecodeGPUContext":
         """Create context with allocated buffers (metadata populated later)."""
         mamba_groups = get_mamba_groups(kv_cache_config)
@@ -959,13 +857,6 @@ class MambaSpecDecodeGPUContext:
                 dtype=torch.int32,
                 device=device,
             ),
-            mamba_state_idx_buf=make_buffer(max_num_reqs, dtype=torch.int32),
-            num_scheduled_tokens_buf=make_buffer(max_num_reqs, dtype=torch.int32),
-            num_computed_tokens_buf=make_buffer(max_num_reqs, dtype=torch.int32),
-            num_draft_tokens_buf=make_buffer(max_num_reqs, dtype=torch.int32),
-            is_prefilling_buf=make_buffer(max_num_reqs, dtype=torch.bool),
-            precopy_src_col_buf=make_buffer(max_num_reqs, dtype=torch.int32),
-            precopy_token_bias_buf=make_buffer(max_num_reqs, dtype=torch.int32),
             is_initialized=False,
             replayssm=None,
         )
@@ -1228,65 +1119,6 @@ class MambaSpecDecodeGPUContext:
         )
         return self.aligned_state_indices[:, :num_reqs]
 
-    def run_fused_postprocess(
-        self,
-        num_reqs: int,
-        num_accepted_tokens_gpu: torch.Tensor,
-        mamba_state_idx_gpu: torch.Tensor,
-        num_scheduled_tokens_gpu: torch.Tensor,
-        num_computed_tokens_gpu: torch.Tensor,
-        num_draft_tokens_gpu: torch.Tensor,
-    ) -> None:
-        """Run the fused postprocess_mamba kernel on GPU.
-
-        This computes decisions and performs mamba state copies entirely on GPU,
-        eliminating the CPU-GPU sync that was previously needed.
-
-        Args:
-            num_reqs: Number of active requests
-            num_accepted_tokens_gpu: [num_reqs] accepted token counts
-            mamba_state_idx_gpu: [num_reqs] source block indices
-            num_scheduled_tokens_gpu: [num_reqs] scheduled token counts
-            num_computed_tokens_gpu: [num_reqs] computed token counts
-            num_draft_tokens_gpu: [num_reqs] draft token counts
-
-        """
-        if num_reqs == 0 or not self.is_initialized:
-            return
-
-        self.num_accepted_tokens_snapshot[:num_reqs].copy_(
-            num_accepted_tokens_gpu[:num_reqs]
-        )
-
-        total_states = self.num_states
-        grid = (num_reqs, total_states, _TEMPORAL_TILES)
-
-        postprocess_mamba_fused_kernel[grid](
-            self.num_accepted_tokens_snapshot,
-            mamba_state_idx_gpu,
-            num_scheduled_tokens_gpu,
-            num_computed_tokens_gpu,
-            num_draft_tokens_gpu,
-            self.block_table_ptrs,
-            self.block_table_stride_req,
-            self.state_base_addrs,
-            self.state_block_strides,
-            self.state_elem_sizes,
-            self.state_inner_sizes,
-            self.state_conv_widths,
-            self.state_group_indices,
-            self.state_dim_row_count,
-            self.state_dim_row_stride,
-            num_accepted_tokens_gpu,
-            None,  # idx_mapping: V1 decision arrays are already in req order
-            num_reqs,
-            block_size=self.block_size,
-            COPY_BLOCK_SIZE=1024,
-            CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
-            SKIP_TEMPORAL_STATE_COPY=self.replayssm is not None,
-            TEMPORAL_TILES=_TEMPORAL_TILES,
-        )
-
     def run_fused_precopy(
         self,
         num_reqs: int,
@@ -1304,7 +1136,7 @@ class MambaSpecDecodeGPUContext:
             src_col_gpu: [max_reqs] pre-advance src block column (-1 = fresh).
             token_bias_gpu: [max_reqs] accepted-token bias (num_accepted - 1).
             idx_mapping: optional [num_reqs] batch_idx -> req_state_idx.
-                None means V1 batch order already equals request state order.
+                None means batch order already equals request state order.
 
         """
         if num_reqs == 0 or not self.is_initialized:
@@ -1388,418 +1220,3 @@ class MambaSpecDecodeGPUContext:
             SKIP_TEMPORAL_STATE_COPY=self.replayssm is not None,
             TEMPORAL_TILES=_TEMPORAL_TILES,
         )
-
-
-@dataclasses.dataclass
-class MambaBuffers:
-    """Single owner for all mamba-specific runner buffers.
-
-    The two sub-objects have different gates:
-    `preprocess` handles prefix-cache state migration; `postprocess_align`
-    owns the fused lifecycle state used by hybrid speculative decoding and
-    FlashInfer ReplaySSM, and is `None` otherwise.
-    """
-
-    preprocess: MambaCopyBuffers
-    postprocess_align: MambaSpecDecodeGPUContext | None
-
-    @classmethod
-    def create(
-        cls,
-        max_num_reqs: int,
-        kv_cache_config: KVCacheConfig,
-        copy_funcs: MambaStateCopyFuncsByType,
-        forward_context: dict[str, Any],
-        make_buffer: Callable[..., CpuGpuBuffer],
-        device: torch.device,
-        with_postprocess_align: bool,
-    ) -> "MambaBuffers":
-        return cls(
-            preprocess=MambaCopyBuffers.create(
-                max_num_reqs, kv_cache_config, copy_funcs, make_buffer
-            ),
-            postprocess_align=(
-                MambaSpecDecodeGPUContext.create(
-                    max_num_reqs=max_num_reqs,
-                    kv_cache_config=kv_cache_config,
-                    copy_funcs=copy_funcs,
-                    forward_context=forward_context,
-                    device=device,
-                    make_buffer=make_buffer,
-                )
-                if with_postprocess_align
-                else None
-            ),
-        )
-
-
-def collect_mamba_copy_meta(
-    copy_bufs: MambaCopyBuffers,
-    kv_cache_config: KVCacheConfig,
-    mamba_state_copy_funcs: MambaStateCopyFuncsByType,
-    mamba_group_ids: list[int],
-    src_block_idx: int,
-    dest_block_idx: int,
-    accept_token_bias: int,
-    req_state: CachedRequestState,
-    forward_context: dict[str, Any],
-) -> None:
-    if src_block_idx == dest_block_idx and accept_token_bias == 0:
-        return
-
-    src_ptrs_np = copy_bufs.src_ptrs.np
-    dst_ptrs_np = copy_bufs.dst_ptrs.np
-    sizes_np = copy_bufs.sizes.np
-    offset = copy_bufs.offset
-
-    for mamba_group_id in mamba_group_ids:
-        block_ids = req_state.block_ids[mamba_group_id]
-        dest_block_id = block_ids[dest_block_idx]
-        kv_cache_group = kv_cache_config.kv_cache_groups[mamba_group_id]
-        layer_names = kv_cache_group.layer_names
-        for layer_name in layer_names:
-            mamba_spec = _get_mamba_spec_for_layer(kv_cache_group, layer_name)
-            state_copy_funcs = mamba_state_copy_funcs[mamba_spec.mamba_type]
-            attention = forward_context[layer_name]
-            kv_caches: list[torch.Tensor] = attention.kv_cache
-            for state, state_copy_func in zip(kv_caches, state_copy_funcs):
-                copy_spec = state_copy_func(
-                    state, block_ids, src_block_idx, accept_token_bias + 1
-                )
-
-                src_ptrs_np[offset] = copy_spec.start_addr
-                dst_ptrs_np[offset] = state[dest_block_id].data_ptr()
-                sizes_np[offset] = copy_spec.num_elements * state.element_size()
-                offset += 1
-
-    copy_bufs.offset = offset
-
-
-def do_mamba_copy_block(copy_bufs: MambaCopyBuffers):
-    n = copy_bufs.offset
-    if n == 0:
-        return
-    batch_memcpy(
-        copy_bufs.src_ptrs.copy_to_gpu(n),
-        copy_bufs.dst_ptrs.copy_to_gpu(n),
-        copy_bufs.sizes.copy_to_gpu(n),
-    )
-
-
-def cleanup_mamba_state_idx(
-    scheduler_output: SchedulerOutput,
-    mamba_state_idx: dict[str, int],
-) -> None:
-    """Pop stale `mamba_state_idx` entries for finished/preempted/resumed reqs.
-
-    Force-preempted requests (e.g., during reset_prefix_cache / KV cache
-    flush) appear in resumed_req_ids without a corresponding entry in
-    preempted_req_ids, leaving stale entries that can point to block
-    indices beyond the new (smaller) block allocation.
-    """
-    finished_req_ids = scheduler_output.finished_req_ids
-    preempted_req_ids = scheduler_output.preempted_req_ids or set()
-    resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
-    for req_id in itertools.chain(finished_req_ids, preempted_req_ids, resumed_req_ids):
-        mamba_state_idx.pop(req_id, None)
-
-
-class _FusedPrecopy(NamedTuple):
-    """Resolved fused align pre-copy resources (all non-None once resolved)."""
-
-    ctx: "MambaSpecDecodeGPUContext"
-    state_idx: CpuGpuBuffer
-    src_col: CpuGpuBuffer
-    token_bias: CpuGpuBuffer
-
-
-def _resolve_fused_precopy(
-    align_ctx: "MambaSpecDecodeGPUContext | None",
-) -> _FusedPrecopy | None:
-    """Bundle the fused-path buffers, or None for the scalar path.
-
-    Returning one non-None bundle lets callers narrow all four members with a
-    single `is not None` check instead of re-asserting each buffer per use.
-    """
-    if align_ctx is None:
-        return None
-    assert align_ctx.mamba_state_idx_buf is not None
-    assert align_ctx.precopy_src_col_buf is not None
-    assert align_ctx.precopy_token_bias_buf is not None
-    return _FusedPrecopy(
-        align_ctx,
-        align_ctx.mamba_state_idx_buf,
-        align_ctx.precopy_src_col_buf,
-        align_ctx.precopy_token_bias_buf,
-    )
-
-
-def preprocess_mamba(
-    scheduler_output: SchedulerOutput,
-    kv_cache_config: KVCacheConfig,
-    cache_config: CacheConfig,
-    mamba_state_idx: dict[str, int],
-    input_batch: InputBatch,
-    requests: dict[str, CachedRequestState],
-    forward_context: dict[str, Any],
-    mamba_state_copy_funcs: MambaStateCopyFuncsByType,
-    copy_bufs: MambaCopyBuffers,
-    align_ctx: MambaSpecDecodeGPUContext | None = None,
-    num_computed_tokens_gpu: torch.Tensor | None = None,
-    query_start_loc_gpu: torch.Tensor | None = None,
-    num_accepted_tokens_gpu: torch.Tensor | None = None,
-):
-    """Copy the mamba state of previous step to the last
-    (1 + num_speculative_blocks) block.
-    """
-    fused = _resolve_fused_precopy(align_ctx)
-    mamba_group_ids = copy_bufs.mamba_group_ids
-    mamba_spec = copy_bufs.mamba_spec
-    num_speculative_blocks = mamba_spec.num_speculative_blocks
-    # TODO(Chen): we need to optimize this function a lot
-    assert cache_config.enable_prefix_caching
-    block_size = mamba_spec.block_size
-    cleanup_mamba_state_idx(scheduler_output, mamba_state_idx)
-
-    copy_bufs.offset = 0
-    num_reqs = len(input_batch.req_ids)
-    if fused is not None:
-        if num_reqs == 0:
-            return
-        if not fused.ctx.is_initialized:
-            fused.ctx.initialize_from_forward_context(
-                kv_cache_config,
-                forward_context,
-                mamba_state_copy_funcs,
-                [
-                    input_batch.block_table[gid].get_device_tensor(num_reqs)
-                    for gid in fused.ctx.mamba_group_ids
-                ],
-            )
-
-        fused.src_col.np[:num_reqs] = -1
-        if fused.ctx.replayssm is None:
-            fused.token_bias.np[:num_reqs] = 0
-
-    for i, req_id in enumerate(input_batch.req_ids):
-        req_state = requests[req_id]
-        prev_state_idx = mamba_state_idx.get(req_id)
-        if prev_state_idx is None:
-            # New / resumed request; num_computed_tokens == 0 gives -1.
-            prev_state_idx = (req_state.num_computed_tokens - 1) // block_size
-
-        num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-        num_blocks = (
-            cdiv(req_state.num_computed_tokens + num_scheduled_tokens, block_size)
-            + num_speculative_blocks
-        )
-        # We always save the current running state at the last
-        # (1 + num_speculative_blocks) block.
-        # A corner case worth mention here: assume we have block_size = 4 and
-        # num_speculative_tokens = 2. The request is [A, B, C] and contains 2 draft
-        # tokens [draft 1, draft 2]. Then we will have:
-        # Block 0: [A, B, C, draft 1]
-        # Block 1: [draft 2, TOFILL, TOFILL, TOFILL]
-        # Block 2: speculative block
-        # Block 3: speculative block
-        # And use block 1 to save the running state.
-        curr_state_idx = num_blocks - 1 - num_speculative_blocks
-        mamba_state_idx[req_id] = curr_state_idx
-        if fused is not None:
-            fused.state_idx.np[i] = curr_state_idx
-            if fused.ctx.replayssm is not None:
-                # The GPU decision uses the actual computed count and the
-                # restored accepted count in current batch order.
-                fused.state_idx.np[i] = prev_state_idx
-
-        # Generic Mamba retains its CPU accepted-token staging. ReplaySSM
-        # computes the convolution offset from the restored GPU count below.
-        if (
-            prev_state_idx != -1
-            and prev_state_idx != curr_state_idx
-            and (fused is None or fused.ctx.replayssm is None)
-        ):
-            accept_token_bias = int(input_batch.num_accepted_tokens_cpu[i]) - 1
-            if fused is not None:
-                assert accept_token_bias >= 0
-                fused.src_col.np[i] = prev_state_idx
-                fused.token_bias.np[i] = accept_token_bias
-            else:
-                collect_mamba_copy_meta(
-                    copy_bufs,
-                    kv_cache_config,
-                    mamba_state_copy_funcs,
-                    mamba_group_ids,
-                    prev_state_idx,
-                    curr_state_idx,
-                    accept_token_bias,
-                    req_state,
-                    forward_context,
-                )
-            input_batch.num_accepted_tokens_cpu[i] = 1
-
-    if fused is not None:
-        fused.state_idx.copy_to_gpu(num_reqs)
-        if fused.ctx.replayssm is not None:
-            assert num_computed_tokens_gpu is not None
-            assert query_start_loc_gpu is not None
-            assert num_accepted_tokens_gpu is not None
-            preprocess_mamba_align_fused_kernel[(triton.cdiv(num_reqs, 256),)](
-                None,
-                fused.state_idx.gpu,
-                num_computed_tokens_gpu,
-                query_start_loc_gpu,
-                num_accepted_tokens_gpu,
-                fused.src_col.gpu,
-                fused.token_bias.gpu,
-                num_reqs,
-                BLOCK_SIZE=256,
-                MAMBA_BLOCK_SIZE=block_size,
-                HAS_IDX_MAPPING=False,
-            )
-            fused.ctx.replayssm.reset_new_slots(
-                idx_mapping=None,
-                src_cols=fused.src_col.gpu,
-                dst_cols=fused.state_idx.gpu,
-                num_reqs=num_reqs,
-            )
-        else:
-            fused.src_col.copy_to_gpu(num_reqs)
-            fused.token_bias.copy_to_gpu(num_reqs)
-        fused.ctx.run_fused_precopy(
-            num_reqs=num_reqs,
-            state_idx_gpu=fused.state_idx.gpu,
-            src_col_gpu=fused.src_col.gpu,
-            token_bias_gpu=fused.token_bias.gpu,
-            idx_mapping=None,
-        )
-    else:
-        do_mamba_copy_block(copy_bufs)
-
-
-def postprocess_mamba_gpu(
-    *,
-    bufs: "MambaBuffers",
-    num_reqs: int,
-    num_accepted_tokens_gpu: torch.Tensor,
-    num_accepted_tokens_cpu_tensor: torch.Tensor | None,
-    input_batch: InputBatch,
-    kv_cache_config: KVCacheConfig,
-    forward_context: dict[str, Any],
-    mamba_state_copy_funcs: MambaStateCopyFuncsByType,
-    run_prefix_state_migration: bool,
-) -> None:
-    """Publish accepted-token results to model-wide Mamba state.
-
-    The first call binds persistent block tables and state pointers. When prefix
-    migration is enabled, the fused kernel snapshots the original accepted
-    counts, copies canonical state at crossed boundaries, and normalizes the live
-    counts for the next step. ReplaySSM then commits its group-shared trackers
-    from the original counts and materializes any planned prefix snapshots; mode
-    `none` skips the copy phase and commits directly. Finally, the normalized
-    live counts are copied back only when the next iteration has a CPU consumer.
-    """
-    ctx = bufs.postprocess_align
-    # The caller enables this context for spec-decode hybrid state copies or
-    # for model-owned FlashInfer ReplaySSM lifecycle maintenance under STP.
-    assert ctx is not None
-    assert ctx.num_scheduled_tokens_buf is not None
-    assert ctx.num_computed_tokens_buf is not None
-    assert ctx.num_draft_tokens_buf is not None
-    assert ctx.is_prefilling_buf is not None
-
-    if not ctx.is_initialized:
-        ctx.initialize_from_forward_context(
-            kv_cache_config,
-            forward_context,
-            mamba_state_copy_funcs,
-            [
-                input_batch.block_table[gid].get_device_tensor(num_reqs)
-                for gid in ctx.mamba_group_ids
-            ],
-        )
-
-    accepted_tokens_for_postprocess = num_accepted_tokens_gpu
-    live_cols = None
-    if run_prefix_state_migration:
-        assert ctx.mamba_state_idx_buf is not None
-        live_cols = ctx.mamba_state_idx_buf.gpu
-        ctx.run_fused_postprocess(
-            num_reqs=num_reqs,
-            num_accepted_tokens_gpu=num_accepted_tokens_gpu,
-            mamba_state_idx_gpu=live_cols,
-            num_scheduled_tokens_gpu=ctx.num_scheduled_tokens_buf.gpu,
-            num_computed_tokens_gpu=ctx.num_computed_tokens_buf.gpu,
-            num_draft_tokens_gpu=ctx.num_draft_tokens_buf.gpu,
-        )
-        accepted_tokens_for_postprocess = ctx.num_accepted_tokens_snapshot
-    if ctx.replayssm is not None:
-        # Keep this separate from run_fused_postprocess: that kernel is a
-        # per-(request, canonical-state, tile) copy and is skipped when prefix
-        # migration is disabled. ReplaySSM must instead publish its shared
-        # per-(request, cache-group) ring trackers in every cache mode, then
-        # optionally compact/materialize one plan per group. Folding the two
-        # would either duplicate tracker writes for every state tensor or make
-        # the generic Mamba kernel depend on FlashInfer-only group descriptors.
-        ctx.replayssm.postprocess(
-            idx_mapping=None,
-            query_metadata=ctx.num_scheduled_tokens_buf.gpu,
-            query_metadata_is_cumulative=False,
-            num_computed_tokens=ctx.num_computed_tokens_buf.gpu,
-            num_computed_is_post_step=False,
-            num_accepted_tokens=accepted_tokens_for_postprocess,
-            is_prefilling=ctx.is_prefilling_buf.gpu,
-            live_cols=live_cols,
-            num_reqs=num_reqs,
-        )
-
-    if num_accepted_tokens_cpu_tensor is not None and ctx.replayssm is None:
-        # CPU consumers need the normalized live counts for the next step, not
-        # the original snapshot retained for ReplaySSM.
-        num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
-            num_accepted_tokens_gpu[:num_reqs], non_blocking=True
-        )
-
-
-def stage_postprocess_inputs_to_gpu(
-    ctx: MambaSpecDecodeGPUContext,
-    scheduler_output: SchedulerOutput,
-    req_ids: list[str],
-    num_reqs: int,
-    requests: dict[str, CachedRequestState],
-    *,
-    num_decodes: int | None = None,
-) -> None:
-    """Stage the per-request decisions consumed after token acceptance.
-
-    Generic Mamba uses scheduled, computed, and draft counts. ReplaySSM also
-    uses the final Mamba attention split to reset trackers after prefill.
-    """
-    assert ctx.num_scheduled_tokens_buf is not None
-    assert ctx.num_computed_tokens_buf is not None
-    assert ctx.num_draft_tokens_buf is not None
-    assert ctx.is_prefilling_buf is not None
-
-    scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
-    num_scheduled = scheduler_output.num_scheduled_tokens
-    scheduled_np = ctx.num_scheduled_tokens_buf.np
-    computed_np = ctx.num_computed_tokens_buf.np
-    draft_np = ctx.num_draft_tokens_buf.np
-    for i in range(num_reqs):
-        req_id = req_ids[i]
-        scheduled = num_scheduled[req_id]
-        req_state = requests[req_id]
-        computed = req_state.num_computed_tokens
-        num_draft = len(scheduled_spec_tokens.get(req_id, []))
-        scheduled_np[i] = scheduled
-        computed_np[i] = computed
-        draft_np[i] = num_draft
-    ctx.num_scheduled_tokens_buf.copy_to_gpu(num_reqs)
-    ctx.num_computed_tokens_buf.copy_to_gpu(num_reqs)
-    ctx.num_draft_tokens_buf.copy_to_gpu(num_reqs)
-    if num_decodes is not None:
-        # Full decode graphs can include padded rows after the real requests.
-        num_decodes = min(num_decodes, num_reqs)
-        ctx.is_prefilling_buf.np[:num_decodes] = False
-        ctx.is_prefilling_buf.np[num_decodes:num_reqs] = True
-        ctx.is_prefilling_buf.copy_to_gpu(num_reqs)

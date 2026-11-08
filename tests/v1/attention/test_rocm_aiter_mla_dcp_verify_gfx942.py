@@ -65,13 +65,6 @@ class _FakeGroup:
         raise RuntimeError("DCP verify must not issue a collective")
 
 
-@pytest.fixture(autouse=True)
-def _use_v2_model_runner(monkeypatch):
-    """max_decode_query_len reads use_v2_model_runner, which would otherwise
-    inspect the stand-in speculative config from _vllm_config."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-
-
 @pytest.fixture
 def fake_dcp_groups(monkeypatch):
     """Point every importer of get_dcp_group at a settable rank stub."""
@@ -100,7 +93,6 @@ def _vllm_config(heads_per_rank: int, qlen: int, fp8_kv: bool):
     # multi-token row is classified as prefill and never reaches decode.
     config.speculative_config = SimpleNamespace(
         num_speculative_tokens=qlen - 1,
-        parallel_drafting=False,
         max_num_new_slots_for_drafting=0,
     )
     config.parallel_config.decode_context_parallel_size = DCP

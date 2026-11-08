@@ -788,7 +788,7 @@ class SimpleCPUOffloadScheduler:
                 req_ids.append(req_id)
 
         # Preemption frees the request's blocks. It resumes with a full new
-        # block table (MRV1 resumed-cached, MRV2 NewRequestData).
+        # block table in its NewRequestData.
         for req_id in preempted_req_ids:
             state = self._reqs_to_store.get(req_id)
             if state is not None:

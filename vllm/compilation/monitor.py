@@ -93,23 +93,3 @@ def monitor_profiling_run(tag: str = "") -> Generator[None, None, None]:
         log_prefix,
         elapsed,
     )
-
-
-cudagraph_capturing_enabled: bool = True
-
-
-def validate_cudagraph_capturing_enabled() -> None:
-    # used to monitor whether a cudagraph capturing is legal at runtime.
-    # should be called before any cudagraph capturing.
-    # if an illegal cudagraph capturing happens, raise an error.
-    global cudagraph_capturing_enabled
-    if not cudagraph_capturing_enabled:
-        raise RuntimeError(
-            "CUDA graph capturing detected at an inappropriate "
-            "time. This operation is currently disabled."
-        )
-
-
-def set_cudagraph_capturing_enabled(enabled: bool) -> None:
-    global cudagraph_capturing_enabled
-    cudagraph_capturing_enabled = enabled

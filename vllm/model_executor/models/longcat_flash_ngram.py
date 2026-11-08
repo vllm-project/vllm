@@ -196,7 +196,7 @@ class FlashNgramModel(FlashModel):
 
 
 class LongcatFlashNgramForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
-    """LongCat-Flash-Lite for causal LM (MRV2-only, n-gram embedding)."""
+    """LongCat-Flash-Lite for causal LM (n-gram embedding)."""
 
     # MTP weights are not part of this model.
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.mtp.": None})
@@ -208,12 +208,6 @@ class LongcatFlashNgramForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
-        if not vllm_config.use_v2_model_runner:
-            raise NotImplementedError(
-                "LongcatFlashNgramForCausalLM (LongCat-Flash-Lite) requires the "
-                "V2 model runner for its n-gram embedding state; it is selected "
-                "automatically unless VLLM_USE_V2_MODEL_RUNNER=0 is set."
-            )
         config = vllm_config.model_config.hf_config
         self.config = config
         self.quant_config = vllm_config.quant_config
@@ -306,14 +300,13 @@ class LongcatNgramModelState(DefaultModelState):
         super().add_request(req_index, new_req_data)  # rope positions
         # Fresh request -> no left-context (-1 fill). On resume, seed from the
         # already-processed token tail. Use prefill_token_ids (full processed
-        # sequence incl. generated tokens on v2 resume), like DefaultModelState;
+        # sequence incl. generated tokens on resume), like DefaultModelState;
         # the prompt alone would be too short when resuming after decode.
         ctx = [-1] * self.ctx_len
         ncomp = new_req_data.num_computed_tokens
-        toks_src = new_req_data.prefill_token_ids or new_req_data.prompt_token_ids
-        if ncomp > 0 and toks_src is not None:
+        if ncomp > 0:
             lo = max(0, ncomp - self.ctx_len)
-            toks = self._neg_eos(list(toks_src[lo:ncomp]))
+            toks = self._neg_eos(list(new_req_data.prefill_token_ids[lo:ncomp]))
             ctx[self.ctx_len - len(toks) :] = toks
         self.token_context[req_index] = torch.tensor(
             ctx, dtype=torch.int32, device=self.token_context.device

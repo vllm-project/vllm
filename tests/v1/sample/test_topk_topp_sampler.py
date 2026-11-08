@@ -7,12 +7,9 @@ from torch import Generator
 from tests.utils import large_gpu_mark
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
-from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p_pytorch,
-    random_sample,
 )
-from vllm.v1.sample.sampler import Sampler
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -23,7 +20,7 @@ VOCAB_SIZE = 128 * 1024
 def _flashinfer_topk_topp_supported() -> bool:
     """True iff the FlashInfer top-k/top-p sampler is usable on this host.
 
-    Mirrors the gate in `TopKTopPSampler.__init__`: CUDA + flashinfer
+    Mirrors the gate in `Sampler`: CUDA + flashinfer
     importable + GPU compute capability supported by the FlashInfer
     backend + more than 16 SMs.
     """
@@ -47,10 +44,6 @@ def _flashinfer_topk_topp_supported() -> bool:
 FLASHINFER_TOPK_TOPP_SUPPORTED = _flashinfer_topk_topp_supported()
 
 
-def _seed_default_generator(seed: int) -> None:
-    set_random_seed(seed)
-
-
 @pytest.fixture(autouse=True)
 def reset_default_device():
     """Explicitly set the default device, which can affect subsequent tests.
@@ -59,88 +52,6 @@ def reset_default_device():
     original_device = torch.get_default_device()
     yield
     torch.set_default_device(original_device)
-
-
-def test_sampler_threads_fp64_gumbel_to_topk_topp_sampler():
-    sampler = Sampler(use_fp64_gumbel=True)
-
-    assert sampler.topk_topp_sampler.use_fp64_gumbel
-
-
-@pytest.mark.skipif(
-    not current_platform.is_rocm(),
-    reason="ROCm aiter sampler test only runs on ROCm",
-)
-def test_rocm_aiter_sampler_defers_import_when_generators_force_native(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from vllm.v1.sample.ops import topk_topp_sampler
-
-    class MockPlatform:
-        @staticmethod
-        def is_cuda():
-            return False
-
-        @staticmethod
-        def is_cuda_alike():
-            return True
-
-        @staticmethod
-        def is_cpu():
-            return False
-
-        @staticmethod
-        def is_xpu():
-            return False
-
-    class MockRocmAiterOps:
-        @staticmethod
-        def is_enabled():
-            return True
-
-    real_import = __import__
-
-    def guard_aiter_sampling_import(name, *args, **kwargs):
-        if name == "aiter.ops.sampling":
-            raise AssertionError("aiter sampling import should be deferred")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(topk_topp_sampler, "current_platform", MockPlatform())
-    monkeypatch.setattr(topk_topp_sampler, "rocm_aiter_ops", MockRocmAiterOps())
-    monkeypatch.setattr("builtins.__import__", guard_aiter_sampling_import)
-
-    sampler = topk_topp_sampler.TopKTopPSampler()
-    logits = torch.randn(2, 8, device=DEVICE_TYPE)
-    k = torch.full((2,), 2, dtype=torch.int32, device=DEVICE_TYPE)
-    generators = {0: torch.Generator(device=logits.device).manual_seed(0)}
-
-    token_ids, logits_to_return = sampler(logits, generators, k, None)
-
-    assert token_ids.shape == (2,)
-    assert logits_to_return is None
-
-
-def test_random_sample_uses_fp64_exponential_race_when_requested():
-    torch.set_default_device(DEVICE_TYPE)
-    probs = torch.tensor(
-        [
-            [0.70, 0.20, 0.10],
-            [0.05, 0.15, 0.80],
-            [0.25, 0.25, 0.50],
-        ],
-        dtype=torch.float32,
-        device=DEVICE_TYPE,
-    )
-
-    _seed_default_generator(12345)
-    q = torch.empty(probs.shape, dtype=torch.float64, device=probs.device)
-    q.exponential_()
-    expected = q.reciprocal_().mul_(probs).argmax(dim=-1).view(-1)
-
-    _seed_default_generator(12345)
-    actual = random_sample(probs.clone(), {}, use_fp64_gumbel=True)
-
-    assert torch.equal(actual, expected)
 
 
 def test_topk_impl_equivalence():
@@ -1060,8 +971,8 @@ class TestFlashInferTopkToppRobustness:
     def test_flashinfer_handles_pathological_logits(self, pattern: str, path: str):
         """flashinfer_sample must return valid ids even on poisoned logits.
 
-        Direct call into `flashinfer_sample` — exactly the code path
-        `TopKTopPSampler.forward_cuda` takes when FI is enabled.
+        Direct call into ``flashinfer_sample`` — exactly the code path the
+        sampler takes when FI is enabled.
         """
         from vllm.v1.sample.ops.topk_topp_sampler import flashinfer_sample
 
@@ -1140,7 +1051,6 @@ class TestFlashInferDistributionMatch:
         from vllm.v1.sample.ops.topk_topp_sampler import (
             apply_top_k_top_p,
             flashinfer_sample,
-            random_sample,
         )
 
         torch.set_default_device(DEVICE_TYPE)
@@ -1188,7 +1098,7 @@ class TestFlashInferDistributionMatch:
         # PyTorch-native dispatch path (Triton-routed filter + Gumbel sample).
         processed = apply_top_k_top_p(batch.clone(), k_batch, p_batch)
         probs = processed.softmax(dim=-1, dtype=torch.float32)
-        pt_tokens = random_sample(probs, {})
+        pt_tokens = torch.multinomial(probs, num_samples=1).view(-1)
         pt_counts = torch.bincount(pt_tokens, minlength=self.VOCAB).cpu().numpy()
         self._chi2_check(
             pt_counts,

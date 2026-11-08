@@ -3,12 +3,9 @@
 """Unit tests for the V2 GPU-accelerated n-gram speculator.
 
 These tests target the Triton proposer in
-`vllm.v1.worker.gpu.spec_decode.ngram.speculator` and complement the CPU
-`NgramProposer` tests in `test_ngram.py`. The GPU speculator follows a
-slightly different policy than the CPU one: when multiple n-gram matches of
-the same length exist, the GPU kernel picks the right-most (most recent)
-match inside the active context, whereas the CPU implementation returns the
-left-most. The expectations below reflect the GPU behavior.
+``vllm.v1.worker.gpu.spec_decode.ngram.speculator``. When multiple n-gram
+matches of the same length exist, the GPU kernel picks the right-most (most
+recent) match inside the active context.
 """
 
 from __future__ import annotations

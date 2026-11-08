@@ -444,9 +444,3 @@ class LLFp32WDotprod:
 
         if const_expr(self.use_pdl):
             cute.arch.griddepcontrol_launch_dependents()
-
-
-def make_host_fp32w(
-    k_val: int, bs: int = 128, token_groups: int = 1, epb: int = 1, m: int = 1
-):
-    return LLFp32WDotprod(m=m, k=k_val, bs=bs, token_groups=token_groups, epb=epb)

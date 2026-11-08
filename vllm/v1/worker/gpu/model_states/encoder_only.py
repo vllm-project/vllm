@@ -198,7 +198,10 @@ class EncoderOnlyModelState(DefaultModelState):
         else:
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
-        max_query_len = int(input_batch.num_scheduled_tokens.max())
+        # Use the promised max_query_len so FULL graphs don't bake in the dummy's.
+        max_query_len = input_batch.max_query_len or int(
+            input_batch.num_scheduled_tokens.max()
+        )
         if for_capture:
             max_seq_len = self.max_model_len
         else:

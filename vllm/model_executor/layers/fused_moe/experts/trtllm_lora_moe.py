@@ -424,11 +424,12 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     def _batch_has_no_lora(lora_context: MoELoRAContext) -> bool:
         """True when no token in the batch selects a LoRA adapter.
 
-        Mirrors the no-lora fast path in `PunicaWrapperGPU.add_lora_fused_moe`: the
-        punica kernel metadata carries a CPU `no_lora_flag` computed once per forward
-        from the token->LoRA mapping. Reading it is a host-only check (no device sync),
-        and under CUDA graphs the branch is frozen at capture time against the graph's
-        `has_lora` dispatch key, so it stays correct on replay.
+        Mirrors the no-lora fast path in
+        ``PunicaWrapperGPU.add_lora_fused_moe``: the punica kernel metadata
+        carries a CPU ``no_lora_flag`` computed once per forward from the
+        token->LoRA mapping. Reading it is a host-only check (no device sync),
+        and under CUDA graphs the branch is frozen at capture time against the
+        graph's ``num_active_loras`` dispatch key, so it stays correct on replay.
         """
         meta = getattr(lora_context.punica_wrapper, "token_mapping_meta", None)
         if meta is None:

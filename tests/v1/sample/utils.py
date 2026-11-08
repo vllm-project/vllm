@@ -1,29 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterator
 from enum import Enum
-from typing import NamedTuple
-from unittest.mock import MagicMock
 
 import regex as re
-import torch
 
 from vllm import CompletionOutput
-from vllm.config import ReasoningConfig
-from vllm.utils.torch_utils import make_tensor_with_pad
-from vllm.v1.sample.logits_processor import BatchUpdate, LogitsProcessor
-from vllm.v1.sample.metadata import SamplingMetadata
-
-
-def create_mock_reasoning_config(
-    start_token_ids: list[int], end_token_ids: list[int]
-) -> ReasoningConfig:
-    return MagicMock(
-        spec=ReasoningConfig,
-        reasoning_start_token_ids=start_token_ids,
-        reasoning_end_token_ids=end_token_ids,
-    )
 
 
 class BatchLogprobsComposition(Enum):
@@ -158,120 +140,3 @@ def compute_correct_cumulative_logprob(completion_output: CompletionOutput) -> f
         assert lp is not None
         values.append(lp[tok_id].logprob)
     return sum(values)
-
-
-def create_fake_logits(batch_size: int, vocab_size: int) -> torch.Tensor:
-    fake_logits = torch.full((batch_size, vocab_size), 1e-2, dtype=torch.float)
-    return fake_logits
-
-
-def create_penalty_tensor(
-    batch_size: int, penalty_value: float, device: torch.device
-) -> torch.Tensor:
-    return torch.full(
-        (batch_size,), fill_value=penalty_value, dtype=torch.float, device=device
-    )
-
-
-def create_prompt_tokens_tensor(
-    prompt_token_ids: list[list[int]],
-    vocab_size: int,
-    device: torch.device,
-) -> torch.Tensor:
-    return make_tensor_with_pad(
-        prompt_token_ids,
-        pad=vocab_size,
-        device=device,
-        dtype=torch.int64,
-        pin_memory=False,
-    )
-
-
-class LogitsprocsTestFakes(NamedTuple):
-    """Wraps fake data structures to support testing."""
-
-    logits: torch.Tensor
-    sampling_metadata: SamplingMetadata
-
-    def get_logitsprocs_by_cls(
-        self,
-        cls: type[LogitsProcessor],
-    ) -> Iterator[LogitsProcessor]:
-        """Yield logits processors of a specific class.
-
-        Args:
-          cls: `LogitsProcessor` subclass
-
-        Returns:
-          Iterator over logits processors
-
-        """
-        return (
-            lp for lp in self.sampling_metadata.logitsprocs.all if isinstance(lp, cls)
-        )
-
-    def get_logitsprocs(self) -> Iterator[LogitsProcessor]:
-        """Iterator over all logits processors."""
-        return self.sampling_metadata.logitsprocs.all
-
-
-def fake_update_logitsprocs_state(
-    test_fakes: LogitsprocsTestFakes,
-    batch_update: BatchUpdate | None,
-) -> None:
-    """Imitate logits processors persistent batch state update
-    in engine core"""
-    for logitproc in test_fakes.get_logitsprocs():
-        logitproc.update_state(batch_update)
-    holder = test_fakes.sampling_metadata.thinking_budget_state_holder
-    if holder is not None:
-        holder.sync_batch(batch_update)
-
-
-def fake_apply_logitsprocs(
-    test_fakes: LogitsprocsTestFakes,
-    slice_indices: list[int],
-    slot_output_token_ids: list[list[int]] | None = None,
-) -> torch.Tensor:
-    """Imitate application of logits processors in engine core.
-
-    When `thinking_budget_state_holder` has tracked requests, this mirrors
-    `Sampler.apply_logits_processors` by refreshing per-slot
-    `output_token_ids` (if `slot_output_token_ids` is provided), then
-    `update_state` + `apply_to_logits` on the holder after built-in logits
-    processors.
-    """
-    logits = test_fakes.logits[torch.tensor(slice_indices, dtype=torch.long)].clone()
-    for processor in test_fakes.get_logitsprocs():
-        logits = processor.apply(logits)
-
-    md = test_fakes.sampling_metadata
-    holder = md.thinking_budget_state_holder
-    if holder is not None and holder.has_tracked_requests():
-        if slot_output_token_ids is not None:
-            for i, toks in enumerate(slot_output_token_ids):
-                if i < len(md.output_token_ids):
-                    md.output_token_ids[i] = list(toks)
-        holder.update_state(md.output_token_ids, md.spec_token_ids, None)
-        logits = holder.apply_to_logits(logits, False, md.spec_token_ids)
-    return logits
-
-
-def create_allowed_token_ids(
-    batch_size: int,
-    vocab_size: int,
-    num_allowed_token_ids: int,
-    device: torch.device,
-) -> torch.Tensor | None:
-    mask: torch.Tensor | None = None
-    for i in range(batch_size):
-        if i % 2 == 1:
-            continue
-        if mask is None:
-            mask = torch.zeros(
-                (batch_size, vocab_size), dtype=torch.bool, device=device
-            )
-        start = min(i, vocab_size - 1)
-        end = min(i + num_allowed_token_ids, vocab_size - 1)
-        mask[i, start:end] = True
-    return mask

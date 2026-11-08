@@ -8,7 +8,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-import vllm._custom_ops as ops
+import vllm._cpu_ops as ops
 from vllm.model_executor.layers.mamba.ops.cpu import gdn_attention
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -1315,40 +1315,6 @@ def test_causal_conv1d_fwd_cpu_accepts_wide_state() -> None:
         wide_state[:, :, :state_len], narrow_state, atol=0, rtol=0
     )
     torch.testing.assert_close(wide_state[:, :, state_len:], wide_tail, atol=0, rtol=0)
-
-
-@torch.inference_mode()
-def test_batch_memcpy_cpu_fallback() -> None:
-    """The ctypes batch_memcpy fallback (used when triton-cpu is absent) must
-    copy each src into its dst, validating the (src_ptrs, dst_ptrs, sizes)
-    argument order against ctypes.memmove(dst, src, size).
-    """
-    from vllm.triton_utils.dispatcher import (
-        KernelOverride,
-        register_kernels,
-    )
-    from vllm.utils.cpu_triton_utils import _batch_memcpy_impl
-
-    register_kernels(
-        {"vllm.v1.worker.mamba_utils.batch_memcpy_kernel": _batch_memcpy_impl}
-    )
-    from vllm.v1.worker.mamba_utils import batch_memcpy_kernel
-
-    assert isinstance(batch_memcpy_kernel, KernelOverride)
-
-    # Varied byte sizes, including a non-power-of-two run.
-    sizes_bytes = [256, 1024, 17 * 4, 4096]
-    srcs = [torch.rand(n // 4, dtype=torch.float32) for n in sizes_bytes]
-    dsts = [torch.zeros_like(s) for s in srcs]
-
-    src_ptrs = torch.tensor([s.data_ptr() for s in srcs], dtype=torch.uint64)
-    dst_ptrs = torch.tensor([d.data_ptr() for d in dsts], dtype=torch.uint64)
-    sizes = torch.tensor(sizes_bytes, dtype=torch.int32)
-
-    batch_memcpy_kernel[(len(srcs),)](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=1024)
-
-    for src, dst in zip(srcs, dsts):
-        torch.testing.assert_close(dst, src)
 
 
 # ---------------------------------------------------------------------------

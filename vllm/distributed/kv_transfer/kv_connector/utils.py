@@ -323,8 +323,9 @@ def yield_req_data(
     """Yields:
     (req_id, block_id_groups, is_full_table)
 
-    `is_full_table` is True when `block_id_groups` is the request's whole
-    block table (new and resumed requests) rather than this step's additions.
+    ``is_full_table`` is True when ``block_id_groups`` is the request's whole
+    block table (new and resumed requests, which are both in
+    ``scheduled_new_reqs``) rather than this step's additions.
     """
     # new requests
     for req_data in scheduler_output.scheduled_new_reqs:
@@ -332,11 +333,8 @@ def yield_req_data(
 
     # cached requests
     cached_reqs = scheduler_output.scheduled_cached_reqs
-    yield from zip(
-        cached_reqs.req_ids,
-        cached_reqs.new_block_ids,
-        (req_id in cached_reqs.resumed_req_ids for req_id in cached_reqs.req_ids),
-    )
+    for req_id, block_id_groups in zip(cached_reqs.req_ids, cached_reqs.new_block_ids):
+        yield req_id, block_id_groups, False
 
 
 def get_current_attn_backends(

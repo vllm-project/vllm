@@ -166,7 +166,11 @@ def minimax_pp_stage(monkeypatch):
         group.is_first_rank = start == 0
         group.is_last_rank = end == 6
         config = SimpleNamespace(
-            vocab_size=16, hidden_size=6144, num_hidden_layers=6, rms_norm_eps=1e-6
+            vocab_size=16,
+            hidden_size=6144,
+            num_hidden_layers=6,
+            rms_norm_eps=1e-6,
+            layer_types=["full_attention"] * 6,
         )
         model = minimax_m3.MiniMaxM3Model(
             vllm_config=SimpleNamespace(
@@ -174,7 +178,6 @@ def minimax_pp_stage(monkeypatch):
                 quant_config=None,
                 speculative_config=None,
                 kernel_config=SimpleNamespace(moe_backend="auto"),
-                use_v2_model_runner=True,
             )
         )
         model._set_aux_hidden_state_layers(taps)

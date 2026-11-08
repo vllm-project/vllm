@@ -18,8 +18,6 @@ No per-token norm-fold. No V rotation. K is Hadamard-rotated at store.
 
 from __future__ import annotations
 
-import math
-
 # ── 15 unique FP4 E2M1 levels, sorted ascending ────
 FP4_LEVELS_SORTED: tuple[float, ...] = (
     -6.0,
@@ -134,19 +132,6 @@ UE8M0_BIAS: int = 127
 # clamps to the zero sentinel.
 _UE8M0_MIN_EXP: int = -126
 _UE8M0_MAX_EXP: int = 127
-
-
-def ue8m0_encode(s: float) -> int:
-    """Snap a positive fp32 scale `s` to the nearest power of 2 and
-    encode as a UE8M0 byte. `s <= 0` encodes as 0 (zero sentinel)."""
-    if s <= 0.0 or not math.isfinite(s):
-        return 0
-    exp = int(round(math.log2(s)))
-    if exp < _UE8M0_MIN_EXP:
-        return 0
-    if exp > _UE8M0_MAX_EXP:
-        exp = _UE8M0_MAX_EXP
-    return exp + UE8M0_BIAS
 
 
 def ue8m0_decode(byte: int) -> float:
