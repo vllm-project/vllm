@@ -104,7 +104,7 @@ def test_humming_fp8_matches_checkpoint_forward(
 
         layer = create("humming.oracle")
         reference = create("humming.checkpoint")
-        for name, parameter in layer.named_parameters():
+        for parameter in layer.parameters():
             parameter.data.fill_(1.0)
         scale_name = "weight_scale_inv" if block_quant else "weight_scale"
         scale = getattr(layer, f"w13_{scale_name}")
@@ -143,7 +143,9 @@ def test_humming_fp8_matches_checkpoint_forward(
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="DSV4.1 requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="DSV4.1 requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
 def test_deepseek_v41_mxfp8_scale_loading(
@@ -287,7 +289,9 @@ def test_deepseek_v41_mxfp8_scale_loading(
         torch.testing.assert_close(actual, reference, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="DSV4.1 requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="DSV4.1 requires CUDA or ROCm"
+)
 @pytest.mark.parametrize(
     "weight_block_size,expert_dtype,scale_name",
     [
@@ -863,11 +867,20 @@ def test_scaled_fp8_quant(dtype) -> None:
     )
 
 
-@pytest.mark.skipif(
-    current_platform.is_fp8_fnuz(),
-    reason="FP8 e4m3fn weight reloading is not supported on e4m3fnuz platforms",
+@pytest.mark.parametrize(
+    "method_cls",
+    [
+        Fp8LinearMethod,
+        pytest.param(
+            Fp8MoEMethod,
+            marks=pytest.mark.skipif(
+                current_platform.is_fp8_fnuz(),
+                reason="Fp8MoEMethod weight reloading is not supported on "
+                "e4m3fnuz platforms",
+            ),
+        ),
+    ],
 )
-@pytest.mark.parametrize("method_cls", [Fp8LinearMethod, Fp8MoEMethod])
 # FP8 weight reloading does not support online quantization
 @pytest.mark.parametrize("weight_block_size", [None, [128, 128]])
 # any postprocessing that is applied to the weights such as padding and repacking

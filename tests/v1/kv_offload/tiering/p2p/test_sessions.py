@@ -3189,6 +3189,73 @@ class TestDisconnect:
         )
         assert session.poll().loads == [LoadResult(8, "req-7", success=False)]
 
+    @pytest.mark.parametrize("finished", [False, True])
+    @pytest.mark.parametrize("ack_before_poll", [False, True])
+    def test_unsent_fetch_retires_without_abort(
+        self, lookup_clock, finished, ack_before_poll, caplog
+    ):
+        session, conn, _ = _make_session()
+        session.request_blocks(7, "req-7", [OffloadKey(b"key")], [0])
+        if finished:
+            session.finish_request("req-7")
+        else:
+            lookup_clock.now = _PD_LOAD_TIMEOUT_S
+        if ack_before_poll:
+            conn.enqueue(_peer_connect_msg())
+            conn.enqueue(
+                {TYPE_KEY: ConnectAckMsg.TYPE, ConnectAckMsg.PEER_ID: "peer:8000"}
+            )
+        assert session.poll().loads == [
+            LoadResult(7, "req-7", success=False, request_finished=finished)
+        ]
+        if not finished:
+            assert "queued fetch req-7" in caplog.text
+        assert not session.has_pending_work
+        session.request_blocks(8, "req-7", [OffloadKey(b"replacement")], [1])
+        if not ack_before_poll:
+            _activate(session, conn)
+        assert [
+            msg[FetchMsg.BLOCK_INDEXES]
+            for msg in conn._sent
+            if msg[TYPE_KEY] == FetchMsg.TYPE
+        ] == ([[], [1]] if ack_before_poll else [[1]])
+        assert not any(msg[TYPE_KEY] == AbortFetchMsg.TYPE for msg in conn._sent)
+        assert session.close().failed_jobs == [8]
+
+    @pytest.mark.parametrize("already_dead", [False, True])
+    def test_dead_connection_does_not_flush_unsent_fetch(
+        self, lookup_clock, already_dead
+    ):
+        class FailedFetchConnection(FakeConnection):
+            def send(self, msg):
+                if msg[TYPE_KEY] == FetchMsg.TYPE:
+                    raise ConnectionError("failed fetch send")
+                super().send(msg)
+
+        conn = FailedFetchConnection()
+        session, _, _ = _make_session(conn=conn)
+        if already_dead:
+            _activate(session, conn)
+            conn.mark_dead()
+        session.request_blocks(1, "req-1", [OffloadKey(b"first")], [0])
+        session.request_blocks(2, "req-2", [OffloadKey(b"second")], [1])
+        if not already_dead:
+            _activate(session, conn)
+        lookup_clock.now = _PD_LOAD_TIMEOUT_S + 1
+        loads = session.poll().loads
+        assert {result.job_id for result in loads} == {1, 2}
+        assert all(not result.success for result in loads)
+        assert next(r for r in loads if r.job_id == 2).deferred_release is None
+        first = next(r for r in loads if r.job_id == 1)
+        if already_dead:
+            assert first.deferred_release is None
+        else:
+            assert first.deferred_release is not None
+            assert not first.deferred_release.is_set()
+            session.close()
+            assert first.deferred_release.is_set()
+        assert not any(msg[TYPE_KEY] == FetchMsg.TYPE for msg in conn._sent)
+
     def test_disconnect_marks_session_dead(self):
         session, conn, _ = _make_session()
         _activate(session, conn)

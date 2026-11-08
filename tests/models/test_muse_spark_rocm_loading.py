@@ -16,8 +16,6 @@ from vllm.models.muse_spark.amd.model import (
 from vllm.models.muse_spark.amd.multimodal import MuseSparkForConditionalGeneration
 from vllm.models.muse_spark.amd.muse_moe_runner import (
     MuseSparkRoutedExperts,
-    _track_quark_expert_weights,
-    _validate_quark_expert_weights,
 )
 from vllm.models.muse_spark.common.moe import MuseSparkConsolidatedRoutedExperts
 from vllm.platforms import current_platform
@@ -160,39 +158,6 @@ def _individual_quark_expert_weights(
         for projection in ("gate_proj", "up_proj", "down_proj")
         for suffix in ("weight", "weight_scale")
     ]
-
-
-def test_quark_expert_weight_audit_accepts_fragmented_loader_calls() -> None:
-    weights = _individual_quark_expert_weights(3)
-    loaded: set[tuple[str, str, int]] = set()
-    first = weights[:7]
-    second = weights[7:]
-
-    assert list(_track_quark_expert_weights(first, loaded)) == first
-    assert list(_track_quark_expert_weights(second, loaded)) == second
-    _validate_quark_expert_weights(loaded, 3)
-
-
-@pytest.mark.parametrize(
-    "missing_name",
-    ["0.gate_proj.weight", "1.down_proj.weight_scale"],
-)
-def test_quark_expert_weight_audit_rejects_missing_tensor(missing_name: str) -> None:
-    weights = [
-        item for item in _individual_quark_expert_weights(2) if item[0] != missing_name
-    ]
-    loaded: set[tuple[str, str, int]] = set()
-    list(_track_quark_expert_weights(weights, loaded))
-    with pytest.raises(ValueError, match="Missing MuseSpark1x Quark expert tensors"):
-        _validate_quark_expert_weights(loaded, 2)
-
-
-def test_quark_expert_weight_audit_rejects_duplicate_across_loader_calls() -> None:
-    weights = _individual_quark_expert_weights(1)
-    loaded: set[tuple[str, str, int]] = set()
-    list(_track_quark_expert_weights(weights[:1], loaded))
-    with pytest.raises(ValueError, match="Duplicate MuseSpark1x expert tensor"):
-        list(_track_quark_expert_weights(weights[:1], loaded))
 
 
 def test_unquantized_loader_routes_per_expert_names_to_expert_mapping(

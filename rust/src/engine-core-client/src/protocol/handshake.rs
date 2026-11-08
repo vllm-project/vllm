@@ -138,7 +138,7 @@ pub struct EngineCoreReadyResponse {
     /// `vllm:cache_config_info`.
     #[serde(default)]
     pub cache_config_info: Option<BTreeMap<String, String>>,
-    /// `compute_hash()` of the engine's initialized `VllmConfig`, the last part
+    /// `hash_config()` of the engine's initialized `VllmConfig`, the last part
     /// of `system_fingerprint`; `None` if hashing failed.
     #[serde(default)]
     pub config_hash: Option<String>,
