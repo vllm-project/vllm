@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import mmap
 import time
-from contextlib import nullcontext
 from unittest.mock import MagicMock
 
 import pytest
@@ -24,9 +23,6 @@ if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
 
 from tests.v1.attention.utils import dense_kv_cache_tensor, dense_kv_cache_views
-from tests.v1.kv_connector.unit.test_kv_connector_lifecycle import (
-    _make_empty_scheduler_output,
-)
 from vllm.config import CacheConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
@@ -36,6 +32,7 @@ from vllm.v1.core.kv_cache_planning import (
     is_kv_cache_spec_uniform,
 )
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -60,7 +57,6 @@ from vllm.v1.simple_kv_offload.metadata import (
 from vllm.v1.simple_kv_offload.sizing import sync_num_offload_blocks_across_workers
 from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
-from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.utils import allocate_kv_cache
 
 NUM_BLOCKS = 64
@@ -69,6 +65,19 @@ ITERS = 30
 # Keep the compute stream busy so the KV write lands late; this makes the
 # store-vs-compute race deterministic instead of timing-dependent.
 SLEEP_CYCLES = 50_000_000
+
+
+def _make_empty_scheduler_output() -> SchedulerOutput:
+    return SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
 
 
 def _make_worker(
@@ -96,8 +105,7 @@ def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
     return backend, gpu["k"], cpu["k"]
 
 
-@pytest.mark.parametrize("use_v2", [False, True])
-def test_no_forward_step_completes_cpu_store(monkeypatch, use_v2):
+def test_no_forward_step_completes_cpu_store(monkeypatch):
     """A finished request's final store must drain without another model step."""
     backend, gpu, cpu = _make_backend()
     worker = _make_worker(None, 0)
@@ -108,23 +116,16 @@ def test_no_forward_step_completes_cpu_store(monkeypatch, use_v2):
     output.kv_connector_metadata = SimpleCPUOffloadMetadata(
         store_event=0, store_gpu_blocks=[0], store_cpu_blocks=[0]
     )
-    module = "vllm.v1.worker.kv_connector_model_runner_mixin"
-    monkeypatch.setattr(f"{module}.get_kv_transfer_group", lambda: connector)
-    monkeypatch.setattr(f"{module}.set_forward_context", lambda *a: nullcontext())
-    monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
     try:
         gpu.fill_(91)
-        if use_v2:
-            active = ActiveKVConnector.__new__(ActiveKVConnector)
-            active.kv_connector = connector
-            active._disabled = False
-            active._pending_load_kwargs = None
-            module = "vllm.v1.worker.gpu.kv_connector"
-            monkeypatch.setattr(f"{module}.is_forward_context_available", lambda: True)
-            monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
-            result = active.no_forward(output)
-        else:
-            result = KVConnectorModelRunnerMixin.kv_connector_no_forward(output, None)
+        active = ActiveKVConnector.__new__(ActiveKVConnector)
+        active.kv_connector = connector
+        active._disabled = False
+        active._pending_load_kwargs = None
+        module = "vllm.v1.worker.gpu.kv_connector"
+        monkeypatch.setattr(f"{module}.is_forward_context_available", lambda: True)
+        monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
+        result = active.no_forward(output)
         completion = (
             result.kv_connector_output.kv_connector_worker_meta
             if result.kv_connector_output is not None
@@ -154,20 +155,25 @@ def test_deferred_store_waits_for_draft_forward(monkeypatch):
     output.kv_connector_metadata = SimpleCPUOffloadMetadata(
         store_event=0, store_gpu_blocks=[0], store_cpu_blocks=[0]
     )
-    module = "vllm.v1.worker.kv_connector_model_runner_mixin"
-    monkeypatch.setattr(f"{module}.get_kv_transfer_group", lambda: connector)
-    monkeypatch.setattr(f"{module}.has_kv_transfer_group", lambda: True)
+    active = ActiveKVConnector.__new__(ActiveKVConnector)
+    active.kv_connector = connector
+    active._disabled = False
+    active._pending_load_kwargs = None
+    module = "vllm.v1.worker.gpu.kv_connector"
+    monkeypatch.setattr(f"{module}.is_forward_context_available", lambda: True)
     monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
     launch = MagicMock(wraps=backend.launch_copy)
     monkeypatch.setattr(backend, "launch_copy", launch)
     try:
-        with KVConnectorModelRunnerMixin._get_kv_connector_output(
-            output, defer_finalize=True
-        ):
-            gpu.fill_(17)
+        active.pre_forward(output)
+        # Target forward.
+        gpu.fill_(17)
+        active.finish_forward()
+        active.post_forward(set(), defer_finalize=True)
         launch.assert_not_called()
+        # Draft forward writes the final KV.
         gpu.fill_(91)
-        KVConnectorModelRunnerMixin.finalize_kv_connector()
+        active.finalize_step()
         assert launch.call_count == 1
         completion = None
         deadline = time.monotonic() + 5
