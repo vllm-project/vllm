@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
 import torch
 
 from tests.utils import multi_gpu_test
@@ -19,9 +20,10 @@ PROMPTS = [
 ACCEPTANCE_TOLERANCE = 0.95
 
 
-def _run(pp_size: int) -> float:
+def _run(pp_size: int, model_impl: str) -> float:
     llm = LLM(
         model=MODEL,
+        model_impl=model_impl,
         tensor_parallel_size=1,
         pipeline_parallel_size=pp_size,
         max_model_len=512,
@@ -49,10 +51,11 @@ def _run(pp_size: int) -> float:
 
 
 @multi_gpu_test(num_gpus=4)
-def test_eagle3_pipeline_parallel_acceptance():
-    baseline = _run(1)
+@pytest.mark.parametrize("model_impl", ["vllm", "transformers"])
+def test_eagle3_pipeline_parallel_acceptance(model_impl: str):
+    baseline = _run(1, model_impl)
     for pp_size in (2, 4):
-        parallel = _run(pp_size)
+        parallel = _run(pp_size, model_impl)
         assert parallel >= baseline * ACCEPTANCE_TOLERANCE, (
             f"PP={pp_size} acceptance regressed: {parallel:.3f} < "
             f"{baseline:.3f} * {ACCEPTANCE_TOLERANCE}"

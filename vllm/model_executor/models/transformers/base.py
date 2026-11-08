@@ -51,6 +51,7 @@ from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
     SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
@@ -84,6 +85,7 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 from vllm.sequence import IntermediateTensors
 
@@ -114,8 +116,10 @@ class Base(
     SupportsPP,
     SupportsEagle,
     SupportsEagle3,
+    EagleModelMixin,
 ):
     hf_to_vllm_mapper: WeightsMapper
+    supports_aux_hidden_states_over_pp = True
 
     # TODO transformers will have a util to get these
     embedding_modules = {"embed_tokens": "input_embeddings"}
@@ -182,6 +186,7 @@ class Base(
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
         # Remove layers not on this pipeline parallel rank
+        self.start_layer, _ = self._pp_indices()
         self.pipeline_parallel()
         # Skip the device sync of dynamic rope where it can never rescale
         disable_noop_dynamic_rope(self.model.get_decoder(), vllm_config)
@@ -426,8 +431,10 @@ class Base(
 
         # Layers before module list
         for name in names[:module_list_idx]:
-            if self.pp_group.is_first_rank or (
-                self._get_tie_word_embeddings() and self.pp_group.is_last_rank
+            if (
+                self.pp_group.is_first_rank
+                or (self._get_tie_word_embeddings() and self.pp_group.is_last_rank)
+                or spec_decode_needs_target_embed(self.vllm_config)
             ):
                 continue
             # attrsetter in case the module is nested (e.g. "text_model.embed_tokens")
@@ -545,7 +552,8 @@ class Base(
                     and len(module) == self.text_config.num_hidden_layers
                 ):
                     # Populate Eagle3 attrs
-                    self._target_class = type(child_module)
+                    if not isinstance(child_module, PPMissingLayer):
+                        self._target_class = type(child_module)
                     layer_name = qual_name.removeprefix("model.")
                     self._layer_names[int(child_name)] = layer_name
                     # MTP weights should not be loaded into the base model
@@ -784,6 +792,7 @@ class Base(
             assert intermediate_tensors is not None
             input_ids = None
             inputs_embeds = intermediate_tensors["hidden_states"]
+        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
         # Add batch dimension before entering Transformers model
         if input_ids is not None and input_ids.ndim == 1:
@@ -812,13 +821,21 @@ class Base(
 
         # Remove batch dimension after exiting Transformers model
         hidden_states = outputs[0][0, ...]
+        aux_hidden_states = []
         if self._output_aux_hidden_states_kwargs:
-            aux_hidden_states = [x[0][0, ...] for x in outputs[1:]]
+            # Layers on other PP ranks capture nothing
+            aux_hidden_states = [x[0][0, ...] for x in outputs[1:] if x]
 
         if not self.pp_group.is_last_rank:
-            return IntermediateTensors({"hidden_states": hidden_states})
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
+            )
 
-        if self._output_aux_hidden_states_kwargs and len(aux_hidden_states) > 0:
+        aux_hidden_states = remote_aux + aux_hidden_states
+        if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
 
@@ -850,8 +867,9 @@ class Base(
         if self.model._can_record_outputs is None:
             self.model._can_record_outputs = {}
 
+        self._set_aux_hidden_state_layers(layers)
         target_class = self._target_class
-        for layer in layers:
+        for layer in self.aux_hidden_state_layers:
             # layer - 1 because we want the input to the layer
             layer_name = self._layer_names[layer - 1]
             layer_key = f"aux_hidden_state_{layer}"

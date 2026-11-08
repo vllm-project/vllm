@@ -7,7 +7,11 @@ import torch.nn as nn
 
 from vllm.config import SpeculativeConfig
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import SupportsEagle3, supports_eagle3
+from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
+    SupportsEagle3,
+    supports_eagle3,
+)
 
 logger = init_logger(__name__)
 
@@ -41,6 +45,8 @@ def _inner_decoder(model: nn.Module) -> nn.Module | None:
         parent_ref = model.get_language_model()
     elif hasattr(model, "language_model"):
         parent_ref = model.language_model
+    if isinstance(parent_ref, EagleModelMixin):
+        return parent_ref
     return getattr(parent_ref, "model", None)
 
 
