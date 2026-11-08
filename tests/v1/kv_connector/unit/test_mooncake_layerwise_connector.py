@@ -42,10 +42,14 @@ pytestmark = pytest.mark.cpu_test
 
 @contextlib.contextmanager
 def _layerwise_copy_worker(
-    *, extra=None, names=("model.layers.0.self_attn",), register=True
+    *,
+    extra=None,
+    names=("model.layers.0.self_attn",),
+    register=True,
+    kv_role="kv_producer",
 ):
     config = _make_worker_vllm_config(
-        "kv_producer", {"transfer_mode": "layerwise", **(extra or {})}
+        kv_role, {"transfer_mode": "layerwise", **(extra or {})}
     )
     config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
     spec = FullAttentionSpec(
@@ -103,6 +107,64 @@ def _copy_destination_metadata(worker, destinations, requests):
         remote_engine_id="decode-engine",
         kv_caches_base_addr=[tensor.data_ptr() for tensor in destinations],
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("num_peers", [1, 2])
+async def test_layerwise_missing_layers_only_fail_the_affected_request(num_peers):
+    names = ("model.layers.0.self_attn", "model.layers.1.self_attn")
+    with _layerwise_copy_worker(names=names, kv_role="kv_consumer") as worker:
+        pulls = {
+            req_id: PullReqMeta(
+                d_req_id=req_id,
+                transfer_id=req_id,
+                local_block_ids=[[block]],
+                num_external_tokens=worker.logical_block_size,
+                remote_engine_id="prefill-engine",
+                remote_bootstrap_addr="http://bootstrap:8998",
+                pull_tasks_count=num_peers,
+            )
+            for req_id, block in (("missing", 3), ("healthy", 4), ("pending", 5))
+        }
+        if num_peers == 2:
+            worker.process_pulling_result(
+                MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.FINISH,
+                    ok_reqs=list(pulls),
+                    covered_layers=[names[0]],
+                ),
+                pulls.copy(),
+            )
+            assert all(not pull.failed for pull in pulls.values())
+            assert not worker.finished_recving_reqs
+
+        responses = [
+            MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.CONTINUE,
+                ok_reqs=["missing"],
+                covered_layers=[names[0]],
+            ),
+            MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.CONTINUE,
+                ok_reqs=["healthy"],
+                covered_layers=list(names),
+            ),
+            MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.FINISH,
+                ok_reqs=["pending"],
+                covered_layers=list(names),
+            ),
+        ]
+        sock = mooncake_connector.make_zmq_socket.return_value.__enter__.return_value
+        sock.recv.side_effect = [worker._encoder.encode(reply) for reply in responses]
+        await worker.receive_kv_from_single_worker("tcp://producer:1234", pulls)
+
+        assert pulls["missing"].failed
+        assert not pulls["healthy"].failed
+        assert not pulls["pending"].failed
+        assert all(pull.pull_tasks_count == 0 for pull in pulls.values())
+        assert worker.finished_recving_reqs == set(pulls)
+        assert worker.get_block_ids_with_load_errors() == {3}
 
 
 @pytest.mark.asyncio
