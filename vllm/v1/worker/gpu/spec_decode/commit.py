@@ -20,11 +20,7 @@ def accept_result_of(
     path = sampler_output.accept_path
     if path is None:
         path = chain_path[: sampled.shape[0], : sampled.shape[1]]
-    return AcceptResult(
-        path=path,
-        path_len=sampler_output.num_sampled,
-        sampled=sampled,
-    )
+    return AcceptResult(path=path, path_len=sampler_output.num_sampled, sampled=sampled)
 
 
 def accepted_rows(result: AcceptResult, num_reqs: int) -> torch.Tensor:

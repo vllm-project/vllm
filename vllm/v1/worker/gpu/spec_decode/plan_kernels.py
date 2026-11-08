@@ -88,12 +88,7 @@ class PlanLayout:
     query, -1 for its first token) and ``pos_delta`` (plan minus chain
     position), plus the chain positions to put back after the forward."""
 
-    def __init__(
-        self,
-        max_num_tokens: int,
-        max_rows: int,
-        device: torch.device,
-    ):
+    def __init__(self, max_num_tokens: int, max_rows: int, device: torch.device):
         self.max_rows = max_rows
         self.tree_parents = torch.full(
             (max_num_tokens,), -1, dtype=torch.int32, device=device

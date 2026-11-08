@@ -28,11 +28,7 @@ from vllm.v1.worker.gpu.spec_decode.plan_kernels import check_accept_result
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
-from vllm.v1.worker.gpu.spec_decode.round import (
-    AcceptResult,
-    TargetTokens,
-    VerifyPlan,
-)
+from vllm.v1.worker.gpu.spec_decode.round import AcceptResult, TargetTokens, VerifyPlan
 
 # The speculator's tree_accept: (plan, target tokens, width) -> accepted paths.
 TreeAccept = Callable[[VerifyPlan, TargetTokens, int], AcceptResult]
