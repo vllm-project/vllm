@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
 
 import numpy as np
@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
-    from vllm.v1.hisparse.runtime import HiSparseCacheHandle
     from vllm.v1.kv_cache_interface import (
         AttentionSpec,
         KVCacheLayout,
@@ -33,7 +32,7 @@ if TYPE_CHECKING:
 from vllm.v1.kv_cache_interface import KVCacheLayout, get_kv_quant_mode
 
 
-class AttentionType(str, Enum):
+class AttentionType(StrEnum):
     """Attention type.
     Use string to be compatible with `torch.compile`.
     """
@@ -48,11 +47,9 @@ class AttentionType(str, Enum):
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
 
 
+@dataclass(frozen=True)
 class MultipleOf:
     base: int
-
-    def __init__(self, base: int):
-        self.base = base
 
     def __repr__(self) -> str:
         return f"MultipleOf({self.base})"
@@ -70,6 +67,9 @@ class AttentionBackend(ABC):
 
     # Does attention's forward() include kv cache update?
     forward_includes_kv_cache_update: bool = True
+
+    # Can forward() run with key/value omitted after a fused op wrote the cache?
+    supports_kv_cache_update_bypass: bool = False
 
     @staticmethod
     def get_supported_kernel_block_sizes(
@@ -104,6 +104,11 @@ class AttentionBackend(ABC):
     def supports_head_size(cls, head_size: int) -> bool:
         supported_head_sizes = cls.get_supported_head_sizes()
         return (not supported_head_sizes) or head_size in supported_head_sizes
+
+    @classmethod
+    def supports_head_size_v(cls, head_size: int, head_size_v: int) -> bool:
+        """Whether the backend can serve a V head size that differs from K's."""
+        return head_size_v == head_size
 
     @classmethod
     def supports_dtype(cls, dtype: torch.dtype) -> bool:
@@ -467,20 +472,11 @@ class CommonAttentionMetadata:
     fixed sliding window. None disables R-SWA. The attention backend copies this
     into its own persistent buffer and reads ``rswa_window`` from model config."""
 
-    replayssm_decode_base_cpu: torch.Tensor | None = None
-    """(batch_size,) CPU ring origin for Mamba2 ReplaySSM decode: num_computed
-    at the current decode run's last full-state write. write_pos counts from
-    here, so a preemption-resumed request re-anchors past the prompt boundary."""
-
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None
 
     def batch_size(self) -> int:
         return self.seq_lens.shape[0]
-
-    def naive_query_lens(self) -> torch.Tensor:
-        """Naive because it assumes that query ends where the next query starts."""
-        return self.query_start_loc[1:] - self.query_start_loc[:-1]
 
     def replace(self, **kwargs) -> "CommonAttentionMetadata":
         return replace(self, **kwargs)
@@ -506,19 +502,13 @@ class CommonAttentionMetadata:
         # but not the right per-request boundaries. Padding requests have a query
         # length of zero and are skipped by the device boundary search.
         num_mapped_tokens = int(self.query_start_loc_cpu[-1])
-        from vllm.v1.attention.ops.metadata import _token_request_mapping_kernel
+        from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
 
         num_output_tokens = max(num_mapped_tokens, num_tokens)
         assert buffer.shape[0] >= num_output_tokens
-        _token_request_mapping_kernel[((num_output_tokens + 255) // 256,)](
-            self.query_start_loc,
-            buffer,
-            self.query_start_loc.shape[0] - 1,
-            num_mapped_tokens,
-            num_output_tokens,
-            num_warps=4,
+        self._token_to_req_indices_cache = compute_token_to_req_indices(
+            self.query_start_loc, buffer, num_mapped_tokens, num_output_tokens
         )
-        self._token_to_req_indices_cache = buffer[:num_output_tokens]
         return self._token_to_req_indices_cache[:num_tokens]
 
     # TODO(lucas): remove once we have FULL-CG spec-decode support
@@ -552,7 +542,6 @@ class CommonAttentionMetadata:
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
             req_idx=maybe_slice_reqs(self.req_idx),
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
-            replayssm_decode_base_cpu=maybe_slice_reqs(self.replayssm_decode_base_cpu),
         )
 
 
@@ -560,9 +549,7 @@ M = TypeVar("M")
 
 
 class AttentionCGSupport(Enum):
-    """Constants for the cudagraph support of the attention backend
-    Here we do not consider the cascade attention, as currently
-    it is never cudagraph supported."""
+    """Constants for the cudagraph support of the attention backend"""
 
     ALWAYS = 3
     """Cudagraph always supported; supports mixed-prefill-decode"""
@@ -579,21 +566,22 @@ class AttentionCGSupport(Enum):
 def max_decode_query_len(vllm_config: "VllmConfig") -> int:
     """Widest request a spec-as-decode builder treats as a decode.
 
-    On model runner V2 this is a verification request, 1 +
-    num_speculative_tokens: no V2 speculator builds a wider query. The reorder
-    threshold and the code that mirrors the builders' decode/prefill split all
-    read this, so they cannot drift apart.
+    This is the widest per-request query any forward pass builds: a verification
+    request (1 + num_speculative_tokens) plus the drafter's extra slots, e.g. the
+    standalone draft model's correction token. The reorder threshold and the code
+    that mirrors the builders' decode/prefill split all read this, so they cannot
+    drift apart.
     """
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is None or speculative_config.num_speculative_tokens is None:
         return 1
-    num_speculative_tokens = speculative_config.num_speculative_tokens
-    max_query_len = 1 + num_speculative_tokens
-    if speculative_config.parallel_drafting and not vllm_config.use_v2_model_runner:
-        # Model runner V1 only; remove with it. Its parallel drafter appends up
-        # to num_speculative_tokens mask slots to each verified request.
-        max_query_len += num_speculative_tokens
-    return max_query_len
+    # Account for additional drafting slots that some speculators append to the
+    # query.
+    return (
+        1
+        + speculative_config.num_speculative_tokens
+        + speculative_config.max_num_new_slots_for_drafting
+    )
 
 
 class AttentionMetadataBuilder(ABC, Generic[M]):
@@ -609,8 +597,11 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     supports_update_block_table: bool = False
     # Whether the builder constructor requires the block-table width.
     requires_block_table_width: ClassVar[bool] = False
-    # Whether all step-dependent draft decode metadata can be updated in place,
-    # allowing one metadata build to be reused across autoregressive draft steps.
+    # Whether update_draft_decode_metadata() can regenerate all decode metadata
+    # from persistent device buffers with capture-safe ops only. Lets a
+    # speculator record the refresh inside its draft decode CUDA graph, so no
+    # eager build() is needed between steps or between the batches that replay
+    # it, whether the graph holds one draft forward or a multi-step loop.
     supports_draft_decode_metadata_update: bool = False
 
     @abstractmethod
@@ -625,10 +616,6 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         self.layer_names = layer_names
         self.vllm_config = vllm_config
         self.device = device
-        self.kernel_block_size: int | None = None
-
-    def set_kernel_block_size(self, kernel_block_size: int) -> None:
-        self.kernel_block_size = kernel_block_size
 
     @classmethod
     def get_cudagraph_support(
@@ -701,7 +688,8 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         Some builders (MLA) require reorder_batch to be called prior to build.
 
         Args:
-            common_prefix_len: The length of the common prefix of the batch.
+            common_prefix_len: Deprecated and always 0. Kept for compatibility
+                with out-of-tree builders.
             common_attn_metadata: The common attention metadata.
             fast_build: The meta-data will prioritize speed of building over
                 then speed at execution. Can be used for spec-decode where the
@@ -735,51 +723,15 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
             common_prefix_len=0, common_attn_metadata=common_attn_metadata
         )
 
-    def build_for_drafting(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        draft_index: int,
-    ) -> M:
-        """Build attention metadata for draft model. Uses build by default.
-
-        Args:
-            common_attn_metadata: The common attention metadata.
-            draft_index: The index of the current draft operation.
-                When speculating a chain of tokens, this index refers to the
-                draft attempt for the i-th token.
-                For tree-based attention, this index instead refers to the
-                draft attempt for the i-th level in the tree of tokens.
-
-        """
-        return self.build(
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
-            fast_build=True,
-        )
-
     def update_draft_decode_metadata(self, metadata: M) -> None:
-        """Update step-dependent draft decode metadata in place.
+        """Update draft decode metadata in place.
 
-        The fused draft loop may call this method during full CUDA graph
-        capture. CUDA graph replay does not run this Python method, so
-        implementations must emit capture-safe operations and keep replayed
-        tensor state in persistent storage.
+        Speculators can record this call inside their draft decode CUDA graphs,
+        so it runs once at capture and never again in Python. Implementations
+        must emit only capture-safe operations and write results into persistent
+        tensors that ``metadata`` already references.
         """
         raise NotImplementedError
-
-    def use_cascade_attention(
-        self,
-        common_prefix_len: int,
-        query_lens: np.ndarray,
-        num_query_heads: int,
-        num_kv_heads: int,
-        use_alibi: bool,
-        use_sliding_window: bool,
-        use_local_attention: bool,
-        num_sms: int,
-        dcp_world_size: int,
-    ) -> bool:
-        return False
 
 
 class AttentionLayer(Protocol):
@@ -816,8 +768,9 @@ class AttentionImplBase(ABC, Generic[T]):
     is_sparse: ClassVar[bool] = False
 
     # Whether this impl provides a dense-MHA prefill path (forward_mha). Sparse
-    # impls without one run the top-k MQA path for all requests.
-    supports_dense_mha_prefill: ClassVar[bool] = True
+    # impls without one run the top-k MQA path for all requests. Impls may
+    # override it per instance, depending on the kv-cache layout.
+    supports_dense_mha_prefill: bool = True
 
     # Required attributes that all impls should have
     num_heads: int
@@ -973,6 +926,16 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """Whether this implementation supports fused QKNorm+MRoPE+KVCache."""
         return False
 
+    def set_interleaved_v_cache(self):
+        """Opt this implementation into the interleaved V-cache layout for all of
+        its cache writers and readers. QkNormRopeKvCacheFusionPass calls this
+        for every eligible layer when it is constructed, i.e. before any KV
+        cache is written, so fused and unfused paths stay consistent whether or
+        not the pattern matches. Default is a no-op; backends whose kernels
+        read an interleaved V-cache under this fusion (e.g. ROCM_ATTN) override.
+        """
+        return False
+
     def fused_rope_kvcache_supported(self):
         """Does this attention implementation support RoPE+KVCache fusion.
         This is used by the RopeKVCacheFusionPass to only fuse the RoPE ops
@@ -1044,8 +1007,10 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """MLA attention implementation with forward_mqa and forward_mha methods."""
 
-    hisparse_cache: "HiSparseCacheHandle | None" = None
     supports_pcp: bool = True
+
+    def get_fp8_ds_mla_row_bytes(self) -> int:
+        return 656
 
     @abstractmethod
     def __init__(
@@ -1098,6 +1063,11 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         """MQA-style decode forward pass."""
         raise NotImplementedError
 
+    def reserve_workspace(self) -> None:
+        """Called in the memory profiling run to claim persistent workspace
+        that is otherwise reserved after profiling."""
+        return
+
     def fused_output_quant_supported(self, quant_key: "QuantKey"):
         """Does this attention implementation support fused output quantization.
         Since MLA quantization is done manually in forward_impl (common code),
@@ -1118,6 +1088,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
+        skip_scale: bool = False,
     ) -> None:
         if kv_cache.numel() == 0:
             return
@@ -1130,6 +1101,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             slot_mapping.flatten(),
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,
+            skip_scale=skip_scale,
         )
 
 

@@ -7,7 +7,7 @@ from abc import abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 
-from openai.types.responses import ToolChoiceFunction
+from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
 from xgrammar import Grammar, StructuralTag
 from xgrammar.structural_tag import (
@@ -21,10 +21,6 @@ from xgrammar.structural_tag import (
     TriggeredTagsFormat,
 )
 
-from vllm.entrypoints.chat_utils import (
-    get_tool_call_id_type,
-    make_tool_call_id,
-)
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
@@ -42,14 +38,24 @@ from vllm.parser.engine.adapters import ParserEngineToolAdapter
 from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.renderers.chat_utils import (
+    get_tool_call_id_type,
+    make_tool_call_id,
+)
+from vllm.sampling_params import (
+    SamplingParams,
+    StructuredOutputsParams,
+    check_json_nesting,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.streaming import (
+    RequiredToolCallScanner,
     extract_named_tool_call_streaming,
     extract_required_tool_call_streaming,
 )
 from vllm.tool_parsers.structural_tag_registry import (
+    get_structural_tag_tools,
     limit_to_single_tool_call,
     resolve_tool_strictness,
 )
@@ -73,6 +79,9 @@ class StreamState:
     # only used for "required" and "named tool" choices,
     # tracks whether function name has been fully returned in the stream yet
     function_name_returned: bool = False
+    required_tool_call_scanner: RequiredToolCallScanner = field(
+        default_factory=RequiredToolCallScanner
+    )
     engine_based: bool = False
 
     def advance(
@@ -113,8 +122,10 @@ class Parser:
     # Subclasses should override these if they use specific parser classes
     reasoning_parser_cls: type[ReasoningParser] | None = None
     tool_parser_cls: type[ToolParser] | None = None
-    # Server-side floor for tool-call structural tags (--tool-strict-level).
-    tool_strict_level: ToolStrictLevel = ToolStrictLevel.AUTO
+    # Server-side floor for tool-call structural tags (--tool-strict-level), or
+    # None for the tool parser's default level.
+    tool_strict_level: ToolStrictLevel | None = None
+    always_adjust_request: bool = False
 
     def __init__(
         self,
@@ -146,6 +157,12 @@ class Parser:
             self._reasoning_parser is None
             or self._reasoning_parser.engine_based_streaming
         ) and (self._tool_parser is None or self._tool_parser.engine_based_streaming)
+        # Without a tool parser nothing else consumes reasoning markers, so a
+        # grammar that can open reasoning from content parses the whole stream,
+        # as the non-streaming path does, even when the prompt closed reasoning.
+        self._reasoning_engine_streams_all = self._tool_parser is None and getattr(
+            self._reasoning_parser, "opens_reasoning_in_content", False
+        )
         if (
             self._reasoning_parser is None
             and self._tool_parser is not None
@@ -189,6 +206,12 @@ class Parser:
         state.history_tool_call_cnt = count_history_tool_calls(request)
         state.history_tool_call_cnt_initialized = True
 
+    def set_history_tool_call_count(self, count: int) -> None:
+        """Seed the history count when `request.messages` is not available."""
+        state = self._stream_state
+        state.history_tool_call_cnt = count
+        state.history_tool_call_cnt_initialized = True
+
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
@@ -205,6 +228,10 @@ class Parser:
 
         """
         return request
+
+    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
+        """Provide the exact rendered prompt to parsers that need prefix state."""
+        return
 
     @abstractmethod
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
@@ -268,6 +295,7 @@ def structured_outputs_to_format(params: StructuredOutputsParams) -> Format | No
     if params.json is not None:
         schema = params.json
         if isinstance(schema, str):
+            check_json_nesting(schema)
             schema = json.loads(schema)
         return JSONSchemaFormat(json_schema=schema)
     if params.regex is not None:
@@ -289,6 +317,7 @@ def structured_outputs_to_format(params: StructuredOutputsParams) -> Format | No
                 raise VLLMValidationError("Invalid grammar specification.") from e
         return GrammarFormat(grammar=grammar)
     if params.structural_tag is not None:
+        check_json_nesting(params.structural_tag, structural_tag=True)
         s_tag = json.loads(params.structural_tag)
         if "structures" in s_tag:
             # LegacyStructuralTagResponseFormat
@@ -347,7 +376,9 @@ class DelegatingParser(Parser):
     def _get_function_name(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> str:
-        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
+        if request.tool_choice and isinstance(
+            request.tool_choice, (ToolChoiceFunction, ToolChoiceCustom)
+        ):
             return request.tool_choice.name
         if request.tool_choice and isinstance(
             request.tool_choice, ChatCompletionNamedToolChoiceParam
@@ -386,7 +417,7 @@ class DelegatingParser(Parser):
         supports_required_and_named = tool_parser.supports_required_and_named
         is_named_tool_choice = request.tool_choice and isinstance(
             request.tool_choice,
-            (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+            (ToolChoiceFunction, ToolChoiceCustom, ChatCompletionNamedToolChoiceParam),
         )
         is_required_tool_choice = request.tool_choice == "required"
         is_auto_tool_choice = enable_auto_tools and (
@@ -491,7 +522,11 @@ class DelegatingParser(Parser):
             or request.tool_choice == "required"
             or isinstance(
                 request.tool_choice,
-                (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
+                (
+                    ChatCompletionNamedToolChoiceParam,
+                    ToolChoiceFunction,
+                    ToolChoiceCustom,
+                ),
             )
         )
         if not need_tool_calling:
@@ -501,6 +536,8 @@ class DelegatingParser(Parser):
         is_auto = request.tool_choice == "auto"
         single_call = request.parallel_tool_calls is False
         strict_level = self.tool_strict_level
+        if strict_level is None:
+            strict_level = tool_parser.default_tool_strict_level
         if single_call and not (is_auto and structured_outputs is not None):
             # Limiting the call count needs the call envelope in the grammar.
             # Auto with structured outputs keeps its format-only grammar, so the
@@ -510,7 +547,11 @@ class DelegatingParser(Parser):
         resolved_tools = None
         if tool_parser.structural_tag_model is not None:
             resolved_tools = resolve_tool_strictness(
-                request.tools,
+                get_structural_tag_tools(
+                    tool_parser.structural_tag_model,
+                    request.tools,
+                    request.tool_choice,
+                ),
                 request.tool_choice,
                 strict_level,
             )
@@ -702,7 +743,11 @@ class DelegatingParser(Parser):
             and request.tool_choice
             and isinstance(
                 request.tool_choice,
-                (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+                (
+                    ToolChoiceFunction,
+                    ToolChoiceCustom,
+                    ChatCompletionNamedToolChoiceParam,
+                ),
             )
         ):
             delta_message, function_name_returned = extract_named_tool_call_streaming(
@@ -718,12 +763,10 @@ class DelegatingParser(Parser):
         if supports_required_and_named and request.tool_choice == "required":
             delta_message, function_name_returned = (
                 extract_required_tool_call_streaming(
-                    previous_text=previous_text,
-                    current_text=current_text,
                     delta_text=delta_text,
-                    function_name_returned=function_name_returned,
                     tool_call_idx=tool_call_idx,
                     tool_call_id_type=tool_call_id_type,
+                    scanner=self._stream_state.required_tool_call_scanner,
                 )
             )
             return delta_message, function_name_returned
@@ -742,6 +785,10 @@ class DelegatingParser(Parser):
             return False
         return self._reasoning_parser.is_reasoning_end(input_ids)
 
+    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
+        if self._reasoning_parser is not None:
+            self._reasoning_parser.set_prompt_token_ids(prompt_token_ids)
+
     def _is_reasoning_end_streaming(
         self, input_ids: list[int], delta_ids: list[int]
     ) -> bool:
@@ -757,7 +804,7 @@ class DelegatingParser(Parser):
     def _in_reasoning_phase(self, state: StreamState) -> bool:
         if self._reasoning_parser is None:
             return False
-        return not state.reasoning_ended
+        return not state.reasoning_ended or self._reasoning_engine_streams_all
 
     def _in_tool_call_phase(self, state: StreamState) -> bool:
         if self._tool_parser is None:
@@ -831,6 +878,7 @@ class DelegatingParser(Parser):
 
         if not state.prompt_reasoning_checked and prompt_token_ids is not None:
             state.prompt_reasoning_checked = True
+            self.set_prompt_token_ids(prompt_token_ids)
             if self._reasoning_parser is None or self.is_reasoning_end(
                 prompt_token_ids
             ):
@@ -866,7 +914,7 @@ class DelegatingParser(Parser):
                 should_transition = self._is_reasoning_end_streaming(
                     current_token_ids, delta_token_ids
                 )
-            if should_transition:
+            if should_transition and not self._reasoning_engine_streams_all:
                 state.reasoning_ended = True
                 reasoning_transitioned = True
                 current_token_ids = self._extract_content_ids(delta_token_ids)
@@ -883,8 +931,17 @@ class DelegatingParser(Parser):
                     (delta_message.content if delta_message else None) or ""
                 ) + ((flush_delta.content if flush_delta else None) or "")
                 if self._engine_based:
-                    if delta_message and self._tool_parser is not None:
-                        delta_message.content = None
+                    if self._tool_parser is not None:
+                        # The tool-call phase below consumes current_text.
+                        if delta_message:
+                            delta_message.content = None
+                    elif current_text:
+                        # No tool phase follows to consume the flushed text,
+                        # and the engine is not fed again after the
+                        # transition, so emit it as content here.
+                        if delta_message is None:
+                            delta_message = DeltaMessage()
+                        delta_message.content = current_text
                 else:
                     delta_text = current_text
 
@@ -922,12 +979,13 @@ class DelegatingParser(Parser):
                 elif not delta_message.reasoning:
                     delta_message.reasoning = reasoning_from_this_batch
 
-            if (
-                delta_message
-                and delta_message.tool_calls
-                and delta_message.tool_calls[0].id is not None
-            ):
-                state.history_tool_call_cnt += 1
+            if delta_message and delta_message.tool_calls:
+                # A delta may start several tool calls at once (e.g. the
+                # "required" path when one delta completes more than one
+                # call), so count every id rather than only the first.
+                state.history_tool_call_cnt += sum(
+                    tc.id is not None for tc in delta_message.tool_calls
+                )
 
         # No phase active: pass through as content.
         # Skip when reasoning just ended in this delta — the engine already
@@ -977,7 +1035,11 @@ class DelegatingParser(Parser):
             # characters from tool-call markup it saw with
             # skip_tool_parsing=True.  Flushing that would leak spurious
             # content (e.g. a stray '"'), so skip it.
-            if parser is self._reasoning_parser and reasoning_ended:
+            if (
+                parser is self._reasoning_parser
+                and reasoning_ended
+                and not self._reasoning_engine_streams_all
+            ):
                 continue
             finish = getattr(parser, "finish_streaming", None)
             if finish is None:

@@ -22,6 +22,7 @@ from transformers import (
     GenerationMixin,
 )
 from transformers.masking_utils import create_causal_mask
+from transformers.utils import ModelOutput
 from transformers.video_utils import VideoMetadata
 
 from vllm.logprobs import SampleLogprobs
@@ -105,7 +106,9 @@ def _llava_vllm_to_hf_output(
     hf_output_str = output_str[1:] if output_str[0] == " " else output_str
 
     if hf_output_ids[-1] == eos_token_id:
-        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+        decoded_eos = tokenizer.decode(eos_token_id)
+        assert isinstance(decoded_eos, str)
+        hf_output_str = hf_output_str + decoded_eos
 
     return hf_output_ids, hf_output_str, out_logprobs
 
@@ -137,7 +140,9 @@ def llava_onevision_vllm_to_hf_output(
 
     hf_output_str = output_str
     if hf_output_ids[-1] == eos_token_id:
-        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+        decoded_eos = tokenizer.decode(eos_token_id)
+        assert isinstance(decoded_eos, str)
+        hf_output_str = hf_output_str + decoded_eos
 
     return hf_output_ids, hf_output_str, out_logprobs
 
@@ -179,7 +184,9 @@ def paligemma_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> Runner
     hf_output_str = output_str
 
     if hf_output_ids[-1] == eos_token_id:
-        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+        decoded_eos = tokenizer.decode(eos_token_id)
+        assert isinstance(decoded_eos, str)
+        hf_output_str = hf_output_str + decoded_eos
 
     return hf_output_ids, hf_output_str, out_logprobs
 
@@ -250,8 +257,8 @@ def deepseekvl2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         return BatchFeature(data=inputs, tensor_type="pt")
 
     hf_model.processor = processor
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language.model.embed_tokens
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.language.model.embed_tokens
     )
     return hf_model
 
@@ -286,7 +293,9 @@ def gemma3_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOut
 
     hf_output_str = output_str
     if hf_output_ids[-1] == eos_token_id:
-        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+        decoded_eos = tokenizer.decode(eos_token_id)
+        assert isinstance(decoded_eos, str)
+        hf_output_str = hf_output_str + decoded_eos
 
     return hf_output_ids, hf_output_str, out_logprobs
 
@@ -353,8 +362,8 @@ def glm4v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         )
 
     hf_model.processor = processor
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.transformer.output_layer
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.transformer.output_layer
     )
     return hf_model
 
@@ -442,8 +451,8 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     hf_model.model.img_context_token_id = img_context_token_id
     hf_model.processor = H2OVLProcessor(hf_model)
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language_model.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.language_model.get_output_embeddings()
     )
     hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
     return hf_model
@@ -572,11 +581,10 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         # Prepare attention mask
         attention_mask = create_causal_mask(
             config=self.config,
-            input_embeds=inputs_embeds,
+            inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             position_ids=position_ids,
-            cache_position=cache_position,
         )
 
         # Initialize and collect hidden states
@@ -678,8 +686,8 @@ def skyworkr1v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     hf_model.model.img_context_token_id = img_context_token_id
     hf_model.processor = SkyworkR1VProcessor(hf_model)
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language_model.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.language_model.get_output_embeddings()
     )
     hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
     return hf_model
@@ -787,8 +795,8 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     hf_model.model.img_context_token_id = img_context_token_id
     hf_model.processor = InternVLProcessor(hf_model)
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language_model.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.language_model.get_output_embeddings()
     )
     hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
     return hf_model
@@ -800,7 +808,7 @@ def _internvl_generate(
     input_ids: torch.FloatTensor,
     attention_mask: torch.LongTensor | None = None,
     **generate_kwargs,
-) -> torch.LongTensor:
+) -> torch.Tensor | ModelOutput:
     """Generate method for InternVL2 model without fixed use_cache."""
     assert self.img_context_token_id is not None
     target_dtype = next(self.parameters()).dtype
@@ -941,8 +949,8 @@ def molmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 def ovis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Ovis2."""
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.llm.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.llm.get_output_embeddings()
     )
 
     def processor(*args, text="", images=None, **kwargs):
@@ -977,8 +985,8 @@ def ovis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 def ovis2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Ovis2."""
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.llm.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.llm.get_output_embeddings()
     )
 
     def processor(*args, text="", images=None, videos=None, **kwargs):
@@ -1111,6 +1119,19 @@ def qwen3_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
+def cohere_compass_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Declare the video modality that CohereCompass omits upstream.
+
+    Without it ``generate`` leaves ``pixel_values_videos`` unconsumed and the
+    forward pass rejects it, see huggingface/transformers#49320. Drop this once
+    the pinned transformers declares the modality itself.
+    """
+    model = hf_model.model
+    if "video" not in model.input_modalities:
+        model.input_modalities = (*model.input_modalities, "video")
+    return hf_model
+
+
 def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
     """Patch HfRunner for Voxtral's conversation-based processor.
 
@@ -1194,7 +1215,7 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
         return output
 
     hf_model.get_inputs = patched_get_inputs  # type: ignore[method-assign]
-    hf_model.model.generate = patched_generate  # type: ignore[method-assign]
+    hf_model.model.generate = patched_generate
     return hf_model
 
 

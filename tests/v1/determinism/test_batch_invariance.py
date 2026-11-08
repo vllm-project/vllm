@@ -12,12 +12,15 @@ from utils import (
     TEST_MODEL,
     _extract_step_logprobs,
     _random_prompt,
-    skip_if_not_cuda,
+    skip_if_not_cuda_alike,
     skip_unsupported,
 )
 
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
+from vllm.inputs import TokensPrompt
+from vllm.platforms import current_platform
+from vllm.transformers_utils.config import get_config
 
 
 @skip_unsupported
@@ -114,7 +117,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
 
         mismatches = 0
 
-        for trial in range(num_trials):
+        for _ in range(num_trials):
             # Create a batch of size `max_batch_size` and insert the needle at
             # a random index
             prompts: list[str] = []
@@ -176,20 +179,10 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     random.seed(seed)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
-    # For batch invariance, disable custom all-reduce to ensure deterministic
-    # all-reduce operations (custom all-reduce may not be deterministic)
-    import vllm.envs as envs
-
-    disable_custom_ar = envs.VLLM_BATCH_INVARIANT
-
-    if disable_custom_ar:
-        print(f"\n{'=' * 80}")
-        print(f"BATCH INVARIANCE MODE: Disabling custom all-reduce (TP={tp_size})")
-        print(f"{'=' * 80}\n")
-
     llm = LLM(
         model=TEST_MODEL,
         tensor_parallel_size=tp_size,
+        disable_custom_all_reduce=os.getenv("VLLM_TEST_DISABLE_CUSTOM_AR") == "1",
         max_num_seqs=128,
         max_model_len=8192,
         dtype="auto",  # not everything is supported
@@ -723,8 +716,10 @@ def test_logprobs_without_batch_invariance_should_fail(
         pytest.fail(fail_msg)
 
 
-@skip_if_not_cuda
-@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
+@skip_if_not_cuda_alike
+@pytest.mark.parametrize(
+    "backend", ["TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
+)
 def test_decode_logprobs_match_prefill_logprobs(
     backend,
 ):
@@ -743,15 +738,6 @@ def test_decode_logprobs_match_prefill_logprobs(
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
-
-    import vllm.envs as envs
-
-    disable_custom_ar = envs.VLLM_BATCH_INVARIANT
-
-    if disable_custom_ar:
-        print(f"\n{'=' * 80}")
-        print(f"BATCH INVARIANCE MODE: Disabling custom all-reduce (TP={tp_size})")
-        print(f"{'=' * 80}\n")
 
     llm = LLM(
         model=TEST_MODEL,
@@ -798,32 +784,16 @@ def test_decode_logprobs_match_prefill_logprobs(
         print(f"[Prompt {prompt_idx}] Generated {len(token_ids)} tokens: {token_ids}")
         print(f"[Prompt {prompt_idx}] Decode logprobs: {decode_logprobs.tolist()}")
 
-        # Step 2: For each token position, run prefill and compare
+        # Step 2: For each token position, run prefill and compare.
+        prompt_token_ids = list(decode_output.prompt_token_ids or [])
+
         print(f"\n[Prompt {prompt_idx}] Verifying each token via prefill...")
 
         for token_idx in range(len(token_ids)):
-            # Construct the prefix up to (but not including) this token
+            # Construct the prefix up to (but not including) this token using
+            # token ids directly.
             current_token = token_ids[token_idx]
-
-            # We need to detokenize to get the text prefix
-            # For this, we'll use the tokenizer from the LLM
-            # However, the LLM API doesn't expose tokenizer easily, so we'll
-            # construct the prefix by decoding from the original prompt
-
-            # Get text up to this point by using the output text
-            # This is approximate but should work for verification
-            if token_idx == 0:
-                prefix_prompt = prompt
-            else:
-                # No per-token text, so regenerate with max_tokens = token_idx
-                # to get the prefix text
-                prefix_sp = SamplingParams(
-                    temperature=0.0,
-                    max_tokens=token_idx,
-                    logprobs=1,
-                )
-                prefix_output = llm.generate([prompt], prefix_sp, use_tqdm=False)[0]
-                prefix_prompt = prompt + prefix_output.outputs[0].text
+            prefix_token_ids = prompt_token_ids + list(token_ids[:token_idx])
 
             # Now run prefill with max_tokens=1 to get the logprob of the next token
             prefill_sp = SamplingParams(
@@ -834,19 +804,23 @@ def test_decode_logprobs_match_prefill_logprobs(
 
             print(
                 f"  [Token {token_idx}] Running prefill for prefix "
-                f"(len={len(prefix_prompt)})..."
+                f"(num_tokens={len(prefix_token_ids)})..."
             )
-            prefill_output = llm.generate([prefix_prompt], prefill_sp, use_tqdm=False)[
-                0
-            ]
-            prefill_logprobs, prefill_token_ids = _extract_step_logprobs(prefill_output)
+            prefill_output = llm.generate(
+                [TokensPrompt(prompt_token_ids=prefix_token_ids)],
+                prefill_sp,
+                use_tqdm=False,
+            )[0]
+            prefill_logprobs, prefill_token_ids_out = _extract_step_logprobs(
+                prefill_output
+            )
 
             if prefill_logprobs is None:
                 print(f"  [Token {token_idx}] Warning: No prefill logprobs available")
                 continue
 
             # The first token from prefill should match the current token
-            prefill_token = prefill_token_ids[0]
+            prefill_token = prefill_token_ids_out[0]
             prefill_logprob = prefill_logprobs[0].item()
             decode_logprob = decode_logprobs[token_idx].item()
 
@@ -871,7 +845,7 @@ def test_decode_logprobs_match_prefill_logprobs(
                         "decode_logprob": decode_logprob,
                         "prefill_logprob": prefill_logprob,
                         "prompt_text": prompt[:100],
-                        "prefix_text": prefix_prompt[:100],
+                        "prefix_token_ids": prefix_token_ids[:50],
                     }
                 )
                 print(f"  [Token {token_idx}] ✗ TOKEN MISMATCH!")
@@ -891,7 +865,7 @@ def test_decode_logprobs_match_prefill_logprobs(
                         "prefill_logprob": prefill_logprob,
                         "diff": diff,
                         "prompt_text": prompt[:100],
-                        "prefix_text": prefix_prompt[:100],
+                        "prefix_token_ids": prefix_token_ids[:50],
                         "decode_all_tokens": token_ids,
                         "decode_all_logprobs": decode_logprobs.tolist(),
                     }
@@ -928,7 +902,7 @@ def test_decode_logprobs_match_prefill_logprobs(
             for i, fail in enumerate(failures[:5]):  # Show first 5 failures per prompt
                 print(f"\n  [Failure {i + 1}] Token position {fail['token_idx']}:")
                 print(f"    Reason: {fail['reason']}")
-                print(f"    Prefix text: '{fail['prefix_text']}...'")
+                print(f"    Prefix token ids: {fail['prefix_token_ids']}...")
                 print(
                     f"    Decode:  token={fail['decode_token']}, "
                     f"logprob={fail['decode_logprob']:.10f}"
@@ -977,6 +951,124 @@ def test_decode_logprobs_match_prefill_logprobs(
     else:
         print("✓ SUCCESS: All decode logprobs match prefill logprobs bitwise!")
         print(f"{'=' * 80}\n")
+
+
+def _supports_online_fp8() -> bool:
+    if current_platform.is_rocm():
+        # Imported lazily: this module resolves the GPU arch at import time.
+        from vllm.platforms.rocm import on_mi3xx
+
+        return on_mi3xx()
+    return current_platform.has_device_capability(89)
+
+
+@skip_if_not_cuda_alike
+@pytest.mark.skipif(
+    not _supports_online_fp8(),
+    reason="Online FP8 requires compute capability 8.9+ or MI300/MI355",
+)
+@pytest.mark.timeout(600)
+def test_online_fp8_moe_logprobs_bitwise_bs1_vs_bsN():
+    """Online (per-tensor weight, dynamic activation) FP8 MoE experts must not
+    let a request's output depend on the other requests in its batch.
+
+    Guards against the expert inputs being quantized with a single dynamic
+    scale over the whole batch (issue #57016): the scale is then the max over
+    every token of every co-batched request, so greedy tokens and logprobs
+    change with batch composition even though each batch is deterministic.
+    """
+    random.seed(int(os.getenv("VLLM_TEST_SEED", "12345")))
+    prompts = [_random_prompt(10, 50) for _ in range(8)]
+    sp = SamplingParams(temperature=0.0, max_tokens=32, logprobs=1)
+
+    llm = LLM(
+        model="ibm-granite/granite-3.1-1b-a400m-instruct",
+        quantization="fp8_per_tensor",
+        enforce_eager=True,
+        max_num_seqs=8,
+        max_model_len=2048,
+        gpu_memory_utilization=0.4,
+        enable_prefix_caching=False,
+    )
+    try:
+        bs1 = [
+            _extract_step_logprobs(llm.generate([p], sp, use_tqdm=False)[0])
+            for p in prompts
+        ]
+        bsN = [
+            _extract_step_logprobs(o) for o in llm.generate(prompts, sp, use_tqdm=False)
+        ]
+    finally:
+        with contextlib.suppress(Exception):
+            llm.llm_engine.engine_core.shutdown()
+
+    for i, ((lp1, tok1), (lpN, tokN)) in enumerate(zip(bs1, bsN)):
+        assert lp1 is not None and lpN is not None
+        assert tok1 == tokN, (
+            f"Prompt {i}: tokens differ between BS=1 and BS={len(prompts)}: "
+            f"{tok1} vs {tokN}"
+        )
+        assert torch.equal(lp1, lpN), (
+            f"Prompt {i}: logprobs are not bitwise equal between BS=1 and "
+            f"BS={len(prompts)}; max abs diff {(lp1 - lpN).abs().max():.3e}"
+        )
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(90)),
+    reason="FA3 drops covered sliding windows only on CUDA Hopper",
+)
+@pytest.mark.timeout(600)
+def test_sliding_window_logprobs_bitwise_alone_vs_mixed_batch():
+    """A sliding-window request must decode the same bits alone (FULL CUDA
+    graphs) and next to other requests' prefill chunks (eager), see #65587."""
+    model = "google/gemma-2-2b-it"
+    window = get_config(model, trust_remote_code=False).sliding_window
+    max_model_len = 2 * window
+    max_tokens = 16
+    rng = random.Random(int(os.getenv("VLLM_TEST_SEED", "12345")))
+
+    def prompt(num_tokens: int) -> TokensPrompt:
+        ids = [rng.randint(1000, 30000) for _ in range(num_tokens)]
+        return TokensPrompt(prompt_token_ids=ids)
+
+    # Every sequence spans several KV tiles but stays inside the window, so
+    # mixed steps see max_seqlen_k < window while FULL graphs see max_model_len.
+    targets = [prompt(rng.randint(256, 512)) for _ in range(4)]
+    fillers = [prompt(rng.randint(window // 2, window - max_tokens)) for _ in range(4)]
+
+    # Random token ids make Gemma emit <end_of_turn> within a few steps.
+    sp = SamplingParams(
+        temperature=0.0, max_tokens=max_tokens, logprobs=1, ignore_eos=True
+    )
+    llm = LLM(
+        model=model,
+        attention_config={"backend": "FLASH_ATTN"},
+        compilation_config={"cudagraph_mode": "FULL_AND_PIECEWISE"},
+        max_model_len=max_model_len,
+        max_num_batched_tokens=256,
+        max_num_seqs=len(targets) + len(fillers),
+        gpu_memory_utilization=0.4,
+        enable_prefix_caching=False,
+    )
+    try:
+        alone = [
+            _extract_step_logprobs(llm.generate([p], sp, use_tqdm=False)[0])
+            for p in targets
+        ]
+        outputs = llm.generate(targets + fillers, sp, use_tqdm=False)
+        batched = [_extract_step_logprobs(o) for o in outputs[: len(targets)]]
+    finally:
+        with contextlib.suppress(Exception):
+            llm.llm_engine.engine_core.shutdown()
+
+    for i, ((lp1, tok1), (lpN, tokN)) in enumerate(zip(alone, batched)):
+        assert len(tok1) == max_tokens and len(tokN) == max_tokens
+        assert tok1 == tokN, f"Prompt {i}: tokens differ: {tok1} vs {tokN}"
+        assert torch.equal(lp1, lpN), (
+            f"Prompt {i}: logprobs differ alone vs batched; "
+            f"max abs diff {(lp1 - lpN).abs().max():.3e}"
+        )
 
 
 def LLM_with_max_seqs(

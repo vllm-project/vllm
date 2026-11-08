@@ -455,6 +455,32 @@ def test_per_head_quant_scales_backend_selection(
             assert backend_name in str(exc_info.value)
 
 
+@pytest.mark.skipif(
+    CudaPlatform is None and RocmPlatform is None,
+    reason="CUDA or ROCm platform is required for this test",
+)
+@pytest.mark.parametrize("head_size", [64, 80, 96, 128, 192, 256])
+def test_int4_per_token_head_head_size_selection(head_size: int):
+    """INT4 per-token-head KV cache is selectable at any even head size.
+
+    The Hadamard rotation the INT4 write path applies is now defined for
+    non-power-of-two rows as well (it runs block-diagonally, see
+    ``fast_hadamard_transform``), so a model such as Phi-3 (head_size=96) must
+    keep selecting TRITON_ATTN instead of being rejected.
+    """
+    vllm_config = VllmConfig(cache_config=CacheConfig(block_size=64))
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm.platforms.current_platform", (CudaPlatform or RocmPlatform)()),
+    ):
+        backend = get_attn_backend(
+            head_size=head_size,
+            dtype=torch.float16,
+            kv_cache_dtype="int4_per_token_head",
+        )
+        assert backend.get_name() == "TRITON_ATTN"
+
+
 @pytest.mark.parametrize(
     "backend_name,use_non_causal,should_succeed",
     [
@@ -475,7 +501,7 @@ def test_non_causal_backend_selection(
 ):
     """Test that use_non_causal on AttentionConfig controls backend filtering.
 
-    DFlashProposer sets use_non_causal=True on the draft model's
+    DFlash draft model configs set use_non_causal=True on the
     AttentionConfig so only non-causal-capable backends are selected.
     The target model keeps use_non_causal=False (default) and can use
     any backend.
@@ -535,11 +561,12 @@ def test_non_causal_autoselect_backend():
         attention_config=attention_config, cache_config=cache_config
     )
 
-    if CudaPlatform is None:
-        pytest.skip("CudaPlatform not available")
+    platform = CudaPlatform or RocmPlatform
+    if platform is None:
+        pytest.skip("CudaPlatform and RocmPlatform are not available")
     with (
         set_current_vllm_config(vllm_config),
-        patch("vllm.platforms.current_platform", CudaPlatform()),
+        patch("vllm.platforms.current_platform", platform()),
     ):
         backend = get_attn_backend(
             head_size=128,

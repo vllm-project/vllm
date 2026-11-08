@@ -15,6 +15,7 @@ from typing import Any
 
 import torch
 from torch import nn
+from transformers import LongcatFlashConfig
 
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
@@ -30,15 +31,15 @@ from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.states import RequestState
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .longcat_flash import FlashConfig, FlashModel
+from .longcat_flash import FlashModel
 from .utils import AutoWeightsLoader, PPMissingLayer, WeightsMapper, maybe_prefix
 
 
-def uses_ngram_embedding(config: FlashConfig) -> bool:
+def uses_ngram_embedding(config: LongcatFlashConfig) -> bool:
     return getattr(config, "ngram_vocab_size_ratio", None) is not None
 
 
-def _config_dtype(config: FlashConfig) -> torch.dtype:
+def _config_dtype(config: LongcatFlashConfig) -> torch.dtype:
     dt = getattr(config, "torch_dtype", None) or getattr(config, "dtype", None)
     if isinstance(dt, torch.dtype):
         return dt
@@ -54,7 +55,7 @@ class NgramEmbedding(nn.Module):
     single ``bmm``. Hashing math is ported from the HF reference.
     """
 
-    def __init__(self, config: FlashConfig, base_embeddings: nn.Module) -> None:
+    def __init__(self, config: LongcatFlashConfig, base_embeddings: nn.Module) -> None:
         super().__init__()
         self.config = config
         self.word_embeddings = base_embeddings
@@ -170,14 +171,6 @@ class FlashNgramModel(FlashModel):
     """FlashModel whose input embedding is an :class:`NgramEmbedding`."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        # Each FlashDecoderLayer is a *dual* layer (2 attentions), so the number
-        # of decoder layers is ``num_layers``. The ngram HF config sets
-        # ``num_hidden_layers`` to a multiple of that (attention-module count),
-        # which FlashModel would otherwise build as too many (dead) layers.
-        hf = vllm_config.model_config.hf_config
-        num_layers = getattr(hf, "num_layers", None)
-        if num_layers is not None and hf.num_hidden_layers != num_layers:
-            hf.num_hidden_layers = num_layers
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.ngram_embeddings: NgramEmbedding | None
         if get_pp_group().is_first_rank and uses_ngram_embedding(self.config):
@@ -204,7 +197,7 @@ class FlashNgramModel(FlashModel):
 
 
 class LongcatFlashNgramForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
-    """LongCat-Flash-Lite for causal LM (MRV2-only, n-gram embedding)."""
+    """LongCat-Flash-Lite for causal LM (n-gram embedding)."""
 
     # MTP weights are not part of this model.
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.mtp.": None})
@@ -216,16 +209,7 @@ class LongcatFlashNgramForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
-        if not vllm_config.use_v2_model_runner:
-            raise NotImplementedError(
-                "LongcatFlashNgramForCausalLM (LongCat-Flash-Lite) requires the "
-                "V2 model runner for its n-gram embedding state; it is selected "
-                "automatically unless VLLM_USE_V2_MODEL_RUNNER=0 is set."
-            )
-        config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
-        config.intermediate_size = getattr(
-            config, "ffn_hidden_size", config.intermediate_size
-        )
+        config = vllm_config.model_config.hf_config
         self.config = config
         self.quant_config = vllm_config.quant_config
 
@@ -317,14 +301,13 @@ class LongcatNgramModelState(DefaultModelState):
         super().add_request(req_index, new_req_data)  # rope positions
         # Fresh request -> no left-context (-1 fill). On resume, seed from the
         # already-processed token tail. Use prefill_token_ids (full processed
-        # sequence incl. generated tokens on v2 resume), like DefaultModelState;
+        # sequence incl. generated tokens on resume), like DefaultModelState;
         # the prompt alone would be too short when resuming after decode.
         ctx = [-1] * self.ctx_len
         ncomp = new_req_data.num_computed_tokens
-        toks_src = new_req_data.prefill_token_ids or new_req_data.prompt_token_ids
-        if ncomp > 0 and toks_src is not None:
+        if ncomp > 0:
             lo = max(0, ncomp - self.ctx_len)
-            toks = self._neg_eos(list(toks_src[lo:ncomp]))
+            toks = self._neg_eos(list(new_req_data.prefill_token_ids[lo:ncomp]))
             ctx[self.ctx_len - len(toks) :] = toks
         self.token_context[req_index] = torch.tensor(
             ctx, dtype=torch.int32, device=self.token_context.device

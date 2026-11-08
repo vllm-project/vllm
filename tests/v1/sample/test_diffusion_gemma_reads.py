@@ -20,7 +20,7 @@ from vllm.platforms import current_platform
 from vllm.v1.outputs import LogprobsTensors
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="the sampler state lives on the GPU"
+    not current_platform.is_cuda_alike(), reason="the sampler state lives on the GPU"
 )
 
 CL = 8
@@ -225,6 +225,10 @@ def test_single_step_tile_skips_self_conditioning():
     _denoise_once(states, [0], compute_sc=False)
 
     assert not states.self_conditioning_embeds[0].any()
+
+
+def test_sample_step_is_compiled():
+    assert hasattr(_compiled_sample_step, "_torchdynamo_orig_callable")
 
 
 @pytest.mark.parametrize("stance", ["default", "force_eager"])

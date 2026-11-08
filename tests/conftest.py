@@ -133,7 +133,6 @@ def sample_json_schema():
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
-_SYS_MSG = os.path.join(_TEST_DIR, "system_messages", "sonnet3.5_nov2024.txt")
 
 _M = TypeVar("_M")
 
@@ -309,12 +308,6 @@ def dynamo_reset():
 @pytest.fixture
 def example_prompts() -> list[str]:
     return [prompt for filename in _TEST_PROMPTS for prompt in _read_prompts(filename)]
-
-
-@pytest.fixture
-def example_system_message() -> str:
-    with open(_SYS_MSG) as f:
-        return f.read()
 
 
 @pytest.fixture(scope="session")
@@ -531,11 +524,13 @@ class HfRunner:
                 ),
             )
 
-            # in case some unquantized custom models are not in same dtype
+            # In case some unquantized custom models are not in the same dtype.
             if getattr(model, "quantization_method", None) is None and any(
                 p.dtype != self.dtype for p in model.parameters()
             ):
-                model = model.to(dtype=self.dtype)
+                for parameter in model.parameters():
+                    if parameter.is_floating_point() or parameter.is_complex():
+                        parameter.data = parameter.data.to(dtype=self.dtype)
 
             if len({p.device for p in model.parameters()}) < 2:
                 model = model.to(device=self.device)
@@ -824,10 +819,10 @@ class HfRunner:
 
         # convert to dict
         seq_logprobs_lst: list[dict[int, float]] = []
-        for tok_idx, tok_logprobs in enumerate(seq_logprobs):
-            # drop prompt logprobs
-            if tok_idx == 0:
-                tok_logprobs = tok_logprobs[-1, :].reshape(1, -1)
+        for tok_logprobs in seq_logprobs:
+            # Keep only the last position: the first step (and every step when
+            # use_cache=False) also returns logprobs for the preceding tokens.
+            tok_logprobs = tok_logprobs[-1, :].reshape(1, -1)
             topk = tok_logprobs.topk(num_logprobs)
 
             tok_logprobs_dct = {}
@@ -1019,9 +1014,12 @@ class VllmRunner:
         from vllm.platforms import current_platform
 
         if current_platform.is_rocm():
-            gpu_memory_utilization = kwargs.get(
-                "gpu_memory_utilization",
-                CacheConfig.gpu_memory_utilization,
+            # An unset utilization resolves to 1.0 with the extensible KV cache,
+            # which no longer needs the memory free up front; wait for the
+            # standard fraction in that case.
+            gpu_memory_utilization = (
+                kwargs.get("gpu_memory_utilization")
+                or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
             )
             # V1 startup requires free_memory >= total * gpu_memory_utilization.
             # ROCm CI can hand a test a device that is still lazily releasing
@@ -1385,6 +1383,7 @@ class VllmRunner:
         # because when the next test starts some GPU memory is still in use.
         gpu_memory_utilization = (
             self.llm.llm_engine.vllm_config.cache_config.gpu_memory_utilization
+            or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
         )
         from vllm.platforms import current_platform
 
@@ -1413,14 +1412,15 @@ def vllm_runner():
 
 
 @pytest.fixture()
-def temporary_enable_log_propagate():
+def temporary_enable_log_propagate(monkeypatch):
     import logging
 
-    logger = logging.getLogger("vllm")
-    previous_propagate = logger.propagate
-    logger.propagate = True
-    yield
-    logger.propagate = previous_propagate
+    from vllm.logger import DEFAULT_LOGGING_CONFIG
+
+    # The first LLM init in a process reapplies DEFAULT_LOGGING_CONFIG, which
+    # would otherwise turn propagation back off mid-test.
+    monkeypatch.setitem(DEFAULT_LOGGING_CONFIG["loggers"]["vllm"], "propagate", True)
+    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
 
 
 @pytest.fixture()

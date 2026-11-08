@@ -418,12 +418,6 @@ class InternS2MobiusForCausalLM(Qwen3_5ForCausalLMBase):
         self.quant_config = vllm_config.quant_config
         self.scheduler_config = vllm_config.scheduler_config
 
-        if vllm_config.cache_config.mamba_cache_mode == "all":
-            raise NotImplementedError(
-                "Intern-S2-Mobius does not support 'all' prefix caching; "
-                "use '--mamba-cache-mode=align' instead."
-            )
-
         nn.Module.__init__(self)
         self.config = config
         self.model = InternS2MobiusModel(

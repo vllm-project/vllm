@@ -34,7 +34,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_config,
-    get_marlin_input_dtype,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -121,13 +120,9 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             assert check_moe_marlin_supports_config(
                 self.moe, self.group_size, allow_tile_padding=True
             )
-            self.input_dtype = get_marlin_input_dtype(layer_name)
         else:
             # channelwise is not supported by this kernel
             assert weight_quant.strategy == "group"
-
-            # Non-Marlin WNA16 always uses bf16/fp16 inputs
-            self.input_dtype = torch.bfloat16
 
     def _packed_dim(self, dim: int) -> int:
         return math.ceil(dim * self.num_bits / 32)
@@ -411,7 +406,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             backend=self.wna16_backend,
             layer=layer,
             quant_config=self.weight_quant,
-            input_dtype=self.input_dtype,
             w13=layer.w13_weight_packed,
             w2=layer.w2_weight_packed,
             w13_scale=layer.w13_weight_scale,
@@ -433,8 +427,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             w2_scales,
             w13_qzeros,
             w2_qzeros,
-            w13_input_global_scale,
-            w2_input_global_scale,
             w13_bias,
             w2_bias,
         ) = converted
@@ -450,27 +442,16 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         if w2_bias is not None:
             replace_parameter(layer, "w2_bias", w2_bias)
 
-        # CPU fused_experts_cpu requires zero points even for symmetric quant.
+        # CPU fused_experts_cpu and the RDNA3 HIP kernel require zero points
+        # even for symmetric quant (the oracle synthesizes them).
         # EMULATION bakes ZP into the dequantized bf16 weights — ZP is None.
         if (
-            not self.symmetric or self.wna16_backend == WNA16MoEBackend.CPU
+            not self.symmetric
+            or self.wna16_backend in (WNA16MoEBackend.CPU, WNA16MoEBackend.RDNA3)
         ) and self.wna16_backend != WNA16MoEBackend.EMULATION:
             assert w13_qzeros is not None and w2_qzeros is not None
             replace_parameter(layer, "w13_weight_zero_point", w13_qzeros)
             replace_parameter(layer, "w2_weight_zero_point", w2_qzeros)
-
-        if self.is_marlin:
-            # Register input global scales if present
-            if w13_input_global_scale is not None:
-                layer.register_parameter(
-                    "w13_input_global_scale",
-                    torch.nn.Parameter(w13_input_global_scale, requires_grad=False),
-                )
-            if w2_input_global_scale is not None:
-                layer.register_parameter(
-                    "w2_input_global_scale",
-                    torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
-                )
 
         # Alias packed weights to w13_weight/w2_weight for the modular kernel interface
         layer.w13_weight = layer.w13_weight_packed
@@ -528,6 +509,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
     def apply(
