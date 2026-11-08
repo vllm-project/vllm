@@ -260,9 +260,6 @@ apache-tvm-ffi==0.1.14.post0 \
     --hash=sha256:dc4dcda9b7d990452200e06ac3d677b6b675c761b23d0970a05b8bf78e1609cb \
     --hash=sha256:fbff37582722fa382b04cdb15654a6bf78172d86ea7afb95b91110e3f04a934b
     # via xgrammar
-arctic-inference==0.1.1 \
-    --hash=sha256:36857e2fbe3ead34821a04be98dfab95086050c1e38199c8fdfe308234fdcf63
-    # via -r requirements/test/cuda.in
 argcomplete==3.5.1 \
     --hash=sha256:1a1d148bdaa3e3b93454900163403df41448a248af01b6e849edc5ac08e6c363 \
     --hash=sha256:eb1ee355aa2557bd3d0145de7b06b2a45b0ce461e1e7813f5d066039ab4177b4
