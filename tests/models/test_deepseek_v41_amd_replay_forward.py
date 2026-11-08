@@ -67,6 +67,7 @@ class _RocmKvInsert:
             torch.arange(num_tokens + 8, dtype=torch.float32, device=DEVICE), inv_freq
         )
         self.attn = SimpleNamespace(
+            use_pcp=False,
             kv_mxfp8=self.kv_mxfp8,
             compressor=None,
             indexer=None,
@@ -213,7 +214,6 @@ def _model(monkeypatch):
         model_config=SimpleNamespace(hf_config=config, dtype=torch.bfloat16),
         quant_config=None,
         cache_config=SimpleNamespace(swa_bounded_replay=True),
-        use_v2_model_runner=True,
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=1,
             use_ubatching=False,

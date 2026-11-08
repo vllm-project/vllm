@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -22,6 +23,7 @@ from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
+from vllm.inputs.engine import tokens_input
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput, WeightVersionSpan
 from vllm.renderers.deepseek_v4 import DeepseekV4Renderer
@@ -59,6 +61,7 @@ class MockModelConfig:
     task = "generate"
     runner_type = "generate"
     model = MODEL_NAME
+    served_model_name = MODEL_NAME
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
@@ -414,6 +417,7 @@ async def test_completion_weight_versions(stream: bool, opt_in: bool):
     response = await _build_serving_completion(mock_engine).create_completion(request)
 
     if stream:
+        assert isinstance(response, AsyncGenerator)
         finals = {}
         async for line in response:
             payload = line.removeprefix("data: ").strip()
@@ -426,6 +430,7 @@ async def test_completion_weight_versions(stream: bool, opt_in: bool):
                     assert choice.get("weight_versions") is None
         got = [finals[i].get("weight_versions") for i in (0, 1)]
     else:
+        assert isinstance(response, CompletionResponse)
         got = [choice["weight_versions"] for choice in response.model_dump()["choices"]]
     assert got == ([expected, []] if opt_in else [None, None])
 
@@ -458,13 +463,16 @@ def _deepseek_v4_suffix_renderer(
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_completion_suffix_uses_renderer_capability():
+async def test_completion_suffix_uses_renderer_capability(
+    monkeypatch: pytest.MonkeyPatch,
+):
     model_config = MockModelConfig()
     online_renderer = _build_online_renderer_for_completion(
         model_config,
         renderer=_deepseek_v4_suffix_renderer(model_config),
     )
-    online_renderer.preprocess_completion = AsyncMock(return_value=[{"ok": True}])
+    preprocess_completion = AsyncMock(return_value=[{"ok": True}])
+    monkeypatch.setattr(online_renderer, "preprocess_completion", preprocess_completion)
 
     request = CompletionRequest(
         model=MODEL_NAME,
@@ -476,8 +484,8 @@ async def test_completion_suffix_uses_renderer_capability():
     result = await online_renderer.render_completion(request)
 
     assert result == [{"ok": True}]
-    online_renderer.preprocess_completion.assert_awaited_once()
-    assert online_renderer.preprocess_completion.call_args.kwargs["prompt_input"] == (
+    preprocess_completion.assert_awaited_once()
+    assert preprocess_completion.call_args.kwargs["prompt_input"] == (
         f"{DEEPSEEK_V4_FIM_BEGIN}def fib(n):\n    return "
         f"{DEEPSEEK_V4_FIM_HOLE}\n\nprint(fib(10))"
         f"{DEEPSEEK_V4_FIM_END}"
@@ -486,13 +494,16 @@ async def test_completion_suffix_uses_renderer_capability():
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_completion_suffix_supports_text_prompt_list():
+async def test_completion_suffix_supports_text_prompt_list(
+    monkeypatch: pytest.MonkeyPatch,
+):
     model_config = MockModelConfig()
     online_renderer = _build_online_renderer_for_completion(
         model_config,
         renderer=_deepseek_v4_suffix_renderer(model_config),
     )
-    online_renderer.preprocess_completion = AsyncMock(return_value=[{"ok": True}])
+    preprocess_completion = AsyncMock(return_value=[{"ok": True}])
+    monkeypatch.setattr(online_renderer, "preprocess_completion", preprocess_completion)
 
     request = CompletionRequest(
         model=MODEL_NAME,
@@ -503,7 +514,7 @@ async def test_completion_suffix_supports_text_prompt_list():
     result = await online_renderer.render_completion(request)
 
     assert result == [{"ok": True}]
-    assert online_renderer.preprocess_completion.call_args.kwargs["prompt_input"] == [
+    assert preprocess_completion.call_args.kwargs["prompt_input"] == [
         (
             f"{DEEPSEEK_V4_FIM_BEGIN}prefix A"
             f"{DEEPSEEK_V4_FIM_HOLE} suffix{DEEPSEEK_V4_FIM_END}"
@@ -517,10 +528,13 @@ async def test_completion_suffix_supports_text_prompt_list():
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_completion_suffix_rejects_renderer_without_fim_support():
+async def test_completion_suffix_rejects_renderer_without_fim_support(
+    monkeypatch: pytest.MonkeyPatch,
+):
     model_config = MockModelConfig()
     online_renderer = _build_online_renderer_for_completion(model_config)
-    online_renderer.preprocess_completion = AsyncMock()
+    preprocess_completion = AsyncMock()
+    monkeypatch.setattr(online_renderer, "preprocess_completion", preprocess_completion)
 
     request = CompletionRequest(
         model=MODEL_NAME,
@@ -532,18 +546,19 @@ async def test_completion_suffix_rejects_renderer_without_fim_support():
 
     assert isinstance(result, ErrorResponse)
     assert "FIM completion rendering" in result.error.message
-    online_renderer.preprocess_completion.assert_not_awaited()
+    preprocess_completion.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_completion_suffix_rejects_echo():
+async def test_completion_suffix_rejects_echo(monkeypatch: pytest.MonkeyPatch):
     model_config = MockModelConfig()
     online_renderer = _build_online_renderer_for_completion(
         model_config,
         renderer=_deepseek_v4_suffix_renderer(model_config),
     )
-    online_renderer.preprocess_completion = AsyncMock()
+    preprocess_completion = AsyncMock()
+    monkeypatch.setattr(online_renderer, "preprocess_completion", preprocess_completion)
 
     request = CompletionRequest(
         model=MODEL_NAME,
@@ -556,18 +571,21 @@ async def test_completion_suffix_rejects_echo():
 
     assert isinstance(result, ErrorResponse)
     assert "Echo is unsupported with suffix" in result.error.message
-    online_renderer.preprocess_completion.assert_not_awaited()
+    preprocess_completion.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_completion_suffix_rejects_prompt_embeds():
+async def test_completion_suffix_rejects_prompt_embeds(
+    monkeypatch: pytest.MonkeyPatch,
+):
     model_config = MockModelConfig()
     online_renderer = _build_online_renderer_for_completion(
         model_config,
         renderer=_deepseek_v4_suffix_renderer(model_config),
     )
-    online_renderer.preprocess_completion = AsyncMock()
+    preprocess_completion = AsyncMock()
+    monkeypatch.setattr(online_renderer, "preprocess_completion", preprocess_completion)
 
     request = CompletionRequest(
         model=MODEL_NAME,
@@ -580,19 +598,22 @@ async def test_completion_suffix_rejects_prompt_embeds():
 
     assert isinstance(result, ErrorResponse)
     assert "suffix is not supported with prompt_embeds" in result.error.message
-    online_renderer.preprocess_completion.assert_not_awaited()
+    preprocess_completion.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("prompt", ([1, 2, 3], [[1, 2, 3]]))
-async def test_completion_suffix_rejects_token_prompt(prompt):
+async def test_completion_suffix_rejects_token_prompt(
+    prompt, monkeypatch: pytest.MonkeyPatch
+):
     model_config = MockModelConfig()
     online_renderer = _build_online_renderer_for_completion(
         model_config,
         renderer=_deepseek_v4_suffix_renderer(model_config),
     )
-    online_renderer.preprocess_completion = AsyncMock()
+    preprocess_completion = AsyncMock()
+    monkeypatch.setattr(online_renderer, "preprocess_completion", preprocess_completion)
 
     request = CompletionRequest(
         model=MODEL_NAME,
@@ -604,7 +625,7 @@ async def test_completion_suffix_rejects_token_prompt(prompt):
 
     assert isinstance(result, ErrorResponse)
     assert "requires text prompt input" in result.error.message
-    online_renderer.preprocess_completion.assert_not_awaited()
+    preprocess_completion.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -657,7 +678,9 @@ async def test_completion_error_non_stream():
 
 
 @pytest.mark.asyncio
-async def test_openai_completion_keeps_mm_cache_for_engine_execution():
+async def test_openai_completion_keeps_mm_cache_for_engine_execution(
+    monkeypatch: pytest.MonkeyPatch,
+):
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -665,8 +688,11 @@ async def test_openai_completion_keeps_mm_cache_for_engine_execution():
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_completion = _build_serving_completion(mock_engine)
-    serving_completion.online_renderer.preprocess_completion = AsyncMock(
-        return_value=[{"prompt_token_ids": [1, 2, 3]}]
+    preprocess_completion = AsyncMock(return_value=[{"prompt_token_ids": [1, 2, 3]}])
+    monkeypatch.setattr(
+        serving_completion.online_renderer,
+        "preprocess_completion",
+        preprocess_completion,
     )
 
     request = CompletionRequest(
@@ -677,15 +703,12 @@ async def test_openai_completion_keeps_mm_cache_for_engine_execution():
     result = await serving_completion.render_completion_request(request)
 
     assert isinstance(result, list)
-    assert (
-        serving_completion.online_renderer.preprocess_completion.call_args.kwargs[
-            "skip_mm_cache"
-        ]
-        is False
-    )
+    assert preprocess_completion.call_args.kwargs["skip_mm_cache"] is False
 
 
-def _build_serving_render(engine: AsyncLLM) -> ServingRender:
+def _build_serving_render(
+    engine: AsyncLLM, monkeypatch: pytest.MonkeyPatch
+) -> ServingRender:
     models = OpenAIServingModels(
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
@@ -707,24 +730,31 @@ def _build_serving_render(engine: AsyncLLM) -> ServingRender:
             [{"prompt_token_ids": [1, 2, 3]}],
         )
 
-    serving_render.online_renderer.preprocess_chat = AsyncMock(
-        side_effect=_fake_preprocess_chat
+    monkeypatch.setattr(
+        serving_render.online_renderer,
+        "preprocess_chat",
+        AsyncMock(side_effect=_fake_preprocess_chat),
     )
     return serving_render
 
 
 @pytest.mark.asyncio
-async def test_renderer_only_completion_request_skips_mm_cache():
+async def test_renderer_only_completion_request_skips_mm_cache(
+    monkeypatch: pytest.MonkeyPatch,
+):
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
-    serving_render = _build_serving_render(mock_engine)
+    serving_render = _build_serving_render(mock_engine, monkeypatch)
 
-    serving_render.online_renderer.preprocess_completion = AsyncMock(
-        return_value=[{"prompt_token_ids": [1, 2, 3]}]
+    preprocess_completion = AsyncMock(return_value=[{"prompt_token_ids": [1, 2, 3]}])
+    monkeypatch.setattr(
+        serving_render.online_renderer,
+        "preprocess_completion",
+        preprocess_completion,
     )
 
     request = CompletionRequest(
@@ -735,12 +765,7 @@ async def test_renderer_only_completion_request_skips_mm_cache():
     result = await serving_render.render_completion_request(request)
 
     assert isinstance(result, list)
-    assert (
-        serving_render.online_renderer.preprocess_completion.call_args.kwargs[
-            "skip_mm_cache"
-        ]
-        is True
-    )
+    assert preprocess_completion.call_args.kwargs["skip_mm_cache"] is True
 
 
 @pytest.mark.asyncio
@@ -796,6 +821,7 @@ async def test_completion_logs_outputs_when_enabled(stream: bool):
 
     response = await serving_completion.create_completion(request)
     if stream:
+        assert isinstance(response, AsyncGenerator)
         async for _ in response:
             pass
 
@@ -812,6 +838,156 @@ async def test_completion_logs_outputs_when_enabled(stream: bool):
         assert logged[0]["outputs"] == "Hello world"
         assert logged[0]["output_token_ids"] == [100, 101]
         assert logged[0]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "options",
+    [
+        pytest.param({}, id="plain"),
+        pytest.param({"stream_options": {"include_usage": True}}, id="final-usage"),
+        pytest.param(
+            {"stream_options": {"include_usage": True, "continuous_usage_stats": True}},
+            id="continuous-usage",
+        ),
+        pytest.param({"echo": True}, id="echo"),
+        pytest.param({"logprobs": 1}, id="logprobs"),
+        pytest.param({"return_token_ids": True}, id="token-ids"),
+        pytest.param({"return_weight_versions": True}, id="weight-versions"),
+        pytest.param({"request_id": "987654321"}, id="ambiguous-template"),
+    ],
+)
+async def test_completion_stream_matches_model_serialization(
+    options: dict[str, Any], monkeypatch: pytest.MonkeyPatch, caplog_vllm
+):
+    from vllm.entrypoints.openai.completion import serving as serving_module
+
+    engine = MagicMock(spec=AsyncLLM)
+    engine.model_config = MockModelConfig()
+    engine.input_processor = MagicMock()
+    engine.renderer = _build_renderer(engine.model_config)
+    serving = _build_serving_completion(
+        engine,
+        request_logger=RequestLogger(max_log_len=None),
+        enable_log_outputs=True,
+        enable_prompt_tokens_details=True,
+    )
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt=["Test prompt", "Test prompt"],
+        n=2,
+        max_tokens=3,
+        stream=True,
+        **options,
+    )
+    request_id = f"cmpl-{request.request_id}"
+
+    async def results():
+        for text, token_id, finish_reason in [
+            ('hé"\\\n', 100, None),
+            ("", 101, None),
+            (" end", 102, "stop"),
+        ]:
+            logprobs = [{token_id: Logprob(-0.1, decoded_token=text or "held")}]
+            for prompt_idx in range(2):
+                result = RequestOutput(
+                    request_id=request_id,
+                    prompt="Test prompt",
+                    prompt_token_ids=[1, 2, 3],
+                    prompt_logprobs=None,
+                    outputs=[
+                        CompletionOutput(
+                            index=i,
+                            text=text,
+                            token_ids=[token_id],
+                            cumulative_logprob=None,
+                            logprobs=logprobs,
+                            finish_reason=finish_reason,
+                            stop_reason=" end" if finish_reason else None,
+                            weight_versions=[WeightVersionSpan("v1", 0, 3)]
+                            if finish_reason
+                            else None,
+                        )
+                        for i in range(2)
+                    ],
+                    finished=finish_reason is not None,
+                    num_cached_tokens=2,
+                    kv_transfer_params={"remote": "cache"},
+                )
+                yield prompt_idx, result
+
+    async def collect():
+        caplog_vllm.clear()
+        metadata = RequestResponseMetadata(request_id=request_id)
+        frames = [
+            frame
+            async for frame in serving.completion_stream_generator(
+                request,
+                [tokens_input([1, 2, 3]), tokens_input([1, 2, 3])],
+                results(),
+                request_id,
+                1706000000,
+                MODEL_NAME,
+                2,
+                engine.renderer.tokenizer,
+                metadata,
+            )
+        ]
+        logs = [
+            record.getMessage()
+            for record in caplog_vllm.records
+            if record.name == "vllm.entrypoints.serve.utils.request_logger"
+        ]
+        return frames, metadata.final_usage_info, logs
+
+    actual = await collect()
+    with monkeypatch.context() as reference:
+        reference.setattr(serving_module, "_delta_frame_template", lambda *_: None)
+        assert actual == await collect()
+
+    frames, usage, logs = actual
+    assert frames[-1] == "data: [DONE]\n\n"
+    chunks = [json.loads(frame.removeprefix("data: ")) for frame in frames[:-1]]
+    choices = [chunk["choices"][0] for chunk in chunks if chunk["choices"]]
+    assert [choice["index"] for choice in choices] == [0, 1, 2, 3] * 3
+    assert [choice["text"] for choice in choices[:4]] == [
+        ("Test prompt" if request.echo else "") + 'hé"\\\n'
+    ] * 4
+    assert [choice["text"] for choice in choices[4:8]] == [""] * 4
+    assert all(choice["finish_reason"] == "stop" for choice in choices[-4:])
+    assert all(choice["stop_reason"] == " end" for choice in choices[-4:])
+    assert all(
+        chunk["kv_transfer_params"] == {"remote": "cache"} for chunk in chunks[8:12]
+    )
+    assert usage is not None
+    assert (usage.prompt_tokens, usage.completion_tokens, usage.total_tokens) == (
+        6,
+        12,
+        18,
+    )
+    assert usage.prompt_tokens_details is not None
+    assert usage.prompt_tokens_details.cached_tokens == 2
+    assert len(logs) == 12
+    assert sum("(streaming complete)" in log for log in logs) == 4
+    if request.return_token_ids:
+        assert all(choice["prompt_token_ids"] == [1, 2, 3] for choice in choices[:4])
+        assert [choice["token_ids"] for choice in choices] == [
+            [token_id] for token_id in (100, 101, 102) for _ in range(4)
+        ]
+    if request.return_weight_versions:
+        assert all(
+            choice["weight_versions"] == [{"version": "v1", "start": 0, "end": 3}]
+            for choice in choices[-4:]
+        )
+    if request.logprobs is not None:
+        assert choices[0]["logprobs"]["token_logprobs"] == [-0.1]
+    if request.stream_options and request.stream_options.include_usage:
+        assert chunks[-1]["choices"] == []
+        assert chunks[-1]["usage"] == usage.model_dump(exclude_none=True)
+        if request.stream_options.continuous_usage_stats:
+            assert [chunk["usage"]["completion_tokens"] for chunk in chunks[:12]] == [
+                count for count in (1, 2, 3) for _ in range(4)
+            ]
 
 
 @pytest.mark.asyncio
@@ -886,6 +1062,7 @@ async def test_completion_error_stream(include_usage: bool):
 
     response = await serving_completion.create_completion(request)
 
+    assert isinstance(response, AsyncGenerator)
     chunks = []
     async for chunk in response:
         chunks.append(chunk)
@@ -946,6 +1123,7 @@ async def test_completion_error_stream_first_chunk(include_usage: bool):
 
     response = await serving_completion.create_completion(request)
 
+    assert isinstance(response, AsyncGenerator)
     chunks = []
     async for chunk in response:
         chunks.append(chunk)

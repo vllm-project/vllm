@@ -6,7 +6,8 @@ This file owns the ROCm-specific fused-MoE custom-op path:
 - custom-op registration and fake-tensor support
 - enablement gating for ``VLLM_ROCM_USE_AITER_MOE`` and shared experts
 - BF16 accuracy for the fused MoE kernel on representative shapes
-- gfx950-only AITER MXFP4 W4A16 MoE support, accuracy, and determinism
+- AITER MXFP4 MoE support per arch (incl. the MXFP4 experts check), and the
+  gfx950-only W4A16 accuracy and determinism
 - MoE-facing FP8 group-quant activation quality
 - deterministic routing and representative gfx942 / gfx950 coverage
 
@@ -31,7 +32,7 @@ import torch.nn.functional as F
 from tests.kernels.moe.utils import _interleave_gate_up_rows
 from tests.kernels.utils import _assert_deterministic
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_cdna, on_gfx942, on_gfx950
+from vllm.platforms.rocm import get_cdna_version, on_cdna, on_gfx942, on_gfx950
 from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
@@ -222,6 +223,10 @@ def ref_moe_forward(
             act = F.silu(gate) * up
         elif activation == "gelu":
             act = F.gelu(gate) * up
+        elif activation == "swigluoai":
+            gate = gate.clamp(max=7.0)
+            up = up.clamp(-7.0, 7.0)
+            act = gate * torch.sigmoid(1.702 * gate) * (up + 1)
         else:
             raise ValueError(f"Unknown activation: {activation}")
         output[expert_mask] = act @ w2_f[expert_idx].T
@@ -632,28 +637,38 @@ def test_aiter_moe_padding_env_var(
 
 
 @pytest.mark.parametrize(
-    ("activation", "use_mxfp4_w4a4", "tp_size", "pads", "expected"),
+    ("activation", "use_mxfp4_w4a4", "use_mxfp4_w4a16", "tp_size", "pads", "expected"),
     [
         # W4A4 SiLU: AITER doubles the pad itself, at TP1 (and EP) as at TP2.
-        ("SILU", True, 1, (0, 64), (0, 64)),
-        ("SILU", True, 1, (0, 128), (0, 128)),
-        ("SILU", True, 2, (0, 64), (0, 64)),
-        # gpt-oss W4A16 at TP1 keeps the doubled pad.
-        ("SWIGLUOAI", False, 1, (0, 192), (0, 384)),
+        ("SILU", True, False, 1, (0, 64), (0, 64)),
+        ("SILU", True, False, 1, (0, 128), (0, 128)),
+        ("SILU", True, False, 2, (0, 64), (0, 64)),
+        # gpt-oss W4A16: AITER doubles the pad itself, at TP1 as at TP2.
+        ("SWIGLUOAI", False, True, 1, (0, 192), (0, 192)),
+        ("SWIGLUOAI", False, True, 2, (0, 96), (0, 64)),
         # BF16 SiLU at TP1 keeps the doubled pad.
-        ("SILU", False, 1, (0, 192), (0, 384)),
+        ("SILU", False, False, 1, (0, 192), (0, 384)),
         # SITU passes through unrounded.
-        ("SITU", False, 1, (40, 96), (40, 96)),
+        ("SITU", False, True, 1, (40, 96), (40, 96)),
     ],
 )
-def test_aiter_moe_pads(activation, use_mxfp4_w4a4, tp_size, pads, expected):
+def test_aiter_moe_pads(
+    activation,
+    use_mxfp4_w4a4,
+    use_mxfp4_w4a16,
+    tp_size,
+    pads: tuple[int, int],
+    expected,
+):
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         aiter_moe_pads,
     )
 
     assert (
-        aiter_moe_pads(*pads, MoEActivation[activation], use_mxfp4_w4a4, tp_size)
+        aiter_moe_pads(
+            *pads, MoEActivation[activation], use_mxfp4_w4a4, use_mxfp4_w4a16, tp_size
+        )
         == expected
     )
 
@@ -784,6 +799,7 @@ def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterQuantType,
         rocm_aiter_fused_experts,
     )
 
@@ -824,6 +840,7 @@ def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
                 topk_weights=case["topk_weights"],
                 topk_ids=case["topk_ids"],
                 moe_config=moe_config,
+                quant_type=AiterQuantType.NO,
                 activation=MoEActivation.SILU,
                 moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
             )
@@ -837,29 +854,123 @@ def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
         )
 
 
+@pytest.mark.skipif(
+    # AITER only ships an asm tkw1 build for CDNA 3/4 today; not an
+    # architectural limit, so widen this if gfx1250 gets one too.
+    get_cdna_version() not in (3, 4),
+    reason="AITER tkw1 asm MoE is MI300/MI350 only",
+)
+def test_aiter_fp8_channel_tkw1_metadata_token_counts():
+    """Metadata without expert token counts (e.g. DeepEP v2 under CUDA graphs)
+    must reach the tkw1 kernel exactly like no metadata; metadata that carries
+    counts must still be rejected."""
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+    from tests.kernels.moe.utils import make_dummy_moe_config, make_test_weights
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterFp8ChannelExperts,
+    )
+
+    _assert_aiter_supported()
+    set_random_seed(0)
+    num_tokens, hidden_dim, intermediate_dim, num_experts = 32, 2048, 1024, 32
+    (_, w1, w1_scale, _), (_, w2, w2_scale, _) = make_test_weights(
+        num_experts,
+        intermediate_dim,
+        hidden_dim,
+        quant_dtype=current_platform.fp8_dtype(),
+        per_out_ch_quant=True,
+    )
+    w1, w2 = rocm_aiter_ops.shuffle_weights(w1, w2)
+    experts = AiterFp8ChannelExperts(
+        make_dummy_moe_config(
+            num_experts=num_experts,
+            hidden_dim=hidden_dim,
+            intermediate_size=intermediate_dim,
+        ),
+        fp8_w8a8_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            per_act_token_quant=True,
+            per_out_ch_quant=True,
+        ),
+    )
+    hidden_states = (
+        torch.randn(num_tokens, hidden_dim, dtype=torch.bfloat16, device="cuda") / 10
+    )
+    topk_weights = torch.rand(num_tokens, 1, device="cuda")
+    topk_ids = torch.randint(
+        0, num_experts, (num_tokens, 1), dtype=torch.int32, device="cuda"
+    )
+    workspace = torch.empty(0, device="cuda")
+
+    def run(
+        expert_tokens_meta: "mk.ExpertTokensMetadata | None",
+    ) -> tuple[torch.Tensor, int]:
+        """Returns the output and how many times the tkw1 kernel was called."""
+        output = torch.empty_like(hidden_states)
+        with mock.patch.object(
+            rocm_aiter_ops, "asm_moe_tkw1", wraps=rocm_aiter_ops.asm_moe_tkw1
+        ) as tkw1_mock:
+            experts.apply(
+                output=output,
+                hidden_states=hidden_states,
+                w1=w1,
+                w2=w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=num_experts,
+                expert_map=None,
+                a1q_scale=None,
+                a2_scale=None,
+                workspace13=workspace,
+                workspace2=workspace,
+                expert_tokens_meta=expert_tokens_meta,
+                apply_router_weight_on_input=True,
+            )
+        return output, tkw1_mock.call_count
+
+    without_counts = mk.ExpertTokensMetadata(
+        expert_num_tokens=None, expert_num_tokens_cpu=None
+    )
+    out_without_counts, calls_without_counts = run(without_counts)
+    out_no_meta, calls_no_meta = run(None)
+    # The generic route is numerically equivalent, so pin the kernel itself.
+    assert calls_without_counts == calls_no_meta == 1, (
+        "count-free metadata did not reach the tkw1 kernel"
+    )
+    # tkw1 is not bitwise deterministic run to run (~1 bf16 ulp).
+    torch.testing.assert_close(out_without_counts, out_no_meta, rtol=1e-2, atol=1e-2)
+
+    with_counts = mk.ExpertTokensMetadata(
+        expert_num_tokens=torch.zeros(num_experts, dtype=torch.int32, device="cuda"),
+        expert_num_tokens_cpu=None,
+    )
+    with pytest.raises(AssertionError, match="num_local_tokens"):
+        run(with_counts)
+
+
 # Enum tests --------------------------------------------------------------
 
 
-def test_quant_method_enum_values():
-    """The AITER quant-method bridge enum should keep its wire values."""
-    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import QuantMethod
+def test_aiter_quant_type_matches_aiter():
+    """`AiterQuantType` must keep the wire values of `aiter.QuantType`."""
+    _assert_aiter_supported()
+    from aiter import QuantType
 
-    assert QuantMethod.NO == 0
-    assert QuantMethod.PER_TENSOR == 1
-    assert QuantMethod.PER_TOKEN == 2
-    assert QuantMethod.BLOCK_1X32 == 3
-    assert QuantMethod.BLOCK_1X128 == 4
-    assert QuantMethod.BLOCK_128x128 == 5
-
-
-def test_activation_method_enum_values():
-    """The AITER activation-method bridge enum should keep its wire values."""
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        ActivationMethod,
+        AiterQuantType,
     )
 
-    assert ActivationMethod.SILU == 0
-    assert ActivationMethod.GELU == 1
+    assert int(QuantType.No) == AiterQuantType.NO
+    assert int(QuantType.per_Tensor) == AiterQuantType.PER_TENSOR
+    assert int(QuantType.per_Token) == AiterQuantType.PER_TOKEN
+    assert int(QuantType.per_1x32) == AiterQuantType.BLOCK_1X32
+    assert int(QuantType.per_1x128) == AiterQuantType.BLOCK_1X128
+    assert AiterQuantType.BLOCK_128x128 == int(QuantType.per_128x128)
 
 
 # MXFP4 kernel tests ------------------------------------------------------
@@ -877,12 +988,95 @@ def test_aiter_mxfp4_quant_scheme_support_matches_gfx950():
     assert AiterMxfp4Experts._supports_quant_scheme(kMxfp4Static, None) is on_gfx950()
 
 
+def _fake_rocm_arch(monkeypatch: pytest.MonkeyPatch, arch: str) -> None:
+    from vllm.platforms import rocm
+
+    for name in ("gfx942", "gfx950", "gfx1250"):
+        monkeypatch.setattr(rocm, f"on_{name}", lambda name=name: name == arch)
+
+
+@pytest.mark.parametrize(
+    ("arch", "int4", "mxfp4"),
+    [("gfx942", True, False), ("gfx950", False, True), ("gfx1250", False, False)],
+)
+def test_aiter_mxfp4_experts_quant_scheme_support_by_arch(
+    monkeypatch: pytest.MonkeyPatch, arch: str, int4: bool, mxfp4: bool
+):
+    """MXFP4 on gfx950 only; int4 on gfx942 only, for Kimi-K3's int4 requant."""
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterMxfp4Experts,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kInt4Static32,
+        kMxfp4Dynamic,
+        kMxfp4Static,
+    )
+
+    _fake_rocm_arch(monkeypatch, arch)
+    supports = AiterMxfp4Experts._supports_quant_scheme
+    assert supports(kInt4Static32, None) is int4
+    assert supports(kMxfp4Static, None) is mxfp4
+    assert supports(kMxfp4Static, kMxfp4Dynamic) is mxfp4
+
+
+@pytest.mark.parametrize(
+    ("backend", "arch", "activation"),
+    [
+        ("AITER_MXFP4_BF16", "gfx950", "SWIGLUOAI"),
+        # Kimi-K3's MXFP4 experts requantized to int4 at load.
+        ("AITER_MXFP4_BF16", "gfx942", "SITU"),
+        ("AITER_MXFP4_MXFP4", "gfx950", "SILU"),
+        ("AITER_TRITON_MXFP4_BF16", "gfx942", "SWIGLUOAI"),
+        ("AITER_TRITON_MXFP4_BF16", "gfx950", "SWIGLUOAI"),
+        ("AITER_TRITON_MXFP4_BF16", "gfx1250", "SWIGLUOAI"),
+        ("AITER_MXFP4_FP8", "gfx950", "SWIGLUOAI"),
+        ("AITER_MXFP4_FP8", "gfx1250", "SWIGLUOAI"),
+        ("AITER_TRITON_MXFP4_MXFP4", "gfx1250", "SILU"),
+    ],
+)
+def test_mxfp4_experts_check_accepts_aiter_deployments(
+    monkeypatch: pytest.MonkeyPatch, backend: str, arch: str, activation: str
+):
+    """make_mxfp4_moe_kernel's fail-closed experts check must accept every
+    AITER MXFP4 backend on the archs it is deployed on."""
+    from dataclasses import replace
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        _validate_mxfp4_experts_config,
+        backend_to_kernel_cls,
+    )
+
+    _fake_rocm_arch(monkeypatch, arch)
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    monkeypatch.setattr(rocm_aiter_ops, "_FMOE_ENABLED", True)
+    moe_config = replace(
+        make_dummy_moe_config(
+            num_experts=128,
+            experts_per_token=4,
+            hidden_dim=2880,
+            intermediate_size=2880,
+            activation=MoEActivation[activation],
+        ),
+        routing_method=RoutingMethodType.Renormalize,
+    )
+    mxfp4_backend = Mxfp4MoeBackend[backend]
+    for experts_cls in backend_to_kernel_cls(mxfp4_backend):
+        _validate_mxfp4_experts_config(experts_cls, moe_config, mxfp4_backend)
+
+
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
 def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
     """The gfx950 AITER MXFP4 W4A16 MoE path should match the dequantized
     MXFP4 reference."""
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterQuantType,
+        mxfp4_w4a16_extra_kwargs,
         rocm_aiter_fused_experts,
     )
 
@@ -901,6 +1095,7 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
         case.w2_ref,
         case.topk_weights,
         case.topk_ids,
+        activation="swigluoai",
     )
     out = rocm_aiter_fused_experts(
         hidden_states=case.hidden_states,
@@ -911,7 +1106,9 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
         activation=MoEActivation.SWIGLUOAI,
         quant_config=case.quant_config,
         moe_config=case.moe_config,
+        quant_type=AiterQuantType.BLOCK_1X32,
         expert_mask=None,
+        **mxfp4_w4a16_extra_kwargs(case.quant_config, case.moe_config),
     )
 
     assert out.shape == case.hidden_states.shape
@@ -932,6 +1129,8 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
     deterministic."""
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterQuantType,
+        mxfp4_w4a16_extra_kwargs,
         rocm_aiter_fused_experts,
     )
 
@@ -955,7 +1154,9 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
             activation=MoEActivation.SWIGLUOAI,
             quant_config=case.quant_config,
             moe_config=case.moe_config,
+            quant_type=AiterQuantType.BLOCK_1X32,
             expert_mask=None,
+            **mxfp4_w4a16_extra_kwargs(case.quant_config, case.moe_config),
         )
 
     _assert_deterministic(run_mxfp4_moe, n_runs=4)
@@ -1023,10 +1224,7 @@ def test_aiter_fused_moe_bf16_accuracy(
 ):
     """The ROCm AITER fused-MoE BF16 path should match the float32 reference
     on representative shapes."""
-    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        ActivationMethod,
-        QuantMethod,
-    )
+    from aiter import ActivationType, QuantType
 
     _assert_aiter_supported()
     case = _make_moe_case(
@@ -1051,8 +1249,8 @@ def test_aiter_fused_moe_bf16_accuracy(
         case["w2"],
         case["topk_weights"],
         case["topk_ids"],
-        activation_method=int(ActivationMethod.SILU),
-        quant_method=int(QuantMethod.NO),
+        activation_method=int(ActivationType.Silu),
+        quant_method=int(QuantType.No),
     )
 
     assert out.shape == (num_tokens, hidden_dim)
@@ -1068,10 +1266,7 @@ def test_aiter_fused_moe_bf16_accuracy(
 def test_aiter_fused_moe_gelu_accuracy():
     """The GELU activation variant should stay aligned with the float32
     reference."""
-    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        ActivationMethod,
-        QuantMethod,
-    )
+    from aiter import ActivationType, QuantType
 
     _assert_aiter_supported()
     case = _make_moe_case(
@@ -1096,8 +1291,8 @@ def test_aiter_fused_moe_gelu_accuracy():
         case["w2"],
         case["topk_weights"],
         case["topk_ids"],
-        activation_method=int(ActivationMethod.GELU),
-        quant_method=int(QuantMethod.NO),
+        activation_method=int(ActivationType.Gelu),
+        quant_method=int(QuantType.No),
     )
 
     assert out.shape == case["hidden_states"].shape
@@ -1113,10 +1308,7 @@ def test_aiter_fused_moe_gelu_accuracy():
 def test_aiter_fused_moe_determinism():
     """The BF16 fused-MoE kernel should stay bitwise deterministic for the
     same inputs."""
-    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        ActivationMethod,
-        QuantMethod,
-    )
+    from aiter import ActivationType, QuantType
 
     _assert_aiter_supported()
     case = _make_moe_case(
@@ -1135,8 +1327,8 @@ def test_aiter_fused_moe_determinism():
             case["w2"],
             case["topk_weights"],
             case["topk_ids"],
-            activation_method=int(ActivationMethod.SILU),
-            quant_method=int(QuantMethod.NO),
+            activation_method=int(ActivationType.Silu),
+            quant_method=int(QuantType.No),
         )
 
     _assert_deterministic(run_moe, n_runs=4)
@@ -1159,10 +1351,7 @@ def test_aiter_fused_moe_end_to_end(
     topk: int,
 ):
     """The full router-logits to top-k to fused-MoE path should stay accurate."""
-    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        ActivationMethod,
-        QuantMethod,
-    )
+    from aiter import ActivationType, QuantType
 
     _assert_aiter_supported()
     torch.set_default_device("cuda")
@@ -1198,8 +1387,8 @@ def test_aiter_fused_moe_end_to_end(
         w2,
         topk_weights,
         topk_ids,
-        activation_method=int(ActivationMethod.SILU),
-        quant_method=int(QuantMethod.NO),
+        activation_method=int(ActivationType.Silu),
+        quant_method=int(QuantType.No),
     )
 
     assert out.shape == (num_tokens, hidden_dim)
@@ -1221,10 +1410,7 @@ def test_aiter_fused_moe_end_to_end(
     reason="gfx942/gfx950 ROCm only",
 )
 def test_aiter_fused_moe_mi3xx_bf16_accuracy():
-    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        ActivationMethod,
-        QuantMethod,
-    )
+    from aiter import ActivationType, QuantType
 
     _assert_aiter_supported()
     case = _make_moe_case(
@@ -1248,8 +1434,8 @@ def test_aiter_fused_moe_mi3xx_bf16_accuracy():
         case["w2"],
         case["topk_weights"],
         case["topk_ids"],
-        activation_method=int(ActivationMethod.SILU),
-        quant_method=int(QuantMethod.NO),
+        activation_method=int(ActivationType.Silu),
+        quant_method=int(QuantType.No),
     )
 
     _assert_close_budget(
@@ -1268,12 +1454,10 @@ def test_aiter_fused_moe_mi3xx_bf16_accuracy():
 def test_aiter_fused_moe_mi3xx_fp8_accuracy():
     """The MI3xx FP8 per-tensor MoE path should stay within the measured FP8
     error budget."""
+    from aiter import ActivationType, QuantType
+
     from tests.kernels.moe.utils import make_test_weights
     from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        ActivationMethod,
-        QuantMethod,
-    )
 
     _assert_aiter_supported()
     torch.set_default_device("cuda")
@@ -1319,8 +1503,8 @@ def test_aiter_fused_moe_mi3xx_fp8_accuracy():
         topk_weights,
         topk_ids,
         expert_mask=None,
-        activation_method=int(ActivationMethod.SILU),
-        quant_method=int(QuantMethod.PER_TENSOR),
+        activation_method=int(ActivationType.Silu),
+        quant_method=int(QuantType.per_Tensor),
         doweight_stage1=False,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
@@ -1530,10 +1714,7 @@ def test_aiter_moe_reload_zeroes_intermediate_padding(
 
 def _aiter_accepts_intermediate(intermediate: int, num_tokens: int) -> bool:
     """Run the real AITER CK MoE kernel and report whether it dispatched."""
-    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        ActivationMethod,
-        QuantMethod,
-    )
+    from aiter import ActivationType, QuantType
 
     case = _make_moe_case(
         num_tokens=num_tokens,
@@ -1550,8 +1731,8 @@ def _aiter_accepts_intermediate(intermediate: int, num_tokens: int) -> bool:
             case["w2"],
             case["topk_weights"],
             case["topk_ids"],
-            activation_method=int(ActivationMethod.SILU),
-            quant_method=int(QuantMethod.NO),
+            activation_method=int(ActivationType.Silu),
+            quant_method=int(QuantType.No),
         )
     except RuntimeError:
         return False

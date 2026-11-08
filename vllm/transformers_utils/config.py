@@ -120,6 +120,7 @@ class LazyConfigDict(dict):
 
 
 _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
+    alpamayo2_super="Alpamayo2SuperConfig",
     bagel="BagelConfig",
     bailing_moe_v3_vl="BailingMoeV3VLConfig",
     beam="BeamConfig",
@@ -130,6 +131,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
+    dory="DoryConfig",
     dots3_note="Dots3NoteConfig",
     k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
@@ -140,14 +142,26 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     kimi_k25="Kimi_K25Config",  # Upstream class, hub remote code uses old schema
+    muse_spark_dspark="MuseSparkDSparkConfig",
+    musespark1x_text="MuseSpark1xTextConfig",
+    muse_spark_text="MuseSparkTextConfig",
+    muse_spark_vision="MuseSparkVisionConfig",
+    muse_spark_audio="MuseSparkAudioConfig",
+    muse_spark="MuseSparkConfig",
     kimi_k3="KimiK3Config",
+    kimi_k31="KimiK3Config",
+    lfm3="Lfm3Config",
+    lfm3_audio="Lfm3AudioConfig",
+    lfm3_vl="Lfm3VlConfig",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
     midashenglm="MiDashengLMConfig",
-    minimax_m3_vl="MiniMaxM3Config",
+    minimax_m3_vl="MiniMaxM3VLConfig",  # Upstream class, hub code uses old schema
     minimax_m3_mtp="MiniMaxM3MTPConfig",
+    ming_v3_asr="MingV3ASRConfig",
     moondream3="Moondream3Config",
     moss_transcribe_diarize="MossTranscribeDiarizeConfig",
+    nemo_speechlm="Nemotron3_5TranscribeConfig",
     eagle="EAGLEConfig",
     speculators="SpeculatorsConfig",
     openvla="OpenVLAConfig",
@@ -158,10 +172,11 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     step3p5="Step3p7TextConfig",  # Upstream class, hub remote code fails validation
     step5="Step5Config",
     step5_vl="Step5VLConfig",
-    qwen3_asr="Qwen3ASRConfig",
+    ricursive="RicursiveConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
     unlimited_ocr="UnlimitedOCRConfig",
     **{"deepseek_v41": "DeepseekV41Config"},
+    flint="FlintConfig",
     inkling_mm_model="InklingMMConfig",
     inkling_model="InklingModelConfig",
 )
@@ -399,6 +414,21 @@ class HFConfigParser(ConfigParserBase):
             }
             kwargs.setdefault("name_or_path", str(model))
             config = Gemma4TextConfig.from_dict(config_dict, **kwargs)
+        elif model_type == "qwen3_asr" and "thinker_config" in config_dict:
+            from transformers import Qwen3ASRConfig
+
+            # Original checkpoints nest their fields in `thinker_config`
+            thinker_config = config_dict.pop("thinker_config")
+            audio_config = thinker_config["audio_config"]
+            audio_config["model_type"] = "qwen3_asr_encoder"
+            config_dict = {**thinker_config, **config_dict}
+            if thinker_config["model_type"] == "qwen3_forced_aligner":
+                config_dict["architectures"] = [
+                    "Qwen3ASRForcedAlignerForTokenClassification"
+                ]
+                config_dict["num_labels"] = config_dict.pop("classify_num")
+            kwargs.setdefault("name_or_path", str(model))
+            config = Qwen3ASRConfig.from_dict(config_dict, **kwargs)
         elif model_type in _ARCHITECTURE_TO_MODEL_TYPE.values():
             from transformers import CONFIG_MAPPING
 
@@ -814,6 +844,10 @@ def maybe_override_with_speculators(
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
 
     """
+    # A single local file (e.g. a .gguf checkpoint) has no speculators config.
+    if os.path.isfile(model):
+        return model, tokenizer, vllm_speculative_config
+
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
     config_dict, _ = PreTrainedConfig.get_config_dict(
         model,
@@ -829,6 +863,9 @@ def maybe_override_with_speculators(
 
     # Speculators format detected - process overrides
     from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+        get_custom_speculator_config_class,
+    )
 
     speculative_config = SpeculatorsConfig.extract_vllm_speculative_config(
         config_dict=config_dict
@@ -839,8 +876,17 @@ def maybe_override_with_speculators(
     if isinstance(vllm_speculative_config, dict):
         speculative_config.update(vllm_speculative_config)
 
-    # Lock fields dictated by the speculators format
-    speculative_config["method"] = speculators_method
+    # Lock fields dictated by the speculators format, except for a custom
+    # method based on the checkpoint's.
+    custom_config_cls = get_custom_speculator_config_class(speculative_config["method"])
+    if custom_config_cls is None:
+        speculative_config["method"] = speculators_method
+    elif custom_config_cls.base_method != speculators_method:
+        raise ValueError(
+            f"Speculative method '{speculative_config['method']}' is based on "
+            f"'{custom_config_cls.base_method}', but the speculators "
+            f"checkpoint {model} is for '{speculators_method}'."
+        )
     speculative_config["model"] = model
 
     # Override model and tokenizer with the verifier model from config
@@ -897,7 +943,7 @@ def get_config(
         except Exception as e:
             error_message = (
                 "Invalid repository ID or local directory specified:"
-                " '{model}'.\nPlease verify the following requirements:\n"
+                f" '{model}'.\nPlease verify the following requirements:\n"
                 "1. Provide a valid Hugging Face repository ID.\n"
                 "2. Specify a local directory that contains a recognized "
                 "configuration file.\n"
@@ -905,7 +951,7 @@ def get_config(
                 "'config.json'.\n"
                 "   - For Mistral models: ensure the presence of a "
                 "'params.json'.\n"
-            ).format(model=model)
+            )
 
             raise ValueError(error_message) from e
 
@@ -1301,7 +1347,10 @@ def try_get_safetensors_metadata(
         return with_retry(
             get_safetensors_metadata_partial,
             "Error retrieving safetensors",
-            fatal_errors=(huggingface_hub.errors.NotASafetensorsRepoError,),
+            fatal_errors=(
+                huggingface_hub.errors.NotASafetensorsRepoError,
+                huggingface_hub.errors.OfflineModeIsEnabled,
+            ),
         )
     except Exception:
         return None

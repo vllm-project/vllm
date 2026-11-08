@@ -24,7 +24,6 @@ def _make_model_runner_output(
     req_ids = list(scheduler_output.num_scheduled_tokens.keys())
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
         sampled_token_ids=[[i] for i in range(len(req_ids))],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -316,13 +315,14 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.kv_event_publisher = Mock()
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
-    scheduler.grammar_compile_error_reqs = set()
+    scheduler.grammar_compile_error_reqs = {}
     scheduler.encoder_cache_mismatch_reqs = set()
     scheduler.vllm_config = Mock()
     scheduler.aux_output_connector = None
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
+    scheduler.num_spec_tokens = 0
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
 
@@ -345,7 +345,6 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     )
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id],
-        req_id_to_index={request.request_id: 0},
         sampled_token_ids=[[123]],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -462,7 +461,6 @@ class PipelinedEngine:
                 self.emitted_position[token] = view[0] - len(tokens) + offset
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
-            req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
             sampled_token_ids=sampled_token_ids,
             logprobs=None,
             prompt_logprobs_dict={},
@@ -500,7 +498,6 @@ def _create_async_pp_scheduler(
         async_scheduling=True,
         num_speculative_tokens=num_spec or None,
         speculative_method="ngram_gpu" if num_spec else None,
-        use_v2_model_runner=True,
         num_blocks=num_blocks,
         block_size=16,
         max_num_batched_tokens=512,
@@ -508,7 +505,7 @@ def _create_async_pp_scheduler(
     # Emulate PP at the scheduler level; constructing with
     # pipeline_parallel_size>1 requires that many visible GPUs. Drive with
     # queue_size=pp_size+1 (V2 async PP runs pp_size+1 concurrent batches).
-    scheduler.pp_size = pp_size
+    scheduler.decode_stagger = pp_size
     scheduler.use_pp = pp_size > 1
     return scheduler
 
@@ -771,10 +768,7 @@ def test_resumable_request_handoff():
     """New streaming input resumes with the correct context and stale results
     are ignored.
     """
-    scheduler = create_scheduler(
-        async_scheduling=True,
-        use_v2_model_runner=True,
-    )
+    scheduler = create_scheduler(async_scheduling=True)
     engine = PipelinedEngine(scheduler, queue_size=3)
     engine._next_token = EOS_TOKEN_ID
 

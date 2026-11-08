@@ -37,7 +37,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
     require_finite_positive_scales,
 )
-from vllm.model_executor.utils import replace_parameter
 
 if TYPE_CHECKING:
     pass
@@ -108,10 +107,7 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return (
-            moe_parallel_config.use_ep
-            and not moe_parallel_config.use_batched_activation_format
-        )
+        return moe_parallel_config.use_ep
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -157,7 +153,8 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
         )
         adapter.warmup()
         for name, tensor in zip(KERNEL_WEIGHT_NAMES, adapter.kernel_weights()):
-            replace_parameter(layer, name, tensor)
+            # Rebind, never copy: the params must alias the megakernel buffers (EPLB).
+            getattr(layer, name).data = tensor
         self._adapter = adapter
 
     def apply(

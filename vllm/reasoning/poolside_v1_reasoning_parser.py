@@ -27,6 +27,7 @@ from transformers import PreTrainedTokenizerBase
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 from vllm.reasoning.deepseek_v3_reasoning_parser import DeepSeekV3ReasoningParser
 from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
+from vllm.v1.token_buffer import rfind_tokens
 
 
 class PoolsideV1ReasoningParser(DeepSeekV3ReasoningParser):
@@ -53,19 +54,17 @@ class PoolsideV1ReasoningParser(DeepSeekV3ReasoningParser):
             return True
 
         assert isinstance(self._parser, DeepSeekR1ReasoningParser)
-        for tok_id in reversed(input_ids):
-            # <think>: reasoning is not yet ended.
-            if tok_id == self._parser.start_token_id:
-                return False
-            # </think>: reasoning has ended.
-            if tok_id == self._parser.end_token_id:
-                return True
-            # <assistant>: reached the start of the current assistant turn
-            # without seeing either marker. Anything further back belongs to
-            # the prior conversation and should be ignored.
-            if tok_id == self._start_of_assistant_message_token_id:
-                return False
-        return False
+        # The newest of <think>, </think> and <assistant> decides: reasoning has
+        # ended only on </think>. Tokens before the current assistant turn
+        # belong to the prior conversation.
+        end_token_id = self._parser.end_token_id
+        tokens = (
+            self._parser.start_token_id,
+            end_token_id,
+            self._start_of_assistant_message_token_id,
+        )
+        i = rfind_tokens(input_ids, tokens)
+        return i >= 0 and input_ids[i] == end_token_id
 
 
 __all__ = ["PoolsideV1ReasoningParser"]

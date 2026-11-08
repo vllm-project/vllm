@@ -29,7 +29,6 @@ from vllm.profiler.wrapper import (
 )
 from vllm.v1.core.sched.output import CachedRequestData
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.xpu_worker import XPUWorker
 
@@ -300,6 +299,7 @@ def test_worker_creates_platform_torch_profiler(device_type, activities, expecte
         worker_name="rank0",
         local_rank=0,
         activities=expected,
+        profiler_kwargs=None,
     )
 
 
@@ -321,6 +321,7 @@ def test_worker_reuses_torch_wrapper_across_profile_rounds(worker_type):
             profile_prefix="first",
             delay_iterations=5,
             max_iterations=2,
+            profiler_kwargs={"record_shapes": True},
         )
         worker.profile(is_start=False)
         worker.profile(profile_prefix="second")
@@ -330,6 +331,10 @@ def test_worker_reuses_torch_wrapper_across_profile_rounds(worker_type):
     assert wrapper.return_value.set_output_name.call_args_list == [
         call("first_rank0"),
         call("second_rank0"),
+    ]
+    assert wrapper.return_value.set_profiler_kwargs.call_args_list == [
+        call({"record_shapes": True}),
+        call(None),
     ]
     assert wrapper.return_value.start.call_args_list == [
         call(delay_iterations=5, max_iterations=2),
@@ -349,6 +354,7 @@ def test_executor_profile_only_forwards_supplied_override_kwargs():
         "bounded",
         delay_iterations=5,
         max_iterations=2,
+        profiler_kwargs={"record_shapes": True},
     )
 
     assert executor.collective_rpc.call_args_list == [
@@ -356,7 +362,11 @@ def test_executor_profile_only_forwards_supplied_override_kwargs():
         call(
             "profile",
             args=(True, "bounded"),
-            kwargs={"delay_iterations": 5, "max_iterations": 2},
+            kwargs={
+                "delay_iterations": 5,
+                "max_iterations": 2,
+                "profiler_kwargs": {"record_shapes": True},
+            },
         ),
     ]
 
@@ -677,9 +687,7 @@ class TestAnnotateProfile:
         ctx_req = MagicMock(req_id="ctx1", num_computed_tokens=0)
         cached = CachedRequestData(
             req_ids=["gen1"],
-            resumed_req_ids=set(),
             new_token_ids=[],
-            all_token_ids={},
             new_block_ids=[],
             num_computed_tokens=[10],
             num_output_tokens=[1],
@@ -717,24 +725,6 @@ class TestAnnotateProfile:
         compute_iteration_details.assert_not_called()
         worker.profiler.annotate_context_manager.assert_not_called()
         assert isinstance(context, nullcontext)
-
-
-def test_profiler_entered_during_capture():
-    """Profiler is used as a context manager in _warmup_and_capture,
-    confirming it is active during the actual graph capture run."""
-    runner = MagicMock()
-    runner.compilation_config.cudagraph_num_of_warmups = 0
-    mock_profiler = MagicMock()
-
-    GPUModelRunner._warmup_and_capture(
-        runner,
-        desc=MagicMock(num_tokens=4, uniform=True),
-        cudagraph_runtime_mode=CUDAGraphMode.FULL,
-        profiler=mock_profiler,
-    )
-
-    mock_profiler.__enter__.assert_called_once()
-    mock_profiler.__exit__.assert_called_once()
 
 
 def make_proton(session_id: int | None = 7):
@@ -964,27 +954,6 @@ class TestProtonConfig:
                     else CUDAGraphMode.FULL,
                     cudagraph_mm_encoder=encoder_only,
                 ),
-            )
-
-    def test_ordinary_proton_keeps_mrv1_graph_restriction(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-        with pytest.raises(ValueError, match="requires proton_graph_attribution=True"):
-            VllmConfig(
-                profiler_config=ProfilerConfig(
-                    profiler="proton", proton_profiler_dir=str(tmp_path)
-                ),
-                compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL),
-            )
-
-    def test_graph_attribution_rejects_mrv1(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-        with pytest.raises(ValueError, match="requires the V2 model runner"):
-            VllmConfig(
-                profiler_config=ProfilerConfig(
-                    profiler="proton",
-                    proton_profiler_dir=str(tmp_path),
-                    proton_graph_attribution=True,
-                )
             )
 
 
@@ -1252,9 +1221,12 @@ def test_gpu_worker_creates_proton_profiler():
         Worker.profile(worker)
 
     wrapper.assert_called_once_with(worker.profiler_config, worker_name="rank1")
-    worker.profiler.start.assert_called_once_with(
+    # mypy still narrows worker.profiler to the None assigned above, so check
+    # the started wrapper directly and that it is the one the worker kept.
+    wrapper.return_value.start.assert_called_once_with(
         delay_iterations=None, max_iterations=None
     )
+    assert worker.profiler is wrapper.return_value
 
 
 @_requires_cuda_for_proton
@@ -1307,13 +1279,12 @@ def test_gpu_worker_reuses_cuda_graph_proton_session():
 
 
 @_requires_cuda_for_proton
-@pytest.mark.parametrize("runner", ["attribution_off", "v1", "no_capture"])
+@pytest.mark.parametrize("runner", ["attribution_off", "no_capture"])
 def test_proton_not_initialized_without_capture(runner):
     worker = MagicMock()
     worker.profiler = None
     worker.profiler_config.profiler = "proton"
     worker.profiler_config.proton_graph_attribution = runner != "attribution_off"
-    worker.use_v2_model_runner = runner != "v1"
     worker.model_runner.needs_cudagraph_capture.return_value = runner != "no_capture"
 
     context = Worker._get_cudagraph_capture_context(worker)
@@ -1339,7 +1310,6 @@ def test_proton_initializes_before_cuda_graph_capture():
     worker.profiler = None
     worker.profiler_config.profiler = "proton"
     worker.profiler_config.proton_graph_attribution = True
-    worker.use_v2_model_runner = True
     worker.model_runner.needs_cudagraph_capture.return_value = True
 
     with (
@@ -1385,10 +1355,7 @@ def test_proton_cuda_graph_replay_attribution_on_gpu(tmp_path, context, output_f
         ),
         worker_name="gpu",
     )
-    worker = SimpleNamespace(
-        profiler=wrapper,
-        use_v2_model_runner=True,
-    )
+    worker = SimpleNamespace(profiler=wrapper)
     x = torch.ones(1024, device="cuda")
     graph = torch.cuda.CUDAGraph()
 
