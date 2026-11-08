@@ -214,6 +214,8 @@ class DSparkSpeculator(DFlashSpeculator):
             raise fail("the draft model fuses its own sequential sampling")
         if hasattr(model, "apply_output_logit_transform"):
             raise fail("an output logit transform is not supported")
+        if getattr(model, "has_recurrent_markov_head", False):
+            raise fail("a recurrent Markov head is not supported")
         if (
             self.use_draft_logits
             and self.draft_logits_spec(self.vllm_config)[0] != torch.bfloat16
