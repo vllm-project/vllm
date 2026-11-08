@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
     TrtLlmMxfp4ExpertsModular,
+    TrtLlmMxfp4Mxfp8ExpertsModular,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import (
     MoEOutput,
@@ -167,7 +168,7 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
             self.experts.routed_experts.quant_method, "experts_cls", None
         )
         if (
-            experts_cls is TrtLlmMxfp4ExpertsModular
+            experts_cls in (TrtLlmMxfp4ExpertsModular, TrtLlmMxfp4Mxfp8ExpertsModular)
             and self.experts.routed_scaling_factor == 1.0
         ):
             moe_config.defer_moe_finalize(MHC_OVERLAP_MAX_TOKENS)
@@ -1000,9 +1001,19 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         lookback_token_ids: torch.Tensor | None = None,
         decode_step: "DecodeStep | None" = None,
     ) -> torch.Tensor | IntermediateTensors:
+        # A specialized decode step embeds from the executor's copy of the
+        # table, which writes the first layer's hc streams too.
+        embedding = (
+            decode_step.executor.embedding
+            if decode_step is not None and not self.use_sequence_parallel
+            else None
+        )
+        streams: torch.Tensor | None = None
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
+            elif embedding is not None and embedding.accepts(input_ids):
+                hidden_states, streams = embedding(input_ids)
             else:
                 hidden_states = self.embed_input_ids(input_ids)
         else:
@@ -1037,14 +1048,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 image_mask = image_sentinel_mask(input_ids)
                 engram_mask = ~image_mask
                 if lookback_token_ids is None:
-                    if not self.engram_hash.use_slot_cache:
-                        raise NotImplementedError(
-                            "engram needs `lookback_token_ids` from the model "
-                            "runner (the DBO/ubatch wrapper drops model kwargs)"
-                        )
-                    num_reqs = swa_metadata.num_decodes + swa_metadata.num_prefills
-                    lookback_token_ids = input_ids.new_full(
-                        (num_reqs, self.engram_hash.lookback_depth), -1
+                    raise NotImplementedError(
+                        "engram needs `lookback_token_ids` from the model runner"
                     )
                 engram_hashes = self.engram_hash(
                     input_ids,
@@ -1053,8 +1058,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     image_mask,
                     lookback_token_ids,
                     image_sentinel_mask(lookback_token_ids),
-                    swa_metadata.slot_mapping,
-                    swa_metadata.block_table,
                 )
             else:
                 # DP-sharded lookups are collective, so a replica skipping the
@@ -1097,7 +1100,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         if decode_step is not None:
             return decode_step.run(
-                hidden_states, positions, input_ids, engram_hashes, engram_mask
+                hidden_states,
+                positions,
+                input_ids,
+                engram_hashes,
+                engram_mask,
+                streams=streams,
             )
 
         residual, post_mix, res_mix = None, None, None
@@ -1695,7 +1703,9 @@ class DeepseekV41LLMForCausalLM(
         self.specialized_decode = SpecializedDecode.for_target(
             self.model, self.specialized_decode_config, self.lm_head
         )
-        self.logits_processor = SpecializedDecodeLogitsProcessor(self.config.vocab_size)
+        self.logits_processor = SpecializedDecodeLogitsProcessor(
+            self.config.vocab_size, self.specialized_decode.all_gather
+        )
         return self.specialized_decode
 
     def get_model_state_cls(self):

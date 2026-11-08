@@ -30,7 +30,7 @@ from typing import ClassVar
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -112,7 +112,9 @@ class CPUMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # tries to pick a GPU prefill kernel and raises on CPU. Instead we
         # replicate the attribute setup here and then wire our own hooks.
         if kv_sharing_target_layer_name is not None:
-            raise NotImplementedError("KV sharing is not supported for MLA")
+            raise NotImplementedError(
+                "KV sharing is only supported by sparse MLA backends"
+            )
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("CPU MLA only supports decoder self-attention.")
         unsupported = [alibi_slopes, sliding_window, logits_soft_cap]

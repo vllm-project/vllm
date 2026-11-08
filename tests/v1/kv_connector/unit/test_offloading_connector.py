@@ -31,7 +31,9 @@ elif current_platform.is_rocm():
     # and the 16-token default.
     CPU_BLOCK_SIZES = 192
 else:
-    CPU_BLOCK_SIZES = 48
+    # A multiple of the 64-token default (and of any smaller backend-preferred
+    # size such as 16 or 32).
+    CPU_BLOCK_SIZES = 192
 
 _ATTN_BACKENDS: list[str] = []
 if current_platform.is_cuda():
@@ -58,8 +60,7 @@ MODEL_PARAMS: list[tuple[str, str | None, int | None, bool]] = [
     ("meta-llama/Llama-3.2-1B-Instruct", backend, CPU_BLOCK_SIZES, False)
     for backend in _ATTN_BACKENDS
 ]
-# HMA / Mamba models are only tested on CUDA (not ROCm).
-if current_platform.is_cuda():
+if current_platform.is_cuda_alike():
     MODEL_PARAMS += [
         ("google/gemma-3-1b-it", None, CPU_BLOCK_SIZES, True),
         ("state-spaces/mamba-130m-hf", None, CPU_BLOCK_SIZES, True),
@@ -399,7 +400,9 @@ def test_cpu_offloading_sliding_window_partial_chunk() -> None:
         del llm
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
 def test_cpu_offloading_metrics() -> None:
     """Verify that offloading Prometheus metrics (new flat and deprecated
     labeled) are emitted after stores and loads."""
@@ -544,6 +547,48 @@ def test_cpu_offloading_metrics() -> None:
         del llm
 
 
+@pytest.mark.parametrize("multiprocessing", [True, False])
+def test_sleep_keeps_offloaded_blocks_unless_reset(
+    monkeypatch: pytest.MonkeyPatch, multiprocessing: bool
+) -> None:
+    """A sleep that keeps the connector's cache serves the prompt from CPU
+    after the wake-up; a sleep that resets it does not."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", str(int(multiprocessing)))
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 256 << 20,
+            "block_size": CPU_BLOCK_SIZES,
+        },
+    )
+    # A prefix of whole offloaded blocks, plus the token to recompute.
+    prefix = [100 + i for i in range(4 * CPU_BLOCK_SIZES)]
+    prompt = TokensPrompt(prompt_token_ids=prefix + [7])
+    sampling_params = SamplingParams(temperature=0, max_tokens=1)
+
+    # Synchronous scheduling leaves the last step's stores unsubmitted when
+    # generate() returns, so the sleep must finish them itself.
+    llm = LLM(
+        model="facebook/opt-125m",
+        max_model_len=2048,
+        gpu_memory_utilization=0.2,
+        enable_sleep_mode=True,
+        async_scheduling=False,
+        kv_transfer_config=kv_transfer_config,
+    )
+    try:
+        expected = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
+        for reset_connector, num_cached in ((False, len(prefix)), (True, 0)):
+            llm.sleep(level=1, reset_connector=reset_connector)
+            llm.wake_up()
+            output = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
+            assert output.num_cached_tokens == num_cached
+            assert output.outputs[0].token_ids == expected.outputs[0].token_ids
+    finally:
+        del llm
+
+
 def test_tiering_offloading() -> None:
     """Tests OffloadingConnector with TieringOffloadingSpec."""
     extra_config: dict = {
@@ -636,15 +681,17 @@ def test_fs_tiering_offloading(tmp_path) -> None:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="HMA mamba-align CPU offload test is CUDA-only",
+    not current_platform.is_cuda_alike(),
+    reason="HMA mamba-align CPU offload test requires CUDA or ROCm",
 )
 @pytest.mark.parametrize(
     "model,block_size,tp_size",
     [
         # ("Qwen/Qwen3.6-35B-A3B", 1056, 2),
         # ("tiiuae/falcon-mamba-7b", 16, 1),
-        ("state-spaces/mamba-1.4b-hf", 16, 1),
+        # The chunk size must be a multiple of the GPU block size, which
+        # defaults to 64 tokens.
+        ("state-spaces/mamba-1.4b-hf", 64, 1),
     ],
 )
 def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
@@ -855,6 +902,7 @@ def test_p2p_cache_reset_with_absent_decoder(monkeypatch):
         max_num_batched_tokens=256,
         gpu_memory_utilization=0.2,
         attention_config={"backend": "TRITON_ATTN"},
+        block_size=16,
         enforce_eager=True,
         async_scheduling=False,
         disable_log_stats=False,
