@@ -2099,6 +2099,7 @@ class VllmConfig:
                 supported_backends = [
                     "deepep_low_latency",
                     "deepep_high_throughput",
+                    "deepep_v2",
                     "nixl_ep",
                 ]
             assert a2a_backend in supported_backends, (
