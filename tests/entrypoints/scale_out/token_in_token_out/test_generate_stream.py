@@ -12,6 +12,7 @@ import pytest
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.generate.base.protocol import DeltaMessage, StreamOptions
+from vllm.entrypoints.openai.chat_completion.protocol import ChatMessage
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
@@ -21,6 +22,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     encode_mm_kwargs_item,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    CitationSourceEntry,
     GenerateDerenderStreamResponse,
     GenerateRequest,
     GenerateTextResponse,
@@ -1614,6 +1616,79 @@ def _derender_request(parse_context=None, n=1, **kwargs):
         output_mode="derender",
         parse_context=parse_context or ParseContext(),
         **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_unary_derender_forwards_citation_sources():
+    """ServingTokens must pass parse_context.citation_sources into derender."""
+    # Build the engine without renderer_from_config so this test does not
+    # need a HuggingFace download (the wiring under test is pure serving).
+    engine = MagicMock(spec=AsyncLLM)
+    engine.errored = False
+    engine.model_config = MockModelConfig()
+    engine.vllm_config = MockVllmConfig(
+        engine.model_config, parallel_config=MockParallelConfig()
+    )
+    engine.input_processor = MagicMock()
+    engine.renderer = MagicMock()
+    engine.renderer.tokenizer = MagicMock()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10],
+            text="Paris",
+            finish_reason="stop",
+            finished=True,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    models = OpenAIServingModels(
+        engine_client=engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+    online_renderer = MagicMock()
+    online_renderer.preprocess_completion = AsyncMock(
+        return_value=[{"prompt_token_ids": [1, 2, 3]}]
+    )
+    serving = ServingTokens(
+        engine,
+        models,
+        online_renderer=online_renderer,
+        online_derenderer=MagicMock(spec=OnlineDerenderer),
+        request_logger=None,
+    )
+    serving.online_derenderer.parser = MagicMock()
+    sources = [
+        CitationSourceEntry(
+            bucket=0,
+            idx=0,
+            source={"type": "document", "id": "doc-1"},
+        )
+    ]
+    serving.online_derenderer.derender_text_choices = AsyncMock(
+        return_value=[(ChatMessage(role="assistant", content="Paris"), "stop")]
+    )
+
+    response = await serving.serve_tokens(
+        GenerateRequest(
+            token_ids=[1, 2, 3],
+            sampling_params=SamplingParams(max_tokens=10),
+            model=MODEL_NAME,
+            stream=False,
+            output_mode="derender",
+            parse_context=ParseContext(citation_sources=sources),
+        )
+    )
+
+    assert not isinstance(response, ErrorResponse)
+    serving.online_derenderer.derender_text_choices.assert_awaited_once()
+    assert (
+        serving.online_derenderer.derender_text_choices.await_args.kwargs[
+            "citation_sources"
+        ]
+        == sources
     )
 
 

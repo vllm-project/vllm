@@ -545,6 +545,20 @@ class TestRenderEndpoint:
         )
         assert GenerateRequest.model_validate(r.json()).parse_context is not None
 
+    def test_grounded_streaming_render_omits_citation_sources(self):
+        """Streaming derender does not install sources yet; skip the field."""
+        render_handler = _RenderHandler(_generate_request())
+        app = _build_render_app(_RenderChatHandler(), render_handler)
+        body = {
+            **_minimal_request_body(),
+            "stream": True,
+            "documents": [{"id": "doc-1", "data": {"text": "Paris is in France."}}],
+        }
+        with TestClient(app) as client:
+            r = client.post("/cohere/v2/chat/render", json=body)
+        assert r.status_code == HTTPStatus.OK
+        assert "citation_sources" not in r.json()["parse_context"]
+
     def test_501_when_chat_handler_missing(self):
         app = _build_render_app(None, _RenderHandler(_generate_request()))
         with TestClient(app) as client:

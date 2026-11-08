@@ -212,7 +212,10 @@ if _SDK_AVAILABLE:
                 kwargs.chat_template_kwargs
             )
 
-        if result.parse_context is not None:
+        # Streaming derender does not install citation_sources yet
+        # (#63103). Skip the field so grounded stream requests do not
+        # 400 on older generate nodes for a field that is unused.
+        if result.parse_context is not None and not request.stream:
             position_to_source = CohereServingChatV2._build_position_to_source(request)
             if position_to_source:
                 result.parse_context.citation_sources = [

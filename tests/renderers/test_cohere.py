@@ -1057,14 +1057,49 @@ async def test_async_cohere_renderer_does_not_block_event_loop():
 
 
 # ======================================================================
-# End-to-end: request-level citations -> rendered prompt markup
+# finalize_message (derender citation attachment)
 # ======================================================================
-#
-# Ties the whole pipeline together: a Cohere v2 request carrying an
-# assistant message with citations must produce a rendered prompt that
-# contains melody's inline ``<co>...</co: <id>>`` markup around the
-# cited span. Preserving this invariant is the whole point of the
-# ``_messages_citations`` chat_template_kwargs entry.
+
+
+class TestFinalizeMessage:
+    """Real ``CohereRenderer.finalize_message`` — not a MagicMock reimplementation."""
+
+    def test_attaches_last_unary_citations(self):
+        from vllm.entrypoints.cohere.cohere_chat_message import (
+            Citation,
+            CitationSource,
+            CohereChatMessage,
+        )
+        from vllm.entrypoints.openai.chat_completion.protocol import ChatMessage
+
+        renderer = object.__new__(CohereRenderer)
+        parser = Mock()
+        parser.last_unary_citations = [
+            Citation(
+                start=0,
+                end=5,
+                text="Paris",
+                sources=[CitationSource(type="document", id="doc-1")],
+            )
+        ]
+        message = ChatMessage(role="assistant", content="Paris is the capital.")
+
+        out = renderer.finalize_message(parser, message)
+
+        assert isinstance(out, CohereChatMessage)
+        assert out.content == message.content
+        assert out.citations is not None
+        assert out.citations[0].sources[0].id == "doc-1"
+
+    def test_passthrough_without_citations(self):
+        from vllm.entrypoints.openai.chat_completion.protocol import ChatMessage
+
+        renderer = object.__new__(CohereRenderer)
+        parser = Mock()
+        parser.last_unary_citations = None
+        message = ChatMessage(role="assistant", content="hello")
+
+        assert renderer.finalize_message(parser, message) is message
 
 
 class TestRequestCitationsReachRenderedPrompt:

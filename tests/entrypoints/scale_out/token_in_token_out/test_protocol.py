@@ -218,6 +218,9 @@ def test_parse_context_omits_unset_citation_sources():
     dumped = ParseContext().model_dump()
     assert "citation_sources" not in dumped
     assert "citation_sources" not in json.loads(ParseContext().model_dump_json())
+    empty = ParseContext(citation_sources=[])
+    assert "citation_sources" not in empty.model_dump()
+    assert "citation_sources" not in json.loads(empty.model_dump_json())
 
 
 def test_parse_context_citation_sources_round_trip():
