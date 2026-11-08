@@ -524,11 +524,13 @@ class HfRunner:
                 ),
             )
 
-            # in case some unquantized custom models are not in same dtype
+            # In case some unquantized custom models are not in the same dtype.
             if getattr(model, "quantization_method", None) is None and any(
                 p.dtype != self.dtype for p in model.parameters()
             ):
-                model = model.to(dtype=self.dtype)
+                for parameter in model.parameters():
+                    if parameter.is_floating_point() or parameter.is_complex():
+                        parameter.data = parameter.data.to(dtype=self.dtype)
 
             if len({p.device for p in model.parameters()}) < 2:
                 model = model.to(device=self.device)
