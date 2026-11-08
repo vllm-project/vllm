@@ -1740,6 +1740,17 @@ class NixlBaseConnectorWorker:
                     block_stride = physical_page_size
                 else:
                     block_stride = cache.stride(0) * cache.element_size()
+                if is_host_resident:
+                    # A page rounded up to a kernel/packing alignment has a
+                    # stride longer than its payload, so cache.nbytes stops
+                    # short of the last block. Register the span the stride
+                    # addresses instead.
+                    registration_len = num_blocks * block_stride
+                    registration_ranges[storage_key] = (
+                        registration_base,
+                        registration_base + registration_len,
+                        region_device_id,
+                    )
                 # A connector that registers the backing as one memory region
                 # may need its length rounded up to a page boundary. Such a tail
                 # is shorter than one block, so it cannot make the storage

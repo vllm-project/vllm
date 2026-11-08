@@ -350,13 +350,18 @@ def test_local_descriptors_follow_each_region_pool_capacity():
 
 
 def _register_overlaid_mla_worker(
-    *, push_pp: bool = False, tail_bytes: int = 0, page_covers_view: bool = True
+    *,
+    push_pp: bool = False,
+    tail_bytes: int = 0,
+    page_covers_view: bool = True,
+    host_resident: bool = False,
 ):
     """Register two MLA layers overlaid on one allocation.
 
     ``tail_bytes`` leaves spare bytes past the last block, the way an allocation
     rounded up to a page boundary does. Clearing ``page_covers_view`` narrows
     each layer's view below its page, leaving the block interior non-contiguous.
+    ``host_resident`` puts the groups in a HiSparse host pool instead of VRAM.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
@@ -388,7 +393,10 @@ def _register_overlaid_mla_worker(
         "layer.0": backing[:, :view_size],
         "layer.1": backing[:, :view_size],
     }
-    groups = [KVCacheGroupSpec([layer_name], spec) for layer_name in caches]
+    groups = [
+        KVCacheGroupSpec([layer_name], spec, host_resident=host_resident)
+        for layer_name in caches
+    ]
 
     worker_cls = NixlPushConnectorWorker if push_pp else NixlConnectorWorker
     worker = object.__new__(worker_cls)
@@ -454,12 +462,14 @@ def _register_overlaid_mla_worker(
     worker._layer_specs = {name: spec for name in caches}
     worker.kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
+        hisparse_host_num_blocks=num_blocks if host_resident else None,
         kv_cache_tensors=[
             KVCacheTensor(
                 size=allocation.nbytes,
                 layers=[name],
                 layer_stride=page_size,
                 block_stride=block_stride,
+                host_resident=host_resident,
             )
             for name in caches
         ],
@@ -552,6 +562,31 @@ def test_registration_ignores_a_sub_block_padding_tail(page_covers_view):
     )
 
     assert _descriptor_geometry(padded) == _descriptor_geometry(unpadded)
+
+
+@pytest.mark.cpu_test
+def test_host_resident_padded_page_registers_its_stride_span():
+    """A host group's aligned page registers the whole span its stride covers.
+
+    The page is rounded up past the view's payload, so ``cache.nbytes`` stops
+    short of the last block and the HiSparse host pool fails to register.
+    """
+    registered = _register_overlaid_mla_worker(
+        host_resident=True, page_covers_view=False
+    )
+    worker = registered.worker
+    allocation = registered.allocation
+    num_blocks = registered.num_blocks
+    block_stride = registered.block_stride
+
+    assert worker.nixl_wrapper.registered[0][0] == [
+        (allocation.data_ptr(), num_blocks * block_stride, 0, "")
+    ]
+    descs = expand_strided_descs(worker.src_blocks_data)
+    assert descs[:, 0].tolist() == [
+        allocation.data_ptr() + block * block_stride for block in range(num_blocks)
+    ]
+    assert descs[:, 1].tolist() == [block_stride] * num_blocks
 
 
 def _make_mla_hybrid_worker(
