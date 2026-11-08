@@ -27,10 +27,18 @@ Nothing is copied or re-quantized. The kernels tile up to 64 rows (`MAX_TOKENS`)
 but at 32 and 64 rows they lose to vLLM's decode, so a served step is capped at 16
 (`MAX_ROWS`).
 
-Kimi-K3.1 DSA layers run their indexer and sparse MLA normally, then pass the
-gated attention output to K2 for o_proj and the latent MoE (at DCP1 too: DSA
-layers never run M1). Eligible KDA layers retain K1/K2. Prefill and unsupported
-decode batches use the standard layer path.
+Kimi-K3.1 DSA layers run vLLM's prologue and indexer, then K2 runs the sparse
+MLA itself (`VLLM_KIMI_SD_DSA`, default `auto`): split-K attention over the
+indexer's top-k (`VLLM_KIMI_SD_DSA_SPLITS` slices per row, 16 by default) on
+K2's top CTAs, with the logical-to-physical index conversion folded in
+(`VLLM_KIMI_SD_DSA_FOLD`), then the split combine, the bf16 W_UV and the gate,
+then o_proj and the latent MoE. `split` runs the attention as its own launch
+before K2, `off` keeps vLLM's sparse MLA (K2 then takes the gated attention
+output). `auto` runs `fused` at DCP1 with the `fp8_ds_mla` cache, a top-k of 2048,
+a bf16 W_UV (no AITER FP4 / FP8 MLA bmms) and one request a step, else falls
+back to `off` and logs why. DSA layers never
+run M1. Eligible KDA layers retain K1/K2. Prefill and unsupported decode batches
+use the standard layer path.
 
 ## Enabling
 
