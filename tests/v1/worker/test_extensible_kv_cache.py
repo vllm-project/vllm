@@ -575,6 +575,53 @@ def test_committed_views_cover_exactly_the_committed_bytes(vmm, layout):
         kv_cache.free()
 
 
+class _Layer:
+    def bind_kv_cache(self, kv_cache):
+        self.kv_cache = kv_cache
+
+
+@requires_cuda
+def test_extend_tells_the_model_state_about_the_rebound_views(vmm):
+    """Model states that check or prepare the bound KV cache (e.g. a
+    specialized decode) must see the views the final extend binds."""
+    layout = KVCacheLayout.LBNHC
+    config, _ = _make_config(layout)
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
+    vllm_config.cache_config.kv_cache_layout = layout.name
+    device = torch.device("cuda")
+    kv_cache = ExtensibleKVCache(config, device, layout)
+    try:
+        views = allocate_kv_cache(config, device, layout, allocate=kv_cache.allocate)
+        layers = {name: _Layer() for name in views}
+        for name, view in views.items():
+            layers[name].bind_kv_cache(view)
+        kv_cache.commit(2)
+        rebound = []
+        model_state = SimpleNamespace(
+            rebind_kv_cache=lambda kv_cache_config: rebound.append(
+                {name: layer.kv_cache.shape[0] for name, layer in layers.items()}
+            )
+        )
+        vllm_config.compilation_config.static_forward_context = layers
+        runner = SimpleNamespace(
+            extensible_kv_cache=kv_cache,
+            vllm_config=vllm_config,
+            cache_config=vllm_config.cache_config,
+            compilation_config=vllm_config.compilation_config,
+            kv_cache_config=copy.copy(config),
+            kernel_block_sizes=None,
+            attn_groups=[],
+            speculator=None,
+            kv_caches_by_layer=views,
+            device=device,
+            model_state=model_state,
+        )
+        extensible_kv_cache.extend_kv_cache(runner, config, 4)
+        assert rebound == [dict.fromkeys(views, 4)]
+    finally:
+        kv_cache.free()
+
+
 def _segments_backed_by_one_chunk(kv_cache: ExtensibleKVCache) -> list[bool]:
     """Whether each segment's committed bytes lie within one driver allocation."""
     return kv_cache.buffer.segments_backed_by_one_chunk(

@@ -133,6 +133,11 @@ class ModelState(ABC):
         """Hook run after the KV cache tensors are allocated and bound."""
         return None
 
+    def rebind_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        """Hook run after the extensible KV cache's final commit rebound the
+        layers to views over the committed blocks (same addresses)."""
+        return None
+
     def capture_inner_cudagraphs(
         self,
         input_buffers: InputBuffers,

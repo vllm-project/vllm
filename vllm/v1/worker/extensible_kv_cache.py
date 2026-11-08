@@ -545,6 +545,7 @@ def extend_kv_cache(
             runner.replayssm_block_copy_tensors = get_replayssm_block_copy_tensors(
                 forward_context
             )
+        runner.model_state.rebind_kv_cache(runner.kv_cache_config)
     runner.kv_connector = get_kv_connector(
         runner.vllm_config, runner.kv_caches_by_layer
     )

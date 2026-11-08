@@ -25,3 +25,9 @@ class KimiK3ModelState(MambaHybridModelState):
         decode = self.language_model.specialized_decode
         if decode is not None:
             decode.prepare_kv()
+
+    def rebind_kv_cache(self, kv_cache_config):
+        super().rebind_kv_cache(kv_cache_config)
+        decode = self.language_model.specialized_decode
+        if decode is not None:
+            decode.prepare_kv()
