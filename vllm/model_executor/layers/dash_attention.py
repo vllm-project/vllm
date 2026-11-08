@@ -145,8 +145,11 @@ def entmax15(x: torch.Tensor) -> torch.Tensor:
     x = (x - x.amax(-1, keepdim=True)) / 2
     ordered = x.sort(-1, descending=True).values
     rho = torch.arange(1, x.shape[-1] + 1, device=x.device).float()
-    mean = ordered.cumsum(-1) / rho
-    mean_sq = ordered.square().cumsum(-1) / rho
+    # Scan both moments in one tensor: CUDA cumsum over a single row takes a
+    # different kernel (and summation order) than over several rows, so
+    # routing would depend on how many queries share the batch.
+    moments = torch.stack((ordered, ordered.square()), -2).cumsum(-1) / rho
+    mean, mean_sq = moments.unbind(-2)
     delta = ((1 - rho * (mean_sq - mean.square())) / rho).clamp(min=0)
     tau = mean - delta.sqrt()
     support = (tau <= ordered).sum(-1, keepdim=True).clamp(min=1)

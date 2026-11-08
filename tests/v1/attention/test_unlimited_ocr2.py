@@ -42,6 +42,22 @@ def test_zero_prior_blocks_still_consume_the_hard_read_budget():
     assert bias[0, 0] > bias[0, 1]
 
 
+@requires_cuda_dash
+def test_route_priors_do_not_depend_on_decode_batch_size():
+    """A lone decode query must route exactly like the same query in a batch."""
+    # Scaled scores from a real decode step. Masked blocks enter entmax at -1e4,
+    # which makes its prefix sums sensitive to the summation order.
+    real = [0.3520485758781433, -0.5194296836853027, -0.5448184013366699]
+    real += [-0.628049373626709, -0.6913151144981384, -0.7494180798530579]
+    scores = torch.tensor([real + [-1e9] * 10], device="cuda")
+    candidate = torch.ones_like(scores, dtype=torch.bool)
+    sp = {"sparse_attention_freq": [1], "sparse_index_dim": 1, "dash_scaling_factor": 1}
+    single = route_blocks(scores, candidate, sp, 0)
+    batched = route_blocks(scores.repeat(2, 1), candidate.repeat(2, 1), sp, 0)
+    for alone, in_batch in zip(single, batched):
+        assert torch.equal(alone, in_batch[:1])
+
+
 def test_extra_response_marker_restarts_final_page_offset():
     roles = torch.tensor([0, 2, 1, 1, 0, 2, 0, 2, 0])
     tok, page, _, query_page = page_coordinates(roles)

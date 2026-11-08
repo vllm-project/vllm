@@ -4,6 +4,7 @@
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
+import vllm.envs as envs
 from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
 from vllm.platforms import current_platform
@@ -265,6 +266,10 @@ def test_unlimited_ocr2_excess_markers_survive_preemption(
     """Recomputation preserves raw logits after routing passes the last page."""
     import torch
 
+    # Batch-invariant kernels make the single-request baselines and the
+    # batched, preempted run bitwise comparable.
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     requests = []
     for idx in range(2):
         pages = []
@@ -330,11 +335,10 @@ def test_unlimited_ocr2_excess_markers_survive_preemption(
         for before, after in zip(baseline, outputs):
             expected, actual = before.outputs[0], after.outputs[0]
             assert actual.token_ids == expected.token_ids == [page_id] * 192
-            # Raw scores are measured before the forced-token mask. Allow BF16
-            # variation across batch sizes and recomputation chunk boundaries.
+            # Raw scores are measured before the forced-token mask.
             torch.testing.assert_close(
                 torch.tensor([p[page_id].logprob for p in actual.logprobs]),
                 torch.tensor([p[page_id].logprob for p in expected.logprobs]),
-                atol=0.5,
+                atol=0,
                 rtol=0,
             )
