@@ -84,7 +84,6 @@ sys.meta_path.insert(0, _Finder())
 @pytest.fixture(scope="module", autouse=True)
 def _env():
     with pytest.MonkeyPatch.context() as mp:
-        mp.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
         mp.setenv("VLLM_ROCM_USE_AITER", "1")
         mp.setenv("VLLM_ROCM_AITER_MLA_ASM_PADDING", "asm")
         mp.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")

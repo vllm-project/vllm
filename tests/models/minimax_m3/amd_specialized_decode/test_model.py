@@ -74,7 +74,7 @@ pytestmark = [
 
 @pytest.fixture(scope="module")
 def model_dir(tmp_path_factory):
-    from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3Config
+    from transformers import MiniMaxM3VLConfig
 
     layers = [0] * 3 + [1] * (LAYERS - 3)
     mx = dict(
@@ -88,7 +88,7 @@ def model_dir(tmp_path_factory):
         round_method="half_even",
     )
     path = tmp_path_factory.mktemp("minimax_m3_mini")
-    MiniMaxM3Config(
+    MiniMaxM3VLConfig(
         text_config=dict(
             num_hidden_layers=LAYERS,
             vocab_size=VOCAB,
