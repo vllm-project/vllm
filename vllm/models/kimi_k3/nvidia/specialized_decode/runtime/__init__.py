@@ -171,8 +171,6 @@ def unsupported(vllm_config) -> str | None:
         (envs.VLLM_BATCH_INVARIANT, "batch invariance"),
         (vllm_config.model_config.enable_sleep_mode, "sleep mode"),
         (vllm_config.lora_config is not None, "LoRA"),
-        # The runner's ModelState hooks build the executor and prepare the KV layouts.
-        (not vllm_config.use_v2_model_runner, "the V1 model runner"),
         # The decode loop runs in forward; a compiled forward would trace it.
         (compilation.mode == CompilationMode.STOCK_TORCH_COMPILE, "torch.compile"),
         # The loop runs only in FULL decode graphs; eager and PIECEWISE steps run stock.
@@ -193,8 +191,10 @@ def unsupported(vllm_config) -> str | None:
         # in both).
         (
             kda_dtypes(vllm_config) not in kda_allowed,
-            "KDA cache dtypes other than a BF16 or FP32 conv state and an FP32 "
-            "recurrent state (mamba cache dtype)",
+            (
+                "KDA cache dtypes other than a BF16 or FP32 conv state and an FP32 "
+                "recurrent state (mamba cache dtype)"
+            ),
         ),
         # The verify kernels take at most 8 tokens per request (KdaSplit's barriers).
         (
@@ -219,9 +219,11 @@ def unsupported(vllm_config) -> str | None:
             dsa
             and vllm_config.cache_config.cache_dtype
             not in ("fp8_ds_mla", "fp8", "fp8_e4m3", "nvfp4_ds_mla"),
-            "DSA layers on KV cache dtypes other than fp8_ds_mla (FlashMLA sparse), "
-            "per-tensor fp8 (FlashInfer sparse) or nvfp4_ds_mla (FlashInfer sparse "
-            "prims_ts)",
+            (
+                "DSA layers on KV cache dtypes other than fp8_ds_mla (FlashMLA "
+                "sparse), per-tensor fp8 (FlashInfer sparse) or nvfp4_ds_mla "
+                "(FlashInfer sparse prims_ts)"
+            ),
         ),
     )
     reason = next((reason for failed, reason in checks if failed), None)
