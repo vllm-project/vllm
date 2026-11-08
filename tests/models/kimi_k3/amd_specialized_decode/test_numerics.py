@@ -2587,7 +2587,8 @@ def _m1_worker(
         assert errs["cache_same"] > 0.99, (S, errs)
         # AITER cprr's padded query (96 -> 128 heads) equals the pad
         # forward_mqa builds itself (from the contiguous q8: a view of qp
-        # would hand qp back). test_m1a_pad_through_aiter_cprr runs it.
+        # would hand qp back). test_m1a_pad_matches_vllm_ops_through_aiter_cprr
+        # runs it.
         if qheads == R * NH:
             continue
         runner.step_begin()
@@ -2756,7 +2757,9 @@ def _m1_worker(
 @needs_gfx950
 @pytest.mark.parametrize("qlen", [4, 8])
 @torch.inference_mode()
-def test_m1a_pad_through_aiter_cprr(monkeypatch: pytest.MonkeyPatch, qlen: int) -> None:
+def test_m1a_pad_matches_vllm_ops_through_aiter_cprr(
+    monkeypatch: pytest.MonkeyPatch, qlen: int
+) -> None:
     """AITER's cprr asm decode, at DCP8 (96 -> 128 heads), on the padded query
     M1a writes (mla.attend hands it over) equals the decode on the pad
     forward_mqa builds itself, and both match attention in torch. With

@@ -148,6 +148,9 @@ def _engine(vllm_runner, num_spec: int, max_num_seqs: int, **kwargs):
         enable_chunked_prefill=True,
         max_num_seqs=max_num_seqs,
         gpu_memory_utilization=0.15,
+        # extend_kv_cache re-binds the KV views without prepare_kv, which
+        # plan() rejects in eager steps (#66370)
+        enable_extensible_kv_cache=False,
         attention_config={"mla_prefill_backend": "ROCM_AITER_FA"},
         speculative_config={
             "method": "dspark",
@@ -480,7 +483,10 @@ def _k1_check_engine(layer, runner, step, ins, rec) -> dict:
         norm_eps=attn.o_norm.eps,
         out=core_v,
     )
-    m["conv_bits"] = float(not torch.equal(conv_v, conv1))
+    # NaN-aware: blocks committed during warmup keep warmup contents, NaNs
+    # included, in state entries the step neither reads nor writes
+    same = (conv_v == conv1) | (conv_v.isnan() & conv1.isnan())
+    m["conv_bits"] = float(not bool(same.all()))
     kernel = N._k1_path(w, taps, rounded=True)
     aiter = N._k1_path(w, taps, rounded=False, g1=g1)
     for rq, (c, r) in enumerate(kernel["qk"]):
