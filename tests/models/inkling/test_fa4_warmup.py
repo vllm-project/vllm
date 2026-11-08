@@ -34,7 +34,7 @@ def _vllm_config_from_reference_config(config: SimpleNamespace) -> SimpleNamespa
             dtype=config.dtype,
         ),
         cache_config=SimpleNamespace(
-            cache_dtype="auto",
+            cache_dtype=getattr(config, "cache_dtype", "auto"),
             block_size=config.block_size,
         ),
         scheduler_config=SimpleNamespace(
@@ -56,6 +56,36 @@ def test_bucket_max_seqlen_q():
         8,
         16,
     ]
+
+
+def test_warmup_keys_fp8_kv_dtype(monkeypatch):
+    # fp8 caches are allocated as uint8; warmup must compile against the
+    # viewed e4m3 dtype, never uint8.
+    monkeypatch.setattr(
+        fa4_rel_attention,
+        "get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    config = SimpleNamespace(
+        num_heads=16,
+        num_kv_heads=2,
+        head_dim=128,
+        rel_extent=1024,
+        window_size=(-1, -1),
+        is_local=False,
+        max_kv_len=65536,
+        dtype=torch.bfloat16,
+        kv_dtype=torch.bfloat16,
+        block_size=16,
+        max_num_reqs=8,
+        max_num_batched_tokens=192,
+        cache_dtype="fp8",
+    )
+    vllm_config = _vllm_config_from_reference_config(config)
+    keys = InklingFA4RelAttentionKernel().get_warmup_keys(vllm_config)
+    assert keys
+    assert all(key.kv_dtype == torch.float8_e4m3fn for key in keys)
+    assert all(key.dtype == torch.bfloat16 for key in keys)
 
 
 def test_warmup_enumerates_every_runtime_compile_class(monkeypatch):

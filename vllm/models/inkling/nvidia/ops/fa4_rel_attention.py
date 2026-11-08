@@ -21,6 +21,10 @@ from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+# fp8 KV caches are allocated as uint8 and viewed as e4m3 at the layer
+# before reaching this kernel; other fp8 variants are rejected there.
+_FP8_KV_DTYPES = (torch.float8_e4m3fn,)
+
 
 def bucket_max_seqlen_q(max_seqlen_q: int) -> int:
     """Round the FA4 scheduling bound up to a power of two."""
@@ -150,6 +154,9 @@ class InklingFA4RelAttentionKernel(
         rel_logits: torch.Tensor,
         num_splits: int = 32,
         out: torch.Tensor | None = None,
+        q_descale: float | None = None,
+        k_descale: float | None = None,
+        v_descale: float | None = None,
     ) -> torch.Tensor:
         """Paged varlen FA4 over the bound K/V cache with the Inkling relative bias.
 
@@ -160,10 +167,33 @@ class InklingFA4RelAttentionKernel(
         ``(num_tokens, num_heads, rel_extent)``.
 
         Hopper uses standard FA4's score-mod gather. Blackwell uses tml-fa4's
-        sheared relative-bias layout.
+        sheared relative-bias layout for both bf16 and fp8 (plain-fp8
+        support lands in the vendored tml-fa4 via the companion kernel
+        PR, adapted from closed tml-fa4 PR #1); the cute score-mod path
+        also supports fp8 on SM100 and remains the cross-check and
+        non-sheared fallback.
+
+        ``q_descale``/``k_descale``/``v_descale`` are per-tensor scalar
+        descales, required for fp8 and rejected otherwise. Neither vendored
+        varlen entry has descale parameters, so the QK descale is folded
+        into ``softmax_scale`` (identical to an in-kernel fold: scores are
+        scaled before the exact bf16 bias is added) and the V descale is
+        applied to the output, which is linear in V. The fold sits outside
+        the backend branch and is path-independent.
         """
         # cute uses (None, None) to mean "no window".
         cute_window = (None, None) if window_size == (-1, -1) else window_size
+
+        kv_is_fp8 = key_cache.dtype in _FP8_KV_DTYPES
+        if kv_is_fp8:
+            assert q.dtype == key_cache.dtype, (
+                "cute FA4 fp8 requires the query quantized to the KV dtype"
+            )
+            assert q_descale is not None
+            assert k_descale is not None and v_descale is not None
+            softmax_scale = softmax_scale * q_descale * k_descale
+        else:
+            assert q_descale is None and k_descale is None and v_descale is None
 
         rel_logits = rel_logits.contiguous()
         flash_attn_varlen_func: Callable[..., Any]
@@ -201,9 +231,11 @@ class InklingFA4RelAttentionKernel(
             out=out,
             **bias_kwargs,
         )
-        if isinstance(ret, tuple):
-            return ret[0]
-        return ret
+        result = ret[0] if isinstance(ret, tuple) else ret
+        if kv_is_fp8 and v_descale != 1.0:
+            # out = P @ (V_fp8 * v_descale) = v_descale * (P @ V_fp8).
+            result.mul_(v_descale)
+        return result
 
     def dispatch(  # type: ignore[override]
         self,
@@ -271,6 +303,12 @@ class InklingFA4RelAttentionKernel(
             vllm_config.cache_config.cache_dtype,
             vllm_config.model_config,
         )
+        if vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3"):
+            # The accepted e4m3 caches are allocated as uint8 and viewed as
+            # the platform fp8 dtype at the layer; warmup must compile the
+            # viewed dtype. Other quantized dtypes are rejected at layer
+            # construction.
+            kv_dtype = current_platform.fp8_dtype()
         block_size = vllm_config.cache_config.block_size
         local_extent = config.sliding_window_size
 
@@ -344,13 +382,21 @@ class InklingFA4RelAttentionKernel(
         with FakeTensorMode():
             device = torch.accelerator.current_accelerator()
             total_q = compile_key.max_seqlen_q + num_reqs - 1
+            kv_is_fp8 = compile_key.kv_dtype in _FP8_KV_DTYPES
+            # With fp8 KV the layer quantizes q to the KV dtype; rel_logits
+            # stay in the model dtype on every path.
             q = torch.empty(
                 total_q,
                 compile_key.num_heads,
                 compile_key.head_dim,
-                dtype=compile_key.dtype,
+                dtype=compile_key.kv_dtype if kv_is_fp8 else compile_key.dtype,
                 device=device,
             )
+            descale_kwargs: dict[str, Any] = {}
+            if kv_is_fp8:
+                # Scalar descales; 1.0 keeps the warmup output-scale
+                # branch identical to the runtime default-scale case.
+                descale_kwargs = dict(q_descale=1.0, k_descale=1.0, v_descale=1.0)
             kv = torch.empty(
                 1,
                 2,
@@ -394,7 +440,16 @@ class InklingFA4RelAttentionKernel(
                     device=device,
                 ),
                 num_splits=compile_key.num_splits,
-                out=torch.empty_like(q),
+                # Output stays in the model dtype on every path; cute
+                # produces bf16 output for fp8 inputs.
+                out=torch.empty(
+                    total_q,
+                    compile_key.num_heads,
+                    compile_key.head_dim,
+                    dtype=compile_key.dtype,
+                    device=device,
+                ),
+                **descale_kwargs,
             )
 
     def __call__(
@@ -414,6 +469,9 @@ class InklingFA4RelAttentionKernel(
         rel_logits: torch.Tensor,
         num_splits: int = 32,
         out: torch.Tensor | None = None,
+        q_descale: float | None = None,
+        k_descale: float | None = None,
+        v_descale: float | None = None,
     ) -> torch.Tensor:
         return self.kernel(
             q,
@@ -430,6 +488,9 @@ class InklingFA4RelAttentionKernel(
             rel_logits=rel_logits,
             num_splits=num_splits,
             out=out,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
         )
 
 
