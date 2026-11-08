@@ -1,5 +1,21 @@
 # CI Failures
 
+## Tests Not Run by CI
+
+The `check-test-tethering` pre-commit hook checks that test files are selected by
+at least one Buildkite job. Changes to pipeline YAML, shell scripts, or the test
+allowlist trigger a full scan, since they can remove coverage for unchanged tests.
+This includes shell scripts outside `.buildkite/` that a job invokes.
+
+If a script edit reports that a test is not run by any job, restore its test
+command or select it from another job. To check a script manually, run:
+
+```bash
+pre-commit run check-test-tethering --files tests/path/to/run-tests.sh
+```
+
+## Failed CI Jobs
+
 What should I do when a CI job fails on my PR, but I don't think my PR caused
 the failure?
 

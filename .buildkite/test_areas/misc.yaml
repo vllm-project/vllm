@@ -868,6 +868,7 @@ steps:
   - tools/pre_commit/check_test_tethering.py
   - tools/pre_commit/test_tethering_allowlist.txt
   - tests/tools/test_check_test_tethering.py
+  - .pre-commit-config.yaml
   - tools/pre_commit/check_agent_files.py
   - tests/tools/test_check_agent_files.py
   - tools/pre_commit/check_trust_remote_code.py
