@@ -36,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
+from vllm.v1.token_buffer import token_slice
 from vllm.v1.utils import tensor_data
 
 if TYPE_CHECKING:
@@ -175,10 +176,10 @@ class KVCacheBlock:
     )
     # The hash key (block hash + group id) of the block, only available
     # when the block is full and cached.
-    _block_hash: BlockHashWithGroupId | None = None
-    # Number of prefix tokens covered by _block_hash. For full blocks this is
+    block_hash: BlockHashWithGroupId | None = None
+    # Number of prefix tokens covered by block_hash. For full blocks this is
     # the full block boundary; partial entries can end inside a cache block.
-    _block_hash_num_tokens: int | None = None
+    block_hash_num_tokens: int | None = None
 
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
@@ -188,29 +189,21 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
-    @property
-    def block_hash(self) -> BlockHashWithGroupId | None:
-        return self._block_hash
-
-    @property
-    def block_hash_num_tokens(self) -> int | None:
-        return self._block_hash_num_tokens
-
     def set_block_hash(
         self,
         block_hash: BlockHashWithGroupId,
         num_tokens: int | None = None,
     ) -> None:
-        assert self.block_hash is None and self._block_hash_num_tokens is None, (
+        assert self.block_hash is None and self.block_hash_num_tokens is None, (
             "The block already has a hash. This should not happen."
         )
-        self._block_hash = block_hash
-        self._block_hash_num_tokens = num_tokens
+        self.block_hash = block_hash
+        self.block_hash_num_tokens = num_tokens
 
     def reset_hash(self):
         """Reset the block hash when the block is evicted."""
-        self._block_hash = None
-        self._block_hash_num_tokens = None
+        self.block_hash = None
+        self.block_hash_num_tokens = None
 
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
@@ -220,8 +213,8 @@ class KVCacheBlock:
         return (
             f"KVCacheBlock(block_id={self.block_id}, "
             f"ref_cnt={self.ref_cnt}, "
-            f"_block_hash={self._block_hash!r}, "
-            f"_block_hash_num_tokens={self._block_hash_num_tokens}, "
+            f"block_hash={self.block_hash!r}, "
+            f"block_hash_num_tokens={self.block_hash_num_tokens}, "
             f"prev_free_block={prev_block_id}, "
             f"next_free_block={next_block_id})"
         )
@@ -1024,8 +1017,10 @@ def get_request_block_hasher(
                     request, start_token_idx, end_token_idx, curr_mm_idx
                 )
 
-            # Compute the hash of the current block
-            block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
+            # Compute the hash of the current block.
+            block_tokens = token_slice(
+                request._all_token_ids, start_token_idx, end_token_idx
+            )
             block_hash = hash_block_tokens(
                 caching_hash_fn, prev_block_hash_value, block_tokens, extra_keys
             )
@@ -1047,7 +1042,8 @@ def frontend_block_hashes(
     block_hashes = request.block_hashes
     if block_hashes is None:
         return None
-    prompt_len = len(request.prompt_token_ids) if request.prompt_token_ids else 0
+    prompt_ids = request.prompt_token_ids
+    prompt_len = len(prompt_ids) if prompt_ids is not None else 0
     # The engine hashes a block once its lookahead tokens exist too.
     if prefix_hash_config is None or len(block_hashes) != (
         max(prompt_len - prefix_hash_config.num_lookahead_tokens, 0)

@@ -290,8 +290,14 @@ class DiffusionGemmaForConditionalGeneration(
     _encoder_chunk = staticmethod(Gemma4ForConditionalGeneration._encoder_chunk)
     _get_max_soft_tokens = Gemma4ForConditionalGeneration._get_max_soft_tokens
     _embed_patches = Gemma4ForConditionalGeneration._embed_patches
-    _process_image_input = Gemma4ForConditionalGeneration._process_image_input
-    _process_video_input = Gemma4ForConditionalGeneration._process_video_input
+    _process_image_input = Gemma4ForConditionalGeneration._process_image_input_local
+    _process_video_input = Gemma4ForConditionalGeneration._process_video_input_local
+    _process_image_input_local = (
+        Gemma4ForConditionalGeneration._process_image_input_local
+    )
+    _process_video_input_local = (
+        Gemma4ForConditionalGeneration._process_video_input_local
+    )
     embed_multimodal = Gemma4ForConditionalGeneration.embed_multimodal
 
     def get_mm_mapping(self) -> MultiModelKeys:
