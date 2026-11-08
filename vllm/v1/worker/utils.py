@@ -58,7 +58,7 @@ def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
 
 @triton.jit
 def _kernel_slots_kernel(src, dst, n, block_size, shift, BLOCK: tl.constexpr):
-    """``dst = src + src // block_size * shift`` over contiguous 1-D slots;
+    """`dst = src + src // block_size * shift` over contiguous 1-D slots;
     negative (padded) slots stay."""
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n
@@ -117,7 +117,7 @@ class KVBlockZeroer:
     """Manages efficient zeroing of KV cache blocks via a Triton kernel.
 
     Construct once after KV caches are allocated to precompute segment
-    addresses, then call :meth:`zero_block_ids` each step to zero
+    addresses, then call `zero_block_ids` each step to zero
     newly-allocated blocks.
     """
 
@@ -135,7 +135,7 @@ class KVBlockZeroer:
         Each entry is the absolute byte address of a segment start on the
         GPU, so segments in different CUDA allocations work correctly.
 
-        Per-layer views are standardized ``[B, H, N, C]`` with blocks at dim 0; dims
+        Per-layer views are standardized `[B, H, N, C]` with blocks at dim 0; dims
         physically outside B (separate head groups under LHBNC) each get their own
         segment. A segment's page spans everything inside its block, so under BHLNC it
         also covers the block's other layers -- safe, since block IDs are global pool
@@ -419,8 +419,8 @@ class AttentionGroup:
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """A token cache's slots in the kernel blocks of a packed cache: offset
-        ``t`` of block ``b`` moves to ``b * kernel_block_stride * kernel_block_size
-        + t``. Padded (negative) slots stay. Written into ``out`` or this group's
+        `t` of block `b` moves to `b * kernel_block_stride * kernel_block_size
+        + t`. Padded (negative) slots stay. Written into `out` or this group's
         persistent per-ubatch buffer."""
         if not self.kernel_block_stride or self.kernel_slot_mapping is None:
             return slot_mapping
@@ -513,7 +513,7 @@ class AttentionGroup:
 def map_kv_caches_to_kernel_blocks(
     kv_caches: dict[str, torch.Tensor], attn_groups: Iterable[AttentionGroup]
 ) -> dict[str, torch.Tensor]:
-    """The views to bind to layers. The manager views in ``kv_caches`` stay for
+    """The views to bind to layers. The manager views in `kv_caches` stay for
     KV connectors."""
     mapped = dict(kv_caches)
     for group in attn_groups:
@@ -546,7 +546,7 @@ def _block_size_is_supported(
 ) -> bool:
     """Check if the block size is supported by all backends.
 
-    An exact ``int`` declaration must match exactly; a ``MultipleOf``
+    An exact `int` declaration must match exactly; a `MultipleOf`
     declaration accepts any multiple of its base.
     """
     for backend, spec in zip(backends, specs, strict=True):
@@ -621,10 +621,10 @@ def allocate_kv_cache(
     kernel_block_sizes: list[int] | None = None,
     allocate: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Allocate the KV cache and view it as ``[B, H, N, C]`` per layer.
+    """Allocate the KV cache and view it as `[B, H, N, C]` per layer.
 
-    Every KVCacheTensor places its layers in the same backing allocation: layer ``l`` of
-    block ``b`` starts at ``offset + l * layer_stride + b * block_stride``. Cache
+    Every KVCacheTensor places its layers in the same backing allocation: layer `l` of
+    block `b` starts at `offset + l * layer_stride + b * block_stride`. Cache
     groups overlay each other, so tensors may address the same bytes.
 
     allocate replaces the default zeroed backing allocation: it takes the
@@ -1046,7 +1046,7 @@ def copy_kv_cache_blocks_inplace(
 def is_uniform_query_len(num_reqs: int, num_tokens: int, max_query_len: int) -> bool:
     """Whether every request in the batch has the same query length.
 
-    Shape test only; use ``get_uniform_decode_token_count`` to classify a
+    Shape test only; use `get_uniform_decode_token_count` to classify a
     scheduled batch, since a prompt chunk can have a decode batch's shape.
     """
     return num_reqs > 0 and num_tokens == max_query_len * num_reqs

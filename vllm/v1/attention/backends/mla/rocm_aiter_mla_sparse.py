@@ -165,7 +165,7 @@ def _compact_dcp_indices(
     """Preserve each row's valid slot order while removing invalid KV entries.
 
     Args:
-        indices: Per-row KV rows, where ``-1`` marks an invalid entry.
+        indices: Per-row KV rows, where `-1` marks an invalid entry.
         counts: Optional per-row count of valid entries, which must then be a
             prefix of the row. Pass it to save the separate prefix sum.
 
@@ -263,7 +263,7 @@ def merge_dcp_scores(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Merge rank-major score candidates into this rank's physical CSR slots.
 
-    Same selection as aiter ``flydsl_dcp_topk_merge``: the global top-k by
+    Same selection as aiter `flydsl_dcp_topk_merge`: the global top-k by
     score, ties at the k-th score taken in rank-major position order.
     """
     rows, k = local_indices.shape
@@ -840,11 +840,11 @@ class ROCMAiterMLASparseMetadataBuilder(
         self._prev_metadata_key: tuple | None = None
 
     def _sparse_decode_max_split(self, max_seq_len: int) -> int:
-        """Cap ``max_split_per_batch`` for the aiter sparse-MLA decode reduce.
+        """Cap `max_split_per_batch` for the aiter sparse-MLA decode reduce.
 
-        The reduce only covers the selected tokens per row (``<= topk_tokens``),
-        so aiter's default (``-1`` => split across every CU) over-fragments it.
-        Mirror ``triton_mla.py``: aim for a minimum work per split, round to a
+        The reduce only covers the selected tokens per row (`<= topk_tokens`),
+        so aiter's default (`-1` => split across every CU) over-fragments it.
+        Mirror `triton_mla.py`: aim for a minimum work per split, round to a
         power of two, and cap by the CU count. Numerics are unchanged.
         """
         effective_len = min(max_seq_len, self.topk_tokens)

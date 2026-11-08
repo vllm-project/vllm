@@ -74,7 +74,7 @@ logger = init_logger(__name__)
 
 
 class _PaddedKimiGDNMergedColumnParallelLinear(_KimiGDNMergedColumnParallelLinear):
-    """Merged projection with ``padding_size`` zero rows appended per rank."""
+    """Merged projection with `padding_size` zero rows appended per rank."""
 
     def __init__(self, *args, padding_size: int = 0, **kwargs) -> None:
         super().__init__(*args, **kwargs)

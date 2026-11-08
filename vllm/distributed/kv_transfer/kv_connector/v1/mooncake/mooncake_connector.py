@@ -331,7 +331,7 @@ def _mamba_hetero_tp_segments(
     """(src_offset, dst_offset, length) copies of one Mamba state page between
     producer and consumer pages of different TP sizes.
 
-    A page (DS conv layout) is ``[conv proj 0 | proj 1 | ... | temporal]``,
+    A page (DS conv layout) is `[conv proj 0 | proj 1 | ... | temporal]`,
     each part sharded by heads across TP. Merging or splitting shards must
     move each part separately: e.g. GDN/KDA producer TP8 -> consumer TP4 puts
     producer rank 2r+1's Q after rank 2r's Q, not after its whole page.
@@ -1162,7 +1162,7 @@ class MooncakeConnectorScheduler:
         h(N-1) instead of h(N). The decoder recomputes the last token to
         derive h(N) correctly.
 
-        Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
+        Guarded by `_p_side_truncated` to avoid repeated truncation if the
         request is preempted and rescheduled."""
         params = request.kv_transfer_params
         if (
@@ -3234,8 +3234,8 @@ class MooncakeConnectorWorker:
     ) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
         """Align and coalesce once per peer layout.
 
-        ``send_kv_to_decode`` runs on every scheduler batch. The registered
-        layout does not change until the next ``register_kv_caches``.
+        `send_kv_to_decode` runs on every scheduler batch. The registered
+        layout does not change until the next `register_kv_caches`.
         """
         cache_key = (
             meta.remote_hostname,

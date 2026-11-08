@@ -399,7 +399,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         )
 
     def _kernel_context_slots(self, i: int, start: int, end: int) -> torch.Tensor:
-        """Context slots of draft group ``i``, in kernel blocks when its cache is
+        """Context slots of draft group `i`, in kernel blocks when its cache is
         a packed token cache split into them. Recorded in FULL graphs as well."""
         slots = self._context_slot_mappings[i][start:end]
         for group in self.attn_groups[self.draft_kv_cache_group_ids[i]]:

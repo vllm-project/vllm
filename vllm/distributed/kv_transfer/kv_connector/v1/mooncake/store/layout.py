@@ -28,12 +28,12 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 def group_compact_kernel_blocks(
     cache: torch.Tensor, num_blocks: int
 ) -> tuple[torch.Tensor, bool]:
-    """Group a layer cache to ``num_blocks`` manager blocks and report whether
+    """Group a layer cache to `num_blocks` manager blocks and report whether
     each manager block is one gapless byte run (moves as one region).
 
     Decided on the kernel-block view, before grouping: a manager block is a run
     of consecutive kernel blocks, so it is compact whenever each kernel block
-    is. The grouped ``cache[0]`` alone cannot tell: tail padding in every
+    is. The grouped `cache[0]` alone cannot tell: tail padding in every
     kernel block makes it non-dense although no other block's data sits in the
     gaps.
     """
@@ -726,7 +726,7 @@ ATTENTION_STORE_LAYOUTS: dict[KVCacheLayout, type[AttentionStoreLayout]] = {
 
 
 class MambaStoreLayout(TPShardedStoreLayout):
-    """Store descriptors for cache groups represented by ``MambaSpec``.
+    """Store descriptors for cache groups represented by `MambaSpec`.
 
     This includes Mamba and GDN convolution/recurrent state caches.
     """

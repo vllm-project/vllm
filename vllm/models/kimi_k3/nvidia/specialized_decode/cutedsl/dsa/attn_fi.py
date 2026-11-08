@@ -22,8 +22,8 @@ kernel's 128 heads, so there is no head pad or unpad copy). A row this rank owns
 none of (count 0) needs no masking: DcpValue reads the counts and drops it, whatever
 its LSE (prims_ts returns -inf, trtllm-gen a finite garbage value).
 
-The kernel is picked per (topology, rows) from ``FI_KERNEL`` among those that read
-the cache (``fi_kernels``)."""
+The kernel is picked per (topology, rows) from `FI_KERNEL` among those that read
+the cache (`fi_kernels`)."""
 
 import bisect
 import math
@@ -106,8 +106,8 @@ def fi_kernels(kv_cache_dtype) -> tuple[str, ...]:
 
 
 def kernel_for(rows, dcp, kernels, heads=None):
-    """The sparse MLA kernel of one batch: the measured choice among ``kernels``
-    (``heads``: the query heads; trtllm-gen takes at most 64 or exactly 128, so
+    """The sparse MLA kernel of one batch: the measured choice among `kernels`
+    (`heads`: the query heads; trtllm-gen takes at most 64 or exactly 128, so
     unpadded 64 < H < 128 run prims_ts). Without DCP, 128 heads are TP1's 96
     head-padded (fi_heads): the stock decode's kernel, trtllm-gen on a per-tensor
     FP8 cache (its split-KV schedule; GB300 128K q5, 5 / 20 / 80 / 160 / 320 rows:
@@ -125,8 +125,8 @@ def kernel_for(rows, dcp, kernels, heads=None):
 
 
 def plan_rows_for(rows, capacities=None):
-    """The rows of the prims_ts plan that runs a batch of ``rows``: the smallest of
-    the stock decode's row ``capacities`` that holds it (None: its own)."""
+    """The rows of the prims_ts plan that runs a batch of `rows`: the smallest of
+    the stock decode's row `capacities` that holds it (None: its own)."""
     if not capacities:
         return rows
     capacity = bisect.bisect_left(capacities, rows)
@@ -138,13 +138,13 @@ class _Plans:
     """prims_ts plans shared by every DSA layer: one per (device, rows, heads, cache
     format, top-k width, LSE), each planned for its exact row count (its schedule is
     the one FlashInfer picks for that many decode rows). The layers run one at a
-    time on one stream, so the plans of a ``plan`` call share one workspace."""
+    time on one stream, so the plans of a `plan` call share one workspace."""
 
     def __init__(self):
         self.plans: dict[tuple, object] = {}
 
     def plan(self, device, shapes, fmt, topk):
-        """Plan every (plan rows, heads, lse) of ``shapes`` not yet planned."""
+        """Plan every (plan rows, heads, lse) of `shapes` not yet planned."""
         from flashinfer.attention.prims_ts import (
             BatchSparseMLADecodePagedTSWrapper,
             get_prims_ts_sparse_mla_decode_workspace_size,
@@ -179,8 +179,8 @@ class _Plans:
 
 
 def _offsets(capacity, rows, device):
-    """The packed-query offsets of ``rows`` one-token rows in a plan of
-    ``capacity``: [0, 1, ..., rows, ..., rows]."""
+    """The packed-query offsets of `rows` one-token rows in a plan of
+    `capacity`: [0, 1, ..., rows, ..., rows]."""
     offsets = torch.arange(capacity + 1, dtype=torch.int32, device=device)
     return offsets.clamp_(max=rows)
 
@@ -189,14 +189,14 @@ PLANS = _Plans()
 
 
 class FlashInferCore:
-    """One layer's FlashInfer sparse core. ``impl`` / ``layer``: its
-    FlashInferMLASparseImpl and attention layer; ``heads``: the query heads per
-    row (the q mailbox's padded heads under DCP); ``buffers``: the model's shared
+    """One layer's FlashInfer sparse core. `impl` / `layer`: its
+    FlashInferMLASparseImpl and attention layer; `heads`: the query heads per
+    row (the q mailbox's padded heads under DCP); `buffers`: the model's shared
     flat rows [R, K], their counts [R], the latent [R * heads * 512] (BF16) and,
-    under DCP, the LSE [R * heads] (FP32); ``kernels``: {rows: kernel}; ``dcp``,
-    ``rank``: the KV cache's DCP sharding; ``capacities``: the stock decode's
-    prims_ts row capacities (``plan_rows_for``); ``widths``: the index widths
-    ``decode`` may get (default the buffers' top-k; e.g. also the DCP top-k
+    under DCP, the LSE [R * heads] (FP32); `kernels`: {rows: kernel}; `dcp`,
+    `rank`: the KV cache's DCP sharding; `capacities`: the stock decode's
+    prims_ts row capacities (`plan_rows_for`); `widths`: the index widths
+    `decode` may get (default the buffers' top-k; e.g. also the DCP top-k
     merge's rows)."""
 
     def __init__(
@@ -232,7 +232,7 @@ class FlashInferCore:
         self, topk, metadata, rows, stride_rows, interleave
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """The top-k ids -> this rank's flat rows of the packed blocks (a compacted
-        prefix; under DCP the global ids this rank owns, ``interleave`` tokens per
+        prefix; under DCP the global ids this rank owns, `interleave` tokens per
         rank in turn) and their counts."""
         from vllm.v1.attention.backends.mla.sparse_utils import (
             triton_convert_req_index_to_global_index,
@@ -256,8 +256,8 @@ class FlashInferCore:
         return slots, valid
 
     def run(self, query, cache, topk, metadata):
-        """``query`` [B, heads, 576] (FP8 bytes) over the packed ``cache`` at the
-        top-k ids ``topk`` -> the latent [B, heads, 512] (and under DCP its LSE
+        """`query` [B, heads, 576] (FP8 bytes) over the packed `cache` at the
+        top-k ids `topk` -> the latent [B, heads, 512] (and under DCP its LSE
         [B, heads] in the kernel's base)."""
         assert topk.shape[1] == self.topk
         stride_rows = self.rows(cache, metadata.block_size)[1]
@@ -266,16 +266,16 @@ class FlashInferCore:
         return self.decode(query, cache, slots, valid, metadata.block_size)
 
     def rows(self, cache, block_size):
-        """The flat rows of the packed ``cache`` and the rows per block stride."""
+        """The flat rows of the packed `cache` and the rows per block stride."""
         from vllm.v1.attention.backends.mla.sparse_utils import flat_kv_row_view
 
         view = torch.float8_e4m3fn if self.fmt == "native" else torch.uint8
         return flat_kv_row_view(cache.view(view), block_size)
 
     def decode(self, query, cache, slots, valid, block_size):
-        """The sparse decode of ``query`` over this rank's flat rows ``slots`` of
-        the packed ``cache`` (a compacted prefix of ``valid`` per row; e.g. from a
-        fused top-k that emits them) -> as ``run``."""
+        """The sparse decode of `query` over this rank's flat rows `slots` of
+        the packed `cache` (a compacted prefix of `valid` per row; e.g. from a
+        fused top-k that emits them) -> as `run`."""
         rows, heads = query.shape[0], self.heads
         assert query.shape[1] == heads
         kv, stride_rows = self.rows(cache, block_size)

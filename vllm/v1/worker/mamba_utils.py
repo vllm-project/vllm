@@ -109,17 +109,17 @@ def _memcpy_u64_tiled(
     COPY_BLOCK_SIZE: tl.constexpr,
     NUM_TILES: tl.constexpr,
 ):
-    """Head/body/tail memcpy with the u64 body split across ``NUM_TILES`` CTAs.
+    """Head/body/tail memcpy with the u64 body split across `NUM_TILES` CTAs.
 
-    Fast path (``src`` and ``dst`` share sub-8B alignment): tile 0 owns the
+    Fast path (`src` and `dst` share sub-8B alignment): tile 0 owns the
     byte head that lifts dst to 8B and the 0-7 byte tail; body tiles vectorize
-    as u64 over the aligned interior. ``NUM_TILES=1`` collapses to a single-
+    as u64 over the aligned interior. `NUM_TILES=1` collapses to a single-
     CTA memcpy. Production callers derive both addresses from the same
-    ``state_base_addr + block_id * stride`` and always take this path.
+    `state_base_addr + block_id * stride` and always take this path.
 
     Slow path (mismatched sub-8B alignment): byte-wide tiled copy. Some
     NVIDIA parts (e.g. GB200) reject misaligned u64 loads with
-    ``cudaErrorMisalignedAddress`` instead of accepting the misaligned-sector
+    `cudaErrorMisalignedAddress` instead of accepting the misaligned-sector
     cost, so we can't just let the fast path run with a misaligned src.
     """
     src_addr_i = src_addr.to(tl.int64)
@@ -208,23 +208,23 @@ def _copy_mamba_state_block(
 ):
     """Copy one (layer, state-type) mamba state block between block columns.
 
-    Shared copy body of ``postprocess_mamba_fused_kernel`` and
-    ``precopy_mamba_align_fused_kernel``:
-    - conv state (conv_width > 0): shift the window by ``token_bias`` tokens,
-      ``state[bt[src_col], token_bias:] ->
-      state[bt[dst_col], :conv_width - token_bias]``
-    - temporal state: ``token_bias`` selects the accepted speculative column,
-      ``state[bt[src_col + token_bias]] -> state[bt[dst_col]]``
+    Shared copy body of `postprocess_mamba_fused_kernel` and
+    `precopy_mamba_align_fused_kernel`:
+    - conv state (conv_width > 0): shift the window by `token_bias` tokens,
+      `state[bt[src_col], token_bias:] ->
+      state[bt[dst_col], :conv_width - token_bias]`
+    - temporal state: `token_bias` selects the accepted speculative column,
+      `state[bt[src_col + token_bias]] -> state[bt[dst_col]]`
 
     The caller owns the decision logic (which columns, whether to copy); this
     device function only performs the byte copy for the given metadata slot.
 
-    ``tile_idx`` in ``[0, TEMPORAL_TILES)`` partitions the temporal state's
-    u64 range into ``TEMPORAL_TILES`` contiguous, COPY_BLOCK_SIZE-aligned
+    `tile_idx` in `[0, TEMPORAL_TILES)` partitions the temporal state's
+    u64 range into `TEMPORAL_TILES` contiguous, COPY_BLOCK_SIZE-aligned
     slices, giving more CTAs to fill the SMs at small batch (multi-MiB
     temporal copies otherwise leave the GPU under-filled). Conv states are
-    small; only ``tile_idx == 0`` copies them. ``TEMPORAL_TILES == 1`` and
-    ``tile_idx == 0`` reproduces the untiled behavior.
+    small; only `tile_idx == 0` copies them. `TEMPORAL_TILES == 1` and
+    `tile_idx == 0` reproduces the untiled behavior.
     """
     state_base_addr = tl.load(state_base_addrs_ptr + state_idx)
     state_block_stride = tl.load(state_block_strides_ptr + state_idx)
@@ -525,7 +525,7 @@ def preprocess_mamba_align_fused_kernel(
 
     Per batch_idx (0..num_reqs-1), resolving req slot via idx_mapping:
       1. Read pre-advance state_idx and num_accepted (last step's values).
-      2. Store the pre-copy src columns for ``precopy_mamba_align_fused_kernel``:
+      2. Store the pre-copy src columns for `precopy_mamba_align_fused_kernel`:
          - src_col = state_idx (the previous running block column)
          - src_off = max(num_accepted - 1, 0) (the accepted-token bias)
       3. Advance state_idx to the new running block. Reset num_accepted to 1
@@ -591,8 +591,8 @@ def precopy_mamba_align_fused_kernel(
     Before the forward pass, copy each request's last SSM/conv state from its
     previous block column into the new window block column, so the kernels read
     the initial state from the write-side block as usual.
-    Same per-(layer, state) copy semantics as ``postprocess_mamba_fused_kernel``
-    (shared ``_copy_mamba_state_block`` body), but driven by the GPU-resident src
+    Same per-(layer, state) copy semantics as `postprocess_mamba_fused_kernel`
+    (shared `_copy_mamba_state_block` body), but driven by the GPU-resident src
     columns so it needs no CPU-GPU sync (async-scheduling safe).
 
     Grid: (num_reqs, num_states [, TEMPORAL_TILES]). The runner passes
@@ -659,7 +659,7 @@ def _get_mamba_spec_for_layer(
 def get_mamba_group_ids(mamba_groups: dict[MambaSpec, list[int]]) -> list[int]:
     """Return the sorted group ids of all mamba groups, without duplicates.
 
-    A group whose layers use different ``MambaSpec``s is listed under one key
+    A group whose layers use different `MambaSpec`s is listed under one key
     per spec, so the same group id can appear more than once.
     """
     return sorted(
@@ -1178,12 +1178,12 @@ class MambaSpecDecodeGPUContext:
         """V2 align postprocess: save the running state to the block-aligned
         position after spec-decode acceptance leaves the sequence non-aligned.
 
-        ``num_accepted_tokens_gpu`` is updated in place while the kernel reads
+        `num_accepted_tokens_gpu` is updated in place while the kernel reads
         from a snapshot to avoid cross-program races when the accepted position
         stays in the running block and the count is reset to 1.
-        ``new_num_computed_tokens`` already holds the post-step computed count
+        `new_num_computed_tokens` already holds the post-step computed count
         (PRECOMPUTED_NEW_COMPUTED).
-        ``idx_mapping`` maps batch row -> req-state slot (HAS_IDX_MAPPING).
+        `idx_mapping` maps batch row -> req-state slot (HAS_IDX_MAPPING).
         """
         if num_reqs == 0 or not self.is_initialized:
             return

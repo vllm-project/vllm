@@ -11,15 +11,15 @@
 
 """FlyDSL sparse MLA forward over fp8_ds_mla records, gfx950.
 
-Serves the DeepSeek-V3.2 / Kimi-K3 fp8_ds_mla path of ``sparse_mla_fwd``
+Serves the DeepSeek-V3.2 / Kimi-K3 fp8_ds_mla path of `sparse_mla_fwd`
 (kv_lora_rank 512, rope 64, bf16 q, <= 16 heads, CSR index stream). The host
-wrapper and its support predicate live in ``flydsl_sparse_mla.py``.
+wrapper and its support predicate live in `flydsl_sparse_mla.py`.
 
 Record (656 B): 512 e4m3 latent | 4 f32 per-128 pow2 scales | 64 bf16 rope.
 
 One 4-wave workgroup per query row (rows issued in reverse order, so the long
 causal tail starts first), 128-token tiles over the row's CSR slice
-``indices[indptr[q] : indptr[q + 1]]``:
+`indices[indptr[q] : indptr[q + 1]]`:
 
   * QK: wave w computes S for tokens [32w, 32w + 32) of the tile, all heads,
     from the raw fp8 latent: a scaled MFMA 16x16x128 with the record's pow2
@@ -33,7 +33,7 @@ causal tail starts first), 128-token tiles over the row's CSR slice
   * Tiles: nt = ceil(len / 128), or with has_invalid ceil(last_valid / 128),
     where a scan of the row finds the last entry >= 0. Positions >= len and,
     with has_invalid, entries < 0 are masked; their latent DMA reads row 0.
-    Index reads go through a buffer descriptor sized to ``indices``, so a tail
+    Index reads go through a buffer descriptor sized to `indices`, so a tail
     tile never reads past the end of the index buffer.
   * KV rows are addressed in 64 bits (global_load ... lds for the latent DMA,
     plain global loads for the scale and rope words), so the cache may span
@@ -125,7 +125,7 @@ def _global_llvm_ptr(addr):
 
 
 def _global_i32(addr, words):
-    """``words`` i32 (1 or 4) at the 64-bit global address ``addr``: a cache
+    """`words` i32 (1 or 4) at the 64-bit global address `addr`: a cache
     past 4 GiB is out of a buffer descriptor's 32-bit offset reach."""
     ptr = fx.inttoptr(
         fx.PointerType.get(T.i32, fx.AddressSpace.Global, 4 * words), fx.Int64(addr)

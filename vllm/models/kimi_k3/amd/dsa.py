@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi K3.1 DSA (DeepSeek Sparse Attention) for the kimi_k3 stack on ROCm.
 
-Ports ``nvidia/dsa.py``: the indexer runs through
-``SparseAttnIndexer.forward_hip`` (the DeepSeek V3.2 ROCm pattern) and the
+Ports `nvidia/dsa.py`: the indexer runs through
+`SparseAttnIndexer.forward_hip` (the DeepSeek V3.2 ROCm pattern) and the
 sparse MLA layers are served by ROCM_AITER_MLA_SPARSE over the fp8_ds_mla
 cache. The DeepGEMM-only 32/64 index-head zero padding is dropped: the ROCm
 indexer kernels take the native head count.
@@ -383,8 +383,8 @@ class KimiK3DSAIndexer(nn.Module):
     """wq/wk/wv indexer projections with FP8 or MXFP4 scoring on ROCm.
 
     Forward quantizes the indexer query, folds the scales into the per-head
-    weights and drives ``torch.ops.vllm.rocm_aiter_sparse_attn_indexer`` via
-    ``SparseAttnIndexer.forward_hip`` with ``cache_layout="NORMAL"``: the
+    weights and drives `torch.ops.vllm.rocm_aiter_sparse_attn_indexer` via
+    `SparseAttnIndexer.forward_hip` with `cache_layout="NORMAL"`: the
     indexer pages are block-flat, which the Triton insert wrapper cannot infer
     from the cache shape alone. MXFP4 uses group scales and dedicated FlyDSL
     scoring with the same global token-index output contract.
@@ -601,7 +601,7 @@ class KimiK3DSAAttention(nn.Module):
     """Kimi K3.1 DSA (DeepSeek Sparse Attention) inference path on ROCm.
 
     Same MLA projections as the dense Kimi-K3 MLA path, plus the DSA indexer
-    wired through ``MLAModules(is_sparse=True)`` so the ROCM_AITER_MLA_SPARSE
+    wired through `MLAModules(is_sparse=True)` so the ROCM_AITER_MLA_SPARSE
     backend consumes the top-k indices.
     """
 

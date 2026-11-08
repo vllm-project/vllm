@@ -32,10 +32,10 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 
 
 def kimi_k3_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
-    """FP8 (132 B/token) indexer keys by default (``indexer_kv_dtype='auto'``);
-    MXFP4 (68 B/token) only when requested with ``--attention-config
-    '{"indexer_kv_dtype": "mxfp4"}'``. MXFP4 needs SM10x (checked by
-    ``dsa_indexer_uses_fp4``), the fused key insert (layernorm k-norm, no indexer
+    """FP8 (132 B/token) indexer keys by default (`indexer_kv_dtype='auto'`);
+    MXFP4 (68 B/token) only when requested with `--attention-config
+    '{"indexer_kv_dtype": "mxfp4"}'`. MXFP4 needs SM10x (checked by
+    `dsa_indexer_uses_fp4`), the fused key insert (layernorm k-norm, no indexer
     RoPE) and no PCP; anything else raises instead of writing another format."""
     if not dsa_indexer_uses_fp4(vllm_config):
         return False
@@ -173,7 +173,7 @@ _PD_REFERENCE_TP = 16
 def dense_mla_draft_bytes_per_token(vllm_config: VllmConfig) -> int:
     """Per-token bytes of a dense MLA draft's caches, which share the DSA row:
     their full-attention MLA specs group with the target's (see
-    ``configure_dense_draft``)."""
+    `configure_dense_draft`)."""
     spec_config = vllm_config.speculative_config
     if spec_config is None or spec_config.method not in ("eagle3", "dspark"):
         return 0
@@ -206,7 +206,7 @@ def packed_dsa_block_size(
     A block row holds every DSA layer's MLA and indexer pages, plus a dense
     MLA draft's pages; size it to fit as many KDA states as there are DSA
     layers. The KDA state shards with TP and the row does not, so the block is
-    rounded at ``_PD_REFERENCE_TP`` and scaled by ``_PD_REFERENCE_TP / tp``.
+    rounded at `_PD_REFERENCE_TP` and scaled by `_PD_REFERENCE_TP / tp`.
     Block sizes of different TP sizes stay divisible, and the rounding stays
     fine: a power of two would leave up to half the row empty once spec
     decoding grows the conv state past one.
