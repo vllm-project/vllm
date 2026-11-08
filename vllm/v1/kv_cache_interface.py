@@ -8,7 +8,7 @@ import math
 from collections import Counter
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field, fields, replace
-from enum import Enum, IntEnum
+from enum import IntEnum, StrEnum
 from fractions import Fraction
 from functools import cached_property
 from math import prod
@@ -169,7 +169,7 @@ def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
     return get_kv_quant_mode(kv_cache_dtype).is_per_token_head
 
 
-class KVCacheSpecKind(str, Enum):
+class KVCacheSpecKind(StrEnum):
     FULL_ATTENTION = "full_attention"
     MLA_ATTENTION = "mla_attention"
     SLIDING_WINDOW = "sliding_window"
@@ -182,7 +182,7 @@ class KVCacheSpecKind(str, Enum):
     UNKNOWN = "unknown"
 
 
-class SparseCacheRole(str, Enum):
+class SparseCacheRole(StrEnum):
     SPARSE = "sparse"
     INDEXER = "indexer"
 
@@ -332,6 +332,21 @@ class KVCacheSpec:
         take no slot mapping row.
         """
         return True
+
+
+def get_block_table_width(
+    max_num_blocks: int,
+    block_size: int,
+    *,
+    token_alignment: int | None = 128,
+) -> int:
+    """Return the width after optional alignment."""
+    if token_alignment is not None:
+        if token_alignment <= 0:
+            raise ValueError("token_alignment must be positive")
+        block_alignment = token_alignment // math.gcd(token_alignment, block_size)
+        max_num_blocks = cdiv(max_num_blocks, block_alignment) * block_alignment
+    return max_num_blocks
 
 
 def group_kernel_blocks(cache: torch.Tensor, num_blocks: int) -> torch.Tensor:
@@ -1515,7 +1530,7 @@ class KVCacheTensor:
     host_resident: bool = False
 
 
-class KVCacheGroupRole(str, Enum):
+class KVCacheGroupRole(StrEnum):
     DEFAULT = "default"
     HISPARSE_SOURCE = "hisparse_source"
     HISPARSE_INDEXER = "hisparse_indexer"
