@@ -10,35 +10,56 @@ from vllm.model_executor.models.interfaces import EagleModelMixin
 from vllm.model_executor.models.mimo import MiMoModel
 from vllm.models.minimax_m3.nvidia import model as minimax_m3
 from vllm.sequence import IntermediateTensors
+from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.eagle.config import Eagle3SpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
-    requires_aux_hidden_states,
     reserve_aux_intermediate_tensor_slots,
     verify_supports_aux_hidden_states_over_pp,
 )
+from vllm.v1.worker.gpu.spec_decode.extract_hidden_states_config import (
+    ExtractHiddenStatesSpeculatorConfig,
+)
+from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
 
 
 @pytest.mark.parametrize(
-    ("method", "hf_config", "expected"),
+    ("config_cls", "hf_config", "expected"),
     [
-        ("eagle3", {"eagle_config": {"use_aux_hidden_state": False}}, False),
-        ("eagle3", {"eagle_config": {"use_aux_hidden_state": True}}, True),
-        ("eagle3", {"eagle_config": {}}, True),
-        ("eagle3", {"eagle_config": None}, True),
-        ("eagle3", {}, True),
-        ("dflash", {"eagle_config": {"use_aux_hidden_state": False}}, True),
-        ("dspark", {"eagle_config": {"use_aux_hidden_state": False}}, True),
-        ("extract_hidden_states", {}, True),
-        ("mtp", {}, False),
+        (
+            Eagle3SpeculatorConfig,
+            {"eagle_config": {"use_aux_hidden_state": False}},
+            False,
+        ),
+        (
+            Eagle3SpeculatorConfig,
+            {"eagle_config": {"use_aux_hidden_state": True}},
+            True,
+        ),
+        (Eagle3SpeculatorConfig, {"eagle_config": {}}, True),
+        (Eagle3SpeculatorConfig, {"eagle_config": None}, True),
+        (Eagle3SpeculatorConfig, {}, True),
+        (
+            DFlashSpeculatorConfig,
+            {"eagle_config": {"use_aux_hidden_state": False}},
+            True,
+        ),
+        (
+            DSparkSpeculatorConfig,
+            {"eagle_config": {"use_aux_hidden_state": False}},
+            True,
+        ),
+        (ExtractHiddenStatesSpeculatorConfig, {}, True),
+        (MTPSpeculatorConfig, {}, False),
     ],
 )
 def test_aux_hidden_state_requirement_respects_eagle3_config(
-    method, hf_config, expected
+    config_cls, hf_config, expected
 ):
     spec_config = SimpleNamespace(
-        method=method,
         draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(**hf_config)),
     )
-    assert requires_aux_hidden_states(spec_config) is expected
+    assert config_cls(spec_config).uses_aux_hidden_states is expected
 
 
 def test_aux_layers_are_sorted_and_deduplicated():
@@ -145,7 +166,11 @@ def minimax_pp_stage(monkeypatch):
         group.is_first_rank = start == 0
         group.is_last_rank = end == 6
         config = SimpleNamespace(
-            vocab_size=16, hidden_size=6144, num_hidden_layers=6, rms_norm_eps=1e-6
+            vocab_size=16,
+            hidden_size=6144,
+            num_hidden_layers=6,
+            rms_norm_eps=1e-6,
+            layer_types=["full_attention"] * 6,
         )
         model = minimax_m3.MiniMaxM3Model(
             vllm_config=SimpleNamespace(
@@ -153,7 +178,6 @@ def minimax_pp_stage(monkeypatch):
                 quant_config=None,
                 speculative_config=None,
                 kernel_config=SimpleNamespace(moe_backend="auto"),
-                use_v2_model_runner=True,
             )
         )
         model._set_aux_hidden_state_layers(taps)

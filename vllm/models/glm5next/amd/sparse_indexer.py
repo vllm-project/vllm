@@ -25,6 +25,12 @@ from vllm.models.glm5next.common.sparse_indexer import (
     kv_cache_as_quant_view,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import (
+    _ON_GFX942,
+    _ON_GFX950,
+    _ON_GFX1151,
+    _ON_RDNA,
+)
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     LayerNameType,
@@ -35,6 +41,9 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    _max_decode_logits_rows,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -177,37 +186,35 @@ def sparse_attn_indexer_kpool(
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
         # Reserve workspace for indexer during profiling run
+        workspace_manager = current_workspace_manager()
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
-        current_workspace_manager().get_simultaneous(
+        workspace_manager.get_simultaneous(
             values_spec,
             scales_spec,
             ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
         )
 
-        # Reserve profiler-visible memory for the worst-case decode logits,
-        # whose shape is [B * next_n, max_pool_len]. This profiling branch
-        # returns before invoking the logits kernel itself.
-        cfg = get_current_vllm_config_or_none()
-        worst_decode_tokens = 0
-        if cfg is not None:
-            sched = cfg.scheduler_config
-            num_spec = (
-                cfg.speculative_config.num_speculative_tokens
-                if cfg.speculative_config is not None
-                else 0
+        # Reserve workspace for the worst-case decode logits, whose shape in
+        # rocm_fp8_paged_mqa_logits is [B * next_n, max_pool_len] (or
+        # [H, B * next_n, max_pool_len] on the stage1 fallback path). This
+        # profiling branch returns before invoking the logits kernel itself.
+        decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
+        if _ON_GFX942 or _ON_GFX950 or (_ON_RDNA and not _ON_GFX1151):
+            workspace_manager.get_simultaneous(
+                ((decode_rows, max_pool_len), torch.float32),
             )
-            worst_decode_tokens = min(
-                sched.max_num_seqs * (num_spec + 1),
-                sched.max_num_batched_tokens,
+        else:
+            workspace_manager.get_simultaneous(
+                ((q_quant.shape[1], decode_rows, max_pool_len), torch.float32),
             )
-        # float32 logits -> 4 bytes/element; uint8 sentinel so elems == bytes.
-        decode_logits_elems = worst_decode_tokens * max_pool_len * 4
+
+        # Transient prefill logits peak memory, produced by rocm_fp8_mqa_logits
+        # while the workspace's k_quant and k_scale views are live.
         prefill_cap_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-        max_logits_elems = max(decode_logits_elems, prefill_cap_elems)
         _ = torch.empty(
-            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
+            prefill_cap_elems, dtype=torch.uint8, device=hidden_states.device
         )
 
         return topk_indices_buffer
@@ -754,6 +761,22 @@ class SparseAttnIndexerKpool(CustomOp):
             raise NotImplementedError(
                 "SparseAttnIndexerKpool on ROCm does not support DCP."
             )
+        model_config = cfg.model_config if cfg is not None else None
+        hf_config = model_config.hf_text_config if model_config is not None else None
+        index_kpool = getattr(hf_config, "index_kpool", None) or 1
+        if index_kpool > 1:
+            kpool_ops.kpool_compress_dispatch.register_warmup(
+                k_cache=k_cache,
+                pool_size=index_kpool,
+                head_dim=head_dim,
+                round_scale=scale_fmt is not None,
+            )
+            if tail_cache is not None:
+                kpool_ops.kpool_tail_seed_dispatch.register_warmup(
+                    tail_cache=tail_cache,
+                    kpool=index_kpool,
+                    head_dim=head_dim,
+                )
 
     def forward_hip(
         self,

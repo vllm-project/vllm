@@ -140,12 +140,12 @@ class Platform:
     device_type: str
 
     # available dispatch keys:
-    # check https://github.com/pytorch/pytorch/blob/313dac6c1ca0fa0cde32477509cce32089f8532a/torchgen/model.py#L134 # noqa
+    # check https://github.com/pytorch/pytorch/blob/313dac6c1ca0fa0cde32477509cce32089f8532a/torchgen/model.py#L134
     # use "CPU" as a fallback for platforms not registered in PyTorch
     dispatch_key: str = "CPU"
 
     # available ray device keys:
-    # https://github.com/ray-project/ray/blob/10ba5adadcc49c60af2c358a33bb943fb491a171/python/ray/_private/ray_constants.py#L438 # noqa
+    # https://github.com/ray-project/ray/blob/10ba5adadcc49c60af2c358a33bb943fb491a171/python/ray/_private/ray_constants.py#L438
     # empty string means the device does not support ray
     ray_device_key: str = ""
 
@@ -156,7 +156,7 @@ class Platform:
     # platform-agnostic way to specify the device control environment variable,
     # .e.g. CUDA_VISIBLE_DEVICES for CUDA.
     # hint: search for "get_visible_accelerator_ids_env_var" in
-    # https://github.com/ray-project/ray/tree/master/python/ray/_private/accelerators # noqa
+    # https://github.com/ray-project/ray/tree/master/python/ray/_private/accelerators
     device_control_env_var: str = "VLLM_DEVICE_CONTROL_ENV_VAR_PLACEHOLDER"
 
     # environment variables that need to be set to 1 to prevent ray from
@@ -382,7 +382,6 @@ class Platform:
         """Override core Triton kernels with platform implementations.
 
         Platforms whose Triton kernels need replacement implementations
-        (e.g. CPU fallbacks when the Triton-CPU backend is unavailable)
         override this method and call
         :func:`vllm.triton_utils.dispatcher.register_kernels`
         with their overrides. It runs during model runner init, before any
@@ -956,6 +955,7 @@ class Platform:
         from vllm.model_executor.layers.mamba.abstract import (
             get_mamba_prefill_checkpoint_alignment,
         )
+        from vllm.model_executor.layers.mamba.mamba_utils import mamba_state_alignment
         from vllm.model_executor.models import ModelRegistry
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -1062,6 +1062,7 @@ class Platform:
             mamba_page_size = MambaSpec(
                 shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
                 dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
+                state_alignment=mamba_state_alignment(vllm_config),
                 block_size=-1,
             ).page_size_bytes
 
@@ -1229,9 +1230,9 @@ class Platform:
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
     @classmethod
-    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+    def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:
         """Returns whether the GPU is an integrated (UMA) device that shares
-        system memory with the CPU.
+        system memory with the CPU. device_id None means the current device.
 
         On UMA systems (e.g. NVIDIA GH200, DGX Spark, Jetson Orin),
         cudaMemGetInfo may underreport free memory because it does not
@@ -1361,6 +1362,12 @@ class Platform:
         return False
 
     @classmethod
+    def uses_standalone_cpu_model_runner(cls) -> bool:
+        """Returns if Model Runner V2 runs as the standalone (no-Triton) CPU
+        runner instead of the Triton-based one."""
+        return False
+
+    @classmethod
     def support_static_graph_mode(cls) -> bool:
         """Returns if the graph mode is supported by the current platform."""
         return False
@@ -1464,7 +1471,20 @@ class Platform:
         """Validate environment variables for the current platform."""
         from vllm import envs
 
-        for env in os.environ:
+        for env, value in os.environ.items():
+            if env == "VLLM_USE_V2_MODEL_RUNNER":
+                if value != "1":
+                    raise ValueError(
+                        f"VLLM_USE_V2_MODEL_RUNNER={value} is no longer supported: "
+                        "Model Runner V1 has been removed. Unset this variable."
+                    )
+                logger.warning(
+                    "VLLM_USE_V2_MODEL_RUNNER=1 is redundant and can be unset: "
+                    "Model Runner V1 has been removed."
+                )
+                continue
+            if hint := envs.removed_environment_variables.get(env):
+                raise ValueError(f"{env} has been removed. {hint}")
             if env.startswith("VLLM_") and env not in envs.environment_variables:
                 if hard_fail:
                     raise ValueError(

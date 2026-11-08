@@ -12,7 +12,6 @@ from vllm.config import CompilationConfig, VllmConfig, replace
 from vllm.config.kernel import MoEBackend
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
-from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
 from ..utils import (
     Messages,
@@ -40,7 +39,6 @@ class ArgsTest:
     # Defaults
     method: str = "draft_model"
     enforce_eager: bool = True
-    parallel_drafting: bool = False
     target_tensor_parallel_size: int = 1
     draft_tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
@@ -51,6 +49,7 @@ class ArgsTest:
     num_prompts: int = 200
     max_num_seqs: int = 100
     enable_prefix_caching: bool | None = None
+    enable_adaptive_verification: bool = False
     chat_template_kwargs: dict | None = None
     reject_full_acceptance: bool = False
     engine_kwargs: dict[str, Any] = field(default_factory=dict)
@@ -116,22 +115,6 @@ def test_draft_model_realistic_example(vllm_runner):
         enforce_eager=False,
         expected_acceptance_len=2.6,  # ref: 2.86
         expected_acceptance_rate=0.5,  # ref: 0.62
-    )
-    assert_draft_model_correctness(args, vllm_runner)
-
-
-@single_gpu_only
-def test_draft_model_parallel_drafting(vllm_runner):
-    args = ArgsTest(
-        target_model="Qwen/Qwen3-1.7B",
-        draft_model="amd/PARD-Qwen3-0.6B",
-        dataset="likaixin/InstructCoder",
-        num_speculative_tokens=3,
-        sampling_config=greedy_sampling(),
-        parallel_drafting=True,
-        enforce_eager=False,
-        expected_acceptance_len=2.3,  # ref: 2.52
-        expected_acceptance_rate=0.4,  # ref: 0.51
     )
     assert_draft_model_correctness(args, vllm_runner)
 
@@ -224,41 +207,9 @@ def test_draft_model_engine_args_tensor_parallelism():
     assert draft_config.quant_config is None
 
 
-@pytest.mark.cpu_test
-@pytest.mark.parametrize("dcp_size", [1, 2])
-def test_draft_model_inherits_target_dcp_config(monkeypatch, dcp_size):
-    monkeypatch.setattr(current_platform, "device_count", lambda: 16)
-    target_config = EngineArgs(
-        model="Qwen/Qwen3-1.7B",
-        tensor_parallel_size=16,
-        decode_context_parallel_size=dcp_size,
-        cp_kv_cache_interleave_size=16,
-        dcp_comm_backend="ag_rs",
-        distributed_executor_backend="mp",
-        speculative_config={
-            "model": "Qwen/Qwen3-0.6B",
-            "method": "draft_model",
-            "num_speculative_tokens": 3,
-        },
-    ).create_engine_config()
-    proposer = object.__new__(DraftModelProposer)
-    proposer.vllm_config = target_config
-    proposer.speculative_config = target_config.speculative_config
-    draft_config = proposer._create_draft_vllm_config()
-    draft_parallel = draft_config.parallel_config
-    assert draft_parallel.decode_context_parallel_size == dcp_size
-    assert draft_parallel.cp_kv_cache_interleave_size == 16
-    assert draft_parallel.dcp_comm_backend == "ag_rs"
-    assert (
-        draft_parallel.dcp_q_replicate == target_config.parallel_config.dcp_q_replicate
-    )
-    assert draft_parallel is not target_config.parallel_config
-    assert target_config.parallel_config.decode_context_parallel_size == dcp_size
-
-
 def _apply_draft_moe_backend(vllm_config: VllmConfig) -> VllmConfig:
-    """Replicate SpecDecodeBaseProposer._create_draft_vllm_config logic
-    so we can test it without instantiating a full proposer."""
+    """Replicate the draft moe_backend override so we can test it without
+    instantiating a full speculator."""
     spec_cfg = vllm_config.speculative_config
     assert spec_cfg is not None
     if spec_cfg.moe_backend is not None:
@@ -440,7 +391,7 @@ def vllm_runner_kwargs(args: ArgsTest) -> dict[str, Any]:
             "max_model_len": args.max_model_len,
             "enforce_eager": args.enforce_eager,
             "draft_tensor_parallel_size": args.draft_tensor_parallel_size,
-            "parallel_drafting": args.parallel_drafting,
+            "enable_adaptive_verification": args.enable_adaptive_verification,
         },
         max_num_seqs=args.max_num_seqs,
         max_model_len=args.max_model_len,

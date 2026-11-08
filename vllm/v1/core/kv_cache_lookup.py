@@ -88,7 +88,9 @@ class JointCacheHit:
             block_hashes, max_length, lookup=lookup
         )
         while length % scheduler_block_size and any(
-            block.pool is lookup.cpu for group in blocks for block in group
+            block.pool is not None and block.pool() is lookup.cpu
+            for group in blocks
+            for block in group
         ):
             blocks, length, uncached = coordinator.find_longest_cache_hit(
                 block_hashes,
@@ -96,7 +98,12 @@ class JointCacheHit:
                 lookup=lookup,
             )
         hits = tuple(
-            [CacheHitBlock(block, block.pool is lookup.cpu) for block in group]
+            [
+                CacheHitBlock(
+                    block, block.pool is not None and block.pool() is lookup.cpu
+                )
+                for block in group
+            ]
             for group in blocks
         )
         gpu_prefix_tokens = length
