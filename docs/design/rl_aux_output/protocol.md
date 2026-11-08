@@ -68,12 +68,14 @@ Sampling-parameter constraints (when requesting `topk_logprobs`, `sampling_mask`
 
 | Field | Meaning |
 |---|---|
+| `key_prefix`, `tail_key` | `<job>/<session>` and the R3 tail key; readers build every object key from these |
 | `blocks` | ordered object names of the full blocks; usually the block hash, `hash~<tag>` for a trajectory's own copy (§5), `hash~r` never appears (a lost block is reported missing) |
 | `tail_start`, `tail_nbytes` | the tail object covering `[tail_start, rows)`; it can span several blocks |
 | `rows` | rows covered; can exceed `L−1` (see §7) |
 | `weight_versions` | `[[start, version], ...]` covering `[0, rows)`, describing the stored objects |
 | `fields` | per output: name, dtype, per-token shape, codec, layout, `missing` and `holes` counts; for sampling-following outputs the chunk count and every chunk's row count (`chunk_lens`: a preemption flushes a short chunk) |
 | `invalid_from` | first position computed on invalid KV, if the engine ever rewound this request (§6.8); rows from here are not valid |
+| `r3_cone` | partial capture only (§6.11): the trajectory's patch list, `ends`, and `uncovered` counts |
 
 ## 4. Objects
 
@@ -179,8 +181,9 @@ A normal abort writes a manifest for the computed positions. Request-private obj
 **The patch list.** The manifest field `r3_cone` lists every patch of the trajectory in request order, each with the end up to which its rows belong to this trajectory:
 
 - At finish, earlier patches are clipped to the request's cut. The cut is `aux_start + 1` when the previous request of the trajectory (or the parent, for a fork) computed position `aux_start` itself and this request holds that computation: the previous tail contains it, or it completed a block whose hash this request shares. Otherwise the cut is `aux_start`; a request that edits the context inside that block, or a fork whose fork-point tail is gone, owns the rows from `aux_start` on.
-- A fork starts from the parent's list clipped at the fork point.
-- `uncovered` counts the needed cells that no patch holds, for example cells of a window the request did not compute. Nothing is substituted for them.
+- A fork starts from the parent's list clipped at the fork point. Indexer patch entries name their codec (`idx_codec`).
+- `ends` lists `[prompt, end]` for every request of the trajectory, clipped at the cut like the patches and inherited at a fork. With it a reader computes the needed cells of the whole trajectory (`need(L)` rows before each sampled token) and reports, position by position, every needed cell no patch holds.
+- `uncovered` counts this request's needed cells that no patch holds, for example cells of a window the request did not compute. Nothing is substituted for them.
 
 **Reader.** Set every deep cell to no-replay (R3 `65535`, indexer `−2`), then overlay the listed patches in order, each up to its end, first written wins. The trainer runs its own routing (or indexer) at no-replay cells, cell by cell. A replay hook that gathers at the sentinel instead is wrong.
 

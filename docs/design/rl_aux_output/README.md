@@ -11,6 +11,7 @@ This folder specifies how vLLM delivers these "aux outputs" to the trainer at fr
 
 | Document | Contents |
 |---|---|
+| [Consumer contract](consumer.md) | What a trainer gets from `read_sample`, what every mask and sentinel means, and what to do with missing or no-replay cells |
 | [Protocol](protocol.md) | What a row is, the invariants, and what the engine, the store, the driver and the trainer each do, event by event |
 | [Design space](design_space.md) | The alternatives for each mechanism and why the protocol picks what it picks |
 | [Scenarios](scenarios.md) | Sizing: bytes per token, pools, bandwidth and object counts, from a single node to frontier scale |
