@@ -24,7 +24,9 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.oracle.base import make_moe_kernel
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     Fp8MoEKernelOracle,
@@ -121,6 +123,12 @@ SELECT_CASES = {
     ),
 }
 
+ASSEMBLY_QUANT_CONFIGS = {
+    # MARLIN/W4A16 builds: `make_nvfp4_moe_kernel` reads this to force A16.
+    "nvfp4_marlin": SimpleNamespace(is_block_quantized=True, use_nvfp4_w4a16=True),
+    "nvfp4_marlin_a16": SimpleNamespace(is_block_quantized=True, use_nvfp4_w4a16=True),
+}
+
 # oracle -> (make_*_moe_kernel call, experts class, expected prepare/finalize
 # extras, expected experts kwargs, optional experts log template).
 ASSEMBLY_CASES = {
@@ -165,6 +173,36 @@ ASSEMBLY_CASES = {
         TritonExperts,
         {"input_dtype": torch.bfloat16},
         {"per_token_activation": True},
+        None,
+    ),
+    # MARLIN consumes A16, so `per_token_activation` must be dropped rather
+    # than forwarded: MarlinExperts takes no such kwarg and the W4A16 quant
+    # config already selects the A16 path.
+    "nvfp4_marlin": (
+        lambda quant_config, moe_config, experts_cls: make_nvfp4_moe_kernel(
+            quant_config,
+            moe_config,
+            experts_cls,
+            NvFp4MoeBackend.MARLIN,
+            per_token_activation=True,
+        ),
+        MarlinExperts,
+        {"input_dtype": None},
+        {},
+        None,
+    ),
+    # Same MARLIN build on the default (per_token_activation=False) path, where
+    # forwarding the flag is an outright TypeError from MarlinExperts.
+    "nvfp4_marlin_a16": (
+        lambda quant_config, moe_config, experts_cls: make_nvfp4_moe_kernel(
+            quant_config,
+            moe_config,
+            experts_cls,
+            NvFp4MoeBackend.MARLIN,
+        ),
+        MarlinExperts,
+        {"input_dtype": None},
+        {},
         None,
     ),
     "unquantized": (
@@ -253,12 +291,7 @@ def test_return_or_raise(
                 )
             ),
         )
-    oracle = Int8MoEKernelOracle(
-        make_dummy_moe_config(),
-        None,
-        None,
-        mk.FusedMoEActivationFormat.Standard,
-    )
+    oracle = Int8MoEKernelOracle(make_dummy_moe_config(), None, None)
 
     if expected_error is not None:
         with pytest.raises(ValueError, match=expected_error):
@@ -294,9 +327,9 @@ TRY_BACKEND_CASES = [
 @pytest.mark.parametrize(("oracle_class", "backend"), TRY_BACKEND_CASES)
 def test_try_backend(oracle_class, backend, monkeypatch):
     """Each oracle class carries its own backend -> kernel-class mapping, and
-    `try_backend` probes exactly that list: first supported wins, otherwise the
-    last rejection reason, with an optional caller-supplied list (mxfp4's
-    LoRA-aware candidates)."""
+    `try_backend` probes exactly that list: first supported wins and the reason
+    of every rejection is returned, with an optional caller-supplied list
+    (mxfp4's LoRA-aware candidates)."""
     oracle = oracle_class(make_dummy_moe_config())
     candidates = oracle.backend_to_kernel_cls(backend)
     assert candidates
@@ -309,17 +342,39 @@ def test_try_backend(oracle_class, backend, monkeypatch):
             "is_supported_config",
             staticmethod(lambda *_, why=rejection: (False, why)),
         )
-    assert oracle.try_backend(backend) == (None, f"{candidates[-1].__name__} rejected")
+    assert oracle.try_backend(backend) == (
+        None,
+        [(candidate, f"{candidate.__name__} rejected") for candidate in candidates],
+    )
 
     monkeypatch.setattr(
         candidates[-1], "is_supported_config", staticmethod(lambda *_: (True, None))
     )
-    assert oracle.try_backend(backend) == (candidates[-1], None)
+    assert oracle.try_backend(backend) == (
+        candidates[-1],
+        [
+            (candidate, f"{candidate.__name__} rejected")
+            for candidate in candidates[:-1]
+        ],
+    )
 
     monkeypatch.setattr(
         TritonExperts, "is_supported_config", staticmethod(lambda *_: (True, None))
     )
-    assert oracle.try_backend(backend, [TritonExperts]) == (TritonExperts, None)
+    assert oracle.try_backend(backend, [TritonExperts]) == (TritonExperts, [])
+
+
+def test_activation_format_is_derived_from_config() -> None:
+    """`activation_format` predicts the prepare/finalize layout and is derived
+    from the MoE config rather than stored on the oracle."""
+    moe_config = make_dummy_moe_config()
+    assert moe_config.activation_format == mk.FusedMoEActivationFormat.Standard
+
+    # An explicitly requested batched_triton backend runs a batched P/F even
+    # without a batched parallel config; this is what upgrades TRITON to
+    # BATCHED_TRITON in select_unquantized_moe_backend.
+    moe_config.moe_backend = "batched_triton"
+    assert moe_config.activation_format == mk.FusedMoEActivationFormat.BatchedExperts
 
 
 @pytest.mark.parametrize("unknown", [False, True], ids=["explicit", "unknown"])
@@ -351,6 +406,70 @@ def test_explicit_moe_backend(oracle, unknown, monkeypatch):
         assert selected_experts_class is not None
 
 
+_FORMAT = mk.FusedMoEActivationFormat
+
+
+@pytest.mark.parametrize(
+    ("experts_format", "pf_format", "accepted"),
+    [
+        (_FORMAT.Standard, _FORMAT.Standard, True),
+        (_FORMAT.BatchedExperts, _FORMAT.BatchedExperts, True),
+        # A padding-aware experts class consumes the unpadded layout; the
+        # reverse is not valid, so the check must be one-directional.
+        (_FORMAT.PaddedStandard, _FORMAT.Standard, True),
+        (_FORMAT.Standard, _FORMAT.PaddedStandard, False),
+        (_FORMAT.Standard, _FORMAT.BatchedExperts, False),
+        (_FORMAT.BatchedExperts, _FORMAT.Standard, False),
+    ],
+    ids=[
+        "standard-standard",
+        "batched-batched",
+        "padded-experts-standard-pf",
+        "standard-experts-padded-pf",
+        "standard-experts-batched-pf",
+        "batched-experts-standard-pf",
+    ],
+)
+def test_make_moe_kernel_activation_format_superset(
+    experts_format: mk.FusedMoEActivationFormat,
+    pf_format: mk.FusedMoEActivationFormat,
+    accepted: bool,
+    monkeypatch,
+) -> None:
+    """The experts' format must be a superset of the prepare/finalize's rather
+    than equal to it, so `PaddedStandard` experts pair with a `Standard`
+    prepare/finalize but not the other way round."""
+    sentinel = object()
+    prepare_finalize = SimpleNamespace(
+        activation_format=pf_format,
+        max_num_tokens_per_rank=lambda: 64,
+        num_dispatchers=lambda: 3,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.oracle.base.maybe_make_prepare_finalize",
+        lambda **kwargs: prepare_finalize,
+    )
+    monkeypatch.setattr(mk, "FusedMoEKernel", lambda pf, experts: sentinel)
+    monkeypatch.setattr(TritonExperts, "__init__", lambda self, **kwargs: None)
+    monkeypatch.setattr(
+        TritonExperts, "activation_format", staticmethod(lambda: experts_format)
+    )
+
+    def assemble():
+        return make_moe_kernel(
+            SimpleNamespace(is_block_quantized=True),
+            make_dummy_moe_config(),
+            TritonExperts,
+        )
+
+    if accepted:
+        assert assemble() is sentinel
+        return
+
+    with pytest.raises(ValueError, match="expects .* activations"):
+        assemble()
+
+
 @pytest.mark.parametrize("batched", [False, True], ids=["standard", "batched"])
 @pytest.mark.parametrize("mismatched", [False, True], ids=["matching", "mismatched"])
 @pytest.mark.parametrize("oracle", ASSEMBLY_CASES)
@@ -364,7 +483,9 @@ def test_make_moe_kernel_assembly(oracle, mismatched, batched, monkeypatch):
         expected_experts_kwargs,
         experts_log,
     ) = ASSEMBLY_CASES[oracle]
-    quant_config = SimpleNamespace(is_block_quantized=True)
+    quant_config = ASSEMBLY_QUANT_CONFIGS.get(
+        oracle, SimpleNamespace(is_block_quantized=True)
+    )
     moe_config = make_dummy_moe_config()
     prepare_finalize_kwargs: dict = {}
     experts_kwargs: dict = {}

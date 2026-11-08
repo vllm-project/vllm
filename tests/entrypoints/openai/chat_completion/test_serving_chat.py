@@ -142,8 +142,10 @@ def gptoss_speculative_server(default_server_args: list[str]):
     )
     server_args = default_server_args + [
         "--speculative-config",
-        f'{{"model": "{GPT_OSS_SPECULATOR_NAME}", '
-        f'"method": "eagle3", "num_speculative_tokens": 3}}',
+        (
+            f'{{"model": "{GPT_OSS_SPECULATOR_NAME}", '
+            f'"method": "eagle3", "num_speculative_tokens": 3}}'
+        ),
         f"--attention-backend={attention_backend}",
     ]
     # gpt-oss requires AITER unified attention on ROCm
@@ -539,6 +541,7 @@ class MockModelConfig:
     task = "generate"
     runner_type = "generate"
     model = MODEL_NAME
+    served_model_name = MODEL_NAME
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
@@ -978,6 +981,7 @@ async def test_chat_full_generator_gives_each_choice_parser_the_prompt():
     serving.chat_template = None
     serving.chat_template_content_format = "auto"  # type: ignore[misc]  # Final attr
     serving.default_chat_template_kwargs = {}
+    serving.online_renderer = MagicMock(reasoning_effort_map={})
     request_output = _make_metrics_request_output()
     request_output.prompt_token_ids = [7, 8]
     request_output.outputs.append(
@@ -1529,6 +1533,47 @@ def test_mm_prompt_tokens_details():
     assert details.cached_tokens == 3
     assert details.created_cache_tokens == 0
     assert details.multimodal_tokens == {"image": 600, "video": 1200}
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_chunk_reports_prompt_tokens_details():
+    """The first chunk's prompt split matches the final usage chunk.
+
+    The Anthropic Messages stream builds ``message_start`` usage from the first
+    chunk, so a missing split there reads as the whole prompt being uncached.
+    """
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.model_config = None
+    serving.enable_prompt_tokens_details = True
+    output = _make_metrics_request_output(None)
+    output.num_cached_tokens = 2
+    output.num_cache_creation_tokens = 1
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        stream=True,
+        stream_options={"include_usage": True, "continuous_usage_stats": True},
+    )
+    usages = []
+    async for line in serving.chat_completion_stream_generator(
+        request,
+        _single_request_output(output),
+        "chatcmpl-details",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-details"),
+    ):
+        raw = line.removeprefix("data: ").strip()
+        if raw != "[DONE]" and json.loads(raw).get("usage"):
+            usages.append(json.loads(raw)["usage"])
+
+    first, last = (
+        usages[0]["prompt_tokens_details"],
+        usages[-1]["prompt_tokens_details"],
+    )
+    assert (first["cached_tokens"], first["created_cache_tokens"]) == (2, 1)
+    assert (last["cached_tokens"], last["created_cache_tokens"]) == (2, 1)
 
 
 def test_completion_tokens_details():

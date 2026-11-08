@@ -319,9 +319,21 @@ def test_local_topk_merge_matches_full_topk():
     assert torch.equal(got, ref)
 
 
-def test_indexer_cp_config_rejects_fp8():
-    """CP scores the index cache with no scale; fp8 must not enable it."""
+@pytest.mark.parametrize("indexer_kv_dtype", ["auto", "bf16", "fp8", "fp8_e4m3"])
+def test_indexer_cp_config_accepts_bf16_and_fp8(indexer_kv_dtype):
+    """bf16 enables this CP indexer, fp8 the AITER MSA one; both are valid."""
+    from vllm.config.attention import AttentionConfig
+
+    config = AttentionConfig(
+        minimax_m3_indexer_cp=True, indexer_kv_dtype=indexer_kv_dtype
+    )
+    assert config.minimax_m3_indexer_cp
+
+
+@pytest.mark.parametrize("indexer_kv_dtype", ["mxfp4", "nvfp4"])
+def test_indexer_cp_config_rejects_dtypes_with_no_cp_indexer(indexer_kv_dtype):
+    """Neither CP score kernel reads a block-scaled cache."""
     from vllm.config.attention import AttentionConfig
 
     with pytest.raises(ValueError, match="minimax_m3_indexer_cp requires a bf16"):
-        AttentionConfig(minimax_m3_indexer_cp=True, indexer_kv_dtype="fp8")
+        AttentionConfig(minimax_m3_indexer_cp=True, indexer_kv_dtype=indexer_kv_dtype)

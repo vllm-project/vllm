@@ -745,6 +745,13 @@ class DeepseekVLV2ForCausalLM(
         features = self.vision.forward_features(pixel_values)
         return self.projector(features)
 
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
+        return self.encoder_cudagraph_forward(
+            {"pixel_values": mm_kwargs["pixel_values"]}, path=path
+        )
+
     def postprocess_encoder_output(
         self,
         outputs: dict[str, torch.Tensor],

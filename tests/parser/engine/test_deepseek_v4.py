@@ -33,6 +33,7 @@ from vllm.parser.deepseek_v4 import (
     DSML_TOOL_START_VARIANTS,
     DeepSeekV4Parser,
     _dsml_arg_converter,
+    _dsml_arg_value_extender,
     _unwrap_wrapper_args,
     deepseek_v4_config,
 )
@@ -241,8 +242,10 @@ class TestImplicitParameterClose:
         chunks = [
             DSML_TOOL_START,
             f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n",
-            f"<{_PARAM_OPEN.format(name='location', is_str='true')}"
-            "Paris a<b><｜DSML｜parameter",
+            (
+                f"<{_PARAM_OPEN.format(name='location', is_str='true')}"
+                "Paris a<b><｜DSML｜parameter"
+            ),
             ' name="date" string="true">tomorrow',
             _PARAM_CLOSE,
             DSML_INVOKE_END,
@@ -353,8 +356,10 @@ class TestMissingInvokeEnd:
         parser = DeepSeekV4Parser(mock_tokenizer)
         chunks = [
             DSML_TOOL_START,
-            f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n"
-            f"{_param('location', 'true', 'NYC')}\n",
+            (
+                f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n"
+                f"{_param('location', 'true', 'NYC')}\n"
+            ),
             DSML_TOOL_END,
             "Done.",
         ]
@@ -1300,6 +1305,55 @@ class TestDelegatingParserLargeDelta:
         assert eos_text not in output.reasoning
         assert output.content == ""
         assert output.tool_calls == []
+
+
+# ── Open string values stream without re-running the converter (#52846) ──
+
+
+class TestArgValueExtender:
+    def test_stops_at_split_param_close(self):
+        extend = _dsml_arg_value_extender(
+            "<" + _PARAM_OPEN.format(name="k", is_str="true") + "x"
+        )
+        assert extend is not None
+        assert [extend(d) for d in ['a"\n', "</｜DSML｜para", "meter>"]] == [
+            'a\\"\\n',
+            "</｜DSML｜para",
+            None,
+        ]
+
+    @pytest.mark.parametrize(
+        "raw_args",
+        [
+            "<" + _PARAM_OPEN.format(name="k", is_str="true") + "x" + _PARAM_CLOSE,
+            "<" + _PARAM_OPEN.format(name="k", is_str="false") + "1",
+            "<"
+            + _PARAM_OPEN.format(name="k", is_str="true")
+            + "x"
+            + _PARAM_CLOSE
+            + "<"
+            + _PARAM_OPEN.format(name="k", is_str="true")
+            + "y",
+        ],
+        ids=["closed_value", "non_string_value", "repeated_key"],
+    )
+    def test_no_extender_unless_open_string_value(self, raw_args):
+        assert _dsml_arg_value_extender(raw_args) is None
+
+    @pytest.mark.parametrize(
+        "partial_tag", ['<｜DSML｜parameter name="j', "<｜DSML｜parameter na"]
+    )
+    def test_holds_back_partial_tag_after_gt(self, partial_tag):
+        raw_args = (
+            "<" + _PARAM_OPEN.format(name="k", is_str="true") + "a > b" + partial_tag
+        )
+        assert json.loads(_dsml_arg_converter(raw_args, True)) == {"k": "a > b"}
+        assert _dsml_arg_value_extender(raw_args) is None
+
+    def test_arms_on_value_ending_in_newline(self):
+        raw_args = "<" + _PARAM_OPEN.format(name="k", is_str="true") + "def f():\n"
+        assert json.loads(_dsml_arg_converter(raw_args, True)) == {"k": "def f():\n"}
+        assert _dsml_arg_value_extender(raw_args) is not None
 
 
 # ── Malformed DSML markup must not leak into content (#51914) ─────────

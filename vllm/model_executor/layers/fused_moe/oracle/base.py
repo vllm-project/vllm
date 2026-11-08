@@ -34,19 +34,20 @@ MOE_EXPERTS_MODULE = "vllm.model_executor.layers.fused_moe.experts"
 _UNSET = cast("QuantKey | None", object())
 
 BackendT = TypeVar("BackendT", bound=Enum)
+Rejection = tuple[type[mk.FusedMoEExperts], str | None]
 
 
 class MoEKernelOracle(ABC, Generic[BackendT]):
     """Abstract base for MoE kernel-selection oracles.
 
-    Concrete oracles provide `name` and `backend_to_kernel_cls` today; the
-    remaining methods below are the #37753 migration target and are still
-    implemented per module, so they are declared but not enforced.
+    Concrete oracles can declare backend priorities and mappings to use the
+    default selection flow, or override methods for their selection policy.
+    Kernel construction and weight conversion remain per-oracle operations.
     """
 
-    # Display name used by the shared selection helpers below.
-    name: ClassVar[str] = "MoE"
-    priority_backends: list[BackendT] = []
+    # Display name for the shared log helpers below; subclasses must set it.
+    name: ClassVar[str]
+    priority_backends: tuple[BackendT, ...] = ()
     backend_mapping: dict[MoEBackend, BackendT] = {}
     experts_mapping: dict[BackendT, tuple[str, ...]] = {}
 
@@ -55,15 +56,11 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         moe_config: FusedMoEConfig,
         weight_key: "QuantKey | None" = None,
         activation_key: "QuantKey | None" = None,
-        activation_format: mk.FusedMoEActivationFormat = (
-            mk.FusedMoEActivationFormat.Standard
-        ),
     ) -> None:
         # Deployment inputs shared by every backend probe of one selection.
         self.moe_config = moe_config
         self.weight_key = weight_key
         self.activation_key = activation_key
-        self.activation_format = activation_format
 
     def backend_enum_cls(self) -> type[BackendT]:
         """Return the concrete `Enum` class enumerating this oracle's
@@ -78,7 +75,10 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         self, backend: BackendT
     ) -> list[type[mk.FusedMoEExperts]]:
         """Map a backend enum value to its concrete `FusedMoEExperts`
-        subclasses, in selection priority order."""
+        subclasses, in selection priority order.
+
+        Overrides with a module-level mapping must forward to it at call time.
+        """
         return resolve_moe_experts(backend, self.experts_mapping, self.name)
 
     def map_backend(self, runner_backend: MoEBackend) -> BackendT:
@@ -93,35 +93,20 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         )
 
     def select_backend(self) -> tuple[BackendT, type[mk.FusedMoEExperts] | None]:
-        """Primary entry point: choose the best supported backend for
-        the given `moe_config`.
-
-        `weight_key` / `activation_key` carry the quantization scheme of
-        the weights and activations and are consumed by quantized oracles
-        (fp8, nvfp4, int8, ...) to disambiguate backends. The unquantized
-        oracle ignores them. Subclasses with additional selection inputs
-        (e.g. int_wna16 needs `weight_bits`, fp8 needs
-        `allow_vllm_cutlass`) widen the signature in their override; a
-        per-oracle config object is the longer-term target tracked in
-        the #37753 follow-up PRs.
-        """
+        """Choose the first supported backend for this deployment."""
         available_backends = self.get_priority_backends()
-
-        # Handle explicit moe_backend from user.
         requested = self.moe_config.moe_backend
         if requested != "auto":
             return self.return_or_raise(self.map_backend(requested), available_backends)
 
-        # Select kernels in order of backend.
         selection_logger = init_logger(type(self).__module__)
         for backend in available_backends:
-            experts_cls, reason = self.try_backend(backend)
+            experts_cls, _ = self.try_backend(backend)
             if experts_cls is not None:
                 selection_logger.info_once(
                     self.make_log_backend(backend, available_backends)
                 )
                 return backend, experts_cls
-            selection_logger.debug_once(self.make_log_unsupported(backend, reason))
 
         raise NotImplementedError(
             f"No {self.name} MoE backend supports the deployment configuration "
@@ -181,6 +166,7 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         self,
         backend: BackendT,
         available_backends: list[BackendT] | None = None,
+        is_lora: bool = False,
     ) -> str:
         """Message for the backend a select loop settled on."""
         available = (
@@ -188,13 +174,17 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
             if available_backends is not None
             else ""
         )
-        return f"Using {backend.value} {self.name} MoE backend{available}."
+        lora = "LoRA " if is_lora else ""
+        return f"Using {backend.value} {self.name} MoE {lora}backend{available}."
 
-    def make_log_unsupported(self, backend: BackendT, reason: str | None) -> str:
+    def make_log_unsupported(
+        self, backend: BackendT, reason: str | None, is_lora: bool = False
+    ) -> str:
         """Message for a backend that does not support the configuration."""
         since = f" since {reason}" if reason else ""
+        lora = "LoRA " if is_lora else ""
         return (
-            f"{self.name} MoE backend '{backend.value}' does not support the "
+            f"{self.name} MoE {lora}backend '{backend.value}' does not support the "
             f"deployment configuration{since}."
         )
 
@@ -203,19 +193,21 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         backend: BackendT,
         kernel_classes: list[type[mk.FusedMoEExperts]] | None = None,
         activation_key: "QuantKey | None" = _UNSET,
-    ) -> tuple[type[mk.FusedMoEExperts] | None, str | None]:
+    ) -> tuple[type[mk.FusedMoEExperts] | None, list[Rejection]]:
         """Probe `backend`'s candidate kernel classes, first supported wins.
 
-        A miss is an error for an explicitly requested backend and a debug line
-        plus the next candidate for the auto-selection loops, so the policy
-        stays with the caller. `activation_key` overrides this oracle's own key
-        for oracles whose activation key varies per backend.
+        A miss logs a DEBUG line and yields to the next candidate; whether that
+        is fatal stays with the caller. `activation_key` overrides this oracle's
+        own key for oracles whose activation key varies per backend.
 
         Returns:
-            `(kernel_cls, None)`, or `(None, reason)` with the last reason.
+            `(kernel_cls, rejected)`: the winning class, or `None`, plus every
+            `(kernel_cls, reason)` probed and rejected before it, in order, so
+            that callers collecting reasons for a report keep one entry per
+            candidate rather than only the last.
 
         """
-        reason: str | None = None
+        rejected: list[Rejection] = []
         act_quant_key = (
             self.activation_key if activation_key is _UNSET else activation_key
         )
@@ -227,11 +219,13 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
                 self.moe_config,
                 self.weight_key,
                 act_quant_key,
-                self.activation_format,
+                self.moe_config.activation_format,
             )
             if supported:
-                return kernel_cls, None
-        return None, reason
+                return kernel_cls, rejected
+            logger.debug_once(self.make_log_unsupported(backend, reason))
+            rejected.append((kernel_cls, reason))
+        return None, rejected
 
     def return_or_raise(
         self,
@@ -239,6 +233,7 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         available_backends: list[BackendT] | None = None,
         kernel_classes: list[type[mk.FusedMoEExperts]] | None = None,
         activation_key: "QuantKey | None" = _UNSET,
+        is_lora: bool = False,
     ) -> tuple[BackendT, type[mk.FusedMoEExperts]]:
         """Return `backend` with its first supported kernel class, or raise.
 
@@ -247,10 +242,11 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
                 configuration; the message carries the last rejection reason.
 
         """
-        kernel_cls, reason = self.try_backend(backend, kernel_classes, activation_key)
+        kernel_cls, rejected = self.try_backend(backend, kernel_classes, activation_key)
         if kernel_cls is None:
-            raise ValueError(self.make_log_unsupported(backend, reason))
-        logger.info_once(self.make_log_backend(backend, available_backends))
+            reason = rejected[-1][1] if rejected else None
+            raise ValueError(self.make_log_unsupported(backend, reason, is_lora))
+        logger.info_once(self.make_log_backend(backend, available_backends, is_lora))
         return backend, kernel_cls
 
 
@@ -308,11 +304,13 @@ def make_moe_kernel(
         **(prepare_finalize_kwargs or {}),
     )
     assert prepare_finalize is not None
-    if experts_cls.activation_format() != prepare_finalize.activation_format:
+    if not experts_cls.activation_format().is_superset(
+        prepare_finalize.activation_format
+    ):
         raise ValueError(
             f"{experts_cls.__name__} expects "
-            f"{experts_cls.activation_format().value} activations but the selected "
-            f"prepare/finalize uses {prepare_finalize.activation_format.value}"
+            f"{experts_cls.activation_format().value[0]} activations but the selected "
+            f"prepare/finalize uses {prepare_finalize.activation_format.value[0]}"
         )
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
@@ -320,7 +318,7 @@ def make_moe_kernel(
         logger.info_once(experts_log, experts_cls.__name__)
 
     extra_kwargs = dict(experts_kwargs or {})
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+    if prepare_finalize.activation_format.is_batched:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         extra_kwargs["max_num_tokens"] = max_num_tokens

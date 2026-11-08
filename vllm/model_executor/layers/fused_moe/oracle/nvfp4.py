@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
+from typing import Any
 
 import torch
 
@@ -37,6 +38,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.model_executor.utils import move_parameter, refill_derived
 
 logger = init_logger(__name__)
 
@@ -54,6 +56,15 @@ class NvFp4MoeBackend(Enum):
     EMULATION = "EMULATION"
     FLASHINFER_MOE_EP_CUTEDSL = "FLASHINFER_MOE_EP_CUTEDSL"
 
+
+# Backends whose experts quantize the MoE input themselves, with one scale per
+# token. ``make_nvfp4_moe_kernel`` only hands ``per_token_activation`` to these.
+PER_TOKEN_NVFP4_MOE_BACKENDS = frozenset(
+    {
+        NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        NvFp4MoeBackend.FLASHINFER_TRTLLM,
+    }
+)
 
 FLASHINFER_NVFP4_MOE_BACKENDS = [
     NvFp4MoeBackend.FLASHINFER_TRTLLM,
@@ -193,7 +204,11 @@ class NvFp4MoEKernelOracle(MoEKernelOracle[NvFp4MoeBackend]):
     """NVFP4 MoE backend selection for one deployment configuration."""
 
     name = "NvFp4"
-    backend_to_kernel_cls = staticmethod(backend_to_kernel_cls)
+
+    def backend_to_kernel_cls(
+        self, backend: NvFp4MoeBackend
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return backend_to_kernel_cls(backend)
 
 
 def select_nvfp4_moe_backend(
@@ -204,6 +219,18 @@ def select_nvfp4_moe_backend(
     """Select the primary NvFP4 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+    from vllm.model_executor.layers.quantization.online.requantization import (
+        is_requantization_source,
+    )
+
+    # TODO: remove and let the oracles have an option to skip init.
+    if is_requantization_source():
+        from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
+            Nvfp4QuantizationEmulationTritonExperts,
+        )
+
+        return NvFp4MoeBackend.EMULATION, Nvfp4QuantizationEmulationTritonExperts
+
     # NOTE: the kernels are selected in the following order.
     # FLASHINFER_B12X is intentionally excluded from auto-selection until
     # the upstream CUTLASS SM121 MMA op guard is resolved; use
@@ -237,12 +264,7 @@ def select_nvfp4_moe_backend(
             b for b in AVAILABLE_BACKENDS if b in NVFP4_BACKENDS_WITH_CLAMP
         ]
 
-    use_batched = config.moe_parallel_config.use_batched_activation_format
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if use_batched
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
 
     runner_backend = config.moe_backend
     requested_backend = (
@@ -251,13 +273,13 @@ def select_nvfp4_moe_backend(
     # B12X can run with BF16 activations when the env forces a16.
     if requested_backend is not None and _use_a16(requested_backend, False):
         activation_key = None
-    oracle = NvFp4MoEKernelOracle(config, weight_key, activation_key, activation_format)
+    oracle = NvFp4MoEKernelOracle(config, weight_key, activation_key)
 
     # Handle explicit moe_backend from user.
     if requested_backend is not None:
         # For batched activation format, use batched variant if available.
         if (
-            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+            activation_format.is_batched
             and requested_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
         ):
             requested_backend = NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED
@@ -277,11 +299,10 @@ def select_nvfp4_moe_backend(
 
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
-        kernel_cls, reason = oracle.try_backend(backend)
+        kernel_cls, _ = oracle.try_backend(backend)
         if kernel_cls is not None:
             logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
             return backend, kernel_cls
-        logger.debug_once(oracle.make_log_unsupported(backend, reason))
 
     raise NotImplementedError(
         "No NvFp4 MoE backend supports the deployment configuration."
@@ -408,10 +429,10 @@ def convert_to_nvfp4_moe_kernel_format(
                 "strategy": "group",
                 "group_size": 16,
             }
-            # CT pack-quantized reads `weight_packed`; the method renamed it to
-            # `weight`. Re-alias (convert replaces all params anyway).
-            layer.w13_weight_packed = layer.w13_weight
-            layer.w2_weight_packed = layer.w2_weight
+            # CT pack-quantized reads `weight_packed`; the method aliased it as
+            # `weight`. Make the loaded `*_weight_packed` name the runtime one.
+            move_parameter(layer, "w13_weight", "w13_weight_packed")
+            move_parameter(layer, "w2_weight", "w2_weight_packed")
         else:
             quant_config = {"quant_method": "modelopt", "quant_algo": "nvfp4"}
 
@@ -547,6 +568,12 @@ def make_nvfp4_moe_quant_config(
         w13_scale = nvfp4_swizzled_scale_to_cutedsl_mma_view(w13_scale)
         w2_scale = nvfp4_swizzled_scale_to_cutedsl_mma_view(w2_scale)
 
+    a1_gscale = 1.0 / a13_scale
+    a2_gscale = 1.0 / a2_scale
+    if layer is not None:
+        a1_gscale = refill_derived(layer, "_a1_gscale", a1_gscale)
+        a2_gscale = refill_derived(layer, "_a2_gscale", a2_gscale)
+
     # Pass w13_scale_2 / w2_scale_2 directly as g1/g2_alphas.
     # The expert's process_weights_after_loading will fuse activation
     # scales in-place. Since the quant config references the same tensor
@@ -554,8 +581,8 @@ def make_nvfp4_moe_quant_config(
     return nvfp4_moe_quant_config(
         g1_alphas=w13_scale_2,
         g2_alphas=w2_scale_2,
-        a1_gscale=(1.0 / a13_scale),
-        a2_gscale=(1.0 / a2_scale),
+        a1_gscale=a1_gscale,
+        a2_gscale=a2_gscale,
         w1_scale=w13_scale,
         w2_scale=w2_scale,
         # NOTE(rob): this is a hack until the MoE kernels
@@ -582,15 +609,21 @@ def make_nvfp4_moe_kernel(
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     per_token_activation: bool = False,
 ) -> mk.FusedMoEKernel:
-    extra_kwargs = {}
-    if (
-        backend
-        in (
-            NvFp4MoeBackend.FLASHINFER_TRTLLM,
-            NvFp4MoeBackend.FLASHINFER_CUTEDSL,
-        )
-        and per_token_activation
-    ):
+    # Marlin consumes A16 and must not receive per-token A4 metadata.
+    if backend == NvFp4MoeBackend.MARLIN and moe_quant_config.use_nvfp4_w4a16:
+        per_token_activation = False
+
+    extra_kwargs: dict[str, Any] = {}
+    if per_token_activation:
+        # Prepare dispatched the input unquantized, so an expert that does
+        # not quantize it itself would read garbage. The backend selection
+        # does not catch this: several NVFP4 experts match on the weight key
+        # alone and accept any activation key.
+        if backend not in PER_TOKEN_NVFP4_MOE_BACKENDS:
+            raise ValueError(
+                f"Per-token NVFP4 activation scales are not supported by "
+                f"{backend.value}."
+            )
         extra_kwargs["per_token_activation"] = True
 
     return make_moe_kernel(

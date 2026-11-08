@@ -74,7 +74,11 @@ class W4A8Int8MoEKernelOracle(MoEKernelOracle[W4A8Int8MoeBackend]):
     """W4A8 INT8 MoE backend selection for one deployment configuration."""
 
     name = "W4A8 Int8"
-    backend_to_kernel_cls = staticmethod(backend_to_kernel_cls)
+
+    def backend_to_kernel_cls(
+        self, backend: W4A8Int8MoeBackend
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return backend_to_kernel_cls(backend)
 
 
 def select_w4a8_int8_moe_backend(
@@ -98,14 +102,7 @@ def select_w4a8_int8_moe_backend(
     if not AVAILABLE_BACKENDS:
         raise NotImplementedError("W4A8 Int8 MoE is only supported on CPU platforms")
 
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
-    oracle = W4A8Int8MoEKernelOracle(
-        config, weight_key, activation_key, activation_format
-    )
+    oracle = W4A8Int8MoEKernelOracle(config, weight_key, activation_key)
 
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend
@@ -115,11 +112,10 @@ def select_w4a8_int8_moe_backend(
 
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
-        kernel_cls, reason = oracle.try_backend(backend)
+        kernel_cls, _ = oracle.try_backend(backend)
         if kernel_cls is not None:
             logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
             return backend, kernel_cls
-        logger.debug_once(oracle.make_log_unsupported(backend, reason))
 
     raise NotImplementedError(
         "No W4A8 Int8 MoE backend supports the deployment configuration."

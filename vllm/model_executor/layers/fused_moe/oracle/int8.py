@@ -37,21 +37,39 @@ class Int8MoeBackend(Enum):
     CPU = "CPU"
 
 
+def _get_priority_backends(
+    moe_config: FusedMoEConfig,
+) -> list[Int8MoeBackend]:
+    """Get available backends in priority order based on platform and config."""
+    return Int8MoEKernelOracle(moe_config).get_priority_backends()
+
+
 def backend_to_kernel_cls(
     backend: Int8MoeBackend,
 ) -> list[type[mk.FusedMoEExperts]]:
     return resolve_moe_experts(backend, Int8MoEKernelOracle.experts_mapping, "Int8")
 
 
+def map_int8_backend(runner_backend: MoEBackend) -> Int8MoeBackend:
+    """Map user's MoEBackend to Int8MoeBackend."""
+    mapping = Int8MoEKernelOracle.backend_mapping
+    if backend := mapping.get(runner_backend):
+        return backend
+    raise ValueError(
+        f"moe_backend='{runner_backend}' is not supported for Int8 MoE. "
+        f"Expected one of {list(mapping.keys())}."
+    )
+
+
 class Int8MoEKernelOracle(MoEKernelOracle[Int8MoeBackend]):
     """INT8 MoE backend selection for one deployment configuration."""
 
     name = "Int8"
-    priority_backends = [
+    priority_backends = (
         Int8MoeBackend.TRITON,
         Int8MoeBackend.HUMMING,
         Int8MoeBackend.CPU,
-    ]
+    )
     backend_mapping: dict[MoEBackend, Int8MoeBackend] = {
         "triton": Int8MoeBackend.TRITON,
         "humming": Int8MoeBackend.HUMMING,
@@ -71,6 +89,11 @@ class Int8MoEKernelOracle(MoEKernelOracle[Int8MoeBackend]):
         ),
     }
 
+    def backend_to_kernel_cls(
+        self, backend: Int8MoeBackend
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return backend_to_kernel_cls(backend)
+
 
 def select_int8_moe_backend(
     config: FusedMoEConfig,
@@ -80,14 +103,9 @@ def select_int8_moe_backend(
     """Select the primary Int8 MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
-    oracle = Int8MoEKernelOracle(config, weight_key, activation_key, activation_format)
-
-    backend, experts_cls = oracle.select_backend()
+    backend, experts_cls = Int8MoEKernelOracle(
+        config, weight_key, activation_key
+    ).select_backend()
     assert experts_cls is not None
     return backend, experts_cls
 

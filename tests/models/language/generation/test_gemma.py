@@ -24,6 +24,9 @@ from vllm.model_executor.models.gemma4_dspark import (
     Gemma4DSparkModel,
 )
 
+from ....utils import multi_gpu_test
+from ...utils import check_logprobs_close
+
 MODELS = ["google/gemma-2b", "google/gemma-2-2b", "google/gemma-3-4b-it"]
 
 
@@ -69,7 +72,7 @@ def test_gemma4_dspark_loads_confidence_head(
         else []
     )
     if not (enabled and has_weights):
-        assert model.model.confidence_head is None
+        assert (model.model.confidence_head is None) is not enabled
         assert not loaded
         return
 
@@ -238,3 +241,32 @@ def test_dummy_loader(vllm_runner, monkeypatch, model: str) -> None:
                 )
                 config = llm.llm.llm_engine.model_config.hf_config
             assert np.allclose(normalizers, config.hidden_size**0.5, rtol=2e-3)
+
+
+@multi_gpu_test(num_gpus=2)
+def test_gemma4_per_layer_embeddings_pipeline_parallel(
+    vllm_runner, example_prompts, monkeypatch
+) -> None:
+    """Stages after the first must use the per-layer embeddings they receive
+    from the previous stage, so PP=2 matches PP=1."""
+    # The base model continues raw prompts; the -it model ends the turn at once.
+    model = "google/gemma-4-E2B"
+    text_only = {"image": 0, "audio": 0, "video": 0}
+    with vllm_runner(model, limit_mm_per_prompt=text_only) as vllm_model:
+        pp1_outputs = vllm_model.generate_greedy_logprobs(example_prompts, 32, 5)
+
+    # KV-shared layers must sit on the same stage as the layers whose KV they
+    # read, which the default split breaks. Put layers 13-34 (the two KV
+    # source layers 13 and 14 and all 20 KV-shared layers) on stage 2.
+    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "13,22")
+    with vllm_runner(
+        model, pipeline_parallel_size=2, limit_mm_per_prompt=text_only
+    ) as vllm_model:
+        pp2_outputs = vllm_model.generate_greedy_logprobs(example_prompts, 32, 5)
+
+    check_logprobs_close(
+        outputs_0_lst=pp1_outputs,
+        outputs_1_lst=pp2_outputs,
+        name_0="pp1",
+        name_1="pp2",
+    )
