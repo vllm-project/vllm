@@ -522,24 +522,6 @@ def has_flashinfer_prims_ts_sparse_mla() -> bool:
 
 
 @functools.cache
-def prims_ts_sparse_mla_schedules_native_heads() -> bool:
-    """Whether FlashInfer's prims_ts sparse MLA schedules a head count between
-    its qualified 8/16/32/64/128 on the next qualified count's tile (e.g. 96
-    heads on the 2-CTA 128-head schedule), flashinfer-ai/flashinfer#7984.
-    Older builds run 65..127 heads as two M64 tiles that load every KV row
-    twice, so their callers pad such queries to 128 heads instead."""
-    if not has_flashinfer_prims_ts_sparse_mla():
-        return False
-    try:
-        from flashinfer.attention.prims_ts.kernels.mla_decode.sparse_policy import (
-            sparse_policy_heads,
-        )
-    except ImportError:
-        return False
-    return "rope_dim" in inspect.signature(sparse_policy_heads).parameters
-
-
-@functools.cache
 def prims_ts_sparse_mla_format_error(kv_cache_format: str) -> str | None:
     """Why the installed FlashInfer cannot plan prims_ts sparse MLA (D576, 128
     E4M3 query heads, LSE) over ``kv_cache_format`` on this GPU, else None.

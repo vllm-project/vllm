@@ -212,9 +212,9 @@ def test_prims_ts_shardq_reserves_the_rank_slice():
     ):
         impl.reserve_workspace()
 
-    # 96 heads pad to 128 in 4096-row chunks; the step output holds the
-    # rank's 4096 + 2 * 64 tokens.
-    shardq_peak = 4096 * 128 * (512 + 64 + 1024 + 4) + 4224 * 96 * 512 * 2
+    # 96 heads in 4096-row chunks; the step output holds the rank's
+    # 4096 + 2 * 64 tokens.
+    shardq_peak = 4096 * 96 * (512 + 64 + 1024 + 4) + 4224 * 96 * 512 * 2
     head_sharded_peak = 4096 * 12 * (512 + 64 + 1024 + 4) + 32768 * 12 * 512 * 2
     assert reserved == [max(shardq_peak, head_sharded_peak)]
-    assert reserved[0] < 4096 * 128 * 1604 + 32768 * 96 * 512 * 2
+    assert reserved[0] < 4096 * 96 * 1604 + 32768 * 96 * 512 * 2
