@@ -280,6 +280,11 @@ def build_offloading_config(
         engine_id=engine_id,
         model=OffloadingModelConfig(
             name=vllm_config.model_config.model,
+            revision=getattr(
+                vllm_config.model_config.revision,
+                "resolved",
+                vllm_config.model_config.revision,
+            ),
             dtype=str(cache_dtype).removeprefix("torch."),
             max_model_len=vllm_config.model_config.max_model_len,
         ),

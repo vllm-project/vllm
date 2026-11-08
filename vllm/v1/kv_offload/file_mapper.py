@@ -38,6 +38,7 @@ class FileMapper:
         parallel_agnostic: bool = False,
         replicated_layout: bool = False,
         canonical_format: str | None = None,
+        model_revision: str | None = None,
     ):
         """Initialize the file mapper. Each worker constructs its own, but
         `config.json` is shared across workers since rank lives outside the hash.
@@ -60,6 +61,8 @@ class FileMapper:
             "kv_cache_groups": kv_cache_groups or [],
             "inference_engine": inference_engine,
         }
+        if model_revision is not None:
+            self.fields["model_revision"] = model_revision
         if not parallel_agnostic:
             self.fields["parallel_agnostic"] = False
         # Only written when True so existing deployments' hashed fields are
@@ -106,6 +109,7 @@ class FileMapper:
             dcp_size=parallel.dcp_size,
             rank=parallel.rank,
             dtype=config.model.dtype,
+            model_revision=config.model.revision,
             kv_cache_groups=kv_cache_groups,
             parallel_agnostic=(
                 parallel_agnostic
