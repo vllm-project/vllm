@@ -4,11 +4,12 @@
 (vLLM's loaded layout, E8M0 scales in 32x32 blocks [N / 32, K / 32]) against
 every token of a tile, its MXFP8 rows in LDS, on the gfx950 scaled MFMA.
 
-A task may cover a window of K (`kbeg` .. `kbeg + nsteps` 128-steps): a split-K part,
-its activations in LDS holding just that window. The weight operands are loaded first
-(all in flight, before the task waits on its activations); wave w takes the window's
-steps w, w + 8, ... (or, `split`, a contiguous range of waves 0 .. split - 1), its 16 x
-16 partial in `red`, summed in wave order by `row_sum`. Adapted from ATOM's
+A task may cover a window of K (`kbeg` .. `kbeg + nsteps` 128-steps): a
+split-K part, its activations in LDS holding just that window. The weight
+operands are loaded first (all in flight, before the task waits on its
+activations); wave w takes the window's steps w, w + 8, ... (or, `split`, a
+contiguous range of waves 0 .. split - 1), its 16 x 16 partial in `red`,
+summed in wave order by `row_sum`. Adapted from ATOM's
 `attn_pre.gemv_fp8_*`, which reads aiter's (16, 16)-preshuffled layout.
 """
 
@@ -208,10 +209,11 @@ def rows_loads(
     pred=None,
 ):
     """Tokens t0 .. t0 + n's published MXFP8 row slices -- `words` i32 from
-    `off_w` and `groups` codes (an i32 each) from `off_g`, rows `stride_w` / `stride_g`
-    i32 apart -- loaded (issued, not waited on), 16 B a lane-item: a thread one column,
-    rows a round apart. Plain loads: their flags are seen, and nothing in the launch
-    read these lines before. `pred` false: masked off (zeros, no memory traffic)."""
+    `off_w` and `groups` codes (an i32 each) from `off_g`, rows
+    `stride_w` / `stride_g` i32 apart -- loaded (issued, not waited on),
+    16 B a lane-item: a thread one column, rows a round apart. Plain loads:
+    their flags are seen, and nothing in the launch read these lines before.
+    `pred` false: masked off (zeros, no memory traffic)."""
     tid = c["tid"]
     nb = None if pred is None else pred.select(fx.Int64(0xFFFFFFFF), fx.Int64(0))
     out = []

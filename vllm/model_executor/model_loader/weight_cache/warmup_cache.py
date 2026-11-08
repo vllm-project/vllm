@@ -12,8 +12,9 @@ layout uses (kind, config hash, dp rank, world rank) and the source resolves
 it to files under the cache root. There is no separate artifact store or
 registry.
 
-The FlashInfer payload is a `{filename: parsed JSON}` map rather than a single document
-because upcoming kinds (Triton tuned configs) consist of several JSON files per cache.
+The FlashInfer payload is a `{filename: parsed JSON}` map rather than a
+single document because upcoming kinds (Triton tuned configs) consist of
+several JSON files per cache.
 
 TODO: install valid files individually instead of falling back to local
 warmup when any file of a multi-file kind fails validation.

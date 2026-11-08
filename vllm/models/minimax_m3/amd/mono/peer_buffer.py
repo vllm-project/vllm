@@ -13,13 +13,14 @@ from aiter.ops.flydsl.quick_allreduce_int4_ipc import UncachedIpcHeap
 class PeerBuffer:
     """One uncached buffer per rank, every rank holding every peer's address.
 
-    K4 pushes a layer's attention partials into every peer's `attn` region and its FFN
-    partials into the `ffn` region, then polls its own. Regions are reused by every
-    layer and step (the mailbox epoch tells a stale pair from a fresh one) and no rank
-    can overwrite a peer's unread pairs: to push layer L's FFN partials a rank must have
-    passed layer L's attention reduce, which needs every peer's layer-L attention push,
-    and a peer only pushes that after it finished reading layer L-1's FFN region. So
-    ranks are at most half a layer apart and the two regions double-buffer each other.
+    K4 pushes a layer's attention partials into every peer's `attn` region and
+    its FFN partials into the `ffn` region, then polls its own. Regions are
+    reused by every layer and step (the mailbox epoch tells a stale pair from a
+    fresh one) and no rank can overwrite a peer's unread pairs: to push layer L's
+    FFN partials a rank must have passed layer L's attention reduce, which needs
+    every peer's layer-L attention push, and a peer only pushes that after it
+    finished reading layer L-1's FFN region. So ranks are at most half a layer
+    apart and the two regions double-buffer each other.
     """
 
     def __init__(self, nbytes: int, group, rank: int, npes: int, device: torch.device):

@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek V4.1 indexer backend for the DeepGEMM sparse MQA-logits path.
 
-Candidate-consuming indexer layers score only the candidate blocks published by the
-candidate-source layer (`fp8_fp4_(paged_)sparse_mqa_logits`) instead of dense logits
-over the whole context. This backend extends the dense indexer metadata with the per-row
-scratch that path needs, so the layer op allocates nothing per step, and lets all
-consumer layers of a step share one candidate expansion and DeepGEMM schedule (they all
-read the same candidate blocks). Opt in with `AttentionConfig.indexer_sparse_logits`.
+Candidate-consuming indexer layers score only the candidate blocks published
+by the candidate-source layer (`fp8_fp4_(paged_)sparse_mqa_logits`) instead
+of dense logits over the whole context. This backend extends the dense
+indexer metadata with the per-row scratch that path needs, so the layer op
+allocates nothing per step, and lets all consumer layers of a step share one
+candidate expansion and DeepGEMM schedule (they all read the same candidate
+blocks). Opt in with `AttentionConfig.indexer_sparse_logits`.
 """
 
 from dataclasses import dataclass, fields

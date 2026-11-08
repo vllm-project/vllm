@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Gemma RMSNorm (optionally fused with the residual add) in one Triton pass.
 
-With an `sf` scale buffer the output is E4M3 data plus UE8M0 scales in the 128x4
-swizzled layout, replacing the BF16 norm followed by a separate MXFP8 quantize (which
-re-reads the full normed activation). Without it, the output is the plain BF16 norm. The
-residual is bitwise the BF16 norm's; the quantized data and scales match the reference
-quantize within one E4M3 step (the rstd reduction order differs).
+With an `sf` scale buffer the output is E4M3 data plus UE8M0 scales in the
+128x4 swizzled layout, replacing the BF16 norm followed by a separate MXFP8
+quantize (which re-reads the full normed activation). Without it, the output
+is the plain BF16 norm. The residual is bitwise the BF16 norm's; the
+quantized data and scales match the reference quantize within one E4M3 step
+(the rstd reduction order differs).
 """
 
 import torch

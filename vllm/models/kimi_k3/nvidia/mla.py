@@ -1013,9 +1013,10 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
     ) -> None:
         """Prefill using the fused key-concat + cache-insert kernel.
 
-        Replaces `_concat_k_nope_k_pe` and the prefill cache write with one fused kernel
-        launch, dispatched by cache dtype. Chunked context runs through this layer's
-        `_compute_prefill_context`, except under DCP where it is delegated to the impl.
+        Replaces `_concat_k_nope_k_pe` and the prefill cache write with one
+        fused kernel launch, dispatched by cache dtype. Chunked context runs
+        through this layer's `_compute_prefill_context`, except under DCP where
+        it is delegated to the impl.
 
         Supported configs (K3 fp8 policy):
           - bf16 cache        -> bf16 prefill query

@@ -1445,10 +1445,11 @@ class SparseAttnIndexer(CustomOp):
         eager gather step, no per-request Python loop.
 
         `prefill_metadata.chunks` always has exactly one entry here:
-        `DeepseekV4CPUIndexerMetadataBuilder` overrides the base chunk split to always
-        return the whole step's prefill batch as one chunk, since the base chunking only
-        bounds CUDA/XPU's dense M*N logits tensor and flat K-gather workspace, neither
-        of which this paged kernel allocates.
+        `DeepseekV4CPUIndexerMetadataBuilder` overrides the base chunk
+        split to always return the whole step's prefill batch as one
+        chunk, since the base chunking only bounds CUDA/XPU's dense M*N
+        logits tensor and flat K-gather workspace, neither of which this
+        paged kernel allocates.
         """
         assert not self.use_fp4_cache, (
             "CPU sparse indexer doesn't support fp4 cache yet"

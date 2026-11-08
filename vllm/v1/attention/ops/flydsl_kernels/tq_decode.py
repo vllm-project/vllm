@@ -101,23 +101,25 @@ def build_tq_decode_module(
     of all global-memory writes by `mfma_row < QG`. Q load iterates
     `(QG + 3) // 4` chunks (= 2 for QG=6/8, 4 for QG=16).
 
-    `kv_block_size` is the number of tokens per vLLM cache block. Must be a multiple of
-    TILE_SIZE (=16). Supported values: 16 and 32. With block_size=32, two MFMA K-tiles
-    fit in each block; the kernel walks block-table entries every
-    `kv_block_size // TILE_SIZE` tiles and re-uses the entry for sub-tiles within the
-    same block. SoA metadata region grows linearly with block_size.
+    `kv_block_size` is the number of tokens per vLLM cache block. Must
+    be a multiple of TILE_SIZE (=16). Supported values: 16 and 32. With
+    block_size=32, two MFMA K-tiles fit in each block; the kernel walks
+    block-table entries every `kv_block_size // TILE_SIZE` tiles and
+    re-uses the entry for sub-tiles within the same block. SoA metadata
+    region grows linearly with block_size.
 
     V is dequantized into a row-major `V[token][head_dim]` LDS layout
     (4 `ds_write_b128` per lane) and read back into the MFMA A operand via
     the CDNA4 `ds_read_tr16_b64` hardware transpose.
 
-    `tile_groups_per_partition` (default 1) controls the FA-2 split-K granularity. With
-    value G each partition processes `G * 16` K-tiles = `G * KV_COMPUTE_BLOCK` tokens,
-    with the existing 16-tile loop body iterated G times. The launcher uses this to
-    bound `num_partitions` (e.g. cap at 32) for long context: at 32K / block_size=32 /
-    num_partitions=32, G=5 covers 32*5*256 = 40 960 tokens of worst-case context with
-    grid.z=32 instead of 256. Behavior at G=1 is bit-identical to the single-partition
-    kernel.
+    `tile_groups_per_partition` (default 1) controls the FA-2 split-K
+    granularity. With value G each partition processes `G * 16` K-tiles
+    = `G * KV_COMPUTE_BLOCK` tokens, with the existing 16-tile loop
+    body iterated G times. The launcher uses this to bound
+    `num_partitions` (e.g. cap at 32) for long context: at 32K /
+    block_size=32 / num_partitions=32, G=5 covers 32*5*256 = 40 960
+    tokens of worst-case context with grid.z=32 instead of 256.
+    Behavior at G=1 is bit-identical to the single-partition kernel.
     """
     assert query_group_size in (6, 8, 16), (
         f"query_group_size must be 6, 8 or 16; got {query_group_size}"

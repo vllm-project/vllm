@@ -848,11 +848,12 @@ class MiniMaxM3Attention(nn.Module):
 class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     """Block-sparse attention layer with the lightning-indexer branch.
 
-    This is a merged attention layer: it owns the projections (qkv + index q/k),
-    per-head QK norms and RoPE, *and* the attention-backend wiring that a generic
-    `Attention` layer would normally provide — it binds the `MiniMaxM3SparseBackend` +
-    main impl, registers the main paged K/V cache, and owns the lightning indexer
-    (`MiniMaxM3Indexer`), which holds the index-key side cache.
+    This is a merged attention layer: it owns the projections (qkv + index
+    q/k), per-head QK norms and RoPE, *and* the attention-backend wiring that a
+    generic `Attention` layer would normally provide — it binds the
+    `MiniMaxM3SparseBackend` + main impl, registers the main paged K/V cache,
+    and owns the lightning indexer (`MiniMaxM3Indexer`), which holds the
+    index-key side cache.
 
     The index branch (index_{q,k}_proj + index_{q,k}_norm) feeds the sparse
     top-k block selection. M3 always disables the index value/output

@@ -141,10 +141,11 @@ class WorkspaceManager:
     def get_persistent_resource(self, key: Hashable, factory: Callable[[], T]) -> T:
         """Return the resource cached for `key` in the current ubatch and lane.
 
-        The first request calls `factory` and stores its result for the lifetime of this
-        manager. Later requests return the same object without calling the factory
-        again. Each ubatch/lane pair has a separate cache. Once the manager is locked,
-        requesting a key missing from that cache raises an AssertionError.
+        The first request calls `factory` and stores its result for the lifetime
+        of this manager. Later requests return the same object without calling
+        the factory again. Each ubatch/lane pair has a separate cache. Once the
+        manager is locked, requesting a key missing from that cache raises an
+        AssertionError.
 
         Keys must identify the resource type and configuration. Callers must not
         resize or replace tensor storage held by a cached resource once the

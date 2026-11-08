@@ -73,9 +73,10 @@ def create_fp4_output_tensors(
     """Allocate both output tensors for scaled_fp4_quant:
     (quantized_output, output_scale).
 
-    Must match the C++ scaled_fp4_quant_func allocation exactly when `padded_n` is
-    `None`. When `padded_n` is provided, allocate a larger packed-FP4 output/scale
-    buffer so the quantization kernel can write CUTLASS-compatible K padding directly
+    Must match the C++ scaled_fp4_quant_func allocation exactly when
+    `padded_n` is `None`. When `padded_n` is provided, allocate a larger
+    packed-FP4 output/scale buffer so the quantization kernel can write
+    CUTLASS-compatible K padding directly
     """
     physical_n = padded_n if padded_n is not None else n
     output = torch.empty((m, physical_n // 2), device=device, dtype=torch.uint8)
@@ -2718,17 +2719,19 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     - sparse layer (`num_index_heads > 0`): `[q | k | v | index_q |
       index_k]` — the index branch is read straight out of `qkv`.
 
-    When `kv_cache` is given, also scatter-inserts the normed/roped k & v into the paged
-    KV cache by `slot_mapping` and, on sparse layers, the index key into `index_cache`
-    by `index_slot_mapping`. `kv_cache_dtype` selects the cache storage/conversion path;
-    a dense layer's insert stores exactly what `reshape_and_cache_flash` would with unit
-    k/v scales. If `index_slot_mapping` is omitted, `slot_mapping` is used for both
-    caches.
+    When `kv_cache` is given, also scatter-inserts the normed/roped k & v
+    into the paged KV cache by `slot_mapping` and, on sparse layers, the
+    index key into `index_cache` by `index_slot_mapping`.
+    `kv_cache_dtype` selects the cache storage/conversion path; a dense
+    layer's insert stores exactly what `reshape_and_cache_flash` would with
+    unit k/v scales. If `index_slot_mapping` is omitted, `slot_mapping` is
+    used for both caches.
 
-    If `q_out` / `index_q_out` (contiguous `[N, nq*128]` / `[N, niq*128]`) are given,
-    the normed/roped q / index_q are written there instead of in place — folding the
-    de-interleave into this kernel's store so callers skip a separate `.contiguous()`
-    copy before the SM100 sparse attention's flat TMA descriptor.
+    If `q_out` / `index_q_out` (contiguous `[N, nq*128]` / `[N,
+    niq*128]`) are given, the normed/roped q / index_q are written there
+    instead of in place — folding the de-interleave into this kernel's store so
+    callers skip a separate `.contiguous()` copy before the SM100 sparse
+    attention's flat TMA descriptor.
 
     If `q_fp8_out` is given, the same normalized q is also written in FP8
     E4M3 using `q_fp8_scale` as its dequantization scale. Without `q_out`,
@@ -2796,11 +2799,12 @@ def fused_minimax_m3_dspark_context_kv(
 ) -> None:
     """Store the MiniMax-M3 DSpark draft's context K/V for every layer.
 
-    `all_kv` `[N, L, 2, nkv, 128]` holds each layer's K and V. K gets the layer's Gemma
-    RMSNorm (`k_norm_weight[L, 128]`) and partial NeoX RoPE; both are stored like
-    `reshape_and_cache_flash` into the layers' caches. Layer `l`'s cache is `kv_cache`
-    (layer 0, `[nb, nkv, bs, 2 * 128]`) shifted by `cache_offsets[l]` elements; its fp8
-    k/v scales are `k_scale` (layer 0's) shifted by `scale_offsets[0, l]` /
+    `all_kv` `[N, L, 2, nkv, 128]` holds each layer's K and V. K gets the
+    layer's Gemma RMSNorm (`k_norm_weight[L, 128]`) and partial NeoX RoPE;
+    both are stored like `reshape_and_cache_flash` into the layers' caches.
+    Layer `l`'s cache is `kv_cache` (layer 0, `[nb, nkv, bs, 2 * 128]`)
+    shifted by `cache_offsets[l]` elements; its fp8 k/v scales are
+    `k_scale` (layer 0's) shifted by `scale_offsets[0, l]` /
     `scale_offsets[1, l]` floats. Slots < 0 are skipped.
     """
     torch.ops._C.fused_minimax_m3_dspark_context_kv(
@@ -3012,9 +3016,10 @@ def swap_blocks(
 ) -> None:
     """Copy specific blocks from one tensor to another.
 
-    This method assumes each of the two input tensors is composed of consecutive
-    contiguous blocks, of size block_size_in_bytes. i.e. the memory layout for each
-    tensor is: `[block0] [block1] ... [block N]`
+    This method assumes each of the two input tensors is composed of
+    consecutive contiguous blocks, of size block_size_in_bytes.
+    i.e. the memory layout for each tensor is:
+    `[block0] [block1] ... [block N]`
 
     block_mapping determines the subset of blocks to copy of the source tensor,
     and their matching destination block number on the destination tensor.

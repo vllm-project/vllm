@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """HyperConnection (Gated Residual) utilities — NVIDIA model variant.
 
-Implements the HyperConnection residual scheme proposed in "HyperConnections"
-(https://arxiv.org/abs/2409.19606). This NVIDIA variant delays each HC combine to the
-following HC mix boundary. HC glue kernels, including fused combine+RMSNorm, live in
-`ops/hc.py`; projections remain standard vLLM Linear modules.
+Implements the HyperConnection residual scheme proposed in
+"HyperConnections" (https://arxiv.org/abs/2409.19606). This NVIDIA variant
+delays each HC combine to the following HC mix boundary. HC glue kernels,
+including fused combine+RMSNorm, live in `ops/hc.py`; projections remain
+standard vLLM Linear modules.
 
 Hidden states between layers have shape `[..., HC*HS]` with HS inner
 (HC outer, HS inner — checkpoint-native layout).
@@ -55,11 +56,12 @@ from .ops.hc import (
 class GatedResidual(nn.Module):
     """Gated HyperConnection with learnable low-rank mixing and injection.
 
-    `combine_and_mix()` runs the pre pipeline (grouped GemmaRMSNorm -> merged low-rank
-    down+inject GEMM -> silu -> up GEMM -> sigmoid -> gated mean over the HC streams).
-    When passed a pending block output, it fuses its residual combine with the RMSNorm.
-    A missing injection selects unit-weight combine. Final mixers use
-    `use_combine=False` and do not produce a new injection.
+    `combine_and_mix()` runs the pre pipeline (grouped GemmaRMSNorm -> merged
+    low-rank down+inject GEMM -> silu -> up GEMM -> sigmoid -> gated mean
+    over the HC streams). When passed a pending block output, it fuses its
+    residual combine with the RMSNorm. A missing injection selects unit-weight
+    combine. Final mixers use `use_combine=False` and do not produce a new
+    injection.
 
     Weights: the norm owns the grouped GemmaRMSNorm affine; the projections
     are vLLM Linear modules (merged replicated linear for down+inject).
@@ -198,9 +200,10 @@ class GatedResidual(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Consume a pending combine, then prepare the next block input.
 
-        `hidden_states` is the multi-stream state from before the pending block's mix.
-        Its combine with `block_output` is fused with this module's input RMSNorm. A
-        missing injection applies the block output to every stream with unit weight.
+        `hidden_states` is the multi-stream state from before the pending
+        block's mix. Its combine with `block_output` is fused with this
+        module's input RMSNorm. A missing injection applies the block output
+        to every stream with unit weight.
         """
         hidden_states, xn = hc_combine_norm(
             hidden_states,

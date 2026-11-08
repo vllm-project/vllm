@@ -152,9 +152,10 @@ def _pad_interleaved_q_warmup_inputs(
 def _pad_interleaved_q(q: torch.Tensor, out: torch.Tensor) -> DispatchSpec:
     """Copy chunk-interleaved `q` [N, H, D] into `out` [N, HP, D].
 
-    Writes the fused KV-insert op's interleaved Q layout: in each 16-dim chunk, the H
-    live heads copied bit for bit, then +0.0 in the HP - H padding slots. Both tensors
-    are dense and share a dtype; `16 * H` and `16 * (HP - H)` must be powers of two.
+    Writes the fused KV-insert op's interleaved Q layout: in each 16-dim chunk,
+    the H live heads copied bit for bit, then +0.0 in the HP - H padding slots.
+    Both tensors are dense and share a dtype; `16 * H` and `16 * (HP - H)`
+    must be powers of two.
     """
     num_tokens, live_heads, head_dim = q.shape
     padded_heads = out.shape[1]
@@ -206,14 +207,15 @@ def _resolve_dsv4_kv_cache_dtype(
 ) -> tuple[CacheDType | str, torch.dtype]:
     """Map `(layout, --kv-cache-dtype)` to `(cache_dtype_str, torch_dtype)`.
 
-    Both layouts are paged; they differ in the per-token block format. The packed
-    formats are `uint8`-backed: `fp8_ds_mla` is UE8M0 block-scaled fp8 throughout,
-    `nvfp4_ds_mla` keeps that sliding-window record and stores the compressed cache as
-    NVFP4. An unspecific `--kv-cache-dtype` (`auto` / `fp8`) resolves to
-    `packed_kv_cache_dtype`, the record this layer's kernel prefers, and the canonical
-    string is written back onto `cache_config` so the page-size specs pick the right
-    per-token slot. Plain-row backends store each token's KV row in its element dtype:
-    bf16 or per-tensor FP8 E4M3.
+    Both layouts are paged; they differ in the per-token block format. The
+    packed formats are `uint8`-backed: `fp8_ds_mla` is UE8M0 block-scaled
+    fp8 throughout, `nvfp4_ds_mla` keeps that sliding-window record and
+    stores the compressed cache as NVFP4. An unspecific `--kv-cache-dtype`
+    (`auto` / `fp8`) resolves to `packed_kv_cache_dtype`, the record this
+    layer's kernel prefers, and the canonical string is written back onto
+    `cache_config` so the page-size specs pick the right per-token slot.
+    Plain-row backends store each token's KV row in its element dtype: bf16 or
+    per-tensor FP8 E4M3.
     """
     if use_fp8_ds_mla_layout:
         if kv_cache_dtype in ("auto", "fp8"):
@@ -244,10 +246,12 @@ def _resolve_dsv4_kv_cache_dtype(
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     """DeepseekV4 MLA attention layer.
 
-    The platform-specific sparse-MLA forward (`forward_mqa` / `get_padded_num_q_heads` /
-    `_o_proj` / `backend_cls`) is provided by a subclass — `DeepseekV4FlashMLAAttention`
-    / `DeepseekV4FlashInferSM120Attention` / `DeepseekV4FlashInferMLAAttention` (CUDA)
-    or `DeepseekV41ROCMAiterMLAAttention` (ROCm) — selected by the platform-specific
+    The platform-specific sparse-MLA forward (`forward_mqa` /
+    `get_padded_num_q_heads` / `_o_proj` / `backend_cls`) is provided by a
+    subclass — `DeepseekV4FlashMLAAttention` /
+    `DeepseekV4FlashInferSM120Attention` /
+    `DeepseekV4FlashInferMLAAttention` (CUDA) or
+    `DeepseekV41ROCMAiterMLAAttention` (ROCm) — selected by the platform-specific
     deepseek_v41 model module. The base is never instantiated directly.
     """
 
@@ -294,7 +298,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         The layer allocates the q/output buffers at
         `[N, get_padded_num_q_heads(n_local_heads), head_dim]`. Must satisfy
-        `result >= num_heads`. Backends with no padding constraint return `num_heads`.
+        `result >= num_heads`. Backends with no padding constraint return
+        `num_heads`.
         """
         raise NotImplementedError
 
@@ -829,9 +834,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     def _wo_b_proj(self, z: torch.Tensor | QuantizedActivation) -> torch.Tensor:
         """Apply `wo_b`; with GEMM-RS bound, also reduce-scatter the result.
 
-        Every `_o_proj` implementation projects through this so the decoder layer sees
-        one contract: when `gemm_rs` is bound the output is already the local
-        sequence-parallel shard, otherwise it is the unreduced TP partial.
+        Every `_o_proj` implementation projects through this so the decoder
+        layer sees one contract: when `gemm_rs` is bound the output is
+        already the local sequence-parallel shard, otherwise it is the
+        unreduced TP partial.
         """
         if self.gemm_rs is None:
             return self.wo_b(z)
@@ -1100,11 +1106,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     ) -> torch.Tensor:
         """Ready `q` for the attention kernel and publish this step's KV.
 
-        One launch does both. With `accepts_unnormed_unroped_query` the attention kernel
-        norms and rotates Q itself and reads it in its own chunk-interleaved layout, so
-        the Q half of the launch is a zero-pad to `padded_heads` -- and nothing at all
-        once the shard is that wide. On large eager steps of a `_pads_q_by_copy` layer,
-        a KV-only launch leaves that pad to `_pad_interleaved_q`.
+        One launch does both. With `accepts_unnormed_unroped_query` the
+        attention kernel norms and rotates Q itself and reads it in its own
+        chunk-interleaved layout, so the Q half of the launch is a zero-pad to
+        `padded_heads` -- and nothing at all once the shard is that wide.
+        On large eager steps of a `_pads_q_by_copy` layer, a KV-only launch
+        leaves that pad to `_pad_interleaved_q`.
         """
         if not isinstance(attn_metadata, dict):
             # Profile run: kernel doesn't fire; produce a padded tensor so

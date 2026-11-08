@@ -361,9 +361,10 @@ def mb_put2(tag, base, i, w0, w1):
 
 def mb_poll(tag, health, specs, region_id=0, batch=16, oks=None, cm=CM_DEV):
     """[(base, pair index, npairs in {1, 2})] -> value words, all re-loaded
-    together until every tag matches (one round trip after the last lands). `oks`
-    (optional, one traced bool a spec): a false spec is not loaded (an out-of-range
-    buffer offset, no memory access), returns zeros, and is not waited for."""
+    together until every tag matches (one round trip after the last lands).
+    `oks` (optional, one traced bool a spec): a false spec is not loaded (an
+    out-of-range buffer offset, no memory access), returns zeros, and is not
+    waited for."""
     if len(specs) == 0:
         return []
     if len(specs) > batch:

@@ -9,8 +9,9 @@ channel as an XTML element built from special tokens::
     <|open|>think<|sep|> <reasoning> <|close|>think<|sep|>
 
 Two subtleties drive the implementation:
-  * Unlike Kimi-K2 (a single `<think>` token), each K3 marker is a 3-token sequence, so
-    the token-id helpers search for the marker *subsequence* rather than a single id.
+  * Unlike Kimi-K2 (a single `<think>` token), each K3 marker is a 3-token
+    sequence, so the token-id helpers search for the marker *subsequence*
+    rather than a single id.
   * In thinking mode the serving layer may feed `<|open|>think<|sep|>` as the
     generation prefix, so the model's output can begin *inside* the think
     channel with no open marker. The text paths therefore treat a missing open
@@ -325,16 +326,18 @@ class KimiK3ReasoningParser(ReasoningParser):
         split-open and split-close handling into the same prefix-diff problem.
 
         Example 1: split think-open marker.
-          chunks: `<|open|>` / `think` / `<|sep|>reasoning` current text after chunk 1:
-          `<|open|>` -> emit `""` current text after chunk 2: `<|open|>think` -> emit
-          `""` current text after chunk 3: `<|open|>think<|sep|>reasoning` -> emit
-          `reasoning`
+          chunks: `<|open|>` / `think` / `<|sep|>reasoning`
+          current text after chunk 1: `<|open|>` -> emit `""`
+          current text after chunk 2: `<|open|>think` -> emit `""`
+          current text after chunk 3: `<|open|>think<|sep|>reasoning`
+          -> emit `reasoning`
 
         Example 2: split think-close marker.
-          chunks: `reasoning` / `<|close|>` / `think<|sep|>...` after `<|close|>`, the
-          suffix is only a partial close marker, so the sendable reasoning is still
-          `reasoning` and the delta is empty. Once `think<|sep|>` arrives, the close
-          branch hands the following response or tools text to the downstream parser.
+          chunks: `reasoning` / `<|close|>` / `think<|sep|>...`
+          after `<|close|>`, the suffix is only a partial close marker, so the
+          sendable reasoning is still `reasoning` and the delta is empty. Once
+          `think<|sep|>` arrives, the close branch hands the following response
+          or tools text to the downstream parser.
         """
         m_open = self._think_open_re.search(text)
         if m_open is not None:

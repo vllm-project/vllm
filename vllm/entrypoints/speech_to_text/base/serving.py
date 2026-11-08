@@ -220,8 +220,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
     ) -> str:
         """Auto-detect the spoken language from an audio chunk.
 
-        Delegates prompt construction and output parsing to the model class via
-        `get_language_detection_prompt` and `parse_language_detection_output`.
+        Delegates prompt construction and output parsing to the model class
+        via `get_language_detection_prompt` and
+        `parse_language_detection_output`.
         """
         prompt = self.model_cls.get_language_detection_prompt(
             audio_chunk,

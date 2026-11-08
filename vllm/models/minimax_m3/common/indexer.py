@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiniMax M3 lightning indexer: side cache, metadata, and impl.
 
-The indexer scores KV blocks with the index heads and selects the top-k blocks (plus
-fixed init/local blocks) that the main block-sparse attention (`sparse_attention.py`)
-then attends to. It owns its own side cache (`MiniMaxM3IndexerCache`, one index-key
-vector per token), metadata, and metadata builder, mirroring how DeepSeek V4 keeps the
-indexer separate from the main attention.
+The indexer scores KV blocks with the index heads and selects the top-k blocks
+(plus fixed init/local blocks) that the main block-sparse attention
+(`sparse_attention.py`) then attends to. It owns its own side cache
+(`MiniMaxM3IndexerCache`, one index-key vector per token), metadata, and
+metadata builder, mirroring how DeepSeek V4 keeps the indexer separate from the
+main attention.
 
 `MiniMaxM3Indexer` is the `nn.Module` the attention layer holds (like
 `DeepseekV4Indexer`); it picks a kernel impl in `__init__` (via
@@ -339,9 +340,10 @@ class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
 class MiniMaxM3IndexerImpl(nn.Module):
     """Abstract base for the indexer kernel impls.
 
-    Each impl owns its side cache and reports its backend via `indexer_backend_cls` (so
-    each gets its own builder). The Triton and MSA subclasses each own a full `forward`
-    returning `(decode_topk, prefill_topk)` -- no shared forward code.
+    Each impl owns its side cache and reports its backend via
+    `indexer_backend_cls` (so each gets its own builder). The Triton and MSA
+    subclasses each own a full `forward` returning `(decode_topk,
+    prefill_topk)` -- no shared forward code.
     """
 
     # Set by each impl so the side cache reports the matching backend + builder.
@@ -512,12 +514,13 @@ def select_indexer_impl_cls(
     """Pick the indexer impl off the platform, top-k count, and cache dtype.
 
     On Blackwell (SM100) with `topk_blocks == 16` (the only width fmha_sm100's
-    `sparse_topk_select` kernel supports), the fmha_sm100 score + top-k path is used for
-    both bf16 and fp8 index caches. An nvfp4 index cache uses the MSA Q8KV4/Q8KV8 paged
-    indexers (SM100/SM103/SM107 only). Everything else falls back to the Triton indexer,
-    with fp8 restricted to CUDA platforms that advertise fp8 support and to ROCm gfx942
-    (MI300-series, CDNA3). gfx950 (MI350-series) takes the fp8 path through the AITER
-    indexer instead, so this fallback stays bf16-only there.
+    `sparse_topk_select` kernel supports), the fmha_sm100 score + top-k path is
+    used for both bf16 and fp8 index caches. An nvfp4 index cache uses the MSA
+    Q8KV4/Q8KV8 paged indexers (SM100/SM103/SM107 only). Everything else falls back to
+    the Triton indexer, with fp8 restricted to CUDA platforms that advertise fp8
+    support and to ROCm gfx942 (MI300-series, CDNA3). gfx950 (MI350-series)
+    takes the fp8 path through the AITER indexer instead, so this fallback
+    stays bf16-only there.
     """
     if get_current_vllm_config().attention_config.minimax_m3_indexer_cp:
         # AttentionConfig already rejects non-bf16 index caches; platform and

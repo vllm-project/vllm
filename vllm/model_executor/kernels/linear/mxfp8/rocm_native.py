@@ -3,11 +3,12 @@
 """Native MXFP8 linear GEMM for AMD CDNA4 (gfx950) via Triton `tl.dot_scaled`.
 
 Consumes the FP8 E4M3 weights + E8M0 block scales directly (no dequant-to-BF16);
-activations are MXFP8-quantized per token (inside the GEMM for small M), or arrive
-pre-quantized as a `QuantizedActivation` with row-major (not swizzled) E8M0 scales. Uses
-the CDNA4 hardware microscaling matrix cores. `dot_scaled` tiles K by 128; a weight
-whose K is not a multiple of that is dequantized to BF16 once at load and served by a
-plain linear instead, since `can_implement` does not filter on K.
+activations are MXFP8-quantized per token (inside the GEMM for small M), or
+arrive pre-quantized as a `QuantizedActivation` with row-major (not swizzled)
+E8M0 scales. Uses the CDNA4 hardware microscaling matrix cores. `dot_scaled`
+tiles K by 128; a weight whose K is not a multiple of that is dequantized to
+BF16 once at load and served by a plain linear instead, since `can_implement`
+does not filter on K.
 """
 
 import torch

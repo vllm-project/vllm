@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Multimodal preprocessing for the DeepSeek-V4.1 vision variant.
 
-The image transform and image-span construction are ported from the official
-repository's `image_processor.py` so that token counts bit-match the reference. Each
-`<｜deepseek_image｜>` placeholder in the prompt expands to
-`[IMAGE_START] + ([IMAGE] * n_llm_w + [IMAGE_NEW_LINE]) * n_llm_h + [IMAGE_END]`; every
-span position carries `image_token_id` (129264) in `input_ids` and the roles ride along
-in a per-image `types` tensor (the reference's out-of-band `token_types`). IMAGE slots
-receive aligner rows in reading order; the delimiters take the learned `image_start` /
+The image transform and image-span construction are ported from the
+official repository's `image_processor.py` so that token counts bit-match
+the reference. Each `<｜deepseek_image｜>` placeholder in the prompt expands
+to `[IMAGE_START] + ([IMAGE] * n_llm_w + [IMAGE_NEW_LINE]) * n_llm_h +
+[IMAGE_END]`; every span position carries `image_token_id` (129264) in
+`input_ids` and the roles ride along in a per-image `types` tensor
+(the reference's out-of-band `token_types`). IMAGE slots receive aligner
+rows in reading order; the delimiters take the learned `image_start` /
 `image_newline` / `image_end` vectors.
 
 The token stream matches the reference exactly: no compressor-alignment

@@ -56,9 +56,10 @@ def resolve_seq_and_query_len(
     """Resolve the (sequence, q-block-within-sequence) pair and load the
     per-sequence lengths.
 
-    Shared across every attention kernel — the `q_block_global_idx` program id indexes
-    into the flattened `(seq, q_block_in_seq)` space, and a binary search over
-    `query_start_len_ptr` recovers the (seq, local-q-block) pair.
+    Shared across every attention kernel — the `q_block_global_idx`
+    program id indexes into the flattened `(seq, q_block_in_seq)`
+    space, and a binary search over `query_start_len_ptr` recovers
+    the (seq, local-q-block) pair.
 
     Returns `(seq_idx, q_block_local_idx, cur_batch_in_all_start_index,
     cur_batch_query_len, seq_len)`.  Callers must still early-return
@@ -88,9 +89,10 @@ def find_seq_idx(
 ):
     """Binary search over the cumulative query-length prefix.
 
-    When `use_q_block_mode` is True, the prefix values are reshaped into units of
-    `BLOCK_Q` plus one entry per boundary — matching the q-block grid laid out by the
-    attention kernels. When False we search the plain cumulative-length prefix (used by
+    When `use_q_block_mode` is True, the prefix values are reshaped
+    into units of `BLOCK_Q` plus one entry per boundary — matching
+    the q-block grid laid out by the attention kernels.  When False
+    we search the plain cumulative-length prefix (used by
     `reduce_segments` which iterates over raw query tokens).
     """
     left: tl.int32 = 0
@@ -120,9 +122,10 @@ def init_softmax_M(
 ):
     """Initial row-max `M` for the online softmax.
 
-    Without sinks: `-inf`. With sinks: load the per-head sink bias once. In 3D mode only
-    segment 0 loads — `reduce_segments` adds the sink contribution exactly once across
-    segments, so other segments must start from `-inf`.
+    Without sinks: `-inf`.  With sinks: load the per-head sink bias
+    once.  In 3D mode only segment 0 loads — `reduce_segments` adds
+    the sink contribution exactly once across segments, so other
+    segments must start from `-inf`.
 
     `segm_idx_or_0` is the 3D segment index or 0 for 2D (caller
     passes `0` when `IS_3D` is False).
@@ -169,16 +172,18 @@ def compute_tile_loop_bounds(
 
     Combines three concerns into one helper:
 
-    1. Longest prefix spanned by any query token in this q-block. Clamped to `seq_len`
-       (causal) or extended to it when mm_prefix is active or non-causal sequences need
-       the full sequence.
+    1. Longest prefix spanned by any query token in this q-block.
+       Clamped to `seq_len` (causal) or extended to it when
+       mm_prefix is active or non-causal sequences need the full
+       sequence.
     2. Sliding-window pruning: narrows `[tile_start, tile_end)` to
        only tiles that can contain an allowed key under SWA. For non-causal
        sequences, the window extends in both directions. For Gemma4's
        window-clamped multimodal prefix mask, the bounds include the union of
        the base mask and each image range intersecting the query block.
-    3. 3D scoping: when `IS_3D` is True, further narrows to the segment's slice via
-       `(segm_idx * tiles_per_segment, (segm_idx + 1) * tiles_per_segment)`.
+    3. 3D scoping: when `IS_3D` is True, further narrows to the
+       segment's slice via `(segm_idx * tiles_per_segment,
+       (segm_idx + 1) * tiles_per_segment)`.
     """
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
@@ -329,16 +334,19 @@ def compute_kv_seq_mask(
 ):
     """Build the KV mask for one tile.
 
-    Causal (key <= query) by default; AND-ed with either chunked attention
-    (`CHUNK_LOOKBACK >= 0`) or sliding window (`SLIDING_WINDOW > 0`); OR-ed with the
-    bidirectional ranges from `mm_prefix_range` when PrefixLM / multimodal attention is
-    active. Order matches FlexAttention: `(causal AND window) OR mm_prefix`. Chunked
-    attention takes precedence over sliding window when both are non-default — the
-    launcher zeros `CHUNK_LOOKBACK` whenever sliding window is disabled.
+    Causal (key <= query) by default; AND-ed with either chunked
+    attention (`CHUNK_LOOKBACK >= 0`) or sliding window
+    (`SLIDING_WINDOW > 0`); OR-ed with the bidirectional ranges from
+    `mm_prefix_range` when PrefixLM / multimodal attention is active.
+    Order matches FlexAttention: `(causal AND window) OR mm_prefix`.
+    Chunked attention takes precedence over sliding window when both
+    are non-default — the launcher zeros `CHUNK_LOOKBACK` whenever
+    sliding window is disabled.
 
-    When `USE_PER_SEQ_CAUSAL` is set, each sequence carries its own causal flag via
-    `per_seq_causal_ptr`; non-causal sequences use a simple `key < seq_len` bound
-    instead. `USE_CAUSAL=False` disables causal masking entirely.
+    When `USE_PER_SEQ_CAUSAL` is set, each sequence carries its own
+    causal flag via `per_seq_causal_ptr`; non-causal sequences use a
+    simple `key < seq_len` bound instead.  `USE_CAUSAL=False`
+    disables causal masking entirely.
     """
     if USE_PER_SEQ_CAUSAL:
         is_causal = tl.load(per_seq_causal_ptr + seq_idx)
@@ -454,9 +462,10 @@ def load_qq_bias_tile(
 def softmax_step(S, M, L):
     """Online softmax update for one tile.
 
-    Returns `(M_new, L_new, P, alpha)`. Caller is responsible for rescaling its
-    accumulator(s) by `alpha[:, None]` — done outside so kernels with a different number
-    / shape of accumulators can reuse the same step.
+    Returns `(M_new, L_new, P, alpha)`.  Caller is responsible for
+    rescaling its accumulator(s) by `alpha[:, None]` — done outside so
+    kernels with a different number / shape of accumulators can reuse
+    the same step.
     """
     # compute running maximum
     # m_j : (BLOCK_M,)

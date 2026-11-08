@@ -6,9 +6,11 @@ Numerics of the reference implementation's CUDA norm and activation kernels,
 everything in fp32 with one output rounding:
 
 - `rms_norm`: `bf16(x * rsqrt(mean(x^2) + eps) * w)`.
-- `fused_add_rms_norm`: `s = x + residual` in fp32, `residual_out = bf16(s)`,
-  `out = bf16(s * rsqrt(mean(s^2) + eps) * w)` from the unrounded `s`.
-- `silu_and_mul`: `bf16(g / (1 + exp(-g)) * u)` (precise `expf` and division).
+- `fused_add_rms_norm`: `s = x + residual` in fp32,
+  `residual_out = bf16(s)`, `out = bf16(s * rsqrt(mean(s^2) + eps) * w)`
+  from the unrounded `s`.
+- `silu_and_mul`: `bf16(g / (1 + exp(-g)) * u)` (precise `expf` and
+  division).
 
 `rsqrt` is `rsqrt.approx.ftz.f32` (`rsqrtf` under fast math). The fused
 Flint kernels (`qkv_fused`, the decode MoE block's norm and shared expert, and

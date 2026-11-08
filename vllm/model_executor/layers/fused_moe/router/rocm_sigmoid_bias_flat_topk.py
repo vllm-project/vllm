@@ -4,18 +4,20 @@
 
 Several DeepSeek-V3-architecture checkpoints route with `use_grouped_topk=True`
 but `num_expert_group=1` and `topk_group=1`, so the group stage selects
-nothing: Moonlight-16B-A3B (64 experts, top-6) and Kimi-K2 (384 experts, top-8), both
-`scoring_func="sigmoid"` with a `noaux_tc` correction bias. On ROCm this lands in
-`aiter.biased_grouped_topk_hip` (`grouped_topk_kernel<..., NUM_GRP=1>`), which keeps the
-biased scores in LDS and runs one serial round per selected expert of
-`LDS scan -> shuffle argmax -> LDS invalidate -> LDS read of the pre-bias sigmoid`.
+nothing: Moonlight-16B-A3B (64 experts, top-6) and Kimi-K2 (384 experts, top-8),
+both `scoring_func="sigmoid"` with a `noaux_tc` correction bias.  On ROCm this
+lands in `aiter.biased_grouped_topk_hip` (`grouped_topk_kernel<...,
+NUM_GRP=1>`), which keeps the biased scores in LDS and runs one serial round
+per selected expert of `LDS scan -> shuffle argmax -> LDS invalidate -> LDS
+read of the pre-bias sigmoid`.
 
-With a single group the group-selection stage is the identity, so the op is exactly
-"sigmoid(logits) + bias -> top-k -> weights = sigmoid at the chosen experts (optionally
-renormalised, times routed_scaling_factor)". This kernel does that with all scores held
-in registers: each score is packed with its expert index into a unique, order-preserving
-int64 key, so every round is a single `tl.max` plus an equality invalidate (no argmax
-pair reduction, no LDS round trips, ties broken towards the lower expert id).
+With a single group the group-selection stage is the identity, so the op is
+exactly "sigmoid(logits) + bias -> top-k -> weights = sigmoid at the chosen
+experts (optionally renormalised, times routed_scaling_factor)".  This kernel
+does that with all scores held in registers: each score is packed with its
+expert index into a unique, order-preserving int64 key, so every round is a
+single `tl.max` plus an equality invalidate (no argmax pair reduction, no
+LDS round trips, ties broken towards the lower expert id).
 """
 
 import torch

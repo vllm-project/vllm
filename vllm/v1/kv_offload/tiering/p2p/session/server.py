@@ -2,15 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Server-role state machine for a single peer session.
 
-Owns block matching (supply vs. demand), inflight RDMA transfers, store-job timeouts,
-abort-drain, and produces `StoreResult` for completed stores. The session coordinator
-parses wire messages and dispatches typed arguments here; this module never touches
-`ControlConnection` directly — it emits via the `send` callback injected by the
-coordinator (which gates on ConnectAck).
+Owns block matching (supply vs. demand), inflight RDMA transfers, store-job
+timeouts, abort-drain, and produces `StoreResult` for completed stores.
+The session coordinator parses wire messages and dispatches typed
+arguments here; this module never touches `ControlConnection` directly
+— it emits via the `send` callback injected by the coordinator (which
+gates on ConnectAck).
 
-Protocol violations the role can detect (today: duplicate `FetchMsg` for the same
-`kv_request_id`) are surfaced as `ValueError` so the coordinator's `_dispatch_message`
-can reuse its existing `_protocol_error` path.
+Protocol violations the role can detect (today: duplicate `FetchMsg`
+for the same `kv_request_id`) are surfaced as `ValueError` so the
+coordinator's `_dispatch_message` can reuse its existing
+`_protocol_error` path.
 """
 
 from __future__ import annotations
@@ -179,9 +181,10 @@ class _InflightXfer:
 class _ActiveLookup:
     """In-flight state for one inbound LookupMsg.
 
-    Aggregates per-key HIT/MISS resolutions and defers the single outbound LookupRespMsg
-    until every key has been resolved or the `deadline` fires (remaining `pending` keys
-    then force-MISS). Exactly one LookupRespMsg is emitted per LookupMsg, carrying every
+    Aggregates per-key HIT/MISS resolutions and defers the single
+    outbound LookupRespMsg until every key has been resolved or the
+    `deadline` fires (remaining `pending` keys then force-MISS).
+    Exactly one LookupRespMsg is emitted per LookupMsg, carrying every
     key in the original wire order.
     """
 
@@ -223,10 +226,11 @@ class _PendingLookup(NamedTuple):
 class _ServerRequestState:
     """Per-kv_request_id server-side state.
 
-    Consolidates the outbound serve/transfer state, the symmetric-P2P inbound-lookup
-    state, abort bookkeeping, and the inflight-transfer count for one kv_request_id. The
-    owning id is the `_requests` dict key and is not duplicated here. An entry is
-    dropped once every field is idle — see `ServerRole._maybe_prune`.
+    Consolidates the outbound serve/transfer state, the symmetric-P2P
+    inbound-lookup state, abort bookkeeping, and the inflight-transfer
+    count for one kv_request_id. The owning id is the `_requests` dict
+    key and is not duplicated here. An entry is dropped once every field
+    is idle — see `ServerRole._maybe_prune`.
     """
 
     # Fetch rounds keyed by wire round_seq. A round is created by its
@@ -454,11 +458,12 @@ class ServerRole:
     ) -> None:
         """Enqueue a LookupMsg from a symmetric-P2P consumer.
 
-        Dispatch runs during `session.poll()` where the `ParentManager` handle is
-        not available, so this only records the raw request. It is resolved — querying
-        the tiering manager and emitting the aggregated `LookupRespMsg` — by the next
-        `serve_external_requests`, the sole window in which parent calls are
-        valid.
+        Dispatch runs during `session.poll()` where the
+        `ParentManager` handle is not available, so this only
+        records the raw request. It is resolved — querying the tiering
+        manager and emitting the aggregated `LookupRespMsg` — by the
+        next `serve_external_requests`, the sole window in which
+        parent calls are valid.
         """
         logger.debug(
             "P2P LOOKUP server %s: RECV LookupMsg kv_request_id=%s round=%s keys=%d",
@@ -479,9 +484,10 @@ class ServerRole:
     def serve_external_requests(self, parent: ParentManager) -> None:
         """Resolve inbound peer lookups against the tiering manager.
 
-        Called once per scheduler step with a `parent` handle valid only for this call.
-        Drains newly-enqueued LookupMsgs, re-polls any parked HIT_PENDING / RETRY keys,
-        and releases the bookkeeping for lookups closed since the last serve.
+        Called once per scheduler step with a `parent` handle valid
+        only for this call. Drains newly-enqueued LookupMsgs, re-polls
+        any parked HIT_PENDING / RETRY keys, and releases the
+        bookkeeping for lookups closed since the last serve.
         """
         for kv_request_id in list(self._serve_pending):
             st = self._requests.get(kv_request_id)
@@ -514,10 +520,11 @@ class ServerRole:
     ) -> list[OffloadKey]:
         """Poll `keys` against the tiering manager and pin any HITs.
 
-        For each key not already definitively resolved, query `parent.lookup` and record
-        the outcome on `lookup`: HIT / MISS land in `resolved` and clear `pending`;
-        HIT_PENDING / RETRY park in `pending` for a later serve. Newly-HIT keys are
-        pinned in one batch via `_pin_and_register_hits` and also returned (for
+        For each key not already definitively resolved, query
+        `parent.lookup` and record the outcome on `lookup`: HIT / MISS
+        land in `resolved` and clear `pending`; HIT_PENDING / RETRY park
+        in `pending` for a later serve. Newly-HIT keys are pinned in one
+        batch via `_pin_and_register_hits` and also returned (for
         caller logging).
 
         Shared by the first-sighting pass (`_process_inbound_lookup`)
@@ -552,16 +559,18 @@ class ServerRole:
     ) -> None:
         """Resolve one enqueued LookupMsg against `parent`.
 
-        For each key, query the tiering manager via `parent.lookup` and pin any HITs
-        immediately via `parent.create_store_job` (plumbed into the existing
-        `add_stored_blocks` matching path so the eventual FetchMsg finds them).
-        HIT_PENDING / RETRY keys park in `_ActiveLookup` for re-polling by
+        For each key, query the tiering manager via `parent.lookup`
+        and pin any HITs immediately via `parent.create_store_job`
+        (plumbed into the existing `add_stored_blocks` matching path so
+        the eventual FetchMsg finds them). HIT_PENDING / RETRY keys park
+        in `_ActiveLookup` for re-polling by
         `_resolve_pending_lookups`.
 
-        The outbound `LookupRespMsg` is deferred until every key has settled to HIT or
-        MISS (or the batch-level `deadline` fires, forcing any stragglers to MISS). One
-        LookupRespMsg goes out per LookupMsg — carrying every key in wire order — after
-        which `parent.on_request_finished` fires and the entry is dropped.
+        The outbound `LookupRespMsg` is deferred until every key has
+        settled to HIT or MISS (or the batch-level `deadline` fires,
+        forcing any stragglers to MISS). One LookupRespMsg goes out per
+        LookupMsg — carrying every key in wire order — after which
+        `parent.on_request_finished` fires and the entry is dropped.
         """
         self._lookup_id_counter += 1
         lookup_id = self._lookup_id_counter
@@ -610,11 +619,13 @@ class ServerRole:
         """Pin primary slots for HIT keys and park them as the lookup's
         round supply via `add_stored_blocks`.
 
-        Caller has already confirmed every key is HIT, so the JobMetadata returned by
-        `parent.create_store_job` carries parallel `keys`/`block_ids` of length
-        `len(keys)`. Nothing can evict between that confirmation and the pin because the
-        whole `serve_external_requests` call runs inside one hold of the tiering
-        manager's lock -- which is why that call must never release it partway through.
+        Caller has already confirmed every key is HIT, so the JobMetadata
+        returned by `parent.create_store_job` carries parallel
+        `keys`/`block_ids` of length `len(keys)`. Nothing can evict
+        between that confirmation and the pin because the whole
+        `serve_external_requests` call runs inside one hold of the tiering
+        manager's lock -- which is why that call must never release it
+        partway through.
         """
         meta = parent.create_store_job(keys, lookup.ctx)
         self.add_stored_blocks(
@@ -631,13 +642,14 @@ class ServerRole:
     ) -> None:
         """Re-poll a request's deferred LookupMsg keys; finalize when ready.
 
-        Walks every parked `_ActiveLookup` for `kv_request_id` and re-calls
-        `parent.lookup` per still-pending key, moving HIT/MISS results into `resolved`.
-        If `deadline` has passed, remaining `pending` keys are force-resolved to MISS so
-        the consumer can fall back instead of waiting on a stuck producer. Newly-HIT
-        keys are pinned via `parent.create_store_job` in one call per affected lookup.
-        Lookups whose `pending` empties out get their aggregated LookupRespMsg sent by
-        `_finalize_lookup`.
+        Walks every parked `_ActiveLookup` for `kv_request_id` and
+        re-calls `parent.lookup` per still-pending key, moving HIT/MISS
+        results into `resolved`. If `deadline` has passed, remaining
+        `pending` keys are force-resolved to MISS so the consumer
+        can fall back instead of waiting on a stuck producer. Newly-HIT
+        keys are pinned via `parent.create_store_job` in one call per
+        affected lookup. Lookups whose `pending` empties out get their
+        aggregated LookupRespMsg sent by `_finalize_lookup`.
         """
         st = self._requests.get(kv_request_id)
         if st is None or not st.lookups:
@@ -692,19 +704,23 @@ class ServerRole:
     def _finish_inbound_lookups(self, kv_request_id: str) -> None:
         """Close the server-side lookup phase for `kv_request_id`.
 
-        Pops every parked `_ActiveLookup` for this id (so `_resolve_pending_lookups`
-        cannot promote a HIT_PENDING / RETRY key into a fresh `parent.create_store_job`
-        after this point) and queues each `lookup.ctx` for `parent.on_request_finished`
-        (fired by the next `serve_external_requests`, since no parent handle is
-        available during dispatch) so the TieringManager can release per-lookup
-        bookkeeping. Any still-unprocessed raw LookupMsg for this id is dropped — it
-        never got `on_new_request`, so nothing is owed. The aggregated LookupRespMsg is
-        skipped — the client already knows the request is over (it just sent a terminal
-        FetchMsg, or is finishing locally).
+        Pops every parked `_ActiveLookup` for this id (so
+        `_resolve_pending_lookups` cannot promote a HIT_PENDING /
+        RETRY key into a fresh `parent.create_store_job` after this
+        point) and queues each `lookup.ctx` for
+        `parent.on_request_finished` (fired by the next
+        `serve_external_requests`, since no parent handle is available
+        during dispatch) so the TieringManager can release per-lookup
+        bookkeeping. Any still-unprocessed raw LookupMsg for this id is
+        dropped — it never got `on_new_request`, so nothing is owed.
+        The aggregated LookupRespMsg is skipped — the client already
+        knows the request is over (it just sent a terminal FetchMsg, or
+        is finishing locally).
 
-        Called on the two events that mean "no more lookup traffic for `kv_request_id`
-        is expected on this session": the terminal empty FetchMsg from the peer and a
-        local `finish`. Whichever fires second is a no-op.
+        Called on the two events that mean "no more lookup traffic for
+        `kv_request_id` is expected on this session": the terminal
+        empty FetchMsg from the peer and a local `finish`. Whichever
+        fires second is a no-op.
         """
         st = self._requests.get(kv_request_id)
         if st is None:
@@ -724,11 +740,12 @@ class ServerRole:
         peer to stop waiting (TransferDoneMsg success=False) instead of
         letting it hit its load timeout.
 
-        Also drops any in-flight lookups for this kv_request_id and queues their ctxs
-        for `parent.on_request_finished` so the TieringManager can release per-request
-        bookkeeping. (For symmetric P2P this path is rarely hit since the producer has
-        no local request lifecycle for the consumer's id; this cleanup is mostly active
-        on the PD side.)
+        Also drops any in-flight lookups for this kv_request_id and
+        queues their ctxs for `parent.on_request_finished` so the
+        TieringManager can release per-request bookkeeping. (For
+        symmetric P2P this path is rarely hit since the producer has no
+        local request lifecycle for the consumer's id; this cleanup is
+        mostly active on the PD side.)
 
         If the decoder hasn't sent fetch yet (no demand received),
         defer — on_fetch will finalize once demand arrives.
@@ -888,13 +905,15 @@ class ServerRole:
     ) -> tuple[list[int], list[ReqContext], dict[int, frozenset[int]]]:
         """Tear down. Cancels inflight, retaining what may still write.
 
-        Returns `(failed_store_job_ids, failed_serves, retained)`. `failed_serves` are
-        synthetic lookup ctxs still owing a `parent.on_request_finished`. The session is
-        going away with no parent handle in hand, so the manager flushes these in its
-        next `serve_external_requests`. `retained` maps each transfer NIXL does not
-        report terminal to the store jobs it still reads: like the abort drain, close
-        never releases such a transfer, so those jobs stay pinned and are left out of
-        `failed_store_job_ids` until the transport reports the transfer stopped.
+        Returns `(failed_store_job_ids, failed_serves, retained)`.
+        `failed_serves` are synthetic lookup ctxs still owing a
+        `parent.on_request_finished`. The session is going away with no
+        parent handle in hand, so the manager flushes these in its next
+        `serve_external_requests`. `retained` maps each transfer NIXL
+        does not report terminal to the store jobs it still reads: like the
+        abort drain, close never releases such a transfer, so those jobs
+        stay pinned and are left out of `failed_store_job_ids` until the
+        transport reports the transfer stopped.
         """
         retained: dict[int, frozenset[int]] = {}
         if self._inflight:
@@ -959,9 +978,10 @@ class ServerRole:
     ) -> list[StoreResult]:
         """Emit StoreResults for a completed transfer's store jobs.
 
-        Pops each attached job from `_store_jobs` and clears it from its round's pending
-        set. A job already popped (via timeout, cancel, etc.) is skipped so we never
-        double-emit a contradictory result.
+        Pops each attached job from `_store_jobs` and clears it from
+        its round's pending set. A job already popped (via timeout,
+        cancel, etc.) is skipped so we never double-emit a contradictory
+        result.
         """
         results: list[StoreResult] = []
         still_pinned = self._read_job_ids() if xfer.round.cancelled else set()

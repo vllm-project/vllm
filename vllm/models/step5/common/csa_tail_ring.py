@@ -158,9 +158,10 @@ class Step5CSATailRing(nn.Module, AttentionLayerBase):
     other seven from here, and a rejected draft is undone by the next step
     overwriting its row.
 
-    One verify step stores up to `k + 1` rows while the next step may still replay up to
-    seven earlier rows of the same region, so the ring needs `7 + k` rows. It is sized
-    to one main KV page so that it shares the page size of the other KV cache groups.
+    One verify step stores up to `k + 1` rows while the next step may still
+    replay up to seven earlier rows of the same region, so the ring needs
+    `7 + k` rows. It is sized to one main KV page so that it shares the
+    page size of the other KV cache groups.
     """
 
     def __init__(

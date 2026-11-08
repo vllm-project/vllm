@@ -39,8 +39,9 @@ class DotsToolParser(ToolParser):
         </invoke>
         </dots_function_call>
 
-    A JSON object with `name` and `arguments` is also accepted as a fallback. Multiple
-    wrapper blocks and multiple invokes per block are supported.
+    A JSON object with `name` and `arguments` is also accepted as a
+    fallback. Multiple wrapper blocks and multiple invokes per block are
+    supported.
     """
 
     supports_required_and_named = False

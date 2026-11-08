@@ -77,8 +77,9 @@ class StreamToolCall(TypedDict):
 class StreamDelta(TypedDict):
     """Return of `extract_tool_calls_streaming`.
 
-    A single engine delta can carry content plus every tool call that was drained from
-    the buffer (batched decode), so `tool_calls` is not limited to one entry.
+    A single engine delta can carry content plus every tool call that was
+    drained from the buffer (batched decode), so `tool_calls` is not limited
+    to one entry.
     """
 
     content: str | None
@@ -99,7 +100,8 @@ def detect_token_suffix(tokenizer: TokenizerLike) -> str:
 
     Raises:
         RuntimeError: The tokenizer declares the structural tokens through
-            `model_specific_special_tokens`, which transformers 5 no longer round-trips.
+            `model_specific_special_tokens`, which transformers 5 no longer
+            round-trips.
 
     """
     init_kwargs = getattr(tokenizer, "init_kwargs", None) or {}
@@ -349,11 +351,12 @@ class HYV4ToolExtractor:
     regexes, and the streaming incremental state. Stateless argument parsing is
     delegated to the module-level utilities above.
 
-    Streaming has two entry paths sharing one incremental argument parser, selected by
-    the `guided` flag of `extract_tool_calls_streaming`: normal / auto tool choice
-    detects markers on atomic token ids so ordinary `<` in content is never withheld,
-    while structural-tag guided decoding detects them on the string level because the
-    grammar may split a marker across sub-word tokens.
+    Streaming has two entry paths sharing one incremental argument parser,
+    selected by the `guided` flag of `extract_tool_calls_streaming`:
+    normal / auto tool choice detects markers on atomic token ids so ordinary
+    `<` in content is never withheld, while structural-tag guided decoding
+    detects them on the string level because the grammar may split a marker
+    across sub-word tokens.
     """
 
     def __init__(self, vocab: dict[str, int], token_suffix: str, strict: bool):
@@ -1057,10 +1060,11 @@ class HYV4ToolParser(ToolParser):
     def _is_guided(request: ChatCompletionRequest) -> bool:
         """Whether a structural tag constrains this request's decoding.
 
-        `get_structural_tag` only applies to required / named tool choice and the
-        serving layer records the result on the request. A structural tag constrains
-        strings rather than token ids, so the `<tool_calls>` marker can arrive split
-        across sub-word tokens and must be detected on the string level.
+        `get_structural_tag` only applies to required / named tool choice and
+        the serving layer records the result on the request. A structural tag
+        constrains strings rather than token ids, so the `<tool_calls>` marker
+        can arrive split across sub-word tokens and must be detected on the
+        string level.
 
         Args:
             request: The request being streamed.

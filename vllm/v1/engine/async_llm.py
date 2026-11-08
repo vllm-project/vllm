@@ -329,8 +329,9 @@ class AsyncLLM(EngineClient):
         Both limits return HTTP 503 (Service Unavailable) so that load
         balancers and client SDKs retry on a different instance.
 
-        - `max_num_queued_reqs`: approximate global cap on the number of unfinished
-          requests (waiting + running). A request with `n > 1` counts as `n` slots.
+        - `max_num_queued_reqs`: approximate global cap on the number of
+          unfinished requests (waiting + running). A request with `n > 1`
+          counts as `n` slots.
         - `max_num_queued_tokens`: TTFT QoS — cap on the total prompt
           tokens of requests still in prefill.
 
@@ -1014,7 +1015,8 @@ class AsyncLLM(EngineClient):
 
         Args:
             mode: How to handle in-flight requests:
-                - `"abort"`: Abort all in-flight requests immediately (default).
+                - `"abort"`: Abort all in-flight requests immediately
+                  (default).
                 - `"wait"`: Wait for in-flight requests to complete.
                 - `"keep"`: Freeze requests in queue; they resume on
                   `resume_generation`.

@@ -5,7 +5,8 @@
 The head reads the final hidden states of the whole prompt, so it runs as a
 `token_classify` pooler.
 
-Each request carries its schema in `PoolingParams.extra_kwargs` under `"joint_schema"`:
+Each request carries its schema in `PoolingParams.extra_kwargs` under
+`"joint_schema"`:
 
 - `question_types`: 0 (noul), 1 (choice) or 2 (score) per question.
 - `question_spans`: the `[start, end)` of each question's instructions.
@@ -151,7 +152,8 @@ class JointSchemaHead(nn.Module):
         schema: SchemaIndices,
     ) -> torch.Tensor:
         """The `[O]` option logits of one prompt, from its `[L, hidden]`
-        final hidden states and each option's `[O, hidden]` mean output embedding."""
+        final hidden states and each option's `[O, hidden]` mean output
+        embedding."""
         num_questions = schema.question_types.shape[0]
         option_question = schema.option_question
         hidden_states = self.hidden_norm(hidden_states)

@@ -138,9 +138,10 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
     ) -> tuple[int, int, int]:
         """Return N-first buffer shape for the given weight/scale/zp tensor.
 
-        All CT MoE weights are allocated in the checkpoint's native N-first layout
-        `[E, N, K_packed]`. Backend-specific transposition (e.g. to Marlin's K-first
-        layout) is deferred to `convert_to_wna16_moe_kernel_format`.
+        All CT MoE weights are allocated in the checkpoint's native N-first
+        layout `[E, N, K_packed]`. Backend-specific transposition (e.g. to
+        Marlin's K-first layout) is deferred to
+        `convert_to_wna16_moe_kernel_format`.
         """
         w13_num_shards = 2 if self.moe.is_act_and_mul else 1
         w13_n = w13_num_shards * intermediate_size_per_partition

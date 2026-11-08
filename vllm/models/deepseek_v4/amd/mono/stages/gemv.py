@@ -222,17 +222,19 @@ def gemv_fp8_loads(c, w, ws, k, rg, split=None, tiled=False, row_major=False):
 
 def gemv_fp8_mfmas(c, k, xl, xsl, red, ops, split=None, tiled=False, rows=None):
     """`gemv_fp8_loads`' operands against the rows in LDS (`rows`: a token
-    tile's, every token's by default) -> `red[wave][lane]`; the scaled 16x16x128 MFMA,
-    chunk kc in dwords 0-3 and kc + 1 in 4-7. `k` a multiple of 32: a last half step has
-    its upper chunk zeroed on both sides at unit scale (a NaN byte past the row must not
-    reach the MFMA), its loads clamped into the row: the last row group's would read
-    past the tensor; a last quarter step its lower chunk's upper block too. A step past
-    the end adds zero at unit scale.
+    tile's, every token's by default) ->
+    `red[wave][lane]`; the scaled 16x16x128 MFMA, chunk kc in dwords 0-3 and kc +
+    1 in 4-7. `k` a multiple of 32: a last half step has its upper chunk zeroed
+    on both sides at unit scale (a NaN byte past the row must not reach the
+    MFMA), its loads clamped into the row: the last row group's would read past
+    the tensor; a last quarter step its lower chunk's upper block too. A step
+    past the end adds zero at unit scale.
 
-    The K order is the original kernel's, which `row_sum` completes: wave w takes steps
-    w, w + 8, ... (`split` None: aiter's preshuffled group32 GEMM, P0.5 microbenchmark
-    1), or waves 0 .. split - 1 one contiguous K range each, the other waves zero
-    (aiter's split-K bmm, whose last split sums the partials in split order)."""
+    The K order is the original kernel's, which `row_sum` completes:
+    wave w takes steps w, w + 8, ... (`split` None: aiter's preshuffled group32
+    GEMM, P0.5 microbenchmark 1), or waves 0 .. split - 1 one contiguous K range
+    each, the other waves zero (aiter's split-K bmm, whose last split sums the
+    partials in split order)."""
     lane, wave = c["lane"], c["wave"]
     acc = fx.Vector.filled(4, 0.0, fx.Float32)
     for i, (st, live) in enumerate(_gemv_steps(c, k, split, tiled)):
@@ -249,10 +251,11 @@ def gemv_fp8_mfmas(c, k, xl, xsl, red, ops, split=None, tiled=False, rows=None):
 @traced
 def poll_copy(c, idx, width, spans, live=None):
     """Mailbox spans [(region, pair_of, n, dst, row)] into LDS: element u (pair
-    `pair_of(u)`) to dst + u, or `lds_at(u, row)` for a span of rows `row` words wide.
-    Thread `idx` of `width` takes u = idx, idx + width, ..., POLL_MAX a round trip, each
-    batch stored before the next is polled (holding them all spills past S = 16); a
-    thread past a span's end re-reads its last element and stores nothing.
+    `pair_of(u)`) to dst + u, or `lds_at(u, row)` for a span of rows
+    `row` words wide. Thread `idx` of `width` takes u = idx, idx +
+    width, ..., POLL_MAX a round trip, each batch stored before the next is
+    polled (holding them all spills past S = 16); a thread past a span's end
+    re-reads its last element and stores nothing.
 
     `live`: a span's elements the reader needs (traced, <= n), a span each;
     a batch past them is not polled and an element past them neither polled

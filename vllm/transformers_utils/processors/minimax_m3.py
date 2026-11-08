@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax M3.1 VL HuggingFace-compatible Processor / ImageProcessor / VideoProcessor,
-vendored into vLLM so the model loads without `--trust-remote-code` (the released
-checkpoint only ships these classes as remote code via `auto_map`).
+"""MiniMax M3.1 VL HuggingFace-compatible Processor / ImageProcessor /
+VideoProcessor, vendored into vLLM so the model loads without
+`--trust-remote-code` (the released checkpoint only ships these classes as
+remote code via `auto_map`).
 
 Both image and video processors use the MiniMax M3.1 aligned-size resize
-(`compute_aligned_size`): tiny inputs are upscaled to a minimum area / short side, then
-both dims are ceil-aligned to the patch factor and capped at a per-modality long side
-(selectable via the OpenAI-style `detail` kwarg or an explicit `max_long_side_pixel`).
-The original async frame-sampling helpers are intentionally omitted: vLLM performs its
-own frame loading and feeds decoded frames to the processor.
+(`compute_aligned_size`): tiny inputs are upscaled to a minimum area /
+short side, then both dims are ceil-aligned to the patch factor and capped
+at a per-modality long side (selectable via the OpenAI-style `detail`
+kwarg or an explicit `max_long_side_pixel`). The original async
+frame-sampling helpers are intentionally omitted: vLLM performs its own
+frame loading and feeds decoded frames to the processor.
 """
 
 import math

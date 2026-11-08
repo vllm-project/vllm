@@ -942,9 +942,10 @@ def routing_data_from_sparse_topk(
     """Build routing structures from the `SparseMatrix` returned by
     `triton_kernels.topk`, reusing its precomputed bitmatrix metadata.
 
-    `make_routing_data` re-packs a bitmatrix from the topk ids and constructs a second
-    `SparseMatrix`, recomputing metadata the topk call already produced; when the topk
-    ids are used as-is (no expert-map remapping) that work is redundant.
+    `make_routing_data` re-packs a bitmatrix from the topk ids and
+    constructs a second `SparseMatrix`, recomputing metadata the topk
+    call already produced; when the topk ids are used as-is (no expert-map
+    remapping) that work is redundant.
     """
     if triton_kernels_version == "3.8":
         # topk ids have no -1 slots, so the topk metadata matches make_routing_data.

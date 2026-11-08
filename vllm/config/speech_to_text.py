@@ -17,9 +17,10 @@ if TYPE_CHECKING:
 class SpeechToTextParams:
     """All parameters consumed by `get_generation_prompt()`.
 
-    `TranscriptionRequest.build_stt_params()` constructs this object, mapping API-level
-    fields into typed attributes. Models only receive this object, so new parameters can
-    be added here without changing the `get_generation_prompt` signature.
+    `TranscriptionRequest.build_stt_params()` constructs this object,
+    mapping API-level fields into typed attributes.  Models only receive
+    this object, so new parameters can be added here without changing the
+    `get_generation_prompt` signature.
     """
 
     audio: np.ndarray

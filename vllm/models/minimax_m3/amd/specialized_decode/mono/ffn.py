@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax-M3 FFN launch: one persistent kernel from the unreduced `o_proj` partial to
-the reduced MoE output (`MiniMaxM3DecoderLayer.forward` after its attention).
+"""MiniMax-M3 FFN launch: one persistent kernel from the unreduced `o_proj`
+partial to the reduced MoE output (`MiniMaxM3DecoderLayer.forward` after its
+attention).
 
 `BLOCKS` x `THREADS`, S rows, one launch per sparse layer and rank:
 
@@ -697,9 +698,10 @@ def up_weights(c, rgs, st0):
 @traced
 def stage_down(c, tasks):
     """Rows 16 task .. of every task in `tasks`: a slot a wave, round robin,
-    its MID columns loaded once for every task; a column's result -> LDS
-    `CONTRIB[task][pick]`, then each token's routed picks (top-k order) x their
-    weights + the shared expert -> bf16 pairs pushed to every rank's FFN region."""
+    its MID columns loaded once for every task; a column's result ->
+    LDS `CONTRIB[task][pick]`, then each token's routed picks (top-k order) x
+    their weights + the shared expert -> bf16 pairs pushed to every rank's FFN
+    region."""
     s, tid, lane, wave, a = c["S"], c["tid"], c["lane"], c["wave"], c["args"]
     nt = len(tasks)
     nu = n_slots(c)

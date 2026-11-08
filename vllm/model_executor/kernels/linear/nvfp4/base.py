@@ -24,9 +24,10 @@ class NvFp4LinearLayerConfig:
 class NvFp4LinearKernel(ABC):
     """Base class for NVFP4 quantized linear kernels.
 
-    Each subclass implements a specific GEMM backend (CUTLASS, Marlin, etc). The kernel
-    selection mechanism iterates over registered subclasses in priority order,calling
-    `is_supported` and `can_implement` to find the best match for the current hardware.
+    Each subclass implements a specific GEMM backend (CUTLASS, Marlin, etc).
+    The kernel selection mechanism iterates over registered subclasses in
+    priority order,calling `is_supported` and `can_implement` to find the best
+    match for the current hardware.
     """
 
     def __init__(self, config: NvFp4LinearLayerConfig) -> None:

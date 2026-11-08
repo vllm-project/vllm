@@ -68,8 +68,9 @@ def apply_rotary_pos_emb_vision(
 class VisionRotaryEmbedding(nn.Module):
     """2D vision RoPE frequency table.
 
-    When `cache_seq_len` is set, precomputes and reuses frequencies up to that length
-    (MoE default). Otherwise frequencies are computed on each forward (dense default).
+    When `cache_seq_len` is set, precomputes and reuses frequencies up to that
+    length (MoE default). Otherwise frequencies are computed on each forward
+    (dense default).
     """
 
     def __init__(
@@ -385,8 +386,9 @@ def resolve_attn_implementation(
 ) -> str:
     """Apply FA3 → FA2 → eager fallback when backends are missing.
 
-    `eager_fallback` selects which eager backend is used when flash-attn is unavailable.
-    MoE historically used per-segment eager (`eager_v2`); dense uses full-mask `eager`.
+    `eager_fallback` selects which eager backend is used when flash-attn is
+    unavailable. MoE historically used per-segment eager (`eager_v2`); dense
+    uses full-mask `eager`.
     """
     if attn_implementation == "flash_attention_3" and not _flash_attn3_available:
         logger.warning_once(

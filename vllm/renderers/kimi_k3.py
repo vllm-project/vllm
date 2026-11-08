@@ -73,8 +73,9 @@ def _normalize_k3_tool_messages(
     """Reorder tool-result messages to match assistant tool_call order.
 
     Supports matching by `tool_call_id` or by the synthetic
-    `"{tool}:{zero_based_index}"` alias. When any tool message in a block cannot be
-    resolved, the whole block is left in its original order (graceful fallback).
+    `"{tool}:{zero_based_index}"` alias. When any tool message in a
+    block cannot be resolved, the whole block is left in its original
+    order (graceful fallback).
 
     Returns a new list; caller-owned message dicts are not mutated.
     """

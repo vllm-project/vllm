@@ -205,12 +205,13 @@ class InklingDecoderLayer(nn.Module):
 class InklingReplicatedEmbedding(nn.Module):
     """Full-vocab embedding table replicated on every TP rank.
 
-    Trades the full table per rank (~2.3 GiB at V=201k / H=6144 bf16, vs a 1/tp shard)
-    for no masked lookup and no per-lookup TP all-reduce — one all-reduce per MTP draft
-    step plus one per verify pass — and keeps the full table on-rank for the fused
-    gather+norm kernels (`embed_rmsnorm`, `embed_dual_rmsnorm_cat`). Bit-exact vs
-    vocab-parallel: the all-reduce there only ever summed one real row against exact
-    zeros. The LM head stays vocab-sharded.
+    Trades the full table per rank (~2.3 GiB at V=201k / H=6144 bf16, vs a
+    1/tp shard) for no masked lookup and no per-lookup TP all-reduce — one
+    all-reduce per MTP draft step plus one per verify pass — and keeps the
+    full table on-rank for the fused gather+norm kernels (`embed_rmsnorm`,
+    `embed_dual_rmsnorm_cat`). Bit-exact vs vocab-parallel: the all-reduce
+    there only ever summed one real row against exact zeros. The LM head
+    stays vocab-sharded.
     """
 
     def __init__(self, num_embeddings: int, embedding_dim: int) -> None:

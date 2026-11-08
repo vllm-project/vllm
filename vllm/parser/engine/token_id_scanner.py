@@ -31,13 +31,15 @@ LexerInput = TextChunk | PreLexedTerminal
 class TokenIDScanner:
     """Maps special token IDs in the delta to terminals.
 
-    Before text-based lexing happens, the scanner checks each token ID in the delta
-    against a mapping of `{token_id: terminal_name}`. Matched tokens are emitted as
-    `PreLexedTerminal` items; everything else is grouped into `TextChunk`
-    items for the incremental lexer to process.
+    Before text-based lexing happens, the scanner checks each token ID
+    in the delta against a mapping of `{token_id: terminal_name}`.
+    Matched tokens are emitted as `PreLexedTerminal` items;
+    everything else is grouped into `TextChunk` items for the
+    incremental lexer to process.
 
-    When a terminal's text is not yet in `delta_text` (held back by the detokenizer),
-    the terminal is deferred until the text arrives in a subsequent delta.
+    When a terminal's text is not yet in `delta_text` (held back by
+    the detokenizer), the terminal is deferred until the text arrives
+    in a subsequent delta.
     """
 
     def __init__(
@@ -214,10 +216,11 @@ class TokenIDScanner:
     ) -> tuple[list[LexerInput], str, int]:
         """Resolve deferred terminals against new delta_text.
 
-        When a previous `scan()` deferred a terminal (its text hadn't arrived yet), the
-        next delta's text should contain that terminal's text. Split delta_text at the
-        terminal boundary: text before belongs to the previous parser state, the
-        terminal triggers the state transition, and text after belongs to the new state.
+        When a previous `scan()` deferred a terminal (its text hadn't
+        arrived yet), the next delta's text should contain that terminal's
+        text.  Split delta_text at the terminal boundary: text before
+        belongs to the previous parser state, the terminal triggers the
+        state transition, and text after belongs to the new state.
 
         Returns `(prefix_items, remaining_text)` where prefix_items
         are the resolved deferred terminals (with any preceding text)
@@ -275,9 +278,10 @@ class TokenIDScanner:
     ) -> list[LexerInput]:
         """Recover detokenizer hold-back text not in delta_token_ids.
 
-        The detokenizer may flush previously held-back text in `delta_text` that has no
-        corresponding token ID in `delta_token_ids`. This hold-back text always appears
-        as a prefix of `delta_text`.
+        The detokenizer may flush previously held-back text in
+        `delta_text` that has no corresponding token ID in
+        `delta_token_ids`.  This hold-back text always appears as a
+        prefix of `delta_text`.
         """
         if not results:
             return [TextChunk(delta_text)]
@@ -318,10 +322,11 @@ class TokenIDScanner:
         delta_text.  If a terminal's text is not found in delta_text,
         it is deferred to the next scan() call.
 
-        Anchors are resolved right-to-left with `rfind` so that each anchor binds to the
-        *rightmost* available occurrence of its text. This prevents earlier literal
-        lookalikes (e.g. a user mentioning `<tool_call>` in prose) from stealing the
-        position of a real special-token anchor that appears later.
+        Anchors are resolved right-to-left with `rfind` so that each
+        anchor binds to the *rightmost* available occurrence of its
+        text.  This prevents earlier literal lookalikes (e.g. a user
+        mentioning `<tool_call>` in prose) from stealing the position
+        of a real special-token anchor that appears later.
 
         If the same anchor text appears multiple times as real special
         tokens (not prose), the rightmost-first binding could misalign.

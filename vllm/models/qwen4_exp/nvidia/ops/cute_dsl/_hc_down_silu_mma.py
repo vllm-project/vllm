@@ -51,9 +51,10 @@ class HcDownSiluMma:
     """BF16 GEMM kernel based on clustered split-K MMA, with the mHC SiLU
     epilogue fused into the final store.
 
-    Computes C[M, N] = A[M, K] @ B[N, K]^T for bf16 inputs, rounds the reduced fp32
-    accumulator to bf16 (production rounding boundary), then applies SiLU(x/HC) to
-    columns < `rank` and passes columns >= `rank` through. Output is bf16 [M, N].
+    Computes C[M, N] = A[M, K] @ B[N, K]^T for bf16 inputs, rounds the reduced
+    fp32 accumulator to bf16 (production rounding boundary), then applies
+    SiLU(x/HC) to columns < `rank` and passes columns >= `rank` through.
+    Output is bf16 [M, N].
 
     See the base class docstring in
     vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_splitk.py for the

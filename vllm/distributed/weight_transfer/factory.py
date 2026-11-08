@@ -176,9 +176,10 @@ class WeightTransferTrainerFactory:
         Called on every trainer rank (multi-rank trainers construct on all
         ranks; the sender is resolved inside the engine's `trainer_init`).
 
-        The trainer side takes no `WeightTransferConfig` and no separate `backend`
-        argument: the backend is read from `init_info.backend` (a `ClassVar` on each
-        `TrainerInitInfo` subclass), and the static wire params ride `init_info`.
+        The trainer side takes no `WeightTransferConfig` and no separate
+        `backend` argument: the backend is read from `init_info.backend` (a
+        `ClassVar` on each `TrainerInitInfo` subclass), and the static wire
+        params ride `init_info`.
 
         Args:
             init_info: Backend-specific trainer init info. Its `backend`

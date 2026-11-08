@@ -55,11 +55,12 @@ def layerwise_groups(names: list[str]) -> list[list[str]]:
     consumer, because it is derived from `metadata` order, which every rank
     shares.
 
-    Keying on the index rather than a literal prefix needs no per-architecture naming
-    table: `model.layers.0.`, `model.language_model.layers.0.`, `transformer.h.0.`,
-    `backbone.layers.0.` and a vision tower's `visual.blocks.0.` all partition alike.
-    Matching one fixed prefix does not, and its failure is silent — every name lands in
-    a single group holding the whole model, which defeats the per-layer bound below.
+    Keying on the index rather than a literal prefix needs no per-architecture
+    naming table: `model.layers.0.`, `model.language_model.layers.0.`,
+    `transformer.h.0.`, `backbone.layers.0.` and a vision tower's
+    `visual.blocks.0.` all partition alike. Matching one fixed prefix does not,
+    and its failure is silent — every name lands in a single group holding the
+    whole model, which defeats the per-layer bound below.
 
     Un-indexed names split by POSITION relative to the first indexed one: the pre
     block (embeddings) and the post block (the final norm, `lm_head`, and any

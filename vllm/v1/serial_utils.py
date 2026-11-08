@@ -513,9 +513,10 @@ class PydanticMsgspecMixin:
     **validation** (JSON/dict -> Struct) and **serialization**
     (Struct -> JSON-safe dict).
 
-    Subclasses may set `__pydantic_msgspec_exclude__` (a `set[str]`) to list
-    non-underscore field names that should also be stripped from serialized output.
-    Fields whose names start with `_` are always excluded automatically.
+    Subclasses may set `__pydantic_msgspec_exclude__` (a `set[str]`)
+    to list non-underscore field names that should also be stripped from
+    serialized output.  Fields whose names start with `_` are always
+    excluded automatically.
     """
 
     # Subclasses can override to exclude additional public-but-internal keys.

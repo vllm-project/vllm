@@ -257,12 +257,13 @@ class PackedLoRALayerWeights(LoRALayerWeights):
     ) -> "PackedLoRALayerWeights":
         """Pack pre-stacked (3D) w1/w2/w3 expert LoRAs into a single LoRA.
 
-        Unlike `pack_moe`, which stacks one 2D tensor per expert, this expects
-        each of the three input LoRAs to already carry the expert dimension
-        (`experts.w{1,2,3}`). It is used for "shared-outer" adapters where some factors
-        are shared across experts (expert-dim 1) and cannot be reconstructed by stacking
-        per-expert tensors. The produced `lora_a`/`lora_b` are the `[w1, w2, w3]` lists
-        that `FusedMoEWithLoRA.set_lora` consumes directly.
+        Unlike `pack_moe`, which stacks one 2D tensor per expert, this
+        expects each of the three input LoRAs to already carry the expert
+        dimension (`experts.w{1,2,3}`). It is used for "shared-outer"
+        adapters where some factors are shared across experts (expert-dim 1)
+        and cannot be reconstructed by stacking per-expert tensors. The
+        produced `lora_a`/`lora_b` are the `[w1, w2, w3]` lists that
+        `FusedMoEWithLoRA.set_lora` consumes directly.
         """
         assert len(loras) == 3, (
             "shared-outer expert LoRA expects exactly w1/w2/w3 stacked tensors"

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""K2 `back`: one attention layer from the rotated query to the rank's wo_b partial.
+"""K2 `back`: one attention layer from the rotated query to the rank's wo_b
+partial.
 
 One launch a layer and rank, `BLOCKS` x `THREADS`, S rows:
 
@@ -198,9 +199,10 @@ def _fp8_pair_f32(word, scale, hi):
 @traced
 def stage_split(c, unit):
     """Flash-decoding over chunk `unit % nchunk` of token `unit // nchunk`
-    (`split_chunk`). A build whose key table is wider than a token's top-k (`bounded`:
-    every compressed row of a long context) skips a chunk past the token's keys at most,
-    known from its position alone: no load of its q or keys."""
+    (`split_chunk`). A build whose key table is wider than a token's top-k
+    (`bounded`: every compressed row of a long context) skips a chunk past
+    the token's keys at most, known from its position alone: no load of its q
+    or keys."""
     nchunk = c["nchunk"]
     t = unit // nchunk
     ch = unit % nchunk

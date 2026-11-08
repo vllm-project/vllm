@@ -264,8 +264,9 @@ class NixlBaseConnectorScheduler:
         speculative scratch slots and everything before the running state
         (null placeholders and the previous step's superseded state) go.
 
-        Use this at every block-id exchange point. Pass `clip_ssm=False` for per-step
-        partial lists (host-buffer save), where the SSM strip does not apply.
+        Use this at every block-id exchange point. Pass `clip_ssm=False`
+        for per-step partial lists (host-buffer save), where the SSM strip
+        does not apply.
         """
         if len(block_ids) == 0:
             # No blocks to clip, e.g. a full prefix cache hit.

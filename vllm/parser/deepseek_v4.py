@@ -63,10 +63,11 @@ def _param_patterns(
 ) -> tuple[re.Pattern, re.Pattern]:
     """Complete and trailing-partial parameter regexes for one DSML dialect.
 
-    The `string` attribute is optional: the model sometimes omits it, and dropping such
-    a parameter hands the client a tool call with no arguments. The trailing-partial
-    regex captures the open value up to the end of the text; `_match_open_param` holds
-    back an unfinished next parameter tag so a streamed string value never includes it.
+    The `string` attribute is optional: the model sometimes omits it, and
+    dropping such a parameter hands the client a tool call with no arguments.
+    The trailing-partial regex captures the open value up to the end of the
+    text; `_match_open_param` holds back an unfinished next parameter tag
+    so a streamed string value never includes it.
     """
     start, close = re.escape(param_start), re.escape(param_close)
     head = rf'{start}\s+name="([^"]+)"(?:\s+string="([^"]*)")?\s*>'

@@ -179,16 +179,17 @@ class DeepseekV41ModelState(DefaultModelState):
     step: exact for prompt and generated tokens alike, whatever instance
     produced their KV.
 
-    SWA bounded replay (`CacheConfig.swa_bounded_replay`) keeps the sliding-window KV
-    out of prefix caching and rebuilds it after a prefix hit by recomputing the hit's
-    last window; the scheduler tells each request the position from which it holds
-    window KV (`NewRequestData.replay_start`). `prepare_attn` gathers those per batch,
-    pads the replayed tokens' slots in the prefix-cacheable groups so the cached KV
-    stays as is, and hands the starts to the sliding-window metadata builders, whose
-    kernels read no window KV below them. With the decoder side on
-    (`model.decoder_replay_layers`) it also prepares the replay layers' batch in eager
-    steps: each prefill's last `window` rows as a sub-batch with metadata and a forward
-    context of its own, like a microbatch.
+    SWA bounded replay (`CacheConfig.swa_bounded_replay`) keeps the
+    sliding-window KV out of prefix caching and rebuilds it after a prefix hit
+    by recomputing the hit's last window; the scheduler tells each request the
+    position from which it holds window KV (`NewRequestData.replay_start`).
+    `prepare_attn` gathers those per batch, pads the replayed tokens' slots
+    in the prefix-cacheable groups so the cached KV stays as is, and hands the
+    starts to the sliding-window metadata builders, whose kernels read no
+    window KV below them. With the decoder side on
+    (`model.decoder_replay_layers`) it also prepares the replay layers'
+    batch in eager steps: each prefill's last `window` rows as a sub-batch
+    with metadata and a forward context of its own, like a microbatch.
     """
 
     def __init__(

@@ -8,21 +8,25 @@ interface.
 MoonEP differs from DeepEP-style backends in two ways that shape this
 integration:
 
-- `dispatch` returns tokens already grouped by expert *row* (a fixed `[NvS, H]` layout
-  with `NvS = S x K` real slots plus padding) together with a `cu_seqlens[E+B]` segment
-  table and an opaque `plan`. There is no per-token topk id tensor after dispatch; the
-  expert compute must be a grouped GEMM over `cu_seqlens` segments.
-- Rows `[E, E+B)` of the weight/segment space are dynamic redundant-expert prefetch
-  slots. `plan.experts_to_copy` names the source expert of each slot and
-  `Buffer.prefetch_weight` must run between dispatch and expert compute.
+- `dispatch` returns tokens already grouped by expert *row* (a fixed
+  `[NvS, H]` layout with `NvS = S x K` real slots plus padding) together
+  with a `cu_seqlens[E+B]` segment table and an opaque `plan`. There is
+  no per-token topk id tensor after dispatch; the expert compute must be a
+  grouped GEMM over `cu_seqlens` segments.
+- Rows `[E, E+B)` of the weight/segment space are dynamic redundant-expert
+  prefetch slots. `plan.experts_to_copy` names the source expert of each
+  slot and `Buffer.prefetch_weight` must run between dispatch and expert
+  compute.
 
 PoC limitations:
 - BF16 / unquantized only, eager only.
-- Expert weights are replicated in global-expert order on every rank (memory-heavy).
-  Production Kimi-K3 serving requires sharded symmetric-memory expert ownership, where
-  rows `[0, E)` physically alias each home rank's parameter memory.
-- Route weights are applied inside the expert compute and MoonEP's `combine` performs
-  the K-sum, so `finalize` requires `TopKWeightAndReduceNoOP`.
+- Expert weights are replicated in global-expert order on every rank
+  (memory-heavy). Production Kimi-K3 serving requires sharded
+  symmetric-memory expert ownership, where rows `[0, E)` physically alias
+  each home rank's parameter memory.
+- Route weights are applied inside the expert compute and MoonEP's
+  `combine` performs the K-sum, so `finalize` requires
+  `TopKWeightAndReduceNoOP`.
 """
 
 from typing import Any, NamedTuple
@@ -47,8 +51,9 @@ MOONEP_WEIGHT_TILE = 128
 class MoonEPExpertWeightLayout(NamedTuple):
     """Contiguous BF16 expert weights in MoonEP `[E+B, ...]` layout.
 
-    Rows `[0, E)` hold expert weights in global expert order; rows `[E, E+B)` are
-    mutable prefetch slots filled by `Buffer.prefetch_weight`.
+    Rows `[0, E)` hold expert weights in global expert order; rows
+    `[E, E+B)` are mutable prefetch slots filled by
+    `Buffer.prefetch_weight`.
 
     The prefetch slots never need re-zeroing between calls: the planner
     marks unused slots with `-1` in `plan.experts_to_copy` (skipped by
@@ -158,9 +163,10 @@ MOONEP_MIN_DISPATCH_TOKENS = 128
 class MoonEPBufferPool:
     """Lazily creates `moonep.Buffer` instances at power-of-two capacities.
 
-    `Buffer` fixes its token capacity `S` at construction, so a single full-capacity
-    buffer would pad every dispatch to `max_num_batched_tokens`. The pool instead serves
-    the smallest power-of-two capacity that fits the step's token count, so decode-sized
+    `Buffer` fixes its token capacity `S` at construction, so a single
+    full-capacity buffer would pad every dispatch to
+    `max_num_batched_tokens`. The pool instead serves the smallest
+    power-of-two capacity that fits the step's token count, so decode-sized
     batches dispatch a few hundred slots rather than the full capacity.
 
     Selection must be identical on every EP rank (dispatch is collective and
@@ -200,10 +206,11 @@ class MoonEPBufferPool:
 class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """Prepare/Finalize using MoonEP balanced dispatch/combine.
 
-    `prepare` pads the batch to the selected buffer's static token capacity, dispatches,
-    runs `prefetch_weight` for the planned redundant experts, and stashes the `plan` for
-    `finalize` (the same pattern DeepEP-HT uses for its handle). Downstream expert
-    compute must consume the expert-grouped `[NvS, H]` layout via `cu_seqlens`.
+    `prepare` pads the batch to the selected buffer's static token
+    capacity, dispatches, runs `prefetch_weight` for the planned redundant
+    experts, and stashes the `plan` for `finalize` (the same pattern
+    DeepEP-HT uses for its handle). Downstream expert compute must consume
+    the expert-grouped `[NvS, H]` layout via `cu_seqlens`.
     """
 
     def __init__(

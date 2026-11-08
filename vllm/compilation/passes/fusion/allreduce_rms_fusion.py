@@ -1307,10 +1307,11 @@ class AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
 
     Without this pattern, `RocmAiterAllReduceFusionPass` would fuse the
     `all_reduce + rms_norm` half (PR #41825 wires that), but the trailing
-    `rocm_aiter_group_fp8_quant` would still launch as a separate kernel. That
-    standalone quant accounts for ~535us / decode step on DSv3.2 MI355X TP4 -- this
-    pattern eliminates it by absorbing the quant into the AR epilogue. Group size 128
-    matches the FP8 block-scaled MM kernel used by DSv3.2's linear weights.
+    `rocm_aiter_group_fp8_quant` would still launch as a separate kernel.
+    That standalone quant accounts for ~535us / decode step on DSv3.2 MI355X
+    TP4 -- this pattern eliminates it by absorbing the quant into the AR
+    epilogue. Group size 128 matches the FP8 block-scaled MM kernel used by
+    DSv3.2's linear weights.
     """
 
     def __init__(

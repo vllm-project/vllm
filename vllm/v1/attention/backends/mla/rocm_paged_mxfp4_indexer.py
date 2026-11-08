@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Indexer metadata for the ROCm paged MXFP4 path.
 
-Extends the dense indexer metadata with what aiter's paged MXFP4 MQA-logits kernel needs
-to read the cache in place: each prefill chunk as its requests, packed through
-query_start_loc into one launch, and the decode rows as next_n-row sequences on uniform
-steps. `RocmMxfp4IndexerMetadataBuilder` plans this for any model's indexer, and a
-two-level indexer's candidate blocks once a subclass sets their size. DeepSeek-V4.1's
-builder does, and with `AttentionConfig.indexer_sparse_logits` adds the per-step state
-the candidate consumers share.
+Extends the dense indexer metadata with what aiter's paged MXFP4 MQA-logits
+kernel needs to read the cache in place: each prefill chunk as its requests,
+packed through query_start_loc into one launch, and the decode rows as
+next_n-row sequences on uniform steps. `RocmMxfp4IndexerMetadataBuilder` plans
+this for any model's indexer, and a two-level indexer's candidate blocks once
+a subclass sets their size. DeepSeek-V4.1's builder does, and with
+`AttentionConfig.indexer_sparse_logits` adds the per-step state the
+candidate consumers share.
 """
 
 import bisect
@@ -165,10 +166,11 @@ def plan_prefill_chunks(
 ) -> list[RocmMxfp4PrefillPlan]:
     """Split each chunk into its requests.
 
-    `query_start_loc` and `seq_lens_cpu` are the step's host copies (the latter an upper
-    bound), `context_lens` the device compressed lengths. A chunk covers whole requests,
-    or a query slice of one request; either way it launches once, packed through the
-    chunk's part of the device `query_start_loc`.
+    `query_start_loc` and `seq_lens_cpu` are the step's host copies (the
+    latter an upper bound), `context_lens` the device compressed lengths.
+    A chunk covers whole requests, or a query slice of one request; either
+    way it launches once, packed through the chunk's part of the device
+    `query_start_loc`.
     """
     block = candidate_block_size
     plans = []
@@ -209,9 +211,10 @@ def split_prefill_chunks(
 ) -> list[tuple[slice, slice]]:
     """(request slice, query slice) chunks, as the base chunker returns them.
 
-    Nothing gathers K here, so the requests' contexts do not add up: a chunk's logits
-    are [rows, widest compressed context] fp32, at most `max_logits_bytes`. A request
-    too wide to launch whole is cut on its query rows.
+    Nothing gathers K here, so the requests' contexts do not add up: a chunk's
+    logits are [rows, widest compressed context] fp32, at most
+    `max_logits_bytes`. A request too wide to launch whole is cut on its
+    query rows.
     """
 
     def max_rows(width: int) -> int:
@@ -456,7 +459,8 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
 
 class DeepseekV41RocmMxfp4IndexerMetadataBuilder(RocmMxfp4IndexerMetadataBuilder):
     """DeepSeek-V4.1's two-level indexer: sets the candidate block size the
-    base plans with and, with `indexer_sparse_logits`, adds the consumers' gathers."""
+    base plans with and, with `indexer_sparse_logits`, adds the consumers'
+    gathers."""
 
     def __init__(
         self,

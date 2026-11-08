@@ -40,8 +40,9 @@ class OnlineSharedExpertLoader:
       slots (`online_w{13,2}_weight[_scale]`), dequantized after loading, and
       quantized into the routed experts slots: with the routed experts when they
       are requantized, else by `finalize`.
-    - Unquantized shared experts with pre-quantized routed experts: the shared experts
-      are quantized on arrival by `quantizer`, and loaded in the routed experts slots.
+    - Unquantized shared experts with pre-quantized routed experts: the shared
+      experts are quantized on arrival by `quantizer`, and loaded in the routed
+      experts slots.
     """
 
     def __init__(

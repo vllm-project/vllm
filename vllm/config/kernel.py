@@ -197,10 +197,11 @@ def bind_passthrough_all2all_backend(
     """Bind `all2all_backend="passthrough"` to MoE backends that own their
     expert-parallel communication (currently the FlashInfer MoE-EP megakernels).
 
-    Such a deployment gets `passthrough` when the all2all backend is left at its default
-    and rejects any other explicit choice; the value is meaningless with a MoE backend
-    that relies on the framework to communicate. The CLI does not offer the value; the
-    early return keeps repeated `set_platform_defaults` calls idempotent.
+    Such a deployment gets `passthrough` when the all2all backend is left at
+    its default and rejects any other explicit choice; the value is meaningless
+    with a MoE backend that relies on the framework to communicate. The CLI does
+    not offer the value; the early return keeps repeated
+    `set_platform_defaults` calls idempotent.
     """
     a2a = parallel_config.all2all_backend
     if moe_backend in FLASHINFER_MOE_EP_BACKENDS:

@@ -1142,10 +1142,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
 class BatchChatCompletionRequest(OpenAIBaseModel):
     """Request model for the /v1/chat/completions/batch endpoint.
 
-    Accepts the same fields as ChatCompletionRequest except that `messages` is a list of
-    conversations (each conversation is a `list[ChatCompletionMessageParam]`). Each
-    conversation is processed independently and the response contains one choice per
-    conversation, indexed 0, 1, ..., N-1.
+    Accepts the same fields as ChatCompletionRequest except that `messages`
+    is a list of conversations (each conversation is a
+    `list[ChatCompletionMessageParam]`).  Each conversation is processed
+    independently and the response contains one choice per conversation,
+    indexed 0, 1, ..., N-1.
 
     Current limitations compared to the single-conversation endpoint:
     - Streaming is not supported (`stream` must be False or omitted).

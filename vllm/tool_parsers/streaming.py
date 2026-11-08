@@ -68,10 +68,11 @@ class _RequiredToolCallSpan:
     """Where one element of a `tool_choice="required"` array sits in the text.
 
     The model output for `tool_choice="required"` is a JSON array of
-    `{"name": ..., "parameters": ...}` objects. `name` is only set once its string value
-    is closed and decodes as JSON; `name_end` is the offset just past that closing
-    quote. `args_start`/`args_end` are the character offsets of the `parameters` value
-    (`args_end` is `None` while the value is still being generated).
+    `{"name": ..., "parameters": ...}` objects. `name` is only set once
+    its string value is closed and decodes as JSON; `name_end` is the
+    offset just past that closing quote. `args_start`/`args_end` are the
+    character offsets of the `parameters` value (`args_end` is `None`
+    while the value is still being generated).
 
     All offsets are prefix-stable: scanning any prefix of the text yields the
     same spans truncated to that prefix. That is what lets one scan of the

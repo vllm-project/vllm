@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helpers shared by the weight cache daemon, the IPC loader and the engine.
 
-These live outside `protocol` so callers that only need to know whether a draft is
-cached, or how a daemon group is named, do not have to import the wire format.
+These live outside `protocol` so callers that only need to know whether a
+draft is cached, or how a daemon group is named, do not have to import the
+wire format.
 """
 
 from collections.abc import Generator

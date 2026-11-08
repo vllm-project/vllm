@@ -89,7 +89,8 @@ CANARY_SUPPORTED_LANGS = {
 # ----- Decoder -----
 class CanaryPositionalEmbedding(nn.Module):
     """Fixed sinusoidal table laid out as `[sin | cos]` and scaled by
-    `1 / sqrt(hidden_size)`; matches `CanaryPositionalEmbedding` in Transformers."""
+    `1 / sqrt(hidden_size)`; matches `CanaryPositionalEmbedding` in
+    Transformers."""
 
     def __init__(self, max_positions: int, hidden_size: int) -> None:
         super().__init__()

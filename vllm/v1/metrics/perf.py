@@ -533,17 +533,19 @@ class AttentionMetrics(ComponentMetrics):
     def _layer_counts(self, per_gpu: bool) -> tuple[float, float, float]:
         """Return `(L, L_full, L_swa)`, the layer counts to bill for.
 
-        Per-GPU counts divide each global count by `pp_size` independently. Deriving the
-        sublayer split after reducing `L` instead rounds a minority sublayer away: a
-        6-layer model with 1 sliding-window layer at `pp_size=2` yields
-        `round(3 * 1 / 6) == 0`, billing all three layers as full attention. Dividing
-        each count separately keeps `L_full + L_swa == L` and keeps the per-GPU values
-        summing back to the whole model across stages.
+        Per-GPU counts divide each global count by `pp_size` independently.
+        Deriving the sublayer split after reducing `L` instead rounds a
+        minority sublayer away: a 6-layer model with 1 sliding-window layer at
+        `pp_size=2` yields `round(3 * 1 / 6) == 0`, billing all three layers
+        as full attention. Dividing each count separately keeps
+        `L_full + L_swa == L` and keeps the per-GPU values summing back to the
+        whole model across stages.
 
-        The counts are fractional because these metrics are built from config alone (see
-        `from_vllm_config`); no pipeline rank is available, so a per-GPU figure is the
-        average stage rather than a specific one. A model whose layers do not divide
-        evenly across stages has no single integer answer here.
+        The counts are fractional because these metrics are built from config
+        alone (see `from_vllm_config`); no pipeline rank is available, so a
+        per-GPU figure is the average stage rather than a specific one. A model
+        whose layers do not divide evenly across stages has no single integer
+        answer here.
         """
         L = float(self.num_hidden_layers)
         L_swa = float(self.num_swa_layers)

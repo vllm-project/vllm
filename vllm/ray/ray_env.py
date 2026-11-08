@@ -65,7 +65,8 @@ def get_env_vars_to_copy(
     1. Env vars registered in `vllm.envs.environment_variables`.
     2. Env vars in `os.environ` matching a prefix in
        `DEFAULT_ENV_VAR_PREFIXES` + `VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY`.
-    3. Individual names in `DEFAULT_EXTRA_ENV_VARS` + `VLLM_RAY_EXTRA_ENV_VARS_TO_COPY`.
+    3. Individual names in `DEFAULT_EXTRA_ENV_VARS` +
+       `VLLM_RAY_EXTRA_ENV_VARS_TO_COPY`.
     4. Caller-supplied *additional_vars* (e.g. platform-specific).
 
     Minus any names in *exclude_vars* or `RAY_NON_CARRY_OVER_ENV_VARS`.

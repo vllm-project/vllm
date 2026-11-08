@@ -196,16 +196,22 @@ class LLBf16SplitK:
           and B `[tile_n, tile_k, stages]`.
         - Build 128-bit cp.async GMEM-to-SMEM tiled copies for DMA warps.
         - Build an m16n8k16 BF16 MMA tiled across the CTA N tile.
-        - Launch grid `ceil(M/16) x ceil(N/tile_n) x split_k` with one cluster along
-          split-K, so each cluster rank owns K tiles `rank, rank + split_k, ...`.
+        - Launch grid `ceil(M/16) x ceil(N/tile_n) x split_k` with one
+          cluster along split-K, so each cluster rank owns K tiles
+          `rank, rank + split_k, ...`.
         - Reduce MMA-warp partials within the CTA, exchange split-K partials
           through DSMEM, then reduce cluster partials and store C.
 
-        :param mA: Input tensor A with shape `[M, K]`. :type mA: cute.Tensor :param mB:
-        Input tensor B with shape `[N, K]`. :type mB: cute.Tensor :param mC: Output
-        tensor C with shape `[M, N]`. :type mC: cute.Tensor :param stream: CUDA stream
-        for asynchronous execution. :type stream: CUstream :param scale: Epilogue scale
-        applied before storing C. :type scale: float
+        :param mA: Input tensor A with shape `[M, K]`.
+        :type mA: cute.Tensor
+        :param mB: Input tensor B with shape `[N, K]`.
+        :type mB: cute.Tensor
+        :param mC: Output tensor C with shape `[M, N]`.
+        :type mC: cute.Tensor
+        :param stream: CUDA stream for asynchronous execution.
+        :type stream: CUstream
+        :param scale: Epilogue scale applied before storing C.
+        :type scale: float
         """
         bM, bN, bK = self.tile_m, self.tile_n, self.tile_k
         copy_bits: cutlass.Constexpr = self.copy_bits

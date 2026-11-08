@@ -4,8 +4,9 @@
 
 * `CuteRecoverSSMVerify`: the speculative verify of one KDA layer with the short
   convolution fused in (`cutedsl/verify_ws.py` for the dim-first conv state,
-  `cutedsl/verify.py` otherwise). It writes the outputs, the rolled conv state and the
-  verify records, like `causal_conv1d_update` followed by `kda_recoverssm_verify`.
+  `cutedsl/verify.py` otherwise). It writes the outputs, the rolled conv state
+  and the verify records, like `causal_conv1d_update` followed by
+  `kda_recoverssm_verify`.
 * `cute_recoverssm_commit`: the state fold of a prepared commit plan for all
   KDA layers in one launch (`cutedsl/commit.py`), replacing the Triton fold of
   `KDARecoverSSMCommitContext.commit`.

@@ -172,7 +172,8 @@ class AttentionStep:
         step: "DecodeStep",
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """`_run_parallel_input_projections`, with the side projections left
-        unjoined on aux streams 0 and 1; `_prepare` joins each at its first reader."""
+        unjoined on aux streams 0 and 1; `_prepare` joins each at its first
+        reader."""
         attn = self.attn
         aux_gemm = self.aux_gemm and step.low_batch
         aux_fns: list[Callable[[], torch.Tensor] | None] = [None, None]

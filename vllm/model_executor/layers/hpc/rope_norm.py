@@ -325,11 +325,12 @@ class HpcRopeNorm(CustomOp, HpcModule):
     ) -> None:
         """Write dense per-token K (or V) into a paged cache view.
 
-        Used on the stride-aware fallback path (see `_forward_impl`). `cache` is a
-        (num_blocks, block_size, num_kv_heads, head_dim) view with arbitrary
-        block/token/head strides; `src` is the dense (num_tokens, num_kv_heads,
-        head_dim) buffer produced by the fused HPC kernel. FP8 payloads are moved as raw
-        bytes because `index_copy_` has no FP8 kernel.
+        Used on the stride-aware fallback path (see `_forward_impl`).
+        `cache` is a (num_blocks, block_size, num_kv_heads, head_dim) view
+        with arbitrary block/token/head strides; `src` is the dense
+        (num_tokens, num_kv_heads, head_dim) buffer produced by the fused HPC
+        kernel. FP8 payloads are moved as raw bytes because `index_copy_`
+        has no FP8 kernel.
 
         Padded tokens carry `PAD_SLOT_ID` (-1); clamping sends them to the
         reserved null block instead of tripping `index_copy_`'s bounds check.

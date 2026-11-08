@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MXFP8 dense GEMM1 (gate_up) with fused clamped-SwiGLU + MXFP8 quant epilogue.
 
-One persistent SM100 tcgen05 MXFP8 GEMM tuned for prefill shapes (BM=128, BN=128 per
-gate/up half, BK=128, cta_group=2; 6-warp CTA: warps 0-3 epilogue, warp 4 MMA, warp 5
-TMA) computes `gate = X @ Wg^T` and `up = X @ Wu^T` and applies clamped SwiGLU and MXFP8
-quantization. No BF16 intermediate.
+One persistent SM100 tcgen05 MXFP8 GEMM tuned for prefill shapes (BM=128,
+BN=128 per gate/up half, BK=128, cta_group=2; 6-warp CTA: warps 0-3
+epilogue, warp 4 MMA, warp 5 TMA) computes `gate = X @ Wg^T` and
+`up = X @ Wu^T` and applies clamped SwiGLU and MXFP8 quantization. No
+BF16 intermediate.
 
 The tmem accumulator is double-buffered with a 32-col overlap (even tiles
 [0,256), odd [224,480), SF fixed [500,512)): the epilogue reads the shared

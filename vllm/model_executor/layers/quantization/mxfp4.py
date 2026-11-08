@@ -518,8 +518,9 @@ def _mxfp4_experts_to_int4_gfx942(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Requantize packed MXFP4 experts to shuffled groupwise int4 for gfx942.
 
-    Takes `(E, N, K // 2)` MXFP4 weights with `(E, N, K // 32)` E8M0 scales and returns
-    `(E, N, K // 2)` packed int4 with flattened per-32 scales.
+    Takes `(E, N, K // 2)` MXFP4 weights with `(E, N, K // 32)` E8M0
+    scales and returns `(E, N, K // 2)` packed int4 with flattened
+    per-32 scales.
     """
     from aiter import dtypes as aiter_dtypes
     from aiter.ops.quant import per_1x32_i4_quant

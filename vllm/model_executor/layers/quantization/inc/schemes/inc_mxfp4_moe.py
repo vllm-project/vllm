@@ -49,10 +49,11 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
     """W4A4 MXFP4 group MoE for AutoRound `auto_round:llm_compressor` exports.
 
     Registers the packed MXFP4 layout (uint8 `weight_packed` + uint8 E8M0
-    `weight_scale`, `group_size=32`) and dispatches the fused MoE to b12x when
-    requested; otherwise it uses CUTLASS W4A4, XPU W4A4, or Marlin W4A16. The per-expert
-    `gate_proj` / `up_proj` / `down_proj` tensors are folded into the stacked `w13` /
-    `w2` parameters by `make_expert_params_mapping`.
+    `weight_scale`, `group_size=32`) and dispatches the fused MoE to b12x
+    when requested; otherwise it uses CUTLASS W4A4, XPU W4A4, or Marlin W4A16.
+    The per-expert `gate_proj` / `up_proj` / `down_proj` tensors are
+    folded into the stacked `w13` / `w2` parameters by
+    `make_expert_params_mapping`.
     """
 
     def __init__(self, moe) -> None:

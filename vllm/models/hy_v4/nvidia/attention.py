@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MLA attention and lightning indexer for HY V4 (NVIDIA).
 
-NOTE: The reference implementation also offers a fused MLA preprocessing wrapper, which
-is not available here, so this port keeps the eager MLA path with an FP8 indexer cache.
-TODO: restore the fused preprocessing once the kernel lands. The HPC gated-MLA GEMM *is*
-wired up: it replaces the eager output gating when the hpc package is installed,
-`VLLM_ENABLE_HPC_OPS=1` and the elementwise/dtype/alignment constraints hold.
+NOTE: The reference implementation also offers a fused MLA preprocessing
+wrapper, which is not available here, so this port keeps the eager MLA path
+with an FP8 indexer cache. TODO: restore the fused preprocessing once the
+kernel lands. The HPC gated-MLA GEMM *is* wired up: it replaces the eager
+output gating when the hpc package is installed, `VLLM_ENABLE_HPC_OPS=1`
+and the elementwise/dtype/alignment constraints hold.
 
 The per-head learnable sink is supported through `.flashmla_sparse`, which
 subclasses the platform's sparse MLA backend to forward `attn_sink`.
@@ -475,11 +476,12 @@ class HYV4MLAAttention(nn.Module):
     def topk_indices_buffer(self) -> torch.Tensor | None:
         """The sparse top-k index buffer this layer reads from.
 
-        The real consumer is `mla_attn.impl`, an `AttentionImpl` rather than an
-        `nn.Module`, so a plain `named_modules()` walk cannot reach it. The MTP proposer
-        rebinds the draft layers onto the target model's buffer through such a walk, so
-        expose it here: without this the draft attention would keep reading its own
-        buffer while the indices it needs are written to the target's.
+        The real consumer is `mla_attn.impl`, an `AttentionImpl` rather than
+        an `nn.Module`, so a plain `named_modules()` walk cannot reach it.
+        The MTP proposer rebinds the draft layers onto the target model's buffer
+        through such a walk, so expose it here: without this the draft attention
+        would keep reading its own buffer while the indices it needs are written
+        to the target's.
         """
         return getattr(self.mla_attn.impl, "topk_indices_buffer", None)
 
@@ -495,8 +497,9 @@ class HYV4MLAAttention(nn.Module):
         The sink is part of the architecture, so a backend that cannot apply it
         changes the model's output. Resolution order:
 
-        1. If the backend the selector would pick already advertises `supports_sink`,
-           keep it — this also honours an explicit `--attention-backend` choice.
+        1. If the backend the selector would pick already advertises
+           `supports_sink`, keep it — this also honours an explicit
+           `--attention-backend` choice.
         2. Otherwise fall back to the sink-capable `FLASHMLA_SPARSE` subclass
            in `.flashmla_sparse`, whose kernels accept `attn_sink`, provided
            it validates against the current runtime configuration.

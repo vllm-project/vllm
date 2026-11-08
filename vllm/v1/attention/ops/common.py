@@ -177,8 +177,9 @@ def pack_seq_triton(
     Args:
         x: [N, ...] — input tensor where N is total number of tokens.
         lengths: [B] — sequence lengths for each batch.
-        pad_value: value to use for padding. Defaults to `-inf` which is only sensible
-            for float dtypes; pass `0` (or any byte) for uint8 inputs.
+        pad_value: value to use for padding. Defaults to `-inf` which is
+            only sensible for float dtypes; pass `0` (or any byte) for
+            uint8 inputs.
         block_t: block size for time dimension.
         block_d: block size for feature dimension.
 

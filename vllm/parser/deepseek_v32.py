@@ -11,8 +11,9 @@ DeepSeek V3.2 output format::
     </｜DSML｜invoke>
     </｜DSML｜function_calls>
 
-This is identical to DeepSeek V4 except for the outer wrapper (`function_calls` instead
-of `tool_calls`) and the absence of `<think>`/`</think>` reasoning tags.
+This is identical to DeepSeek V4 except for the outer wrapper
+(`function_calls` instead of `tool_calls`) and the absence of
+`<think>`/`</think>` reasoning tags.
 """
 
 from __future__ import annotations

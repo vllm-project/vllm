@@ -37,9 +37,10 @@ def attend(wrapper, q8, kv_cache, md):
     """The partial (this rank's KV) attention: `o` [S, heads * dcp, 512] and
     its LSE [S, heads * dcp] (None at DCP1), both possibly strided views.
 
-    `q8` may carry more heads than the layer: AITER's cprr pad (e.g. 96 -> 128, M1a
-    writes it). forward_mqa gets the real heads, a view whose row stride spans the pad,
-    and AITER's `get_mla_padded_q` widens it back to `q8` instead of copying."""
+    `q8` may carry more heads than the layer: AITER's cprr pad (e.g. 96 ->
+    128, M1a writes it). forward_mqa gets the real heads, a view whose row
+    stride spans the pad, and AITER's `get_mla_padded_q` widens it back to
+    `q8` instead of copying."""
     from vllm.platforms import current_platform
 
     attn = wrapper.mla_attn

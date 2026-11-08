@@ -9,12 +9,13 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, RSWASpec, get_kv_quant_mode
 class RSWAAttention(Attention):
     """Attention layer that reports `RSWASpec` as its KV cache spec.
 
-    Drop-in replacement for the standard `Attention` layer when the model is configured
-    with Reference Sliding Window Attention (R-SWA, `rswa_window > 0`). The actual
-    masking logic lives in the attention backend (FlexAttention or FA4 mask_mod); this
-    layer only overrides `get_kv_cache_spec` so the KV cache manager instantiates
-    `RSWAManager` (instead of `FullAttentionManager`) and can therefore evict "gap"
-    blocks to keep per-request KV memory bounded at O(prefix + window).
+    Drop-in replacement for the standard `Attention` layer when the model is
+    configured with Reference Sliding Window Attention (R-SWA,
+    `rswa_window > 0`). The actual masking logic lives in the attention
+    backend (FlexAttention or FA4 mask_mod); this layer only overrides
+    `get_kv_cache_spec` so the KV cache manager instantiates `RSWAManager`
+    (instead of `FullAttentionManager`) and can therefore evict "gap" blocks
+    to keep per-request KV memory bounded at O(prefix + window).
     """
 
     def __init__(self, *args, rswa_window: int, **kwargs) -> None:

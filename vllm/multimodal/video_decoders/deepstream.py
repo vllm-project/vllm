@@ -46,13 +46,15 @@ def decode_deepstream(
 class DeepStreamVideoBackendMixin:
     """NVIDIA DeepStream (NVDEC) GPU-decode codec utilities.
 
-    Decoding runs on a shared pool of daemon threads inside one CUDA context (see the
-    `nvidia-deepstream-videodecode-cu13` package). The container bytes are pushed into
-    an `appsrc` GStreamer pipeline, so no local file path is required — HTTP and base64
-    sources decode identically to local files.
+    Decoding runs on a shared pool of daemon threads inside one CUDA
+    context (see the `nvidia-deepstream-videodecode-cu13` package). The
+    container bytes are pushed into an `appsrc` GStreamer pipeline, so no
+    local file path is required — HTTP and base64 sources decode identically
+    to local files.
 
-    Like the OpenCV mixin, this provides only the codec layer. Frame *selection* lives
-    in the loader's `compute_frames_index_to_sample` and arrives here as an explicit
+    Like the OpenCV mixin, this provides only the codec layer.
+    Frame *selection* lives in the loader's
+    `compute_frames_index_to_sample` and arrives here as an explicit
     list of frame indices.
     """
 
@@ -64,10 +66,11 @@ class DeepStreamVideoBackendMixin:
     def _get_pool(cls, pool_size: int | None = None):
         """Lazy-initialize the shared decode pool on first use.
 
-        `pool_size` (number of decode worker threads) comes from `--media-io-kwargs`
-        (`{"video": {"pool_size": N}}`); when unset it defaults to the existing
-        `VLLM_MEDIA_LOADING_THREAD_COUNT` so no DeepStream-specific env var is needed.
-        The pool is a process-wide singleton, so the first decode's value wins.
+        `pool_size` (number of decode worker threads) comes from
+        `--media-io-kwargs` (`{"video": {"pool_size": N}}`); when unset it
+        defaults to the existing `VLLM_MEDIA_LOADING_THREAD_COUNT` so no
+        DeepStream-specific env var is needed. The pool is a process-wide
+        singleton, so the first decode's value wins.
         """
         if cls._pool is not None:
             return cls._pool
@@ -106,10 +109,11 @@ class DeepStreamVideoBackendMixin:
         decode-order index is in `frame_indices` (1:1, frame-exact) and
         sends EOS once the last one is matched.
 
-        `codec` (e.g. `"h264"`/`"hevc"`) lets the pool keep its NVDEC session warm
-        across same-codec streams and rebuild only on a codec change. Frames are
-        returned as a CPU NHWC uint8 array so the upstream multimodal parser sees the
-        same shape as the other backends.
+        `codec` (e.g. `"h264"`/`"hevc"`) lets the pool keep its NVDEC
+        session warm across same-codec streams and rebuild only on a codec
+        change. Frames are returned as a CPU NHWC uint8 array so the
+        upstream multimodal parser sees the same shape as the other
+        backends.
         """
         if not frame_indices:
             raise ValueError("DeepStream backend received no frame indices")

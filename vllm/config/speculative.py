@@ -1307,16 +1307,18 @@ class SpeculativeConfig:
     ) -> Callable[[PreTrainedConfig], PreTrainedConfig]:
         """Build the `hf_overrides` for the draft `ModelConfig`.
 
-        Callable overrides on the target are config-to-config transforms (e.g. test
-        harnesses shrinking `num_hidden_layers`) and must also reach the draft config —
-        otherwise a draft belonging to a large target is instantiated at full size even
-        when the target is shrunk. Dict overrides are target-specific key patches and
-        are not applied to the draft.
+        Callable overrides on the target are config-to-config transforms
+        (e.g. test harnesses shrinking `num_hidden_layers`) and must also
+        reach the draft config — otherwise a draft belonging to a large
+        target is instantiated at full size even when the target is shrunk.
+        Dict overrides are target-specific key patches and are not applied
+        to the draft.
 
-        The composed override must stay picklable: the draft `ModelConfig` is sent to
-        spawned engine-core processes, so a local closure would fail with
-        `Can't get local object` during pickling. Bind the target via
-        `functools.partial` over a module-referenceable static method instead.
+        The composed override must stay picklable: the draft `ModelConfig`
+        is sent to spawned engine-core processes, so a local closure would
+        fail with `Can't get local object` during pickling. Bind the
+        target via `functools.partial` over a module-referenceable static
+        method instead.
         """
         if not callable(target_hf_overrides):
             return functools.partial(

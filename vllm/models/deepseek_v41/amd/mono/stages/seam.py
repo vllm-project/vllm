@@ -555,7 +555,8 @@ def stage_norm(c, t, store, tail_barrier=True):
 @traced
 def stage_reduce(c, task):
     """The attention output at this slice's 32 columns: the TP ranks' partials
-    in the all-reduce's order (`sum_partials`), in fp32 -> bf16 -> `pend_lds`."""
+    in the all-reduce's order (`sum_partials`), in fp32 -> bf16 ->
+    `pend_lds`."""
     s, tid = c["S"], c["tid"]
     for pas in range_constexpr(0, s * COLS // 2, THREADS):
         reduce_attn_pair(c, task, plus(pas, tid))

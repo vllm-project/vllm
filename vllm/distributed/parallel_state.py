@@ -88,11 +88,12 @@ class _RetainedHandle:
     Used by `isend_object` to keep the serialized CPU tensors alive while
     gloo copies them in the background; `wait` drops the refs once drained.
 
-    `wait` must be idempotent: gloo `Work.wait()` is single-shot for point-to-point
-    operations — calling it a second time on an already completed send blocks forever
-    (verified empirically). Both the worker's top-of-step drain of `_pp_send_work` and
-    `_reap_completed_isends` may wait the same entry's metadata handle, so the second
-    caller must not re-wait the underlying works.
+    `wait` must be idempotent: gloo `Work.wait()` is single-shot for
+    point-to-point operations — calling it a second time on an already
+    completed send blocks forever (verified empirically). Both the worker's
+    top-of-step drain of `_pp_send_work` and `_reap_completed_isends`
+    may wait the same entry's metadata handle, so the second caller must
+    not re-wait the underlying works.
     """
 
     def __init__(self, works: list[Any], retained: tuple[torch.Tensor, ...]) -> None:
@@ -1131,15 +1132,16 @@ class GroupCoordinator:
         """Lazily drop self-retained `isend_tensor_dict` entries that have
         completed, oldest first (FIFO).
 
-        gloo `Work.is_completed()` is unreliable (it can report completion before the
-        background copy of the source buffer finishes), so the metadata handle
-        (`handles[0]`, a gloo-backed `_RetainedHandle`) is never used as the completion
-        gate. Instead we gate on the tensor-send handles (`handles[1:]`), which run on
-        the device backend where `is_completed()` is reliable. Once all tensor sends are
-        done the peer must already have posted the matching tensor recvs — and since the
-        receiver ingests metadata before tensors, the gloo metadata send is then
-        guaranteed complete, so `wait()` on it is ~instant and only serves to drop the
-        retained refs.
+        gloo `Work.is_completed()` is unreliable (it can report completion
+        before the background copy of the source buffer finishes), so the
+        metadata handle (`handles[0]`, a gloo-backed `_RetainedHandle`) is
+        never used as the completion gate. Instead we gate on the tensor-send
+        handles (`handles[1:]`), which run on the device backend where
+        `is_completed()` is reliable. Once all tensor sends are done the
+        peer must already have posted the matching tensor recvs — and since
+        the receiver ingests metadata before tensors, the gloo metadata send
+        is then guaranteed complete, so `wait()` on it is ~instant and only
+        serves to drop the retained refs.
 
         Metadata-only entries (`handles[1:]` empty, e.g. an empty
         `IntermediateTensors`) have no reliable completion signal; drop them
@@ -1172,11 +1174,12 @@ class GroupCoordinator:
     ) -> list[Handle]:
         """Send the input tensor dictionary asynchronously.
 
-        The returned handles are additionally self-retained in `self._pending_isends`
-        (together with the sent source tensors) and reaped lazily on subsequent calls,
-        so fire-and-forget callers that drop the handles cannot free or overwrite the
-        send buffers while the sends are still in flight. Callers that do keep the
-        handles may `wait()` them as before; the retention entry is dropped on reap
+        The returned handles are additionally self-retained in
+        `self._pending_isends` (together with the sent source tensors) and
+        reaped lazily on subsequent calls, so fire-and-forget callers that
+        drop the handles cannot free or overwrite the send buffers while the
+        sends are still in flight. Callers that do keep the handles may
+        `wait()` them as before; the retention entry is dropped on reap
         either way.
         """
         if self.world_size <= 1:
@@ -1575,8 +1578,9 @@ def _replace_active_groups(
 ) -> tuple[GroupCoordinator | None, ...]:
     """Replace the active groups and return the groups they replaced.
 
-    The caller must destroy the returned DP, EP, WORLD, and EPLB groups collectively and
-    in that order. Pass all-`None` to remove the active groups without replacement.
+    The caller must destroy the returned DP, EP, WORLD, and EPLB groups
+    collectively and in that order. Pass all-`None` to remove the active
+    groups without replacement.
     """
     global _WORLD, _DP, _EP, _EPLB, _NODE_COUNT
     old_groups = _DP, _EP, _WORLD, _EPLB
@@ -1694,17 +1698,18 @@ def _aiter_registers_graph_buffers(group: GroupCoordinator) -> bool:
 @contextmanager
 def graph_capture(device: torch.device, stream: torch.cuda.Stream | None = None):
     """`graph_capture` is a context manager which should surround the code that
-    is capturing the CUDA graph. Its main purpose is to ensure that some operations will
-    be run after the graph is captured, before the graph is replayed. It returns a
-    `GraphCaptureContext` object which contains the necessary data for the graph
-    capture. Currently, it only contains the stream that the graph capture is running
-    on. This stream is set to the current CUDA stream when the context manager is
-    entered and reset to the default stream when the context manager is exited. This is
-    to ensure that the graph capture is running on a separate stream from the default
-    stream, in order to explicitly distinguish the kernels to capture from other kernels
-    possibly launched on background in the default stream. A given `stream` is reused
-    instead, so graphs captured on it share the caching allocator's free blocks of the
-    graph pool.
+    is capturing the CUDA graph. Its main purpose is to ensure that some
+    operations will be run after the graph is captured, before the graph
+    is replayed. It returns a `GraphCaptureContext` object which contains the
+    necessary data for the graph capture. Currently, it only contains the
+    stream that the graph capture is running on. This stream is set to the
+    current CUDA stream when the context manager is entered and reset to the
+    default stream when the context manager is exited. This is to ensure that
+    the graph capture is running on a separate stream from the default stream,
+    in order to explicitly distinguish the kernels to capture
+    from other kernels possibly launched on background in the default stream.
+    A given `stream` is reused instead, so graphs captured on it share the
+    caching allocator's free blocks of the graph pool.
     """
     from vllm.device_allocator.alloc_conf import non_expandable_allocations
     from vllm.platforms import current_platform
@@ -1776,10 +1781,11 @@ def _init_process_group_for_split_group(
 
 def _validate_default_pg_for_split_group() -> None:
     """When an external launcher (e.g. `torchrun`) initialized the default
-    PG, `GroupCoordinator` cannot patch in additional backends or change the eager-init
-    behavior — `split_group` only selects subsets of an existing parent. Validate that
-    the parent has both `device_id` and a CPU (gloo) backend, and emit a descriptive
-    error pointing at the exact init call to update otherwise.
+    PG, `GroupCoordinator` cannot patch in additional backends or change
+    the eager-init behavior — `split_group` only selects subsets of an
+    existing parent. Validate that the parent has both `device_id` and a
+    CPU (gloo) backend, and emit a descriptive error pointing at the exact
+    init call to update otherwise.
     """
     default_pg = torch.distributed.distributed_c10d._get_default_group()
     assert default_pg.bound_device_id is not None, (

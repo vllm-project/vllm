@@ -3,13 +3,14 @@
 """Zero-copy views (and two converted copies) of one vLLM `MiniMaxM3DecoderLayer`
 for the mono kernels.
 
-The kernels read tensors through raw pointers in fixed layouts: a differently laid-out
-weight would not fault, it would produce plausible garbage. So every layout assumption
-is asserted once and a model that does not match is refused (`MonoUnsupported`). The
-experts already have the kernels' layout (MXFP4, aiter `shuffle_weight(16, 16)` +
-`e8m0_shuffle` scales, fused shared expert in slot 128). The attention linears are MXFP8
-in vLLM and the router gate is fp32, so those are converted once when the runner is
-built: MXFP8 -> bf16 -> per-channel fp8, preshuffled (16, 16); gate -> bf16.
+The kernels read tensors through raw pointers in fixed layouts: a differently
+laid-out weight would not fault, it would produce plausible garbage. So every
+layout assumption is asserted once and a model that does not match is refused
+(`MonoUnsupported`). The experts already have the kernels' layout (MXFP4, aiter
+`shuffle_weight(16, 16)` + `e8m0_shuffle` scales, fused shared expert in slot
+128). The attention linears are MXFP8 in vLLM and the router gate is fp32, so
+those are converted once when the runner is built: MXFP8 -> bf16 -> per-channel
+fp8, preshuffled (16, 16); gate -> bf16.
 
 Without shared-expert fusion the routed table holds the 128 routed experts and
 the shared expert stays the separate MXFP8 MLP; its weights are copied once into

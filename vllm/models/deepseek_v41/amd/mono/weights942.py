@@ -18,9 +18,10 @@ copy the gfx942 GEMV reads (`attention.gemv._step_load_942`):
   The 2 KB hold the first halves of the 64 lanes in lane order, then the
   second halves, so each of the two 16-byte loads of a lane reads 1 KB that
   is contiguous across the wave.
-* `chunk_q`: within each 8-byte chunk the even K first, then the odd K. The MoE stages
-  quantize their activations in that order, to match the bytes the FP4 conversion of the
-  routed experts produces (`common.gfx942.fp4x8_fnuz`).
+* `chunk_q`: within each 8-byte chunk the even K first, then the odd K.
+  The MoE stages quantize their activations in that order, to match the
+  bytes the FP4 conversion of the routed experts produces
+  (`common.gfx942.fp4x8_fnuz`).
 """
 
 import torch
@@ -31,8 +32,9 @@ EVEN_ODD = [0, 2, 4, 6, 1, 3, 5, 7]
 
 def ocp_from_dequant(w: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     """The OCP e4m3 bytes [N, K] behind a bf16 weight vLLM dequantized at load
-    (`w` = e4m3 value x 2^(code - 127), `scale` the codes in 32 x 32 blocks [N / 32, K /
-    32]). Refuses a weight the bytes do not give back exactly."""
+    (`w` = e4m3 value x 2^(code - 127), `scale` the codes in 32 x 32
+    blocks [N / 32, K / 32]). Refuses a weight the bytes do not give back
+    exactly."""
     n, k = w.shape
     assert scale.shape == (n // 32, k // 32), (w.shape, scale.shape)
     mul = torch.exp2(127.0 - scale.float())
@@ -95,12 +97,13 @@ def linear_copy(w: torch.Tensor, scale: torch.Tensor):
 
 def moe_copies(w13, w13_s, w2, w2_s, inter: int):
     """VLLM's plain MXFP4 expert tensors before its kernel conversion (w13
-    [E, 2 Np, K / 2], w2 [E, H, Np / 2] and codes [E, rows, K / 32], with w13's gate
-    rows, then its up rows, each padded with zero rows from `inter` to Np) -> the gfx942
-    mono copies: w13 [E, 2 inter, K / 2] with gate row i at 2 i and up row i at 2 i + 1,
-    w2 [E, H, inter / 2], their codes alike, no -0 nibbles. The weight bytes are in
-    `fp4_tile_major` order. The w13 codes are in `codes_tile_rounds` order, and the w2
-    codes stay row-major because a lane group reads 4 whole rows of them. Refuses
+    [E, 2 Np, K / 2], w2 [E, H, Np / 2] and codes [E, rows, K / 32], with
+    w13's gate rows, then its up rows, each padded with zero rows from
+    `inter` to Np) -> the gfx942 mono copies: w13 [E, 2 inter, K / 2] with
+    gate row i at 2 i and up row i at 2 i + 1, w2 [E, H, inter / 2], their
+    codes alike, no -0 nibbles. The weight bytes are in `fp4_tile_major`
+    order. The w13 codes are in `codes_tile_rounds` order, and the w2 codes
+    stay row-major because a lane group reads 4 whole rows of them. Refuses
     padding rows that are not zero."""
     e, two_np, kh = w13.shape
     np_ = two_np // 2
@@ -132,15 +135,17 @@ def moe_copies(w13, w13_s, w2, w2_s, inter: int):
 
 def fp4_tile_major(w: torch.Tensor) -> torch.Tensor:
     """Packed e2m1 rows [..., rows, K / 2] (rows a multiple of 16) -> the byte
-    order the gfx942 routed GEMVs load. For each tile of 16 rows and each 64-byte step
-    (four K blocks), the copy stores the 64 lanes' 16 bytes in lane order. Lane 16 j + r
-    holds the 16 bytes that `fp4_lane_major` gives lane group j of row r. One 16-byte
-    load a lane then reads 1 KB that is contiguous, 8 whole 128-byte lines. In the
-    `fp4_lane_major` order the same load would read 64 bytes from each of 16 rows that
-    are K / 2 bytes apart, so it would take 16 memory requests instead of 8 and fetch
-    each line with two loads. On MI325X a CTA's ug GEMV takes 23.2 us in this order and
-    32.5 us in the `fp4_lane_major` order (6 rows, all 4 waves), with the same results
-    bit for bit. A last 32-byte step (two K blocks, the 576-wide w2 rows) is stored the
+    order the gfx942 routed GEMVs load. For each tile of 16 rows and each
+    64-byte step (four K blocks), the copy stores the 64 lanes' 16 bytes in
+    lane order. Lane 16 j + r holds the 16 bytes that `fp4_lane_major`
+    gives lane group j of row r. One 16-byte load a lane then reads 1 KB that
+    is contiguous, 8 whole 128-byte lines. In the `fp4_lane_major` order
+    the same load would read 64 bytes from each of 16 rows that are K / 2
+    bytes apart, so it would take 16 memory requests instead of 8 and fetch
+    each line with two loads. On MI325X a CTA's ug GEMV takes 23.2 us in this
+    order and 32.5 us in the `fp4_lane_major` order (6 rows, all 4 waves),
+    with the same results bit for bit.
+    A last 32-byte step (two K blocks, the 576-wide w2 rows) is stored the
     same way with 8 bytes a lane, 512 contiguous bytes."""
     kb = w.shape[-1]
     full = kb // 64 * 64
@@ -156,11 +161,12 @@ def fp4_tile_major(w: torch.Tensor) -> torch.Tensor:
 
 def codes_tile_rounds(codes: torch.Tensor, blocks: int = 8) -> torch.Tensor:
     """e8m0 codes [..., rows, K / 32] (rows a multiple of 16) -> the order the
-    gfx942 ug GEMV loads. For each tile of 16 rows and each round of `blocks` K blocks
-    (`moe.UG_ROUND_942`), the copy stores the 16 rows' codes of the round row after row,
-    16 x `blocks` bytes together. Lane group j then reads the codes of its rows 4 j .. 4
-    j + 3 with two 16-byte loads from one line. Row-major codes would take four 8-byte
-    loads from four lines."""
+    gfx942 ug GEMV loads. For each tile of 16 rows and each round of
+    `blocks` K blocks (`moe.UG_ROUND_942`), the copy stores the 16 rows'
+    codes of the round row after row, 16 x `blocks` bytes together. Lane
+    group j then reads the codes of its rows 4 j .. 4 j + 3 with two 16-byte
+    loads from one line. Row-major codes would take four 8-byte loads from
+    four lines."""
     kc = codes.shape[-1]
     assert kc % blocks == 0 and codes.shape[-2] % 16 == 0, codes.shape
     v = codes.reshape(-1, 16, kc // blocks, blocks)  # [tile, r, round, block]
@@ -169,13 +175,14 @@ def codes_tile_rounds(codes: torch.Tensor, blocks: int = 8) -> torch.Tensor:
 
 def fp4_lane_major(w: torch.Tensor) -> torch.Tensor:
     """Packed e2m1 rows [..., K / 2] -> each row's bytes in lane order, for
-    `fp4_tile_major`. A lane of the 16 x 16 x 32 MFMA takes the dword of K 32 i + 8 j
-    .. + 8 of a row in each 32-wide K block i, with j = lane / 16. Within each 64-byte
-    step (four K blocks) the copy stores lane group j's four dwords together at bytes 16
-    j .. 16 j + 15, so one 16-byte load a lane reads them, and the 4 lane groups of a
-    row read 64 contiguous bytes. A last 32-byte step (two K blocks, the 576-wide w2
-    rows) stores lane group j's two dwords at bytes 8 j .. 8 j + 7. The scale codes keep
-    their order, because each K block keeps its code."""
+    `fp4_tile_major`. A lane of the 16 x 16 x 32 MFMA takes the dword of K
+    32 i + 8 j .. + 8 of a row in each 32-wide K block i, with j = lane / 16.
+    Within each 64-byte step (four K blocks) the copy stores lane group j's
+    four dwords together at bytes 16 j .. 16 j + 15, so one 16-byte load a
+    lane reads them, and the 4 lane groups of a row read 64 contiguous bytes.
+    A last 32-byte step (two K blocks, the 576-wide w2 rows) stores lane
+    group j's two dwords at bytes 8 j .. 8 j + 7. The scale codes keep their
+    order, because each K block keeps its code."""
     *lead, kb = w.shape
     full = kb // 64 * 64
     head = w[..., :full].reshape(*lead, kb // 64, 4, 4, 4).transpose(-3, -2)
@@ -189,9 +196,10 @@ def fp4_lane_major(w: torch.Tensor) -> torch.Tensor:
 
 def fp4_drop_negative_zero_(w: torch.Tensor) -> int:
     """Rewrite every -0 nibble (0x8) of a packed e2m1 tensor to +0, in place,
-    chunk by chunk. -0 and +0 give the same products, so vLLM's own MoE kernels compute
-    the same results afterwards. gfx942's FP4 conversion (`common.gfx942.fp4x8_fnuz`)
-    would turn -0 into the FNUZ NaN. Returns how many nibbles changed."""
+    chunk by chunk. -0 and +0 give the same products, so vLLM's own MoE
+    kernels compute the same results afterwards. gfx942's FP4 conversion
+    (`common.gfx942.fp4x8_fnuz`) would turn -0 into the FNUZ NaN. Returns
+    how many nibbles changed."""
     assert w.dtype == torch.uint8
     flat = w.view(-1)
     changed = 0

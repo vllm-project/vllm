@@ -535,9 +535,10 @@ _RANDOM_LEN_FALLBACKS = {
 def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
     """Translate throughput args into a namespace the shared get_samples reads.
 
-    `get_samples` (used by `bench serve`) expects ~45 attributes; the throughput CLI
-    exposes most of them under the same names, and this adapter fills the rest while
-    preserving throughput's existing flag names so no script breaks.
+    `get_samples` (used by `bench serve`) expects ~45 attributes; the
+    throughput CLI exposes most of them under the same names, and this adapter
+    fills the rest while preserving throughput's existing flag names so no
+    script breaks.
 
     Args:
         args: parsed throughput CLI namespace.

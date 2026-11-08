@@ -11,7 +11,8 @@ routing kernel with precomputed ids and an 8-token tile:
 * local experts (ids in `[0, experts)`) in ascending id order, each one's
   rows in ascending token order, every expert's segment padded to a multiple
   of the tile (8 rows);
-* `permuted[t, k]` = the slot's row in that order, -1 for an id outside `[0, experts)`;
+* `permuted[t, k]` = the slot's row in that order, -1 for an id outside
+  `[0, experts)`;
 * the record (int32, one buffer per call)::
 
       [0]                      8 * tiles (padded rows)

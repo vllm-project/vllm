@@ -613,11 +613,12 @@ class TransferTopology:
         its KV cache) sizes — does not require the remote engine to be
         registered yet.
 
-        DCP support is scoped to `dcp_size in (1, tp_size)` on each side and DCP sizes
-        that divide one another: neither side ever has a partially-duplicated,
-        partially-sharded KV cache. When the remote is not sharded
-        (`remote_dcp_size == 1`) this reduces exactly to the DTP>=PTP case, since a
-        sharded local side already has `tp_size == dcp_size`.
+        DCP support is scoped to `dcp_size in (1, tp_size)` on each side
+        and DCP sizes that divide one another: neither side ever has a
+        partially-duplicated, partially-sharded KV cache. When the
+        remote is not sharded (`remote_dcp_size == 1`) this reduces
+        exactly to the DTP>=PTP case, since a sharded local side
+        already has `tp_size == dcp_size`.
         """
         if remote_dcp_size > 1:
             return self.dcp_source_ranks(remote_tp_size, remote_dcp_size)
@@ -631,10 +632,11 @@ class TransferTopology:
     def dcp_consumer_count(self, remote_tp_size: int, remote_dcp_size: int) -> int:
         """How many local ranks (in aggregate) read from a given remote rank.
 
-        Used by the producer side to know how many reader notifications to wait for
-        before freeing a request's blocks. Reuses `tp_ratio` whenever the remote isn't
-        sharded — a sharded local side already has `tp_size == dcp_size`, so the
-        existing TP-ratio formula is already correct there unmodified.
+        Used by the producer side to know how many reader notifications to
+        wait for before freeing a request's blocks. Reuses `tp_ratio`
+        whenever the remote isn't sharded — a sharded local side already
+        has `tp_size == dcp_size`, so the existing TP-ratio formula is
+        already correct there unmodified.
         """
         if remote_dcp_size > 1:
             if self.dcp_size == 1:

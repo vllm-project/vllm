@@ -610,8 +610,9 @@ class Platform:
     def get_all_gpu_pci_bus_ids(cls) -> dict[int, str]:
         """Return a mapping of device index to PCI bus ID string.
 
-        Used by `VLLM_GPU_NIC_PCIE_MAPPING` for RDMA NIC selection. Subclasses should
-        override with platform-specific discovery (e.g. pynvml for CUDA).
+        Used by `VLLM_GPU_NIC_PCIE_MAPPING` for RDMA NIC selection.
+        Subclasses should override with platform-specific discovery
+        (e.g. pynvml for CUDA).
         """
         raise NotImplementedError(
             "VLLM_GPU_NIC_PCIE_MAPPING is not supported on the "
@@ -834,10 +835,11 @@ class Platform:
         """Align block size when several KV dtypes share one block pool.
 
         A quantized primary (e.g. nvfp4) shares the block pool with one or more
-        higher-precision "padded specs" (skip layers today; the first/last-N sibling in
-        the future). A padded spec's per-token page is larger than the primary's *and
-        not an integer multiple of it*, so the trivial `unify_kv_cache_spec_page_size`
-        cannot reconcile them. We do it here instead, before the specs are built:
+        higher-precision "padded specs" (skip layers today; the first/last-N
+        sibling in the future). A padded spec's per-token page is larger than
+        the primary's *and not an integer multiple of it*, so the trivial
+        `unify_kv_cache_spec_page_size` cannot reconcile them. We do it here
+        instead, before the specs are built:
 
         1. Bump the primary `block_size` (kernel-aligned) until the primary
            page is large enough to cover the largest padded-spec page.
@@ -1501,12 +1503,13 @@ class Platform:
         !!! note
             Experimental, like the `KVCacheConfigBuilder` interface it selects.
 
-        The builder supplies grouping (`get_kv_cache_groups`) and tensor placement
-        (`get_kv_cache_config_from_groups`). Vendors may override this to return a
-        platform-specific builder. The default builder honors a model implementing
-        `SupportsKVCacheGrouping`; a
-        builder that overrides `get_kv_cache_groups` owns grouping and bypasses that
-        model hook unless it calls `super()`.
+        The builder supplies grouping (`get_kv_cache_groups`) and tensor
+        placement (`get_kv_cache_config_from_groups`). Vendors may override
+        this to return a platform-specific builder. The default builder honors a
+        model implementing
+        `SupportsKVCacheGrouping`;
+        a builder that overrides `get_kv_cache_groups` owns grouping and
+        bypasses that model hook unless it calls `super()`.
 
         Returns:
             Fully-qualified class path of a `KVCacheConfigBuilder` subclass.

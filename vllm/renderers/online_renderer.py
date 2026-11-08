@@ -119,9 +119,10 @@ def _reused_prompt_token_ids(
     `kv_transfer_params` so the decode stage can skip re-tokenizing. Removing
     the key keeps the id list out of the engine's sampling metadata.
 
-    Returns None without checking the ids when `echo` is set or `messages` has non-text
-    content, since both need `messages` to be rendered. Otherwise raises
-    VLLMValidationError if the ids are malformed or out of vocabulary.
+    Returns None without checking the ids when `echo` is set or `messages`
+    has non-text content, since both need `messages` to be rendered.
+    Otherwise raises VLLMValidationError if the ids are malformed or out of
+    vocabulary.
     """
     kv = getattr(request, "kv_transfer_params", None)
     if not isinstance(kv, dict):
@@ -242,10 +243,11 @@ class OnlineRenderer:
         Called directly by render_chat_request and delegated to by
         OpenAIServingChat.render_chat_request after its engine-aware checks.
 
-        Decode-side token reuse (ids forwarded in `kv_transfer_params`) is handled
-        deeper, in `preprocess_chat` / `_make_request_with_harmony`, so it skips only
-        templating and tokenization while tool-choice validation and `adjust_request`
-        still run and the output is detokenized (text-out).
+        Decode-side token reuse (ids forwarded in `kv_transfer_params`) is
+        handled deeper, in `preprocess_chat` / `_make_request_with_harmony`,
+        so it skips only templating and tokenization while tool-choice
+        validation and `adjust_request` still run and the output is
+        detokenized (text-out).
         """
         render_start = time.perf_counter()
         tokenizer = self.renderer.tokenizer

@@ -201,10 +201,11 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     ) -> torch.Tensor:
         """Decode-only MLA through one fused AITER launch.
 
-        Replaces the fp8 KV-cache write plus the `[ql_nope | q_pe]` concat and that
-        query's static fp8 quant with a single `fused_qk_rope_concat_and_cache_mla`. On
-        an untouched upstream build the concat and quant already arrive as one
-        inductor-fused kernel, so this collapses two launches into one.
+        Replaces the fp8 KV-cache write plus the `[ql_nope | q_pe]` concat and
+        that query's static fp8 quant with a single
+        `fused_qk_rope_concat_and_cache_mla`. On an untouched upstream build
+        the concat and quant already arrive as one inductor-fused kernel, so
+        this collapses two launches into one.
         """
         from aiter.ops.cache import fused_qk_rope_concat_and_cache_mla
 

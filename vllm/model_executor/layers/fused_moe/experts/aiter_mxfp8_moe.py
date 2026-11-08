@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MXFP8 (1x32 block, E8M0) MoE via AITER's FlyDSL two-stage grouped GEMM (gfx950);
-alternative to `Mxfp8NativeTritonExperts`. Routes through `aiter.fused_moe` (per_1x32,
-gate_mode=INTERLEAVE); weights are preshuffled in `convert_to_fp8_moe_kernel_format`.
+"""MXFP8 (1x32 block, E8M0) MoE via AITER's FlyDSL two-stage grouped GEMM
+(gfx950); alternative to `Mxfp8NativeTritonExperts`. Routes through
+`aiter.fused_moe` (per_1x32, gate_mode=INTERLEAVE); weights are preshuffled in
+`convert_to_fp8_moe_kernel_format`.
 """
 
 import math

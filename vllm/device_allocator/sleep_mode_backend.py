@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pluggable sleep-mode backends (RFC #34303).
 
-vLLM's sleep/wake-up today is hard-wired to `CuMemAllocator`: the GPU worker calls
-`allocator.sleep(...)` / `allocator.wake_up(...)` directly. RFC #34303 proposes
-additional mechanisms for freeing and restoring GPU state - CUDA process checkpoint,
-CRIU, durable snapshot/restore - that share the *dispatch* (`/sleep` endpoint -> engine
--> executor -> worker) but differ in *mechanism* and in which resources they preserve
-(NCCL communicators, compiled kernels, CUDA graphs, survival across process restart).
+vLLM's sleep/wake-up today is hard-wired to `CuMemAllocator`: the GPU worker
+calls `allocator.sleep(...)` / `allocator.wake_up(...)` directly. RFC #34303
+proposes additional mechanisms for freeing and restoring GPU state - CUDA
+process checkpoint, CRIU, durable snapshot/restore - that share the *dispatch*
+(`/sleep` endpoint -> engine -> executor -> worker) but differ in *mechanism*
+and in which resources they preserve (NCCL communicators, compiled kernels,
+CUDA graphs, survival across process restart).
 
 This module introduces a thin backend abstraction so those mechanisms can be
 selected by name without changing the public API. The default `cumem` backend

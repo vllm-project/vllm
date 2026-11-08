@@ -670,9 +670,10 @@ def _k3_argument_tag(
     property whose type is a union / missing is left permissive (any XTML type,
     raw value) so a valid call is never rejected.
 
-    `root_defs` carries the tool parameters' root-level `$defs` / `definitions`: slicing
-    a property out of the parameters document orphans its `#/$defs/...` references, so
-    those tables must be re-attached to keep the embedded schema self-contained.
+    `root_defs` carries the tool parameters' root-level `$defs` /
+    `definitions`: slicing a property out of the parameters document orphans
+    its `#/$defs/...` references, so those tables must be re-attached to keep
+    the embedded schema self-contained.
     """
     prop = schema if isinstance(schema, dict) else {}
     json_type = prop.get("type")
@@ -1108,7 +1109,8 @@ def get_glm_4_7_structural_tag(
         function_tools: Normalized function tools with `strict` pinned by
             `resolve_tool_strictness`.
         builtin_tools: Unused; GLM-4.7 has no builtin tools.
-        tool_choice: Simplified tool choice (`auto` / `required` / `forced`).
+        tool_choice: Simplified tool choice (`auto` / `required` /
+            `forced`).
         reasoning: Whether the grammar also covers the reasoning phase.
         token_suffix: Unused; GLM-4.7 structural tokens are fixed.
 

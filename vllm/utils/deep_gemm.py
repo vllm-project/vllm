@@ -97,11 +97,12 @@ class DeepGemmQuantScaleFMT(Enum):
     def from_oracle(cls) -> "DeepGemmQuantScaleFMT":
         """Return the oracle decision, initializing it on first use.
 
-        The cache is normally populated by `_lazy_init()` (e.g. during engine startup),
-        but standalone consumers such as `QuantFP8` with an explicit `use_ue8m0=True`
-        can reach this before any DeepGEMM kernel wrapper has run. Resolve the DeepGEMM
-        symbols and initialize the decision here instead of asserting; without DeepGEMM
-        this yields FLOAT32, matching `is_deep_gemm_e8m0_used()`.
+        The cache is normally populated by `_lazy_init()` (e.g. during
+        engine startup), but standalone consumers such as `QuantFP8` with an
+        explicit `use_ue8m0=True` can reach this before any DeepGEMM kernel
+        wrapper has run. Resolve the DeepGEMM symbols and initialize the
+        decision here instead of asserting; without DeepGEMM this yields
+        FLOAT32, matching `is_deep_gemm_e8m0_used()`.
         """
         cached = getattr(cls, "_oracle_cache", None)
         if cached is None:
@@ -243,8 +244,9 @@ _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl: (
 def _import_deep_gemm():
     """Import the deep_gemm module.
 
-    Prefers an externally installed `deep_gemm` package (so users can pin a specific
-    version), then falls back to the vendored copy bundled in the vLLM wheel.
+    Prefers an externally installed `deep_gemm` package (so users can
+    pin a specific version), then falls back to the vendored copy bundled
+    in the vLLM wheel.
 
     Returns `None` when neither source is usable.
     """
@@ -816,12 +818,14 @@ def fp8_fp4_paged_mqa_logits(
     """Compute MQA logits using a paged KV-cache.
 
     Unified FP8/FP4 dispatch — the underlying DeepGEMM kernel takes
-    `q = (values, scales_or_None)`; see `fp8_fp4_mqa_logits` for the per-architecture
-    formats. SM100 requires the varlen form (`indices` with next_n == 1).
+    `q = (values, scales_or_None)`; see `fp8_fp4_mqa_logits` for the
+    per-architecture formats. SM100 requires the varlen form (`indices`
+    with next_n == 1).
 
     Args:
-        q: Tuple `(q_values, q_scale)`, q_values of shape [B, next_n, H, D] (packed to
-            D/2 bytes for MXFP4) and q_scale int32 [B, next_n, H] or None.
+        q: Tuple `(q_values, q_scale)`, q_values of shape
+            [B, next_n, H, D] (packed to D/2 bytes for MXFP4) and q_scale
+            int32 [B, next_n, H] or None.
         kv_cache: Paged KV-cache of shape [num_blocks, block_size, 1, D+4]
             (D/2+4 for MXFP4), dtype `torch.uint8`; the last 4 bytes per
             (block, pos) hold the int32 packed UE8M0 scales with MX scales,
@@ -899,10 +903,11 @@ def get_sparse_mqa_logits_metadata(
         cu_seqlen_ke: Per-row K range end bounds in the packed KV workspace,
             shape [num_q_tokens], dtype int32.
         num_kv_tokens: Total KV tokens in the packed workspace.
-        sparse_kv_block_indices: Per-row candidate block ids, shape [num_q_tokens,
-            num_max_sparse_blocks], dtype int32. Each row's valid prefix must be sorted
-            ascending (repeats are tolerated but wasteful); pad by repeating the last
-            valid block. Block `i` covers tokens
+        sparse_kv_block_indices: Per-row candidate block ids, shape
+            [num_q_tokens, num_max_sparse_blocks], dtype int32. Each row's
+            valid prefix must be sorted ascending (repeats are tolerated but
+            wasteful); pad by repeating the last valid block. Block `i`
+            covers tokens
             `[i * sparse_block_kv + ks % sparse_block_kv, ...)`.
         qk_dtype: dtype of the packed Q values (`torch.int8` for MXFP4,
             `torch.float8_e4m3fn` for FP8).
@@ -975,7 +980,8 @@ def fp8_fp4_sparse_mqa_logits(
         q: `(q_values, q_scale)`. q_values is [M, H, D] (packed FP4 viewed
             as int8, or FP8); q_scale is the packed UE8M0 scale tensor [M, H]
             int32 (mandatory, unlike the dense kernels).
-        kv: `(kv_values, kv_scale)` — the packed KV workspace with UE8M0 int32 scales.
+        kv: `(kv_values, kv_scale)` — the packed KV workspace with UE8M0
+            int32 scales.
         weights: [M, H] `torch.bfloat16` (the Q scale is NOT folded in).
         metadata: From `get_sparse_mqa_logits_metadata`.
         num_max_sparse_blocks: Width of each sparse-index row.

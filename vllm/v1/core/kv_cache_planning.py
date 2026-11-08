@@ -373,17 +373,18 @@ def unify_kv_cache_spec_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> dict[str, KVCacheSpec]:
     """Unify the page size of the given KVCacheSpec. If the page size of all layers
-    are the same, return the original KVCacheSpec. If not same, unify the page size by
-    increasing the block size of layers with smaller page size. Two cases cannot be
-    unified by block size alone and pad their physical page to the maximum instead:
-    Mamba layers, whose page size comes from state shapes and is independent of block
-    size; and non-MLA attention layers whose page does not evenly divide the maximum
-    (the padded page is read through a strided view). MLA is excluded because sparse MLA
-    indexes the cache in whole token rows (see `flat_kv_row_view`), so its block stride
-    can only be padded by its own row-aligned `alignment`, not to an arbitrary page
+    are the same, return the original KVCacheSpec. If not same, unify the page
+    size by increasing the block size of layers with smaller page size. Two
+    cases cannot be unified by block size alone and pad their physical page to
+    the maximum instead: Mamba layers, whose page size comes from state shapes
+    and is independent of block size; and non-MLA attention layers whose page
+    does not evenly divide the maximum (the padded page is read through a
+    strided view). MLA is excluded because sparse MLA indexes the cache in
+    whole token rows (see `flat_kv_row_view`), so its block stride can only
+    be padded by its own row-aligned `alignment`, not to an arbitrary page
     size. Raise NotImplementedError if failed to unify the page size;
-    `get_kv_cache_groups` catches it to try the full-allocation fallback (e.g. MLA next
-    to an incompatible sliding-window draft).
+    `get_kv_cache_groups` catches it to try the full-allocation fallback
+    (e.g. MLA next to an incompatible sliding-window draft).
 
     Args:
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
@@ -940,13 +941,14 @@ def _get_packed_kv_cache_groups(
 ) -> list[KVCacheGroupSpec] | None:
     """Group mixed-page-size layers for contiguous block-outermost packing.
 
-    Greedily buckets layers into uniform-type specs. Buckets with equal layer counts per
-    page size are treated as a repeating layer pattern (one layer per page size) and
-    split into groups covering the same number of pattern repeats (picked by
-    `_approximate_gcd` to minimize padding), so all groups pack into the same per-block
-    layout. Mamba buckets are additionally split to fit the block the attention buckets
-    already need. Returns None when the layout is not block-outermost or all layers
-    already share one page size.
+    Greedily buckets layers into uniform-type specs. Buckets with equal layer
+    counts per page size are treated as a repeating layer pattern (one layer
+    per page size) and split into groups covering the same number of pattern
+    repeats (picked by `_approximate_gcd` to minimize padding), so all
+    groups pack into the same per-block layout. Mamba buckets are additionally
+    split to fit the block the attention buckets already need.
+    Returns None when the layout is not block-outermost or all layers already
+    share one page size.
     """
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     page_sizes = {spec.page_size_bytes for spec in kv_cache_spec.values()}
@@ -1743,9 +1745,10 @@ class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
         This class is part of the experimental `KVCacheConfigBuilder`
         interface and is subject to change.
 
-    Subclasses override only the hooks they need. The planning flow and its invariants
-    (`num_gpu_blocks_override`, null-block reservation, auto-fit, admission checks,
-    cross-rank convergence) stay in the Core-owned `get_kv_cache_configs`.
+    Subclasses override only the hooks they need. The planning flow and its
+    invariants (`num_gpu_blocks_override`, null-block reservation, auto-fit,
+    admission checks, cross-rank convergence) stay in the Core-owned
+    `get_kv_cache_configs`.
     """
 
     def get_kv_cache_groups(

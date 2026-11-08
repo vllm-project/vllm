@@ -1008,11 +1008,12 @@ def flint_moe_ll(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Decode MoE block for M <= LL_MOE_MAX_TOKENS tokens.
 
-    Computes `residual' = attn_out + residual` and `x = rms_norm(residual')` as
-    `norm.fused_add_rms_norm`, then the routed + shared expert MoE of `x` (NVFP4 rule).
-    Returns `(moe_out, residual')`; inputs are not modified. A Triton router kernel and
-    two CuTe split-K expert kernels (`moe_gemv`) chained with programmatic dependent
-    launch. counter: buffer from `make_route_counter`.
+    Computes `residual' = attn_out + residual` and `x = rms_norm(residual')`
+    as `norm.fused_add_rms_norm`, then the routed + shared expert MoE of
+    `x` (NVFP4 rule). Returns `(moe_out, residual')`; inputs are not
+    modified. A Triton router kernel and two CuTe split-K expert kernels
+    (`moe_gemv`) chained with programmatic dependent launch. counter: buffer
+    from `make_route_counter`.
     """
     m, hidden = attn_out.shape
     assert 0 < m <= LL_MOE_MAX_TOKENS and attn_out.is_contiguous()

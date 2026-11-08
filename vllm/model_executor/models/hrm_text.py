@@ -5,17 +5,19 @@
 Reference Hugging Face implementation:
     src/transformers/models/hrm_text/modeling_hrm_text.py
 
-The model performs a hierarchical recurrent forward over two transformer stacks (`H`
-slow, `L` fast) inside nested loops. Each recurrence step gets its own KV cache slot via
-a unique vLLM-visible layer index. The PrefixLM attention pattern (prompt bidirectional,
-response causal) is realized by reusing `EncoderOnlyAttention` (which sets
-`causal=False` unconditionally on every metadata build) but with `attn_type=DECODER` so
-the KV cache is allocated; see `HrmTextAttention` for usage.
+The model performs a hierarchical recurrent forward over two transformer
+stacks (`H` slow, `L` fast) inside nested loops. Each recurrence step
+gets its own KV cache slot via a unique vLLM-visible layer index. The
+PrefixLM attention pattern (prompt bidirectional, response causal) is
+realized by reusing `EncoderOnlyAttention` (which sets `causal=False`
+unconditionally on every metadata build) but with `attn_type=DECODER`
+so the KV cache is allocated; see `HrmTextAttention` for usage.
 
-The on-disk `attn.gqkv_proj.weight` (rows concatenated as `[gate | q | k | v]`) is
-loaded by a single `MergedColumnParallelLinear` with four equal-sized output partitions;
-its weight loader auto-splits the fused tensor along the output dim by `output_sizes`
-(the same path used by Phi-3's fused gate_up_proj).
+The on-disk `attn.gqkv_proj.weight` (rows concatenated as
+`[gate | q | k | v]`) is loaded by a single
+`MergedColumnParallelLinear` with four equal-sized output partitions;
+its weight loader auto-splits the fused tensor along the output dim by
+`output_sizes` (the same path used by Phi-3's fused gate_up_proj).
 """
 
 from collections.abc import Iterable
@@ -88,28 +90,34 @@ class HrmTextMLP(nn.Module):
 class HrmTextAttention(nn.Module):
     """One self-attention block; weights shared across recurrence steps.
 
-    HF transformers writes a single fused `attn.gqkv_proj.weight` on disk (per
-    `transformers/conversion_mapping.py` `"hrm_text"` mapping; rows are concatenated as
-    `[gate | q | k | v]` along `dim=0`). We mirror that on the model side with a single
-    `MergedColumnParallelLinear` whose four equal output partitions are sharded along
-    the head axis under TP; its weight loader auto-splits the fused tensor (same path
-    used by Phi-3's fused gate_up_proj). HF's runtime config currently hardcodes MHA
-    (`num_key_value_groups=1`); GQA would require `QKVParallelLinear` semantics for
-    q/k/v shard replication and is left for a follow-up if/when HF adds it.
+    HF transformers writes a single fused `attn.gqkv_proj.weight` on
+    disk (per `transformers/conversion_mapping.py` `"hrm_text"`
+    mapping; rows are concatenated as `[gate | q | k | v]` along
+    `dim=0`). We mirror that on the model side with a single
+    `MergedColumnParallelLinear` whose four equal output partitions
+    are sharded along the head axis under TP; its weight loader
+    auto-splits the fused tensor (same path used by Phi-3's fused
+    gate_up_proj). HF's runtime config currently hardcodes MHA
+    (`num_key_value_groups=1`); GQA would require `QKVParallelLinear`
+    semantics for q/k/v shard replication and is left for a follow-up
+    if/when HF adds it.
 
     Holds:
       - parameters: gqkv_proj, o_proj, rotary_emb (shared across cycles).
-      - `attn_per_step`: a `nn.ModuleDict` keyed by recurrence step (as a string), each
-        value an `EncoderOnlyAttention` (with `attn_type=DECODER` so the KV cache is
-        allocated; the `EncoderOnlyAttention` wrapper sets `causal=False` on every
+      - `attn_per_step`: a `nn.ModuleDict` keyed by recurrence step
+        (as a string), each value an `EncoderOnlyAttention` (with
+        `attn_type=DECODER` so the KV cache is allocated; the
+        `EncoderOnlyAttention` wrapper sets `causal=False` on every
         metadata build). The L stack steps are
-        `[high_cycle_idx*(L_cycles+1)+low_cycle_idx]` and the H stack steps are
-        `[high_cycle_idx*(L_cycles+1)+L_cycles]`; the two ranges are disjoint so each
-        instance registers a unique vLLM `layer_name`
-        (`model.{H,L}_module.layers.{global_idx}.self_attn`) and gets its own KV cache
-        slot. The global layer index per recurrence step is
-        `step * num_layers_per_stack + layer_idx_in_stack`, matching the HF transformers
-        `cycle_offset` formula in `modeling_hrm_text.py`.
+        `[high_cycle_idx*(L_cycles+1)+low_cycle_idx]` and the H stack
+        steps are `[high_cycle_idx*(L_cycles+1)+L_cycles]`; the two
+        ranges are disjoint so each instance registers a unique vLLM
+        `layer_name`
+        (`model.{H,L}_module.layers.{global_idx}.self_attn`) and gets
+        its own KV cache slot. The global layer index per recurrence step
+        is `step * num_layers_per_stack + layer_idx_in_stack`, matching
+        the HF transformers `cycle_offset` formula in
+        `modeling_hrm_text.py`.
     """
 
     def __init__(

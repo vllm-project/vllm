@@ -92,13 +92,15 @@ class LogitsContext:
 class LogitsProcessor(ABC):
     """Custom logits processor for Model Runner V2.
 
-    Per-request state is keyed by the request slot index; slots are recycled through a
-    free list, so per-slot state must be fully (re)initialized in `add_request()`.
+    Per-request state is keyed by the request slot index; slots are recycled
+    through a free list, so per-slot state must be fully (re)initialized in
+    `add_request()`.
 
-    `apply()` runs after the built-in bias, penalty, bad-words and grammar stages and
-    before temperature, min_p and top-k/top-p, so it sees unscaled logits and must not
-    re-inflate grammar-masked tokens. Thinking-budget forcing runs after `apply()` and
-    wins over its edits for requests whose budget is exhausted.
+    `apply()` runs after the built-in bias, penalty, bad-words and grammar
+    stages and before temperature, min_p and top-k/top-p, so it sees unscaled
+    logits and must not re-inflate grammar-masked tokens. Thinking-budget
+    forcing runs after `apply()` and wins over its edits for requests whose
+    budget is exhausted.
 
     State that is constant for a request belongs in `__init__()` or
     `add_request()`; `apply()` receives only what changes per step.

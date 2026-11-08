@@ -16,19 +16,21 @@ handle passed between calls. The exception is peer registration moved onto a
 worker thread, as NixlConnector's handshake executor does: it runs outside the
 lock and relies, like that connector, on NIXL tolerating it beside transfers.
 
-Serialized use from a second thread is supported (checked against NIXL 1.4.1 sources):
-NIXL never creates its UCX worker in UCS_THREAD_MODE_SINGLE, the only
+Serialized use from a second thread is supported (checked against NIXL 1.4.1
+sources): NIXL never creates its UCX worker in UCS_THREAD_MODE_SINGLE, the only
 creator-thread-affine mode. The weakest mode it ever requests is
-UCS_THREAD_MODE_SERIALIZED, documented as "multiple threads can access, but only one at
-a time", and because `enable_prog_thread` defaults on here it actually requests
-UCS_THREAD_MODE_MULTI and fails construction if the UCX build cannot provide it.
+UCS_THREAD_MODE_SERIALIZED, documented as "multiple threads can access, but only
+one at a time", and because `enable_prog_thread` defaults on here it actually
+requests UCS_THREAD_MODE_MULTI and fails construction if the UCX build cannot
+provide it.
 
-Two caveats. NIXL binds a shared UCX worker per calling thread (`tlsSharedWorkerMap`),
-which is harmless only while there is exactly one shared worker -- true here, but it
-would stop being true if a `num_workers` UCX backend param were ever set. And NIXL 1.4.1
-does accept an explicit `sync_mode` (including NIXL_THREAD_SYNC_RW), which would make
-its own locking real; that parameter does not exist before 1.x, so passing it would need
-a version gate, the way `capture_telemetry` does.
+Two caveats. NIXL binds a shared UCX worker per calling thread
+(`tlsSharedWorkerMap`), which is harmless only while there is exactly one
+shared worker -- true here, but it would stop being true if a `num_workers`
+UCX backend param were ever set. And NIXL 1.4.1 does accept an explicit
+`sync_mode` (including NIXL_THREAD_SYNC_RW), which would make its own locking
+real; that parameter does not exist before 1.x, so passing it would need a
+version gate, the way `capture_telemetry` does.
 """
 
 from __future__ import annotations
@@ -85,12 +87,13 @@ def _peer_fault_status(exc: Exception) -> str | None:
 def _is_terminal_state_error(exc: Exception) -> bool:
     """True if a failed NIXL state check ends the transfer.
 
-    Only `nixlRemoteDisconnectError` does: NIXL raises it once the target endpoint is
-    gone, so nothing more can land. Any other raise says nothing about the WRITE
-    itself; #59790 measured a WRITE that kept landing after `remove_remote_agent` while
-    its handle raised `nixlNotFoundError`. Such a transfer stays inflight, so its pins
-    and the peer's destination blocks are not reused under it. The raise still faults
-    its peer (see `_record_state_check_failure`), which bounds how long it stays.
+    Only `nixlRemoteDisconnectError` does: NIXL raises it once the target
+    endpoint is gone, so nothing more can land. Any other raise says nothing
+    about the WRITE itself; #59790 measured a WRITE that kept landing after
+    `remove_remote_agent` while its handle raised `nixlNotFoundError`.
+    Such a transfer stays inflight, so its pins and the peer's destination
+    blocks are not reused under it. The raise still faults its peer (see
+    `_record_state_check_failure`), which bounds how long it stays.
     """
     return _peer_fault_status(exc) == "NIXL_ERR_REMOTE_DISCONNECT"
 
@@ -98,10 +101,11 @@ def _is_terminal_state_error(exc: Exception) -> bool:
 class _Inflight(NamedTuple):
     """A submitted-but-not-yet-drained transfer.
 
-    `peer_id` lets poll() scope to a single owning session, since the transport is
-    shared across all peer sessions of the engine. `struck` is set once the transfer has
-    counted against its peer, so a state check that keeps raising charges it once, not
-    once per poll. `retired` is set once its peer is removed while it still runs; only
+    `peer_id` lets poll() scope to a single owning session, since the
+    transport is shared across all peer sessions of the engine.
+    `struck` is set once the transfer has counted against its peer, so a
+    state check that keeps raising charges it once, not once per poll.
+    `retired` is set once its peer is removed while it still runs; only
     poll_retired() sees it from then on.
     """
 
@@ -535,10 +539,11 @@ class NixlTransport(DataTransport):
     def poll_retired(self) -> list[int]:
         """Release retired transfers that have stopped; return their ids.
 
-        A transfer stopped once NIXL reports it terminal, by the same rule as
-        `cancel(mode="wait")`, but without charging its peer: the peer is gone, and a
-        reconnected one under the same id is not at fault. A removed peer's remote
-        handles are released once none of its retired transfers remain.
+        A transfer stopped once NIXL reports it terminal, by the same rule
+        as `cancel(mode="wait")`, but without charging its peer: the
+        peer is gone, and a reconnected one under the same id is not at
+        fault. A removed peer's remote handles are released once none of
+        its retired transfers remain.
         """
         stopped: list[int] = []
         for tid, entry in self._inflight.items():
@@ -580,13 +585,15 @@ class NixlTransport(DataTransport):
     ) -> list[int]:
         """Cancel inflight transfers by their IDs.
 
-        See `DataTransport.cancel` for the contract. In "wait" mode, a transfer is
-        released only once NIXL reports it terminal. Releasing a PROC/PEND handle does
-        not stop the WRITE: the UCX backend frees the request without cancelling RMA,
-        and the bytes keep landing. So PROC/PEND transfers, and those whose state check
-        or `release_xfer_handle` raises, stay in `self._inflight` for a later `poll()`
-        to observe. A state check that raises faults the peer; only a remote disconnect
-        also counts as terminal (see `_is_terminal_state_error`).
+        See `DataTransport.cancel` for the contract. In "wait" mode, a
+        transfer is released only once NIXL reports it terminal. Releasing
+        a PROC/PEND handle does not stop the WRITE: the UCX backend frees
+        the request without cancelling RMA, and the bytes keep landing. So
+        PROC/PEND transfers, and those whose state check or
+        `release_xfer_handle` raises, stay in `self._inflight` for a
+        later `poll()` to observe. A state check that raises faults the
+        peer; only a remote disconnect also counts as terminal (see
+        `_is_terminal_state_error`).
         """
         if mode == "immediate":
             handles = [

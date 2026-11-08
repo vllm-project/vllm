@@ -76,10 +76,11 @@ def get_attn_spec_kind(
     produced `KVCacheSpec`) so users can target groups by kind when
     setting `AttentionConfig.backend_per_kind`.
 
-    `SINK_FULL_ATTENTION` is intentionally not derived here: it is produced only by the
-    `StaticSinkAttention` layer, whereas a plain `Attention` layer with attention sinks
-    (e.g. gpt-oss) still yields a `FullAttentionSpec`/`SlidingWindowSpec`. Sinks
-    therefore do not change the kind.
+    `SINK_FULL_ATTENTION` is intentionally not derived here: it is produced
+    only by the `StaticSinkAttention` layer, whereas a plain `Attention`
+    layer with attention sinks (e.g. gpt-oss) still yields a
+    `FullAttentionSpec`/`SlidingWindowSpec`. Sinks therefore do not change
+    the kind.
 
     Args:
         use_mla: Whether the layer uses multi-head latent attention.

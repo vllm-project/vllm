@@ -162,9 +162,10 @@ def score_data_to_prompts(
 ) -> list[PromptType]:
     """Convert a list of ScoreData into PromptType objects.
 
-    For plain text inputs, returns the string directly. For multimodal inputs (list of
-    content parts), parses them into a `TextPrompt` with attached
-    `multi_modal_data` / `multi_modal_uuids`.
+    For plain text inputs, returns the string directly.
+    For multimodal inputs (list of content parts), parses them into
+    a `TextPrompt` with attached `multi_modal_data` /
+    `multi_modal_uuids`.
 
     This is used by late-interaction scoring where each query/document
     is encoded independently.

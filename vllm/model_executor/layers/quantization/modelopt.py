@@ -1509,13 +1509,14 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         """One-time MXFP8->BF16 weight dequant for the emulation path.
 
         On devices without a native MXFP8 MoE kernel (e.g. gfx942 / MI300),
-        `Mxfp8EmulationTritonExperts` otherwise dequantizes every expert weight to BF16
-        on *every* forward step -- the dominant cost (conc1 ~1.3 tok/s). Doing the
-        dequant once here and replacing the MXFP8 parameters with BF16 makes the MoE run
-        exactly like a plain BF16 checkpoint (full precision, no per-step dequant);
-        SwiGLU-OAI is still applied by the experts' `activation()` override. The MXFP8
-        weights are freed by `replace_parameter` (BF16 is 2x their size; the small E8M0
-        scale tensors are left in place, unused).
+        `Mxfp8EmulationTritonExperts` otherwise dequantizes every expert
+        weight to BF16 on *every* forward step -- the dominant cost (conc1
+        ~1.3 tok/s). Doing the dequant once here and replacing the MXFP8
+        parameters with BF16 makes the MoE run exactly like a plain BF16
+        checkpoint (full precision, no per-step dequant); SwiGLU-OAI is still
+        applied by the experts' `activation()` override. The MXFP8 weights
+        are freed by `replace_parameter` (BF16 is 2x their size; the small
+        E8M0 scale tensors are left in place, unused).
         """
         from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
             dequant_mxfp8_to_bf16,
@@ -1666,10 +1667,11 @@ ModelOptMxFp8Config.KVCacheMethodCls = ModelOptKVCacheMethod
 class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
     """Config class for ModelOpt MIXED_PRECISION.
 
-    Supports checkpoints where different layers use different quantization algorithms
-    (e.g., FP8 for dense layers and NVFP4 for MoE experts). The per-layer algorithm is
-    specified in the `quantized_layers` dict inside `config.json`'s
-    `quantization_config` (preferred) or the legacy `hf_quant_config.json`.
+    Supports checkpoints where different layers use different quantization
+    algorithms (e.g., FP8 for dense layers and NVFP4 for MoE experts).
+    The per-layer algorithm is specified in the `quantized_layers` dict
+    inside `config.json`'s `quantization_config` (preferred) or the
+    legacy `hf_quant_config.json`.
     """
 
     def __init__(
@@ -2568,12 +2570,13 @@ def select_linear_kernel(
 class FormatScheme:
     """Optional per-format hooks that compose *around* the QuantKey schemes.
 
-    Extension seam for residue that belongs to a format as a whole rather than a single
-    QuantKey — an extra parameter the weight/activation schemes don't cover, or a tweak
-    before/after their `process`. All hooks default to no-ops; most formats need none
-    (they are a pure `(weight, activation)` key pair). To add one: subclass, override
-    the hooks you need, and return an instance from the format's `resolve()` branch — no
-    change to `ModelOptLinearMethod` itself.
+    Extension seam for residue that belongs to a format as a whole rather than a
+    single QuantKey — an extra parameter the weight/activation schemes don't
+    cover, or a tweak before/after their `process`. All hooks default to
+    no-ops; most formats need none (they are a pure `(weight, activation)` key
+    pair). To add one: subclass, override the hooks you need, and return an
+    instance from the format's `resolve()` branch — no change to
+    `ModelOptLinearMethod` itself.
     """
 
     def extra_weights(self, layer, shapes: "Shapes", ctx: CkptCtx, wl) -> None:
@@ -2592,9 +2595,10 @@ class FormatScheme:
     def apply(self, layer, x, bias, kernel_apply):
         """Wrap the kernel's forward. `kernel_apply(layer, x, bias) -> Tensor`.
 
-        Default: delegate unchanged. A format whose residue lives at compute time (e.g.
-        run the GEMM on a padded weight then slice the output back to its logical
-        width, #53132-style) overrides this and calls `kernel_apply` in the middle.
+        Default: delegate unchanged. A format whose residue lives at compute
+        time (e.g. run the GEMM on a padded weight then slice the output back
+        to its logical width, #53132-style) overrides this and calls
+        `kernel_apply` in the middle.
         """
         return kernel_apply(layer, x, bias)
 
@@ -2671,8 +2675,9 @@ _DROP_INPUT_SCALE = _DropInputScale()
 @register_weight_loader_v2_supported_method
 class ModelOptLinearMethod(LinearMethodBase):
     """Generic, format-agnostic ModelOpt linear method. Holds a weight scheme +
-    an activation scheme (from the QuantSpec pair) and an optional `FormatScheme`, runs
-    a fixed lifecycle, selects the kernel from the pair, and applies.
+    an activation scheme (from the QuantSpec pair) and an optional
+    `FormatScheme`, runs a fixed lifecycle, selects the kernel from the pair,
+    and applies.
 
     Registered for weight_loader_v2 (like every ModelOpt linear method) so the
     `BasevLLMParameter` params route through the v2 fused loader, not the
@@ -2823,8 +2828,9 @@ class ModelOptLinearMethod(LinearMethodBase):
 def resolve(algo: str, subcfg, prefix: str):
     """Turn a sub-config into (QuantSpec, CkptCtx, format_scheme).
 
-    Strictly read-only over `subcfg`: in mixed precision the same sub-config is shared
-    with the MoE method, so writing back would leak a linear-only change into MoE.
+    Strictly read-only over `subcfg`: in mixed precision the same sub-config
+    is shared with the MoE method, so writing back would leak a linear-only
+    change into MoE.
     """
     if algo == "FP8":
         # Plain per-tensor static FP8 (W8A8): same key in both slots (bivalent).
@@ -2889,10 +2895,11 @@ LINEAR_METHOD_BUILDERS: dict[str, Callable[..., LinearMethodBase]] = {}
 def build_linear_method(config, algo: str, prefix: str) -> LinearMethodBase:
     """Construct the linear method for `algo`.
 
-    Returns a bespoke method if one is registered in `LINEAR_METHOD_BUILDERS`, else the
-    generic `ModelOptLinearMethod` built from `resolve(algo, config, prefix)`. Single
-    indirection point shared by the homogeneous and mixed-precision dispatch, so a new
-    format plugs in without editing either `get_quant_method`.
+    Returns a bespoke method if one is registered in `LINEAR_METHOD_BUILDERS`,
+    else the generic `ModelOptLinearMethod` built from `resolve(algo, config,
+    prefix)`. Single indirection point shared by the homogeneous and
+    mixed-precision dispatch, so a new format plugs in without editing either
+    `get_quant_method`.
     """
     builder = LINEAR_METHOD_BUILDERS.get(algo)
     if builder is not None:

@@ -1416,10 +1416,11 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         [q | k | v | index_q | index_k]
 
     `index_q` must have the same head count as the KV heads
-    (`total_num_index_heads == total_num_kv_heads`) and `index_head_size == head_size`,
-    so it shards exactly like K/V -- including the KV-head *replication* path when
-    `tp_size > total_num_kv_heads` (this is what makes a TP size greater than the
-    KV-head count work). `index_k` is a single shared head, replicated to every rank.
+    (`total_num_index_heads == total_num_kv_heads`) and `index_head_size ==
+    head_size`, so it shards exactly like K/V -- including the KV-head
+    *replication* path when `tp_size > total_num_kv_heads` (this is what makes
+    a TP size greater than the KV-head count work). `index_k` is a single
+    shared head, replicated to every rank.
 
     `replicate_index_q` moves `index_q` onto that replicated path too, so
     every rank projects all the index heads rather than its own. That is what

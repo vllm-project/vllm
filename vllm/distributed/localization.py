@@ -2,14 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Per-device locality-domain contexts, streams, and memory pools.
 
-Initialize before weight allocation and CUDA graph capture; all layers share these
-resources. Enable with VLLM_USE_LOCALITY_DOMAINS. Optional VLLM_MOE_LOCALIZE_BACKFILL
-adds SMs outside each domain's local allocation. Requires upstream PyTorch
-LocalizedAllocator, SMPartition, and `torch.cuda.execute_on_streams` APIs (nightly from
-2026-10-08, 2.16), FlashInfer with locality-domain MoE support (main after
-flashinfer-ai/flashinfer#6488; no 0.7.x release has it), CUDA driver and cuda.bindings
-13.4+, and a GPU with multiple locality domains. When any of these is missing,
-localization logs why and is disabled; the ordinary full-width MoE path runs instead.
+Initialize before weight allocation and CUDA graph capture; all layers share
+these resources. Enable with VLLM_USE_LOCALITY_DOMAINS. Optional
+VLLM_MOE_LOCALIZE_BACKFILL adds SMs outside each domain's local allocation.
+Requires upstream PyTorch LocalizedAllocator, SMPartition, and
+`torch.cuda.execute_on_streams` APIs (nightly from 2026-10-08, 2.16), FlashInfer
+with locality-domain MoE support (main after flashinfer-ai/flashinfer#6488; no
+0.7.x release has it), CUDA driver and cuda.bindings 13.4+, and a GPU with
+multiple locality domains. When any of these is missing, localization logs why
+and is disabled; the ordinary full-width MoE path runs instead.
 """
 
 from __future__ import annotations

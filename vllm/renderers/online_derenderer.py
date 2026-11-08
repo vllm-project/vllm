@@ -1526,9 +1526,10 @@ def _convert_chat_logprobs_to_completion_logprobs(
     """Convert ChatCompletionLogProbs (per-token objects) to CompletionLogProbs
     (parallel flat lists) as required by the /v1/completions response schema.
 
-    `generate_logprobs` is what `logprobs` was resolved from. A position with no
-    candidates there had no logprobs in the engine output, which /v1/completions reports
-    as `None`; every other position is a dict of the candidates the cut kept.
+    `generate_logprobs` is what `logprobs` was resolved from. A position
+    with no candidates there had no logprobs in the engine output, which
+    /v1/completions reports as `None`; every other position is a dict of
+    the candidates the cut kept.
 
     `initial_text_offset` keeps `text_offset` absolute across streaming
     chunks, mirroring the generate streaming path.

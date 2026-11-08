@@ -3,10 +3,11 @@
 """MSA (SM100/Blackwell) indexer impl for MiniMax M3.
 
 Both sides write block scores into one unified token-major buffer
-`[total_q, H, max_k_tiles]`, then a single `fmha_sm100.sparse_topk_select` selects the
-top-k blocks for the whole batch (decode `[:nd]` + prefill `[nd:]`) into the shared
-`topk_indices_buffer`. It bounds each row by its causal page count and force-includes
-the init/local blocks, so the unwritten tail of the buffer is pre-filled with `-inf`.
+`[total_q, H, max_k_tiles]`, then a single `fmha_sm100.sparse_topk_select`
+selects the top-k blocks for the whole batch (decode `[:nd]` + prefill
+`[nd:]`) into the shared `topk_indices_buffer`. It bounds each row by its
+causal page count and force-includes the init/local blocks, so the unwritten
+tail of the buffer is pre-filled with `-inf`.
 
 Prefill scores with `fmha_sm100`'s score-only (`OnlyScore`) path (much faster
 than Triton for the wide prefill score, benchmarked ~3-5x), writing its

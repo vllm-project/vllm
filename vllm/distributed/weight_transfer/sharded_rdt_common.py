@@ -138,13 +138,15 @@ class RdtRouter:
         Args:
             num_producers: Trainer ranks. Owner indices are positions in this
                 range, and `validate` rejects any that fall outside it.
-            num_consumers: Inference workers across the whole fleet. Fixes the id space;
-                the block carve uses `workers_per_replica` of it.
+            num_consumers: Inference workers across the whole fleet. Fixes
+                the id space; the block carve uses `workers_per_replica`
+                of it.
             owner_sets: The distinct producer sets that occur, one row per
                 owner class; each row is deduplicated and sorted here. Empty
                 means a single class owning every producer.
-            name_owner_class: Parallel to `names` — `name_owner_class[i]` indexes
-                `owner_sets` for `names[i]`. A name with no entry falls back to class 0.
+            name_owner_class: Parallel to `names` — `name_owner_class[i]`
+                indexes `owner_sets` for `names[i]`. A name with no entry
+                falls back to class 0.
             names: Every parameter name, in group-major order: concatenating
                 the gather groups reproduces this list exactly. The other two
                 tables are keyed by this order.
@@ -240,13 +242,14 @@ class RdtRouter:
         producer, which is what lets a chunk be a single pull.
 
         The carve is over ONE DEPLOYMENT (this consumer's index within its own
-        deployment, over `workers_per_replica` of them), so the same worker of every
-        deployment resolves the same producer for every name. Carving over the whole
-        fleet instead spreads the multi-owner names of different deployments onto
-        different producers while single-owner names still route by ownership, so a
-        producer serves several distinct worker indices, each needing its own serve
-        ring, and none of them can share a slot. With one deployment the width is the
-        fleet, so this is the plain block rule.
+        deployment, over `workers_per_replica` of them), so the same worker of
+        every deployment resolves the same producer for every name. Carving over
+        the whole fleet instead spreads the multi-owner names of different
+        deployments onto different producers while single-owner names still
+        route by ownership, so a producer serves several distinct worker
+        indices, each needing its own serve ring, and none of them can share a
+        slot. With one deployment the width is the fleet, so this is the plain
+        block rule.
         """
         own = self.owners(name)
         if not own:

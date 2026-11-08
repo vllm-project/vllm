@@ -8,12 +8,13 @@ For a fixed (model, config, hardware, library) combination the result is
 deterministic, yet it is re-measured on every boot.
 
 When `VLLM_ENABLE_STARTUP_PLAN=1`, each worker persists that value under
-`{VLLM_CACHE_ROOT}/startup_plan/` (regenerable derived state, alongside the
-torch.compile cache), keyed by a fingerprint of everything the value depends on, and
-later boots apply it automatically -- skipping the memory-profiling measurement and the
-CUDA-graph memory estimation pass -- if and only if the fingerprint matches and the
-device has at least as much free memory as when the plan was recorded. On any mismatch
-the worker falls back to full profiling, so a stale plan costs nothing and is never
+`{VLLM_CACHE_ROOT}/startup_plan/` (regenerable derived state, alongside
+the torch.compile cache), keyed by a fingerprint of everything the value
+depends on, and later boots apply it automatically -- skipping the
+memory-profiling measurement and the CUDA-graph memory estimation pass --
+if and only if the fingerprint matches and the device has at least as much
+free memory as when the plan was recorded. On any mismatch the worker
+falls back to full profiling, so a stale plan costs nothing and is never
 trusted.
 """
 
@@ -166,7 +167,8 @@ def maybe_apply_startup_plan(worker: "Worker") -> None:
 
 def maybe_save_startup_plan(worker: "Worker", kv_cache_memory_bytes: int) -> None:
     """Atomically persist this boot's profiling result for future boots.
-    No-op unless `VLLM_ENABLE_STARTUP_PLAN=1`; failures are logged, never raised."""
+    No-op unless `VLLM_ENABLE_STARTUP_PLAN=1`; failures are logged,
+    never raised."""
     if not envs.VLLM_ENABLE_STARTUP_PLAN:
         return
     fingerprint = compute_plan_fingerprint(

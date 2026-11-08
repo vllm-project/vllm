@@ -826,9 +826,10 @@ def _mhc_fused_post_pre_tilelang_impl(
     `n_splits` and `tile_n` are retained for the shared MHC operator API.
     The TileLang path selects both values internally from the runtime shape.
 
-    With `reuse_residual`, the unfused path writes residual_cur into `residual`'s
-    storage instead of allocating a new buffer. The post kernel reads every hc row of a
-    hidden block before writing that block, so the in-place update is exact.
+    With `reuse_residual`, the unfused path writes residual_cur into
+    `residual`'s storage instead of allocating a new buffer. The post kernel
+    reads every hc row of a hidden block before writing that block, so the
+    in-place update is exact.
 
     Returns:
         residual_cur: post-mapped residual, shape (..., hc_mult, hidden_size)

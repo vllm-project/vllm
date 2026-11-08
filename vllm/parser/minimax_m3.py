@@ -13,10 +13,11 @@ MiniMax M3 prefixes every structural tag with the `]<]minimax[>[` marker::
     ]<]minimax[>[</invoke>
     ]<]minimax[>[</tool_call>
 
-Each `<invoke>` becomes one tool call. Parameters are elements named after the argument
-and may nest: an element holding child elements becomes an object, or an array when its
-schema says so (the chat template renders list items as `<item>`). Arguments are emitted
-once the whole `<invoke>` is parsed. Reasoning is handled by `MiniMaxM3ReasoningParser`.
+Each `<invoke>` becomes one tool call. Parameters are elements named after
+the argument and may nest: an element holding child elements becomes an
+object, or an array when its schema says so (the chat template renders list
+items as `<item>`). Arguments are emitted once the whole `<invoke>` is
+parsed. Reasoning is handled by `MiniMaxM3ReasoningParser`.
 """
 
 from __future__ import annotations

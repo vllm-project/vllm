@@ -82,9 +82,10 @@ def _resolve_mm_processor_kwargs(
 ) -> dict[str, object]:
     """Resolve flat processor kwargs into HuggingFace processor kwarg scopes.
 
-    With `supported_mm_processor_kwargs`, each scope lists the flat keys it supports.
-    Matching flat keys are routed to every scope that supports them, existing scoped
-    values take precedence, and keys not supported by any scope remain flat.
+    With `supported_mm_processor_kwargs`, each scope lists the flat keys it
+    supports. Matching flat keys are routed to every scope that supports them,
+    existing scoped values take precedence, and keys not supported by any scope
+    remain flat.
 
     Without `supported_mm_processor_kwargs`, flat keys already represented in
     at least one existing mapping-valued scope are removed from the shared flat
@@ -380,10 +381,11 @@ class InputProcessingContext:
     ) -> dict[str, Any]:
         """Merge configured and request `mm_processor_kwargs`.
 
-        When `supported_mm_processor_kwargs` is provided, flat keys are matched against
-        the keys supported by each HuggingFace processor kwarg scope. Matching flat keys
-        are routed to every scope that supports them and removed from the shared flat
-        namespace; keys not supported by any scope remain flat.
+        When `supported_mm_processor_kwargs` is provided, flat keys are matched
+        against the keys supported by each HuggingFace processor kwarg scope.
+        Matching flat keys are routed to every scope that supports them and
+        removed from the shared flat namespace; keys not supported by any scope
+        remain flat.
 
         Without `supported_mm_processor_kwargs`, flat keys already represented
         in at least one existing mapping-valued scope are removed from the shared

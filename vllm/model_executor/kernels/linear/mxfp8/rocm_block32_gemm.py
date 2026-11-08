@@ -955,14 +955,15 @@ def _rocm_mxfp8_block32_gemm_quant_impl(
     """`x @ weight.T` for raw bf16/fp16 `x` and a 32x32 block-scaled
     MXFP8 weight, quantizing `x` inside the GEMM at tiny M.
 
-    M <= 8 with a packed tile config (every tuned M <= 8 tier is packed) runs one launch
-    whose K loop computes the per-32-block E8M0 scale and the e4m3 cast exactly as
-    `_mxfp8_quant_triton_kernel` and feeds `tl.dot_scaled` from registers --
-    bit-identical output to `mxfp8_e4m3_quantize` + `rocm_mxfp8_block32_gemm` with one
-    launch fewer on the decode critical path. Everything else (larger M, non-packed
-    tiles, or non-contiguous or non-bf16/fp16 x) runs the stock two-launch path with
-    identical results. The branch is inside this opaque op so a compiled caller cannot
-    freeze the token-count decision.
+    M <= 8 with a packed tile config (every tuned M <= 8 tier is packed)
+    runs one launch whose K loop computes the per-32-block E8M0 scale and
+    the e4m3 cast exactly as `_mxfp8_quant_triton_kernel` and feeds
+    `tl.dot_scaled` from registers -- bit-identical output to
+    `mxfp8_e4m3_quantize` + `rocm_mxfp8_block32_gemm` with one launch
+    fewer on the decode critical path. Everything else (larger M,
+    non-packed tiles, or non-contiguous or non-bf16/fp16 x) runs the stock
+    two-launch path with identical results. The branch is inside this
+    opaque op so a compiled caller cannot freeze the token-count decision.
     """
     M, K = x.shape
     out = torch.empty((M, weight.shape[0]), dtype=out_dtype, device=x.device)
@@ -1033,8 +1034,9 @@ def rocm_mxfp8_block32_gemm_quant(
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
     """`x @ weight.T` for a raw bf16/fp16 `x` [M, K] and a 32x32
-    block-scaled MXFP8 `weight` [N, K] with `weight_scale` [N / 32, K / 32]. Tiny-M
-    batches quantize inside the packed GEMM (see `_rocm_mxfp8_block32_gemm_quant_impl`).
+    block-scaled MXFP8 `weight` [N, K] with `weight_scale`
+    [N / 32, K / 32]. Tiny-M batches quantize inside the packed GEMM (see
+    `_rocm_mxfp8_block32_gemm_quant_impl`).
     """
     return torch.ops.vllm.rocm_mxfp8_block32_gemm_quant(
         x, weight, weight_scale, out_dtype

@@ -56,12 +56,13 @@ def _deepseek_v4_cpu_prepare_and_attn(
     """Opaque custom-op boundary around attention-prep + sparse-indexer +
     MLA attention + output projection -- CPU-only.
 
-    Wraps cache writes with no explicit tensor args (SWA/compressor/indexer state),
-    which torch.compile can't otherwise track as mutations -- one opaque call sidesteps
-    that. `_o_proj` is folded in too because CPU's `DYNAMO_TRACE_ONCE` mode traces
-    exactly once, during warmup when `attn_metadata` is `None`; tracing `_o_proj`
-    separately would bake that warmup branch into the compiled graph permanently,
-    dead-code- eliminating the whole attention computation upstream.
+    Wraps cache writes with no explicit tensor args (SWA/compressor/indexer
+    state), which torch.compile can't otherwise track as mutations -- one
+    opaque call sidesteps that. `_o_proj` is folded in too because CPU's
+    `DYNAMO_TRACE_ONCE` mode traces exactly once, during warmup when
+    `attn_metadata` is `None`; tracing `_o_proj` separately would bake
+    that warmup branch into the compiled graph permanently, dead-code-
+    eliminating the whole attention computation upstream.
     """
     layer_name_str = _resolve_layer_name(layer_name)
     self = get_forward_context().no_compile_layers[layer_name_str]
@@ -108,8 +109,9 @@ direct_register_custom_op(
 def _dequant_linear_weight(layer: torch.nn.Module) -> torch.Tensor:
     """Dequantize a linear layer's weight, including FP8 block scales.
 
-    `_o_proj` reads `wo_a.weight` directly (not via `quant_method.apply()`), so the
-    per-block FP8 scale must be applied here explicitly.
+    `_o_proj` reads `wo_a.weight` directly (not via
+    `quant_method.apply()`), so the per-block FP8 scale must be applied
+    here explicitly.
     """
     weight = layer.weight
     scale = getattr(layer, "weight_scale_inv", None)
@@ -200,9 +202,10 @@ class DeepseekV4CPUIndexer(DeepseekV4Indexer):
         skip_compressor: bool = False,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """CPU override: no aux streams, so wq_b_and_q_quant and the
-        compressor run straight-line instead of through `maybe_execute_in_parallel`; the
-        short-context check drops the CUDA-only `is_current_stream_capturing()` guard
-        (always False here)."""
+        compressor run straight-line instead of through
+        `maybe_execute_in_parallel`; the short-context check drops the
+        CUDA-only `is_current_stream_capturing()` guard (always False
+        here)."""
         compressor = self.compressor
 
         attn_metadata = get_forward_context().attn_metadata
@@ -285,9 +288,10 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
         but that arrive bf16 (rotary cos/sin table, compressor RMSNorm
         weights) -- cast once here instead of per forward call.
 
-        Runs after every quantized layer's own `process_weights_after_loading` (see
-        `is_deferred_attention_layer`); `wo_a`'s packing must happen *before* that phase
-        instead, so it's a separate monkeypatch in `__init__`.
+        Runs after every quantized layer's own
+        `process_weights_after_loading` (see `is_deferred_attention_layer`);
+        `wo_a`'s packing must happen *before* that phase instead, so it's a
+        separate monkeypatch in `__init__`.
         """
         self.rotary_emb.cos_sin_cache = self.rotary_emb.cos_sin_cache.to(
             torch.float32
@@ -299,8 +303,9 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
 
     def _wrap_wo_a_process_weights_after_loading(self) -> None:
         """Snapshot and pack `wo_a`'s weight into a bf16 copy for
-        `bmm_cpu` before the FP8 kernel's own `process_weights_after_loading`
-        VNNI-repacks it in place for row-major reads `_o_proj` never does."""
+        `bmm_cpu` before the FP8 kernel's own
+        `process_weights_after_loading` VNNI-repacks it in place for
+        row-major reads `_o_proj` never does."""
         wo_a = self.wo_a
         quant_method = wo_a.quant_method
         orig_pwal = quant_method.process_weights_after_loading

@@ -200,8 +200,9 @@ def _load_q_td(
     Caller guarantees (via the wrapper's `use_td_qo` gate):
       * `HEAD_SIZE == HEAD_SIZE_PADDED` (head_size is a power of 2),
       * `num_queries_per_kv` is a power of 2,
-      * the `num_queries_per_kv` heads of the current KV group are contiguous in memory
-        (`query_stride_1 == HEAD_SIZE`, which is the default vLLM query layout).
+      * the `num_queries_per_kv` heads of the current KV group are
+        contiguous in memory (`query_stride_1 == HEAD_SIZE`, which is
+        the default vLLM query layout).
 
     Under those preconditions the inner two axes are flattened into one
     row of size `num_queries_per_kv * HEAD_SIZE` with stride 1, which
@@ -272,9 +273,10 @@ def _store_output_td(
     """Store an output tile via a tensor descriptor.
 
     The 2D and 3D epilogues differ only in `base_ptr` and the
-    `(stride_token, stride_head)` pair: 2D writes directly to the flat output buffer, 3D
-    writes to a single per-segment slice of `segm_output_ptr`. Descriptor shape /
-    block_shape / reshape are the same in both modes, so share one helper.
+    `(stride_token, stride_head)` pair: 2D writes directly to the
+    flat output buffer, 3D writes to a single per-segment slice of
+    `segm_output_ptr`.  Descriptor shape / block_shape / reshape
+    are the same in both modes, so share one helper.
     """
     acc = acc.to(base_ptr.dtype.element_ty)
     output_desc = tl.make_tensor_descriptor(

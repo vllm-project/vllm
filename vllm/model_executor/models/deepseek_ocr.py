@@ -555,7 +555,8 @@ class DeepseekOCRForCausalLM(
         image_spatial_crop: torch.Tensor | None = None,
     ) -> tuple[int, int, int, int]:
         """Return (num_input_tokens, num_output_tokens, global_output_token,
-        local_output_token) for a single image described by `image_spatial_crop`.
+        local_output_token) for a single image described by
+        `image_spatial_crop`.
         """
         is_tiled = False
         if image_spatial_crop is not None:
@@ -828,7 +829,8 @@ class DeepseekOCRForCausalLM(
         """Assemble per-image embeddings from global and local encoder outputs.
 
         `output['global']` contains global-image features with newlines already
-        inserted (from CUDA graph replay or eager fallback): `[B * 272, n_embed]`.
+        inserted (from CUDA graph replay or eager fallback):
+        `[B * 272, n_embed]`.
 
         `output['local']` contains local-patch features without
         newlines (from CUDA graph replay or eager fallback):

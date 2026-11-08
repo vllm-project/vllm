@@ -139,12 +139,13 @@ def emit_index_scores(
     for token k, k-chunk s (bf16x8 of index q). Pair k * MAX_INDEX_BLOCKS + b of
     mailbox `iscore` <- the score of token k's block b.
 
-    `wait_new_keys()` (K1 fused into the layer kernel; wave-local) waits for the index
-    keys this launch inserts: a block within MAX_TOKENS keys of a token's end may hold
-    an earlier token of its request (speculative decode rows). Without it, every key
-    this launch inserts must sit in a pinned block (one-token requests).
-    `prepare(first, last)` (with CTA barriers) runs on a CTA with tasks before any index
-    q is read: K1 makes rows first..last's there.
+    `wait_new_keys()` (K1 fused into the layer kernel; wave-local) waits for the
+    index keys this launch inserts: a block within MAX_TOKENS keys of a token's
+    end may hold an earlier token of its request (speculative decode rows).
+    Without it, every key this launch inserts must sit in a pinned block
+    (one-token requests). `prepare(first, last)` (with CTA barriers) runs on a
+    CTA with tasks before any index q is read: K1 makes rows first..last's
+    there.
 
     Indexer context parallelism (`heads.count` > 1): a long request
     (`step_rows`) scores only this rank's blocks, b = heads.own

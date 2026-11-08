@@ -16,9 +16,10 @@ mirror `fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_{bf16,fp8}_insert`.
   the same K concat (plus the fp8 K/V cast) without the cache insert, for context
   chunks whose latent was gathered back out of the paged cache.
 
-The optional `positions` / `cos_sin_cache` pair enables GPT-J-style RoPE inside the
-epilogue. Omitting both keeps the K3 NoPE fast path. The kernels use Programmatic
-Dependent Launch to overlap the tail of the producing GEMMs on sm_90+.
+The optional `positions` / `cos_sin_cache` pair enables GPT-J-style RoPE
+inside the epilogue. Omitting both keeps the K3 NoPE fast path. The kernels use
+Programmatic Dependent Launch to overlap the tail of the producing GEMMs on
+sm_90+.
 """
 
 import torch
@@ -178,10 +179,11 @@ def fused_mla_kv_concat(
 ) -> torch.Tensor:
     """Concat `k = [k_nope | k_pe]` into a contiguous key, in one launch.
 
-    The chunked-context counterpart of `fused_mla_key_concat_kv_cache_insert`: no query,
-    no cache insert and no RoPE (the gathered `k_pe` is already rotated). `k_nope` is a
-    strided half of one `kv_b_proj` output and `k_pe` a strided view of the gather
-    workspace, so neither has to be made contiguous first.
+    The chunked-context counterpart of `fused_mla_key_concat_kv_cache_insert`:
+    no query, no cache insert and no RoPE (the gathered `k_pe` is already
+    rotated). `k_nope` is a strided half of one `kv_b_proj` output and
+    `k_pe` a strided view of the gather workspace, so neither has to be made
+    contiguous first.
     """
     k_pe = k_pe.reshape(k_pe.shape[0], k_pe.shape[-1])
     k = _empty_full_key(k_nope, k_pe, k_nope.dtype)

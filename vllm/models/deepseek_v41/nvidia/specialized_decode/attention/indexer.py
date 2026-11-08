@@ -445,12 +445,13 @@ def decode_schedule(
 class CandidateOverlap:
     """The candidate consumers' expansion and schedule on a side stream.
 
-    The first candidate consumer of a decode step expands the candidate blocks into
-    DeepGEMM sparse block ids and builds the paged sparse MQA-logits schedule, which
-    later consumers reuse. Neither reads Q, the KV cache or the hidden states, so the
-    candidate source forks them onto `stream` once it has written the candidates
-    (`fork`) and every consumer waits for them (`join`) before scoring. The kernels and
-    inputs are those of the inline path, so the outputs match.
+    The first candidate consumer of a decode step expands the candidate blocks
+    into DeepGEMM sparse block ids and builds the paged sparse MQA-logits
+    schedule, which later consumers reuse. Neither reads Q, the KV cache or the
+    hidden states, so the candidate source forks them onto `stream` once it
+    has written the candidates (`fork`) and every consumer waits for them
+    (`join`) before scoring. The kernels and inputs are those of the inline
+    path, so the outputs match.
 
     The side stream issues no collectives. The fork waits on the main stream,
     so a step's writes to the builder's `sparse_indices` / `end` cannot

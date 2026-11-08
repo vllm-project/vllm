@@ -102,7 +102,8 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
             num_heads: Local (TP-sharded) query head count of this layer.
 
         Raises:
-            ValueError: If the dtype is not float32 or the shape is not `(num_heads,)`.
+            ValueError: If the dtype is not float32 or the shape is not
+                `(num_heads,)`.
 
         """
         if sinks is None:

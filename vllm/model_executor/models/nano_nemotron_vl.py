@@ -634,9 +634,10 @@ class NanoNemotronVLMultiModalProcessor(
     ) -> tuple[MultiModalDataItems, list[AudioItem], list[bool]]:
         """Extract audio tracks from video bytes in *mm_items*.
 
-        Videos whose bytes are missing or that contain no audio stream are silently
-        skipped. The returned *has_audio* mask is aligned with the video list so callers
-        know which `<video>` tokens need an accompanying audio context.
+        Videos whose bytes are missing or that contain no audio stream are
+        silently skipped.  The returned *has_audio* mask is aligned with
+        the video list so callers know which `<video>` tokens need an
+        accompanying audio context.
 
         Returns:
             A 3-tuple of (augmented mm_items, extracted audio items,

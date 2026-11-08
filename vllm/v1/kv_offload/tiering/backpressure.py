@@ -68,10 +68,11 @@ class ThrottledDropPolicy(DropAccountingPolicy):
         overshoot = (ema - high_water) / high_water
         drop_rate = min(1.0, overshoot / ramp_factor)
 
-    With the default `ramp_factor=2.0`, stores ramp from 0% drop at the high watermark
-    to 100% drop at 3x the high watermark. This keeps secondary tiers populated under
-    moderate pressure, reducing cache misses (and therefore recomputation / ITL
-    regression) while still protecting TTFT under severe congestion.
+    With the default `ramp_factor=2.0`, stores ramp from 0% drop at
+    the high watermark to 100% drop at 3x the high watermark.  This
+    keeps secondary tiers populated under moderate pressure, reducing
+    cache misses (and therefore recomputation / ITL regression) while
+    still protecting TTFT under severe congestion.
 
     Accumulate `drop_rate` across store decisions. When the accumulator
     reaches one, drop the store and subtract one from the accumulator,
@@ -203,9 +204,10 @@ class EMABackpressureDetector(BackpressureDetector):
         with `"locality": "REMOTE"`): CephFS sustains ~1.5 GB/s.
         high=0.020 s/MiB (~50 MB/s); low=0.005 s/MiB (~200 MB/s).
 
-    `obj` tiers get NETWORK defaults automatically. An `fs` tier defaults to LOCAL
-    (appropriate for NVMe/SSD); set `"locality": "REMOTE"` in the tier config for
-    network-backed filesystems like CephFS.
+    `obj` tiers get NETWORK defaults automatically. An
+    `fs` tier defaults to LOCAL (appropriate for NVMe/SSD); set
+    `"locality": "REMOTE"` in the tier config for network-backed
+    filesystems like CephFS.
     """
 
     _MIB = 1 << 20
@@ -323,10 +325,11 @@ class EMABackpressureDetector(BackpressureDetector):
     def _apply_idle_decay(self) -> None:
         """Decay the EMA toward zero based on elapsed idle time.
 
-        Uses the formula `ema * 0.5^(dt / half_life)` so the EMA halves every
-        `decay_half_life_s` seconds of silence. This lets the detector recover from
-        pressure when no stores are attempted (and therefore no completions arrive to
-        update the EMA organically).
+        Uses the formula `ema * 0.5^(dt / half_life)` so the EMA
+        halves every `decay_half_life_s` seconds of silence.  This
+        lets the detector recover from pressure when no stores are
+        attempted (and therefore no completions arrive to update the
+        EMA organically).
         """
         now = time.monotonic()
         dt = now - self._last_update
@@ -395,9 +398,10 @@ class EMABackpressureDetector(BackpressureDetector):
     def is_healthy(self) -> bool:
         """True when the tier has been consistently fast.
 
-        After `_HEALTHY_THRESHOLD` consecutive store completions with EMA below the low
-        watermark (and no active pressure), the detector enters a healthy fast-path:
-        `should_store()` returns `True` immediately, skipping the policy check entirely.
+        After `_HEALTHY_THRESHOLD` consecutive store completions with
+        EMA below the low watermark (and no active pressure), the
+        detector enters a healthy fast-path: `should_store()` returns
+        `True` immediately, skipping the policy check entirely.
         """
         return (
             not self._under_pressure and self._healthy_streak >= self._HEALTHY_THRESHOLD

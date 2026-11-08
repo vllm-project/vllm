@@ -82,9 +82,10 @@ def _linear(
 class MelSpectrogram(nn.Module):
     """Log-mel features as NeMo `FilterbankFeatures` computes them at inference.
 
-    Dither is off and no normalization is applied; frames past each row's length are set
-    to `pad_value`. The filterbank and window come from the checkpoint and are held in
-    the model dtype, as in the reference, and are upcast to float32 for the computation.
+    Dither is off and no normalization is applied; frames past each row's
+    length are set to `pad_value`. The filterbank and window come from the
+    checkpoint and are held in the model dtype, as in the reference, and are
+    upcast to float32 for the computation.
     """
 
     def __init__(self, cfg: dict[str, Any]) -> None:
@@ -400,11 +401,12 @@ class TransformerBlock(nn.Module):
 class TransformerEncoder(nn.Module):
     """NeMo `TransformerEncoder` with RoPE and full attention, at inference.
 
-    `forward` takes `(B, C, T)` mel features, or `(B, T, d_model)` pre-encoded
-    embeddings with `bypass_pre_encode=True`, and returns `(B, d_model, T')` states with
-    their lengths. Only each row's valid frames run through the layers, packed for
-    variable-length attention; the padded positions of the output are zero.
-    `lengths_cpu`, the lengths on the host, lets the packing skip a device-to-host copy.
+    `forward` takes `(B, C, T)` mel features, or `(B, T, d_model)`
+    pre-encoded embeddings with `bypass_pre_encode=True`, and returns
+    `(B, d_model, T')` states with their lengths. Only each row's valid frames
+    run through the layers, packed for variable-length attention; the padded
+    positions of the output are zero. `lengths_cpu`, the lengths on the host,
+    lets the packing skip a device-to-host copy.
     """
 
     def __init__(

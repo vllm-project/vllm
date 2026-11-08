@@ -221,10 +221,11 @@ class QSAIndexer(nn.Module):
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         """Update indexer caches and select token indices from pre-projected Q/K.
 
-        Returns the packed buffer of shape [num_tokens, output_width + 1]: the leading
-        `output_width` columns are `-1`-padded request-relative token indices, and the
-        trailing column is the row's valid-entry count (the attention kernel's loop
-        bound, never a token index).
+        Returns the packed buffer of shape [num_tokens, output_width + 1]:
+        the leading `output_width` columns are `-1`-padded
+        request-relative token indices, and the trailing column is the row's
+        valid-entry count (the attention kernel's loop bound, never a token
+        index).
 
         With `attn.use_fused_qsa_prepare`, the same launch also writes
         `attn`'s K/V into `attn.kv_cache` at `slot_mapping` and prepares

@@ -70,11 +70,12 @@ _SCOPE_CM = {Space.SCRATCH: CM_DEV, Space.PEER: CM_SYS}
 class Mailbox:
     """Tagged-pair hand-off between CTAs (device scope) and GPUs (system scope).
 
-    Every 32-bit value is stored next to this launch's tag; a consumer polls the payload
-    until all tags match, so a hand-off costs one round trip (no store drain, no
-    separate flag). The mono layer's launches tag their hand-offs with their epoch
-    (`layer.py`), so a pair from an earlier step never carries a live tag. Every address
-    is an `Addr`: its space picks the scope.
+    Every 32-bit value is stored next to this launch's tag; a consumer
+    polls the payload until all tags match, so a hand-off costs one round trip
+    (no store drain, no separate flag). The mono layer's launches tag their
+    hand-offs with their epoch (`layer.py`), so a pair from an earlier step
+    never carries a live tag. Every address is an `Addr`: its space picks the
+    scope.
     """
 
     def __init__(self, tag):

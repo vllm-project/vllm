@@ -7,13 +7,14 @@ runs `torch.topk` over all of them. At long context most of a decode row is
 padding, so here the score kernel also writes each row's valid block count and
 `cooperative_topk` scans only that prefix.
 
-The selected set of non-negative ids matches `select_candidate_blocks` except for which
-blocks whose fp32 scores tie exactly at the selection boundary are kept.
-`cooperative_topk` keeps at most `k` (rows of up to 16384 blocks) or 1024 per cluster
-CTA (longer rows) candidates of its fp16 boundary bin, so a more crowded boundary bin is
-selected approximately. The pinned newest block is kept unless at least `k` blocks of
-the row score NaN or overflow fp16. Rows are not sorted and -1 padding may sit anywhere;
-every consumer of the candidate buffer treats a row as a set.
+The selected set of non-negative ids matches `select_candidate_blocks` except
+for which blocks whose fp32 scores tie exactly at the selection boundary are
+kept. `cooperative_topk` keeps at most `k` (rows of up to 16384 blocks) or
+1024 per cluster CTA (longer rows) candidates of its fp16 boundary bin, so a
+more crowded boundary bin is selected approximately. The pinned newest block is
+kept unless at least `k` blocks of the row score NaN or overflow fp16. Rows
+are not sorted and -1 padding may sit anywhere; every consumer of the candidate
+buffer treats a row as a set.
 """
 
 import torch
@@ -116,7 +117,8 @@ def select_candidate_blocks_cooperative(
     """`select_candidate_blocks` for decode rows, on `cooperative_topk`.
 
     Args:
-        logits: [rows, width] fp32 logits; row `i` is valid below `row_ends[i]`.
+        logits: [rows, width] fp32 logits; row `i` is valid below
+            `row_ends[i]`.
         row_ends: Contiguous [rows] int32 row lengths in logits columns.
         block_size: Columns per candidate block.
         out: Contiguous [rows, k] int32 candidate block ids, -1 padded; see

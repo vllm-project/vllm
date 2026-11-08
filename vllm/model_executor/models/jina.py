@@ -332,10 +332,11 @@ class JinaEmbeddingsV5EncoderModel(LlamaForCausalLM, VllmModelForPooling):
 class JinaEmbeddingsV5Model(JinaEmbeddingsV5DecoderModel):
     """Dispatcher for the jina-embeddings-v5 family.
 
-    The family ships two backbones under one `architectures` entry: Qwen3 decoders
-    (-small) and bidirectional EuroBERT encoders (-nano), told apart by `is_decoder`.
-    Inherits the decoder implementation so registry introspection still sees a valid
-    pooling model, and `__new__` swaps in the encoder variant for encoder checkpoints.
+    The family ships two backbones under one `architectures` entry: Qwen3
+    decoders (-small) and bidirectional EuroBERT encoders (-nano), told apart by
+    `is_decoder`. Inherits the decoder implementation so registry introspection
+    still sees a valid pooling model, and `__new__` swaps in the encoder
+    variant for encoder checkpoints.
     """
 
     def __new__(cls, *, vllm_config: VllmConfig, prefix: str = ""):

@@ -125,13 +125,14 @@ async def _drain_and_stop(
 ) -> None:
     """Stop the gRPC server and AsyncLLM within `--shutdown-timeout`.
 
-    0 keeps the abort behavior: in-flight RPCs get `_RPC_GRACE_S`, then EngineCore gets
-    its default join. Otherwise the server refuses new RPCs at once and EngineCore keeps
-    serving until the in-flight RPCs (`inflight`) and their requests are done; RPCs
-    still running at the deadline (`--shutdown-timeout`, but no less than
-    `_RPC_GRACE_S`) are cancelled and abort their requests. EngineCore then drains work
-    that outlives an RPC, such as NIXL prefill blocks the decode side has not read yet,
-    until the same deadline plus `_ENGINE_TEARDOWN_S` for teardown.
+    0 keeps the abort behavior: in-flight RPCs get `_RPC_GRACE_S`, then
+    EngineCore gets its default join. Otherwise the server refuses new RPCs at
+    once and EngineCore keeps serving until the in-flight RPCs (`inflight`)
+    and their requests are done; RPCs still running at the deadline
+    (`--shutdown-timeout`, but no less than `_RPC_GRACE_S`) are cancelled
+    and abort their requests. EngineCore then drains work that outlives an
+    RPC, such as NIXL prefill blocks the decode side has not read yet, until
+    the same deadline plus `_ENGINE_TEARDOWN_S` for teardown.
     """
     loop = asyncio.get_running_loop()
     if shutdown_timeout == 0:

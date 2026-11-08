@@ -41,10 +41,11 @@ def _get_tmp_suffix() -> str:
 def probe_o_direct(directory: str) -> bool:
     """Return whether `O_DIRECT` I/O works in *directory*.
 
-    `O_DIRECT` is unsupported on some filesystems (e.g. the overlayfs backing a
-    container `/tmp`, older tmpfs, or some NFS mounts), where opening or writing a file
-    with it fails with `EINVAL`. Probe once with an aligned single-page write so callers
-    can fall back to buffered I/O instead of failing on every block.
+    `O_DIRECT` is unsupported on some filesystems (e.g. the overlayfs backing
+    a container `/tmp`, older tmpfs, or some NFS mounts), where opening or
+    writing a file with it fails with `EINVAL`. Probe once with an aligned
+    single-page write so callers can fall back to buffered I/O instead of
+    failing on every block.
     """
     if not O_DIRECT:
         return False

@@ -9,14 +9,16 @@ uint8 `[N, K / 2]` (two E2M1 codes per byte, low nibble first) and
 both kernels share the same tensors.
 
 Numerics: every weight is dequantized exactly to BF16 (`e2m1 * e4m3` via
-`cvt.rn.bf16x2.e2m1x2` and `mul.rn.bf16x2`), multiplied with the BF16 activations on
-tensor cores (`mma.sync` m16n8k16, FP32 accumulate), and the FP32 global scale is
-applied to the FP32 accumulator before the single output rounding to BF16.
+`cvt.rn.bf16x2.e2m1x2` and `mul.rn.bf16x2`), multiplied with the BF16
+activations on tensor cores (`mma.sync` m16n8k16, FP32 accumulate), and the
+FP32 global scale is applied to the FP32 accumulator before the single output
+rounding to BF16.
 
-Each CTA owns 16 output features (the MMA M dimension, swap-AB) and `8 * nt` tokens
-(`nt` = 1, 2 or 4, i.e. up to 32); its warps (and, with `split > 1`, the CTAs of a
-cluster) split K and reduce through shared memory / DSMEM. All weight loads are issued
-before `griddepcontrol.wait` so they overlap the previous kernel under PDL.
+Each CTA owns 16 output features (the MMA M dimension, swap-AB) and `8 * nt`
+tokens (`nt` = 1, 2 or 4, i.e. up to 32); its warps (and, with `split > 1`,
+the CTAs of a cluster) split K and reduce through shared memory / DSMEM. All
+weight loads are issued before `griddepcontrol.wait` so they overlap the
+previous kernel under PDL.
 """
 
 from dataclasses import dataclass

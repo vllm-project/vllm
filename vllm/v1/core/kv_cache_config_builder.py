@@ -23,14 +23,14 @@ class KVCacheConfigBuilder(ABC):
         This interface is experimental and subject to change. The exact hooks
         and the `num_blocks` contract may evolve before it stabilizes.
 
-    Subclasses normally inherit from `DefaultKVCacheConfigBuilder` and override only the
-    hooks they need. The cross-worker planning flow
-    (`vllm.v1.core.kv_cache_planning.get_kv_cache_configs`) is Core-owned; this
-    builder supplies the placement decisions: how layers are split into groups and how a
-    group list is materialized into tensors for a given block count. Grouping
-    coordination lives in `DefaultKVCacheConfigBuilder` (a model implementing
-    `SupportsKVCacheGrouping` owns its grouping there); a platform that replaces the
-    builder fully owns its own grouping.
+    Subclasses normally inherit from `DefaultKVCacheConfigBuilder` and
+    override only the hooks they need. The cross-worker planning flow
+    (`vllm.v1.core.kv_cache_planning.get_kv_cache_configs`) is Core-owned;
+    this builder supplies the placement decisions: how layers are split into
+    groups and how a group list is materialized into tensors for a given block
+    count. Grouping coordination lives in `DefaultKVCacheConfigBuilder` (a
+    model implementing `SupportsKVCacheGrouping` owns its grouping there); a
+    platform that replaces the builder fully owns its own grouping.
     """
 
     @abstractmethod
@@ -60,10 +60,11 @@ class KVCacheConfigBuilder(ABC):
     ) -> "KVCacheConfig":
         """Materialize the groups for exactly `num_blocks` blocks.
 
-        Each device backing's size is `bytes_per_block * num_blocks`. All device tensors
-        share one backing allocation unless the builder overrides
-        `_get_pool_bytes_per_block`. Host-resident tensors, such as HiSparse source
-        storage, are excluded from the device byte accounting and sized independently.
+        Each device backing's size is `bytes_per_block * num_blocks`. All
+        device tensors share one backing allocation unless the builder
+        overrides `_get_pool_bytes_per_block`. Host-resident tensors, such as
+        HiSparse source storage, are excluded from the device byte accounting
+        and sized independently.
         """
         raise NotImplementedError
 

@@ -97,7 +97,8 @@ TOOL_NAME_TO_MCP_SERVER_LABEL: Final[dict[str, str]] = {
 def _resolve_mcp_name_label(recipient: str) -> tuple[str, str]:
     """Resolve MCP tool name and server label from a recipient string.
 
-    - `mcp.*` recipients: strip prefix, use the bare name as both name and server_label.
+    - `mcp.*` recipients: strip prefix, use the bare name as both
+      name and server_label.
     - Everything else: use the recipient as the name and look up the
       server_label in TOOL_NAME_TO_MCP_SERVER_LABEL.
     """

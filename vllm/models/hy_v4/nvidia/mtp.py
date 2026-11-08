@@ -146,9 +146,10 @@ def _create_mtp_quant_config(
     """Create the quantization config for the MTP layers.
 
     The MTP quantization algorithm is given by the `mtp_quant_algo` field in
-    `config.json`, independently of the backbone's quantization. Supported values are
-    `"FP8"`, `"NONE"` (inherit the backbone) and `"BF16"` / `"FP16"` (unquantized). A
-    missing or `"NONE"` value falls back to the backbone config.
+    `config.json`, independently of the backbone's quantization. Supported
+    values are `"FP8"`, `"NONE"` (inherit the backbone) and `"BF16"` /
+    `"FP16"` (unquantized). A missing or `"NONE"` value falls back to the
+    backbone config.
 
     Args:
         hf_config: The draft model's HF config.

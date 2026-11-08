@@ -163,8 +163,9 @@ class SiluAndMul(CustomOp):
 class SituAndMul(CustomOp):
     """SituGLU activation used by Kimi models.
 
-    Computes beta * tanh(gate / beta) * sigmoid(gate) * up. When `linear_beta` is set,
-    the up projection is also softly clipped with linear_beta * tanh(up / linear_beta).
+    Computes beta * tanh(gate / beta) * sigmoid(gate) * up.  When
+    `linear_beta` is set, the up projection is also softly clipped with
+    linear_beta * tanh(up / linear_beta).
     """
 
     def __init__(

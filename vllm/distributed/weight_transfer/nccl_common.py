@@ -90,11 +90,12 @@ class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
       that mint the unique id out of band and share it (over HTTP, etc.). Note a
       JAX peer must use `base64.b64encode`, not `urlsafe_b64encode`.
 
-    On the unique-id path all ranks must enter init concurrently (there is no store
-    barrier), and every peer must honor the warm-up handshake: the worker's communicator
-    issues a one-element `all_reduce` immediately after `ncclCommInitRank` (see
-    `PyNcclCommunicator.from_unique_id_bytes`), so a foreign peer must issue a matching
-    one-element `all_reduce` before any other collective or all ranks deadlock.
+    On the unique-id path all ranks must enter init concurrently (there is no
+    store barrier), and every peer must honor the warm-up handshake: the
+    worker's communicator issues a one-element `all_reduce` immediately after
+    `ncclCommInitRank` (see `PyNcclCommunicator.from_unique_id_bytes`), so a
+    foreign peer must issue a matching one-element `all_reduce` before any
+    other collective or all ranks deadlock.
     """
 
     master_address: str | None = None

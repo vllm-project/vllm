@@ -7,9 +7,10 @@ MiniCPM-V specifics:
 
 - `<|im_end|>` and the reserved marker tokens are passthrough terminals,
   so they never leak into `content`.
-- The tokenizer decodes a newline as the two characters `\\` and `n` (e.g. token
-  id 1639) instead of `\\n`, so the decoded text is recovered before it reaches the
-  client. Code blocks, inline code and LaTeX are left alone, as are tool call arguments.
+- The tokenizer decodes a newline as the two characters `\\` and `n`
+  (e.g. token id 1639) instead of `\\n`, so the decoded text is recovered
+  before it reaches the client. Code blocks, inline code and LaTeX are left
+  alone, as are tool call arguments.
 """
 
 from __future__ import annotations

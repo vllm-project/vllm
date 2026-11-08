@@ -44,29 +44,33 @@ publish kernel of `BoundaryAllReduce` reads it back and multicasts it into the
 Lamport mailbox before the consumer can collect the peers' contributions.
 
 `PublishingMxfp8Linear` runs the same GEMM, with the tactic FlashInfer's
-autotuner selected for the plain call, but its epilogue also does the publish kernel's
-work: every output value goes, rounded to BF16 with negative zero cleared, into this
-rank's slot of the mailbox generation `stage_state[0]` on all ranks (`multimem.st`), and
-one thread sets `stage_state[1]` to that generation. The caller then calls the same
-`BoundaryAllReduce` instance with the returned tensor, which launches only the consumer
-(`BoundaryAllReduce.mark_published`). The consumer is unchanged, so its outputs are
-bit-identical to the unfused path's.
+autotuner selected for the plain call, but its epilogue also does the publish
+kernel's work: every output value goes, rounded to BF16 with negative zero
+cleared, into this rank's slot of the mailbox generation `stage_state[0]` on
+all ranks (`multimem.st`), and one thread sets `stage_state[1]` to that
+generation. The caller then calls the same `BoundaryAllReduce` instance with
+the returned tensor, which launches only the consumer
+(`BoundaryAllReduce.mark_published`). The consumer is unchanged, so its
+outputs are bit-identical to the unfused path's.
 
-GEMM structure. The kernel computes `C[n, m] = sum_k W[n, k] x[m, k]` with the weight as
-operand A (128 output columns per CTA, `N / 128` CTAs) and the at most 8 activation rows
-as operand B. With split-K `S` (the tactic's last field), the `S` CTAs of a cluster each
-multiply a K slice, exchange FP32 partials through distributed shared memory and each
-reduce `1 / S` of the register elements. The epilogue's TMEM load is 16x256b for this
-BF16 output (32x32b is also handled): for one register element, the eight consecutive
-output columns of one row sit in eight lanes four apart, all owned by the same CTA. Warp
-shuffles pack them into one 16-byte multicast store issued by the lane whose column is a
-multiple of 8, so every store is aligned like the consumer's 16-byte mailbox fragments.
+GEMM structure. The kernel computes `C[n, m] = sum_k W[n, k] x[m, k]` with the
+weight as operand A (128 output columns per CTA, `N / 128` CTAs) and the at
+most 8 activation rows as operand B. With split-K `S` (the tactic's last
+field), the `S` CTAs of a cluster each multiply a K slice, exchange FP32
+partials through distributed shared memory and each reduce `1 / S` of the
+register elements. The epilogue's TMEM load is 16x256b for this BF16 output
+(32x32b is also handled): for one register element, the eight consecutive
+output columns of one row sit in eight lanes four apart, all owned by the same
+CTA. Warp shuffles pack them into one 16-byte multicast store issued by the lane
+whose column is a multiple of 8, so every store is aligned like the
+consumer's 16-byte mailbox fragments.
 
-Ordering. The epilogue reads `stage_state[0]` after its MMA completed, hence after the
-GEMM's programmatic grid wait (the B loads follow it), exactly as the publish kernel
-reads it after its own grid wait; the previous consumer wrote it. The consumer, launched
-as the GEMM's programmatic dependent, reads `stage_state[1]` only after its grid wait,
-that is, after the whole GEMM grid and its stores completed.
+Ordering. The epilogue reads `stage_state[0]` after its MMA completed, hence
+after the GEMM's programmatic grid wait (the B loads follow it), exactly as the
+publish kernel reads it after its own grid wait; the previous consumer wrote it.
+The consumer, launched as the GEMM's programmatic dependent, reads
+`stage_state[1]` only after its grid wait, that is, after the whole GEMM grid
+and its stores completed.
 
 Addresses. The mailbox multicast address, the stage-state address, the rank,
 the TP size, the mailbox capacity and the hidden size are compile-time

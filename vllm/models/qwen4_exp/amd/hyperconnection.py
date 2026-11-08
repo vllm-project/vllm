@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """HyperConnection (Gated Residual) utilities for the AMD model variant.
 
-Implements the HyperConnection residual scheme proposed in "HyperConnections"
-(https://arxiv.org/abs/2409.19606). This AMD variant delays each HC combine to the
-following HC mix boundary. HC glue kernels, including fused combine+RMSNorm, live in
-`ops/hc.py`; projections remain standard vLLM Linear modules.
+Implements the HyperConnection residual scheme proposed in
+"HyperConnections" (https://arxiv.org/abs/2409.19606). This AMD variant
+delays each HC combine to the following HC mix boundary. HC glue kernels,
+including fused combine+RMSNorm, live in `ops/hc.py`; projections remain
+standard vLLM Linear modules.
 
 Hidden states between layers have shape `[..., HC*HS]` with HS inner
 (HC outer, HS inner — checkpoint-native layout).
@@ -156,8 +157,9 @@ class GatedResidual(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Consume a pending combine, then prepare the next block input.
 
-        `hidden_states` is the multi-stream state from before the pending block's mix.
-        Its combine with `block_output` is fused with this module's input RMSNorm.
+        `hidden_states` is the multi-stream state from before the pending
+        block's mix. Its combine with `block_output` is fused with this
+        module's input RMSNorm.
         """
         hidden_states, xn = hc_combine_norm(
             hidden_states,

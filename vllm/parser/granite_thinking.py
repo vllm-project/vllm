@@ -45,11 +45,13 @@ class GraniteThinkingParser(NemotronV3Parser):
     """Granite 4.2 parser: same format as Nemotron V3, with
     leading-newline stripping on content after `</think>`.
 
-    The `reasoning_ended` property is overridden to delay the reasoning-to-content
-    transition reported to `DelegatingParser` until
-    the template's leading newline has been consumed. Without this delay,
-    `DelegatingParser.parse_delta` passes newline tokens through a raw pass-through path
-    that bypasses the engine's `_events_to_delta` (and therefore our stripping logic).
+    The `reasoning_ended` property is overridden to delay the
+    reasoning-to-content transition reported to
+    `DelegatingParser` until the
+    template's leading newline has been consumed.  Without this delay,
+    `DelegatingParser.parse_delta` passes newline tokens through a
+    raw pass-through path that bypasses the engine's
+    `_events_to_delta` (and therefore our stripping logic).
     """
 
     def __init__(

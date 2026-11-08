@@ -1277,13 +1277,14 @@ def _max_decode_logits_rows(num_batched_tokens: int) -> int:
     """Upper bound on decode rows the paged-MQA logits buffer can ever hold.
 
     `rocm_fp8_paged_mqa_logits` sizes its workspace as
-    `(batch_size * next_n, max_model_len)`. `batch_size` is bounded by `max_num_seqs`
-    and `next_n` by `1 + num_speculative_tokens`, which is far tighter than
-    `max_num_batched_tokens` -- 192 vs 16384 for a typical 32-seq DSpark-5 deployment.
-    The loose bound is harmless at short contexts but scales with `max_model_len`, so at
-    the model's full context it asks for tens of TiB and the engine cannot start. Take
-    whichever valid bound is smaller; the workspace is locked after profiling, so it
-    must not be under- estimated.
+    `(batch_size * next_n, max_model_len)`. `batch_size` is bounded by
+    `max_num_seqs` and `next_n` by `1 + num_speculative_tokens`, which is
+    far tighter than `max_num_batched_tokens` -- 192 vs 16384 for a typical
+    32-seq DSpark-5 deployment. The loose bound is harmless at short contexts
+    but scales with `max_model_len`, so at the model's full context it asks
+    for tens of TiB and the engine cannot start. Take whichever valid bound is
+    smaller; the workspace is locked after profiling, so it must not be under-
+    estimated.
     """
     try:
         vllm_config = get_current_vllm_config()
@@ -1935,10 +1936,11 @@ def rocm_inv_rope_einsum(
 ) -> torch.Tensor:
     """Inverse-RoPE + WO_A bmm path used on ROCm.
 
-    Fuses the inverse GPT-J RoPE into one Triton kernel and caches the bf16 wo_a weight
-    so the per-step dequant disappears. Callers whose attention already rotated every
-    row pass `inverse_rope=False`; that is a property of the attention backend, not of
-    the batch, so it stays constant across steps and is safe to read from compiled code.
+    Fuses the inverse GPT-J RoPE into one Triton kernel and caches the bf16
+    wo_a weight so the per-step dequant disappears. Callers whose attention
+    already rotated every row pass `inverse_rope=False`; that is a property
+    of the attention backend, not of the batch, so it stays constant across
+    steps and is safe to read from compiled code.
     """
     if inverse_rope:
         o_ref = _fused_inverse_rope_gptj(
@@ -2119,11 +2121,12 @@ def rocm_mxfp8_wo_a_bmm(
 ) -> torch.Tensor:
     """Grouped MXFP8 wo_a: `out[t, g, :] = a[t, g, :] @ W[g].T`, bf16 out.
 
-    `a` is the [T, G * K] e4m3 attention output and `a_scale` its [T, G * K // 32] E8M0
-    scales, as the sparse decode reduce writes them. The weight is the checkpoint's
-    MXFP8 `wo_a` as loaded, [G * R, K] with either [G * R // 32, K // 32] block scales
-    or [G * R, K // 32] per-row scales, so there is no dequantized copy to keep. Returns
-    [T, G * R].
+    `a` is the [T, G * K] e4m3 attention output and `a_scale` its
+    [T, G * K // 32] E8M0 scales, as the sparse decode reduce writes them.
+    The weight is the checkpoint's MXFP8 `wo_a` as loaded, [G * R, K] with
+    either [G * R // 32, K // 32] block scales or [G * R, K // 32] per-row
+    scales, so there is no dequantized copy to keep.
+    Returns [T, G * R].
     """
     return torch.ops.vllm.rocm_dsv41_mxfp8_wo_a_bmm(
         a, a_scale, wo_a.weight, wo_a.weight_scale, n_groups, o_lora_rank
@@ -3952,9 +3955,10 @@ def _decode_num_splits(
         over-split into many mostly-idle waves (e.g. batch 224 on 256 CUs is
         best left at 1 split rather than 8 splits across 7 waves).
 
-    The minimiser naturally prefers split counts that pack the device into full waves
-    (`base * s` near a multiple of `CU`) and falls back to 1 split once the batch
-    already fills the device. Ties favour the smaller split count (less reduce work).
+    The minimiser naturally prefers split counts that pack the device into full
+    waves (`base * s` near a multiple of `CU`) and falls back to 1 split
+    once the batch already fills the device. Ties favour the smaller split
+    count (less reduce work).
 
     Finally we "snap down" the chosen split count to the smallest value that
     yields the same wave count *and* the same per-workgroup BLOCK_K iteration
@@ -4816,9 +4820,10 @@ def rocm_sparse_attn_decode(
     so a caller mixing in a decode path that does not fuse still knows what it
     owes the standalone pass. Read it from the eager attention segment only.
 
-    `output_mxfp8 = (data, scale)` replaces `output`: the reduce also MXFP8-quantizes
-    the rotated rows for the FP8 wo_a (see `_rocm_sparse_attn_decode_ragged_triton`). It
-    needs gfx950 and the fused inverse RoPE, and always covers every row.
+    `output_mxfp8 = (data, scale)` replaces `output`: the reduce also
+    MXFP8-quantizes the rotated rows for the FP8 wo_a (see
+    `_rocm_sparse_attn_decode_ragged_triton`). It needs gfx950 and the fused
+    inverse RoPE, and always covers every row.
     """
     assert swa_k_cache.dtype == torch.uint8, (
         "ROCm Triton sparse decode expects uint8 fp8_ds_mla SWA cache, "

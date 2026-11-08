@@ -9,7 +9,8 @@ every rank to score every head:
 1. all-gather the index queries (`heads * 128` bf16 per token),
 2. score all global heads on this rank's round-robin block shard (1/P of the
    index cache),
-3. pack each head's shard top-k as `(score, global block id)` keys and all-gather them,
+3. pack each head's shard top-k as `(score, global block id)` keys and
+   all-gather them,
 4. merge per global head, keeping only the heads this rank owns.
 
 Each head's merge sees every shard's top-k *for that head*, so it is exact: a
@@ -201,10 +202,11 @@ _SHARED_CP_DECODE: dict[tuple, IndexerCPDecode] = {}
 def get_shared_cp_decode(**kwargs) -> IndexerCPDecode:
     """One `IndexerCPDecode` per rank and geometry, shared by all layers.
 
-    Each of M3's sparse layers has its own indexer, and a private buffer set per layer
-    would hold ~57 idle copies. The buffers are written and consumed within one indexer
-    call and layers run in order on one stream (as the model's shared
-    `topk_indices_buffer` already assumes), so all layers can reuse one set.
+    Each of M3's sparse layers has its own indexer, and a private buffer set
+    per layer would hold ~57 idle copies. The buffers are written and consumed
+    within one indexer call and layers run in order on one stream (as the
+    model's shared `topk_indices_buffer` already assumes), so all layers can
+    reuse one set.
     """
     group = kwargs["group"]
     key = tuple(sorted((k, v) for k, v in kwargs.items() if k != "group")) + (
@@ -222,10 +224,11 @@ class MiniMaxM3IndexerTritonCPImpl(MiniMaxM3IndexerTritonImpl):
     Decode runs through `IndexerCPDecode`. Prefill uses the base Triton
     kernels.
 
-    CUDAGraph: v2 FULL capture records the model with `cudagraph_runtime_mode=NONE` (see
-    `ModelCudaGraphManager.capture`), so a `CUDAGraphMode.FULL` guard never fires and a
-    stream-capturing skip would bake the non-CP indexer into decode graphs. Persistent
-    buffers keep this path allocation-free so CP is what gets captured.
+    CUDAGraph: v2 FULL capture records the model with
+    `cudagraph_runtime_mode=NONE` (see `ModelCudaGraphManager.capture`), so
+    a `CUDAGraphMode.FULL` guard never fires and a stream-capturing skip
+    would bake the non-CP indexer into decode graphs. Persistent buffers keep
+    this path allocation-free so CP is what gets captured.
     """
 
     def __init__(self, **kwargs) -> None:

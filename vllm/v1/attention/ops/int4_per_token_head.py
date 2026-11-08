@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sub-byte packed (INT4) per-token-head KV cache mode.
 
-INT4 packs two 4-bit values per cache byte, pre-rotates with a single RHT, and hides a
-4-bit zero-point in the scale's low mantissa bits — too different from the core kernel
-to share it. Owns the whole mode: nibble pack/unpack, the reshape (write) kernel, the
-split-dot attention (read) kernel, the RHT transform, and the public
-`reshape_and_cache_int4` / `unified_attention_int4` entry points.
+INT4 packs two 4-bit values per cache byte, pre-rotates with a single RHT,
+and hides a 4-bit zero-point in the scale's low mantissa bits — too
+different from the core kernel to share it. Owns the whole mode: nibble
+pack/unpack, the reshape (write) kernel, the split-dot attention (read)
+kernel, the RHT transform, and the public `reshape_and_cache_int4` /
+`unified_attention_int4` entry points.
 """
 
 from __future__ import annotations
@@ -908,9 +909,10 @@ def unified_attention_int4(
 ) -> None:
     """Paged attention over the INT4 packed cache, writing into *out*.
 
-    The forward RHT has norm `sqrt(b)` for `b` the largest power-of-two divisor of
-    `head_size` (`b == head_size` for power-of-two sizes), so `softmax_scale` is divided
-    by `b` and the inverse RHT divides the output by `b` as well.
+    The forward RHT has norm `sqrt(b)` for `b` the largest power-of-two
+    divisor of `head_size` (`b == head_size` for power-of-two sizes), so
+    `softmax_scale` is divided by `b` and the inverse RHT divides the output
+    by `b` as well.
     """
     q_orig_dtype = q.dtype
     q = single_rht(q.float()).to(q_orig_dtype)

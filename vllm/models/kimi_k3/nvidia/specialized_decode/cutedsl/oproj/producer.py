@@ -7,9 +7,10 @@ parts are reduced in order. Weights load before the PDL wait; the split producer
 triggers its consumer right after it. With `group_tiles` the batch runs in groups of
 that many 8-token tiles: each group's x arrives through a double-buffered cp.async ring
 during the previous group's MMAs, and is reduced and published during the next one's.
-With `twoshot` the partial chunks go to their owners' receive slots instead (the first
-shot of `common.twoshot`; args 2-4: receive view, owners' bases, rank). `OprojUmma` is
-the tcgen05 engine of the same producer for B>8."""
+With `twoshot` the partial chunks go to their owners' receive slots instead (the
+first shot of `common.twoshot`; args 2-4: receive view, owners' bases, rank).
+`OprojUmma` is the tcgen05 engine of
+the same producer for B>8."""
 
 import cutlass
 import cutlass.cute as cute

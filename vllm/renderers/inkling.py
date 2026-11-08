@@ -3,12 +3,14 @@
 """Native Inkling chat renderer for the Python frontend.
 
 Mirrors the Rust frontend's native Inkling renderer
-(`rust/src/chat/src/renderer/inkling/mod.rs`): chat messages are rendered directly to
-token ids — Inkling has no Jinja chat template and no faithful text form.
+(`rust/src/chat/src/renderer/inkling/mod.rs`): chat messages are rendered
+directly to token ids — Inkling has no Jinja chat template and no faithful
+text form.
 
-The encoding logic lives in `inkling_encoding.py` behind a narrow "OpenAI messages +
-tools -> token ids" call; see the swap-point comment in `InklingRenderer._render`
-for adopting a standalone Inkling input-processing library (mistral-common style) later.
+The encoding logic lives in `inkling_encoding.py` behind a narrow
+"OpenAI messages + tools -> token ids" call; see the swap-point comment
+in `InklingRenderer._render` for adopting a standalone Inkling
+input-processing library (mistral-common style) later.
 """
 
 from vllm.config import VllmConfig

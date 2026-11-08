@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Admission control for frontend GPU-side multimodal work.
 
-When multimodal media is decoded on the GPU in the API-server (frontend) process, the
-decoded buffers compete for the same device memory that the engine reserves for weights,
-activations, and the KV cache. To keep the frontend's GPU usage within a sequestered
-budget (see `MultiModalConfig.mm_ipc_gpu_memory_gb`), decode paths acquire the number of
-bytes they need from a process-global `MultiModalGPUMemoryPool` before allocating
-on the device and release them once the device memory is freed.
+When multimodal media is decoded on the GPU in the API-server (frontend)
+process, the decoded buffers compete for the same device memory that the
+engine reserves for weights, activations, and the KV cache. To keep the
+frontend's GPU usage within a sequestered budget (see
+`MultiModalConfig.mm_ipc_gpu_memory_gb`), decode paths acquire the number of
+bytes they need from a process-global `MultiModalGPUMemoryPool` before
+allocating on the device and release them once the device memory is freed.
 
 The pool is a simple byte-counting semaphore: `acquire` blocks until enough
 budget is free, so concurrent requests serialize rather than oversubscribe the
@@ -163,10 +164,11 @@ def reserve_mm_ipc_gpu_memory(
     * The total `mm_ipc_gpu_memory_gb` budget for transient decoded-frame
       buffers. This budget is divided among API processes, so it is not
       multiplied by `api_process_count`.
-    * For GPU video backends, a fixed upper bound for each API process's retained
-      decoder surfaces and CUDA context. The PyNvVideoCodec surface reservation scales
-      with its configured `hw_decoders` value, and the entire decoder reservation scales
-      with `api_process_count` because these resources are not shared between processes.
+    * For GPU video backends, a fixed upper bound for each API process's
+      retained decoder surfaces and CUDA context. The PyNvVideoCodec surface
+      reservation scales with its configured `hw_decoders` value, and the
+      entire decoder reservation scales with `api_process_count` because
+      these resources are not shared between processes.
 
     Args:
         available_kv_cache_memory_bytes: KV-cache capacity before reserving

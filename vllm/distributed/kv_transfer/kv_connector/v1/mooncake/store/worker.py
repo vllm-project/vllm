@@ -298,8 +298,9 @@ def _split_disk_offload_load_batches(
     segments) for key `i`. `usable_budget_bytes` caps a multi-key batch;
     `raw_budget_bytes` is the hard per-key cap.
 
-    Returns `(batches, oversize_key)`. Aborts with `([], key)` if any single key exceeds
-    `raw_budget_bytes`; otherwise `oversize_key` is `None`.
+    Returns `(batches, oversize_key)`. Aborts with `([], key)` if any
+    single key exceeds `raw_budget_bytes`; otherwise `oversize_key` is
+    `None`.
     """
     batches: list[tuple[list[str], list[list[int]], list[list[int]]]] = []
     batch_keys: list[str] = []
@@ -2700,7 +2701,8 @@ class LookupKeyServer:
     Handles two request types, tagged at frame 0:
     - `LOOKUP_MSG`: prefix-cache hit query, returns its load plan.
     - `RESET_MSG`: drains the send thread queue, then runs
-      `store.remove_all(force=True)`. Caller must have paused the scheduler first.
+      `store.remove_all(force=True)`. Caller must have paused the
+      scheduler first.
     """
 
     def __init__(

@@ -44,7 +44,8 @@ def detect_token_suffix(tokenizer: TokenizerLike) -> str:
 
     Raises:
         RuntimeError: The tokenizer declares the structural tokens through
-            `model_specific_special_tokens`, which transformers 5 no longer round-trips.
+            `model_specific_special_tokens`, which transformers 5 no longer
+            round-trips.
 
     """
     init_kwargs = getattr(tokenizer, "init_kwargs", None) or {}

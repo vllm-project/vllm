@@ -293,8 +293,9 @@ class MooncakeStoreCoordinator:
     ) -> tuple[list[bool] | None, ...]:
         """Per-group lookup masks.
 
-        `mask[g][i]` is True iff physical block `i` of group `g` should be looked up as
-        an aligned hit boundary. `None` is the all-True sentinel.
+        `mask[g][i]` is True iff physical block `i` of group `g` should be
+        looked up as an aligned hit boundary. `None` is the all-True
+        sentinel.
         """
         return self._reachable_masks(
             aligned_token_len,

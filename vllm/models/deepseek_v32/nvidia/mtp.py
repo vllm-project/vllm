@@ -255,8 +255,9 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         """Greedy draft token ids via per-rank argmax over the vocab shard.
 
-        Saves the full-vocab all-gather `compute_logits` does; same tokens. Name is
-        fixed by the protocol the proposer probes for (`use_local_argmax_reduction`).
+        Saves the full-vocab all-gather `compute_logits` does; same tokens.
+        Name is fixed by the protocol the proposer probes for
+        (`use_local_argmax_reduction`).
         """
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]

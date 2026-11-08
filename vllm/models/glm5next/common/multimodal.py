@@ -721,10 +721,11 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
     ) -> list[int]:
         """Timestamps for the video placeholder, from the pixel path's sampler.
 
-        The inherited GLM-4.6V timestamp sampling uses different constants than this
-        checkpoint's `Glm5NextVideoProcessor` pixel sampling, so placeholder count and
-        `video_grid_thw` disagree outside 30-300s durations. Sampling with the pixel
-        path's own policy makes one timestamp per temporal patch == `grid_t`.
+        The inherited GLM-4.6V timestamp sampling uses different constants
+        than this checkpoint's `Glm5NextVideoProcessor` pixel sampling, so
+        placeholder count and `video_grid_thw` disagree outside 30-300s
+        durations. Sampling with the pixel path's own policy makes one
+        timestamp per temporal patch == `grid_t`.
         """
         video_processor = self.get_video_processor()
         temporal_patch_size = int(
@@ -786,10 +787,11 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
     ) -> tuple[ImageSize, int]:
         """GLM-5.3-Flash canvas geometry for token budgeting and dummy inputs.
 
-        The inherited Glm4v path resolves the pixel budget from `size.longest_edge` and
-        resizes with GLM-4V's `smart_resize`. This checkpoint ships token bounds
-        instead, and the alignment factor carries `patch_expand_factor` — resolve both
-        from the processor so profiling matches runtime geometry.
+        The inherited Glm4v path resolves the pixel budget from
+        `size.longest_edge` and resizes with GLM-4V's `smart_resize`. This
+        checkpoint ships token bounds instead, and the alignment factor carries
+        `patch_expand_factor` — resolve both from the processor so profiling
+        matches runtime geometry.
         """
         from transformers.models.glm5_next.image_processing_glm5_next import (
             smart_resize,

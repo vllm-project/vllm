@@ -150,10 +150,11 @@ def fill_mm_prefix_query_ranges(
     `[start, end]` bounds of the bidirectional range that query token `i`
     belongs to, or `(-1, -1)` when it is outside every range.
 
-    mm_prefix ranges never overlap, so "query and key share a range" is equivalent to
-    "the key lies inside the query's own range". The kernel therefore needs no key-side
-    lookup, and this metadata is sized by scheduled query tokens rather than by context
-    length -- bounded by `max_num_batched_tokens` instead of `num_seqs * max_seq_len`.
+    mm_prefix ranges never overlap, so "query and key share a range" is
+    equivalent to "the key lies inside the query's own range". The kernel
+    therefore needs no key-side lookup, and this metadata is sized by scheduled
+    query tokens rather than by context length -- bounded by
+    `max_num_batched_tokens` instead of `num_seqs * max_seq_len`.
 
     Ranges are absolute prompt positions and may extend past the tokens
     scheduled so far under chunked prefill; the portion outside the current
@@ -314,17 +315,19 @@ def resolve_kv_cache_layout(
 ) -> KVCacheLayout:
     """Resolve one KV cache layout for the whole model.
 
-    Runs once in the engine core. Every worker reports the layouts its backends support,
-    most preferred first (`get_supported_kv_cache_layouts`). Pipeline stages hold
-    different layers, so their lists may differ; the candidates are the layouts every
-    worker supports, and the layout the most workers put first wins. Workers whose
-    backends declare nothing do not vote. Specs mixing HNC shapes narrow the candidates
-    to block-compact layouts. An explicit `VLLM_KV_CACHE_LAYOUT` must be one of the
-    candidates or resolution fails, with the legacy `NHD`/`HND` names as aliases for
-    `LBNHC`/`LBHNC`; the connector's preference is used when compatible and dropped with
-    a warning otherwise. A layout already present on `cache_config` wins outright, and
-    the result is recorded there (see `CacheConfig.kv_cache_layout`); it reaches workers
-    through the `set_kv_cache_layout` RPC and `KVCacheConfig.kv_cache_layout`.
+    Runs once in the engine core. Every worker reports the layouts its backends
+    support, most preferred first (`get_supported_kv_cache_layouts`). Pipeline
+    stages hold different layers, so their lists may differ; the candidates are
+    the layouts every worker supports, and the layout the most workers put first
+    wins. Workers whose backends declare nothing do not vote. Specs mixing HNC
+    shapes narrow the candidates to block-compact layouts. An explicit
+    `VLLM_KV_CACHE_LAYOUT` must be one of the candidates or resolution fails,
+    with the legacy `NHD`/`HND` names as aliases for `LBNHC`/`LBHNC`; the
+    connector's preference is used when compatible and dropped with a warning
+    otherwise. A layout already present on `cache_config` wins outright, and
+    the result is recorded there (see `CacheConfig.kv_cache_layout`); it
+    reaches workers through the `set_kv_cache_layout` RPC and
+    `KVCacheConfig.kv_cache_layout`.
     """
     cache_config = vllm_config.cache_config
     if cache_config.kv_cache_layout is not None:
@@ -508,10 +511,11 @@ def get_num_attention_heads_from_layers(
 ) -> int | None:
     """Per-TP-rank `num_heads` shared by the named Attention layers.
 
-    Use in metadata builders whose plan-time allocations depend on the head count: the
-    model-wide `get_num_attention_heads()` is wrong for models with non-uniform
-    per-layer head counts. All layers in one attention group must agree on `num_heads`;
-    this is asserted. Returns `None` when no matching Attention layer is found.
+    Use in metadata builders whose plan-time allocations depend on the
+    head count: the model-wide `get_num_attention_heads()` is wrong
+    for models with non-uniform per-layer head counts. All layers in
+    one attention group must agree on `num_heads`; this is asserted.
+    Returns `None` when no matching Attention layer is found.
     """
     attn_layers = get_layers_from_vllm_config(
         vllm_config,

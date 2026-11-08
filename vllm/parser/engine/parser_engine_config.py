@@ -60,9 +60,10 @@ class Transition:
 class ParserEngineConfig:
     """Declarative description of a model's tool-call / reasoning format.
 
-    The engine feeds terminals from the incremental lexer into the transition table and
-    emits the corresponding semantic events. Content tokens (text between terminals) are
-    classified by the current state via `content_events`.
+    The engine feeds terminals from the incremental lexer into the
+    transition table and emits the corresponding semantic events.
+    Content tokens (text between terminals) are classified by the
+    current state via `content_events`.
     """
 
     name: str

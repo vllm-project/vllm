@@ -34,11 +34,12 @@ class MultiModalCacheMissError(RuntimeError):
     """Raised by the P1 receiver cache when items are requested with no data and
     are not cached.
 
-    P0 (frontend) keeps a metadata-only shadow of P1 (engine) and sends `data=None` on a
-    shadow hit. The two caches are updated in different orders across processes, so they
-    can drift -- leaving P0 referencing items P1 has evicted. Raising (instead of
-    asserting) lets the engine return a retryable response and have P0 drop the stale
-    entries (`BaseMultiModalProcessorCache.invalidate`) so the client resends the data.
+    P0 (frontend) keeps a metadata-only shadow of P1 (engine) and sends
+    `data=None` on a shadow hit. The two caches are updated in different orders
+    across processes, so they can drift -- leaving P0 referencing items P1 has
+    evicted. Raising (instead of asserting) lets the engine return a retryable
+    response and have P0 drop the stale entries
+    (`BaseMultiModalProcessorCache.invalidate`) so the client resends the data.
     Carries every drifted `mm_hash` in the request so P0 can drop them all in one
     pass -- one retry then recovers the whole request, not one item per retry.
     """

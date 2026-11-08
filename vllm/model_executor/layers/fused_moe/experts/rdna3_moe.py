@@ -55,10 +55,11 @@ def rdna3_moe_kernel_available() -> bool:
 class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
     """W4A16 experts backed by `moe_gptq_gemm_rdna3` (gfx1100).
 
-    Both GEMMs accumulate atomically, so their destinations are zeroed first. The second
-    GEMM is given `output_topk`, which makes it reduce over the top-k dimension while it
-    accumulates — the `moe_sum` launch and the `[M * top_k, K]` intermediate are fused
-    away, hence `TopKWeightAndReduceNoOP`.
+    Both GEMMs accumulate atomically, so their destinations are zeroed first.
+    The second GEMM is given `output_topk`, which makes it reduce over the
+    top-k dimension while it accumulates — the `moe_sum` launch and the
+    `[M * top_k, K]` intermediate are fused away, hence
+    `TopKWeightAndReduceNoOP`.
     """
 
     def __init__(

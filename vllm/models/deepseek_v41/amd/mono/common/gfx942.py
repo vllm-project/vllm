@@ -3,16 +3,18 @@
 """gfx942 (MI300X, MI325X) replacements for the gfx950 instructions the mono
 kernels use.
 
-FP8 on gfx942 is FNUZ: the same bit patterns as OCP e4m3 stand for half the OCP value,
-and 0x80 is NaN instead of -0. The kernels quantize with an FP8 maximum of 224 there
-(`arch.GFX942`), which gives the same bit patterns as OCP quantization with 448 and a
-scale code one higher. A product of two bytes then needs 2^(code_a + code_b - 254) with
-the FNUZ codes, which is what `mx_factor` returns.
+FP8 on gfx942 is FNUZ: the same bit patterns as OCP e4m3 stand for half the
+OCP value, and 0x80 is NaN instead of -0. The kernels quantize with an FP8
+maximum of 224 there (`arch.GFX942`), which gives the same bit patterns as
+OCP quantization with 448 and a scale code one higher. A product of two
+bytes then needs 2^(code_a + code_b - 254) with the FNUZ codes, which is what
+`mx_factor` returns.
 
-gfx942 has no scaled MFMA. A GEMV runs one `v_mfma_f32_16x16x32_fp8_fp8` per 32-wide K
-block (one scale block) with a zero accumulator and adds the result times the block's
-scale factor (`mfma_fp8_scaled`). A lane holds 8 bytes of each block: K 8 (lane / 16)
-.. + 8 of the block, for its row (A) or column (B).
+gfx942 has no scaled MFMA. A GEMV runs one `v_mfma_f32_16x16x32_fp8_fp8`
+per 32-wide K block (one scale block) with a zero accumulator and adds the
+result times the block's scale factor (`mfma_fp8_scaled`). A lane holds 8
+bytes of each block: K 8 (lane / 16) .. + 8 of the block, for its row (A) or
+column (B).
 """
 
 import flydsl.expr as fx

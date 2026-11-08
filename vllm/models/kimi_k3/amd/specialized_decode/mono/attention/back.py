@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""K2a `attn_post`: one Kimi-K3 KDA layer from the gated core output to the MoE's input
-row -- o_proj, its TP all-reduce inside the kernel, and the MLP AttnRes seam.
+"""K2a `attn_post`: one Kimi-K3 KDA layer from the gated core output to the
+MoE's input row -- o_proj, its TP all-reduce inside the kernel, and the MLP
+AttnRes seam.
 
 One launch a layer and rank, `BLOCKS` x `THREADS`:
 

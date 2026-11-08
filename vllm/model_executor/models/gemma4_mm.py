@@ -7,10 +7,11 @@ text-only Gemma4ForCausalLM.  The vision/audio encoders are loaded via
 AutoModel.from_config and run in eager mode while the language model uses
 the vLLM-optimized path.
 
-Video support: Gemma4 does **not** have a native video tower. Videos are decomposed into
-timestamped image frames (up to 32 frames at 70 soft tokens each) and fed through the
-same vision tower as regular images. The processor inserts `mm:ss` timestamps between
-frames so the model can reason about temporal order.
+Video support:  Gemma4 does **not** have a native video tower.  Videos are
+decomposed into timestamped image frames (up to 32 frames at 70 soft tokens
+each) and fed through the same vision tower as regular images.  The
+processor inserts `mm:ss` timestamps between frames so the model can
+reason about temporal order.
 """
 
 import itertools
@@ -325,8 +326,9 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         Args:
             image_width: Width of the image in pixels.
             image_height: Height of the image in pixels.
-            max_soft_tokens: Override for the vision config's `default_output_length`.
-                When *None*, the value from the model config is used.
+            max_soft_tokens: Override for the vision config's
+                `default_output_length`.  When *None*, the value from
+                the model config is used.
 
         """
         vision_cfg = self.get_hf_config().vision_config
@@ -983,11 +985,12 @@ class Gemma4MultimodalEmbedder(nn.Module):
     Architecture:
         inputs_embeds → embedding_projection → embedding_post_projection_norm
 
-    Unlike Gemma3n which has separate hard/soft embedding paths with per-path
-    normalization and a learned embedding table, Gemma4 uses a simplified 2-layer
-    design: a linear projection followed by RMSNorm (without learnable scale). The
-    checkpoint confirms this — only `embedding_projection.weight` exists; there is no
-    embedding table or pre-projection norm weights.
+    Unlike Gemma3n which has separate hard/soft embedding paths with
+    per-path normalization and a learned embedding table, Gemma4 uses a
+    simplified 2-layer design: a linear projection followed by RMSNorm
+    (without learnable scale).  The checkpoint confirms this — only
+    `embedding_projection.weight` exists; there is no embedding table
+    or pre-projection norm weights.
     """
 
     def __init__(
@@ -1293,12 +1296,13 @@ class Gemma4ForConditionalGeneration(
     ) -> int:
         """Max chunk size whose F.one_hot transient fits in the budget.
 
-        The dominant transient inside HF's
-        `Gemma4VisionPatchEmbedder. _position_embeddings` is
-        `F.one_hot(clamped_positions, num_classes=position_embedding_size)` with shape
-        `(chunk, patches, 2, position_embedding_size)`, int64, plus its simultaneous
-        cast to the position embedding table dtype. That, not the encoder residual
-        stream, sets peak memory.
+        The dominant transient inside HF's `Gemma4VisionPatchEmbedder.
+        _position_embeddings` is
+        `F.one_hot(clamped_positions, num_classes=position_embedding_size)`
+        with shape `(chunk, patches, 2, position_embedding_size)`,
+        int64, plus its simultaneous cast to the position embedding
+        table dtype. That, not the encoder residual stream, sets peak
+        memory.
         """
         if patches_per_item <= 0:
             return 1

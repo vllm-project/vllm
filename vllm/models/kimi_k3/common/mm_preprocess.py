@@ -93,9 +93,10 @@ def navit_resize_image(
 class KimiK3ProcessingInfo(BaseProcessingInfo):
     """Processing information for the image-only Kimi-K3 model.
 
-    K3 uses the standard `image` modality (unlike K2.5's unified `vision_chunk`), so it
-    builds its own `KimiK3Processor` wrapper around the checkpoint's image processor and
-    resolves the `<|media_pad|>` token id the same way K2.5 does.
+    K3 uses the standard `image` modality (unlike K2.5's unified
+    `vision_chunk`), so it builds its own `KimiK3Processor` wrapper around
+    the checkpoint's image processor and resolves the `<|media_pad|>` token
+    id the same way K2.5 does.
     """
 
     def __init__(self, ctx: InputProcessingContext) -> None:

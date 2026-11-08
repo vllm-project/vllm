@@ -81,9 +81,10 @@ def build_dynamic_sd_schedule_lookup(
 ) -> list[int]:
     """Expand the configured schedule into a dense batch_size -> K lookup.
 
-    "dense_schedule" means a 1-indexed lookup table where index `batch_size` stores the
-    exact K to use for that runtime batch size. This lets the scheduler do a simple
-    array lookup instead of searching the configured ranges on every scheduling step.
+    "dense_schedule" means a 1-indexed lookup table where index `batch_size`
+    stores the exact K to use for that runtime batch size. This lets the
+    scheduler do a simple array lookup instead of searching the configured
+    ranges on every scheduling step.
     """
     if vllm_max_batch_size <= 0:
         raise ValueError("vllm_max_batch_size must be > 0.")

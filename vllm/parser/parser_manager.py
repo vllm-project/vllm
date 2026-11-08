@@ -116,12 +116,14 @@ class ParserManager:
             model_name: The model name for parser-specific warnings.
             is_harmony: Whether the selected model uses the Harmony format.
                         If True, HarmonyParser is always returned.
-            tool_strict_level: Server-side floor for tool-call structural tags
-                (`--tool-strict-level`), or `None` for the tool parser's default level.
-            tokenizer: Tokenizer the composed parser is validated against at startup
-                (see `validate_parser_tokenizer`), including its
-                `response_template` metadata when a response-template parser is
-                selected. `None` skips the check (e.g. `skip_tokenizer_init`).
+            tool_strict_level: Server-side floor for tool-call structural
+                tags (`--tool-strict-level`), or `None` for the tool
+                parser's default level.
+            tokenizer: Tokenizer the composed parser is validated against
+                at startup (see `validate_parser_tokenizer`), including
+                its `response_template` metadata when a response-template
+                parser is selected. `None` skips the check (e.g.
+                `skip_tokenizer_init`).
 
         Returns:
             A Parser class, or None if neither parser is specified.

@@ -490,9 +490,10 @@ class Ernie4_5_VisionTransformer(nn.Module):
             num_pad: Legacy `cu_seqlens` padding
             max_batch_size: If set, pad `cu_seqlens` to `max_batch_size + 1`
                 entries for a fixed graph buffer shape.
-            max_seqlen_override: If set, use this value for `max_seqlen` instead of
-                deriving it from `cu_seqlens`. CUDA graph capture bakes `max_seqlen` at
-                capture time, so it must cover the worst-case replay.
+            max_seqlen_override: If set, use this value for `max_seqlen`
+                instead of deriving it from `cu_seqlens`. CUDA graph capture
+                bakes `max_seqlen` at capture time, so it must cover the
+                worst-case replay.
             device: Device for the returned tensors. Defaults to `self.device`.
 
         Returns:

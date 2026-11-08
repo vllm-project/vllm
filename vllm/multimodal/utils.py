@@ -393,8 +393,9 @@ def fetch_video(
 def set_mm_embedding_modality(embed: "torch.Tensor", modality: str) -> "torch.Tensor":
     """Attach modality metadata to a gathered multimodal embedding tensor.
 
-    Used by interleaved Omni merge paths that need to group embeddings by modality
-    without threading a parallel modalities list through `embed_input_ids`.
+    Used by interleaved Omni merge paths that need to group embeddings by
+    modality without threading a parallel modalities list through
+    `embed_input_ids`.
     """
     embed.modality = modality  # type: ignore[attr-defined]
     return embed

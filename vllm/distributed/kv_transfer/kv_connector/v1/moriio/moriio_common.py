@@ -240,9 +240,10 @@ def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int = 1) -> int:
 def fold_local_rank(global_dp_rank: int, dp_size_local: int) -> int:
     """Fold a global DP rank into its pod-local rank [0, dp_size_local).
 
-    `dp_size_local == 0` is the external-DP sentinel (local size unknown): return the
-    rank unchanged, since a global DP rank is always < the global DP size so no folding
-    is needed and the modulo is skipped (never divides by zero).
+    `dp_size_local == 0` is the external-DP sentinel (local size unknown):
+    return the rank unchanged, since a global DP rank is always < the global
+    DP size so no folding is needed and the modulo is skipped (never divides
+    by zero).
     """
     return global_dp_rank % dp_size_local if dp_size_local else global_dp_rank
 
@@ -463,9 +464,10 @@ def parse_moriio_zmq_address(
     Parses `"host:IP,handshake:PORT,notify:PORT"` into
         (host, handshake_port, notify_port).
 
-    Each key-value pair is split on the *first* colon so that IPv6 addresses (e.g.
-    `host:::1`) are handled correctly. Raises `ValueError` if any of `host`,
-    `handshake`, or `notify` keys are absent or if the port values are non-numeric.
+    Each key-value pair is split on the *first* colon so that IPv6 addresses
+    (e.g. `host:::1`) are handled correctly.  Raises `ValueError` if any
+    of `host`, `handshake`, or `notify` keys are absent or if the port
+    values are non-numeric.
     """
     parts: dict[str, str] = {}
     for segment in zmq_address.split(","):
@@ -489,11 +491,13 @@ def get_peer_zmq_from_request_id(request_id: str, is_producer: bool) -> str | No
     The producer (prefill) needs the decode's address; the consumer (decode)
     needs the prefill's address.
 
-    Returns `None` when the request_id does not encode peer info. The llm-d routing
-    sidecar (`llm-d-inference-scheduler`) does not embed addresses in `request_id`;
-    instead it passes `remote_host`, `remote_handshake_port` and `remote_notify_port`
-    explicitly in `kv_transfer_params`. Callers must handle the `None` return by falling
-    back to those fields. See `add_new_req` for the canonical fallback path.
+    Returns `None` when the request_id does not encode peer info. The
+    llm-d routing sidecar (`llm-d-inference-scheduler`) does not embed
+    addresses in `request_id`; instead it passes `remote_host`,
+    `remote_handshake_port` and `remote_notify_port` explicitly in
+    `kv_transfer_params`. Callers must handle the `None` return by
+    falling back to those fields. See `add_new_req` for the canonical
+    fallback path.
     """
     if is_producer:
         m = _DECODE_ZMQ_RE.search(request_id)

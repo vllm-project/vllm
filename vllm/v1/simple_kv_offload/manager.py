@@ -121,11 +121,13 @@ class _StoreAdmission(Enum):
 class BoundaryStoreStats:
     """Cumulative counters for boundary hand-off stores.
 
-    Every branch that declines a hand-off is silent by design: the boundary is simply
-    not offloaded and a later request misses. Without counters the only symptom is a
-    lower cache hit rate with nothing in the logs, so each decline reason is counted and
-    exposed through `SimpleCPUOffloadConnector.get_boundary_store_stats()`. Reset by
-    `reset()`, which carries any not-yet-drained deltas; not otherwise cleared.
+    Every branch that declines a hand-off is silent by design: the boundary is
+    simply not offloaded and a later request misses. Without counters the only
+    symptom is a lower cache hit rate with nothing in the logs, so each decline
+    reason is counted and exposed through
+    `SimpleCPUOffloadConnector.get_boundary_store_stats()`. Reset by
+    `reset()`, which carries any not-yet-drained deltas; not otherwise
+    cleared.
     """
 
     published: int = 0

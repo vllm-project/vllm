@@ -368,9 +368,10 @@ def compute_trtllm_sparse_mla_workspace_bytes(
     counter and scratch regions. `base_workspace_bytes` must stay available
     for those regions, so the slab is added on top of it (see #50781).
 
-    Without DCP no LSE is requested, no slab is carved, and the base size is returned
-    unchanged. A launch covers at most `_TRTLLM_GEN_MAX_REQUESTS` tokens, and launches
-    run in order on one stream, so larger batches reuse the same slab.
+    Without DCP no LSE is requested, no slab is carved, and the base size is
+    returned unchanged. A launch covers at most `_TRTLLM_GEN_MAX_REQUESTS`
+    tokens, and launches run in order on one stream, so larger batches reuse
+    the same slab.
     """
     if dcp_world_size <= 1:
         return base_workspace_bytes

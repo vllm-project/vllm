@@ -176,15 +176,16 @@ class CuMemAllocator:
     def release_pools(self) -> None:
         """Drop Python references to MemPool/pluggable allocators eagerly.
 
-        A cumem `MemPool` outlives the `use_memory_pool` context (a strong reference is
-        kept in `allocator_and_pools` to work around pytorch/pytorch#146431), and a
-        captured CUDA graph can keep it alive longer still. `MemPool` only holds a
-        non-owning pointer to the allocator, whose owning reference lives in the Python
-        `CUDAPluggableAllocator`. If both are instead dropped during interpreter
-        shutdown, GC may finalize the allocator first; the eventual `~MemPool` ->
-        `emptyCache` -> `release_block` then makes a virtual call into the freed
-        allocator -- aborting the process with "pure virtual method called"
-        (pytorch/pytorch#145168).
+        A cumem `MemPool` outlives the `use_memory_pool` context (a strong
+        reference is kept in `allocator_and_pools` to work around
+        pytorch/pytorch#146431), and a captured CUDA graph can keep it alive
+        longer still. `MemPool` only holds a non-owning pointer to the
+        allocator, whose owning reference lives in the Python
+        `CUDAPluggableAllocator`. If both are instead dropped during
+        interpreter shutdown, GC may finalize the allocator first; the eventual
+        `~MemPool` -> `emptyCache` -> `release_block` then makes a virtual
+        call into the freed allocator -- aborting the process with "pure virtual
+        method called" (pytorch/pytorch#145168).
 
         Release the kept-alive pools before interpreter finalization, and keep
         the pluggable allocator wrappers alive while MemPool destructors run.

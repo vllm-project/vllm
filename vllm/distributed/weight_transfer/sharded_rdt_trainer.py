@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Trainer-side engine for the sharded-RDT (pull-based NIXL) backend.
 
-RDT is pull-based, so unlike NCCL this engine broadcasts nothing. It owns a per-rank
-producer server (an internal Ray actor exposing the NIXL serve surface the worker engine
-dials by name), and on each `send_weights` gathers this rank's weights group-by-group
-from the `WeightSource`, shares each group into the server over CUDA IPC, and — on the
-sender — drives the inference-side start/update/finish handshake, whose single empty
-`update_weights` unblocks the workers to pull.
+RDT is pull-based, so unlike NCCL this engine broadcasts nothing. It owns a
+per-rank producer server (an internal Ray actor exposing the NIXL serve surface
+the worker engine dials by name), and on each `send_weights` gathers this
+rank's weights group-by-group from the `WeightSource`, shares each group into
+the server over CUDA IPC, and — on the sender — drives the inference-side
+start/update/finish handshake, whose single empty `update_weights` unblocks the
+workers to pull.
 
 All serve-side state lives on the server actor, so trainer processes need no
 mixin, no named actors and no special actor options.
@@ -300,8 +301,9 @@ class _RDTProducerServer:
         `set_gather_error`, which every waiter here already checks — so the rank
         unwinds through one path and the driver gets a real exception.
 
-        The progress stamp is global to the producer, not per-waiter: a merely slow
-        waiter is kept alive by its peers' progress. Caller holds `_cache_cond`.
+        The progress stamp is global to the producer, not per-waiter: a merely
+        slow waiter is kept alive by its peers' progress. Caller holds
+        `_cache_cond`.
         """
         while blocked():
             if self._gather_error is not None:
@@ -519,10 +521,11 @@ class _RDTProducerServer:
         pull, while the fabric is idle (avoids registration races during the
         sync-0 RDMA churn under M:N fan-in). Idempotent; grows only if needed.
 
-        The ring is keyed by SLOT-SHARING GROUP, so the sharers of one group reserve ONE
-        ring between them. They all call this, same group and same size, so the whole
-        body runs under `_serve_lock`, or two concurrent first-callers would each
-        allocate a ring and one would be dropped while still registered.
+        The ring is keyed by SLOT-SHARING GROUP, so the sharers of one group
+        reserve ONE ring between them. They all call this, same group and same
+        size, so the whole body runs under `_serve_lock`, or two concurrent
+        first-callers would each allocate a ring and one would be dropped while
+        still registered.
 
         `plan_digest` is the caller's ordered chunk plan for THIS producer.
         Sharers must agree on it, and this is where a disagreement is caught
@@ -663,14 +666,15 @@ class _RDTProducerServer:
     ):
         """Serve one batched slice request over NIXL.
 
-        Waits until the specs' names are cached, then rendezvouses with the other live
-        sharers of this consumer's slot-sharing group. The last to arrive replays each
-        spec's op chain (pure views into cached tensors, guarded by ALLOWED_OPS) and
-        byte-packs the slices 16B-aligned into the group's ring slot `seq % nring`,
-        mirroring the consumer's identical layout; every sharer then returns that one
-        packed blob, so R deployments cost one pack and one slot instead of R. With a
-        single deployment every group is a singleton, so the arriving call is always its
-        own packer and this is the unshared serve path exactly.
+        Waits until the specs' names are cached, then rendezvouses with the
+        other live sharers of this consumer's slot-sharing group. The last to
+        arrive replays each spec's op chain (pure views into cached tensors,
+        guarded by ALLOWED_OPS) and byte-packs the slices 16B-aligned into the
+        group's ring slot `seq % nring`, mirroring the consumer's identical
+        layout; every sharer then returns that one packed blob, so R deployments
+        cost one pack and one slot instead of R. With a single deployment every
+        group is a singleton, so the arriving call is always its own packer and
+        this is the unshared serve path exactly.
 
         `seq` is the caller's index in its pull stream to this producer, which
         is what fixes the slot. Callers that want a single slice pass one spec

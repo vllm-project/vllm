@@ -158,9 +158,10 @@ def fused_mqa_topk_prefill(
 
     q: [rows, 32, 128] fp8 e4m3; k: [keys, 128] fp8 e4m3 (keys <=
     FUSED_MQA_TOPK_MAX_KEYS); scales: [keys] fp32; weights: [rows, 32] fp32;
-    starts/ends: [rows] int32, the visible key range `[start, end)` of each row; output:
-    [rows, k] int32 with k (the top-k) 512, 1024 or 2048. All contiguous; q, k, scales,
-    weights and output 16-byte aligned (the op checks the contract).
+    starts/ends: [rows] int32, the visible key range `[start, end)` of each
+    row; output: [rows, k] int32 with k (the top-k) 512, 1024 or 2048. All
+    contiguous; q, k, scales, weights and output 16-byte aligned (the op checks
+    the contract).
 
     Writes the same convention as `ops.top_k_per_row_prefill`: indices
     relative to the row's `start` (i.e. `key - start`), unordered, `-1`

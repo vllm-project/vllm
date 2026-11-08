@@ -10,9 +10,10 @@ autotune code block while depyf is active therefore dies with a `TypeError`,
 which surfaces as `InductorError: Failed to run autotuning code block`.
 
 depyf has hit this before -- `linemap` and `attrs` broke the same hook in
-thuml/depyf#80 -- but 0.20.0 is both the pinned version and the last release upstream
-published, so a version bump cannot resolve it. Patch the hook here instead, following
-what depyf itself does for `lazy_format_graph_code`: accept `**kwargs` and forward them.
+thuml/depyf#80 -- but 0.20.0 is both the pinned version and the last release
+upstream published, so a version bump cannot resolve it. Patch the hook here
+instead, following what depyf itself does for `lazy_format_graph_code`:
+accept `**kwargs` and forward them.
 
 Route every depyf entry point through `prepare_debug` below so the patch is
 never missed.

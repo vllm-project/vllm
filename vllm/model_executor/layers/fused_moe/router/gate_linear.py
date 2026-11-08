@@ -39,8 +39,9 @@ class GateLinear(ReplicatedLinear):
        routes low M through the tier 2 kernel
     7. F.linear via ReplicatedLinear (ultimate fallback)
 
-    The `out_dtype` attribute is mutable and can be set after init (e.g. when the
-    required dtype depends on the expert quantization method which is only known later).
+    The `out_dtype` attribute is mutable and can be set after init
+    (e.g. when the required dtype depends on the expert quantization
+    method which is only known later).
 
     A `quant_config` that actually quantizes the gate disables every
     specialized tier, leaving plain `ReplicatedLinear` behavior.
@@ -402,10 +403,11 @@ class GateLinear(ReplicatedLinear):
 class _GateLinearMethod(UnquantizedLinearMethod):
     """UnquantizedLinearMethod plus the ROCm bf16x3 weight split.
 
-    Building the split here rather than lazily in forward() charges it to the weights
-    memory pool ahead of KV cache profiling, and rebuilds it on weight reload. The
-    latter matters because an in-place `param.data.copy_()` leaves both `data_ptr()` and
-    `_version` untouched, so a stale split cannot be detected from inside forward().
+    Building the split here rather than lazily in forward() charges it to the
+    weights memory pool ahead of KV cache profiling, and rebuilds it on weight
+    reload. The latter matters because an in-place `param.data.copy_()`
+    leaves both `data_ptr()` and `_version` untouched, so a stale split
+    cannot be detected from inside forward().
 
     `allow_rocm_bf16x3_router_gemm` is final by the time this runs: the only
     caller of `set_out_dtype` does so during model construction.

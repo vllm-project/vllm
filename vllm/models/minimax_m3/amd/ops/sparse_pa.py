@@ -392,11 +392,12 @@ def minimax_m3_rebase_block_table_to_page16(
     """Rebase a logical page table onto AITER's page-16 page numbering.
 
     The page ids AITER's top-k emits for the attend are
-    `block_table[blk] * pages_per_block + j`, and `pages_per_block` is fixed at AITER
-    build time to one side's pages. An interleaved block spans both sides, so the only
-    way to reach its pages through that kernel is to hand it a table already scaled to
-    the wider stride. The caller does this once per step, since every sparse layer
-    resolves its selection through the same table.
+    `block_table[blk] * pages_per_block + j`, and `pages_per_block` is fixed
+    at AITER build time to one side's pages. An interleaved block spans both
+    sides, so the only way to reach its pages through that kernel is to hand it
+    a table already scaled to the wider stride. The caller does this once per
+    step, since every sparse layer resolves its selection through the same
+    table.
     """
     if out is None:
         out = torch.empty_like(block_table)

@@ -1583,8 +1583,9 @@ def supports_any_eagle(
 class LocalArgmaxMixin:
     """Mixin for draft model heads in speculative decoding.
 
-    Provides a D2T-aware `get_top_tokens` that preserves the local-argmax communication
-    reduction even when the draft vocabulary is smaller than the target vocabulary.
+    Provides a D2T-aware `get_top_tokens` that preserves the
+    local-argmax communication reduction even when the draft vocabulary
+    is smaller than the target vocabulary.
 
     When `draft_id_to_target_id` is present (shape `(draft_vocab_size,)`,
     containing per-token offset to target vocab id), the draft argmax index
@@ -1597,7 +1598,8 @@ class LocalArgmaxMixin:
     O(batch * 2 * tp_size) communication instead of O(batch * vocab_size).
 
     Requires the subclass to expose:
-        `self.logits_processor`: LogitsProcessor `self.lm_head`: ParallelLMHead
+        `self.logits_processor`: LogitsProcessor
+        `self.lm_head`: ParallelLMHead
         `self.draft_id_to_target_id` (optional): nn.Parameter
     """
 

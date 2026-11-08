@@ -245,8 +245,9 @@ class Step5FlashInferSparse:
         """Score regions for (token, KV group) rows.
 
         `query` is `[tokens, row_groups, heads, 256]` and `weights` is
-        `[tokens, row_groups, heads]`; row `r` is group `r % row_groups` of token
-        `r // row_groups`. `query_len` tokens share a request of `table`/`seq_lens`.
+        `[tokens, row_groups, heads]`; row `r` is group `r % row_groups`
+        of token `r // row_groups`. `query_len` tokens share a request of
+        `table`/`seq_lens`.
         """
         assert query.shape[1] == row_groups
         if (

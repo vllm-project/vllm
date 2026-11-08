@@ -144,9 +144,10 @@ def extract_mm_features(
 ) -> MultiModalFeatures | None:
     """Extract multimodal features from a rendered engine prompt.
 
-    Returns `None` for text-only prompts. `mm_metadata` keeps the intersection of
-    processed kwargs that prefill needs after EC transfer: fields declared as embedding
-    metadata, plus fields marked `keep_on_cpu` (for example M-RoPE grid dims). With
+    Returns `None` for text-only prompts. `mm_metadata` keeps the
+    intersection of processed kwargs that prefill needs after EC transfer:
+    fields declared as embedding metadata, plus fields marked
+    `keep_on_cpu` (for example M-RoPE grid dims). With
     `mm_payload="none"` neither is serialized.
     """
     if engine_input.get("type") != "multimodal":

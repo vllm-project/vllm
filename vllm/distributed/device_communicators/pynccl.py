@@ -208,9 +208,10 @@ class PyNcclCommunicator:
         ranks must enter init concurrently or `ncclCommInitRank` hangs.
 
         Warm-up handshake: immediately after `ncclCommInitRank` this issues a
-        one-element `all_reduce` (mirroring `__init__`). It is a collective, so every
-        peer -- including a foreign, non-vLLM rank -- must issue a matching one-element
-        `all_reduce` before any other collective, or all ranks deadlock.
+        one-element `all_reduce` (mirroring `__init__`). It is a collective,
+        so every peer -- including a foreign, non-vLLM rank -- must issue a
+        matching one-element `all_reduce` before any other collective, or all
+        ranks deadlock.
         """
         if len(unique_id_bytes) != NCCL_UNIQUE_ID_BYTES:
             raise ValueError(

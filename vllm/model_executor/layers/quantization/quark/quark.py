@@ -223,10 +223,11 @@ class QuarkConfig(QuantizationConfig):
     def _scale_block_rows(self, prefix: str, layer_type: type[torch.nn.Module]) -> int:
         """How many weight rows one checkpoint scale row covers.
 
-        1 for the canonical 1-D per-group MX spelling; `block_size[0]` for MXFP8 exports
-        that spell the scale 2-D (DeepSeek-V4.1 uses 32). The scheme cannot work this
-        out itself: it has no handle on the layer name, and tensor-parallel sharding
-        narrows the loaded scale so the ratio is not recoverable from shapes either.
+        1 for the canonical 1-D per-group MX spelling; `block_size[0]` for
+        MXFP8 exports that spell the scale 2-D (DeepSeek-V4.1 uses 32). The
+        scheme cannot work this out itself: it has no handle on the layer name,
+        and tensor-parallel sharding narrows the loaded scale so the ratio is
+        not recoverable from shapes either.
         """
         config = self._find_matched_config(prefix, layer_type)
         weight = self._unwrap_single_quant_config(config.get("weight"))

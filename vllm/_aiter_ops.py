@@ -2503,8 +2503,9 @@ class rocm_aiter_ops:
     ) -> bool:
         """Whether MiniMax-M3 can use AITER's consolidated fused QK-norm.
 
-        Requires AITER to be installed and enabled. bf16 (`auto`) always qualifies; fp8
-        e4m3 also needs K/V scales. Other cache dtypes fall back to vLLM's fused kernel.
+        Requires AITER to be installed and enabled. bf16 (`auto`) always
+        qualifies; fp8 e4m3 also needs K/V scales. Other cache dtypes fall
+        back to vLLM's fused kernel.
         """
         if not cls._AITER_ENABLED:
             return False
@@ -4879,23 +4880,25 @@ class rocm_aiter_ops:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """MHC pre using the pre-mix carried from the previous sublayer.
 
-        Same gates as `mhc_pre`, but the stream collapse applies the caller's
-        `pre_mix` instead of the one computed here, and the one computed here is
-        returned for the next sublayer seam. AITER has no single kernel for that shape,
-        so drive its two stages directly: `mhc_pre_big_fuse` still produces the post and
-        comb gates (including every sinkhorn iteration), while the pre gate is recovered
-        from the same split-k GEMM output and the collapse is done by the Triton kernel.
-        `mhc_pre_big_fuse` also writes a collapse we do not use; that redundant store is
-        the price of not having a native delayed kernel, and is small next to the ~140
-        launches it replaces.
+        Same gates as `mhc_pre`, but the stream collapse applies the
+        caller's `pre_mix` instead of the one computed here, and the one
+        computed here is returned for the next sublayer seam. AITER has no
+        single kernel for that shape, so drive its two stages directly:
+        `mhc_pre_big_fuse` still produces the post and comb gates (including
+        every sinkhorn iteration), while the pre gate is recovered from the
+        same split-k GEMM output and the collapse is done by the Triton
+        kernel. `mhc_pre_big_fuse` also writes a collapse we do not use;
+        that redundant store is the price of not having a native delayed
+        kernel, and is small next to the ~140 launches it replaces.
 
-        Passing `sublayer_out` / `post_layer_mix` / `comb_res_mix` also applies the
-        preceding post block. AITER then projects the new residual in the same kernel
-        that computes it (`mhc_fused_post_pre_gemm_sqrsum`), which saves one launch;
-        every later stage is identical either way. That new residual is written to
-        `residual_out`, which the caller must supply in that case; it is an output
-        buffer rather than a return value so the op never has to hand back one of its
-        own inputs on the unfused path.
+        Passing `sublayer_out` / `post_layer_mix` / `comb_res_mix`
+        also applies the preceding post block. AITER then projects the new
+        residual in the same kernel that computes it
+        (`mhc_fused_post_pre_gemm_sqrsum`), which saves one launch; every
+        later stage is identical either way. That new residual is written to
+        `residual_out`, which the caller must supply in that case; it is an
+        output buffer rather than a return value so the op never has to hand
+        back one of its own inputs on the unfused path.
 
         Returns:
             post_mix: shape (..., hc_mult, 1), dtype torch.float32
@@ -5028,8 +5031,9 @@ class rocm_aiter_ops:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """`mhc_pre_delayed` with the RMSNorm of the collapse folded in.
 
-        Runs aiter's fused Triton kernel `mhc_fused_post_pre_delayed_rmsnorm`; the
-        returned `layer_input` is already normalised with `norm_weight` / `norm_eps`.
+        Runs aiter's fused Triton kernel `mhc_fused_post_pre_delayed_rmsnorm`;
+        the returned `layer_input` is already normalised with `norm_weight` /
+        `norm_eps`.
         """
         from aiter.ops.triton.fusions.mhc_fused_post_pre_delayed_rmsnorm import (
             mhc_fused_post_pre_delayed_rmsnorm,

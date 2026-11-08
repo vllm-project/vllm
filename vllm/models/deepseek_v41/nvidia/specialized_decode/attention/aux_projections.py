@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Low-batch GEMMs of the attention side projections.
 
-Next to `fused_wqa_wkv`, the kv-source layers project the attention input through the
-compressor's `fused_wkv_wgate` (FP32 `kv_score`) and the index-source layers through the
-indexer's `weights_proj`. At decode sizes cuBLAS runs both as a split-K GEMM plus a
-reduce kernel, longer than `fused_wqa_wkv` itself. For low-batch FULL-graph steps they
-run the CuTe DSL `ll_bf16` kernels instead: FP32 `x @ W.T` that differs from cuBLAS only
-in the K summation order. The indexer's `wk` (compressor latent to index key) takes the
-same kernels.
+Next to `fused_wqa_wkv`, the kv-source layers project the attention input
+through the compressor's `fused_wkv_wgate` (FP32 `kv_score`) and the
+index-source layers through the indexer's `weights_proj`. At decode sizes
+cuBLAS runs both as a split-K GEMM plus a reduce kernel, longer than
+`fused_wqa_wkv` itself. For low-batch FULL-graph steps they run the CuTe DSL
+`ll_bf16` kernels instead: FP32 `x @ W.T` that differs from cuBLAS only in
+the K summation order. The indexer's `wk` (compressor latent to index key)
+takes the same kernels.
 """
 
 from collections.abc import Iterable

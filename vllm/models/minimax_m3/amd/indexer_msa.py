@@ -133,11 +133,12 @@ class MiniMaxM3IndexerMSABackend(MiniMaxM3IndexerBackend):
 class MiniMaxM3IndexerMSAMetadata(MiniMaxM3IndexerMetadata):
     """Adds the per-row shape the ragged top-k needs.
 
-    The uniform decode rows are recovered inside the kernel from `seq_lens` and the
-    shared query length, which also clamps cudagraph padding rows to nothing. Prefill
-    rows have no such shape, so it is materialized here once per forward and shared by
-    every layer -- which is also where the emitted page table's tail block comes from,
-    since a block count alone does not say how many tokens the last block holds.
+    The uniform decode rows are recovered inside the kernel from `seq_lens` and
+    the shared query length, which also clamps cudagraph padding rows to nothing.
+    Prefill rows have no such shape, so it is materialized here once per forward
+    and shared by every layer -- which is also where the emitted page table's
+    tail block comes from, since a block count alone does not say how many tokens
+    the last block holds.
     """
 
     # [num_prefill_tokens] int32, causal block count per row.
@@ -759,10 +760,11 @@ def msa_indexer_unsupported_reason(
 ) -> str | None:
     """Return why this config cannot use this indexer, or None if it can.
 
-    Checks platform (ROCm/gfx950), the AITER sparse PA attend, index-cache dtype, the
-    kernels' shape contract and the max context in blocks. The default `cp_world=1`
-    ignores every argument below it and asks about the unsharded indexer; above one it
-    adds the checks sharding brings. Callers fall back on a reason rather than raise.
+    Checks platform (ROCm/gfx950), the AITER sparse PA attend, index-cache
+    dtype, the kernels' shape contract and the max context in blocks. The
+    default `cp_world=1` ignores every argument below it and asks about the
+    unsharded indexer; above one it adds the checks sharding brings. Callers
+    fall back on a reason rather than raise.
     """
     if not current_platform.is_rocm():
         return (

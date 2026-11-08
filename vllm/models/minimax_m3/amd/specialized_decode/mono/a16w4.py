@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """BF16 x MXFP4 (A16W4) MFMA operands over AITER's post-load layouts.
 
-Weights are `shuffle_weight(layout=(16, 16))` fp4x2 `[E, N, K / 2]`: a 16-row group's
-128-wide K step is 1 KiB, and lane `l`'s 16 bytes hold row `l % 16`, K `32 (l / 16)
-..` -- one E8M0 group. Scales are `e8m0_shuffle` `[E N, K / 32]`; lane `l`'s dword at
-`(r32 C8 + st / 2) 64 + l` holds its row's codes of steps `st` (even, odd) for both
-16-row halves of the 32-row block. A dequantized dword is one `16x16x32` BF16 MFMA A
-operand; the B operand is the same 8 K values of the lane's token (column `l % 16`).
+Weights are `shuffle_weight(layout=(16, 16))` fp4x2 `[E, N, K / 2]`: a
+16-row group's 128-wide K step is 1 KiB, and lane `l`'s 16 bytes hold row
+`l % 16`, K `32 (l / 16) ..` -- one E8M0 group. Scales are
+`e8m0_shuffle` `[E N, K / 32]`; lane `l`'s dword at
+`(r32 C8 + st / 2) 64 + l` holds its row's codes of steps `st` (even, odd)
+for both 16-row halves of the 32-row block. A dequantized dword is one
+`16x16x32` BF16 MFMA A operand; the B operand is the same 8 K values of the
+lane's token (column `l % 16`).
 """
 
 import flydsl.expr as fx

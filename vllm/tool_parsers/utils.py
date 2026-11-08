@@ -214,10 +214,11 @@ def get_function_tools(
 ) -> list[ChatCompletionToolsParam | FunctionTool]:
     """Return the function tools the model is shown, in request order.
 
-    This is the single source for both the chat template's tool list and the tools a
-    tool-call grammar constrains, so the two cannot drift apart. Namespace functions are
-    flattened to `<namespace>__<name>`; custom tools become a single-string function
-    shim. Other Responses tool types are never rendered for the model and are dropped.
+    This is the single source for both the chat template's tool list and the
+    tools a tool-call grammar constrains, so the two cannot drift apart.
+    Namespace functions are flattened to `<namespace>__<name>`; custom tools
+    become a single-string function shim. Other Responses tool types are never
+    rendered for the model and are dropped.
     """
     function_tools: list[ChatCompletionToolsParam | FunctionTool] = []
     for tool in tools:
@@ -613,8 +614,9 @@ def _ast_callable_dotted_name(node: ast.expr) -> str:
 def handle_single_tool(call: ast.Call) -> ToolCall:
     """Convert a single AST function call node into a ToolCall object.
 
-    Accepts both bare names (`foo(...)`) and dotted attribute chains (`a.b.c(...)`); the
-    resulting tool call `name` field preserves the dotted form.
+    Accepts both bare names (`foo(...)`) and dotted attribute chains
+    (`a.b.c(...)`); the resulting tool call `name` field preserves the
+    dotted form.
 
     Raises:
         UnexpectedAstError: If the call target is neither a simple name
@@ -643,14 +645,15 @@ def handle_single_tool(call: ast.Call) -> ToolCall:
 def escape_ctrl_chars_in_strings(text: str) -> str:
     """Escape literal control chars inside string literals of pythonic text.
 
-    Models emitting pythonic tool calls frequently place raw newlines inside a string
-    argument (e.g. `exec(command='line1\\nline2')` written with a real line break). That
-    is invalid Python — `ast.parse` fails with "unterminated string literal" — so the
-    call would be dropped even though the intent is unambiguous. A NUL byte is worse:
-    `ast.parse` rejects it anywhere in the source with `ValueError`. Escaping
-    `\\n`/`\\r`/`\\t`/`\\x00` only *inside* string literals makes the text parseable
-    while preserving the argument value exactly (the escape sequences evaluate back to
-    the original control chars).
+    Models emitting pythonic tool calls frequently place raw newlines inside a
+    string argument (e.g. `exec(command='line1\\nline2')` written with a real
+    line break). That is invalid Python — `ast.parse` fails with "unterminated
+    string literal" — so the call would be dropped even though the intent is
+    unambiguous. A NUL byte is worse: `ast.parse` rejects it anywhere in the
+    source with `ValueError`. Escaping `\\n`/`\\r`/`\\t`/`\\x00` only
+    *inside* string literals makes the text parseable while preserving the
+    argument value exactly (the escape sequences evaluate back to the original
+    control chars).
 
     Text outside string literals is returned unchanged.
     """
@@ -691,11 +694,12 @@ _RESERVED_KW_SUFFIX = "_pyreservedkw_"
 def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
     """Rename Python-keyword parameter names so pythonic tool text parses.
 
-    Tools legitimately name parameters `from`, `in`, `class` — but `memory_get(from=1)`
-    is a Python `SyntaxError`, so the whole call would be dropped. Rename `from=` to
-    `from_pyreservedkw_=` (outside string literals only, and only in keyword-argument
-    position: preceded by `(` or `,` and followed by a single `=`), parse, then restore
-    the original name with `restore_reserved_kwarg_names`.
+    Tools legitimately name parameters `from`, `in`, `class` — but
+    `memory_get(from=1)` is a Python `SyntaxError`, so the whole call
+    would be dropped. Rename `from=` to `from_pyreservedkw_=` (outside
+    string literals only, and only in keyword-argument position: preceded by
+    `(` or `,` and followed by a single `=`), parse, then restore the
+    original name with `restore_reserved_kwarg_names`.
 
     Returns (rewritten_text, changed). Keyword *values* (`x=True`) and
     keywords inside string arguments are never touched.
@@ -774,12 +778,13 @@ def restore_reserved_kwarg_names(arguments: dict) -> dict:
 def normalize_leading_zero_ints(text: str) -> str:
     """Strip leading zeros from decimal integer literals so the text parses.
 
-    Models emit zero-padded integers (`month=07`), which Python rejects ("leading zeros
-    in decimal integer literals are not permitted"), so the whole call would be dropped.
-    Rewrite `07` to `7` outside string literals only. Tokens that are already valid
-    Python are left alone: all-zero literals (`00`), floats and fractional parts
-    (`07.5`, `1.07`), exponents (`1e07`, consumed as a name run), and `0x`/ `0o`/`0b`
-    prefixes (the digit run stops at the prefix letter).
+    Models emit zero-padded integers (`month=07`), which Python rejects
+    ("leading zeros in decimal integer literals are not permitted"), so the
+    whole call would be dropped. Rewrite `07` to `7` outside string
+    literals only. Tokens that are already valid Python are left alone:
+    all-zero literals (`00`), floats and fractional parts (`07.5`,
+    `1.07`), exponents (`1e07`, consumed as a name run), and `0x`/
+    `0o`/`0b` prefixes (the digit run stops at the prefix letter).
     """
     out: list[str] = []
     quote: str | None = None
@@ -838,18 +843,20 @@ _QUOTE_FOLLOWERS = {",", ")", "]", "}", ":"}
 def escape_nested_quotes_in_strings(text: str) -> tuple[str, bool]:
     """Close a broken string literal at the only closing quote that works.
 
-    Models emitting shell commands frequently nest unescaped same-style quotes inside a
-    string argument — `command='sed -n '360,450p' f.py'`, or a quoted `python3 -c`
-    payload that itself contains quoted strings — which Python reads as juxtaposed
-    garbage, so the call is dropped even though the intent is unambiguous. A string is
-    treated as broken when its first unescaped quote cannot syntactically close it (what
-    follows is none of `,`, `)`, `]`, `}`, `:`). For a broken string, every
-    syntactically plausible closing quote is tried: interior quotes escaped, the rest of
-    the text kept verbatim, and the result (with control chars escaped) validated with
-    `ast.parse`. Exactly one candidate parsing means recovery — the decoded value is
-    exactly the text the model wrote. Zero or several parsing candidates means the
-    nesting is genuinely ambiguous and the text is returned unchanged rather than
-    guessed at.
+    Models emitting shell commands frequently nest unescaped same-style
+    quotes inside a string argument — `command='sed -n '360,450p' f.py'`,
+    or a quoted `python3 -c` payload that itself contains quoted strings —
+    which Python reads as juxtaposed garbage, so the call is dropped even
+    though the intent is unambiguous. A string is treated as broken when
+    its first unescaped quote cannot syntactically close it (what follows
+    is none of `,`, `)`, `]`, `}`, `:`). For a broken string,
+    every syntactically plausible closing quote is tried: interior quotes
+    escaped, the rest of the text kept verbatim, and the result (with
+    control chars escaped) validated with `ast.parse`. Exactly one
+    candidate parsing means recovery — the decoded value is exactly the
+    text the model wrote. Zero or several parsing candidates means the
+    nesting is genuinely ambiguous and the text is returned unchanged
+    rather than guessed at.
 
     Returns (rewritten_text, changed); run the result through
     escape_ctrl_chars_in_strings before parsing — quotes chosen here can

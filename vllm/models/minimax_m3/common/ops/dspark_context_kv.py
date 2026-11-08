@@ -4,19 +4,22 @@
 
 Replaces the permute copy, per-layer K-norm launches + stack, positions.repeat,
 rotary_embedding and per-layer reshape_and_cache_flash calls in
-`DFlashQwen3Model.precompute_and_store_context_kv`. K/V are read straight from the fused
-projection output `all_kv` `[num_ctx, L, 2, nkv, 128]` and written into each layer's
-paged cache (FLASH_ATTN, FLASHINFER_TS) `[num_blocks, nkv, block_size, 2 * 128]` (K at
-`[..., :128]`, V at `[..., 128:]`), matching `reshape_and_cache_flash`: fp8 e4m3 of
-`x / scale` for kv_cache_dtype fp8, raw bf16 otherwise; slots < 0 are padding and are
-not written.
+`DFlashQwen3Model.precompute_and_store_context_kv`. K/V are read straight
+from the fused projection output `all_kv` `[num_ctx, L, 2, nkv, 128]` and
+written into each layer's paged cache (FLASH_ATTN, FLASHINFER_TS)
+`[num_blocks, nkv, block_size, 2 * 128]` (K at `[..., :128]`, V at
+`[..., 128:]`), matching `reshape_and_cache_flash`: fp8 e4m3 of
+`x / scale` for kv_cache_dtype fp8, raw bf16 otherwise; slots < 0 are padding
+and are not written.
 
-K gets the Gemma RMSNorm of its layer (`x * rsqrt(mean(x^2) + eps) * (1 + w)` in fp32,
-materialized to bf16 like the unfused flashinfer path) followed by partial NeoX RoPE
-with the token's position (see `fused_minimax_m3_dspark_context_kv`). Each layer's cache
-is a separate allocation, addressed as layer 0's cache plus a per-layer element offset,
-and each fp8 scale as layer 0's k scale plus a float offset; the offset tables are built
-once and cached (keyed by the data_ptrs) so the call stays CUDA-graph safe.
+K gets the Gemma RMSNorm of its layer (`x * rsqrt(mean(x^2) + eps) * (1 + w)`
+in fp32, materialized to bf16 like the unfused flashinfer path) followed by
+partial NeoX RoPE with the token's position (see
+`fused_minimax_m3_dspark_context_kv`). Each layer's cache is a separate
+allocation, addressed as layer 0's cache plus a per-layer element offset, and
+each fp8 scale as layer 0's k scale plus a float offset; the offset tables are
+built once and cached (keyed by the data_ptrs) so the call stays CUDA-graph
+safe.
 """
 
 import torch

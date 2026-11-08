@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Which MiniMax-M3 forwards take the mono path (`VLLM_ROCM_MINIMAX_M3_MONO=1`).
 
-The deployment is checked once (`_config_refusal`); a step is routed to the kernels only
-when it is a pure decode of 1..MAX_TOKENS tokens whose tables the kernels can read
-(`_step_refusal`). Every per-step condition is decided from TP-replicated state: the
-kernels all-reduce in-kernel, so ranks that disagreed would wait on each other forever.
+The deployment is checked once (`_config_refusal`); a step is routed to the
+kernels only when it is a pure decode of 1..MAX_TOKENS tokens whose tables the
+kernels can read (`_step_refusal`). Every per-step condition is decided from
+TP-replicated state: the kernels all-reduce in-kernel, so ranks that disagreed
+would wait on each other forever.
 
 The runner is built on the first eligible step, which under cudagraphs is the
 warmup run before the first capture (its allocations and IPC handshake cannot be

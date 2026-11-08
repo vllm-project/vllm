@@ -189,10 +189,11 @@ class TailKeyBoundary:
 
     Attributes:
         group_id: KV-cache group containing the tail block.
-        num_tokens: Token boundary whose prefix hash identifies the matched stored
-            block. The loader uses `block_hashes[num_tokens // hash_block_size - 1]`
-            instead of the hash implied by `MooncakeLookupResult.hit_length`. This
-            changes only the load key, not the reusable prefix.
+        num_tokens: Token boundary whose prefix hash identifies the matched
+            stored block. The loader uses
+            `block_hashes[num_tokens // hash_block_size - 1]` instead of the
+            hash implied by `MooncakeLookupResult.hit_length`. This changes
+            only the load key, not the reusable prefix.
 
     """
 

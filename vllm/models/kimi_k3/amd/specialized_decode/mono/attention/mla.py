@@ -816,11 +816,13 @@ def mla_pre(
     tl=None,
 ):
     """Host launcher. `w_k` (12, 512, 64) u8 MXFP4 and `w_k_scale` (12, 512,
-    4) e8m0, any strides but W_K's last; `kv_cache` [blocks, block_size, 576] one-byte,
-    entries dense; `slots` [S] int64 (-1: another rank's token); `gate_out` [S, 1536]
-    bf16; `q_out` [S, q_heads(key), 576] fp8 (dense; bf16 with `qbf16`); `peers` every
-    rank's peer buffer base (i64 a rank; unread at ranks 1, may be None); `layer` a slot
-    below `kda.TAG_SLOTS`."""
+    4) e8m0, any strides but W_K's last; `kv_cache` [blocks, block_size, 576]
+    one-byte, entries dense; `slots` [S] int64 (-1: another rank's token);
+    `gate_out` [S, 1536] bf16; `q_out` [S, q_heads(key), 576] fp8 (dense; bf16 with
+    `qbf16`);
+    `peers` every rank's peer buffer base (i64 a rank; unread at ranks 1,
+    may be None); `layer` a slot below
+    `kda.TAG_SLOTS`."""
     assert w_k.stride(-1) == 1 and kv_cache.stride(-1) == 1
     assert slots.dtype == torch.int64 and slots.size(0) == key.tokens
     assert q_out.is_contiguous() and gate_out.is_contiguous()

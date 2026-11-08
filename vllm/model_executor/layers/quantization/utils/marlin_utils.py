@@ -359,10 +359,11 @@ def check_moe_marlin_supports_config(
 ) -> bool:
     """Whether the fused MoE Marlin kernel supports `config`.
 
-    With `allow_tile_padding=True`, a tile-misaligned intermediate size is zero-padded
-    to a valid thread tile at weight prep (see marlin_moe_padded_intermediate), so only
-    a group straddling the padded boundary stays unsupported. hidden_size is the MoE I/O
-    extent and is never padded.
+    With `allow_tile_padding=True`, a tile-misaligned intermediate size is
+    zero-padded to a valid thread tile at weight prep (see
+    marlin_moe_padded_intermediate), so only a group straddling the padded
+    boundary stays unsupported. hidden_size is the MoE I/O extent and is never
+    padded.
     """
     if current_platform.is_rocm():
         return False

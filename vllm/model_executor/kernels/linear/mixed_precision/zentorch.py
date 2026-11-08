@@ -200,8 +200,9 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Repack CT GPTQ weights into the zentorch DA8W4 or WOQ layout.
 
-        Falls back to `CPUWNA16LinearKernel.process_weights_after_loading` via `super()`
-        when the layer doesn't satisfy `_zentorch_woq_eligible`.
+        Falls back to `CPUWNA16LinearKernel.process_weights_after_loading`
+        via `super()` when the layer doesn't satisfy
+        `_zentorch_woq_eligible`.
 
         On success, `layer._zentorch_processed_weights` is set to `True`
         """

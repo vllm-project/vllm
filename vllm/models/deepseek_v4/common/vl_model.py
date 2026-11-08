@@ -11,9 +11,10 @@ Thin multimodal wrapper around the text-only `DeepseekV4ForCausalLM`:
   in `common/mm_preprocess.py` into sentinel blocks borrowing reserved
   in-vocab tokens `<|place_holder_mm_span_0431|>`..`_0435|>`
   (see `common/vision.py` for the tower itself).
-- Merged embeddings enter the text model via `inputs_embeds`, i.e. before its
-  hyper-connection stream expansion. Raw `input_ids` still flow into the model so the
-  MoE router can apply `bias_vl` to image tokens (`requires_raw_input_tokens`).
+- Merged embeddings enter the text model via `inputs_embeds`, i.e. before
+  its hyper-connection stream expansion. Raw `input_ids` still flow into
+  the model so the MoE router can apply `bias_vl` to image tokens
+  (`requires_raw_input_tokens`).
 """
 
 from collections.abc import Iterable

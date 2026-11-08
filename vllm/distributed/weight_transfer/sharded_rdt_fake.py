@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Op-chain recording for the sharded-RDT backend.
 
-The consumer asks the trainer for the exact slice a worker consumes, described as an op
-chain replayed on the trainer's live tensor. `FakeRDTTensor` builds the chain by
-intercepting the model's own weight loaders; `copy_` is its data sink, `BakeSink` — the
-dry run records how each slice would be fetched and where it lands.
+The consumer asks the trainer for the exact slice a worker consumes, described as
+an op chain replayed on the trainer's live tensor. `FakeRDTTensor` builds the
+chain by intercepting the model's own weight loaders; `copy_` is its data sink,
+`BakeSink` — the dry run records how each slice would be fetched and where it
+lands.
 
 Chains are built against meta tensors, so nothing here touches Ray or a GPU.
 """
@@ -51,10 +52,11 @@ class _Scatter:
     -- `layer` is resolved to a param at replay time, never baked, since every
     sync re-materializes fresh tensors.
 
-    `shape` and `dtype` also size the slice ON THE WIRE, so `dtype` is the PRODUCED
-    dtype (the fake's after its op chain), not the source name's: `view(dtype)` is
-    allowlisted, and taking the source's would size the slice with the wrong itemsize
-    and carve the packed blob differently on the two sides.
+    `shape` and `dtype` also size the slice ON THE WIRE, so `dtype` is the
+    PRODUCED dtype (the fake's after its op chain), not the source name's:
+    `view(dtype)` is allowlisted, and taking the source's would size the slice
+    with the wrong itemsize and carve the packed blob differently on the two
+    sides.
     """
 
     layer: Any
@@ -70,12 +72,14 @@ def _meta_copy_(dest: torch.Tensor, src: "FakeRDTTensor") -> torch.Tensor:
     """Fire `dest.copy_` from a zero-storage meta source of `src`'s geometry.
 
     Moves no data but still counts against the layer's loaded numel, which drives
-    `_layerwise_process`; skipping it would leave the layer looking unloaded forever.
+    `_layerwise_process`; skipping it would leave the layer looking unloaded
+    forever.
 
     A non-meta `dest` is one the layerwise reload never moved there (the
-    `SKIP_LOAD_TENSORS` set, e.g. GLM's router bias). Torch forbids `real.copy_(meta)`,
-    and skipping the count is consistent -- `get_layer_size` excludes the same set. The
-    caller still RECORDS the copy, so the replay writes the real param.
+    `SKIP_LOAD_TENSORS` set, e.g. GLM's router bias). Torch forbids
+    `real.copy_(meta)`, and skipping the count is consistent -- `get_layer_size`
+    excludes the same set. The caller still RECORDS the copy, so the replay writes
+    the real param.
     """
     if not dest.is_meta:
         return dest

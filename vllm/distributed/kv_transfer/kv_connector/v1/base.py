@@ -512,9 +512,10 @@ class KVConnectorBase_V1(ABC):
     def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
         """KV cache groups restored by this connector's load for `request`.
 
-        Called after `get_num_new_matched_tokens` returned a positive count. Defaults to
-        the prefix-cacheable groups, all a hash-addressed store holds; a connector
-        transferring the request's own blocks restores every transfer group.
+        Called after `get_num_new_matched_tokens` returned a positive count.
+        Defaults to the prefix-cacheable groups, all a hash-addressed store
+        holds; a connector transferring the request's own blocks restores
+        every transfer group.
         """
         return self._kv_cache_config.prefix_cacheable_group_ids
 
@@ -560,9 +561,10 @@ class KVConnectorBase_V1(ABC):
     ) -> dict[CacheHitSource, int]:
         """Split `num_external_tokens` by the cache tier that supplied them.
 
-        Called after `update_state_after_alloc`, so the load plan is known. Counts
-        must sum to `num_external_tokens`; a mismatch is reported as
-        `external_unspecified`. Only non-zero counts are included.
+        Called after `update_state_after_alloc`, so the load plan is
+        known. Counts must sum to `num_external_tokens`; a mismatch is
+        reported as `external_unspecified`. Only non-zero counts are
+        included.
 
         Default: all tokens under `_cache_hit_source`.
         """

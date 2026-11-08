@@ -87,12 +87,14 @@ def eager_break_during_capture(fn: F) -> F:
     caller-provided output tensor; a fresh tensor returned by `fn` would
     change address each replay and break downstream graph segments.
 
-    **Decorator order matters.** Apply as the *outermost* decorator if there are other
-    decorators that introduce host-side side effects around the call -- the canonical
-    example is `@maybe_transfer_kv_layer` for PD-disaggregation, whose
-    `wait_for_layer_load` and `save_kv_layer` calls must run in the eager segment, not
-    inside the captured cudagraph. Putting `@eager_break_during_capture` *inside* such a
-    decorator would record those side effects into the graph and hang on replay.
+    **Decorator order matters.** Apply as the *outermost* decorator if
+    there are other decorators that introduce host-side side effects
+    around the call -- the canonical example is
+    `@maybe_transfer_kv_layer` for PD-disaggregation, whose
+    `wait_for_layer_load` and `save_kv_layer` calls must run in the
+    eager segment, not inside the captured cudagraph. Putting
+    `@eager_break_during_capture` *inside* such a decorator would
+    record those side effects into the graph and hang on replay.
 
     The correct order is::
 
@@ -256,7 +258,8 @@ class BreakableCUDAGraphWrapper:
     `torch.cuda.graph()` capture.
 
     Same dispatch contract as `CUDAGraphWrapper`:
-        * If no `forward_context` is available, run the underlying callable eagerly.
+        * If no `forward_context` is available, run the underlying
+          callable eagerly.
         * If runtime mode mismatch / NONE, run eagerly.
         * Otherwise, lazily capture per `batch_descriptor` and replay
           on subsequent invocations with the same descriptor.

@@ -2,17 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused SwiGLU-OAI activation (split layout) for AMD ROCm via Triton.
 
-SwiGLU-OAI on a `[*, 2I]` split-layout input (gate = first half, up = second half):
+SwiGLU-OAI on a `[*, 2I]` split-layout input (gate = first half, up = second
+half):
 
     gate = clamp(gate, max=limit)
     up   = clamp(up, -limit, +limit)
     out  = gate * sigmoid(alpha * gate) * (up + beta)
 
-On ROCm the dense MLP and the native MXFP8 MoE (between its two GEMMs) fell back to a
-chain of elementwise PyTorch ops with fp32 intermediates: vLLM's shared
-`SiluAndMulWithClamp` blanket-routes ROCm to `forward_native`, and the MoE applies the
-activation inline in PyTorch. This Triton kernel collapses that into a single pass
-producing the `[*, I]` output directly, and computes in fp32 (rel ~1e-6 vs reference).
+On ROCm the dense MLP and the native MXFP8 MoE (between its two GEMMs) fell back
+to a chain of elementwise PyTorch ops with fp32 intermediates: vLLM's shared
+`SiluAndMulWithClamp` blanket-routes ROCm to `forward_native`, and the MoE
+applies the activation inline in PyTorch. This Triton kernel collapses that into
+a single pass producing the `[*, I]` output directly, and computes in fp32
+(rel ~1e-6 vs reference).
 
 Note: the vectorized `torch.ops._C.silu_and_mul_with_clamp` op IS built on
 ROCm and is ~1.2-2.2x faster in isolation, but the win is launch overhead that

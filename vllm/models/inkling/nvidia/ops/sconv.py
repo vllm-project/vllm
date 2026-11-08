@@ -8,19 +8,21 @@ occupies the contiguous D-sub-range `[off_s, off_s + ws)` across all `H`
 heads, so its flat per-token width is `H * ws` and that is the conv channel
 dim. The cache stores the conv *input* at every absolute position.
 
-`fused_sconv` is the single-launch path used by the model: per token it writes the
-current input to its slot and convolves the `W` taps ending at its absolute position. A
-tap landing inside the current forward is read from the immutable input `x` (row
-`src - pos + pid_t`); only pre-forward taps are read from the paged cache (window
-position `src` -> physical block via `block_table[req, src // N]`). The just-written
-slot is never read back this step, so there is no write/read hazard within or across
-programs -- which is why this needs no decode-vs-prefill split and is valid for prefill
-/ decode / spec alike.
+`fused_sconv` is the single-launch path used by the model: per token it writes
+the current input to its slot and convolves the `W` taps ending at its
+absolute position. A tap landing inside the current forward is read from the
+immutable input `x` (row `src - pos + pid_t`); only pre-forward taps are read
+from the paged cache (window position `src` -> physical block via
+`block_table[req, src // N]`). The just-written slot is never read back this
+step, so there is no write/read hazard within or across programs -- which is
+why this needs no decode-vs-prefill split and is valid for prefill / decode /
+spec alike.
 
-All kernels address the cache purely by `(slot, absolute_position)` and allocate nothing
-inside the captured region; their grids depend only on the token count (`fused_sconv` on
-a fixed token/channel tiling), so the same path replays correctly under eager, breakable
-PIECEWISE, and FULL cudagraphs without any data-dependent shape or branch.
+All kernels address the cache purely by `(slot, absolute_position)` and
+allocate nothing inside the captured region; their grids depend only on the
+token count (`fused_sconv` on a fixed token/channel tiling), so the same
+path replays correctly under eager, breakable PIECEWISE, and FULL cudagraphs
+without any data-dependent shape or branch.
 """
 
 from __future__ import annotations

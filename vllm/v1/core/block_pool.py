@@ -227,11 +227,12 @@ class BlockPool:
             block_size: Number of tokens in each block.
             kv_cache_group_id: The id of the KV cache group.
             block_mask: Optional mask aligned with
-                `blocks[num_cached_blocks:num_full_blocks]`. When provided, blocks where
-                the mask is False are skipped (treated like null blocks). Used by groups
-                whose `find_longest_cache_hit` only consults a subset of blocks (e.g.
-                SWA tail-window), so blocks that can never serve a hit stay out of the
-                prefix-cache hash map.
+                `blocks[num_cached_blocks:num_full_blocks]`. When provided,
+                blocks where the mask is False are skipped (treated like null
+                blocks). Used by groups whose `find_longest_cache_hit` only
+                consults a subset of blocks (e.g. SWA tail-window), so blocks
+                that can never serve a hit stay out of the prefix-cache hash
+                map.
 
         """
         if num_cached_blocks >= num_full_blocks:
@@ -466,14 +467,16 @@ class BlockPool:
     ) -> BlockHashWithGroupId | None:
         """Register a partial prefix-cache entry for an existing block.
 
-        Prefix-cache keys normally identify full cache blocks. A partial entry makes an
-        existing cache block reachable from a fine-grained prefix boundary inside that
-        block without allocating or copying a new `KVCacheBlock`.
+        Prefix-cache keys normally identify full cache blocks. A partial entry
+        makes an existing cache block reachable from a fine-grained prefix
+        boundary inside that block without allocating or copying a new
+        `KVCacheBlock`.
 
-        The partial entry is lookup metadata owned by `block`. If `block` has no primary
-        hash, the key becomes its primary hash. If the block already has a primary hash,
-        the partial entry is tracked in `cached_block_hashes_by_block` so eviction,
-        reset, and promotion can remove every hash key that points to the block.
+        The partial entry is lookup metadata owned by `block`. If `block`
+        has no primary hash, the key becomes its primary hash. If the block
+        already has a primary hash, the partial entry is tracked in
+        `cached_block_hashes_by_block` so eviction, reset, and promotion can
+        remove every hash key that points to the block.
 
         Args:
             request: Request whose token IDs and block hashes define the
@@ -484,9 +487,10 @@ class BlockPool:
                 must be a positive multiple of `self.hash_block_size` and
                 cannot exceed the request's computed block hashes.
             kv_cache_group_id: KV cache group that owns the partial entry.
-            block_size: Cache block size for the owning group. The partial entry hash
-                itself is always the prefix-chain hash at `num_tokens`; `block_size`
-                must be a multiple of the hash block size.
+            block_size: Cache block size for the owning group. The partial
+                entry hash itself is always the prefix-chain hash at
+                `num_tokens`; `block_size` must be a multiple of the hash
+                block size.
             replace_existing_hashes: Whether the block contents were replaced
                 and all existing cache entries must be removed before the new
                 entry is registered.

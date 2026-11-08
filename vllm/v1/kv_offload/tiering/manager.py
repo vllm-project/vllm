@@ -217,7 +217,8 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         """Return the memoryview over the primary tier's KV cache buffer.
 
         The view has shape (num_chunks, row_stride_bytes) and is backed by the
-        SharedOffloadRegion mmap. Secondary tiers address chunk *c* as `view[c]`.
+        SharedOffloadRegion mmap.  Secondary tiers address chunk *c* as
+        `view[c]`.
         """
         return self._kv_memoryview
 

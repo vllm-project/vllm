@@ -188,8 +188,9 @@ def _parse_dest(kv_params: dict | None) -> P2PDestInfo | None:
 def _annotate_req_context(req_context: ReqContext) -> None:
     """Parse kv_transfer_params once and cache the P2P routing state.
 
-    Called from `on_new_request`; later calls for the same request read the cached
-    `P2PSourceInfo`/`P2PDestInfo` via `get_state` instead of re-parsing.
+    Called from `on_new_request`; later calls for the same request read
+    the cached `P2PSourceInfo`/`P2PDestInfo` via `get_state` instead
+    of re-parsing.
     """
     source = _parse_source(req_context.kv_transfer_params)
     if source is not None:
@@ -229,9 +230,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     to be serviced from that thread too; without it a peer's lookup or fetch
     waits for a step boundary, which on a saturated rank can be seconds.
 
-    `has_pending_work()` reports peer-originated work, not idle polling, so a peer-only
-    engine can pause and shut down. The tiering manager keeps the engine ticking when
-    the tier-poll thread is off or another secondary tier exists.
+    `has_pending_work()` reports peer-originated work, not idle polling,
+    so a peer-only engine can pause and shut down. The tiering manager keeps
+    the engine ticking when the tier-poll thread is off or another secondary
+    tier exists.
     """
 
     cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.P2P
@@ -251,9 +253,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     ) -> None:
         """Initialize the P2P secondary tier manager.
 
-        All keyword arguments after `primary_kv_view` come from the `secondary_tiers`
-        entry in `kv_connector_extra_config`. See `docs/features/kv_offloading_usage.md`
-        for the user-facing configuration reference.
+        All keyword arguments after `primary_kv_view` come from the
+        `secondary_tiers` entry in `kv_connector_extra_config`. See
+        `docs/features/kv_offloading_usage.md` for the user-facing
+        configuration reference.
 
         Args:
             offloading_spec: Owning `OffloadingSpec` (provides normalized
@@ -261,27 +264,33 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             primary_kv_view: Memoryview over the CPU primary tier; the
                 NIXL agent registers this region for RDMA transfers.
             tier_type: Tier identifier (defaults to `"p2p"`).
-            host: Address the ZMQ control socket binds to, used verbatim as both the
-                bind address and the identity peers dial back (mirrors the NIXL
-                connector's `VLLM_NIXL_SIDE_CHANNEL_HOST`; no auto-detection). Defaults
-                to `VLLM_P2P_SIDE_CHANNEL_HOST` (`localhost`) when not set; must be set
-                to the node's routable IP for cross-host P2P so remote peers can reach
-                the socket.
-            port: Base port for the ZMQ control socket. Must be reachable from peers.
-                Defaults to `VLLM_P2P_SIDE_CHANNEL_PORT` (`5710`) when not set. The
-                bound port is `base + data_parallel_index` so each DP replica gets a
-                distinct port (one socket per replica, like NIXL); for DP=1 the offset
-                is 0.
-            backends: NIXL transport backends (e.g. `["UCX"]`, `["MOONCAKE"]`,
-                `["LIBFABRIC"]`). Defaults to `["UCX"]`. When any non-UCX backend is
-                requested, the NIXL agent is initialized with `backends=...`; otherwise
-                it falls back to a UCX-only agent with `num_threads` threads.
-            num_threads: NIXL agent worker threads for the UCX-only branch. Ignored when
-                `backends` contains a non-UCX entry.
-            unbound_store_timeout_s: Seconds a producer holds stored blocks for a
-                consumer that has not fetched them yet, before `_reap_unbound_stores`
-                drops them. Raise it for deployments whose prefills outlast the default;
-                the blocks keep primary-tier slots pinned for the whole window.
+            host: Address the ZMQ control socket binds to, used verbatim
+                as both the bind address and the identity peers dial back
+                (mirrors the NIXL connector's `VLLM_NIXL_SIDE_CHANNEL_HOST`;
+                no auto-detection). Defaults to
+                `VLLM_P2P_SIDE_CHANNEL_HOST` (`localhost`) when not set;
+                must be set to the node's routable IP for cross-host P2P so
+                remote peers can reach the socket.
+            port: Base port for the ZMQ control socket. Must be
+                reachable from peers. Defaults to
+                `VLLM_P2P_SIDE_CHANNEL_PORT` (`5710`) when not set.
+                The bound port is `base + data_parallel_index` so each
+                DP replica gets a distinct port (one socket per replica,
+                like NIXL); for DP=1 the offset is 0.
+            backends: NIXL transport backends (e.g. `["UCX"]`,
+                `["MOONCAKE"]`, `["LIBFABRIC"]`). Defaults to
+                `["UCX"]`. When any non-UCX backend is requested, the
+                NIXL agent is initialized with `backends=...`;
+                otherwise it falls back to a UCX-only agent with
+                `num_threads` threads.
+            num_threads: NIXL agent worker threads for the UCX-only
+                branch. Ignored when `backends` contains a non-UCX
+                entry.
+            unbound_store_timeout_s: Seconds a producer holds stored blocks
+                for a consumer that has not fetched them yet, before
+                `_reap_unbound_stores` drops them. Raise it for
+                deployments whose prefills outlast the default; the blocks
+                keep primary-tier slots pinned for the whole window.
             **kwargs: Reserved for future tier-specific options.
 
         Raises:
@@ -445,13 +454,14 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         """Parse kv_transfer_params once and open the outbound session.
 
-        Parses the P2P routing state onto `req_context` (cached for the later
-        lookup/submit/finish calls). On the consumer side (`remote_prefiller` for PD or
-        `remote_kv_source` for symmetric P2P), open a session toward the producer at
-        remote_host:remote_port so submit_load can issue FetchMsg as soon as it fires.
-        On the prefiller side, sessions are created when the consumer's inbound
-        connection arrives in _accept_new_peers — submit_store no longer pre-creates
-        anything.
+        Parses the P2P routing state onto `req_context` (cached for the
+        later lookup/submit/finish calls). On the consumer side
+        (`remote_prefiller` for PD or `remote_kv_source` for symmetric
+        P2P), open a session toward the producer at remote_host:remote_port
+        so submit_load can issue FetchMsg as soon as it fires. On the
+        prefiller side, sessions are created when the consumer's inbound
+        connection arrives in _accept_new_peers — submit_store no longer
+        pre-creates anything.
 
         Producer-leg requests (`remote_decoder` present) ask for
         REQUEST_LEVEL: the peer needs every block of the request, not just
@@ -472,14 +482,16 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def on_request_finished(self, req_context: ReqContext) -> None:
         """Cancels pending loads and prunes session-scoped state.
 
-        Consumer side (`remote_prefiller` for PD or `remote_kv_source` for
-        symmetric-P2P): looks up the session by peer_id because the producer's address
-        is what addresses the client-role load to cancel; also drops any pending
-        symmetric-P2P lookup state via `session.finish_request`. Prefiller side
-        (`remote_decoder` set): looks up via kv_request_id because peer_id is no longer
-        carried on store-time kv_transfer_params; if a session has bound the id, finish
-        it. If no session has bound the id yet, this is a no-op: parked batches in
-        `_unbound_stores` are left in place and cleaned up only by
+        Consumer side (`remote_prefiller` for PD or `remote_kv_source`
+        for symmetric-P2P): looks up the session by peer_id because the
+        producer's address is what addresses the client-role load to
+        cancel; also drops any pending symmetric-P2P lookup state via
+        `session.finish_request`.
+        Prefiller side (`remote_decoder` set): looks up via kv_request_id
+        because peer_id is no longer carried on store-time
+        kv_transfer_params; if a session has bound the id, finish it. If
+        no session has bound the id yet, this is a no-op: parked batches
+        in `_unbound_stores` are left in place and cleaned up only by
         `_reap_unbound_stores` after `_unbound_store_timeout_s`.
 
         A PD prefiller request may carry both roles: `remote_kv_source`
@@ -680,10 +692,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
         Fail stores still waiting for a fetch, then poll until no session has
         outstanding inbound loads or in-flight outbound stores, and no reaped session's
-        transfer is still retained (bounded by its hold cap). Mid-flight transfers are
-        NOT cancelled — the caller (`TieringOffloadingManager.reset_cache`) needs the
-        primary memoryview to be quiescent, not aborted. Results accumulate in
-        `_finished_jobs` and are surfaced by the next `get_finished_jobs()` call.
+        transfer is still retained (bounded by its hold cap). Mid-flight
+        transfers are NOT cancelled — the caller
+        (`TieringOffloadingManager.reset_cache`) needs the primary
+        memoryview to be quiescent, not aborted. Results
+        accumulate in `_finished_jobs` and are surfaced by the next
+        `get_finished_jobs()` call.
 
         Inbound loads are aborted up front rather than waited out: a peer
         that never writes would otherwise block the reset for the full load
@@ -731,10 +745,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def serve_external_requests(self, parent: ParentManager) -> None:
         """Serve inbound peer lookups against the tiering manager.
 
-        Called once per scheduler step (before this tier's `on_schedule_end`) with a
-        `parent` handle valid only for the duration of the call — the sole window in
-        which the P2P server role may query the tiering manager. First release
-        bookkeeping for the failed serves left by a reaped session, then let every live
+        Called once per scheduler step (before this tier's
+        `on_schedule_end`) with a `parent` handle valid only for the
+        duration of the call — the sole window in which the P2P server
+        role may query the tiering manager. First release bookkeeping for
+        the failed serves left by a reaped session, then let every live
         session resolve its enqueued inbound LookupMsgs.
         """
         if self._failed_serve_ctxs:
@@ -765,11 +780,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def _get_or_create_session(self, peer_id: str) -> P2PSession | None:
         """Return the existing session for peer_id, or open one outbound.
 
-        Consumer-side helper for on_new_request: when `remote_prefiller` (PD) or
-        `remote_kv_source` (symmetric P2P) is set, the consumer must reach the producer
-        at peer_id. If we already have a session toward that peer (from a prior load or
-        a peer-initiated inbound), reuse it; otherwise open an outbound
-        ControlConnection and build a connected session.
+        Consumer-side helper for on_new_request: when `remote_prefiller`
+        (PD) or `remote_kv_source` (symmetric P2P) is set, the consumer
+        must reach the producer at peer_id. If we already have a session
+        toward that peer (from a prior load or a peer-initiated inbound),
+        reuse it; otherwise open an outbound ControlConnection and build a
+        connected session.
 
         Returns None if the session could not be created (capacity
         exceeded or transport error).
@@ -1130,9 +1146,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def _poll_once(self, *, draining: bool = False) -> None:
         """One sweep of the polling work.
 
-        Drains the control transport, polls every session, accumulates their results
-        into `_finished_jobs`, and reaps any dead sessions. Runs under the tiering
-        manager's lock, on the scheduler thread or on the tier-poll thread.
+        Drains the control transport, polls every session, accumulates
+        their results into `_finished_jobs`, and reaps any dead sessions.
+        Runs under the tiering manager's lock, on the scheduler thread or on
+        the tier-poll thread.
         """
         new_connections = self._control.poll()
         if new_connections:

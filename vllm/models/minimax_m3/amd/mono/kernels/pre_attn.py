@@ -5,8 +5,9 @@
 # Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 """K1 `mono_pre`: one MiniMax-M3 sparse layer, input norm through cache insert.
 
-One launch per layer and rank, `BLOCKS` CTAs x `THREADS` threads, for S = `tokens`
-decode rows, `q_len` consecutive rows a request (each row below is per token)::
+One launch per layer and rank, `BLOCKS` CTAs x `THREADS` threads, for S =
+`tokens` decode rows, `q_len` consecutive rows a request (each row below is
+per token)::
 
     acc = ar + res (f32)  -> residual out bf16(acc)
       -> gemma RMSNorm -> per-token FP8 (amax / FP8_MAX, true divide)
@@ -185,9 +186,10 @@ def emit_pre_attn(
     x8s_mb, stamp, eps, tokens, heads, ptrs, signal=None, long_step=None,
 ):  # fmt: skip
     """K1's body: the GEMV tasks (ROWS_PER_TASK of the `heads` projection's rows
-    each: the rank's own on CTAs 0 .. ONE_GEMV, its other index q heads' on CTAs XT0 ..,
-    in a step where `long_step()`), the head tasks (CTAs HT0 .., a token per half wave)
-    and, with S > 2, one norm task per token (CTAs NT0 ..) feeding the GEMV tasks."""
+    each: the rank's own on CTAs 0 .. ONE_GEMV, its other index q heads' on CTAs
+    XT0 .., in a step where `long_step()`), the head tasks (CTAs HT0 .., a token
+    per half wave) and, with S > 2, one norm task per token (CTAs NT0 ..) feeding
+    the GEMV tasks."""
     rows = heads.rows
     (
         ar,

@@ -164,9 +164,10 @@ def gguf_nvfp4_weights_iterator(
     dequantize: frozenset[str] = frozenset(),
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """Yield HF-style (name, tensor) pairs; NVFP4 tensors become `.weight`
-    (packed uint8), `.weight_scale` (E4M3) and `.weight_scale_2` (F32), except HF base
-    names in `dequantize`, which become a BF16 `.weight` holding `e2m1 * e4m3` (exact)
-    plus the F32 `.weight_scale_2` that the caller applies to the fp32 output."""
+    (packed uint8), `.weight_scale` (E4M3) and `.weight_scale_2` (F32),
+    except HF base names in `dequantize`, which become a BF16 `.weight`
+    holding `e2m1 * e4m3` (exact) plus the F32 `.weight_scale_2` that the
+    caller applies to the fp32 output."""
     try:
         import gguf
     except ImportError as err:

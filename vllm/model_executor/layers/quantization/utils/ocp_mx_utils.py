@@ -53,11 +53,12 @@ def ocp_mx_weight_dtype_and_rows(
     """Normalize a Quark weight quant config to `(mx_dtype, scale_block_rows)`.
 
     Quark spells OCP MX weights two ways. The canonical one is 1-D per-group:
-    `qscheme="per_group"`, `group_size=32`, `scale_format="e8m0"`. MXFP8 checkpoints may
-    instead use a 2-D per-block spelling (`qscheme="per_block"`, `block_size=[R, 32]`,
-    `scale_type="float8_e8m0fnu"`), which carries one scale per `R` weight rows rather
-    than one per row. `scale_block_rows` is that `R`; it is 1 for the canonical
-    spelling, where the two layouts coincide.
+    `qscheme="per_group"`, `group_size=32`, `scale_format="e8m0"`. MXFP8
+    checkpoints may instead use a 2-D per-block spelling
+    (`qscheme="per_block"`, `block_size=[R, 32]`,
+    `scale_type="float8_e8m0fnu"`), which carries one scale per `R` weight
+    rows rather than one per row. `scale_block_rows` is that `R`; it is 1
+    for the canonical spelling, where the two layouts coincide.
 
     Returns `None` when the config is not an OCP MX weight quantization.
     """

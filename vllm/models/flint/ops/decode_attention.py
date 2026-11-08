@@ -2,22 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Split-KV paged decode attention for Flint (GQA 8, head_dim 128, bf16 KV).
 
-Numerics mirror FlashInfer's trtllm-gen decode kernel: `S = K q` with bf16 inputs and
-fp32 accumulation; softmax in fp32 as `exp2(S * c - m * c)` with `c = scale * log2(e)`
-and the running max `m` in unscaled logits; the row sum accumulates the fp32
-probabilities while `P` is rounded to bf16 for `P V` (fp32 accumulation); the sink adds
-`exp2(sink * log2(e) - m * c)` to the final denominator. Split partials (unnormalized O,
-m, l) stay fp32 (trtllm-gen stores partial O in bf16) and are merged either by the last
-CTA of each (request, kv head), found with a self-resetting arrival counter, or, for the
-short sliding-window layers, inside a thread-block cluster through distributed shared
-memory (every rank merges a slice of the head dims).
+Numerics mirror FlashInfer's trtllm-gen decode kernel: `S = K q` with bf16
+inputs and fp32 accumulation; softmax in fp32 as `exp2(S * c - m * c)` with
+`c = scale * log2(e)` and the running max `m` in unscaled logits; the row
+sum accumulates the fp32 probabilities while `P` is rounded to bf16 for
+`P V` (fp32 accumulation); the sink adds `exp2(sink * log2(e) - m * c)` to
+the final denominator. Split partials (unnormalized O, m, l) stay fp32
+(trtllm-gen stores partial O in bf16) and are merged either by the last CTA of
+each (request, kv head), found with a self-resetting arrival counter, or, for
+the short sliding-window layers, inside a thread-block cluster through
+distributed shared memory (every rank merges a slice of the head dims).
 
-Each warp streams 8 KB pages (16 tokens x [K | V], HND layout) through a private ring of
-bulk-copy (TMA) stages and runs `mma.sync` on them. The kernel is launched with
-programmatic dependent launch: it prefetches its leading pages before waiting on the
-grid dependency (all but the page holding the current token, whose K/V the previous
-kernel writes), touches q and its workspace only after the wait, and triggers its
-dependents once K/V streaming is done.
+Each warp streams 8 KB pages (16 tokens x [K | V], HND layout) through a
+private ring of bulk-copy (TMA) stages and runs `mma.sync` on them. The
+kernel is launched with programmatic dependent launch: it prefetches its
+leading pages before waiting on the grid dependency (all but the page holding
+the current token, whose K/V the previous kernel writes), touches q and its
+workspace only after the wait, and triggers its dependents once K/V streaming
+is done.
 """
 
 from functools import cache
@@ -272,10 +274,11 @@ def _neg_inf():
 
 class _FlintDecodeAttention:
     """Grid (splits, kv heads, batch). The attended pages of a (request, kv
-    head) are interleaved over the warps of its active splits; a split is active when
-    every one of its warps gets at least `min_pages` pages. With `cluster` the splits of
-    a (request, kv head) form a thread-block cluster and merge through distributed
-    shared memory instead of global partials."""
+    head) are interleaved over the warps of its active splits; a split is
+    active when every one of its warps gets at least `min_pages` pages.
+    With `cluster` the splits of a (request, kv head) form a thread-block
+    cluster and merge through distributed shared memory instead of global
+    partials."""
 
     def __init__(
         self,

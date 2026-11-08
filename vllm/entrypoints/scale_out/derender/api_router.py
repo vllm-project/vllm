@@ -96,7 +96,8 @@ async def derender_completion(
     Accepts both non-streaming (`stream=false`, default) and streaming
     (`stream=true`) request bodies on the same path.
 
-    Non-streaming: body is `DerenderCompletionRequest`. Returns a `CompletionResponse`.
+    Non-streaming: body is `DerenderCompletionRequest`. Returns a
+    `CompletionResponse`.
 
     Streaming: body is `DerenderCompletionStreamRequest` (one
     `generate_chunk` + optional `stream_state`). Returns a

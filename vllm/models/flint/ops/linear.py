@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Flint dense linears with a small-M CuTe GEMV fast path.
 
-NVFP4 (W4A16): the GEMV (`nvfp4_gemv`) reads the very tensors the FlashInfer CuTe-DSL
-kernel was prepared with (ModelOpt-packed weight, 128x4-swizzled scales), so dispatching
-per token count costs no extra weight memory; larger M stays on FlashInfer. BF16: the
-same GEMV kernel on BF16 weights where it beats cuBLAS, cuBLAS otherwise.
+NVFP4 (W4A16): the GEMV (`nvfp4_gemv`) reads the very tensors the FlashInfer
+CuTe-DSL kernel was prepared with (ModelOpt-packed weight, 128x4-swizzled
+scales), so dispatching per token count costs no extra weight memory; larger
+M stays on FlashInfer. BF16: the same GEMV kernel on BF16 weights where it
+beats cuBLAS, cuBLAS otherwise.
 """
 
 from collections.abc import Iterable, Iterator
@@ -200,8 +201,9 @@ _BF16_NO_PDL_SUFFIXES = ("o_proj",)
 def install_flint_dense_kernels(model: nn.Module) -> None:
     """Route the dense linears of `model` through the Flint GEMV (launched
     with PDL except the BF16 `_BF16_NO_PDL_SUFFIXES`): NVFP4 linears get
-    `FlintNvFp4LinearKernel`, unquantized BF16 projections (`_DENSE_SUFFIXES`)
-    `FlintBf16LinearMethod`. Must run before weights are processed after loading."""
+    `FlintNvFp4LinearKernel`, unquantized BF16 projections
+    (`_DENSE_SUFFIXES`) `FlintBf16LinearMethod`. Must run before weights
+    are processed after loading."""
     count = 0
     for module in model.modules():
         if not isinstance(module, LinearBase):

@@ -182,11 +182,12 @@ def mistral_config(
     """Return a `ParserEngineConfig` for the Mistral output format.
 
     Args:
-        reasoning_encoding: Reasoning token format. `"special_token"` – v13+
-            `[THINK]`/`[/THINK]` special tokens placed in both `terminals` and
-            `token_id_terminals`. `"text"` – v11 `<think>`/`</think>` plain text placed
-            in `terminals` only; no `token_id_terminals` for think tokens. `"none"` – no
-            reasoning support.
+        reasoning_encoding: Reasoning token format.
+            `"special_token"` – v13+ `[THINK]`/`[/THINK]` special
+            tokens placed in both `terminals` and `token_id_terminals`.
+            `"text"` – v11 `<think>`/`</think>` plain text placed in
+            `terminals` only; no `token_id_terminals` for think tokens.
+            `"none"` – no reasoning support.
         name: Name embedded in the returned config (used for debugging).
 
     Returns:
@@ -308,9 +309,10 @@ class MistralParser(ParserEngine):
     buffer via an `ARG_VALUE_CHUNK` event on the transition (mirrors
     kimi_k2, JSON args, `tool_args_json=True`).
 
-    When the tokenizer does not support grammar (`_reasoning_encoding == "none"`), the
-    legacy `[TOOL_CALLS]`-based extraction path is used instead of the declarative
-    engine, handling both pre-v11 JSON-array and v11+ `funcname{args}` formats.
+    When the tokenizer does not support grammar (`_reasoning_encoding ==
+    "none"`), the legacy `[TOOL_CALLS]`-based extraction path is used
+    instead of the declarative engine, handling both pre-v11 JSON-array and
+    v11+ `funcname{args}` formats.
     """
 
     def __init__(

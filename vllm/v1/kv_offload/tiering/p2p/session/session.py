@@ -414,8 +414,9 @@ class P2PSession:
             falls back to local prefill instead of deferring forever on an
             answer that can never arrive.
         failed_stores: server store job_ids to fail.
-        failed_serves: synthetic lookup ctxs still owing `parent.on_request_finished`
-            (the manager flushes these on its next `serve_external_requests`).
+        failed_serves: synthetic lookup ctxs still owing
+            `parent.on_request_finished` (the manager flushes these on
+            its next `serve_external_requests`).
         retained: server transfers that may still be writing, with the
             store jobs they read (held until they stop).
         """

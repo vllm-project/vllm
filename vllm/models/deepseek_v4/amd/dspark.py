@@ -11,7 +11,8 @@ ROCm port of `nvidia/dspark.py`. Follows the same nvidia->amd recipe used for
     tilelang / triton / torch) instead of calling the tilelang kernels directly,
     and gate the trailing `mhc_post` on `use_fused_mhc` (True when AITER
     or TileLang fused MHC is available; False only on the torch fallback);
-  * use the AITER MegaMoE path (`aiter_mega_moe`) instead of the DeepGEMM mega-MoE path.
+  * use the AITER MegaMoE path (`aiter_mega_moe`) instead of the DeepGEMM
+    mega-MoE path.
 
 Everything else — the semi-autoregressive drafting hooks, the Markov head, the
 sliding-window context-KV insert, and the checkpoint `mtp.*` weight remap — is
@@ -152,9 +153,10 @@ class DSparkDeepseekV4Model(nn.Module):
     ) -> None:
         """Insert the sliding-window context KV for every draft layer.
 
-        Mirrors the reference DSparkAttention: each layer derives its context KV from
-        the SAME projected target hidden `main_x`, via that layer's own `wkv` +
-        `kv_norm` + RoPE + quant, then writes it at the layer's context slots.
+        Mirrors the reference DSparkAttention: each layer derives its context KV
+        from the SAME projected target hidden `main_x`, via that layer's own
+        `wkv` + `kv_norm` + RoPE + quant, then writes it at the
+        layer's context slots.
 
         `context_slot_mappings` is a per-layer list (each entry is the context
         slot mapping for that layer's kv-cache group, since the hybrid manager may

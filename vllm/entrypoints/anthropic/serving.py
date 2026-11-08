@@ -98,10 +98,11 @@ def _build_anthropic_usage(
     cache_creation`.  vLLM's `prompt_tokens` is the total, so
     `input_tokens = prompt_tokens - cache_read - cache_creation`.
 
-    Cache fields are taken from `UsageInfo.prompt_tokens_details`. When cache info is
-    absent (e.g. `--enable-prompt-tokens-details` off, or a streaming chunk that hasn't
-    carried it yet), cache fields are left **unset** so `exclude_unset=True`
-    serialization omits them entirely.
+    Cache fields are taken from `UsageInfo.prompt_tokens_details`.
+    When cache info is absent (e.g. `--enable-prompt-tokens-details`
+    off, or a streaming chunk that hasn't carried it yet), cache fields
+    are left **unset** so `exclude_unset=True` serialization omits them
+    entirely.
 
     `completion_tokens` follows `UsageInfo` and may be `None` on
     intermediate stream chunks; we coerce to `0` for the wire format.

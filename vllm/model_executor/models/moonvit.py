@@ -121,10 +121,11 @@ class Learnable2DInterpPosEmb(nn.Module):
     ) -> torch.Tensor:
         """Build packed per-token positional embeddings for a list of grids.
 
-        Returns a tensor of shape `(sum(h * w), dim)` formed by interpolating the
-        learned `(height, width, dim)` weight to each `(h, w)` grid and concatenating
-        the flattened results in the same order as `grid_hws_list`. Lives outside the
-        captured CUDA graph so the per-grid Python iteration is safe.
+        Returns a tensor of shape `(sum(h * w), dim)` formed by interpolating
+        the learned `(height, width, dim)` weight to each `(h, w)` grid and
+        concatenating the flattened results in the same order as
+        `grid_hws_list`. Lives outside the captured CUDA graph so the
+        per-grid Python iteration is safe.
         """
         weight_shape = list(self.weight.shape[:-1])
         pos_embs: list[torch.Tensor] = []
@@ -447,8 +448,9 @@ class MoonVitEncoderLayer(nn.Module):
         """Args:
         x (torch.Tensor): (seqlen, hidden_dim)
         cu_seqlens (torch.Tensor):
-        max_seqlen: Optional precomputed scalar tensor. When omitted it is derived from
-            `cu_seqlens`, which produces a GPU scalar that breaks CUDA graph capture.
+        max_seqlen: Optional precomputed scalar tensor. When omitted it
+            is derived from `cu_seqlens`, which produces a GPU scalar
+            that breaks CUDA graph capture.
 
         """
         seq_length = x.size(0)
@@ -713,10 +715,12 @@ class MoonVitPretrainedModel(PreTrainedModel):
 
         Args:
             grid_hws_list: List of `(h, w)` patch-grid sizes per image.
-            max_batch_size: When set, `cu_seqlens` is right-padded with its last value
-                so the buffer covers up to this many sequences. Required at CUDA graph
-                capture/replay so the buffer shape matches what was recorded; padding
-                entries are zero-length sequences and are ignored by varlen attention.
+            max_batch_size: When set, `cu_seqlens` is right-padded with
+                its last value so the buffer covers up to this many
+                sequences. Required at CUDA graph capture/replay so the
+                buffer shape matches what was recorded; padding entries
+                are zero-length sequences and are ignored by varlen
+                attention.
             max_seqlen_override: Override the per-replay max sequence
                 length scalar. At capture this must be a safe upper bound
                 (worst case: a single image consuming the full token
@@ -790,11 +794,13 @@ class MoonVitPretrainedModel(PreTrainedModel):
         pixel_values (torch.Tensor): The input pixel values.
         grid_hw (torch.Tensor): The grid height and width.
         encoder_metadata: Optional precomputed metadata produced by
-            `prepare_encoder_metadata`. When provided every `.tolist()` call in
-            the forward path is skipped, the returned tensor is the packed
-            `(sum(new_h*new_w), kh*kw, hidden_size)` form (suitable for CUDA graph
-            capture/replay), and `grid_hw` is unused. When `None` the legacy path runs
-            and returns a list of per-image tensors.
+            `prepare_encoder_metadata`. When provided every
+            `.tolist()` call in the forward path is skipped, the
+            returned tensor is the packed
+            `(sum(new_h*new_w), kh*kw, hidden_size)` form (suitable
+            for CUDA graph capture/replay), and `grid_hw` is unused.
+            When `None` the legacy path runs and returns a list of
+            per-image tensors.
 
         """
         if encoder_metadata is not None:

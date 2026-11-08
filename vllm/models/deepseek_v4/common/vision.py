@@ -3,11 +3,12 @@
 """DeepSeek-V4 vision tower (ViT + aligner) with TP-sharded linears.
 
 Ported from the official reference implementation
-(deepseek-ai/DeepSeek-V4-Flash-Vision-Exp). Weight names match the HF checkpoint so no
-renaming is needed at load time. Attention and MLP weights are tensor-parallel sharded
-(replicated when the vision head count is not divisible by TP size, or under
-`--mm-encoder-tp-mode data`); the patch embed and norms are replicated, so the residual
-stream is full-width on every rank.
+(deepseek-ai/DeepSeek-V4-Flash-Vision-Exp). Weight names match the HF
+checkpoint so no renaming is needed at load time. Attention and MLP weights
+are tensor-parallel sharded (replicated when the vision head count is not
+divisible by TP size, or under `--mm-encoder-tp-mode data`); the patch
+embed and norms are replicated, so the residual stream is full-width on
+every rank.
 """
 
 import itertools
@@ -379,9 +380,10 @@ class DeepseekV4Aligner(nn.Module):
     ) -> torch.Tensor:
         """Packed multi-image path for encoder CUDA graphs.
 
-        `merge_idx`/`merge_mask` come from `build_packed_merge_metadata`; gather+mask
-        reproduces the eager `F.pad` + `F.unfold` merge exactly (unfold rows are
-        channel-major, so the gathered patch rows are transposed before flattening).
+        `merge_idx`/`merge_mask` come from `build_packed_merge_metadata`;
+        gather+mask reproduces the eager `F.pad` + `F.unfold` merge
+        exactly (unfold rows are channel-major, so the gathered patch rows
+        are transposed before flattening).
         """
         r2 = self.downsample_ratio**2
         m = merge_idx.shape[0]
@@ -452,10 +454,11 @@ def run_dp_sharded_vision_tower(
 ) -> list[torch.Tensor]:
     """Run the ViT + aligner with images sharded across TP ranks.
 
-    Every rank holds the full tower weights (`--mm-encoder-tp-mode data`) and receives
-    the full `patches` batch. Images are assigned to ranks by patch count (greedy load
-    balancing), each rank encodes only its share, and per-image embeddings are exchanged
-    with one padded all-gather and returned in the original image order.
+    Every rank holds the full tower weights (`--mm-encoder-tp-mode data`)
+    and receives the full `patches` batch. Images are assigned to ranks by
+    patch count (greedy load balancing), each rank encodes only its share,
+    and per-image embeddings are exchanged with one padded all-gather and
+    returned in the original image order.
 
     Args:
         vision_model: The (weight-replicated) ViT tower.

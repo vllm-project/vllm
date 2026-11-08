@@ -100,9 +100,10 @@ class VitMropeSetup(PluggableLayer):
     and the rotation comes from the per-axis inv_freq, so there is no
     cos/sin cache to size or grow.
 
-    Stateless: the caller's inv_freq buffers are passed per call. OOT platforms replace
-    the whole layer via `@VitMropeSetup.register_oot` with a subclass overriding
-    `forward` (e.g. to retune the kernel tiling for their hardware).
+    Stateless: the caller's inv_freq buffers are passed per call. OOT
+    platforms replace the whole layer via `@VitMropeSetup.register_oot`
+    with a subclass overriding `forward` (e.g. to retune the kernel
+    tiling for their hardware).
     """
 
     def forward(

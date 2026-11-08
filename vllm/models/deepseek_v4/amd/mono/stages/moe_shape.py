@@ -148,8 +148,9 @@ class RouteShape:
     @property
     def x_tile(self) -> int:
         """The rows of an x tile in LDS -- the shared stage's token tile, the
-        ug stage's pick tile: an MFMA's N (16) while they fit `X_TILE_BYTES`, else 8 (a
-        wide hidden: the MFMA's columns past them repeat the last)."""
+        ug stage's pick tile: an MFMA's N (16) while they fit
+        `X_TILE_BYTES`, else 8 (a wide hidden: the MFMA's columns past
+        them repeat the last)."""
         row = HIDDEN + X_GROUPS
         return TILE if TILE * row <= X_TILE_BYTES else TILE // 2
 

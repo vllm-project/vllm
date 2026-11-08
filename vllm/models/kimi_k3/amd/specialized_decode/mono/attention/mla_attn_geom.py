@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""M1c `mla_attn`'s launch geometry, without the kernel's FlyDSL imports: the runtime's
-config checks (`runtime.m1c_serves`) size M1c's KV splits on any platform."""
+"""M1c `mla_attn`'s launch geometry, without the kernel's FlyDSL imports: the
+runtime's config checks (`runtime.m1c_serves`) size M1c's KV splits on any
+platform."""
 
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import BLOCKS
 

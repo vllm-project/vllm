@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KDA prefill backend selection for ROCm.
 
-The Kimi-K3 KDA layer calls `chunk_kda_prefill`, which either runs the fused HIP
-kernels in `kda_chunk` or falls back to the vendored Triton chunk path.
+The Kimi-K3 KDA layer calls `chunk_kda_prefill`, which either runs the
+fused HIP kernels in `kda_chunk` or falls back to the vendored Triton chunk
+path.
 """
 
 import torch
@@ -73,15 +74,17 @@ def chunk_kda_prefill(
         cu_seqlens: int32 cumulative sequence lengths.
         chunk_indices: precomputed chunk indices for `cu_seqlens`.
         chunk_offsets: int32 per-sequence first chunk index.
-        backend: `"triton"` (the vendored chunk path), `"fused"` (the two-kernel ROCm
-            path; used only when every one of its preconditions holds, otherwise the
-            Triton path runs unchanged) or `"gluon"` (AITER's `chunk_kda`).
+        backend: `"triton"` (the vendored chunk path), `"fused"` (the
+            two-kernel ROCm path; used only when every one of its
+            preconditions holds, otherwise the Triton path runs unchanged) or
+            `"gluon"` (AITER's `chunk_kda`).
         out: buffer the result must land in. Honoured by both backends, so the
             caller can hand in a slice of its own output and skip a copy.
         checkpoint_state: destination for mid-prefill recurrent state
             snapshots, letting a later prefix-cache hit resume from a mamba
             block boundary. See `fused_kda_chunk`.
-        checkpoint_offsets: per-sequence token offset to snapshot at, `0` for none.
+        checkpoint_offsets: per-sequence token offset to snapshot at, `0`
+            for none.
         checkpoint_state_indices: optional per-sequence destination row.
         state_cache: the paged recurrent state. The fused backend reads and
             writes FP32 or BF16 cache rows directly, accumulating in FP32.

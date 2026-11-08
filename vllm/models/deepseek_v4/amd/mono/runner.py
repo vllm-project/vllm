@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek-V4-Pro mono decode layer: host side.
 
-One `MonoRunner` a TP rank runs every mono layer of a decode step (at most `MAX_TOKENS`
-rows): two persistent launches a layer (`layer`) from the layer's inputs at the
-attention seam to its outputs at the next one -- the MoE's reduced output, the residual
-after the FFN seam and that seam's mixes -- with both TP all-reduces inside the kernels
-(symmetric peer memory). Every argument is a device pointer: the launches can be
-captured in a HIP graph. The kernels move their mailbox epoch on themselves; every rank
-runs the same launches, so the ranks' epochs agree.
+One `MonoRunner` a TP rank runs every mono layer of a decode step (at most
+`MAX_TOKENS` rows): two persistent launches a layer (`layer`) from the
+layer's inputs at the attention seam to its outputs at the next one -- the
+MoE's reduced output, the residual after the FFN seam and that seam's mixes --
+with both TP all-reduces inside the kernels (symmetric peer memory). Every
+argument is a device pointer: the launches can be captured in a HIP graph. The
+kernels move their mailbox epoch on themselves; every rank runs the same
+launches, so the ranks' epochs agree.
 """
 
 from __future__ import annotations
@@ -314,12 +315,13 @@ class MonoRunner:
         global_keys: bool = False,
     ):
         """-> (out, residual, post_mix, res_mix, pre_mix): the layer's outputs
-        (`outs`: buffers to write them into). `select(normed, qr)`: vLLM's compressor
-        and, on a CSA layer, its top-k selection into `topk_indices`, run between the
-        kernels on K1's normed input and qr. `route_ids`: a hash layer's experts of the
-        step's tokens. `topk`: the build's key table width (`Dims.topk`); `global_keys`:
-        `topk_indices` holds compressed slots (a row of its own width), not indices
-        through `comp_block_table`."""
+        (`outs`: buffers to write them into). `select(normed, qr)`: vLLM's
+        compressor and, on a CSA layer, its top-k selection into
+        `topk_indices`, run between the kernels on K1's normed input and qr.
+        `route_ids`: a hash layer's experts of the step's tokens. `topk`:
+        the build's key table width (`Dims.topk`); `global_keys`:
+        `topk_indices` holds compressed slots (a row of its own width), not
+        indices through `comp_block_table`."""
         M = x.shape[0]
         assert self.supports(M), M
         a = w.attn

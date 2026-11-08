@@ -30,12 +30,13 @@ _MINIMAX_FUSED_AR_RMS_QK = getattr(torch.ops._C, "minimax_allreduce_rms_qk", Non
 def _all_reduce_variance(var: torch.Tensor) -> torch.Tensor:
     """All-reduce a per-token variance tensor across the TP group.
 
-    Variance is accumulated in fp32 for numerical stability. The FlashInfer fused
-    all-reduce caches a single global workspace keyed to the model's 16-bit activation
-    dtype (`use_fp32_lamport=False`); routing an fp32 reduction through it would read
-    against a mismatched workspace and corrupt the result. FlashInfer's fast-path only
-    triggers for 2D inputs, so reducing a flattened (1D) view keeps these fp32
-    reductions on custom all-reduce / pynccl, both of which handle fp32 correctly.
+    Variance is accumulated in fp32 for numerical stability. The FlashInfer
+    fused all-reduce caches a single global workspace keyed to the model's
+    16-bit activation dtype (`use_fp32_lamport=False`); routing an fp32
+    reduction through it would read against a mismatched workspace and corrupt
+    the result. FlashInfer's fast-path only triggers for 2D inputs, so reducing
+    a flattened (1D) view keeps these fp32 reductions on custom all-reduce /
+    pynccl, both of which handle fp32 correctly.
     """
     return tensor_model_parallel_all_reduce(var.flatten()).view_as(var)
 
@@ -51,9 +52,10 @@ def _minimax_qk_var_kernel(
 ):
     """TP-pre stage: per-token mean-of-squares for the q and k segments.
 
-    Accumulates in fp32 while reading the 16-bit qkv in place, so no fp32 copy of q/k is
-    materialized. `var[:, 0]` is the q variance and `var[:, 1]` the k variance; both are
-    the local-shard means, ready for the all-reduce that follows.
+    Accumulates in fp32 while reading the 16-bit qkv in place, so no fp32
+    copy of q/k is materialized. `var[:, 0]` is the q variance and
+    `var[:, 1]` the k variance; both are the local-shard means, ready for
+    the all-reduce that follows.
     """
     token = tl.program_id(0)
     base = qkv_ptr + token * row_stride

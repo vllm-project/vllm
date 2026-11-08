@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""K1 `front`: one attention layer (the counts below are TP8's) from its normed input
-row to the rotated query and the step's KV rows in the sliding-window cache.
+"""K1 `front`: one attention layer (the counts below are TP8's) from its
+normed input row to the rotated query and the step's KV rows in the
+sliding-window cache.
 
 One launch a layer and rank, `BLOCKS` CTAs x `THREADS` threads, S rows.
 Every CTA issues its weight loads (its wqkv part and its wq_b tasks) at the

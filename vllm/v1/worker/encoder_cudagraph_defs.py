@@ -20,8 +20,9 @@ ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG = "encoder_cudagraph_axis_keys"
 class EncoderItemSpec:
     """Description of a single encoder input item.
 
-    Returned by `get_encoder_cudagraph_item_specs()` to describe each image or video in
-    a batch without the manager needing to understand model-specific input formats.
+    Returned by `get_encoder_cudagraph_item_specs()` to describe each
+    image or video in a batch without the manager needing to understand
+    model-specific input formats.
     """
 
     input_size: int
@@ -59,8 +60,9 @@ class EncoderCudaGraphPathConfig:
 class EncoderCudaGraphConfig:
     """Configuration for encoder CUDA graph management.
 
-    Provided by the model at init time via `get_encoder_cudagraph_config()`. Values are
-    fixed for the lifetime of the manager.
+    Provided by the model at init time via
+    `get_encoder_cudagraph_config()`. Values are fixed for the
+    lifetime of the manager.
     """
 
     modalities: list[str]

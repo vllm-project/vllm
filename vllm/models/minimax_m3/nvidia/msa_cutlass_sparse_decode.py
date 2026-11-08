@@ -49,9 +49,10 @@ def nvfp4_kv_cache_views(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return the K data, K scale, V data and V scale views of an NVFP4 cache.
 
-    `kv_cache` is uint8 `[pages, 2 * Hkv, page_size, 72]`; slot `2 * head + side` (K =
-    0, V = 1) is that head's E2M1 data `[page_size, 64]` followed by its E4M3 block
-    scales `[page_size, 8]`, the one page layout `fmha_sm100` reads.
+    `kv_cache` is uint8 `[pages, 2 * Hkv, page_size, 72]`; slot
+    `2 * head + side` (K = 0, V = 1) is that head's E2M1 data
+    `[page_size, 64]` followed by its E4M3 block scales `[page_size, 8]`,
+    the one page layout `fmha_sm100` reads.
     """
     from vllm.third_party.fmha_sm100.nvfp4_kv import nvfp4_head_slot_views
 

@@ -46,9 +46,10 @@ def get_sampling_params(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Sample per-request input/output token lengths and vocab offsets.
 
-    Lengths are drawn uniformly from integer ranges around the configured means,
-    controlled by *range_ratio*. It may be a single `float` (applied to both input and
-    output) or a `dict` with `"input"` and `"output"` keys for independent control.
+    Lengths are drawn uniformly from integer ranges around the configured
+    means, controlled by *range_ratio*.  It may be a single `float`
+    (applied to both input and output) or a `dict` with `"input"` and
+    `"output"` keys for independent control.
 
     Tokenizer special tokens are subtracted from `input_len` before
     computing the sampling interval.

@@ -10,10 +10,11 @@ fused all-reduce + mHC kernel (`BoundaryAllReduce`) does all of that for every
 step the executor runs; the next sublayer's mHC coefficients then come from the
 stock `mhc_pre_delayed_overlap` on the shared mHC side stream.
 
-The fused kernel also finalizes a MoE output left unfinalized, collects a `wo_b` output
-the publishing GEMM already stored into its mailbox, writes the attention input as MXFP8
-for `fused_wqa_wkv`, and writes only the streams (residual-only) where the next consumer
-is not a sublayer's pre: an Engram injection and the final collapse.
+The fused kernel also finalizes a MoE output left unfinalized, collects a
+`wo_b` output the publishing GEMM already stored into its mailbox, writes the
+attention input as MXFP8 for `fused_wqa_wkv`, and writes only the streams
+(residual-only) where the next consumer is not a sublayer's pre: an Engram
+injection and the final collapse.
 """
 
 from dataclasses import dataclass

@@ -23,12 +23,14 @@ Connection Lifecycle
 Block Transfer Flow (happy path)
 ---------------------------------
 
-1. Client sends FetchMsg with a kv_request_id and lists of block keys + remote indexes
-   where it wants the data written. A request may run several lookup→fetch rounds;
-   symmetric-P2P messages carry ROUND_SEQ so each round's supply, demand, and completion
-   stay isolated. The terminal empty FetchMsg is the server-side "request finished"
-   signal for the id: parked LookupMsg batches are popped and `cb.finish_request` fires
-   on each.
+1. Client sends FetchMsg with a kv_request_id and lists of
+   block keys + remote indexes where it wants the data written.
+   A request may run several lookup→fetch rounds; symmetric-P2P
+   messages carry ROUND_SEQ so each round's supply, demand, and
+   completion stay isolated. The terminal empty FetchMsg is the
+   server-side "request finished" signal for the id: parked
+   LookupMsg batches are popped and `cb.finish_request` fires on
+   each.
 2. Server matches requested blocks against locally stored blocks:
    - Blocks already available are transferred immediately via RDMA.
    - Blocks not yet available are recorded as "demanded" and

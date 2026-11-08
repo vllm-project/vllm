@@ -2,20 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DSpark's sequential Markov sampling with one launch a draft step.
 
-vLLM's `DSparkSpeculator._sample_sequential` runs about 9 kernels for each of the 5
-draft steps: the Markov embedding of the previous token, the bias GEMV over the whole
-vocabulary (66 MB of markov_w2 at 129280 x 256 bf16), the add to the base logits, the
-Gumbel sample (its kernel, the argmax over its blocks and a gather) and the copy into
-draft_tokens. On MI325X at TP 4 that is about 220 us a decode step.
+vLLM's `DSparkSpeculator._sample_sequential` runs about 9 kernels for each
+of the 5 draft steps: the Markov embedding of the previous token, the bias
+GEMV over the whole vocabulary (66 MB of markov_w2 at 129280 x 256 bf16),
+the add to the base logits, the Gumbel sample (its kernel, the argmax over
+its blocks and a gather) and the copy into draft_tokens. On MI325X at TP 4
+that is about 220 us a decode step.
 
-Here each step is one launch over the vocabulary in blocks of BLOCK tokens. For each
-row, a program computes its block's bias from markov_w2, adds the base logits, stores
-the step's logits into the draft logits cache and takes the Gumbel-max of its block with
-vLLM's own `gumbel_noised_argmax`. The next step's programs first take the argmax over
-the previous step's block maxima themselves, which gives the previous token, and the
-last step's tokens get one small launch. The noise depends only on the request's seed,
-the draft step, the position and the token id, and both paths keep the first of equal
-maxima, so the sampled token does not depend on the block size.
+Here each step is one launch over the vocabulary in blocks of BLOCK tokens.
+For each row, a program computes its block's bias from markov_w2, adds the
+base logits, stores the step's logits into the draft logits cache and takes
+the Gumbel-max of its block with vLLM's own `gumbel_noised_argmax`. The
+next step's programs first take the argmax over the previous step's block
+maxima themselves, which gives the previous token, and the last step's
+tokens get one small launch. The noise depends only on the request's seed,
+the draft step, the position and the token id, and both paths keep the first
+of equal maxima, so the sampled token does not depend on the block size.
 
 The bias is an fp32 sum of 256 products rounded to bf16, as vLLM's GEMV
 output. The products are added in another order than in vLLM's GEMV, so a

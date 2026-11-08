@@ -42,14 +42,16 @@ three kernels; `RoutedExpertFront` replaces them with one launch:
    amax / 448 and E4M3 values rounded to nearest with saturation;
 3. the routing record (`routed_expert_route_cute.py`).
 
-Bitwise contract. Every output equals that of the three kernels it replaces, so the
-arithmetic is spelled out instruction by instruction in inline PTX: the Triton kernel's
-exp is `ex2.approx.f32` of x * log2(e), its sqrt `sqrt.approx.ftz.f32`, its division
-`div.full.f32`, its weight sum the butterfly order of a one-warp eight-lane reduction;
-the quantization is FlashInfer's instruction sequence. The one exception is the log:
-like the Triton kernel, the kernel calls the toolchain's `logf` (libdevice, through
-`cute.math.log`), whose argument 1 + exp(x) is at least 1. No other floating-point
-operation is left to the compiler, which could contract or flush it.
+Bitwise contract. Every output equals that of the three kernels it replaces,
+so the arithmetic is spelled out instruction by instruction in inline PTX:
+the Triton kernel's exp is `ex2.approx.f32` of x * log2(e), its sqrt
+`sqrt.approx.ftz.f32`, its division `div.full.f32`, its weight sum the
+butterfly order of a one-warp eight-lane reduction; the quantization is
+FlashInfer's instruction sequence. The one exception is the log: like the
+Triton kernel, the kernel calls the toolchain's `logf` (libdevice, through
+`cute.math.log`), whose argument 1 + exp(x) is at least 1. No other
+floating-point operation is left to the compiler, which could contract or
+flush it.
 
 Work split (1024 threads a CTA). The kernel is built for calls of up to 8,
 16, 32, 64, 128 or 192 rows (`max_rows`); the first `S = 8` CTAs select

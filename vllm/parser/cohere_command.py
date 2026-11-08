@@ -451,8 +451,9 @@ def _melody_citations_to_vllm(
 ) -> list[Citation] | None:
     """Convert melody `FilterCitation` objects into `Citation`.
 
-    Citations whose sources all fail to resolve are still returned with `sources=[]`;
-    the serving layer drops them so the fail-closed policy lives in one place.
+    Citations whose sources all fail to resolve are still returned with
+    `sources=[]`; the serving layer drops them so the fail-closed policy
+    lives in one place.
     """
     if not citations:
         return None

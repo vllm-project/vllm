@@ -7,17 +7,19 @@ is a plain subclass of `MiniCPMV4_6ForConditionalGeneration` in transformers
 too; what differs is the image geometry:
 
 * `downsample_mode` defaults to `"4x"`, and in that mode
-  `MiniCPMOcrImageProcessor.find_best_resize` aligns the patch grid to `patch_size * 2`
-  instead of `patch_size * 4`, because `"4x"` goes through one 2x2 merge (downsample
-  MLP) rather than two (ViT insert merger as well).
+  `MiniCPMOcrImageProcessor.find_best_resize` aligns the patch grid to
+  `patch_size * 2` instead of `patch_size * 4`, because `"4x"` goes
+  through one 2x2 merge (downsample MLP) rather than two (ViT insert merger as
+  well).
 * An image small enough not to be sliced may be resized to a target picked from
   its own pixels (`adaptive_small_image_upsize`) or kept at its native
   resolution (`disable_small_image_upsize`).
 
-The second point is why the image placeholder here is measured from the `target_sizes`
-the image processor actually returned rather than recomputed from the image dimensions:
-the adaptive tier is decided by an Otsu threshold plus connected-component analysis over
-the pixels, which a size-only reimplementation cannot reproduce. This mirrors
+The second point is why the image placeholder here is measured from the
+`target_sizes` the image processor actually returned rather than recomputed
+from the image dimensions: the adaptive tier is decided by an Otsu threshold
+plus connected-component analysis over the pixels, which a size-only
+reimplementation cannot reproduce. This mirrors
 `MiniCPMOcrProcessor.replace_image_token`, which reads the same tensor.
 """
 
@@ -180,11 +182,12 @@ class MiniCPMOcrMultiModalProcessor(MiniCPMV4_6MultiModalProcessor):
     ) -> Mapping[str, object]:
         """Resolve the OCR-only upsize options into the flat form.
 
-        `process_images` forwards flat keys only (`_flat_processor_kwargs` drops the
-        nested scopes), and 4.6 recovers just `downsample_mode` / `max_slice_nums` from
-        the merge. Resolve the OCR options the same way so that a server-level
-        `mm_processor_kwargs` value, and the nested `images_kwargs` form, both reach the
-        image processor instead of being silently dropped.
+        `process_images` forwards flat keys only (`_flat_processor_kwargs`
+        drops the nested scopes), and 4.6 recovers just `downsample_mode` /
+        `max_slice_nums` from the merge. Resolve the OCR options the same way
+        so that a server-level `mm_processor_kwargs` value, and the nested
+        `images_kwargs` form, both reach the image processor instead of being
+        silently dropped.
         """
         info = self.info
         assert isinstance(info, MiniCPMOcrProcessingInfo)
@@ -263,10 +266,11 @@ class MiniCPMOcrMultiModalProcessor(MiniCPMV4_6MultiModalProcessor):
         `token_divisor`, unlike the pixel-side computation in
         `_compute_visual_tokens` which also divides by `patch_size ** 2`.
 
-        The slice grid is not pixel-dependent (`get_sliced_grid` is a function of the
-        image size, `max_slice_nums` and `scale_resolution`), so it still comes from the
-        geometry helper. Returns `None` when the two disagree, leaving the caller on the
-        4.6 path rather than emitting a count we cannot justify.
+        The slice grid is not pixel-dependent (`get_sliced_grid` is a
+        function of the image size, `max_slice_nums` and
+        `scale_resolution`), so it still comes from the geometry helper.
+        Returns `None` when the two disagree, leaving the caller on the 4.6
+        path rather than emitting a count we cannot justify.
         """
         info = self.info
         assert isinstance(info, MiniCPMOcrProcessingInfo)

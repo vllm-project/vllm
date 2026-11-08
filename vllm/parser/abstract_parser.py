@@ -112,9 +112,10 @@ class StreamState:
 class Parser:
     """Parse model output into reasoning, content and tool calls.
 
-    The serving layer holds one `Parser` per request and calls only the members defined
-    here. `ParserEngine` implements them over a single declarative engine;
-    `DelegatingParser` composes a legacy `ReasoningParser` / `ToolParser` pair.
+    The serving layer holds one `Parser` per request and calls only the
+    members defined here. `ParserEngine` implements them over a single
+    declarative engine; `DelegatingParser` composes a legacy
+    `ReasoningParser` / `ToolParser` pair.
     """
 
     # Class-level parser classes for compatibility with existing patterns

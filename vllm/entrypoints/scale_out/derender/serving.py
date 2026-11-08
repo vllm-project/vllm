@@ -148,8 +148,9 @@ class ServingDerender(BaseServing):
         Non-streaming only: expects the complete GenerateResponse with all
         token IDs present.  Uses `parser.parse()` for one-shot extraction.
 
-        When `request.chat_request` is provided, the parser splits the output into
-        (reasoning, content, tool_calls). Otherwise falls back to plain detokenization.
+        When `request.chat_request` is provided, the parser splits the
+        output into (reasoning, content, tool_calls).  Otherwise falls
+        back to plain detokenization.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:

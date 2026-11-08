@@ -3,19 +3,21 @@
 """Multimodal preprocessing for the DeepSeek-V4 vision variants
 (DeepSeek-V4-Flash-Vision-Exp).
 
-The image transform and sentinel-block construction are ported from the official
-repository's `image_processor.py` so that token counts bit-match the reference. Each
-`<｜deepseek_image｜>` placeholder in the prompt expands to a variable-length block of
-sentinel tokens; only positions with `type == IMAGE` receive vision embeddings, the
-other sentinels are looked up from learned embedding vectors in the model.
+The image transform and sentinel-block construction are ported from the
+official repository's `image_processor.py` so that token counts bit-match
+the reference. Each `<｜deepseek_image｜>` placeholder in the prompt expands
+to a variable-length block of sentinel tokens; only positions with
+`type == IMAGE` receive vision embeddings, the other sentinels are looked
+up from learned embedding vectors in the model.
 
-Unlike the reference (which uses out-of-vocab ids `vocab_size + type`), the sentinel
-block borrows five consecutive reserved tokenizer tokens
-(`<|place_holder_mm_span_0431|>` .. `_0435|>`): they are special tokens the tokenizer
-never emits from plain text, so the ids stay in-vocabulary and work with stock token
-validation, logprobs and detokenization. The ids are pure markers — every sentinel
-position's embedding is overwritten with vision/sentinel vectors before the decoder
-layers see it, exactly like the reference's out-of-vocab scheme.
+Unlike the reference (which uses out-of-vocab ids `vocab_size + type`),
+the sentinel block borrows five consecutive reserved tokenizer tokens
+(`<|place_holder_mm_span_0431|>` .. `_0435|>`): they are special tokens
+the tokenizer never emits from plain text, so the ids stay in-vocabulary and
+work with stock token validation, logprobs and detokenization. The ids are
+pure markers — every sentinel position's embedding is overwritten with
+vision/sentinel vectors before the decoder layers see it, exactly like the
+reference's out-of-vocab scheme.
 """
 
 import math
@@ -226,8 +228,9 @@ def build_image_block(n_llm_h: int, n_llm_w: int, start_pos: int):
 def build_image_block_pad_free(n_llm_h: int, n_llm_w: int):
     """`build_image_block` without the position-dependent compressor pad.
 
-    `start_pos` is chosen so that `compress_pad == 0`; the pad is instead prepended when
-    the block is spliced into the final prompt, where its position is known.
+    `start_pos` is chosen so that `compress_pad == 0`; the pad is instead
+    prepended when the block is spliced into the final prompt, where its
+    position is known.
     """
     return build_image_block(n_llm_h, n_llm_w, COMPRESS_PAD_TO - 1)
 

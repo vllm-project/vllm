@@ -136,9 +136,10 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
     ) -> tuple[list[tuple[str, torch.Tensor]], set[str]]:
         """Separate and load ColBERT projection weights.
 
-        Scans *weights* for entries whose name ends with one of *colbert_weight_names*.
-        The matching weight is loaded into `self.colbert_linear` (creating it first if
-        `colbert_dim` was not known at init time).
+        Scans *weights* for entries whose name ends with one of
+        *colbert_weight_names*.  The matching weight is loaded into
+        `self.colbert_linear` (creating it first if `colbert_dim` was
+        not known at init time).
 
         Args:
             weights: Iterable of `(name, tensor)` weight pairs.

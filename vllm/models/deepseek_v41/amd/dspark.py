@@ -158,9 +158,10 @@ class DSparkDeepseekV4Model(nn.Module):
     ) -> None:
         """Insert the sliding-window context KV for every draft layer.
 
-        Mirrors the reference DSparkAttention: each layer derives its context KV from
-        the SAME projected target hidden `main_x`, via that layer's own `wkv` +
-        `kv_norm` + RoPE + quant, then writes it at the layer's context slots.
+        Mirrors the reference DSparkAttention: each layer derives its context KV
+        from the SAME projected target hidden `main_x`, via that layer's own
+        `wkv` + `kv_norm` + RoPE + quant, then writes it at the
+        layer's context slots.
 
         `context_slot_mappings` is a per-layer list (each entry is the context
         slot mapping for that layer's kv-cache group, since the hybrid manager may

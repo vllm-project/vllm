@@ -48,10 +48,12 @@ def parse_thinking_output(text: str) -> dict[str, str | None]:
     Use this on **all** Gemma4 output regardless of whether thinking mode
     was enabled.  It handles three cases:
 
-    1. **Thinking enabled, tags present** — splits on `<|channel>`/ `<channel|>` to
-       separate chain-of-thought from the answer and strips the `thought\\n` role label.
-    2. **Thinking disabled, spurious label** — strips the bare `thought\\n` prefix that
-       some Gemma4 models emit even without thinking mode.
+    1. **Thinking enabled, tags present** — splits on `<|channel>`/
+       `<channel|>` to separate chain-of-thought from the answer and
+       strips the `thought\\n` role label.
+    2. **Thinking disabled, spurious label** — strips the bare
+       `thought\\n` prefix that some Gemma4 models emit even
+       without thinking mode.
     3. **Clean output** — returns the text unchanged.
 
     The answer text is always cleaned of trailing sentinel tokens

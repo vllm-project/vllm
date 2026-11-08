@@ -108,7 +108,8 @@ logger = init_logger(__name__)
 
 def _text_config(config):
     """MuseGlimmer checkpoints may nest the text config under `text_config`
-    (multimodal `MuseGlimmerConfig`) or expose it directly (`MuseGlimmerTextConfig`)."""
+    (multimodal `MuseGlimmerConfig`) or expose it directly
+    (`MuseGlimmerTextConfig`)."""
     return getattr(config, "text_config", config)
 
 

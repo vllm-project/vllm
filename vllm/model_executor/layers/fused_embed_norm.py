@@ -116,10 +116,11 @@ def fused_embed_norm(
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Fused embedding row gather (`embed_table[input_ids]`).
 
-    Requires the full vocab on-rank (replicated embedding). When `chain_weight` is
-    given, also emits `rmsnorm(gathered, chain_weight)` (the first decoder layer's
-    `input_layernorm`) as a second output in the same launch, so the returned pair is
-    `(residual, normed_input)`. Bit-exact vs a plain gather followed by an `RMSNorm`.
+    Requires the full vocab on-rank (replicated embedding). When
+    `chain_weight` is given, also emits `rmsnorm(gathered, chain_weight)`
+    (the first decoder layer's `input_layernorm`) as a second output in the
+    same launch, so the returned pair is `(residual, normed_input)`. Bit-exact
+    vs a plain gather followed by an `RMSNorm`.
     """
     assert embed_table.ndim == 2, embed_table.shape
     ids = input_ids.view(-1)

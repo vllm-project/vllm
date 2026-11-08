@@ -10,10 +10,11 @@ per depth, selected by `mtp_config.local_layer_ids`). When enabled, a shared
 `chain_norm` is applied after every depth; its output is both the logits input
 and the previous hidden state fed to the next depth.
 
-The draft shares the target's token embedding table and LM head (`load_eagle_model`
-wires those references) and applies the backbone `embed_norm` on top: the depth layers
-were trained on the same normed embeddings the backbone consumes (their own `embed_norm`
-weights are near-identity trims, unlike the backbone's whitening `embed_norm`).
+The draft shares the target's token embedding table and LM head
+(`load_eagle_model` wires those references) and applies the backbone
+`embed_norm` on top: the depth layers were trained on the same normed
+embeddings the backbone consumes (their own `embed_norm` weights are
+near-identity trims, unlike the backbone's whitening `embed_norm`).
 """
 
 from __future__ import annotations

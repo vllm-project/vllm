@@ -18,11 +18,12 @@ instead:
 The merge is exact: the global top 16 lies in the union of per-rank top 16s.
 The stock decode ranks 16-bit quantized scores, so the two may differ at ties.
 
-The chunking is written against one contract, the MSA Q8KV4 decode scorer's: eight query
-slots per request, `(seq_len - 1) / 128` pages scored, and only the pages below a
-query's own page stored. The three places that depend on it are
-`_compact_block_table_kernel` (the length it is handed), `_local_topk_push_kernel` (the
-cut that length drops) and `_set_width` (room for the page that length invents).
+The chunking is written against one contract, the MSA Q8KV4 decode scorer's:
+eight query slots per request, `(seq_len - 1) / 128` pages scored, and only
+the pages below a query's own page stored. The three places that depend on it
+are `_compact_block_table_kernel` (the length it is handed),
+`_local_topk_push_kernel` (the cut that length drops) and `_set_width`
+(room for the page that length invents).
 
 Both exchanges are NVLink stores into symmetric buffers whose payload is the
 flag (`0xFF` E4M3 NaN for queries, `-1` for keys); consumers restore it.
@@ -97,11 +98,12 @@ def _compact_block_table_kernel(
     """Compact page j = global page `j * CP + RANK`, and the length the score
     kernel is handed for it.
 
-    That length is a lie: the scorer stores only the pages below a query's own page, so
-    `n_local * 128 + 8` puts all eight query slots one page past the chunk and stores
-    every owned page, uncausally. The real cut comes back in `_local_topk_push_kernel`.
-    `W` keeps the invented page addressable, since a scorer that clamps the own page to
-    its last score column would drop the chunk's last page."""
+    That length is a lie: the scorer stores only the pages below a query's own
+    page, so `n_local * 128 + 8` puts all eight query slots one page past
+    the chunk and stores every owned page, uncausally. The real cut comes back
+    in `_local_topk_push_kernel`. `W` keeps the invented page addressable,
+    since a scorer that clamps the own page to its last score column would
+    drop the chunk's last page."""
     b = tl.program_id(0)
     seq = tl.load(seq_lens_ptr + b)
     tl.store(seq_out_ptr + b, seq)

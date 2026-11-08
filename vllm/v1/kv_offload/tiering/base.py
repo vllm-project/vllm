@@ -385,8 +385,9 @@ class SecondaryTierManager(ABC):
         store. Queued (not-yet-started) transfers may be cancelled, but their
         failure result must still appear in `get_finished_jobs()`.
 
-        Likewise, every `JobResult.deferred_release` event must be set before this
-        returns, so the tier must bound how long it can defer a release.
+        Likewise, every `JobResult.deferred_release` event must be set
+        before this returns, so the tier must bound how long it can defer a
+        release.
         """
         pass
 

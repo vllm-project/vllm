@@ -160,10 +160,11 @@ class FunctionGemmaToolParser(ToolParser):
     def _parse_arguments(self, args_str: str, partial: bool = False) -> dict:
         """Parse a FunctionGemma argument string into a dictionary.
 
-        The chat template writes strings as `<escape>text<escape>` and everything else
-        bare: `true`/`false`, numbers, `[item,...]` and `{key:value,...}` with bare
-        keys. With `partial` the string is a streaming prefix: parsing stops at the
-        first incomplete value and the complete arguments before it are returned.
+        The chat template writes strings as `<escape>text<escape>` and
+        everything else bare: `true`/`false`, numbers, `[item,...]` and
+        `{key:value,...}` with bare keys. With `partial` the string is a
+        streaming prefix: parsing stops at the first incomplete value and the
+        complete arguments before it are returned.
         """
         arguments: dict = {}
         pos = 0

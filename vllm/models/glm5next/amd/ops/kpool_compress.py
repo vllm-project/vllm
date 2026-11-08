@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """kpool (key-pooling) Triton kernels for the sparse-attention indexer.
 
-The cache stores POOLS (1 entry per `pool_size` consecutive tokens) rather than
-individual tokens. `compress_ratio == pool_size` on the kv_cache_spec makes the metadata
-builder emit pool-granular slot_mapping / seq_lens / cu_seq_lens / page_table for free;
-this file supplies the compress-write kernel (replacing `indexer_k_quant_and_cache`) and
-the pool-level topk helpers (select pools -> expand to tokens -> append tail).
+The cache stores POOLS (1 entry per `pool_size` consecutive tokens) rather
+than individual tokens. `compress_ratio == pool_size` on the kv_cache_spec
+makes the metadata builder emit pool-granular slot_mapping / seq_lens /
+cu_seq_lens / page_table for free; this file supplies the compress-write
+kernel (replacing `indexer_k_quant_and_cache`) and the pool-level topk
+helpers (select pools -> expand to tokens -> append tail).
 """
 
 from __future__ import annotations
@@ -956,11 +957,12 @@ def expand_pools_and_append_tail(
 ) -> torch.Tensor:
     """Fuse `expand_pools_to_tokens` + `append_tail_to_topk` (identity path).
 
-    Produces the same `[rows, topk + pool_size - 1]` int32 output as calling the two
-    functions in sequence when neither `page_table` nor `topk_offsets` is passed — the
-    only path used by the GLM-5.3-Flash indexer. The kernel derives
-    `pool_len = seq_len // pool_size` internally, so the caller no longer needs to
-    precompute it. Replaces ~25 elementwise kernels with one Triton launch.
+    Produces the same `[rows, topk + pool_size - 1]` int32 output as calling
+    the two functions in sequence when neither `page_table` nor
+    `topk_offsets` is passed — the only path used by the GLM-5.3-Flash indexer.
+    The kernel derives `pool_len = seq_len // pool_size` internally, so the
+    caller no longer needs to precompute it. Replaces ~25 elementwise kernels
+    with one Triton launch.
     """
     rows, n_groups = pool_ids.shape
     topk = n_groups * pool_size

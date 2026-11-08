@@ -100,9 +100,10 @@ def render_inkling_messages(
 ) -> list[int]:
     """Render chat messages to Inkling input ids.
 
-    PURE renderer: emits Inkling framing plus bare media markers; media encoding and
-    placeholder expansion happen later in the MM processor. `add_generation_prompt`
-    appends the assistant turn opener so the model continues into the response.
+    PURE renderer: emits Inkling framing plus bare media markers; media
+    encoding and placeholder expansion happen later in the MM processor.
+    `add_generation_prompt` appends the assistant turn opener so the
+    model continues into the response.
     """
     input_ids: list[int] = []
     tool_call_id_to_name: dict[str, str] = {}

@@ -19,10 +19,11 @@ f32, strided views). As `dcp_a2a_lse_reduce` -> `_v_up_proj` -> the gate:
                         the latents -> MXFP4 (aiter's even scale), four FP4
                         MFMAs against W_V -> bf16, times the gate -> ``core``
 
-At DCP1 (`ranks` 1) `o` [S, 12, 512] is already the attention's output, as vLLM hands it
-to `_v_up_proj`: no push, no LSE; the combine stage loads it. With `splits` (M1c
-`mla_attn`'s partials: `o` / `lse` split 0 of dense [splits, S, 12, 512] bf16 / [splits,
-S, 12] f32) the combine stage merges a token's request's splits, LSE-weighted.
+At DCP1 (`ranks` 1) `o` [S, 12, 512] is already the attention's output, as
+vLLM hands it to `_v_up_proj`: no push, no LSE; the combine stage loads it.
+With `splits` (M1c `mla_attn`'s partials: `o` / `lse` split 0 of dense
+[splits, S, 12, 512] bf16 / [splits, S, 12] f32) the combine stage merges a
+token's request's splits, LSE-weighted.
 
 K2 (`layer`, `K2Build.m1b_qlen`) runs these stages in its own launch.
 """
@@ -737,10 +738,11 @@ def mla_post(
     scratch=None,
 ):
     """Host launcher. `o` [S, >= ranks x 12, 512] bf16 and `lse` [S, >=
-    ranks x 12] f32, rows and heads strided (ranks 1: no `lse`, `peers` may be None);
-    `seq_lens` [requests] and `qsl` [requests + 1] int32 (the local KV lengths, the
-    query starts); `w_v` (12, 128, 256) u8 MXFP4 and `w_v_scale` (12, 128, 16) e8m0, any
-    strides but W_V's last; `gate` / `core` [S, 1536] bf16, dense."""
+    ranks x 12] f32, rows and heads strided (ranks 1: no `lse`, `peers`
+    may be None); `seq_lens` [requests] and `qsl`
+    [requests + 1] int32 (the local KV lengths, the query starts); `w_v` (12,
+    128, 256) u8 MXFP4 and `w_v_scale` (12, 128, 16) e8m0, any strides but
+    W_V's last; `gate` / `core` [S, 1536] bf16, dense."""
     del scratch
     assert core.is_contiguous()
     f = build(key)

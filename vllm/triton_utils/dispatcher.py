@@ -11,11 +11,12 @@ without modifying core code:
         "vllm.v1.worker.gpu.input_batch._prepare_pos_seq_lens_kernel": my_impl,
     })
 
-The same call covers Triton *device functions* (`@triton.jit` helpers called from inside
-other kernels and inlined at compile time): an implementation that is itself a Triton
-kernel is swapped in directly, so outer kernels keep compiling and launchable kernels
-run natively. Only non-Triton implementations (plain callables, grid-remapping
-launchers) are wrapped in a launch adapter.
+The same call covers Triton *device functions* (`@triton.jit` helpers
+called from inside other kernels and inlined at compile time): an
+implementation that is itself a Triton kernel is swapped in directly, so
+outer kernels keep compiling and launchable kernels run natively. Only
+non-Triton implementations (plain callables, grid-remapping launchers)
+are wrapped in a launch adapter.
 """
 
 import importlib
@@ -60,14 +61,16 @@ class KernelOverride:
     themselves Triton kernels (plain callables, grid-remapping launchers);
     Triton kernel implementations are swapped in directly and never wrapped.
 
-    The JIT warmup infrastructure launches kernels as `kernel[grid](**kwargs)` where
-    `kwargs` are keyed by the original kernel's argument names. This wrapper forwards
-    those launch arguments to the platform implementation: by keyword when the
-    implementation's parameter names match the kernel's, otherwise positionally in the
-    kernel's parameter order. An implementation that reimplements the `kernel[grid]`
-    protocol (a grid-remapping launcher) receives the caller's grid. Compile-only JIT
-    warmup (`kernel.warmup(grid, **kwargs)`) is delegated to the implementation's own
-    `warmup` when present, and is a no-op otherwise.
+    The JIT warmup infrastructure launches kernels as
+    `kernel[grid](**kwargs)` where `kwargs` are keyed by the original
+    kernel's argument names. This wrapper forwards those launch arguments
+    to the platform implementation: by keyword when the implementation's
+    parameter names match the kernel's, otherwise positionally in the
+    kernel's parameter order. An implementation that reimplements the
+    `kernel[grid]` protocol (a grid-remapping launcher) receives the
+    caller's grid. Compile-only JIT warmup (`kernel.warmup(grid,
+    **kwargs)`) is delegated to the implementation's own `warmup` when
+    present, and is a no-op otherwise.
     """
 
     def __init__(self, kernel: Callable[..., Any], impl: Callable[..., Any]) -> None:
@@ -91,12 +94,14 @@ class KernelOverride:
     def __getitem__(self, grid: Any) -> Callable[..., Any]:
         """Bind a launch grid, mirroring Triton's `kernel[grid]`.
 
-        A platform override that is itself a Triton kernel (or any object implementing
-        `__getitem__`) takes over the launch natively: `impl[grid](*args, **kwargs)`
-        binds against the override's own signature, so the caller's grid reaches the
-        override unchanged. Such an override must mirror the original kernel's parameter
-        names (or order), since launch sites key arguments by the original names.
-        Plain-callable overrides are invoked with the launch arguments directly.
+        A platform override that is itself a Triton kernel (or any object
+        implementing `__getitem__`) takes over the launch natively:
+        `impl[grid](*args, **kwargs)` binds against the override's own
+        signature, so the caller's grid reaches the override unchanged.
+        Such an override must mirror the original kernel's parameter names
+        (or order), since launch sites key arguments by the original names.
+        Plain-callable overrides are invoked with the launch arguments
+        directly.
         """
         impl_getitem = getattr(self._impl, "__getitem__", None)
         if impl_getitem is not None:
@@ -107,10 +112,11 @@ class KernelOverride:
         """Delegate compile-only warmup to the implementation.
 
         The JIT warmup machinery compiles warmup-owned kernels as
-        `kernel.warmup(grid, **kwargs)`. Forward that to the implementation's own kernel
-        so the override is what gets compiled. Implementations without a warmable Triton
-        kernel (plain callables, grid-remapping launchers) have nothing to warm up and
-        compile lazily on first launch.
+        `kernel.warmup(grid, **kwargs)`. Forward that to the
+        implementation's own kernel so the override is what gets compiled.
+        Implementations without a warmable Triton kernel (plain callables,
+        grid-remapping launchers) have nothing to warm up and compile
+        lazily on first launch.
         """
         impl_warmup = getattr(self._impl, "warmup", None)
         if impl_warmup is None:
@@ -224,12 +230,13 @@ def register_kernels(overrides: Mapping[str, Callable[..., Any]]) -> None:
             owned by a JIT warmup class, include the attribute path, e.g.
             "module.KernelClass.kernel".
 
-            An implementation that is itself a Triton kernel (also the only kind that
-            works for Triton *device functions*, which are inlined into other kernels at
-            compile time) is swapped in directly and launches natively:
-            `impl[grid](*args, **kwargs)` binds against the implementation's own
-            signature and the caller's grid reaches it unchanged. Such an implementation
-            must mirror the original kernel's parameter names (or order).
+            An implementation that is itself a Triton kernel (also the
+            only kind that works for Triton *device functions*, which are
+            inlined into other kernels at compile time) is swapped in
+            directly and launches natively: `impl[grid](*args, **kwargs)`
+            binds against the implementation's own signature and the
+            caller's grid reaches it unchanged. Such an implementation must
+            mirror the original kernel's parameter names (or order).
 
             Any other implementation (a plain callable, or a launcher that
             rewrites the grid for a non-CUDA device) is invoked with the

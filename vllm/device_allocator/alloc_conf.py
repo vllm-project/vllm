@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helpers for reading and editing PyTorch's allocator configuration.
 
-Torch's allocator config is parsed as a whole: `parseArgs` resets every option that is
-not explicitly present in the string it is handed. Writing a single field therefore
-silently drops the rest of the user's configuration, for the remainder of the process:
+Torch's allocator config is parsed as a whole: `parseArgs` resets every
+option that is not explicitly present in the string it is handed. Writing a
+single field therefore silently drops the rest of the user's configuration,
+for the remainder of the process:
 
     >>> # PYTORCH_ALLOC_CONF=expandable_segments:True,max_split_size_mb:512
     >>> torch._C._accelerator_setAllocatorSettings("expandable_segments:False")

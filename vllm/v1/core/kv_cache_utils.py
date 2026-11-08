@@ -820,13 +820,14 @@ def resolve_kv_cache_block_sizes(
       `cache_config.block_size * dcp`. Multiple groups: LCM of every
       group's effective block size. Attention groups are scaled by DCP;
       Mamba groups keep their full per-rank state and are not scaled.
-    - `hash_block_size` is the granularity at which `Request.block_hashes` is computed.
-      Single group: equals scheduler block size, and any other
-      `cache_config.prefix_match_unit` is rejected while block hashing is active.
-      Multiple groups: `cache_config.prefix_match_unit` override if set, else the GCD of
-      group block sizes; every group's block size must be divisible by it. Returns the
-      scheduler block size (i.e. disables finer hashing) if block hashing is inactive or
-      a mamba group is not using cache mode "align".
+    - `hash_block_size` is the granularity at which `Request.block_hashes`
+      is computed. Single group: equals scheduler block size, and any other
+      `cache_config.prefix_match_unit` is rejected while block hashing is
+      active. Multiple groups:
+      `cache_config.prefix_match_unit` override if set, else the GCD of
+      group block sizes; every group's block size must be divisible by it.
+      Returns the scheduler block size (i.e. disables finer hashing) if block
+      hashing is inactive or a mamba group is not using cache mode "align".
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
@@ -958,10 +959,11 @@ def get_request_block_hasher(
     boundary. Coarser group block sizes and partial-cache boundaries reuse
     these hashes directly (see `BlockHashListWithBlockSize`).
 
-    With `num_hash_lookahead_tokens` (L) > 0, each hash also covers the L tokens after
-    its block, which the drafter's KV at the block's last position depends on, so it is
-    emitted only once those tokens exist. The block tokens stay the hashed tokens; the
-    extra keys become `(E, *tokens)`, where `E` covers the block and those tokens.
+    With `num_hash_lookahead_tokens` (L) > 0, each hash also covers the L
+    tokens after its block, which the drafter's KV at the block's last position
+    depends on, so it is emitted only once those tokens exist. The block tokens
+    stay the hashed tokens; the extra keys become `(E, *tokens)`, where `E`
+    covers the block and those tokens.
     """
 
     def request_block_hasher(request: Request) -> list[BlockHash]:

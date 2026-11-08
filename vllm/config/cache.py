@@ -77,10 +77,11 @@ KV_CACHE_DTYPES: list[str] = list(get_args(CacheDType))
 class KVCacheDTypeHandler(Protocol):
     """Contract for a custom `--kv-cache-dtype` value.
 
-    A platform backend implements this protocol to answer the questions vLLM currently
-    answers with closed tables (`STR_DTYPE_TO_TORCH_DTYPE` / `get_kv_quant_mode` /
-    `is_quantized_kv_cache`). A single handler may be device-aware (e.g., resolving
-    different torch dtypes per device generation).
+    A platform backend implements this protocol to answer the questions vLLM
+    currently answers with closed tables (`STR_DTYPE_TO_TORCH_DTYPE` /
+    `get_kv_quant_mode` / `is_quantized_kv_cache`). A single handler may
+    be device-aware (e.g., resolving different torch dtypes per device
+    generation).
     """
 
     name: str
@@ -98,8 +99,9 @@ class KVCacheDTypeHandler(Protocol):
     def quant_mode(self) -> KVQuantMode:
         """The `KVQuantMode` used by generic kernels.
 
-        Return an existing mode to reuse generic kernel paths, or `KVQuantMode.CUSTOM`
-        when the backend fully self-manages kernel dispatch.
+        Return an existing mode to reuse generic kernel paths, or
+        `KVQuantMode.CUSTOM` when the backend fully self-manages kernel
+        dispatch.
         """
         ...
 
@@ -118,8 +120,9 @@ def register_kv_cache_dtype(name: str):
 
     - append `name` to the mutable `KV_CACHE_DTYPES` list (driving
       Pydantic + CLI validation);
-    - resolve `torch_dtype()` once and inject it into `STR_DTYPE_TO_TORCH_DTYPE`, so all
-      existing `dict[name]` / `name in dict` sites need zero changes;
+    - resolve `torch_dtype()` once and inject it into
+      `STR_DTYPE_TO_TORCH_DTYPE`, so all existing `dict[name]` /
+      `name in dict` sites need zero changes;
     - be stored for later `quant_mode()` queries.
 
     Examples:

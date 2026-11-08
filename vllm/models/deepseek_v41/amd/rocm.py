@@ -729,11 +729,12 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     ]:
         """CSA layers: one fork replaces the base pipeline's three.
 
-        Each fork/join is a HIP event pair per side stream on ROCm, so the base
-        three-fork pipeline is expensive there; the compressor chain and the indexer
-        weights projection run fully in parallel with the default chain. The indexer K
-        write and q-side stay serial after the join: `wk` consumes the aux-0 latent and
-        the q-side's wq_b consumes the default-stream qr.
+        Each fork/join is a HIP event pair per side stream on ROCm, so the
+        base three-fork pipeline is expensive there; the compressor chain and
+        the indexer weights projection run fully in parallel with the default
+        chain. The indexer K write and q-side stay serial after the join:
+        `wk` consumes the aux-0 latent and the q-side's wq_b consumes the
+        default-stream qr.
         """
         attn_metadata = get_forward_context().attn_metadata
         compressor = self.compressor

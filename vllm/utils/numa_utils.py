@@ -275,9 +275,10 @@ _PROC_CPUINFO_PATH = "/proc/cpuinfo"
 def _pct_sku_from_cpuinfo() -> _PctSku | None:
     """Return the `_PctSku` config for this host's SKU, or None.
 
-    Reads `/proc/cpuinfo`'s `model name` and looks the SKU up in `_PCT_CAPABLE_SKUS`.
-    Returns `None` when the host is not a known PCT-capable Granite Rapids Xeon (or when
-    `/proc/cpuinfo` is unreadable).
+    Reads `/proc/cpuinfo`'s `model name` and looks the SKU up in
+    `_PCT_CAPABLE_SKUS`. Returns `None` when the host is not a known
+    PCT-capable Granite Rapids Xeon (or when `/proc/cpuinfo` is
+    unreadable).
     """
     try:
         with open(_PROC_CPUINFO_PATH) as f:
@@ -300,10 +301,12 @@ def _pct_sku_config() -> _PctSku | None:
     (why we hard-code SKUs, why we read CPPC `highest_perf`, etc.).
 
     Returns the matching `_PctSku` config when both gates hold:
-      * `/proc/cpuinfo` `model name` contains an SKU listed in `_PCT_CAPABLE_SKUS`.
+      * `/proc/cpuinfo` `model name` contains an SKU listed in
+        `_PCT_CAPABLE_SKUS`.
       * `/sys/devices/system/cpu/cpu0/acpi_cppc/highest_perf` matches
         that SKU's expected `highest_perf`.
-    Otherwise returns `None` and the caller falls back to the default NUMA-node bind.
+    Otherwise returns `None` and the caller falls back to the default
+    NUMA-node bind.
     """
     sku = _pct_sku_from_cpuinfo()
     if sku is None:
@@ -343,18 +346,20 @@ def _get_numa_node(parallel_config, gpu_index: int) -> int:
 def _maybe_get_pct_cpu_binding(numa_nodes: list[int]) -> list[int] | None:
     """Return the union of PCT priority cores across `numa_nodes` (or None).
 
-    PCT (Priority Core Turbo) lets a subset of cores boost above the rest; we want
-    workers and the EngineCore on those cores. The Linux kernel does not expose PCT
-    membership without root, so we use the empirical heuristic documented above
-    `_PCT_CAPABLE_SKUS`: priority cores within each NUMA node satisfy
-    `cpu_id % stride in (0, 1)` intersected with the node's `cpulist`, where `stride` is
-    the SKU's logical CPUs per priority group (16 on 64-core SKUs, 18 on 72-core SKUs).
-    Only triggers on the SKUs in `_PCT_CAPABLE_SKUS` with the expected CPPC
-    `highest_perf` signal; on any other host it returns None and the caller falls back
-    to the default NUMA-node bind.
+    PCT (Priority Core Turbo) lets a subset of cores boost above the rest;
+    we want workers and the EngineCore on those cores. The Linux kernel does
+    not expose PCT membership without root, so we use the empirical heuristic
+    documented above `_PCT_CAPABLE_SKUS`: priority cores within each NUMA
+    node satisfy `cpu_id % stride in (0, 1)` intersected with the node's
+    `cpulist`, where `stride` is the SKU's logical CPUs per priority
+    group (16 on 64-core SKUs, 18 on 72-core SKUs). Only triggers on the
+    SKUs in `_PCT_CAPABLE_SKUS` with the expected CPPC `highest_perf`
+    signal; on any other host it returns None and the caller falls back to
+    the default NUMA-node bind.
 
-    Returns the sorted CPU ids as a `list[int]`; the caller is expected to format them
-    for the chosen tool (e.g. comma-joined for `numactl --physcpubind`).
+    Returns the sorted CPU ids as a `list[int]`; the caller is expected
+    to format them for the chosen tool (e.g. comma-joined for
+    `numactl --physcpubind`).
     """
     sku = _pct_sku_config()
     if sku is None:
@@ -460,12 +465,14 @@ def _get_numactl_enginecore_args(
 ) -> str:
     """Compute the numactl args for an EngineCore subprocess.
 
-    `--numa-bind-cpus` is deliberately ignored here: the user provides a per-worker CPU
-    list, and binding EngineCore to any of those entries would shrink its `cpus_allowed`
-    below the strict-superset that the workers' `--physcpubind` spawns require. We fall
-    back to `--cpunodebind=<shard nodes>` instead, which is always a safe superset. PCT
-    auto-detection still applies when the user did not pass `--numa-bind-cpus` (its
-    priority-core union across the shard nodes is also a safe superset by construction).
+    `--numa-bind-cpus` is deliberately ignored here: the user provides a
+    per-worker CPU list, and binding EngineCore to any of those entries
+    would shrink its `cpus_allowed` below the strict-superset that the
+    workers' `--physcpubind` spawns require. We fall back to
+    `--cpunodebind=<shard nodes>` instead, which is always a safe
+    superset. PCT auto-detection still applies when the user did not pass
+    `--numa-bind-cpus` (its priority-core union across the shard nodes
+    is also a safe superset by construction).
     """
     shard_nodes = _get_enginecore_numa_nodes(parallel_config, dp_local_rank)
     node_binding = ",".join(str(n) for n in shard_nodes)

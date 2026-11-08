@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Replace `slice_scatter` and `split_with_sizes` nodes with a single assignment if
-there are no users for the inplace tensor written to by the slice_scatter call.
+"""Replace `slice_scatter` and `split_with_sizes` nodes with a single
+assignment if there are no users for the inplace tensor written to by
+the slice_scatter call.
 
 The inplace rotary_embedding custom op takes in mutable query and key inputs
 that are split+getitem outputs of a single qkv tensor.

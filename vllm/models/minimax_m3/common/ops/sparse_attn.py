@@ -3,11 +3,13 @@
 """Triton kernels for MiniMax M3 block-sparse GQA attention.
 
 The main heads attend only to the blocks selected by the lightning indexer (see
-`index_topk`). Adapted to vLLM's paged KV cache: the KV page size is forced to equal the
-sparse block size (128), so one selected block maps to exactly one page.
+`index_topk`). Adapted to vLLM's paged KV cache: the KV page size is forced to
+equal the sparse block size (128), so one selected block maps to exactly one
+page.
 
 Main K/V cache layout (vLLM):
-  `(num_blocks, num_kv_heads, 128, 2 * head_dim)` K=[..., :head_dim] V=[..., head_dim:]
+  `(num_blocks, num_kv_heads, 128, 2 * head_dim)`
+  K=[..., :head_dim] V=[..., head_dim:]
 
 Only the paths MiniMax M3 uses are implemented: no attention sink, base-2
 (exp2/log2) softmax. The decode kernels use split-K (flash-decoding) over the

@@ -4,9 +4,10 @@
 """Configuration for NVIDIA Nemotron-3.5-Transcribe.
 
 The checkpoint's `config.json` is a NeMo SpeechLM config: the decoder under
-`llm_config`, the speech front end under `perception` and the Parallel Expert Encoder
-(an ASR encoder plus a Sortformer speaker encoder) under `pe_encoder_config`. Everything
-the audio tower needs is resolved into one flat `audio_config` dict.
+`llm_config`, the speech front end under `perception` and the Parallel
+Expert Encoder (an ASR encoder plus a Sortformer speaker encoder) under
+`pe_encoder_config`. Everything the audio tower needs is resolved into one
+flat `audio_config` dict.
 """
 
 import math

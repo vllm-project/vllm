@@ -133,10 +133,12 @@ def _resolve_dsv4_kv_cache_dtype(
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     """DeepseekV4 MLA attention layer.
 
-    The platform-specific sparse-MLA forward (`forward_mqa` / `get_padded_num_q_heads` /
-    `_o_proj` / `backend_cls`) is provided by a subclass — `DeepseekV4FlashMLAAttention`
-    / `DeepseekV4FlashInferSM120Attention` / `DeepseekV4FlashInferMLAAttention` (CUDA)
-    or `DeepseekV4ROCMAiterMLAAttention` (ROCm) — selected by the platform-specific
+    The platform-specific sparse-MLA forward (`forward_mqa` /
+    `get_padded_num_q_heads` / `_o_proj` / `backend_cls`) is provided by a
+    subclass — `DeepseekV4FlashMLAAttention` /
+    `DeepseekV4FlashInferSM120Attention` /
+    `DeepseekV4FlashInferMLAAttention` (CUDA) or
+    `DeepseekV4ROCMAiterMLAAttention` (ROCm) — selected by the platform-specific
     deepseek_v4 model module. The base is never instantiated directly.
     """
 
@@ -161,7 +163,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         The layer allocates the q/output buffers at
         `[N, get_padded_num_q_heads(n_local_heads), head_dim]`. Must satisfy
-        `result >= num_heads`. Backends with no padding constraint return `num_heads`.
+        `result >= num_heads`. Backends with no padding constraint return
+        `num_heads`.
         """
         raise NotImplementedError
 
@@ -622,9 +625,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     ) -> torch.Tensor:
         """Project the q-lora input to the query heads.
 
-        `qr_scale` is only set by the ROCm fused path, where `qr` is already
-        fp8-quantized with per-1x128 scales and must bypass the linear's internal
-        re-quantization (apply_weights would quantize the fp8 input again).
+        `qr_scale` is only set by the ROCm fused path, where `qr` is
+        already fp8-quantized with per-1x128 scales and must bypass the
+        linear's internal re-quantization (apply_weights would quantize
+        the fp8 input again).
         """
         if qr_scale is None:
             return self.wq_b(qr)

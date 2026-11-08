@@ -4,14 +4,16 @@
 
 In push mode, scheduler-side responsibilities are:
 
-* D side (decode): on `update_state_after_alloc`, stash registration data (D's
-  identity + locally allocated block IDs) into `_push_pending_registrations`. The D
-  worker drains it from `meta.push_registrations` next step and sends a NIXL
-  notification to the P worker (no scheduler-level networking).
-* P side (prefill): on `request_finished`, stash the finished block IDs into
-  `_finished_request_blocks` for the lease, and into `_newly_finished_push_blocks` so
-  the P worker picks them up via `meta.push_finished_blocks` and matches against any D
-  registrations it already received via NIXL notifications.
+* D side (decode): on `update_state_after_alloc`, stash registration data
+  (D's identity + locally allocated block IDs) into
+  `_push_pending_registrations`. The D worker drains it from
+  `meta.push_registrations` next step and sends a NIXL notification to the
+  P worker (no scheduler-level networking).
+* P side (prefill): on `request_finished`, stash the finished block IDs
+  into `_finished_request_blocks` for the lease, and into
+  `_newly_finished_push_blocks` so the P worker picks them up via
+  `meta.push_finished_blocks` and matches against any D registrations
+  it already received via NIXL notifications.
 * Both sides: `has_pending_push_work` keeps the engine main loop stepping
   while pushes are in flight. `update_connector_output` cleans up
   `_finished_request_blocks` once the WRITE completes.
@@ -52,9 +54,10 @@ logger = init_logger(__name__)
 class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
     """Push-specific scheduler logic (WRITE-based KV transfer).
 
-    All P2P communication is deferred to the worker level via NIXL notifications. The
-    scheduler communicates with workers only through the standard `build_connector_meta`
-    / `update_connector_output` hooks.
+    All P2P communication is deferred to the worker level via NIXL
+    notifications. The scheduler communicates with workers only through
+    the standard `build_connector_meta` / `update_connector_output`
+    hooks.
     """
 
     _TRANSFER_MODE: str = "push"

@@ -50,13 +50,14 @@ def get_engine_process_shutdown_timeout(
 ) -> float | None:
     """Return the EngineCore process-manager shutdown timeout.
 
-    `VllmConfig.shutdown_timeout` controls how long in-flight requests may drain. A
-    value of zero therefore tells EngineCore to abort requests as soon as it receives
-    SIGTERM. The parent process manager still needs a separate window in which the
-    EngineCore can release device resources before it is force-killed. An explicitly set
-    `VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS` sets that window on every platform. Otherwise
-    ROCm gets a fixed window: its teardown can take longer than the generic best-effort
-    window, and force-killing during teardown can leave VRAM resident.
+    `VllmConfig.shutdown_timeout` controls how long in-flight requests may
+    drain. A value of zero therefore tells EngineCore to abort requests as soon
+    as it receives SIGTERM. The parent process manager still needs a separate
+    window in which the EngineCore can release device resources before it is
+    force-killed. An explicitly set `VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS`
+    sets that window on every platform. Otherwise ROCm gets a fixed window:
+    its teardown can take longer than the generic best-effort window, and
+    force-killing during teardown can leave VRAM resident.
 
     `process_timeout` may be a remaining budget computed by an outer process
     manager. Keep it unchanged unless both values are zero: a zero remaining
@@ -165,10 +166,11 @@ def _dp_nodes_master_first(
 ) -> list[tuple[str, dict]]:
     """Live Ray nodes as `(node_id, resources)` with the DP master first.
 
-    The master is found through the `node:<ip>` resource Ray sets on every node, so this
-    works with the resource maps from `ray._private.state`. Do not replace it with
-    `ray.util.state.list_nodes()`: that API goes through the dashboard HTTP server and
-    only exists with `ray[default]` (see #23822).
+    The master is found through the `node:<ip>` resource Ray sets on every
+    node, so this works with the resource maps from `ray._private.state`.
+    Do not replace it with `ray.util.state.list_nodes()`: that API goes
+    through the dashboard HTTP server and only exists with `ray[default]`
+    (see #23822).
     """
     master_key = f"node:{dp_master_ip}"
     nodes = sorted(

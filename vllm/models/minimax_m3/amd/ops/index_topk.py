@@ -10,9 +10,10 @@ sparse block size (128), so one sparse block maps to exactly one page.
 Index-K cache layout (vLLM): `(num_blocks, 128, idx_head_dim)` (one shared
 key vector per token).
 
-Only the paths MiniMax M3 uses are implemented: score_type="max", index value disabled
-(score-only indexer), and shared index keys. Each local index-query head selects its own
-block ids for the block-sparse attention kernels in `sparse_attn`.
+Only the paths MiniMax M3 uses are implemented: score_type="max", index value
+disabled (score-only indexer), and shared index keys. Each local index-query
+head selects its own block ids for the block-sparse attention kernels in
+`sparse_attn`.
 """
 
 import torch

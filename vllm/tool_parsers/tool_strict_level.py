@@ -13,7 +13,8 @@ class ToolStrictLevel(enum.IntEnum):
     AUTO:      derive call constraints from `tool_choice` and argument-schema
                enforcement from each tool's explicit `strict` field.
     FUNCTION:  constrain the tool-call envelope for every request with tools.
-    PARAMETER: additionally pin argument schemas, as if every tool were `strict: true`.
+    PARAMETER: additionally pin argument schemas, as if every tool were
+               `strict: true`.
     """
 
     AUTO = 0

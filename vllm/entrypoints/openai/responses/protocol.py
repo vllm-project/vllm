@@ -788,10 +788,11 @@ class ResponsesRequest(OpenAIBaseModel):
     def _normalize_openresponses_input_item(item: Any) -> Any:
         """Normalize input items to bridge OpenResponses schema and openai-python.
 
-        The OpenResponses specification treats several fields as optional (`id`,
-        `status` on assistant/reasoning items; `annotations` on output_text content)
-        that the openai-python SDK marks as required. Fill sensible defaults so payloads
-        conforming to the OpenResponses spec pass SDK validation.
+        The OpenResponses specification treats several fields as optional
+        (`id`, `status` on assistant/reasoning items; `annotations`
+        on output_text content) that the openai-python SDK marks as
+        required.  Fill sensible defaults so payloads conforming to the
+        OpenResponses spec pass SDK validation.
         """
         if not isinstance(item, dict):
             return item

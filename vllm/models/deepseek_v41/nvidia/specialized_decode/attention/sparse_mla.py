@@ -5,10 +5,11 @@
 It is the decode branch of `DeepseekV4FlashInferMLAAttention.forward_mqa`
 with two changes, neither of which issues a collective:
 
-- Shared sparse-index tables (`SparseIndexTables`). Compressed layers that share an
-  index source build equal tables in a step, so the first of them builds the table and
-  the others reuse it; the first layer of such a run also builds, on a side stream, the
-  tables its later layers look up in other SWA KV-cache groups.
+- Shared sparse-index tables (`SparseIndexTables`). Compressed layers that
+  share an index source build equal tables in a step, so the first of them
+  builds the table and the others reuse it; the first layer of such a run also
+  builds, on a side stream, the tables its later layers look up in other SWA
+  KV-cache groups.
 - Persistent multi-CTA KV counters. Without a caller-owned counter buffer,
   `trtllm_batch_decode_sparse_mla_dsv4` allocates and zeroes a fresh one
   before every call, a small fill kernel ahead of each decode launch. The
@@ -170,19 +171,21 @@ def sparse_index_key(attn: DeepseekV4FlashInferMLAAttention) -> str:
 class SparseIndexTables:
     """The sparse-index tables of one decode step, shared by equal keys.
 
-    Each SWA KV-cache group has its own metadata, and the layers of a run of equal keys
-    interleave the groups: each group would build each key's table on the critical path.
-    A table depends only on the step's metadata, the group's SWA indices and block table
-    and, for compressed layers, the index source's top-k indices; not on any layer's KV
-    write. So the first layer of a run builds its own group's table through the stock
-    `_build_sparse_index_metadata` and then forks, onto `stream`, the builds that later
-    layers of the run look up in other groups:
+    Each SWA KV-cache group has its own metadata, and the layers of a run of
+    equal keys interleave the groups: each group would build each key's table
+    on the critical path. A table depends only on the step's metadata, the
+    group's SWA indices and block table and, for compressed layers, the index
+    source's top-k indices; not on any layer's KV write. So the first layer of
+    a run builds its own group's table through the stock
+    `_build_sparse_index_metadata` and then forks, onto `stream`, the
+    builds that later layers of the run look up in other groups:
 
     * `lookup` returns a layer's table, building and forking on a miss and
       making the current stream wait for a table built on `stream`.
-    * `join` makes the current stream wait for everything `stream` ran. Index sources
-      call it before their indexer overwrites the top-k indices, and the executor at the
-      end of its step, so a CUDA graph capture ends joined.
+    * `join` makes the current stream wait for everything `stream` ran.
+      Index sources call it before their indexer overwrites the top-k indices,
+      and the executor at the end of its step, so a CUDA graph capture ends
+      joined.
 
     Events are reused across forks: a wait on an event that a later fork
     re-recorded waits for more work on the same in-order stream, never less.

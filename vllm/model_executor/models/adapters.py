@@ -313,8 +313,9 @@ def _resolve_num_labels(hf_config: Any, text_config: Any) -> int:
     `num_labels` from `get_text_config()` silently returns that default and
     builds a score head of the wrong size.
 
-    Prefer the top-level config whenever it declares a label space of its own, mirroring
-    the `classifier_from_token` / `method` lookups in `as_seq_cls_model`.
+    Prefer the top-level config whenever it declares a label space of its own,
+    mirroring the `classifier_from_token` / `method` lookups in
+    `as_seq_cls_model`.
     """
     if text_config is hf_config:
         return hf_config.num_labels

@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Apply dense or sparse weight updates in checkpoint coordinates.
 
-The model's `load_weights` method still handles checkpoint-name mapping, TP slicing, and
-packed parameters. Sparse patches use NaN to mark unchanged checkpoint elements. The
-supported sparse-loader contract permits only final same-shaped floating-point
-`Tensor.copy_` writes. Composed, multi-stage, and custom-write loaders are unsupported.
+The model's `load_weights` method still handles checkpoint-name mapping,
+TP slicing, and packed parameters. Sparse patches use NaN to mark unchanged
+checkpoint elements. The supported sparse-loader contract permits only final
+same-shaped floating-point `Tensor.copy_` writes. Composed, multi-stage, and
+custom-write loaders are unsupported.
 """
 
 from __future__ import annotations

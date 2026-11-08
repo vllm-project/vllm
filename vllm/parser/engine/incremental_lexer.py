@@ -82,10 +82,11 @@ class LexerShape:
 class IncrementalLexer:
     """Converts streaming text into terminal tokens.
 
-    The key feature is **prefix-match buffering**: when the text in the buffer could be
-    the start of a multi-character terminal (e.g. `"<tool_"` that could become
-    `"<tool_call>"`), the lexer holds the text rather than emitting it. When the next
-    chunk arrives, it either completes the terminal or flushes the buffered text as
+    The key feature is **prefix-match buffering**: when the text in the
+    buffer could be the start of a multi-character terminal (e.g.
+    `"<tool_"` that could become `"<tool_call>"`), the lexer holds
+    the text rather than emitting it.  When the next chunk arrives, it
+    either completes the terminal or flushes the buffered text as
     content.
 
     Terminals are tried in priority order (literals first, then by

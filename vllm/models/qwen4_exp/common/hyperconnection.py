@@ -8,7 +8,8 @@ Implements the HyperConnection residual scheme proposed in
 The two concrete variants are:
   - `HyperConnectionBase`  - simple average pooling across hc_count parallel
     streams (equivalent to hyperconnection_average).
-  - `GatedResidual` - learnable low-rank gated mixing and injection (gated_residual).
+  - `GatedResidual`  - learnable low-rank gated mixing and injection
+    (gated_residual).
 
 Hidden states between layers have shape `[..., HC*HS]` with HS inner
 (HC outer, HS inner — checkpoint-native layout). The local torch
@@ -149,9 +150,10 @@ class HyperConnectionBase(nn.Module):
 class GatedResidual(HyperConnectionBase):
     """Gated HyperConnection with learnable low-rank mixing and injection.
 
-    `mix()` applies GemmaRMSNorm per HC stream and projects through a low-rank sigmoid
-    gate to produce a single block input. `combine()` injects the block output back into
-    each stream through a learned per-stream injection weight.
+    `mix()` applies GemmaRMSNorm per HC stream and projects through a
+    low-rank sigmoid gate to produce a single block input. `combine()`
+    injects the block output back into each stream through a learned
+    per-stream injection weight.
 
     This implementation uses only PyTorch operators. Tensor-parallel
     collectives are supplied by its caller.

@@ -6,11 +6,12 @@
 """The router GEMV tile for decode: bf16 x [T, K] times the gate weight
 [experts, K] -> f32 logits, in one fixed summation order (K the hidden width).
 
-Rows 16 a tile, K in `PARTS` contiguous parts, 16x16x32 bf16 MFMA: in part p wave w
-takes the part's K steps w, w + 8, ... (32 columns each) in that order, and the eight
-wave partials are summed in wave order (`common.ops.row_sum`); the MoE's route stage
-sums the parts in part order. The MoE stages spread a tile's parts over PARTS CTAs, and
-past 16 tokens a token tile a CTA too, which the order allows: a CTA alone cannot read a
+Rows 16 a tile, K in `PARTS` contiguous parts, 16x16x32 bf16 MFMA: in part
+p wave w takes the part's K steps w, w + 8, ... (32 columns each) in that
+order, and the eight wave partials are summed in wave order
+(`common.ops.row_sum`); the MoE's route stage sums the parts in part
+order. The MoE stages spread a tile's parts over PARTS CTAs, and past 16 tokens
+a token tile a CTA too, which the order allows: a CTA alone cannot read a
 tile, or every token's x, fast enough.
 """
 

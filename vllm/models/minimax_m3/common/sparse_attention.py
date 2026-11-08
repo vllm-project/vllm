@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Main block-sparse GQA attention for MiniMax M3 sparse layers.
 
-The lightning indexer (`indexer.py`) selects the top-k KV blocks (written into the
-shared `layer.topk_indices_buffer`); this module holds the main attention that attends
-only to those blocks: the paged K/V cache backend, its metadata + builder, and the impl
-that reads the indexer's top-k from that buffer. The generic Triton attend kernel lives
-in `common/ops`; Hopper uses the query-tiled prefill kernel in `nvidia/ops`. The SM100
-(MSA) `build_k2q_csr` + `sparse_atten_func` attend lives in
+The lightning indexer (`indexer.py`) selects the top-k KV blocks (written into
+the shared `layer.topk_indices_buffer`); this module holds the main attention
+that attends only to those blocks: the paged K/V cache backend, its metadata +
+builder, and the impl that reads the indexer's top-k from that buffer. The generic
+Triton attend kernel lives in `common/ops`; Hopper uses the query-tiled prefill
+kernel in `nvidia/ops`. The SM100 (MSA)
+`build_k2q_csr` + `sparse_atten_func` attend lives in
 `nvidia/sparse_attention_msa.py`.
 
 `MiniMaxM3SparseBackend` and `MiniMaxM3SparseMetadata` are referenced by the
@@ -391,10 +392,11 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
 class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
     """Abstract base for block-sparse GQA over the indexer-selected blocks.
 
-    Inherits `AttentionImplBase` for a custom forward signature (the layer pre-inserts
-    K/V and runs the indexer, which writes the selected blocks into the shared
-    `layer.topk_indices_buffer`; the attend reads them back from there). The Triton and
-    MSA subclasses each own a full `forward` -- no shared forward code.
+    Inherits `AttentionImplBase` for a custom forward signature (the layer
+    pre-inserts K/V and runs the indexer, which writes the selected blocks into
+    the shared `layer.topk_indices_buffer`; the attend reads them back from
+    there). The Triton and MSA subclasses each own a full `forward` -- no
+    shared forward code.
     """
 
     def __init__(
@@ -436,7 +438,8 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
     ) -> torch.Tensor:
         """Attend the queries to the indexer-selected blocks. Per kernel.
 
-        `query` is E4M3 for impls with `use_cutlass_decode`, else the model dtype.
+        `query` is E4M3 for impls with `use_cutlass_decode`, else the model
+        dtype.
 
         The indexer has already written the top-k block ids into
         `layer.topk_indices_buffer` (decode at `[:, :nd]`, prefill at

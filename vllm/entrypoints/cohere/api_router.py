@@ -8,23 +8,27 @@ Exposes two routes:
 * `POST /cohere/v2/chat/render` - tokenize a request without running
   generation, mirroring `POST /v1/chat/completions/render`.
 
-The Cohere v2 protocol models are sourced from the official `cohere` Python SDK
-(`pip install cohere`). To keep that an *optional* dependency for vLLM, the
-SDK-dependent imports - and the route handlers themselves - are gated on a one-shot
-probe at module load. If the SDK isn't installed, `attach_router` becomes a no-op
-(with an info log) and vLLM continues to boot normally.
+The Cohere v2 protocol models are sourced from the official `cohere`
+Python SDK (`pip install cohere`). To keep that an *optional*
+dependency for vLLM, the SDK-dependent imports - and the route handlers
+themselves - are gated on a one-shot probe at module load. If the SDK
+isn't installed, `attach_router` becomes a no-op (with an info
+log) and vLLM continues to boot normally.
 
 Even when the SDK is installed, `attach_router` also requires
-`VLLM_ENABLE_COHERE_API=1` in the environment before it will expose the chat route. The
-render route additionally requires scale-out endpoints to be enabled, i.e.
-`--enable-scale-out` or `--tokens-only`. These gates keep unrelated deployments from
+`VLLM_ENABLE_COHERE_API=1` in the environment before it will expose
+the chat route. The render route additionally requires scale-out
+endpoints to be enabled, i.e. `--enable-scale-out` or
+`--tokens-only`. These gates keep unrelated deployments from
 accidentally exposing the APIs.
 
-Note: the handlers must live at module scope (not inside `attach_router`) so that
-FastAPI's `typing.get_type_hints` resolves the `CohereChatV2Request` body annotation
-against the module's globals. Defining them locally inside `attach_router` would hide
-the type from `get_type_hints`, causing FastAPI to silently degrade the body parameter
-into a query parameter and reject every request with 422.
+Note: the handlers must live at module scope (not inside
+`attach_router`) so that FastAPI's `typing.get_type_hints` resolves
+the `CohereChatV2Request` body annotation against the module's
+globals. Defining them locally inside `attach_router` would hide the
+type from `get_type_hints`, causing FastAPI to silently degrade the
+body parameter into a query parameter and reject every request with
+422.
 """
 
 import json
@@ -83,9 +87,10 @@ if _SDK_AVAILABLE:
         """Best-effort lookup of the active request id.
 
         Prefers the id the underlying chat handler stamped onto
-        `raw_request.state.request_metadata` (if it got that far before failing),
-        falling back to the `X-Request-Id` HTTP header. May return `None` if neither is
-        available, in which case the field is omitted from the response.
+        `raw_request.state.request_metadata` (if it got that far before
+        failing), falling back to the `X-Request-Id` HTTP header. May
+        return `None` if neither is available, in which case the field
+        is omitted from the response.
         """
         if raw_request is None:
             return None
@@ -163,11 +168,12 @@ if _SDK_AVAILABLE:
     async def chat_v2_render(request: CohereChatV2Request, raw_request: Request):
         """Tokenize a Cohere v2 chat request without running generation.
 
-        The Cohere counterpart to `POST /v1/chat/completions/render`. The v2 body goes
-        through the same conversion `/cohere/v2/chat` uses and is then handed to the
-        shared `ServingRender`, so the returned `GenerateRequest` carries the
-        prompt tokens and sampling params the chat endpoint would have sent to the
-        engine.
+        The Cohere counterpart to `POST /v1/chat/completions/render`.
+        The v2 body goes through the same conversion
+        `/cohere/v2/chat` uses and is then handed to the shared
+        `ServingRender`, so the returned `GenerateRequest`
+        carries the prompt tokens and sampling params the chat endpoint
+        would have sent to the engine.
         """
         handler = _serving(raw_request)
         render_handler = _serving_render(raw_request)
@@ -207,16 +213,17 @@ if _SDK_AVAILABLE:
     class CohereErrorEnvelopeMiddleware(BaseHTTPMiddleware):
         """Rewrite vLLM error bodies into the Cohere `{message, id}` shape.
 
-        The endpoint handler above already returns `CohereError` for errors it
-        owns, but globally-registered exception handlers (e.g.
+        The endpoint handler above already returns `CohereError` for
+        errors it owns, but globally-registered exception handlers (e.g.
         `validation_exception_handler` for pydantic body errors,
-        `http_exception_handler`, engine error handlers) fire *before* the handler
-        runs and produce vLLM's internal `ErrorResponse` shape
-        (`{"error": {"message": ...}}`). That shape doesn't match the `CohereError`
-        schema advertised on the route's OpenAPI `responses`, so clients (and
-        schema-conformance tests like `test_openai_schema.py`) would see a mismatch on
-        those paths. This middleware normalises any error body on `/cohere/*` responses
-        to `CohereError`.
+        `http_exception_handler`, engine error handlers) fire *before*
+        the handler runs and produce vLLM's internal
+        `ErrorResponse` shape (`{"error": {"message": ...}}`). That
+        shape doesn't match the `CohereError` schema advertised on the
+        route's OpenAPI `responses`, so clients (and schema-conformance
+        tests like `test_openai_schema.py`) would see a mismatch on
+        those paths. This middleware normalises any error body on
+        `/cohere/*` responses to `CohereError`.
         """
 
         async def dispatch(self, request: Request, call_next):
@@ -273,11 +280,13 @@ def attach_router(app: FastAPI) -> None:
 
     No-op when either:
 
-    * the `VLLM_ENABLE_COHERE_API` env var isn't set to `1`. The Cohere v2 endpoints are
-      opt-in because they carry Cohere-specific request/response semantics (grounding
-      citations, tool_plan, PLAN/THINKING_CONTENT blocks) that are only meaningful when
+    * the `VLLM_ENABLE_COHERE_API` env var isn't set to `1`. The
+      Cohere v2 endpoints are opt-in because they carry Cohere-specific
+      request/response semantics (grounding citations, tool_plan,
+      PLAN/THINKING_CONTENT blocks) that are only meaningful when
       serving a Cohere Command-family model.
-    * the optional `cohere` SDK isn't installed (the v2 protocol models live there)
+    * the optional `cohere` SDK isn't installed (the v2 protocol
+      models live there)
 
     The two skip paths log at different levels: an operator who set
     `VLLM_ENABLE_COHERE_API=1` but forgot to install `cohere` sees

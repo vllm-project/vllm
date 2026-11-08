@@ -70,10 +70,11 @@ class QuantizeMethodBase(ABC):
     def tie_weights(self, layer: torch.nn.Module, embed_tokens: torch.nn.Module):
         """Tie `layer`'s weight to `embed_tokens`' weight.
 
-        The default shares the weight tensor, which is the standard behavior for tied
-        word embeddings and matches what `ParallelLMHead.tie_weights` did directly
-        before quantization methods became responsible for it. Quantization methods that
-        need special weight handling (e.g. repacked weights) override this.
+        The default shares the weight tensor, which is the standard behavior for
+        tied word embeddings and matches what `ParallelLMHead.tie_weights` did
+        directly before quantization methods became responsible for it.
+        Quantization methods that need special weight handling (e.g. repacked
+        weights) override this.
 
         Expects create_weights to have been called before on the layer."""
         layer.weight = embed_tokens.weight

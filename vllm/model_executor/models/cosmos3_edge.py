@@ -534,9 +534,10 @@ class Cosmos3EdgeForCausalLM(nn.Module):
 def _cosmos3_edge_diffusers_prefix_map() -> dict[str, str]:
     """Map Diffusers blocks to interleaved Nemotron-H layers.
 
-    The checkpoint stores attention and MLP in one `layers.N` block, while the
-    Nemotron-H model represents them as separate decoder layers. Therefore, checkpoint
-    block `N` maps its attention to layer `2N` and its MLP to layer `2N + 1`.
+    The checkpoint stores attention and MLP in one `layers.N` block, while
+    the Nemotron-H model represents them as separate decoder layers. Therefore,
+    checkpoint block `N` maps its attention to layer `2N` and its MLP to
+    layer `2N + 1`.
     """
     mappings = {
         "embed_tokens.": "language_model.model.embed_tokens.",

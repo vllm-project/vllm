@@ -8,12 +8,14 @@ whether an lm_head LoRA is attached:
 
 * No LoRA: fold `1/mup` into the lm_head GEMM alpha (fp32 epilogue) -- no
   separate elementwise kernel, no extra rounding, no weight mutation.
-* LoRA attached: the LoRA manager wraps this layer in `LogitsProcessorWithLoRA`, whose
-  `forward` calls `type(base_layer).forward(self=wrapper)` -- so this `forward` runs
-  with `self` bound to the wrapper. We detect that via `base_layer` and take the LoRA
-  path: run the wrapper's `_get_logits` (base logits + the lm_head LoRA delta), then
-  divide the full logits by the multiplier so the delta is scaled too. muP thus composes
-  with the LoRA delta, with the dispatch as the only model-side branching.
+* LoRA attached: the LoRA manager wraps this layer in
+  `LogitsProcessorWithLoRA`, whose `forward` calls
+  `type(base_layer).forward(self=wrapper)` -- so this `forward` runs with
+  `self` bound to the wrapper. We detect that via `base_layer` and take the
+  LoRA path: run the wrapper's `_get_logits` (base logits + the lm_head LoRA
+  delta), then divide the full logits by the multiplier so the delta is scaled
+  too. muP thus composes with the LoRA delta, with the dispatch as the only
+  model-side branching.
 """
 
 from __future__ import annotations

@@ -142,9 +142,10 @@ def get_expert_substitution_spec(model_config: Any) -> ExpertSubstitutionSpec | 
 class ConstantExpertSubstitution(nn.Module):
     """Constant outputs for the substituted experts of one MoE layer.
 
-    Router outputs keep logical expert IDs. `transform_routes` maps retained experts to
-    compact physical rows and turns substituted routes into zero-weight routes to
-    physical expert 0, so any decomposed MoE backend can run them unchanged.
+    Router outputs keep logical expert IDs. `transform_routes` maps retained
+    experts to compact physical rows and turns substituted routes into
+    zero-weight routes to physical expert 0, so any decomposed MoE backend can
+    run them unchanged.
     """
 
     def __init__(

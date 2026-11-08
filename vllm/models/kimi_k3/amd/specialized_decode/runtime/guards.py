@@ -217,11 +217,12 @@ def cache_reasons(caches: Mapping[str, Any]) -> list[str]:
 
 class FailStop:
     """Stops every TP rank at the same step once any of them gave up an in-kernel
-    wait (its health word FAILED, `mono.abi`). Each step queues a D2H copy of this
-    rank's word and keeps the newest copy that has landed, without blocking; every
-    CHECK_EVERY steps the ranks agree on those over the TP CPU group and all raise
-    together. A rank that raised alone would leave the others in the next collective
-    (the drafter's) for ever. A failure is seen within about CHECK_EVERY steps."""
+    wait (its health word FAILED, `mono.abi`). Each step queues a D2H copy of
+    this rank's word and keeps the newest copy that has landed, without blocking;
+    every CHECK_EVERY steps the ranks agree on those over the TP CPU group and all
+    raise together. A rank that raised alone would leave the others in the next
+    collective (the drafter's) for ever. A failure is seen within about
+    CHECK_EVERY steps."""
 
     CHECK_EVERY = 16
 

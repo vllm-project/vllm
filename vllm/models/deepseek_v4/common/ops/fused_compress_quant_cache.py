@@ -754,8 +754,9 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
       [0, bs*128):       FP8 data (128 bytes/token)
       [bs*128, +bs*4):   float32 scales (4 bytes/token)
 
-    For head_dim=128 we have exactly one quant block, so we skip the [N_QUANT_BLOCKS,
-    QUANT_BLOCK] reshape entirely and use a flat `tl.max` reduction.
+    For head_dim=128 we have exactly one quant block, so we skip the
+    [N_QUANT_BLOCKS, QUANT_BLOCK] reshape entirely and use a flat
+    `tl.max` reduction.
     """
     token_idx = tl.program_id(0)
 

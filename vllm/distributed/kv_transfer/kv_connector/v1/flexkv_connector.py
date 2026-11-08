@@ -84,9 +84,10 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
 
         FlexKV manages all KV transfers on the **scheduler side** via
         `build_connector_meta` (which calls `launch_tasks`) and
-        `update_connector_output` (which polls `query_finished_task`). KV blocks are
-        transferred directly between the FlexKV server and vLLM's GPU memory without
-        worker-side intervention during the forward pass — similar to how NIXL operates.
+        `update_connector_output` (which polls `query_finished_task`).
+        KV blocks are transferred directly between the FlexKV server and
+        vLLM's GPU memory without worker-side intervention during the
+        forward pass — similar to how NIXL operates.
 
         These worker-side hooks are kept (rather than omitted) to satisfy
         the `KVConnectorBase_V1` interface contract and to serve as
@@ -141,9 +142,10 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
     def wait_for_save(self):
         """No-op for FlexKV (currently).
 
-        KV offload tasks are tracked asynchronously by the scheduler connector via
-        `request_finished` / `query_finished_task`. There is no pending worker-side save
-        to wait for at forward-context exit.
+        KV offload tasks are tracked asynchronously by the scheduler
+        connector via `request_finished` / `query_finished_task`.
+        There is no pending worker-side save to wait for at
+        forward-context exit.
 
         Retained to satisfy `KVConnectorBase_V1` and as an extension
         point for future worker-side save-completion signalling.

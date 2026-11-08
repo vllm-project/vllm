@@ -199,13 +199,20 @@ class LLBf16Dotprod:
         - Reduce each token accumulator first within the warp, then across
           warps through shared memory, and store `C[:, n]`.
 
-        :param gA: Input tensor A with shape `[M, K]`. :type gA: cute.Tensor :param gB:
-        Input tensor B with shape `[N, K]`. :type gB: cute.Tensor :param gC: Output
-        tensor C with shape `[M, N]`. :type gC: cute.Tensor :param M: Token count
-        selected by the compile key. :type M: cutlass.Constexpr :param K_dim: Hidden
-        size selected by the compile key. :type K_dim: cutlass.Constexpr :param N_dim:
-        Output column count used for the launch grid. :type N_dim: cutlass.Int32 :param
-        stream: CUDA stream for asynchronous execution. :type stream: CUstream
+        :param gA: Input tensor A with shape `[M, K]`.
+        :type gA: cute.Tensor
+        :param gB: Input tensor B with shape `[N, K]`.
+        :type gB: cute.Tensor
+        :param gC: Output tensor C with shape `[M, N]`.
+        :type gC: cute.Tensor
+        :param M: Token count selected by the compile key.
+        :type M: cutlass.Constexpr
+        :param K_dim: Hidden size selected by the compile key.
+        :type K_dim: cutlass.Constexpr
+        :param N_dim: Output column count used for the launch grid.
+        :type N_dim: cutlass.Int32
+        :param stream: CUDA stream for asynchronous execution.
+        :type stream: CUstream
         """
         self.kernel(
             gA,

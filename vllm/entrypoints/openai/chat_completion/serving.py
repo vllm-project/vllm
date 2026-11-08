@@ -227,12 +227,13 @@ class OpenAIServingChat(GenerateBaseServing):
     ) -> dict[str, Any]:
         """Subclass hook to narrow `chat_template_kwargs` for the engine.
 
-        The same dict is used twice: to build the API-server-side parser instance, and
-        to populate `EngineCoreRequest.reasoning_parser_kwargs` for the engine-core
+        The same dict is used twice: to build the API-server-side parser
+        instance, and to populate
+        `EngineCoreRequest.reasoning_parser_kwargs` for the engine-core
         side. The latter crosses ZMQ as msgpack, so a handler that stashes
-        request-scoped state only the API-server-side parser needs (values msgpack can't
-        encode, or payloads not worth shipping) can drop those entries here without
-        affecting the in-process parser.
+        request-scoped state only the API-server-side parser needs (values
+        msgpack can't encode, or payloads not worth shipping) can drop
+        those entries here without affecting the in-process parser.
 
         Must not mutate the argument -- the caller still needs the full
         dict. The default forwards it unchanged.
@@ -445,9 +446,10 @@ class OpenAIServingChat(GenerateBaseServing):
     def _create_chat_message(self, *args: Any, **kwargs: Any) -> ChatMessage:
         """Construct the response `ChatMessage` for the non-streaming path.
 
-        Subclasses can swap in a specialized `ChatMessage` subclass (e.g.
-        `CohereServingChatV2` returning `CohereChatMessage`) without duplicating the
-        field selection in `assemble_chat_message_fields`. The default returns a plain
+        Subclasses can swap in a specialized `ChatMessage` subclass
+        (e.g. `CohereServingChatV2` returning `CohereChatMessage`)
+        without duplicating the field selection in
+        `assemble_chat_message_fields`. The default returns a plain
         `ChatMessage`.
         """
         return ChatMessage(*args, **kwargs)
@@ -460,10 +462,11 @@ class OpenAIServingChat(GenerateBaseServing):
     ) -> ChatMessage:
         """Subclass hook to enrich a fully-constructed `ChatMessage`.
 
-        Default is a no-op. Subclasses that need to surface parser-side extras (e.g.
-        `CohereServingChatV2` reading grounding citations off the reasoning
-        parser and populating `CohereChatMessage.citations`) override this to
-        inspect `parser` and mutate/replace `message`.
+        Default is a no-op. Subclasses that need to surface parser-side
+        extras (e.g. `CohereServingChatV2` reading grounding
+        citations off the reasoning parser and populating
+        `CohereChatMessage.citations`) override this to inspect
+        `parser` and mutate/replace `message`.
         """
         return message
 

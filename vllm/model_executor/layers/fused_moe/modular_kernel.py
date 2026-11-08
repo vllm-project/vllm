@@ -314,8 +314,9 @@ class FusedMoEPrepareAndFinalize(ABC):
     def supports_deferred_moe_finalize(self) -> bool:
         """Whether `finalize` can be skipped for a deferring consumer.
 
-        An implementation opts in only if everything it does in `finalize` -- the top-k
-        reduction, and any combine or reduce-scatter -- is work the consumer takes over.
+        An implementation opts in only if everything it does in `finalize`
+        -- the top-k reduction, and any combine or reduce-scatter -- is work
+        the consumer takes over.
         """
         return False
 

@@ -3,10 +3,11 @@
 """Merge AITER segmented MLA split-K partials into output plus natural-log LSE.
 
 This mirrors AITER's own segment reduction, including its
-`tiles_per_segment = cdiv(seq_len, NUM_SEGMENTS * TILE_SIZE)` partitioning, so it has to
-move together with the `skip_reduce=True` call in the AITER MLA backend. It is a
-rank-local split-K merge and unrelated to any collective reduce; the natural-log LSE it
-returns is what the cross-rank DCP merge consumes.
+`tiles_per_segment = cdiv(seq_len, NUM_SEGMENTS * TILE_SIZE)` partitioning, so
+it has to move together with the `skip_reduce=True` call in the AITER MLA
+backend. It is a rank-local split-K merge and unrelated to any collective
+reduce; the natural-log LSE it returns is what the cross-rank DCP merge
+consumes.
 """
 
 import torch

@@ -71,11 +71,12 @@ def replay_boundaries(
     at each position; EAGLE groups also keep the block above, which they
     match and drop back from (see `reachable_block_mask`).
 
-    Two positions are reachable: a resend of the identical prompt is capped at
-    `num_tokens - 1` (its last token is recomputed for logits), a longer sibling matches
-    the final aligned block. They differ only on a block-aligned prompt, where retaining
-    just the higher one collapses the resend's hit to 0. The alignment is the scheduler
-    block size, not the finer hash granularity, which would over-estimate the reach.
+    Two positions are reachable: a resend of the identical prompt is capped
+    at `num_tokens - 1` (its last token is recomputed for logits), a
+    longer sibling matches the final aligned block. They differ only on a
+    block-aligned prompt, where retaining just the higher one collapses the
+    resend's hit to 0. The alignment is the scheduler block size, not the
+    finer hash granularity, which would over-estimate the reach.
     """
     if not use_eagle:
         return (num_prompt_tokens - 1,)
@@ -776,9 +777,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
     def _align_cacheable(self, num_tokens: int) -> int:
         """Largest prefix of `num_tokens` a future cache hit could match.
 
-        Hits are `scheduler_block_size`-aligned (see `find_longest_cache_hit`) unless
-        fine-grained partial hash hits are enabled, in which case no rounding applies --
-        rounding even to `hash_block_size` would re-register a privatized Mamba tail.
+        Hits are `scheduler_block_size`-aligned (see
+        `find_longest_cache_hit`) unless fine-grained partial hash hits are
+        enabled, in which case no rounding applies -- rounding even to
+        `hash_block_size` would re-register a privatized Mamba tail.
         """
         if self.enable_partial_hash_hits:
             return num_tokens

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Build the `system_fingerprint` string returned by the OpenAI-compatible server.
+"""Build the `system_fingerprint` string returned by the OpenAI-compatible
+server.
 
 Four modes, configured via `--fingerprint-mode`:
 

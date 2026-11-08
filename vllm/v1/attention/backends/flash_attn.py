@@ -1760,23 +1760,27 @@ def _make_mm_prefix_mask_mod(
     cells into the compile key; the nested `_load_q_range` would otherwise
     get a new address each call and force a full JIT recompile every forward.
 
-    The FA4 kernel passes *local* `q_idx` (0-based within the current prefill chunk)
-    while `kv_idx` is absolute (0-based over the full KV cache). We recover the absolute
-    Q position via `q_abs = q_idx + seqlen_k - seqlen_q` (the context-length offset) so
-    that causal, sliding-window, and mm_prefix range comparisons all use consistent
-    absolute positions. This matches the Triton reference path (`compute_kv_seq_mask`).
+    The FA4 kernel passes *local* `q_idx` (0-based within the current
+    prefill chunk) while `kv_idx` is absolute (0-based over the full
+    KV cache).  We recover the absolute Q position via
+    `q_abs = q_idx + seqlen_k - seqlen_q` (the context-length offset)
+    so that causal, sliding-window, and mm_prefix range comparisons all
+    use consistent absolute positions.  This matches the Triton
+    reference path (`compute_kv_seq_mask`).
 
-    `aux_tensors[0]` holds the absolute `[start, end]` bounds of the mm_prefix range
-    containing each scheduled query token (`(-1, -1)` when none), and `aux_tensors[1]`
-    is `cu_seqlens_q`, used to turn the local `q_idx` into a packed row index. Because
-    mm_prefix ranges never overlap, `r_start <= kv_idx <= r_end` is exactly "query and
-    key share a range", so no key-side lookup is needed and `kv_idx` is never used as an
-    index. The `(-1, -1)` sentinel falls out for free: `kv_idx <= -1` is false for every
-    valid key.
+    `aux_tensors[0]` holds the absolute `[start, end]` bounds of the
+    mm_prefix range containing each scheduled query token (`(-1, -1)` when
+    none), and `aux_tensors[1]` is `cu_seqlens_q`, used to turn the local
+    `q_idx` into a packed row index.  Because mm_prefix ranges never overlap,
+    `r_start <= kv_idx <= r_end` is exactly "query and key share a range", so
+    no key-side lookup is needed and `kv_idx` is never used as an index.
+    The `(-1, -1)` sentinel falls out for free: `kv_idx <= -1` is false for
+    every valid key.
 
-    `sliding_window_left` enforces the sliding window on the causal term (None = full
-    causal, no window). `sliding_window` clamps the bidirectional block to the window
-    (0 = unclamped; >0 = Gemma4 local layers via `mm_prefix_clamp_sliding_window`).
+    `sliding_window_left` enforces the sliding window on the causal
+    term (None = full causal, no window).  `sliding_window` clamps the
+    bidirectional block to the window (0 = unclamped; >0 = Gemma4 local
+    layers via `mm_prefix_clamp_sliding_window`).
     """
     import cutlass
     import cutlass.cute as cute

@@ -202,8 +202,9 @@ def _validate_layout(layout: str) -> InputLayout:
 class IdentityInputNorm(nn.Module):
     """Stand-in used when the processor requires no rescale/normalise.
 
-    Not a no-op: with `mm_device_do_normalize` enabled, raw `uint8` pixels travel to the
-    device unprocessed and must be cast to `visual_dtype` here.
+    Not a no-op: with `mm_device_do_normalize` enabled, raw `uint8`
+    pixels travel to the device unprocessed and must be cast to
+    `visual_dtype` here.
     """
 
     @property
@@ -223,17 +224,20 @@ class FusedMMInputNorm(CustomOp):
 
     Dtype semantics:
 
-    * Input dtype — the dtype of the `pixel_values` argument to `forward_*`. It is
-      `uint8` when `mm_device_do_normalize` is enabled (raw bytes travel to the device
-      unprocessed) and equals `visual_dtype` otherwise.
-    * Output dtype — the `visual_dtype` argument of `forward_*`. The computation itself
-      is always fp32, independent of the output dtype (e.g. compute fp32, emit bf16).
+    * Input dtype — the dtype of the `pixel_values` argument to `forward_*`.
+      It is `uint8` when `mm_device_do_normalize` is enabled (raw bytes
+      travel to the device unprocessed) and equals `visual_dtype`
+      otherwise.
+    * Output dtype — the `visual_dtype` argument of `forward_*`. The
+      computation itself is always fp32, independent of the output dtype
+      (e.g. compute fp32, emit bf16).
 
     Input Layout semantics:
 
     * `layout="pcl"`  (default) — `pixel_values` is `(patches, C*L)`,
       output has the same shape.
-    * `layout="bchw"` — `pixel_values` is `(B, C, H, W)`, output has the same shape.
+    * `layout="bchw"` — `pixel_values` is `(B, C, H, W)`, output has
+      the same shape.
 
     Platform dispatch:
 
@@ -307,10 +311,12 @@ class FusedMMInputNorm(CustomOp):
     ) -> tuple[torch.Tensor, tuple[int, ...]]:
         """Normalise either layout to `(P, C, L)` plus the output shape.
 
-        Returns a `(x3, out_shape)` pair where `x3` is a `(P, C, L)` view of the input
-        and `out_shape` is the shape the final output must have. The `reshape` below is
-        a pure view as long as the caller's tensor is contiguous; the platform forward_*
-        methods call `.contiguous()` inside `fused_mm_input_norm_triton` when needed.
+        Returns a `(x3, out_shape)` pair where `x3` is a
+        `(P, C, L)` view of the input and `out_shape` is the shape
+        the final output must have. The `reshape` below is a pure view
+        as long as the caller's tensor is contiguous; the platform
+        forward_* methods call `.contiguous()` inside
+        `fused_mm_input_norm_triton` when needed.
         """
         if self.layout == "bchw":
             assert pixel_values.ndim == 4, (
@@ -391,9 +397,10 @@ def build_mm_input_norm(
 ) -> nn.Module:
     """Build the input normalisation module for a model.
 
-    Returns an `IdentityInputNorm` when device-side normalisation is disabled or the
-    processor's rescale/normalise is numerically the identity transform; otherwise a
-    `FusedMMInputNorm` built from the processor's parameters."""
+    Returns an `IdentityInputNorm` when device-side normalisation is
+    disabled or the processor's rescale/normalise is numerically the identity
+    transform; otherwise a `FusedMMInputNorm` built from the processor's
+    parameters."""
     mm_config = getattr(model_config, "multimodal_config", None)
     if not getattr(mm_config, "mm_device_do_normalize", False):
         return IdentityInputNorm()

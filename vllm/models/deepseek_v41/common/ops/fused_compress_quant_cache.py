@@ -38,15 +38,16 @@ def fused_save_compress_norm(
     The latent feeds the main-cache insert and the indexer K path, which the
     attention layer schedules on separate streams.
 
-    Ratio 2 keeps one ring block per request holding the open group's rows: position `p`
-    lives in row `p % capacity` and `slot_mapping` encodes
-    `block * capacity + p % capacity`. The grid has one program per request followed by
-    one per pair of packed tokens. A request program handles the group that the chunk's
-    first token closes with its predecessor's ring row, then stores the chunk's last
-    `capacity` rows to the ring; because the same program does both, ring reads and
-    writes never race. A pair program handles the group that ends inside its pair,
-    reading both rows from the raw input. Ratio 1 has no ring and one program per token;
-    `slot_mapping` then only marks valid tokens.
+    Ratio 2 keeps one ring block per request holding the open group's rows:
+    position `p` lives in row `p % capacity` and `slot_mapping` encodes
+    `block * capacity + p % capacity`. The grid has one program per request
+    followed by one per pair of packed tokens. A request program handles the
+    group that the chunk's first token closes with its predecessor's ring row,
+    then stores the chunk's last `capacity` rows to the ring; because the
+    same program does both, ring reads and writes never race. A pair program
+    handles the group that ends inside its pair, reading both rows from the
+    raw input. Ratio 1 has no ring and one program per token; `slot_mapping`
+    then only marks valid tokens.
 
     Args:
         kv_score: FP32 [tokens, 512] for CR1, [tokens, 1024] for CR2.
@@ -304,13 +305,14 @@ def rope_quant_insert(
 
     The BF16 latent supplies both NoPE quantization and RoPE input. It is read
     only for valid slots at group boundaries. The cache dtype selects the
-    layout: `uint8` is a paged FlashMLA layout, whose record the per-token byte width
-    names -- 584 B for V4 (576 value bytes and eight segregated UE8M0 scale bytes,
-    including one zero padding scale), 528 B for V4.1 (512 MXFP8 value bytes covering
-    the RoPE dims too, then 16 UE8M0 scales of 32 dims each), or 288 B for V4.1 NVFP4
-    (256 bytes of e2m1 pairs then 32 e4m3 scales of 16 dims each), which only the
-    compressed cache uses. The two V4.1 records keep each token's scales right after its
-    own values. `bfloat16` and `float8_e4m3fn` are the plain [448 NoPE | 64 RoPE] rows
+    layout: `uint8` is a paged FlashMLA layout, whose record the per-token
+    byte width names -- 584 B for V4 (576 value bytes and eight segregated
+    UE8M0 scale bytes, including one zero padding scale), 528 B for V4.1
+    (512 MXFP8 value bytes covering the RoPE dims too, then 16 UE8M0 scales of
+    32 dims each), or 288 B for V4.1 NVFP4 (256 bytes of e2m1 pairs then 32
+    e4m3 scales of 16 dims each), which only the compressed cache uses. The
+    two V4.1 records keep each token's scales right after its own values.
+    `bfloat16` and `float8_e4m3fn` are the plain [448 NoPE | 64 RoPE] rows
     read by FlashInfer, the latter scaled by the per-tensor `fp8_scale`.
     """
     assert compress_ratio in (1, 2)

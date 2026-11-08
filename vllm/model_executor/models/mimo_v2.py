@@ -545,12 +545,13 @@ def _fused_qkv_kv_chunk_rows(
 ) -> int:
     """Padded `K | V` rows per checkpoint chunk, or 0 for `[Q | K | V]`.
 
-    0 when the de-interleaved `[Q | K | V]` layout is already exact: a rank owns at most
-    one checkpoint chunk, the chunk counts do not divide, or every chunk's Q, K and V
-    rows span whole scale blocks (a block permutation; MiMo SWA layers). When a rank
-    owns several chunks whose K and V rows share a scale block (MiMo global layers: 192
-    K + 128 V rows), the rank keeps each chunk's K and V rows together, zero-padded to
-    whole blocks, so every row keeps its checkpoint scale::
+    0 when the de-interleaved `[Q | K | V]` layout is already exact: a rank
+    owns at most one checkpoint chunk, the chunk counts do not divide, or
+    every chunk's Q, K and V rows span whole scale blocks (a block
+    permutation; MiMo SWA layers). When a rank owns several chunks whose K
+    and V rows share a scale block (MiMo global layers: 192 K + 128 V rows),
+    the rank keeps each chunk's K and V rows together, zero-padded to whole
+    blocks, so every row keeps its checkpoint scale::
 
         [Q_1 | ... | Q_g | K_1 V_1 pad | ... | K_g V_g pad]
     """
@@ -598,8 +599,9 @@ def _shard_fp8_qkv_proj(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Shard the fp8 qkv_proj weights for `tp_rank`.
 
-    The checkpoint stores the fused QKV pre-sharded for `ckpt_tp` ranks (the model
-    config's `num_key_value_heads`), each chunk holding that slice's Q, K and V rows:
+    The checkpoint stores the fused QKV pre-sharded for `ckpt_tp` ranks (the
+    model config's `num_key_value_heads`), each chunk holding that slice's
+    Q, K and V rows:
 
         [Q_0 | K_0 | V_0 | Q_1 | K_1 | V_1 | ... | Q_n | K_n | V_n]   (n = ckpt_tp)
 
@@ -616,15 +618,16 @@ def _shard_fp8_qkv_proj(
 
         [Q_1 | Q_2 | ... | Q_g | K_1 | K_2 | ... | K_g | V_1 | V_2 | ... | V_g]
 
-    When `tp_size == ckpt_tp` the checkpoint chunk *is* that layout, so a plain chunk of
-    both weight and scale suffices. When `tp_size` is a proper divisor of `ckpt_tp` and,
-    under per-chunk scales, each chunk's Q, K and V segments span whole scale blocks,
-    the rank gathers its rows as an exact block permutation with no
-    dequantize-requantize round trip; with `kv_chunk_rows` a K segment that straddles a
-    scale block gathers into the zero-padded `[Q_1..Q_g | K_1 V_1 pad | ..]` layout
-    instead. Otherwise each rank's Q, K and V rows are gathered from the chunks that
-    hold them, dequantized with the chunk's own scales, reordered, and re-quantized to
-    fp8.
+    When `tp_size == ckpt_tp` the checkpoint chunk *is* that layout, so a
+    plain chunk of both weight and scale suffices. When `tp_size` is a
+    proper divisor of `ckpt_tp` and, under per-chunk scales, each chunk's
+    Q, K and V segments span whole scale blocks, the rank gathers its rows
+    as an exact block permutation with no dequantize-requantize round trip;
+    with `kv_chunk_rows` a K segment that straddles a scale block gathers
+    into the zero-padded `[Q_1..Q_g | K_1 V_1 pad | ..]` layout instead.
+    Otherwise each rank's Q, K and V rows are gathered from the chunks that
+    hold them, dequantized with the chunk's own scales, reordered, and
+    re-quantized to fp8.
     """
     assert num_heads % tp_size == 0, (
         f"num_heads={num_heads} must be divisible by tp_size={tp_size}."

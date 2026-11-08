@@ -1069,11 +1069,12 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
     def _replace_executor(self) -> None:
         """Replace the inner render pool after a stuck worker.
 
-        Called after a render timeout so that the stuck thread (which CPython cannot
-        interrupt) does not permanently block all subsequent renders. The executor
-        *object* is kept so `make_async` wrappers bound at init (tokenize, decode,
-        pooling, derender) keep submitting work. The old inner pool is abandoned with
-        wait=False — its thread will eventually finish or be reaped on process exit.
+        Called after a render timeout so that the stuck thread (which CPython
+        cannot interrupt) does not permanently block all subsequent renders.
+        The executor *object* is kept so `make_async` wrappers bound at
+        init (tokenize, decode, pooling, derender) keep submitting work.
+        The old inner pool is abandoned with wait=False — its thread will
+        eventually finish or be reaped on process exit.
         """
         self._executor.replace_inner()
         logger.warning(

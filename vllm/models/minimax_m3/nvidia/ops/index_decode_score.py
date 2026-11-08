@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CuteDSL MiniMax M3 index decode score kernel.
 
-The kernel computes decode-time index block scores with TMA + `mma.sync`. We use
-`mma.sync` instead of tcgen05 because this score GEMM has a very small N dimension and
-benefits more from higher CTA occupancy than from a deeper single-CTA tcgen05 pipeline.
+The kernel computes decode-time index block scores with TMA + `mma.sync`.
+We use `mma.sync` instead of tcgen05 because this score GEMM has a very small
+N dimension and benefits more from higher CTA occupancy than from a deeper
+single-CTA tcgen05 pipeline.
 
 The implementation should be portable to SM90/SM120 in principle, but it is
 currently validated only for SM100.

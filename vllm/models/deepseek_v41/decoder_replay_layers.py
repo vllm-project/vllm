@@ -2,14 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Decoder-side SWA bounded replay: running the replay layers on their batch.
 
-Once the last KV-source layer has written every row's KV, it and the layers past it
-(which own only SWA KV) run on each request's last `window` rows only.
-`DeepseekV41ModelState` prepares those rows as a sub-batch with attention metadata and a
-forward context of its own, like a microbatch; `DecoderReplayLayers` gathers the layer
-inputs by its rows, runs the layers under that context and scatters the outputs back to
-batch rows. FULL graphs and small PIECEWISE ones keep the layers on the whole batch;
-larger PIECEWISE graphs break out to the replay batch, which may run in a graph of its
-own (decoder_replay_cudagraph.py).
+Once the last KV-source layer has written every row's KV, it and the layers past
+it (which own only SWA KV) run on each request's last `window` rows only.
+`DeepseekV41ModelState` prepares those rows as a sub-batch with attention
+metadata and a forward context of its own, like a microbatch;
+`DecoderReplayLayers` gathers the layer inputs by its rows, runs the layers
+under that context and scatters the outputs back to batch rows. FULL graphs and
+small PIECEWISE ones keep the layers on the whole batch; larger PIECEWISE graphs
+break out to the replay batch, which may run in a graph of its own
+(decoder_replay_cudagraph.py).
 """
 
 from collections.abc import Callable

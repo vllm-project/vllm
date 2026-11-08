@@ -7,9 +7,10 @@ indicates a cache miss or unexpected input shape that causes a latency spike.
 This module registers hooks in supported runtimes to detect such events so
 they can be investigated.
 
-Set `--jit-monitor-mode=error` to fail fast on unexpected runtime compilation. Set
-`--jit-monitor-verbose` to log every JIT compile with additional runtime details.
-Verbose logging is intentionally opt-in because it can emit many logs and add overhead.
+Set `--jit-monitor-mode=error` to fail fast on unexpected runtime
+compilation. Set `--jit-monitor-verbose` to log every JIT compile with
+additional runtime details. Verbose logging is intentionally opt-in because it
+can emit many logs and add overhead.
 
 Currently monitors:
 - CuTeDSL cute.compile calls

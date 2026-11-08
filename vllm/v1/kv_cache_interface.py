@@ -829,10 +829,11 @@ class HiddenStateCacheSpec(MLAAttentionSpec):
 class RSWASpec(FullAttentionSpec):
     """KV cache spec for Reference Sliding Window Attention (R-SWA).
 
-    Prefill (image + text prompt) tokens are always globally visible. Only the last
-    `rswa_window` generated tokens are kept in the KV cache; gap blocks (between the
-    prefill tail and the current decode window) are evicted during each decode step to
-    bound memory at O(prefix_blocks + window_blocks).
+    Prefill (image + text prompt) tokens are always globally visible.
+    Only the last `rswa_window` generated tokens are kept in the KV cache;
+    gap blocks (between the prefill tail and the current decode window) are
+    evicted during each decode step to bound memory at
+    O(prefix_blocks + window_blocks).
     """
 
     rswa_window: int
@@ -1509,15 +1510,16 @@ def get_kv_cache_spec_sliding_window(kv_cache_spec: KVCacheSpec) -> int | None:
 class KVCacheTensor:
     """A class for specifying how the workers should initialize the KV cache.
 
-    Placement of a set of same-shaped layers in the KV cache allocation. Layer
-    `layers[l]`'s page for block `b` starts at
-    `offset + l * layer_stride + b * block_stride` bytes into the backing allocation of
-    `size` bytes. Layer-outermost layouts give each layer a contiguous region
-    (`layer_stride = page * num_blocks`, `block_stride = page`); block-outermost layouts
-    make each block a block of all layers' pages (`layer_stride = page`,
-    `block_stride` = the packed block). Tensors whose address ranges overlap alias the
-    same bytes: cache groups overlay each other, which is sound because a block ID is
-    owned by one group at a time.
+    Placement of a set of same-shaped layers in the KV cache allocation.
+    Layer `layers[l]`'s page for block `b` starts at
+    `offset + l * layer_stride + b * block_stride` bytes into the backing
+    allocation of `size` bytes. Layer-outermost layouts give each layer a
+    contiguous region (`layer_stride = page * num_blocks`,
+    `block_stride = page`); block-outermost layouts make each block a
+    block of all layers' pages (`layer_stride = page`, `block_stride` =
+    the packed block). Tensors whose address ranges overlap
+    alias the same bytes: cache groups overlay each other, which is sound
+    because a block ID is owned by one group at a time.
     """
 
     size: int  # total size of the backing allocation in bytes

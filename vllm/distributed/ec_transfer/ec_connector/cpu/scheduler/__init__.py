@@ -502,10 +502,11 @@ class ECCPUScheduler:
     def _promote_completed_reads(self) -> None:
         """Drain the just-completed set built during `_poll_step`.
 
-        Reads are marked ready in `_process_session_results`, so a deferred request is
-        re-admitted by `ensure_cache_available` and loaded through the same local path
-        as a natively cached entry (`update_state_after_alloc` -> `_pending_loads`). No
-        explicit pin/load bookkeeping is needed here beyond clearing the set.
+        Reads are marked ready in `_process_session_results`, so a deferred
+        request is re-admitted by `ensure_cache_available` and loaded through
+        the same local path as a natively cached entry
+        (`update_state_after_alloc` -> `_pending_loads`). No explicit
+        pin/load bookkeeping is needed here beyond clearing the set.
         """
         self._step_completed.clear()
 

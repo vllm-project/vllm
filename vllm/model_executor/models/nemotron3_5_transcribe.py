@@ -3,14 +3,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 """Inference-only NVIDIA Nemotron-3.5-Transcribe.
 
-A NeMo speech-language model. The audio tower (log-mel, Parallel Expert Encoder,
-projection; see `nemotron3_5_transcribe_audio.py`) turns each 80 ms of audio into one
-embedding, and those embeddings replace the `<|audio|>` placeholders in the prompt of a
-NemotronH decoder (hybrid Mamba, MoE and attention layers).
+A NeMo speech-language model. The audio tower (log-mel, Parallel Expert
+Encoder, projection; see `nemotron3_5_transcribe_audio.py`) turns each
+80 ms of audio into one embedding, and those embeddings replace the
+`<|audio|>` placeholders in the prompt of a NemotronH decoder (hybrid
+Mamba, MoE and attention layers).
 
-The checkpoint uses NeMo names: the audio tower under `perception.*`, the decoder under
-`llm.*`, the multi-token-prediction head under `llm.mtp.*` and an optional CTC timestamp
-head, which is not loaded, under `ctc_timestamp.*`.
+The checkpoint uses NeMo names: the audio tower under `perception.*`, the
+decoder under `llm.*`, the multi-token-prediction head under `llm.mtp.*`
+and an optional CTC timestamp head, which is not loaded, under
+`ctc_timestamp.*`.
 """
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -388,7 +390,8 @@ def _mtp_weights(
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """Select the MTP head's NeMo tensors and rename them for `NemotronHMTP`.
 
-    The head is `llm.mtp.*`; the drafter shares the target's embedding and LM head.
+    The head is `llm.mtp.*`; the drafter shares the target's embedding and LM
+    head.
     """
     for name, tensor in weights:
         if name.startswith("llm.mtp.") and not name.endswith("._extra_state"):

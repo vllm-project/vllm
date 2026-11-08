@@ -80,11 +80,12 @@ def proxy_fence():
 
 class KdaCommit:
     """Args: state / correction / key-gate base addresses [L], their slot / row
-    strides [L] (elements), a_log [L, H], dt_bias [L, H, K], source slots [B], commit
-    lengths [B], destination slots [B], boundary slots [B] and lengths [B] (read with
-    `align`), lower bound, null slot, stream. Per slot the state is [H, V, K] BF16;
-    request b's records are row b of the corrections [rows, H, Q, V] FP32 and key / gate
-    records [rows, H, Q, 2K] BF16, all contiguous."""
+    strides [L] (elements), a_log [L, H], dt_bias [L, H, K], source slots [B],
+    commit lengths [B], destination slots [B], boundary slots [B] and lengths [B]
+    (read with `align`), lower bound, null slot, stream. Per slot the state is
+    [H, V, K] BF16; request b's records are row b of the corrections
+    [rows, H, Q, V] FP32 and key / gate records [rows, H, Q, 2K] BF16, all
+    contiguous."""
 
     def __init__(self, heads: int, window: int, align: bool = False):
         assert 1 <= window <= 8

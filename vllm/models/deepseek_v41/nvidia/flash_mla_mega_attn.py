@@ -191,10 +191,11 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
     def is_available_for(cls, vllm_config: VllmConfig) -> bool:
         """Whether this layer can serve the configured model on this device.
 
-        The kernel is SM100-only and wants `WV_GROUP_SIZE` heads per `wo_a` group, which
-        stops holding once TP divides the head count far enough (TP16 on a 64-head model
-        leaves 4). `__init__` raises on both, so the default-backend selector asks here
-        first rather than turning an unsupported topology into a startup crash.
+        The kernel is SM100-only and wants `WV_GROUP_SIZE` heads per `wo_a`
+        group, which stops holding once TP divides the head count far enough
+        (TP16 on a 64-head model leaves 4). `__init__` raises on both, so the
+        default-backend selector asks here first rather than turning an
+        unsupported topology into a startup crash.
         """
         if not is_flashmla_mega_attn_supported()[0]:
             return False

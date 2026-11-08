@@ -368,17 +368,19 @@ class DoubleAiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
 class DoubleAiterRMSFp8GroupQuantViewPattern(AiterRMSNormQuantPattern):
     """View-tolerant variant of `DoubleAiterRMSFp8GroupQuantPattern`.
 
-    Matches the same 1-to-2 fan-out, but with a `view`/`reshape` between the `rms_norm`
-    output and the two `rocm_aiter_group_fp8_quant` consumers::
+    Matches the same 1-to-2 fan-out, but with a `view`/`reshape` between
+    the `rms_norm` output and the two `rocm_aiter_group_fp8_quant`
+    consumers::
 
         rms_norm -> view -> rocm_aiter_group_fp8_quant
                 \\-> view -> rocm_aiter_group_fp8_quant
 
-    This shape arises in DeepSeek-V3.2's MLA indexer q_c norm, where the FP8 linear
-    path's 2D-flatten boilerplate (`Fp8BlockScaledMMLinearKernel.apply_weights`) inserts
-    a view between the rms_norm output and each FP8 group quant op. The non-view sibling
-    pattern silently no-ops on this graph because the pattern matcher requires the
-    in-graph and in-pattern node shapes to align.
+    This shape arises in DeepSeek-V3.2's MLA indexer q_c norm, where the
+    FP8 linear path's 2D-flatten boilerplate
+    (`Fp8BlockScaledMMLinearKernel.apply_weights`) inserts a view between
+    the rms_norm output and each FP8 group quant op. The non-view sibling
+    pattern silently no-ops on this graph because the pattern matcher
+    requires the in-graph and in-pattern node shapes to align.
 
     The trace_fn runs Inductor's `view_to_reshape` post-grad pass to
     normalize `view` to `reshape` in both the pattern and the input
@@ -1229,12 +1231,14 @@ class MLADualRMSGroupQuantPattern(
     ]
 ):
     """Fuse the MLA FP8 *block-scale* attention path -- q-latent RMSNorm + FP8
-    group quant plus kv-latent RMSNorm -- into AITER's `fused_qk_rmsnorm_group_quant`.
+    group quant plus kv-latent RMSNorm -- into AITER's
+    `fused_qk_rmsnorm_group_quant`.
 
     With a block-scale FP8 `q_b_proj` (DeepSeek fp8), the earlier
     `RocmAiterRMSNormQuantFusionPass` folds the q side into
-    `rocm_aiter_rmsnorm_fp8_group_quant` (the Triton rms+group-quant kernel) and leaves
-    the kv side a plain `vllm_ir.rms_norm`. This pattern matches that asymmetric pair::
+    `rocm_aiter_rmsnorm_fp8_group_quant` (the Triton rms+group-quant kernel)
+    and leaves the kv side a plain `vllm_ir.rms_norm`. This pattern matches
+    that asymmetric pair::
 
         gemm -> split_with_sizes([q_dim, kv_dim])
             +-- q_c     -> rocm_aiter_rmsnorm_fp8_group_quant -> (q_fp8, q_scale)

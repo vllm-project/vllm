@@ -767,8 +767,9 @@ class ParallelConfig:
     def _pick_stateless_dp_port(self) -> tuple[int, socket.socket | None]:
         """Return `(port, listen_socket)` for DP group init.
 
-        With a coord store, rank 0 binds a socket and publishes the port; others read
-        it. Without one, pops a pre-allocated port and returns `listen_socket=None`.
+        With a coord store, rank 0 binds a socket and publishes the port;
+        others read it.  Without one, pops a pre-allocated port and
+        returns `listen_socket=None`.
         """
         if not self._coord_store_port:
             return self.get_next_dp_init_port(), None

@@ -221,13 +221,14 @@ def build_post_attn_kernel(
     shared_fp8: bool = False,
 ):
     """`@flyc.jit` launcher of K4 for one rank of an `npes`-way TP group and a
-    decode step of `tokens` (<= MAX_TOKENS) rows, `q_len` consecutive rows a request (a
-    speculative verify's), with contexts up to MAX_CONTEXT. `fuse_k1`: the layer's K1
-    runs first in the same launch (`K1_ARGS`, `positions`, `slot_mapping`, `res`; 0
-    otherwise), for a fused projection of index q `heads` (`IndexHeads`). `shared_fp8`:
-    the expert tables hold the routed experts only and the shared expert is MXFP8, its
-    tables behind the `sh_args` pointer table (`SH_ARGS`; 0 otherwise), its GEMVs fp8 x
-    fp8 MFMAs."""
+    decode step of `tokens` (<= MAX_TOKENS) rows, `q_len` consecutive rows a
+    request (a speculative verify's), with contexts up to MAX_CONTEXT.
+    `fuse_k1`: the layer's K1 runs first in the same launch (`K1_ARGS`,
+    `positions`, `slot_mapping`, `res`; 0 otherwise), for a fused projection
+    of index q `heads` (`IndexHeads`). `shared_fp8`: the expert tables hold
+    the routed experts only and the shared expert is MXFP8, its tables behind
+    the `sh_args` pointer table (`SH_ARGS`; 0 otherwise), its GEMVs fp8 x fp8
+    MFMAs."""
     assert 1 <= tokens <= MAX_TOKENS
     N_E = N_ROUTED if shared_fp8 else N_ROUTED + 1  # experts in w13 .. s2
     E_TOP = N_E - 1  # the bound a routed expert id is clamped to
@@ -1431,13 +1432,14 @@ def build_post_attn_kernel(
 
         def route_top4(k, k0, sc0, k1, sc1, sig, wave_mask=None):
             """route[8k : 8k+4] / rwt[..] := token k's sigmoid top-k gating from the
-            router tasks' routing keys `k0` / `k1` (experts `lane` / `lane + 64`,
-            sigmoid + bias, see route_key) and unbiased sigmoids (wave k % WAVES
-            computes it, looking the sigmoids up in LDS at `sig`): a pick is one wave
-            max; the weights are the picks' sigmoids renormalized and scaled by
-            route_scale. Slot 4 is the fused shared expert. `wave_mask`: this wave's
-            expert -> token mask, the picks' bit k set (the picks are distinct, and the
-            wave's tokens run in program order). The caller syncs."""
+            router tasks' routing keys `k0` / `k1` (experts `lane` / `lane +
+            64`, sigmoid + bias, see route_key) and unbiased sigmoids (wave k % WAVES
+            computes it, looking the sigmoids up in LDS at `sig`): a pick is one
+            wave max; the weights are the picks' sigmoids renormalized and scaled by
+            route_scale. Slot 4 is the fused shared expert. `wave_mask`: this
+            wave's expert -> token mask, the picks' bit k set (the picks are
+            distinct, and the wave's tokens run in program order). The caller
+            syncs."""
             if wave == k % WAVES:
                 # the unbiased weights, looked up by expert once the picks are known
                 fx.ptr_store(sc0, sig + (k * N_ROUTED + lane))
@@ -2186,9 +2188,10 @@ def build_post_attn_kernel(
 
         def wug_acc(wts, scs, half, cg_, cu_, ks=UG_KS, fp8=False):
             """A task's up / gate MFMAs over its 128-k chunks `ks` of this wave
-            (wts[gu][j]: chunk ks[j]) for every token (B column l % 16 = token l % 16),
-            into (cg_, cu_). `half`: the task's 16-row half of its 32-row scale block
-            (compile time); `fp8`: an MXFP8 task (`wug_load(fp8=True)`)."""
+            (wts[gu][j]: chunk ks[j]) for every token (B column l % 16 = token
+            l % 16), into (cg_, cu_). `half`: the task's 16-row half of its
+            32-row scale block (compile time); `fp8`: an MXFP8 task
+            (`wug_load(fp8=True)`)."""
             mfma_ = mfma_f8f8 if fp8 else mfma_f4f8
             col = fx.min(l16, tokens - 1)
             sbs = [

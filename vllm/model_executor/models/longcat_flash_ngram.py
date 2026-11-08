@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only LongCat-Flash-Lite (n-gram embedding) model.
 
-`LongcatFlashNgramForCausalLM` is LongCat-Flash (MLA dual-attention + zero-expert MoE +
-YaRN) plus an n-gram embedding input layer: each position's embedding fuses the token
-embedding with hashed embeddings of the preceding `n` tokens. That per-request token
-history is isolated in a Model-Runner-V2 `LongcatNgramModelState` (mirroring
-`DiffusionGemmaModelState`), so `get_model_state_cls` makes the model MRV2-only.
+`LongcatFlashNgramForCausalLM` is LongCat-Flash (MLA dual-attention +
+zero-expert MoE + YaRN) plus an n-gram embedding input layer: each position's
+embedding fuses the token embedding with hashed embeddings of the preceding
+`n` tokens. That per-request token history is isolated in a Model-Runner-V2
+`LongcatNgramModelState` (mirroring `DiffusionGemmaModelState`), so
+`get_model_state_cls` makes the model MRV2-only.
 """
 
 from collections.abc import Iterable

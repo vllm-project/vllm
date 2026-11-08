@@ -412,8 +412,9 @@ class Qwen3NextAttention(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Return post-norm, post-RoPE (q, k, v) and the pre-sigmoid gate.
 
-        Dispatches between the fused Triton kernel and the eager split + QK-RMSNorm +
-        RoPE path. `gate` is `None` when output gating is disabled.
+        Dispatches between the fused Triton kernel and the eager
+        split + QK-RMSNorm + RoPE path. `gate` is `None` when output
+        gating is disabled.
         """
         if self.use_fused_qk_norm_rope_gate:
             q_gate, k, v = qkv.split(

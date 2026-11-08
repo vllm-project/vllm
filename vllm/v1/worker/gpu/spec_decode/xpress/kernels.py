@@ -41,7 +41,8 @@ def _xpress_add_argmax_partial_kernel(
     sum is never stored.
 
     Args:
-        base_ptr (tl.tensor): [rows, V] base logits (bf16), row stride `stride_base_r`.
+        base_ptr (tl.tensor): [rows, V] base logits (bf16), row stride
+            `stride_base_r`.
         bias_ptr (tl.tensor): [rows, V] refiner bias, same layout.
         out_val_ptr (tl.tensor): [rows, num_chunks] fp32 chunk maxima (written).
         out_idx_ptr (tl.tensor): [rows, num_chunks] int64 chunk argmax, in vocab
@@ -89,11 +90,12 @@ def _xpress_latent_kernel(
 ):
     """The latent stage of one Jacobi pass for one block, fused end to end.
 
-    Grid: (N,), one program per block. For every slot b it gathers the previous slot's
-    token embedding (slot 0 reads the anchor's predecessor `am1`), adds the
-    pass-invariant hidden cache, applies the folded causal mixer
-    `u[b] = sum_{j <= b} L[b, j, :] * x[j]`, then a SwiGLU MLP with a residual, and
-    writes the latent for slots 1..B-1 (slot 0 is the anchor and is never read out).
+    Grid: (N,), one program per block. For every slot b it gathers the previous
+    slot's token embedding (slot 0 reads the anchor's predecessor `am1`),
+    adds the pass-invariant hidden cache, applies the folded causal mixer
+    `u[b] = sum_{j <= b} L[b, j, :] * x[j]`, then a SwiGLU MLP with a
+    residual, and writes the latent for slots 1..B-1 (slot 0 is the anchor and
+    is never read out).
 
     Args:
         blk_ptr (tl.tensor): [N, B] int64 current block tokens; slot b reads

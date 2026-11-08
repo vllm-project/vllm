@@ -41,9 +41,10 @@ class SimpleCPUOffloadMetadata(KVConnectorMetadata):
 class SimpleCPUOffloadWorkerMetadata(KVConnectorWorkerMetadata):
     """Worker -> Scheduler metadata for completed store events.
 
-    Each worker reports {event_idx: 1} for newly completed stores. `aggregate()` sums
-    counts across workers within a step. The scheduler-side manager accumulates across
-    steps and processes a store completion only when count reaches `world_size`.
+    Each worker reports {event_idx: 1} for newly completed stores.
+    `aggregate()` sums counts across workers within a step.
+    The scheduler-side manager accumulates across steps and processes
+    a store completion only when count reaches `world_size`.
     """
 
     completed_store_events: dict[int, int]

@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Direct weight reload (`VLLM_RELOAD_MODE=direct`).
 
-Cold start records each tensor's checkpoint layout before post-load processing (PWAL).
-`begin` views re-laid-out tensors back to that layout on their storage, the loaders
-write the checkpoint in place, and `finish` reruns PWAL, which must keep addresses
-(captured CUDA graphs) and refill derived tensors. Between `begin` and a successful
-`finish` the model must not run; there is no rollback, the next full update repairs it.
+Cold start records each tensor's checkpoint layout before post-load processing
+(PWAL). `begin` views re-laid-out tensors back to that layout on their
+storage, the loaders write the checkpoint in place, and `finish` reruns PWAL,
+which must keep addresses (captured CUDA graphs) and refill derived tensors.
+Between `begin` and a successful `finish` the model must not run; there is
+no rollback, the next full update repairs it.
 
 Delivery contract (not checked here): an update delivers every checkpoint
 tensor of each module whose PWAL changes its layout or is not idempotent, and

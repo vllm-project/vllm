@@ -365,10 +365,11 @@ def create_mla_static_tile_scheduler(
 
 class MLAWorkListTileScheduler:
     """Persistent tile scheduler over a device work list (added for the Kimi K3
-    KV-balanced MLA decode). CTA `i` of the grid walks clusters `i // cluster`, then
-    every `grid / cluster` further; entry `c` of the list is
-    `(q_tile * B + batch) << 8 | split`, or < 0. The valid entries are a prefix followed
-    by at least one wave of negative entries, so every walk ends inside the list."""
+    KV-balanced MLA decode). CTA `i` of the grid walks clusters `i // cluster`,
+    then every `grid / cluster` further; entry `c` of the list is
+    `(q_tile * B + batch) << 8 | split`, or < 0. The valid entries are a prefix
+    followed by at least one wave of negative entries, so every walk ends inside
+    the list."""
 
     def __init__(
         self,

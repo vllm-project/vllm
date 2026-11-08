@@ -6,10 +6,11 @@
 """The mono layer's MoE stages: one V4.1 layer's FFN, from the FFN seam's normed
 rows to the reduced output (its TP all-reduce in-kernel).
 
-One launch a layer and rank, `BLOCKS` x `THREADS`, S = `tokens` rows, E routed experts
-and top-k (`MoeBuild`: the target's 384 / 6, the DSpark draft's 128 / 3). The rank holds
-every routed expert's 1/TP of the intermediate width (TP-sharded MoE) and the shared
-expert's 1/TP (`Dims`). Stages, with TP4's task counts:
+One launch a layer and rank, `BLOCKS` x `THREADS`, S = `tokens` rows,
+E routed experts and top-k (`MoeBuild`: the target's 384 / 6, the DSpark
+draft's 128 / 3). The rank holds every routed expert's 1/TP of the
+intermediate width (TP-sharded MoE) and the shared expert's 1/TP (`Dims`).
+Stages, with TP4's task counts:
 
     xq      (S): the row as MXFP8 for the routed experts (aiter
             ``fused_mx_quant_moe_sort``: amax seeded 1e-10) and for the shared
@@ -1278,13 +1279,14 @@ UG_AHEAD_942 = 2
 def fp4_round_loads_942(c, w, ws, e, n_rows, k, rg0, kb0):
     """gfx942 ug: one round's loads (`UG_ROUND_942` K blocks from block kb0,
     a multiple of UG_ROUND_942) for tiles rg0 and rg0 + 1 of expert e's MXFP4
-    weight: [experts * n_rows, k / 2] bytes (two e2m1 a byte, the lower K in the low
-    nibble) in `weights942.fp4_tile_major` order, and e8m0 codes [experts * n_rows, k /
-    32] in `weights942.codes_tile_rounds` order. A lane (row lane % 16 of a tile, K
-    chunk j = lane / 16) needs a dword a block, the 8 e2m1 of K 32 b + 8 j .. + 8, and
-    gets the dwords of 4 blocks with one 16-byte load. The 64 lanes of such a load read
-    1 KB that is contiguous. A lane also loads the round's codes of rows 4 j .. 4 j + 3
-    of each tile, the rows of its accumulator values, which are 4 UG_ROUND_942
+    weight: [experts * n_rows, k / 2] bytes (two e2m1 a byte, the lower K in
+    the low nibble) in `weights942.fp4_tile_major` order, and e8m0 codes
+    [experts * n_rows, k / 32] in `weights942.codes_tile_rounds` order. A
+    lane (row lane % 16 of a tile, K chunk j = lane / 16) needs a dword a
+    block, the 8 e2m1 of K 32 b + 8 j .. + 8, and gets the dwords of 4 blocks
+    with one 16-byte load. The 64 lanes of such a load read 1 KB that is
+    contiguous. A lane also loads the round's codes of rows 4 j .. 4 j + 3 of
+    each tile, the rows of its accumulator values, which are 4 UG_ROUND_942
     contiguous bytes. Loads only, nothing waits on them here."""
     lane = c["lane"]
     j = lane // 16
@@ -1395,8 +1397,9 @@ def gemv_fp4_pair_942(c, w, ws, e, n_rows, k, rg0, ks, xl, xsl, col):
 
 def ug_round_942(accs, wds, scs, kr, xl, xsl, col, x_row, s_row, j):
     """One round of the gfx942 ug GEMV: UG_ROUND_942 K blocks from block kr
-    (an int or a traced Int32) for both tiles, the B operand and activation code of a
-    block read once from LDS for both. Returns the accumulators through `pin_acc`."""
+    (an int or a traced Int32) for both tiles, the B operand and activation
+    code of a block read once from LDS for both. Returns the accumulators
+    through `pin_acc`."""
     for b4 in range_constexpr(UG_ROUND_942 // 4):
         sx4 = fx.Vector(
             fx.ptr_load(
@@ -1454,7 +1457,8 @@ def mid_word_942(d, row, part, i):
 def ug_mid_store_942(c, d, q8, code, part, i, row, live):
     """gfx942 ug epilogue: thread i's FP8 value `q8` of group `part` into
     MID, 4 threads a word: values i, i + 2, i + 4, i + 6 of an 8-value chunk
-    (`mid_word_942`), and the group's code into MIDS (`[pick row][inter / 32]` i32)."""
+    (`mid_word_942`), and the group's code into MIDS (`[pick row][inter / 32]`
+    i32)."""
     lane = c["lane"]
     nb = [
         lane_gather(q8.bitcast(fx.Int32), fx.min(lane + 2 * q, 63)).bitcast(fx.Float32)
@@ -1469,11 +1473,12 @@ def ug_mid_store_942(c, d, q8, code, part, i, row, live):
 
 def down_weights_942(c, e, task):
     """gfx942 down: rows 16 task .. of expert e's w2 ([experts * 5120,
-    inter_real / 2] bytes in `weights942.fp4_tile_major` order, e8m0 codes [experts *
-    5120, inter_real / 32] row-major): a dword of 8 e2m1 a K block a lane (row lane %
-    16, K chunk lane / 16), 4 blocks a 16-byte load (the 64 lanes 1 contiguous KB) and
-    the last 2 blocks with one 8-byte load (512 contiguous bytes), and the codes of rows
-    4 (lane / 16) .. + 3, 4 rows x inter_real / 32 contiguous bytes. Loads only."""
+    inter_real / 2] bytes in `weights942.fp4_tile_major` order, e8m0 codes
+    [experts * 5120, inter_real / 32] row-major): a dword of 8 e2m1 a K block
+    a lane (row lane % 16, K chunk lane / 16), 4 blocks a 16-byte load (the
+    64 lanes 1 contiguous KB) and the last 2 blocks with one 8-byte load (512
+    contiguous bytes), and the codes of rows 4 (lane / 16) .. + 3, 4 rows x
+    inter_real / 32 contiguous bytes. Loads only."""
     lane, a, d = c["lane"], c["args"], c["d"]
     j = lane // 16
     kd, kc = d.inter_real // 8, d.inter_real // 32
@@ -2273,11 +2278,12 @@ def contrib_load(c, j, i):
 
 def contrib_store_942(c, j, pick, word, a, b):
     """gfx942: task j's routed contribution of `pick` (t topk + k), rows
-    2 word and 2 word + 1, as bf16(a) and bf16(b) in one word (`[pick][8 words]`). `a`
-    and `b` are the rows' f32 sums already times the pick's route weight. `down_combine`
-    rounds exactly that product to bf16 on gfx950, so it adds the same values here, and
-    the contributions take half the LDS. Without that the gfx942 kernels need more than
-    64 KB of LDS from 36 rows on."""
+    2 word and 2 word + 1, as bf16(a) and bf16(b) in one word (`[pick][8
+    words]`). `a` and `b` are the rows' f32 sums already times the pick's
+    route weight. `down_combine` rounds exactly that product to bf16 on
+    gfx950, so it adds the same values here, and the contributions take half
+    the LDS. Without that the gfx942 kernels need more than 64 KB of LDS from
+    36 rows on."""
     at = j * c["rs"].picks * 8 + pick * 8 + word
     fx.ptr_store(bf16_pair(a, b).bitcast(fx.Int32), c["contrib"] + at)
 
@@ -2377,10 +2383,11 @@ def pipe_mids_words(rs, p):
 
 def stage_lds(s, rs):
     """Word offsets into `Smem.stage` of the buffers only one stage reads: the
-    shared stage's MXFP8 x tile; the waves' scale blocks (`wsl`, the ug and down
-    stages'), then the ug stage's routed MXFP8 x tile, or the down stage's token tile of
-    the shared expert's MXFP8 intermediate (`load_smid_tile`), each down task's routed
-    contributions (`contrib_store`, or `contrib_store_942` on gfx942) and its shared
+    shared stage's MXFP8 x tile; the waves' scale blocks (`wsl`, the ug and
+    down stages'), then the ug stage's routed MXFP8 x tile, or the down stage's
+    token tile of the shared expert's MXFP8 intermediate (`load_smid_tile`),
+    each down task's routed contributions (`contrib_store`, or
+    `contrib_store_942` on gfx942) and its shared
     expert rows (`down_shared`). A barrier ends every stage."""
     d = rs.dims
     # the x tile the shared / ug stages hold (every token's up to one tile)

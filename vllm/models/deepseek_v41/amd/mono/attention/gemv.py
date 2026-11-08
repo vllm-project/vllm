@@ -4,11 +4,12 @@
 (vLLM's loaded layout, E8M0 scales in 32x32 blocks [N / 32, K / 32]) against
 every token of a tile, its MXFP8 rows in LDS, on the gfx950 scaled MFMA.
 
-A task may cover a window of K (`kbeg` .. `kbeg + nsteps` 128-steps): a split-K part,
-its activations in LDS holding just that window. The weight operands are loaded first
-(all in flight, before the task waits on its activations); wave w takes the window's
-steps w, w + 8, ... (or, `split`, a contiguous range of waves 0 .. split - 1), its 16 x
-16 partial in `red`, summed in wave order by `row_sum`. Adapted from ATOM's
+A task may cover a window of K (`kbeg` .. `kbeg + nsteps` 128-steps): a
+split-K part, its activations in LDS holding just that window. The weight
+operands are loaded first (all in flight, before the task waits on its
+activations); wave w takes the window's steps w, w + 8, ... (or, `split`, a
+contiguous range of waves 0 .. split - 1), its 16 x 16 partial in `red`,
+summed in wave order by `row_sum`. Adapted from ATOM's
 `attn_pre.gemv_fp8_*`, which reads aiter's (16, 16)-preshuffled layout.
 """
 
@@ -73,11 +74,12 @@ def _step_load(c, r_w, r_ws, k, row0, st, pred=None):
 
 def _step_load_942(r_w, r_ws, k, row0, lane, st):
     """gfx942: step `st` of rows row0 .. + 16 of the runner's tile-major FP8
-    copy of the weight (`weights942.dense_copy`). Lane 16 j + r takes row r's four
-    8-byte chunks of lane group j (K 32 b + 8 j .. + 8 for blocks b = 0 .. 3) with two
-    16-byte loads, blocks 0 and 1, then blocks 2 and 3. Each load of the wave reads 1 KB
-    that is contiguous. The scale codes are the FNUZ codes (e8m0 + 1) in 32 x 32 blocks.
-    The step's four codes are one dword, as K / 32 is a multiple of 4."""
+    copy of the weight (`weights942.dense_copy`). Lane 16 j + r takes row
+    r's four 8-byte chunks of lane group j (K 32 b + 8 j .. + 8 for blocks
+    b = 0 .. 3) with two 16-byte loads, blocks 0 and 1, then blocks 2 and 3.
+    Each load of the wave reads 1 KB that is contiguous. The scale codes are
+    the FNUZ codes (e8m0 + 1) in 32 x 32 blocks. The step's four codes are
+    one dword, as K / 32 is a multiple of 4."""
     # A step of the 16 rows is 2 KB, the first halves of the lanes and then
     # the second halves.
     base = (row0 * k + 2048 * st) // 4 + 4 * lane
@@ -236,10 +238,11 @@ def rows_loads(
     pred=None,
 ):
     """Tokens t0 .. t0 + n's published MXFP8 row slices -- `words` i32 from
-    `off_w` and `groups` codes (an i32 each) from `off_g`, rows `stride_w` / `stride_g`
-    i32 apart -- loaded (issued, not waited on), 16 B a lane-item: a thread one column,
-    rows a round apart. Plain loads: their flags are seen, and nothing in the launch
-    read these lines before. `pred` false: masked off (zeros, no memory traffic)."""
+    `off_w` and `groups` codes (an i32 each) from `off_g`, rows
+    `stride_w` / `stride_g` i32 apart -- loaded (issued, not waited on),
+    16 B a lane-item: a thread one column, rows a round apart. Plain loads:
+    their flags are seen, and nothing in the launch read these lines before.
+    `pred` false: masked off (zeros, no memory traffic)."""
     tid = c["tid"]
     nb = None if pred is None else pred.select(fx.Int64(0xFFFFFFFF), fx.Int64(0))
     out = []

@@ -2,25 +2,28 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The specialized decode executor.
 
-`SpecializedDecode` runs the decoder layers of `DeepseekV4Model` for the steps captured
-into FULL CUDA graphs of pure decode batches of up to `FUSED_MHC_MAX_ROWS` rows. Its
-model state builds it once the weights are loaded. `plan` decides per forward whether it
-runs; the model's forward then passes the returned `DecodeStep` to the backbone, which
-runs its embedding and Engram hashing as usual and hands the layers to `DecodeStep.run`.
-Every other forward (prefill, mixed, eager, PIECEWISE) runs the stock layers, which the
-executor leaves unchanged.
+`SpecializedDecode` runs the decoder layers of `DeepseekV4Model` for the
+steps captured into FULL CUDA graphs of pure decode batches of up to
+`FUSED_MHC_MAX_ROWS` rows. Its model state builds it once the weights are
+loaded. `plan` decides per forward whether it runs; the model's forward then
+passes the returned `DecodeStep` to the backbone, which runs its embedding
+and Engram hashing as usual and hands the layers to `DecodeStep.run`. Every
+other forward (prefill, mixed, eager, PIECEWISE) runs the stock layers, which
+the executor leaves unchanged.
 
 Per layer the executor runs the stock modules through its own steps:
 
 - `Boundaries` (`boundary`): the mHC between sublayers, on the fused
   all-reduce + mHC kernel;
 - `AttentionStep` (`attention.step`);
-- `MoEStep` (`moe.step`), which leaves the MoE finalize to the next boundary;
+- `MoEStep` (`moe.step`), which leaves the MoE finalize to the next
+  boundary;
 - `EngramPrefetch` (`engram.prefetch`) for the Engram layers.
 
-The steps issue TP collectives, so every decision reads host state that all TP ranks
-share: the step's rows and the attention metadata's host fields. Side streams the steps
-fork are joined before `run` returns, so a capture ends joined.
+The steps issue TP collectives, so every decision reads host state that all TP
+ranks share: the step's rows and the attention metadata's host fields. Side
+streams the steps fork are joined before `run` returns, so a capture ends
+joined.
 """
 
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias, cast

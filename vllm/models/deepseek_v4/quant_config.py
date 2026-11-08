@@ -35,12 +35,13 @@ def align_mtp_quant_config(
 ) -> None:
     """Re-key the quant config's MTP entries onto the draft module prefixes.
 
-    `_make_deepseek_v4_weights_mapper` renames the checkpoint's `mtp.{i}.` layers to
-    `model.mtp.{i}.`, but the draft modules are built under
-    `model.layers.{num_hidden_layers + i}.`. Without this remap no per-layer entry
-    matches, so every MTP linear falls back to the global scheme. On a mixed checkpoint
-    (FP8 attention and shared experts, NVFP4 routed experts) that builds NVFP4
-    parameters for FP8 weights and the load then fails a shape assertion.
+    `_make_deepseek_v4_weights_mapper` renames the checkpoint's `mtp.{i}.`
+    layers to `model.mtp.{i}.`, but the draft modules are built under
+    `model.layers.{num_hidden_layers + i}.`. Without this remap no per-layer
+    entry matches, so every MTP linear falls back to the global scheme. On a
+    mixed checkpoint (FP8 attention and shared experts, NVFP4 routed experts)
+    that builds NVFP4 parameters for FP8 weights and the load then fails a
+    shape assertion.
     """
     from vllm.model_executor.models.utils import WeightsMapper
 

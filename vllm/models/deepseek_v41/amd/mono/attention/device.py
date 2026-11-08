@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Device primitives of the DeepSeek-V4.1 attention mega kernel.
 
-Wave reductions and shuffles, hardware math, bf16 / fp8 / MX packing, the scaled MFMA,
-buffer and 64-bit global accesses, and the tagged-pair mailbox. Adapted from ATOM's mono
-decode framework (`atom/mono/device`), itself ported from the FlyDSL GLM-5 layer kernel.
+Wave reductions and shuffles, hardware math, bf16 / fp8 / MX packing, the
+scaled MFMA, buffer and 64-bit global accesses, and the tagged-pair mailbox.
+Adapted from ATOM's mono decode framework (`atom/mono/device`), itself ported
+from the FlyDSL GLM-5 layer kernel.
 """
 
 import flydsl.expr as fx

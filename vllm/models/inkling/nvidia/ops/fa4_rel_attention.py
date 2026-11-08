@@ -153,10 +153,11 @@ class InklingFA4RelAttentionKernel(
     ) -> torch.Tensor:
         """Paged varlen FA4 over the bound K/V cache with the Inkling relative bias.
 
-        `q` is `(num_tokens, num_heads, head_dim)`; `key_cache` / `value_cache` are the
-        paged caches `(num_blocks, block_size, num_kv_heads, head_dim)`; `block_table`
-        is the per-request page table and `cache_seqlens` the per-request KV lengths
-        (`seqused_k`). `rel_logits` is `(num_tokens, num_heads, rel_extent)`.
+        `q` is `(num_tokens, num_heads, head_dim)`; `key_cache` / `value_cache`
+        are the paged caches `(num_blocks, block_size, num_kv_heads, head_dim)`;
+        `block_table` is the per-request page table and `cache_seqlens` the
+        per-request KV lengths (`seqused_k`). `rel_logits` is
+        `(num_tokens, num_heads, rel_extent)`.
 
         Hopper uses standard FA4's score-mod gather. Blackwell uses tml-fa4's
         sheared relative-bias layout.

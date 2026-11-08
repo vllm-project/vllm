@@ -2,24 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek-V4.1 mono decode layer on ROCm CDNA4 and CDNA3 (`--monokernel`).
 
-A decode step's backbone layer -- the attention seam, the attention, its TP all-reduce,
-the FFN seam, the MoE and its all-reduce -- runs as two persistent FlyDSL launches
-(`mono`, this directory) on the layer's loaded weights, the TP reductions inside the
-kernels. Every backbone layer of the checkpoint runs whole (compress ratio 0, 1 or 2
-over `fp8_ds_mla` records): the first layer and the Engram layers hand K1 a settled
-residual, and an index source runs vLLM's compressor and indexer between the two
-launches. A layer outside that (an MXFP8 KV cache, another indexer) keeps vLLM's
-attention seam and attention and runs the rest as one launch, the FFN launch, from
-wo_b's unreduced output. A step takes the kernels when it is decode only, at most
-`MAX_ROWS` rows (eager or a FULL CUDA graph: the model is not torch.compiled); a whole
-layer also needs its SWA rows as the kernels read them (causal windows; for the DSpark
-draft's layers, the block's non-causal rows). Anything else runs the layer as before;
-the paths share every tensor at the layer boundary, so they interleave freely.
+A decode step's backbone layer -- the attention seam, the attention, its TP
+all-reduce, the FFN seam, the MoE and its all-reduce -- runs as two persistent
+FlyDSL launches (`mono`, this directory) on the layer's loaded
+weights, the TP reductions inside the kernels. Every backbone layer of the
+checkpoint runs whole (compress ratio 0, 1 or 2 over `fp8_ds_mla` records):
+the first layer and the Engram layers hand K1 a settled residual, and an index
+source runs vLLM's compressor and indexer between the two launches. A layer
+outside that (an MXFP8 KV cache, another indexer) keeps vLLM's attention seam
+and attention and runs the rest as one launch, the FFN launch, from wo_b's
+unreduced output. A step takes the kernels when it is decode only, at most
+`MAX_ROWS` rows (eager or a FULL CUDA graph: the model is not torch.compiled);
+a whole layer also needs its SWA rows as the kernels read them (causal windows;
+for the DSpark draft's layers, the block's non-causal rows). Anything else runs
+the layer as before; the paths share every tensor at the layer boundary, so they
+interleave freely.
 
-On CDNA3 (gfx942) the kernels compute the same layer on their own copies of the weights
-(`mono/weights942.py`), at TP 4 and on steps of up to `MAX_ROWS_GFX942` rows. An index
-source's keys are written by `mono/keylist.py` between vLLM's indexer and K2 there, and
-the DSpark draft layers also take the FFN launch, built for the draft's routing.
+On CDNA3 (gfx942) the kernels compute the same layer on their own copies of
+the weights (`mono/weights942.py`), at TP 4 and on steps of up to
+`MAX_ROWS_GFX942` rows. An index source's keys are written by
+`mono/keylist.py` between vLLM's indexer and K2 there, and the DSpark draft
+layers also take the FFN launch, built for the draft's routing.
 
 Every TP rank must take the same path at every layer (the kernels wait on each
 other's pushes): the conditions read only metadata every rank holds alike.
@@ -145,8 +148,9 @@ def _max_rows() -> int:
 
 def _capture_plain_experts(experts) -> None:
     """gfx942: vLLM converts the routed experts to its Triton kernels' format
-    when the weights are loaded and frees the plain scales. Wrap that step so the gfx942
-    copies (`weights942.moe_copies`) are made from the plain tensors first."""
+    when the weights are loaded and frees the plain scales. Wrap that step so
+    the gfx942 copies (`weights942.moe_copies`) are made from the
+    plain tensors first."""
     qm = experts.quant_method
     original = qm.process_weights_after_loading
 

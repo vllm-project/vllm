@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """One decode step of 1..MAX_TOKENS tokens on the mono kernels.
 
-Every sparse MoE layer is one launch of the fused layer kernel; it takes `(ar, res)` --
-the pair vLLM's input norm would receive (reduced MoE output, residual) -- and leaves
-`(ar, h_mid)` for the next layer, alternating between two buffers by layer parity. The
-embedding, the leading dense-FFN layers and the final norm run the original modules. The
-K/V cache is read in vLLM's interleaved page-16 layout under the fixed unit fp8 scale;
-the step's tables come from the forward context.
+Every sparse MoE layer is one launch of the fused layer kernel; it takes
+`(ar, res)` -- the pair vLLM's input norm would receive (reduced MoE output,
+residual) -- and leaves `(ar, h_mid)` for the next layer, alternating between
+two buffers by layer parity. The embedding, the leading dense-FFN layers and the
+final norm run the original modules. The K/V cache is read in vLLM's interleaved
+page-16 layout under the fixed unit fp8 scale; the step's tables come from the
+forward context.
 """
 
 from typing import Any, NamedTuple, cast

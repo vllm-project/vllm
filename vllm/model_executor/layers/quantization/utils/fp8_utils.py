@@ -269,11 +269,12 @@ def silu_mul_quant_fp8_packed_triton(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fuse activation and FP8 quantization, optionally skipping expert padding.
 
-    `expert_ends` uses DeepGEMM's prefix-sum layout: each entry is the exclusive end of
-    an expert's live rows, including earlier alignment gaps. An expert starts at the
-    preceding end rounded up to `expert_alignment`. Padding outputs are left unwritten
-    and must not be consumed as live rows. Without `expert_ends`, the original dense
-    launch configuration is used and the metadata loads are compiled out.
+    `expert_ends` uses DeepGEMM's prefix-sum layout: each entry is the
+    exclusive end of an expert's live rows, including earlier alignment gaps.
+    An expert starts at the preceding end rounded up to `expert_alignment`.
+    Padding outputs are left unwritten and must not be consumed as live rows.
+    Without `expert_ends`, the original dense launch configuration is used
+    and the metadata loads are compiled out.
     """
     assert input.dim() == 2
     assert input.is_contiguous()

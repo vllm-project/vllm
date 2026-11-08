@@ -38,11 +38,12 @@ AITER_SUPPORTED = is_aiter_found()
 def flatten_to_2d_is_free(x: Tensor) -> bool:
     """Whether `x.reshape(-1, x.shape[-1])` is a view with unit-stride rows.
 
-    The AITER norm kernels only take dense 2D inputs, so the wrappers below flatten the
-    leading dims with `Tensor.reshape`, which silently falls back to `contiguous()` when
-    the flattened shape is not expressible with the existing strides, adding a
-    whole-tensor device copy that costs more than the kernel saves. A strided last dim
-    flattens without a copy but not into a dense buffer, so it is rejected too.
+    The AITER norm kernels only take dense 2D inputs, so the wrappers below
+    flatten the leading dims with `Tensor.reshape`, which silently falls back
+    to `contiguous()` when the flattened shape is not expressible with the
+    existing strides, adding a whole-tensor device copy that costs more than
+    the kernel saves. A strided last dim flattens without a copy but not into a
+    dense buffer, so it is rejected too.
     """
     if x.dim() <= 2:
         return True

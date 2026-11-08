@@ -17,8 +17,9 @@ def _build_decode_scatter_indices(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Per-token (request id, intra-request index) for a non-uniform decode
     batch. `n` is the graph-padded token count and may be larger than
-    `decode_lens.sum()` under adaptive verification. All graph-padding tokens are mapped
-    to a dummy request that is appended as the last one (`idx=num_requests`).
+    `decode_lens.sum()` under adaptive verification. All graph-padding tokens
+    are mapped to a dummy request that is appended as the last one
+    (`idx=num_requests`).
 
     Shared by every `_scatter_decode_tokens_by_request` call in a step:
     building it per call would repeat the same repeat_interleave/cumsum chain
@@ -67,10 +68,11 @@ def _scatter_decode_tokens_by_request(
     """Group `[N, ...]` decode tokens into a padded `[num_requests, lmax, ...]`
     layout: request `r`'s tokens at row `r` in order; short requests padded.
 
-    Unlike `pack_seq_triton` this is dtype-agnostic (needed for the int32 slot/pos
-    tensors) — it scatters with the shared per-step indices from
-    `_build_decode_scatter_indices`. Used only for the non-uniform (`requires_padding`)
-    decode batch; uniform batches use a zero-copy reshape.
+    Unlike `pack_seq_triton` this is dtype-agnostic (needed for the int32
+    slot/pos tensors) — it scatters with the shared per-step indices from
+    `_build_decode_scatter_indices`. Used only for the non-uniform
+    (`requires_padding`) decode batch; uniform batches use a zero-copy
+    reshape.
     """
     req_id, intra = scatter_indices
     # The final row is the dummy request. It receives graph-padding tokens and
@@ -96,15 +98,16 @@ def _decode_topk_seq_lens(
 ) -> torch.Tensor:
     """Token-granular seq_len (pos + 1) per pool-topk row, layout-aware.
 
-    `pool_topk` (and the logits it comes from) follow the padded `[batch_size, next_n]`
-    grid whenever `requires_padding` is set, so row `(b, t)` corresponds to flat decode
-    token `offset_b + t` -- NOT `b * next_n + t`. Slicing flat
-    `positions[: batch_size * next_n]` (the uniform-layout shortcut) misaligns every row
-    after the first non-uniform request and, past the decode region, reads prefill
-    tokens' positions; `expand_pools_and_append_tail` then anchors the tail at another
-    request's length, dropping the row's real tail tokens or emitting indices past its
-    sequence (out-of-bounds block-table reads). Padded rows get 0 (empty tail); they are
-    dropped by `unpack_seq_triton` anyway.
+    `pool_topk` (and the logits it comes from) follow the padded
+    `[batch_size, next_n]` grid whenever `requires_padding` is set, so row
+    `(b, t)` corresponds to flat decode token `offset_b + t` -- NOT
+    `b * next_n + t`. Slicing flat `positions[: batch_size * next_n]`
+    (the uniform-layout shortcut) misaligns every row after the first
+    non-uniform request and, past the decode region, reads prefill tokens'
+    positions; `expand_pools_and_append_tail` then anchors the tail at
+    another request's length, dropping the row's real tail tokens or emitting
+    indices past its sequence (out-of-bounds block-table reads). Padded rows
+    get 0 (empty tail); they are dropped by `unpack_seq_triton` anyway.
     """
     n = batch_size * next_n
     if not requires_padding:

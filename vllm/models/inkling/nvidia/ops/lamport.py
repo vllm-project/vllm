@@ -13,13 +13,14 @@ Large grids are deliberately split at the two communication dependencies:
   3. `_sconv_publish_kernel` only computes and publishes the local result.
   4. `_gather_norm_kernel` waits, gathers, and normalizes.
 
-Without PDL, CUDA stream order completes a producer before its consumer. With PDL, every
-producer CTA posts all peer stores before triggering its dependent, and the consumer
-executes `gdc_wait` before polling. A consumer therefore waits only for stores from a
-producer that is already running (or complete) on another GPU. It never waits for
-another block in its own grid. Consequently spinning consumers cannot occupy resources
-needed by any producer, and the wait-for graph has no cycle. The proof is independent of
-grid size, block dispatch order, and occupancy.
+Without PDL, CUDA stream order completes a producer before its consumer.  With
+PDL, every producer CTA posts all peer stores before triggering its dependent,
+and the consumer executes `gdc_wait` before polling.  A consumer therefore
+waits only for stores from a producer that is already running (or complete) on
+another GPU.  It never waits for another block in its own grid.  Consequently
+spinning consumers cannot occupy resources needed by any producer, and the
+wait-for graph has no cycle.  The proof is independent of grid size, block
+dispatch order, and occupancy.
 
 For one token, the first three phases use eight independent channel slices to
 expose enough CTA parallelism for decode latency.  Each slice has exclusive

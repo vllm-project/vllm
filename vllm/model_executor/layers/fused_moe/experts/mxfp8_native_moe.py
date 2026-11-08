@@ -3,11 +3,12 @@
 """Native MXFP8 (1x32 block, E8M0 scale) MoE for AMD CDNA4 (gfx950) via Triton
 `tl.dot_scaled` (hardware microscaling matmul).
 
-The expert GEMMs consume the FP8 E4M3 weights and their E8M0 block scales directly (no
-dequant-to-BF16), and activations are MXFP8-quantized per token. On CDNA4 `dot_scaled`
-maps to the native MX matrix-core ops; on other archs Triton upcasts to BF16 (so this
-stays correct, just not faster) — but the oracle only selects this path on gfx950 and
-routes everything else to the BF16 `Mxfp8EmulationTritonExperts` fallback.
+The expert GEMMs consume the FP8 E4M3 weights and their E8M0 block scales
+directly (no dequant-to-BF16), and activations are MXFP8-quantized per token.
+On CDNA4 `dot_scaled` maps to the native MX matrix-core ops; on other archs
+Triton upcasts to BF16 (so this stays correct, just not faster) — but the
+oracle only selects this path on gfx950 and routes everything else to the
+BF16 `Mxfp8EmulationTritonExperts` fallback.
 
 Structure mirrors vLLM's `fused_moe_kernel`: tokens are sorted by expert
 (`moe_align_block_size`); each program computes a `[BLOCK_M, BLOCK_N]` tile

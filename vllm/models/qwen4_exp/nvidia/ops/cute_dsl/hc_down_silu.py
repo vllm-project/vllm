@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Adapted from vllm/model_executor/kernels/linear/cute_dsl/ll_bf16.py.
 
-Fused Qwen4Exp mHC down projection + SiLU epilogue, where columns < lora_rank get
-`silu(bf16(acc) / hc_count)`, the hc_count injection-logit columns pass through as
-`bf16(acc)`, and the pad columns are never computed. Output is bf16 (ll_bf16's
-fp32-output bonus is given up to preserve the production rounding boundary).
+Fused Qwen4Exp mHC down projection + SiLU epilogue, where
+columns < lora_rank get `silu(bf16(acc) / hc_count)`, the hc_count
+injection-logit columns pass through as `bf16(acc)`, and the pad columns
+are never computed. Output is bf16 (ll_bf16's fp32-output bonus is given up
+to preserve the production rounding boundary).
 
 The GEMM uses an FMA backend for M <= 4 and a split-K MMA backend beyond,
 both with PDL. The model uses its Linear module above M=48.

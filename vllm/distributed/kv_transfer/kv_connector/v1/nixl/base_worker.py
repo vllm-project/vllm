@@ -131,12 +131,13 @@ def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
 class _RegionPairs:
     """How a peer's KV regions transfer with the local ones.
 
-    Pairs come from the layers both sides hold (`region_members`): pair `k` moves the
-    peer's region `remote[k]` and local region `local[k]` at cache group `group[k]`'s
-    blocks. A region shared by several cache groups pairs once per group it holds a
-    layer of, so which layers share a region may differ between the two sides. `remote`
-    indexes `remote_regions`, the peer's regions that pair (in its order), which are the
-    ones its descriptor list holds.
+    Pairs come from the layers both sides hold (`region_members`): pair `k`
+    moves the peer's region `remote[k]` and local region `local[k]` at
+    cache group `group[k]`'s blocks. A region shared by several cache groups
+    pairs once per group it holds a layer of, so which layers share a region
+    may differ between the two sides. `remote` indexes `remote_regions`,
+    the peer's regions that pair (in its order), which are the ones its
+    descriptor list holds.
     """
 
     remote: list[int]
@@ -1464,10 +1465,11 @@ class NixlBaseConnectorWorker:
     ) -> Future[tuple[dict[tuple[int, int], str], float]] | None:
         """Ensure a handshake is in-flight (or already done) for *engine_id*.
 
-        Returns the `Future` if a handshake is pending (or was just started), or `None`
-        if the handshake already completed successfully. Callers can attach per-request
-        callbacks to the returned future. Failures to handshake are logged and the
-        request is marked as failed.
+        Returns the `Future` if a handshake is pending (or was just
+        started), or `None` if the handshake already completed
+        successfully.  Callers can attach per-request callbacks to the
+        returned future.
+        Failures to handshake are logged and the request is marked as failed.
         """
         self._evict_stale_engines()
         with self._handshake_lock:

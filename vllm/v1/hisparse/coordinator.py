@@ -88,12 +88,13 @@ class _PendingSpill:
 class HiSparseCoordinator:
     """Own HiSparse host allocation, host publication, spills, and GPU residency.
 
-    GPU-resident pages are a write-back cache of the host tier. Once a page's host copy
-    is durable and its owner can read from host (it has, or has asked for, a hot
-    region), the page's allocation reference is released with `BlockPool.unpin_blocks`:
-    the block keeps being read, but the pool counts it as free and may hand it out, at
-    which point the owner stops reading it. Residency changes reach the worker through
-    `take_residency_updates`, not the block table, which stays append-only.
+    GPU-resident pages are a write-back cache of the host tier. Once a page's
+    host copy is durable and its owner can read from host (it has, or has
+    asked for, a hot region), the page's allocation reference is released with
+    `BlockPool.unpin_blocks`: the block keeps being read, but the pool counts
+    it as free and may hand it out, at which point the owner stops reading it.
+    Residency changes reach the worker through `take_residency_updates`, not
+    the block table, which stays append-only.
     """
 
     def __init__(
@@ -450,9 +451,10 @@ class HiSparseCoordinator:
     def advance_scheduled(self, requests: Iterable[tuple[str, int]]) -> None:
         """Run the per-step residency work for each scheduled request.
 
-        `requests` pairs a request id with the number of tokens computed once the step
-        completes. As in `KVCacheCoordinator.cache_blocks`, the last
-        `num_reprefillable_tokens` are not final yet and are not written back.
+        `requests` pairs a request id with the number of tokens computed
+        once the step completes. As in `KVCacheCoordinator.cache_blocks`, the
+        last `num_reprefillable_tokens` are not final yet and are not written
+        back.
         """
         if not self.resident_managers:
             return
@@ -553,9 +555,10 @@ class HiSparseCoordinator:
     def size_import(self, request_id: str, num_pages: int) -> None:
         """Note the full-sequence host pages of an import being admitted.
 
-        The admission gate runs in the same `allocate_slots` call as the allocation, so
-        the next `record_pending_host_import` is this request's if it is admitted; a
-        size left by a rejected admission is discarded.
+        The admission gate runs in the same `allocate_slots` call as the
+        allocation, so the next `record_pending_host_import` is this
+        request's if it is admitted; a size left by a rejected admission is
+        discarded.
         """
         self._sized_import = (request_id, num_pages)
 

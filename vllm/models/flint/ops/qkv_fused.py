@@ -5,10 +5,11 @@
 1. `fused_add_rms_norm` (or `rms_norm` for the first layer) writing the
    normalized activations `xn` and the new residual; it releases its PDL
    dependents immediately so the second kernel's weights stream in meanwhile.
-2. the qkv GEMV (same fragment math, K split and summation order as `nvfp4_gemv` at M
-   <= 8) whose 16-row CTAs form one cluster per head and send their BF16 rows to rank 0
-   through DSMEM, which applies per-head q/k RMSNorm, NeoX RoPE (FP32 cos/sin table,
-   FP32 math) and the paged KV-cache write like `qk_norm_rope_cache`.
+2. the qkv GEMV (same fragment math, K split and summation order as
+   `nvfp4_gemv` at M <= 8) whose 16-row CTAs form one cluster per head and
+   send their BF16 rows to rank 0 through DSMEM, which applies per-head q/k
+   RMSNorm, NeoX RoPE (FP32 cos/sin table, FP32 math) and the paged KV-cache
+   write like `qk_norm_rope_cache`.
 
 Numerics are those of `norm.fused_add_rms_norm` / `norm.rms_norm` ->
 GEMV -> `qk_norm_rope_cache`; the per-head q/k norm sums its squares in a

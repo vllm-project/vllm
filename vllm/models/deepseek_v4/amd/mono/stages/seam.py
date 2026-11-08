@@ -388,7 +388,8 @@ def collapse_chunk(c, t, col, pre):
 @traced
 def stage_reduce(c, task):
     """The attention output at this slice's 32 columns: the TP ranks' partials
-    in the all-reduce's order (`sum_partials`), in fp32 -> bf16 -> `pend_lds`."""
+    in the all-reduce's order (`sum_partials`), in fp32 -> bf16 ->
+    `pend_lds`."""
     s, tid = c["S"], c["tid"]
     if const_expr(c.get("two_hop", False)):
         # this slice's columns' owner sums them for every rank (``allreduce``)
@@ -407,7 +408,8 @@ def stage_reduce(c, task):
 @traced
 def reduce_attn_pair(c, task, idx, how="sum"):
     """Thread `idx`'s column pair of token idx / 16 (`stage_reduce`;
-    `how`: the `allreduce` way, `reduce_pair` / `_owned` / `_gathered`)."""
+    `how`: the `allreduce` way, `reduce_pair` / `_owned` /
+    `_gathered`)."""
     s, d = c["S"], c["d"]
     c0 = task * COLS
     if idx < s * COLS // 2:

@@ -9,8 +9,9 @@ from Gemma4 models. These are pure-Python utilities with zero heavy
 dependencies — they work on raw decoded strings from any inference
 backend (vLLM, HuggingFace, TGI, etc.).
 
-For the OpenAI-compatible API server tool parser (streaming + non-streaming), see
-`vllm.tool_parsers.gemma4_tool_parser`. For thinking/reasoning output parsing, see
+For the OpenAI-compatible API server tool parser (streaming +
+non-streaming), see `vllm.tool_parsers.gemma4_tool_parser`.
+For thinking/reasoning output parsing, see
 `vllm.reasoning.gemma4_utils`.
 
 Usage with vLLM offline inference::
@@ -72,14 +73,16 @@ def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
     Parsing tiers:
         1. **Standard**: `<|tool_call>call:name{args}<tool_call|>`
            (special token IDs 48/49 in decoded text)
-        2. **Fallback** (when `strict=False`): bare `call:name{args}` patterns,
-           including `<call>name{args}` (fragmented tokens from multimodal inputs)
+        2. **Fallback** (when `strict=False`): bare `call:name{args}`
+           patterns, including `<call>name{args}` (fragmented tokens from
+           multimodal inputs)
 
     Args:
         text: Decoded model output text (from `tokenizer.decode(...,
             skip_special_tokens=False)`).
-        strict: If `True`, only match the standard `<|tool_call>` format. If `False`
-            (default), also try fallback patterns for known Gemma4 output variations.
+        strict: If `True`, only match the standard `<|tool_call>` format.
+            If `False` (default), also try fallback patterns for
+            known Gemma4 output variations.
 
     Returns:
         A list of dicts, each with keys:
@@ -131,9 +134,10 @@ def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
 def has_tool_response_tag(text: str) -> bool:
     """Check if model output properly ends with a tool response tag.
 
-    Some Gemma4 models sometimes emit `<eos>` instead of `<|tool_response>` after a tool
-    call. This helper detects whether the model used the proper termination, so callers
-    can decide whether to inject `<|tool_response>` into the next prompt.
+    Some Gemma4 models sometimes emit `<eos>` instead of
+    `<|tool_response>` after a tool call. This helper detects
+    whether the model used the proper termination, so callers can
+    decide whether to inject `<|tool_response>` into the next prompt.
 
     Args:
         text: Decoded model output text.

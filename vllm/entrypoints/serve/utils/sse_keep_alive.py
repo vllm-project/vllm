@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """SSE keep-alive comments for idle streaming responses.
 
-Reverse proxies and tunnels (Cloudflare Tunnel, NGINX `proxy_read_timeout`, AWS ALB,
-...) can close a streaming connection when no bytes are sent for a while. That happens
-while a request is queued, during prefill, or in gaps between tokens.
-`with_sse_keep_alive` wraps the final SSE generator and emits a comment line
-(`": keep-alive\\n\\n"`) whenever it has been idle for `interval` seconds. Comments are
-ignored by SSE-compliant clients but still count as bytes for proxy read-timeout logic.
+Reverse proxies and tunnels (Cloudflare Tunnel, NGINX `proxy_read_timeout`,
+AWS ALB, ...) can close a streaming connection when no bytes are sent for a
+while. That happens while a request is queued, during prefill, or in gaps
+between tokens. `with_sse_keep_alive` wraps the final SSE generator and emits
+a comment line (`": keep-alive\\n\\n"`) whenever it has been idle for
+`interval` seconds. Comments are ignored by SSE-compliant clients but still
+count as bytes for proxy read-timeout logic.
 """
 
 import asyncio

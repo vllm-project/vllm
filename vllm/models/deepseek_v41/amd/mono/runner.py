@@ -2,14 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek-V4.1-Flash mono decode layer: host side.
 
-One `DSV41MonoLayer` a TP rank runs every mono layer of a decode step (M <= 48 rows):
-two persistent launches a layer (`layer`) from the layer's inputs at the attention seam
-to its outputs at the next one -- the MoE's reduced output, the residual after the FFN
-seam and that seam's mixes -- with both TP all-reduces inside the kernels (symmetric
-peer memory). A layer whose attention vLLM runs (`ffn`) takes one launch from its
-unreduced attention output on. Every argument is a device pointer: the launches can be
-captured in a HIP graph. The kernels move their mailbox epoch on themselves; every rank
-runs the same launches, so the ranks' epochs agree.
+One `DSV41MonoLayer` a TP rank runs every mono layer of a decode step (M <= 48
+rows): two persistent launches a layer (`layer`) from the layer's
+inputs at the attention seam to its outputs at the next one -- the MoE's
+reduced output, the residual after the FFN seam and that seam's mixes -- with
+both TP all-reduces inside the kernels (symmetric peer memory). A layer whose
+attention vLLM runs (`ffn`) takes one launch from its unreduced attention
+output on. Every argument is a device pointer: the launches can be captured in a
+HIP graph. The kernels move their mailbox epoch on themselves; every rank runs
+the same launches, so the ranks' epochs agree.
 """
 
 from __future__ import annotations

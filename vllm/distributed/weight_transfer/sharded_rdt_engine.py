@@ -5,13 +5,14 @@
 Pulls only the slice each vLLM worker consumes under tensor/expert parallelism,
 not the full HF-format tensor.
 
-Two phases. BAKE, once at `init_transfer_engine`: drive `model.load_weights` against
-`FakeRDTTensor` placeholders and record, per leaf module, how each destination slice is
-fetched (an op chain) and where it lands (an `as_strided` descriptor). REPLAY, every
-sync: no `load_weights`, no `FakeRDTTensor` dispatch, no discovery — pull the recorded
-slices in packed chunks over a ring of receive buffers, scatter them into freshly
-materialized params, then quant and kernel-copy. A live name with no recorded plan fails
-the plan build: there is no fallback load.
+Two phases. BAKE, once at `init_transfer_engine`: drive `model.load_weights`
+against `FakeRDTTensor` placeholders and record, per leaf module, how each
+destination slice is fetched (an op chain) and where it lands (an `as_strided`
+descriptor). REPLAY, every sync: no `load_weights`, no `FakeRDTTensor`
+dispatch, no discovery — pull the recorded slices in packed chunks over a ring
+of receive buffers, scatter them into freshly materialized params, then quant
+and kernel-copy. A live name with no recorded plan fails the plan build: there
+is no fallback load.
 
 Weights arrive in checkpoint format: the engine drives layerwise reload itself,
 in `start_weight_update` / `finish_weight_update`.
@@ -117,9 +118,10 @@ class _CallPlan:
     """The static plan for one sync (see Data flow). Pure, so it is built once
     and reused; runtime is then execution only.
 
-    `pre_free` = groups with NO chunk on this worker, signaled at sync start (owners
-    tolerate a signal preceding its publish). With the last-chunk signals this keeps the
-    completeness invariant consumer-local: every group is signaled exactly once.
+    `pre_free` = groups with NO chunk on this worker, signaled at sync start
+    (owners tolerate a signal preceding its publish). With the last-chunk signals
+    this keeps the completeness invariant consumer-local: every group is signaled
+    exactly once.
     """
 
     chunks: "list[_Chunk]"
@@ -271,10 +273,11 @@ class ShardedRDTWeightTransferEngine(
     """Pull-based RDT/NIXL backend that transports only the slice each worker
     consumes.
 
-    Requires `distributed_executor_backend="ray"`, `nixl` in the shared env, a named
-    trainer actor exposing a `@ray.method(tensor_transport="nixl")` producer, and weight
-    loaders that stay inside `SUPPORTED_OPS` — anything needing real data (`.to`,
-    `.item`, arithmetic, bool-mask indexing) raises during the bake.
+    Requires `distributed_executor_backend="ray"`, `nixl` in the shared env,
+    a named trainer actor exposing a `@ray.method(tensor_transport="nixl")`
+    producer, and weight loaders that stay inside `SUPPORTED_OPS` — anything
+    needing real data (`.to`, `.item`, arithmetic, bool-mask indexing)
+    raises during the bake.
 
     The plan is baked once at `init_transfer_engine` into one scatter list
     per fully-loaded leaf module, indexed by source name; every
@@ -442,10 +445,11 @@ class ShardedRDTWeightTransferEngine(
         """Work out this worker's consumer identity, build the router, and bind
         EVERY producer actor.
 
-        Pull routing is M:N: each chunk goes to ONE producer holding every name in it
-        (see `RdtRouter`), so one producer serves a whole pull. All producers are bound
-        regardless, because the per-group `free_group` signal fans out to every owner of
-        a group, including producers this worker never pulls from.
+        Pull routing is M:N: each chunk goes to ONE producer holding every name
+        in it (see `RdtRouter`), so one producer serves a whole pull. All
+        producers are bound regardless, because the per-group `free_group`
+        signal fans out to every owner of a group, including producers this
+        worker never pulls from.
         """
         try:
             import ray
@@ -541,11 +545,12 @@ class ShardedRDTWeightTransferEngine(
     def _resolve_consumer_id(self, init_info: ShardedRDTWeightTransferInitInfo) -> int:
         """This worker's DISTINCT index in 0..C-1 across the whole fleet.
 
-        Within one engine that is `_global_worker_index()`. But a fleet of INDEPENDENT
-        engines (each with its own parallel config) restarts that index at 0 per engine,
-        so each engine offsets into its own range using `replica_rank`: with a uniform
-        fleet, `workers_per_replica = C // num_replicas`. `num_replicas` defaults to 1
-        (offset 0), preserving single-engine and single-DP-deployment behaviour.
+        Within one engine that is `_global_worker_index()`. But a fleet of
+        INDEPENDENT engines (each with its own parallel config) restarts that
+        index at 0 per engine, so each engine offsets into its own range using
+        `replica_rank`: with a uniform fleet,
+        `workers_per_replica = C // num_replicas`. `num_replicas` defaults to
+        1 (offset 0), preserving single-engine and single-DP-deployment behaviour.
         """
         replica_rank = max(0, int(init_info.replica_rank or 0))
         return (
@@ -658,9 +663,10 @@ class ShardedRDTWeightTransferEngine(
 
     def update_weights(self, update_info: dict[str, Any]) -> None:
         """Receive one update. Unlike the base, does NOT issue a per-update
-        device sync: post-processing is deferred to background threads and a sync here
-        would block on them and serialize the pull/process pipeline. Completion is
-        guaranteed by `drain_pending` in `finish_weight_update`."""
+        device sync: post-processing is deferred to background threads and a
+        sync here would block on them and serialize the pull/process pipeline.
+        Completion is guaranteed by `drain_pending` in
+        `finish_weight_update`."""
         self.receive_weights(self.parse_update_info(update_info))
 
     def receive_weights(
@@ -724,12 +730,13 @@ class ShardedRDTWeightTransferEngine(
         chunk i+1 before completing chunk i, so the producer serves the next
         chunk while the in-flight RDMA streams.
 
-        Slot-reuse guard, both stages required: a generation wait (the CUDA event binds
-        only to its LAST record, so synchronizing before the background thread recorded
-        this item's event passes silently — observed as nondeterministic weight
-        corruption), then the event synchronize. It must precede `set_target_for_ref`,
-        not just the get: the transfer may start any time after the metadata push. See
-        the doc's "slot generation handshake".
+        Slot-reuse guard, both stages required: a generation wait (the CUDA event
+        binds only to its LAST record, so synchronizing before the background
+        thread recorded this item's event passes silently — observed as
+        nondeterministic weight corruption), then the event synchronize. It must
+        precede `set_target_for_ref`, not just the get: the transfer may start
+        any time after the metadata push. See the doc's "slot generation
+        handshake".
         """
         from ray.experimental import set_target_for_ref
 
@@ -803,13 +810,14 @@ class ShardedRDTWeightTransferEngine(
     def _bake(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Bake the replay plan once, as a self-driven meta dry run.
 
-        Puts the params on meta, then drives `model.load_weights` over `init_info.names`
-        through the model's ORIGINAL loaders (the stamps bypass `online_process_loader`,
-        so `_layerwise_process` is never in the path). Nothing materializes or pulls;
-        the fake's `copy_` records the source op chain and the meta destination's
-        geometry. Afterwards one scatter list per fully-loaded leaf module (copied
-        numel == loadable size) is indexed by source name; a partial or unrecordable
-        module fails the plan build. The model is restored.
+        Puts the params on meta, then drives `model.load_weights` over
+        `init_info.names` through the model's ORIGINAL loaders (the stamps
+        bypass `online_process_loader`, so `_layerwise_process` is never in
+        the path). Nothing materializes or pulls; the fake's `copy_` records
+        the source op chain and the meta destination's geometry. Afterwards one
+        scatter list per fully-loaded leaf module (copied numel == loadable
+        size) is indexed by source name; a partial or unrecordable module fails
+        the plan build. The model is restored.
 
         This leans on layerwise internals a public API should expose first-class:
         a currently-loading hook instead of monkeypatched stamps, a dry-run mode
@@ -1220,12 +1228,13 @@ class ShardedRDTWeightTransferEngine(
     def _signal_group_done(self, group_idx: int) -> None:
         """Fire-and-forget `free_group` signal at EVERY owner of the group.
 
-        The per-group barrier: each owner counts one signal per live consumer and frees
-        the group (releasing its lookahead credit) on the last one, so every owner must
-        hear from every consumer — including owners this worker pulls nothing from. Refs
-        are held and drained in `drain_pending` so every signal has EXECUTED before the
-        sync ends: `begin_sync` resets the counters, and a straggler landing in the next
-        sync would credit a group it does not belong to."""
+        The per-group barrier: each owner counts one signal per live consumer
+        and frees the group (releasing its lookahead credit) on the last one, so
+        every owner must hear from every consumer — including owners this worker
+        pulls nothing from. Refs are held and drained in `drain_pending` so
+        every signal has EXECUTED before the sync ends: `begin_sync` resets
+        the counters, and a straggler landing in the next sync would credit a
+        group it does not belong to."""
         assert self._router is not None
         self._pending_frees.extend(self._router.free_group(group_idx))
 
@@ -1237,9 +1246,10 @@ class ShardedRDTWeightTransferEngine(
         slot and the background thread scatters i-1 out of another. Reads stay
         serialized on the shared NIC — the bandwidth floor, not a loss.
 
-        Slot safety rests on two arguments spelled out in the doc: the producer's ring
-        is no shallower than this one and drain-before-issue orders its reuse; the
-        consumer's slots are held by `_issue_pull`'s generation handshake.
+        Slot safety rests on two arguments spelled out in the doc: the producer's
+        ring is no shallower than this one and drain-before-issue orders its
+        reuse; the consumer's slots are held by `_issue_pull`'s generation
+        handshake.
         """
         from collections import deque
 

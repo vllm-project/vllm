@@ -606,7 +606,8 @@ def dequantize_w4a16(
 ) -> torch.Tensor:
     """Dequantize [N, K] int32 uint4 values (natural K order) to [N, K] dtype.
 
-    `scales` and `zp` are [N, K//G]; without `zp` the constant `zp_bias` is subtracted.
+    `scales` and `zp` are [N, K//G]; without `zp` the constant
+    `zp_bias` is subtracted.
     """
     N_dim, K_dim = unpacked.shape
     w = unpacked.view(N_dim, K_dim // group_size, group_size).to(dtype)
@@ -711,10 +712,11 @@ direct_register_custom_op(
 class RDNAHybridW4A16LinearKernel(MPLinearKernel):
     """Hybrid W4A16 kernel: HIP skinny for decode, Triton for prefill.
 
-    Stores the weights once as int8 [N, K//2] (ExLlama shuffle packed). The HIP skinny
-    kernel reads it directly; the triton kernel reinterprets the same buffer as int32
-    [N, K//8] via a view, so there is no dual weight storage unless
-    `rdna_hybrid_w4a16_prefill_dequant` caches a dense prefill copy.
+    Stores the weights once as int8 [N, K//2] (ExLlama shuffle packed). The
+    HIP skinny kernel reads it directly; the triton kernel reinterprets the
+    same buffer as int32 [N, K//8] via a view, so there is no dual weight
+    storage unless `rdna_hybrid_w4a16_prefill_dequant` caches a dense prefill
+    copy.
     """
 
     SUPPORTED_QUANT_TYPES = [

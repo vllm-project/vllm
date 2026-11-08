@@ -18,12 +18,13 @@ def _patch_instrumentator_route_walk() -> None:
     """Make prometheus-fastapi-instrumentator's route walk tolerate routes
     without a `.path`.
 
-    FastAPI >= 0.137 stores lazy `_IncludedRouter` objects in `app.routes`; these are
-    `BaseRoute` subclasses with no `.path` attribute. The instrumentator's
-    `_get_route_name` (up to 8.0.0) reads `route.path` unconditionally, so every request
-    raises `AttributeError` in the metrics middleware and the server returns 500 (e.g.
-    `/health` never goes ready). Skip path-less routes; this only affects the metric
-    handler label, not request routing. Idempotent.
+    FastAPI >= 0.137 stores lazy `_IncludedRouter` objects in `app.routes`;
+    these are `BaseRoute` subclasses with no `.path` attribute. The
+    instrumentator's `_get_route_name` (up to 8.0.0) reads `route.path`
+    unconditionally, so every request raises `AttributeError` in the metrics
+    middleware and the server returns 500 (e.g. `/health` never goes ready).
+    Skip path-less routes; this only affects the metric handler label, not
+    request routing. Idempotent.
     """
 
     def _get_route_name(scope: Scope, routes, route_name=None):

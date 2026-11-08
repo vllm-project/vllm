@@ -49,9 +49,10 @@ logger = init_logger(__name__)
 class DSparkMarkovHead(nn.Module):
     """Sequential transition-bias head (low-rank V x r, r x V).
 
-    `markov_w1[token]` embeds the previously sampled token (target vocab, `vocab_size`);
-    `markov_w2` projects it to a draft-vocab bias (`draft_vocab_size`) added to the base
-    draft logits. The two sizes coincide for full-vocab drafts.
+    `markov_w1[token]` embeds the previously sampled token (target vocab,
+    `vocab_size`); `markov_w2` projects it to a draft-vocab bias
+    (`draft_vocab_size`) added to the base draft logits. The two sizes
+    coincide for full-vocab drafts.
 
     Both weights are replicated because the head runs sequentially for every
     draft position. Sharding them would add an all-reduce and a full-vocab

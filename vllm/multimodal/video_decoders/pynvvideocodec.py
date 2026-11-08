@@ -151,13 +151,14 @@ def _pynvvc_frames_to_nhwc(frames):
 class PyNvVideoCodecDecoderSlot:
     """A retained PyNv decoder slot and its CUDA stream.
 
-    The decoder is reused across requests: `reconfigure_decoder` repoints the existing
-    decoder at each new source instead of paying a fresh `SimpleDecoder` construction
-    per request. Construction (CUVID parser + decoder + surface-pool allocation) is the
-    dominant per-request cost, so reconfiguring is far cheaper. Decoder dimensions are
-    bounded at construction so resolution changes do not replace its native frame pool.
-    A single decoder serves both metadata (`len`/`get_stream_metadata`) and frame
-    decode -- no separate metadata decoder.
+    The decoder is reused across requests: `reconfigure_decoder` repoints the
+    existing decoder at each new source instead of paying a fresh
+    `SimpleDecoder` construction per request. Construction (CUVID parser +
+    decoder + surface-pool allocation) is the dominant per-request cost, so
+    reconfiguring is far cheaper. Decoder dimensions are bounded at construction
+    so resolution changes do not replace its native frame pool. A single decoder
+    serves both metadata (`len`/`get_stream_metadata`) and frame decode -- no
+    separate metadata decoder.
     """
 
     def __init__(self, stream) -> None:

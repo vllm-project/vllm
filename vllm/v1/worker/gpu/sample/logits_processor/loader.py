@@ -38,8 +38,9 @@ STR_POOLING_REJECTS_LOGITSPROCS = (
 def _load_v2_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
     """Load installed logits processor plugins.
 
-    Plugins registered under `LOGITSPROCS_GROUP` ship V1-interface processors today;
-    those crash under the V2 sampler, so reject them at load time.
+    Plugins registered under `LOGITSPROCS_GROUP` ship V1-interface
+    processors today; those crash under the V2 sampler, so reject them at
+    load time.
     """
     from vllm.utils.torch_utils import guard_cuda_initialization
 

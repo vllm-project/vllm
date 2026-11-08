@@ -23,12 +23,13 @@
 
 """rel_mha extend Gluon kernel for AMD GFX950.
 
-This handles ragged, multi-token queries against a paged KV cache. The query axis is
-tiled into the MFMA `M` dimension (prefill-style): `BLOCK_M` query rows of a single
-q-head share each paged KV tile, so every KV tile is loaded once and reused across all
-rows in the tile. The grid is `(blocks_per_req, batch, n_heads)` -- all host-known
-sizes -- and each program self-locates its request from `cu_seqlens_q` / `cache_seqlens`
-in-kernel, so the launch stays CUDA-graph static with no device->host sync.
+This handles ragged, multi-token queries against a paged KV cache. The query
+axis is tiled into the MFMA `M` dimension (prefill-style): `BLOCK_M` query
+rows of a single q-head share each paged KV tile, so every KV tile is loaded
+once and reused across all rows in the tile. The grid is
+`(blocks_per_req, batch, n_heads)` -- all host-known sizes -- and each program
+self-locates its request from `cu_seqlens_q` / `cache_seqlens` in-kernel, so
+the launch stays CUDA-graph static with no device->host sync.
 
 Visibility per query row depends on `is_causal` and the optional sliding
 window:

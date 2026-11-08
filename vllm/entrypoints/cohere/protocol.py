@@ -12,8 +12,9 @@ avoid re-declaring the schema. We only own three things locally:
 2. The non-streaming response envelope (the SDK exposes the message
    shape via `AssistantMessageResponse` but no full response
    wrapper).
-3. The streaming discriminated union (the SDK exports each event type individually but
-   not as a combined `Annotated[Union[...], discriminator]`).
+3. The streaming discriminated union (the SDK exports each event type
+   individually but not as a combined `Annotated[Union[...],
+   discriminator]`).
 
 Importing this module pulls in the `cohere` package. The router that
 mounts `POST /cohere/v2/chat` guards on that import succeeding so vLLM still
@@ -225,20 +226,23 @@ class CohereChatV2Request(BaseModel):
     def _normalize_message_roles(cls, v: Any) -> Any:
         """Rewrite OpenAI-style `developer` roles to `system`.
 
-        Cohere's v2 `ChatMessageV2` discriminated union only admits the four literal
-        roles `user` / `assistant` / `system` / `tool`. OpenAI's `developer` role is
-        documented as high-priority system instructions, so we alias it onto `system`
-        *before* the SDK discriminator runs (otherwise it rejects the message with a
-        `literal_error` against each union member). Mirrors `_role_to_melody` in the
-        renderer so the same alias is honoured no matter which surface the message
+        Cohere's v2 `ChatMessageV2` discriminated union only admits
+        the four literal roles `user` / `assistant` / `system` /
+        `tool`. OpenAI's `developer` role is documented as
+        high-priority system instructions, so we alias it onto
+        `system` *before* the SDK discriminator runs (otherwise it
+        rejects the message with a `literal_error` against each union
+        member). Mirrors `_role_to_melody` in the renderer so the
+        same alias is honoured no matter which surface the message
         arrives through.
 
         `mode="before"` is required so the rewrite happens before the
-        `list[ChatMessageV2]` coercion runs the SDK's discriminated union; a
-        default-mode validator would never see `developer` because validation would have
-        already failed. On any structural malformation (non-iterable input, items
-        without a dict-shaped `role` field, etc.) we hand `v` back unchanged and let
-        Pydantic's normal coercion surface a precise error.
+        `list[ChatMessageV2]` coercion runs the SDK's discriminated
+        union; a default-mode validator would never see `developer`
+        because validation would have already failed. On any
+        structural malformation (non-iterable input, items without a
+        dict-shaped `role` field, etc.) we hand `v` back unchanged
+        and let Pydantic's normal coercion surface a precise error.
         """
         try:
             return [
@@ -301,11 +305,12 @@ class CohereLogprobItem(BaseModel):
 class CohereChatV2Response(BaseModel):
     """Cohere Chat v2 non-streaming response body.
 
-    Wraps the SDK `AssistantMessageResponse` (the message shape) in the
-    documented v2 response envelope (`id`, `finish_reason`, `usage`, `logprobs`). The
-    single constructor in `CohereServingChatV2._chat_completion_to_v2` is
-    responsible for supplying a non-empty `id` (falling back to a synthesized one if the
-    upstream response is missing it) to this model.
+    Wraps the SDK `AssistantMessageResponse` (the message shape) in
+    the documented v2 response envelope (`id`, `finish_reason`,
+    `usage`, `logprobs`). The single constructor in
+    `CohereServingChatV2._chat_completion_to_v2` is responsible for
+    supplying a non-empty `id` (falling back to a synthesized one if
+    the upstream response is missing it) to this model.
     """
 
     id: str

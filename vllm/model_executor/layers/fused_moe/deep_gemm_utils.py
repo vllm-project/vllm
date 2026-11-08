@@ -33,10 +33,11 @@ def compute_aligned_M_and_alignment(
 ) -> tuple[int, int]:
     """Return (M_sum, alignment_used).
 
-    `alignment_used` may be smaller than the caller-supplied `alignment` on SM100/SM120
-    when DeepGEMM can JIT a smaller BLOCK_M for the per-call expected_m. Callers that
-    index by block size (e.g. `M_sum // block_m`) or assert workspace alignment must use
-    the returned `alignment_used`, not their original `alignment` argument.
+    `alignment_used` may be smaller than the caller-supplied `alignment` on
+    SM100/SM120 when DeepGEMM can JIT a smaller BLOCK_M for the per-call
+    expected_m. Callers that index by block size (e.g. `M_sum // block_m`)
+    or assert workspace alignment must use the returned `alignment_used`,
+    not their original `alignment` argument.
 
     Prefer this over the int-returning `compute_aligned_M` when the
     GEMM call site needs to wrap itself in `mk_alignment_scope` or
@@ -90,10 +91,11 @@ def compute_aligned_M(
 ) -> int:
     """Return `M_sum` only (backward-compat wrapper).
 
-    Equivalent to `compute_aligned_M_and_alignment`'s first return value. Existing
-    downstream callers and the warmup path that only size a workspace use this. Call
-    sites that need the actual per-expert alignment (to wrap GEMMs in
-    `mk_alignment_scope`) should use `compute_aligned_M_and_alignment` instead.
+    Equivalent to `compute_aligned_M_and_alignment`'s first return
+    value. Existing downstream callers and the warmup path that only size
+    a workspace use this. Call sites that need the actual per-expert
+    alignment (to wrap GEMMs in `mk_alignment_scope`) should use
+    `compute_aligned_M_and_alignment` instead.
     """
     M_sum, _ = compute_aligned_M_and_alignment(
         M, num_topk, local_num_experts, alignment, expert_tokens_meta

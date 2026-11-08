@@ -238,22 +238,25 @@ def fused_kda_chunk(
             fp32 or bf16 `[rows, H, 128, 128]`. Without
             `checkpoint_state_indices` it is a staging buffer indexed by
             sequence; with them it can be the paged state cache itself.
-        checkpoint_offsets: int32 `[N]` token offsets, each relative to its sequence's
-            first query token, at which to snapshot the recurrent state. `0` disables
-            the export for that sequence. A non-zero offset must be a multiple of
-            `KDA_CHECKPOINT_ALIGNMENT`; the kernel skips any that is not, so the
-            caller has to filter rather than rely on the store happening.
+        checkpoint_offsets: int32 `[N]` token offsets, each relative to its
+            sequence's first query token, at which to snapshot the recurrent
+            state. `0` disables the export for that sequence. A non-zero
+            offset must be a multiple of `KDA_CHECKPOINT_ALIGNMENT`;
+            the kernel skips any that is not, so the caller has to filter
+            rather than rely on the store happening.
         checkpoint_state_indices: optional int32 `[N]` destination row per
             sequence. A negative row disables the export for that sequence.
-        state_cache: the paged recurrent state, fp32 or bf16 `[slots, H, 128, 128]`.
-            When given, the walk reads sequence `n`'s initial state from row
-            `state_indices[n]` and writes its final state back to the same row, which
-            removes the gather and the scatter that otherwise bracket this kernel.
-            Replaces `initial_state` / `output_final_state`, and the returned final
+        state_cache: the paged recurrent state, fp32 or bf16
+            `[slots, H, 128, 128]`. When given, the walk reads sequence
+            `n`'s initial state from row `state_indices[n]` and writes its
+            final state back to the same row, which removes the gather and the
+            scatter that otherwise bracket this kernel. Replaces
+            `initial_state` / `output_final_state`, and the returned final
             state is then `None` because it is already in the cache.
         state_indices: int32 `[N]` cache row per sequence.
-        has_initial_state: bool `[N]`; a false entry starts that sequence from a zero
-            state and its cache row is read only, never before the walk writes it.
+        has_initial_state: bool `[N]`; a false entry starts that sequence
+            from a zero state and its cache row is read only, never before the
+            walk writes it.
 
     """
     if state_cache is not None:

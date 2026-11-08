@@ -871,13 +871,15 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     ) -> dict[str, object]:
         """Complete missing Qwen-VL size aliases.
 
-        Qwen-VL accepts `size.shortest_edge` / `min_pixels` and `size.longest_edge` /
-        `max_pixels` as equivalent controls. When only one representation is provided
-        with a non-`None` value, add the missing equivalent representation. If both are
-        already present, leave them unchanged even when their values conflict.
+        Qwen-VL accepts `size.shortest_edge` / `min_pixels` and
+        `size.longest_edge` / `max_pixels` as equivalent controls. When
+        only one representation is provided with a non-`None` value, add the
+        missing equivalent representation. If both are already present, leave
+        them unchanged even when their values conflict.
 
-        Apply this independently to the flat kwargs and to each existing `images_kwargs`
-        / `videos_kwargs` mapping. Values are not propagated between these mappings.
+        Apply this independently to the flat kwargs and to each existing
+        `images_kwargs` / `videos_kwargs` mapping. Values are not propagated
+        between these mappings.
         """
 
         def add_missing_size_aliases(
@@ -935,9 +937,10 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     ) -> dict[str, Any]:
         """Merge configured and request Qwen-VL `mm_processor_kwargs`.
 
-        Request-side `size.shortest_edge` / `min_pixels` and `size.longest_edge` /
-        `max_pixels` aliases are completed before the merge so request precedence is
-        preserved across equivalent representations.
+        Request-side `size.shortest_edge` / `min_pixels` and
+        `size.longest_edge` / `max_pixels` aliases are completed before the
+        merge so request precedence is preserved across equivalent
+        representations.
         """
         # Complete request-side Qwen-VL size aliases before merging with
         # configured kwargs.

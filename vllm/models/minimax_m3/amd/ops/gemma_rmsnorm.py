@@ -19,10 +19,11 @@ Entry points:
         -> (MXFP8 values, E8M0 scales, normed, x + res): the same, plus the
            normed rows in the input dtype for consumers that cannot take MXFP8.
 
-Both normalize over the last dim and broadcast `weight` (shape [N]) over it, so they
-serve both the full-hidden norms (input/post-attn/final) and the per-head q_norm/k_norm
-(N == head_dim). Inputs may be non-contiguous views (e.g. `qkv.split` slices); strides
-are passed through and outputs are written contiguous.
+Both normalize over the last dim and broadcast `weight` (shape [N]) over it,
+so they serve both the full-hidden norms (input/post-attn/final) and the
+per-head q_norm/k_norm (N == head_dim). Inputs may be non-contiguous views
+(e.g. `qkv.split` slices); strides are passed through and outputs are written
+contiguous.
 """
 
 from typing import Literal, overload

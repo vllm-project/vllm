@@ -440,9 +440,10 @@ def load_audio(
         max_duration_s: Reject audio longer than this many seconds.
         max_decode_bytes: Reject audio that would decode to more than this
             many bytes.
-        backend: One of `AUDIO_BACKENDS`. `None` (default) selects `"auto"`, which tries
-            torchcodec, then falls back to the soundfile → PyAV chain; the other values
-            select a single backend with no fallback.
+        backend: One of `AUDIO_BACKENDS`. `None` (default) selects
+            `"auto"`, which tries torchcodec, then falls back to the
+            soundfile → PyAV chain; the other values select a single
+            backend with no fallback.
 
     """
     backend = backend or "auto"

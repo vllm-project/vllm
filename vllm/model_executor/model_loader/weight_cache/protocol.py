@@ -171,9 +171,10 @@ def ensure_private_socket_dir(directory: str, strict_perms: bool = True) -> None
 def verify_private_dir(directory: str, strict_perms: bool = True) -> None:
     """Verify a directory is a real dir owned by us and not world/group readable.
 
-    When `strict_perms` is False the group/world permission bits are not checked; this
-    is used for directories the operator explicitly configured (they own the trust
-    decision), while the auto-derived per-user directory is always checked strictly.
+    When `strict_perms` is False the group/world permission bits are not
+    checked; this is used for directories the operator explicitly configured
+    (they own the trust decision), while the auto-derived per-user directory is
+    always checked strictly.
     """
     info = os.lstat(directory)
     if stat.S_ISLNK(info.st_mode):
@@ -485,8 +486,9 @@ def recv_json(
     Args:
         sock: Connected socket.
         max_size: Largest payload accepted.
-        deadline: `time.monotonic()` by which the whole message must have arrived; a
-            per-read timeout alone lets a peer trickle bytes forever.
+        deadline: `time.monotonic()` by which the whole message must have
+            arrived; a per-read timeout alone lets a peer trickle bytes
+            forever.
 
     """
     (length,) = _LEN_STRUCT.unpack(_recv_exact(sock, _LEN_STRUCT.size, deadline))

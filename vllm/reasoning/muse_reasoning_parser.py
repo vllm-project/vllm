@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Reasoning-content parser for Muse. Port of the `reasoning_content` rule from the
-HuggingFace Muse `MUSE_GLIMMER_RESPONSE_SCHEMA` (synced with internal master). Muse
-emits chain-of-thought in `to=self` channels delimited by `<|message|>` ... `<|eom|>`:
+"""Reasoning-content parser for Muse.
+Port of the `reasoning_content` rule from the HuggingFace Muse
+`MUSE_GLIMMER_RESPONSE_SCHEMA` (synced with internal master). Muse emits
+chain-of-thought in `to=self` channels delimited by `<|message|>` ... `<|eom|>`:
     to=self<|message|>...reasoning...<|eom|>
-Spark also routes recipient-less messages to reasoning, commentary to content, and drops
-developer messages. The Glimmer compatibility profile retains its original channel
-semantics. Because Muse's framing markers (`<|message|>`, `<|eom|>`) are not guaranteed
-to be single vocab tokens across every checkpoint's tokenizer, this parser works on the
-decoded text with regexes rather than the single start/end-token base class.
+Spark also routes recipient-less messages to reasoning, commentary to content,
+and drops developer messages. The Glimmer compatibility profile retains its
+original channel semantics.
+Because Muse's framing markers (`<|message|>`, `<|eom|>`) are not guaranteed
+to be single vocab tokens across every checkpoint's tokenizer, this parser works
+on the decoded text with regexes rather than the single start/end-token base class.
 Usage: `--reasoning-parser muse`
 """
 
@@ -162,21 +164,23 @@ class MuseReasoningParser(ReasoningParser):
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
         """Preserve Muse's ATEM framing tokens in the decoded output.
-        vLLM's serving default is `skip_special_tokens=True`, which strips `<|start|>` /
-        `<|message|>` / `<|eom|>` / `<|eot|>` before the parsers run, collapsing
-        reasoning into content and breaking channel scoping. Unlike the base tool-parser
-        hook we do NOT touch `structured_outputs` -- Muse emits native ATEM, not JSON.
+        vLLM's serving default is `skip_special_tokens=True`, which strips
+        `<|start|>` / `<|message|>` / `<|eom|>` / `<|eot|>` before the
+        parsers run, collapsing reasoning into content and breaking channel
+        scoping. Unlike the base tool-parser hook we do NOT touch
+        `structured_outputs` -- Muse emits native ATEM, not JSON.
         """
         request.skip_special_tokens = False
         return request
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """Whether the model has left reasoning and opened a TOOL channel.
-        A `to=user` answer is NOT a reason to leave the reasoning phase -- this parser
-        surfaces that content itself. Only a real tool channel switches the
-        `DelegatingParser` phase machine over to the tool parser. Both closed and
-        unterminated reasoning spans are stripped before the check, so an
-        `<atem:invoke>` the model merely echoes inside its CoT never flips the phase.
+        A `to=user` answer is NOT a reason to leave the reasoning phase -- this
+        parser surfaces that content itself. Only a real tool channel switches
+        the `DelegatingParser` phase machine over to the tool parser.
+        Both closed and unterminated reasoning spans are stripped before the
+        check, so an `<atem:invoke>` the model merely echoes inside its CoT
+        never flips the phase.
         """
         try:
             text = self.model_tokenizer.decode(input_ids)

@@ -233,11 +233,12 @@ def embed_rmsnorm(
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Fused `rmsnorm(embed_table[input_ids], weight)` row gather + norm.
 
-    Requires the full vocab on-rank (replicated or tp_size == 1). `weight=None` skips
-    the norm (`use_embed_norm=False`), leaving a pure embedding-table gather.
-    `chain_weight` additionally emits `rmsnorm(out, chain_weight)` (the first decoder
-    layer's pre-attention norm) as a second output, still one launch. Bit-exact vs the
-    unfused module sequence."""
+    Requires the full vocab on-rank (replicated or tp_size == 1).
+    `weight=None` skips the norm (`use_embed_norm=False`), leaving a pure
+    embedding-table gather.
+    `chain_weight` additionally emits `rmsnorm(out, chain_weight)` (the
+    first decoder layer's pre-attention norm) as a second output, still one
+    launch. Bit-exact vs the unfused module sequence."""
     ids = input_ids.view(-1)
     (T,) = ids.shape
     n = embed_table.shape[1]

@@ -236,9 +236,10 @@ class CudaGraphManager:
     def _build_lora_dispatch_map(self) -> tuple[dict[int, int], int]:
         """Precompute actual num_active_loras -> effective captured case.
 
-        Mirrors the num_tokens candidate expansion in `_init_candidates`: every possible
-        active-LoRA count is mapped ahead of time to the smallest captured case that can
-        serve it, so `dispatch` is a plain dict lookup instead of a per-call bisect.
+        Mirrors the num_tokens candidate expansion in `_init_candidates`:
+        every possible active-LoRA count is mapped ahead of time to the
+        smallest captured case that can serve it, so `dispatch` is a plain
+        dict lookup instead of a per-call bisect.
         """
         captured_with_lora = sorted(c for c in self.lora_capture_cases if c > 0)
         if not captured_with_lora:

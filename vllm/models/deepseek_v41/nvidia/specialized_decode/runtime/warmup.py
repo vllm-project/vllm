@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tuning and compiling the specialized decode's kernels.
 
-The model state calls `warm_up` once the executor is built, before memory profiling and
-CUDA graph capture, so no kernel compiles or tunes inside a capture. FlashInfer's tuner
-times each tactic on every TP rank and reduces the timings over the TP group, so every
-rank makes the same calls in the same order.
+The model state calls `warm_up` once the executor is built, before memory
+profiling and CUDA graph capture, so no kernel compiles or tunes inside a
+capture. FlashInfer's tuner times each tactic on every TP rank and reduces the
+timings over the TP group, so every rank makes the same calls in the same
+order.
 """
 
 from collections.abc import Iterator

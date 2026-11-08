@@ -354,14 +354,15 @@ class KVCacheManager:
     ) -> tuple[KVCacheBlocks, int, int, bool]:
         """Local prefix-cache lookup for a request scheduled with a KV connector.
 
-        Hybrid (Mamba + full-attention) models can have per-group prefix hits diverge
-        under block pressure: the full-attention tail may be evicted while a deeper
-        Mamba state survives, or vice versa. Report the full-attention hit as the local
-        prefix - the connector transfers the remaining suffix and the Mamba state is
-        transferred unconditionally by nixl's `_apply_prefix_caching` - and flag when
-        that hit ran deeper than a lagging group. Such a hit only has a valid Mamba
-        state at its boundary if the connector supplies it, so the caller must fall back
-        to `get_computed_blocks` to reconcile when no external tokens are found.
+        Hybrid (Mamba + full-attention) models can have per-group prefix hits
+        diverge under block pressure: the full-attention tail may be evicted
+        while a deeper Mamba state survives, or vice versa. Report the
+        full-attention hit as the local prefix - the connector transfers the
+        remaining suffix and the Mamba state is transferred unconditionally by
+        nixl's `_apply_prefix_caching` - and flag when that hit ran deeper
+        than a lagging group. Such a hit only has a valid Mamba state at its
+        boundary if the connector supplies it, so the caller must fall back to
+        `get_computed_blocks` to reconcile when no external tokens are found.
 
         Non-hybrid models and already-convergent hits use `get_computed_blocks`.
 
@@ -897,11 +898,12 @@ class KVCacheManager:
     ) -> dict[str, list[tuple[int, int, int]]]:
         """Drain this step's boundary-state hand-offs for a KV connector.
 
-        Returns `{request_id: [(group_id, block_id, boundary_tokens), ...]}` for mamba
-        "align" boundary states: the request's committed boundary-state snapshots and,
-        on a sub-block partial hit, the CoW copy of its last-prompt-boundary state. Only
-        mamba "align" groups contribute; empty otherwise. A connector reads the
-        referenced blocks — never resolving them positionally — and offloads them so a
+        Returns `{request_id: [(group_id, block_id, boundary_tokens), ...]}`
+        for mamba "align" boundary states: the
+        request's committed boundary-state snapshots and, on a sub-block partial
+        hit, the CoW copy of its last-prompt-boundary state. Only mamba "align"
+        groups contribute; empty otherwise. A connector reads the referenced
+        blocks — never resolving them positionally — and offloads them so a
         later request can hit that prefix.
         """
         offloads: dict[str, list[tuple[int, int, int]]] = {}

@@ -179,9 +179,10 @@ def inter_lds(s):
 
 def few_rows(s):
     """At most a pick tile of rows: a slot's picks fit one tile, so a slot is
-    a tile and the MFMAs' columns are the tokens. The route table is then expert flags
-    and each slot's top-k index a token (`kof`), and the latent's scale codes a word
-    each: none of the bitmap, the pick order or the packed codes' atomics."""
+    a tile and the MFMAs' columns are the tokens. The route table is then
+    expert flags and each slot's top-k index a token (`kof`), and the
+    latent's scale codes a word each: none of the bitmap, the pick order or
+    the packed codes' atomics."""
     return s <= PTILE
 
 
@@ -769,12 +770,13 @@ def load_route_few(c):
 @traced
 def load_route(c):
     """ROUTE -> LDS (ids, weights), then U, the experts with picks (ascending),
-    and their pick tiles: each expert's slot, each slot's expert, first pick and first
-    tile, the picks (t TOPK + k) in slot order (a slot's tokens ascending) and each
-    tile's slot. A pick ORs its token's bit into its expert's bitmap (`redi`): a slot's
-    picks are the bitmap's popcount, a pick's rank in its slot the bits below its token.
-    The bitmaps are the same whatever order the ORs land in, so every CTA lays out the
-    same table. Returns the pick tiles' count. At `few_rows`, `load_route_few`."""
+    and their pick tiles: each expert's slot, each slot's expert, first pick
+    and first tile, the picks (t TOPK + k) in slot order (a slot's tokens
+    ascending) and each tile's slot. A pick ORs its token's bit into its
+    expert's bitmap (`redi`): a slot's picks are the bitmap's popcount, a
+    pick's rank in its slot the bits below its token. The bitmaps are the same
+    whatever order the ORs land in, so every CTA lays out the same table.
+    Returns the pick tiles' count. At `few_rows`, `load_route_few`."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     if const_expr(few_rows(s)):
         return load_route_few(c)
@@ -1150,10 +1152,11 @@ def down_loads(c, rgd, nt, b0):
 @traced
 def stage_down(c, rgd, nt, ops0):
     """Latent rows 16 rgd ..: every pick tile's w2 against its picks (wave w
-    the tiles w, w + 8, ...; a batch of DOWN_BATCH in flight, the next issued under this
-    one's MFMAs; `ops0` the first, issued before INTER was waited for) -> bf16(w acc) a
-    (token, k) in LDS -> folded in top-k order with a bf16 rounding an add -> every
-    rank's LATR. INTER from LDS (`inter_lds`), else a tile's polled at its use."""
+    the tiles w, w + 8, ...; a batch of DOWN_BATCH in flight, the next issued
+    under this one's MFMAs; `ops0` the first, issued before INTER was waited
+    for) -> bf16(w acc) a (token, k) in LDS -> folded in top-k order with a
+    bf16 rounding an add -> every rank's LATR. INTER from LDS (`inter_lds`),
+    else a tile's polled at its use."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     rt = c["rt"]
     kb = lane // 16

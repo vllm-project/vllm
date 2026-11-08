@@ -237,10 +237,11 @@ class DeepGemmMegaMoEExperts(nn.Module):
     before any weight loads; a fused layer owns the shared-expert weights and
     the caller drops its shared MLP.
 
-    NVFP4 experts also take per-expert `weight_scale_2` (`w1` and `w3` must match: one
-    L1 scale per expert) and `w2` `input_scale`; the kernel quantizes every L2 input
-    with the max of the latter over all loaded experts. Dispatch uses per-token scales,
-    so `w1`/`w3` `input_scale` are not loaded.
+    NVFP4 experts also take per-expert `weight_scale_2` (`w1` and `w3`
+    must match: one L1 scale per expert) and `w2` `input_scale`; the kernel
+    quantizes every L2 input with the max of the latter over all loaded
+    experts. Dispatch uses per-token scales, so `w1`/`w3` `input_scale`
+    are not loaded.
 
     Args:
         num_experts: Physical experts across EP ranks, redundant included.

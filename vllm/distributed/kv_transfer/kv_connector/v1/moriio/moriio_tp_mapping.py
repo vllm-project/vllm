@@ -6,17 +6,19 @@ In WRITE mode every prefill (producer) rank pushes its own shard of the KV
 cache and recurrent state into the decode (consumer) ranks that need it:
 
 * consumer TP > producer TP (fan-out): producer rank `p` feeds consumer ranks
-  `p * r .. p * r + r - 1`. MLA latents and replicated KV heads are copied whole to each
-  of them; split KV heads and mamba state are sliced, and each consumer gets its slice.
+  `p * r .. p * r + r - 1`. MLA latents and replicated KV heads are copied
+  whole to each of them; split KV heads and mamba state are sliced, and each
+  consumer gets its slice.
 * producer TP > consumer TP (fan-in): consumer rank `d` is fed by producer
   ranks `d * r .. d * r + r - 1`. Split KV heads and mamba state are
   gathered: each producer writes its shard at its offset inside the consumer's
   block. Copies that would be identical (MLA, replicated heads) are written by
   one producer only.
 
-Heads follow vLLM's sharding: with `tp_size <= num_kv_heads` rank `i` holds heads
-`[i * n, (i + 1) * n)` with `n = num_kv_heads // tp_size`; with more ranks than heads
-every rank holds the single head `i * num_kv_heads // tp_size`.
+Heads follow vLLM's sharding: with `tp_size <= num_kv_heads` rank `i` holds
+heads `[i * n, (i + 1) * n)` with `n = num_kv_heads // tp_size`; with more
+ranks than heads every rank holds the single head `i * num_kv_heads //
+tp_size`.
 """
 
 from dataclasses import dataclass

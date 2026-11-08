@@ -219,11 +219,12 @@ def _copy_mamba_state_block(
     The caller owns the decision logic (which columns, whether to copy); this
     device function only performs the byte copy for the given metadata slot.
 
-    `tile_idx` in `[0, TEMPORAL_TILES)` partitions the temporal state's u64 range into
-    `TEMPORAL_TILES` contiguous, COPY_BLOCK_SIZE-aligned slices, giving more CTAs to
-    fill the SMs at small batch (multi-MiB temporal copies otherwise leave the GPU
-    under-filled). Conv states are small; only `tile_idx == 0` copies them.
-    `TEMPORAL_TILES == 1` and `tile_idx == 0` reproduces the untiled behavior.
+    `tile_idx` in `[0, TEMPORAL_TILES)` partitions the temporal state's
+    u64 range into `TEMPORAL_TILES` contiguous, COPY_BLOCK_SIZE-aligned
+    slices, giving more CTAs to fill the SMs at small batch (multi-MiB
+    temporal copies otherwise leave the GPU under-filled). Conv states are
+    small; only `tile_idx == 0` copies them. `TEMPORAL_TILES == 1` and
+    `tile_idx == 0` reproduces the untiled behavior.
     """
     state_base_addr = tl.load(state_base_addrs_ptr + state_idx)
     state_block_stride = tl.load(state_block_strides_ptr + state_idx)
@@ -1177,11 +1178,12 @@ class MambaSpecDecodeGPUContext:
         """V2 align postprocess: save the running state to the block-aligned
         position after spec-decode acceptance leaves the sequence non-aligned.
 
-        `num_accepted_tokens_gpu` is updated in place while the kernel reads from a
-        snapshot to avoid cross-program races when the accepted position stays in the
-        running block and the count is reset to 1. `new_num_computed_tokens` already
-        holds the post-step computed count (PRECOMPUTED_NEW_COMPUTED). `idx_mapping`
-        maps batch row -> req-state slot (HAS_IDX_MAPPING).
+        `num_accepted_tokens_gpu` is updated in place while the kernel reads
+        from a snapshot to avoid cross-program races when the accepted position
+        stays in the running block and the count is reset to 1.
+        `new_num_computed_tokens` already holds the post-step computed count
+        (PRECOMPUTED_NEW_COMPUTED).
+        `idx_mapping` maps batch row -> req-state slot (HAS_IDX_MAPPING).
         """
         if num_reqs == 0 or not self.is_initialized:
             return

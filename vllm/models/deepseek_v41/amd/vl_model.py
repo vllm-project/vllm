@@ -4,14 +4,16 @@
 
 Thin multimodal wrapper around the text-only `DeepseekV41LLMForCausalLM`:
 
-- `vision` ViT + `aligner` produce per-image embeddings for the IMAGE positions; three
-  learned vectors (`image_start` / `image_newline` / `image_end`) fill the delimiter
-  positions. Every image-span position carries `image_token_id` (129264) in `input_ids`;
-  the per-position roles come from the processor's `types` tensor (see
+- `vision` ViT + `aligner` produce per-image embeddings for the IMAGE
+  positions; three learned vectors (`image_start` / `image_newline` /
+  `image_end`) fill the delimiter positions. Every image-span position
+  carries `image_token_id` (129264) in `input_ids`; the per-position
+  roles come from the processor's `types` tensor (see
   `common/mm_preprocess.py`, and `common/vision.py` for the tower).
-- Merged embeddings enter the text model via `inputs_embeds`, i.e. before its
-  hyper-connection stream expansion. Raw `input_ids` still flow into the model so the
-  MoE router can apply `bias_vl` to image tokens (`requires_raw_input_tokens`).
+- Merged embeddings enter the text model via `inputs_embeds`, i.e. before
+  its hyper-connection stream expansion. Raw `input_ids` still flow into
+  the model so the MoE router can apply `bias_vl` to image tokens
+  (`requires_raw_input_tokens`).
 """
 
 from collections.abc import Iterable
@@ -126,9 +128,10 @@ class DeepseekV41ForCausalLM(
 ):
     """Multimodal entry point for DeepSeek-V4.1 checkpoints with a vision tower.
 
-    `SupportsEagle3` (aux hidden-state plumbing for MTP/DSpark drafters) delegates
-    through `language_model` via the protocol defaults. `SupportsEncoderCudaGraph` (ViT
-    CUDA graph capture/replay) is implemented by `DeepseekV4VLEncoderCudaGraphMixin`.
+    `SupportsEagle3` (aux hidden-state plumbing for MTP/DSpark drafters)
+    delegates through `language_model` via the protocol defaults.
+    `SupportsEncoderCudaGraph` (ViT CUDA graph capture/replay) is
+    implemented by `DeepseekV4VLEncoderCudaGraphMixin`.
     """
 
     supports_encoder_tp_data = True

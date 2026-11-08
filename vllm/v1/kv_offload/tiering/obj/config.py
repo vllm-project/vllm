@@ -9,9 +9,10 @@ from dataclasses import dataclass, field
 class ObjStoreConfig:
     """Connection parameters for an object store backend.
 
-    When `access_key` and `secret_key` are left empty the NIXL OBJ plugin falls back to
-    the AWS SDK default credential provider chain (IAM roles, environment variables,
-    credential files, etc.), which enables workload-identity based auth on Kubernetes.
+    When `access_key` and `secret_key` are left empty the NIXL OBJ
+    plugin falls back to the AWS SDK default credential provider chain
+    (IAM roles, environment variables, credential files, etc.), which
+    enables workload-identity based auth on Kubernetes.
     """
 
     bucket: str

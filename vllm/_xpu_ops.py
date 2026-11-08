@@ -322,24 +322,29 @@ def _xpu_fp8_bmm_impl(
     `[G, M, K] @ [G, K, N] -> [G, M, N]`.
 
     Args:
-        a: FP8 activation tensor with shape `[G, M, K]`. Does not need to be contiguous.
-        b: FP8 weight tensor with shape `[G, K, N]`. Does not need to be contiguous.
+        a: FP8 activation tensor with shape `[G, M, K]`.
+            Does not need to be contiguous.
+        b: FP8 weight tensor with shape `[G, K, N]`.
+            Does not need to be contiguous.
         out_dtype: Output dtype accepted by the kernel (typically
             `torch.bfloat16` for the DeepSeek-V4 O-proj path).
-        a_scale: Activation scale tensor for `a`. In current DeepSeek-V4 XPU usage it is
-            block-scaled with shape `[G, M, K/bs]` (`bs` is the quant block size, e.g.
-            128). Must be contiguous.
-        b_scale: Weight scale tensor for `b`. In current DeepSeek-V4 XPU usage it is
-            block-scaled with shape `[G, K/bs, N/bs]` (`bs` is the quant block size,
-            e.g. 128). Must be contiguous.
+        a_scale: Activation scale tensor for `a`.
+            In current DeepSeek-V4 XPU usage it is block-scaled with shape
+            `[G, M, K/bs]` (`bs` is the quant block size, e.g. 128).
+            Must be contiguous.
+        b_scale: Weight scale tensor for `b`.
+            In current DeepSeek-V4 XPU usage it is block-scaled with shape
+            `[G, K/bs, N/bs]` (`bs` is the quant block size, e.g. 128).
+            Must be contiguous.
         bias: Optional bias tensor. Pass `None` when no bias is required.
 
     Returns:
         Output tensor with shape `[G, M, N]` and dtype `out_dtype`.
 
     Notes:
-        This implementation centralizes access to `torch.ops._xpu_C.fp8_bmm`. Both
-        scales must be contiguous, while `a` and `b` may be non-contiguous views.
+        This implementation centralizes access to
+        `torch.ops._xpu_C.fp8_bmm`. Both scales must be contiguous, while
+        `a` and `b` may be non-contiguous views.
 
     """
     return torch.ops._xpu_C.fp8_bmm(a, b, out_dtype, a_scale, b_scale, bias)
@@ -511,8 +516,9 @@ def _xpu_deepseek_fused_indexer_q_rope_mxfp4_impl(
     index_weights_out: torch.Tensor,
 ) -> None:
     """Fused RoPE + MXFP4 quant of the DeepSeek-V4 sparse-indexer Q (XPU).
-    Writes `index_q_packed`, `index_q_scale` and `index_weights_out` in place (no
-    return). Requires head_dim=128, rope_dim=64, and num_heads divisible by 4.
+    Writes `index_q_packed`, `index_q_scale` and `index_weights_out` in
+    place (no return). Requires head_dim=128, rope_dim=64, and num_heads
+    divisible by 4.
 
     Args:
         index_q: (T, H, 128) bfloat16 Q before RoPE. Contiguous.

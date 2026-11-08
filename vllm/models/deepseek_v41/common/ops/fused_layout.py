@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Weight permutations for FlashMLA's mega-attention kernel.
 
-The kernel reads Q with 16-element head-dim chunks interleaved across heads and writes O
-with 32-element chunks interleaved across the 8 heads of a `wo_a` group. Every
-permutation here satisfies `fused = standard[perm]`, and is applied once to `wq_b` rows
-and `wo_a` columns at load time so the surrounding GEMMs produce and consume the
-kernel's layouts directly -- no per-step shuffle.
+The kernel reads Q with 16-element head-dim chunks interleaved across heads and
+writes O with 32-element chunks interleaved across the 8 heads of a `wo_a`
+group. Every permutation here satisfies `fused = standard[perm]`, and is
+applied once to `wq_b` rows and `wo_a` columns at load time so the
+surrounding GEMMs produce and consume the kernel's layouts directly -- no
+per-step shuffle.
 """
 
 import torch

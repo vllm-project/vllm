@@ -223,11 +223,12 @@ def xp_at(r, h, k, lane):
 @traced
 def q_split(c, rows, at):
     """The CTA's bf16 Q rows (slot 1: `[row][ENTRY]`) -> E4M3 hi, lo of q 2^k
-    (a power of two a row: its |max| in [128, 256)): hi + lo is q exactly, bf16's 8 bits
-    E4M3's 4 + 4 (lo q - hi, a multiple of hi's ulp / 16; but below 2^-9 of 2^k: 2^-17
-    of the row's |max|). At dword `at`: `[hi | lo][row][ENTRY]` bytes, the tail chunk's
-    also at `qt`; a row's 2^-k at `xm` + row. A row 16 threads, 4 latents a unit
-    (`tid % 16` + 16 i)."""
+    (a power of two a row: its |max| in [128, 256)): hi + lo is q exactly,
+    bf16's 8 bits E4M3's 4 + 4 (lo q - hi, a multiple of hi's ulp / 16; but
+    below 2^-9 of 2^k: 2^-17 of the row's |max|). At dword `at`:
+    `[hi | lo][row][ENTRY]` bytes, the tail chunk's also at `qt`; a row's
+    2^-k at `xm` + row. A row 16 threads, 4 latents a unit (`tid % 16` +
+    16 i)."""
     tid = c["tid"]
     rr = tid // 16
     if rr < rows:
@@ -387,9 +388,10 @@ def dma_offs(c, idx):
 
 def k_dma(c, b, offs, ps=None, tile=None):
     """Block b's K tile of this wave (or `tile`; `dma_offs`) -> slot
-    b % 2: a DMA a chunk (64 lanes x 16 B: line s's 8 tokens, the tail's 16). Inline
-    asm: LLVM's own wait for an LDS DMA would hold this block's slot reads for the next
-    block's DMA too; `vmwait` / `wait_dma` are the only waits."""
+    b % 2: a DMA a chunk (64 lanes x 16 B: line s's 8 tokens, the tail's 16).
+    Inline asm: LLVM's own wait for an LDS DMA would hold this block's slot
+    reads for the next block's DMA too; `vmwait` / `wait_dma` are the only
+    waits."""
     ps = range(KLOADS) if ps is None else ps
     tile = c["wave"] if tile is None else tile
     dst = c["ks_b"] + ((b % 2) * SLOT + tile * TILEW) * 4
@@ -426,9 +428,10 @@ def k_dma(c, b, offs, ps=None, tile=None):
 
 def lds_dma(src, dst):
     """A global_load_lds_dwordx4: lane i's 16 B at `src` -> LDS byte
-    `dst` (uniform) + 16 i. (Every LDS DMA here an `s_nop` between its M0 write and the
-    load: right after the write the load could read a stale M0, the warp-specialized
-    waves' K / index DMAs then landing in another slot: nondeterministic outputs.)"""
+    `dst` (uniform) + 16 i. (Every LDS DMA here an `s_nop` between its M0
+    write and the load: right after the write the load could read a stale M0,
+    the warp-specialized waves' K / index DMAs then landing in another slot:
+    nondeterministic outputs.)"""
     llvm.inline_asm(
         None,
         [as_ir_value(fx.Int64(src)), as_ir_value(uniform(dst))],

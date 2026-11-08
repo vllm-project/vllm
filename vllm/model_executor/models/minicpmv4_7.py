@@ -567,10 +567,11 @@ def _compute_canvas_packed(
     def _group_end_pos(g, s_end):
         """First position after a group's trailing structural tokens.
 
-        Matches the transformers reference, which closes a span over every marker in
-        `markers` -- newlines included. The chat template joins content parts with
-        `\\n`, so an image followed by text always ends with one; leaving it out moves
-        that newline out of the canvas and pushes every later position one step forward.
+        Matches the transformers reference, which closes a span over every
+        marker in `markers` -- newlines included. The chat template joins
+        content parts with `\\n`, so an image followed by text always ends with
+        one; leaving it out moves that newline out of the canvas and pushes
+        every later position one step forward.
         """
         le = g["slices"][-1][1] if g["slices"] else g["thumbnail"][1]
         ge = le

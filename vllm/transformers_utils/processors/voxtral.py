@@ -68,7 +68,8 @@ class MistralCommonFeatureExtractor(SequenceFeatureExtractor):
 
         * `np.ndarray` / `torch.Tensor` — returned as-is.
         * `list[float]` — returned as-is (a single audio sample).
-        * `str` URL or path — delegated to `transformers.audio_utils.load_audio`.
+        * `str` URL or path — delegated to
+          `transformers.audio_utils.load_audio`.
         * `list` of any of the above — recursed element-wise.
 
         `ProcessorMixin.prepare_inputs_layout` always passes already-decoded

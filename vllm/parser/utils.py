@@ -70,8 +70,9 @@ _JSON_WS = " \t\r\n"
 
 def scan_json_object_end(raw: str, start: int) -> int | None:
     """Return the end index (exclusive) of the JSON object starting at
-    `raw[start]` (which must be `{`), or `None` when it is still unterminated. String-
-    and escape-aware so braces inside strings do not mislead the depth count."""
+    `raw[start]` (which must be `{`), or `None` when it is still
+    unterminated. String- and escape-aware so braces inside strings do not
+    mislead the depth count."""
     depth = 0
     in_string = False
     escape = False
@@ -101,14 +102,15 @@ def extract_json_member_object(raw: str, key: str) -> str | None:
     """Extract the raw text span of the top-level object-valued member `key`
     from a (possibly incomplete) `{...}` JSON wrapper.
 
-    Returns the verbatim substring (prefix-stable as the input grows, which the engine's
-    argument-delta diffing relies on), possibly an unterminated object prefix; `None`
-    when the value has not started. Raises `ValueError` when the member is present but
-    its value is not a JSON object. A verbatim substring (not re-serialized JSON) is
-    required because the engine diffs successive converter outputs and expects each to
-    extend the previous one; the scanner is string/escape-aware so a matching literal
-    inside another value cannot mislead it, and it recovers a partial span when the
-    wrapper is truncated (where `json.loads` would fail)."""
+    Returns the verbatim substring (prefix-stable as the input grows, which
+    the engine's argument-delta diffing relies on), possibly an unterminated
+    object prefix; `None` when the value has not started. Raises
+    `ValueError` when the member is present but its value is not a JSON
+    object. A verbatim substring (not re-serialized JSON) is required because
+    the engine diffs successive converter outputs and expects each to extend
+    the previous one; the scanner is string/escape-aware so a matching literal
+    inside another value cannot mislead it, and it recovers a partial span when
+    the wrapper is truncated (where `json.loads` would fail)."""
     depth = 0
     in_string = False
     escape = False

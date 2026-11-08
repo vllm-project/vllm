@@ -168,9 +168,10 @@ def verify_group_size_divides_partition(
 def is_weak_contiguous(inp: torch.Tensor) -> bool:
     """Check that *inp* occupies a single contiguous block of memory.
 
-    Unlike `torch.Tensor.is_contiguous()`, this also accepts tensors whose strides are
-    not strictly C-contiguous (e.g. column-major) as long as the underlying storage from
-    the tensor's offset onward is exactly `numel * element_size` bytes.
+    Unlike `torch.Tensor.is_contiguous()`, this also accepts tensors
+    whose strides are not strictly C-contiguous (e.g. column-major) as
+    long as the underlying storage from the tensor's offset onward is
+    exactly `numel * element_size` bytes.
     """
     return inp.is_contiguous() or (
         inp.storage().nbytes() - inp.storage_offset() * inp.element_size()
@@ -741,9 +742,10 @@ def stateless_init_torch_distributed_process_group(
     always formed with process 1, 2, ..., 8, and the additional communication
     channel is formed with process 9 and 10.
 
-    When *listen_socket* is provided, the rendezvous step is skipped and a `TCPStore`
-    server is created directly using the pre-bound socket. This is useful for
-    eliminating TOCTOU races between port allocation and binding.
+    When *listen_socket* is provided, the rendezvous step
+    is skipped and a `TCPStore` server is created directly using the
+    pre-bound socket.  This is useful for eliminating TOCTOU races
+    between port allocation and binding.
 
     If *timeout* is None, use PyTorch's default for the backend.
     """

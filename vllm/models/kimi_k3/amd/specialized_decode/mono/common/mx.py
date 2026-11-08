@@ -75,7 +75,8 @@ def fp4_tile_load(r_w, base, rg, k, st, at):
 
 def mfma_scaled(a, b, c, sa, sb, a_fmt=FP8, b_fmt=FP8, sa_byte=0, sb_byte=0):
     """One 16x16x128 scaled MFMA (gfx950 f8f6f4): A `a` (`a_fmt`) with E8M0
-    `sa` (its byte `sa_byte`), B `b` (`b_fmt`) with E8M0 `sb` (its byte `sb_byte`)."""
+    `sa` (its byte `sa_byte`), B `b` (`b_fmt`) with E8M0 `sb` (its
+    byte `sb_byte`)."""
     return fx.Vector(
         rocdl.mfma_scale_f32_16x16x128_f8f6f4(
             T.vec(4, T.f32), [a, b, c, a_fmt, b_fmt, sa_byte, sa, sb_byte, sb]

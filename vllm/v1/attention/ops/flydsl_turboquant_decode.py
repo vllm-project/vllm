@@ -127,12 +127,13 @@ def _detect_max_capture_B() -> int:
 class _SegmBufPool:
     """Single-bucket buffer pool for segm_out/segm_max/segm_sum/output.
 
-    Each unique shape signature (Hk, Hq, num_partitions, QG, D, device, dtype) is backed
-    by ONE allocation sized at `max_B` (= max captured cudagraph batch size, or env
-    override). Per-call `get(B, ...)` returns `[:B]` views — same data_ptr base,
-    narrower N dim. The kernel grid is `(B, ...)` so it only ever writes the first B
-    rows of segm_out / segm_max / segm_sum; downstream readers (Triton reducer + caller)
-    only consume the first B rows of output.
+    Each unique shape signature (Hk, Hq, num_partitions, QG, D, device,
+    dtype) is backed by ONE allocation sized at `max_B` (= max captured
+    cudagraph batch size, or env override). Per-call `get(B, ...)`
+    returns `[:B]` views — same data_ptr base, narrower N dim. The
+    kernel grid is `(B, ...)` so it only ever writes the first B rows
+    of segm_out / segm_max / segm_sum; downstream readers (Triton
+    reducer + caller) only consume the first B rows of output.
 
     Why a single bucket: cudagraph records launch pointers at capture
     time. With per-B allocations, every captured size triggered a fresh
@@ -142,11 +143,12 @@ class _SegmBufPool:
     calls. The data_ptr is stable from first allocation onward, so
     cudagraph capture is happy across all captured B's.
 
-    Eliminates per-decode-step `cudaMalloc` (× 4) plus the device-side memset kernels
-    behind `torch.full(-inf)` and `torch.zeros`. The kernel always writes the FULL
-    `[B, Hk, P, QG, D]` slice and every (n, kv_h, p, qg) position of segm_max / segm_sum
-    (it stores `-inf` and `0` for empty partitions itself), so uninitialized bytes from
-    the pool are safe to reuse for any B ≤ B_bucket.
+    Eliminates per-decode-step `cudaMalloc` (× 4) plus the device-side
+    memset kernels behind `torch.full(-inf)` and `torch.zeros`.
+    The kernel always writes the FULL `[B, Hk, P, QG, D]` slice and
+    every (n, kv_h, p, qg) position of segm_max / segm_sum (it stores
+    `-inf` and `0` for empty partitions itself), so uninitialized
+    bytes from the pool are safe to reuse for any B ≤ B_bucket.
     """
 
     __slots__ = ("_bufs", "_max_B")

@@ -466,9 +466,10 @@ class SingleTypeKVCacheManager(ABC):
     ) -> None:
         """Redirect a partial prefix-cache hit to a private CoW block.
 
-        Both copy endpoints stay retained until the copy has run on the worker, so a
-        same-step free cannot recycle them: `source_block` keeps its hit-ref,
-        `cow_block` takes an extra ref beyond the one handed to the request.
+        Both copy endpoints stay retained until the copy has run on the worker,
+        so a same-step free cannot recycle them: `source_block` keeps its
+        hit-ref, `cow_block` takes an extra ref beyond the one handed to the
+        request.
         """
         req_blocks = self.req_to_blocks[request_id]
         assert block_idx < len(req_blocks)

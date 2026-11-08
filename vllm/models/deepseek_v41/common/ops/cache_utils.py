@@ -684,8 +684,9 @@ def dequantize_and_gather_k_cache(
 ) -> None:
     """Dequantize and gather a paged DSv4 K cache.
 
-    The record is read off `k_cache.shape[-1]`; see the module header. Only the fp8
-    records have a CuteDSL gather, so NVFP4 always takes the Triton path.
+    The record is read off `k_cache.shape[-1]`; see the module header. Only
+    the fp8 records have a CuteDSL gather, so NVFP4 always takes the Triton
+    path.
 
     `use_fnuz` MUST match the encoder of the specific cache being read:
     `False` for `compressed_k_cache` (Triton encoder is OCP everywhere),
@@ -897,8 +898,9 @@ _COMBINE_TOPK_SWA_POINTER_INPUTS = zip_inputs(
 def _combine_topk_swa_warmup_inputs(vllm_config: Any) -> _WarmupInputRows:
     """One warmup row per v4.1 layer type (compress ratio) in the model.
 
-    Every layer slices the shared `index_topk`-wide indices buffer, so the padded width
-    is the same for all rows; SWA-only layers (ratio 0) pass `TOP_K=0`.
+    Every layer slices the shared `index_topk`-wide indices buffer, so the
+    padded width is the same for all rows; SWA-only layers (ratio 0) pass
+    `TOP_K=0`.
     """
     hf_config = vllm_config.model_config.hf_config
     compress_ratios = get_compress_ratios(hf_config) or [0]

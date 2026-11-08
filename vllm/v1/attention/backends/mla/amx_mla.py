@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """AMX-only, high-performance MLA backend for DeepSeek V2/V3/R1 on CPU.
 
-Built on the AMX decode/extend/bmm kernels vendored under `csrc/cpu/sgl-kernels/`,
-plugged into vLLM's `MLACommonBackend`/ `MLACommonImpl` abstraction the same way every
-other concrete MLA backend (`TritonMLAImpl`, etc.) does.
+Built on the AMX decode/extend/bmm kernels vendored under
+`csrc/cpu/sgl-kernels/`, plugged into vLLM's `MLACommonBackend`/
+`MLACommonImpl` abstraction the same way every other concrete MLA backend
+(`TritonMLAImpl`, etc.) does.
 
 This is a separate backend from the reference `CPUMLABackend`
 (`vllm/v1/attention/backends/mla/cpu_mla.py`): that one targets every CPU
@@ -17,20 +18,23 @@ whenever the host supports it -- see `CpuPlatform.get_attn_backend_cls`.
 Two points where this backend differs structurally from the GPU backends,
 both explained in the CPU MLA design plan:
 
-- `forward_mha` is fully overridden (not inherited from `MLACommonBaseImpl`): the GPU
-  "compute-friendly" prefill path depends on a pluggable `MLAPrefillBackend` and
-  CUDA-only chunked-context gather ops, neither of which exist on CPU. Instead, this
-  attends directly in latent-MQA space via the `extend_attention_cpu` kernel, which
-  handles cached-prefix continuation and fresh prefill in one causal pass (the KV cache
-  already contains the new tokens by the time this runs, since `do_kv_cache_update`
-  executes first).
-- Weight absorption for the prefill path is done with this impl's own VNNI-packed copies
-  of `W_UK`/`W_UV` (computed in `process_weights_after_loading`, using `bmm_cpu`),
-  rather than reading the generic `layer.W_UK_T`/`layer.W_UV`/`layer._v_up_proj` the way
-  GPU backends do, since `forward_mha`'s abstract signature has no `layer` parameter
-  (only `forward_mqa` does) and that signature is left untouched. The decode path needs
-  no such packing: `MLAAttention.forward_impl` already absorbs/de-absorbs Q around the
-  `forward_mqa` call using the generic (unpacked) `layer.W_UK_T`/`layer._v_up_proj`, so
+- `forward_mha` is fully overridden (not inherited from
+  `MLACommonBaseImpl`): the GPU "compute-friendly" prefill path depends on
+  a pluggable `MLAPrefillBackend` and CUDA-only chunked-context gather ops,
+  neither of which exist on CPU. Instead, this attends directly in
+  latent-MQA space via the `extend_attention_cpu` kernel, which handles
+  cached-prefix continuation and fresh prefill in one causal pass (the KV
+  cache already contains the new tokens by the time this runs, since
+  `do_kv_cache_update` executes first).
+- Weight absorption for the prefill path is done with this impl's own
+  VNNI-packed copies of `W_UK`/`W_UV` (computed in
+  `process_weights_after_loading`, using `bmm_cpu`), rather than reading
+  the generic `layer.W_UK_T`/`layer.W_UV`/`layer._v_up_proj` the way
+  GPU backends do, since `forward_mha`'s abstract signature has no
+  `layer` parameter (only `forward_mqa` does) and that signature is left
+  untouched. The decode path needs no such packing: `MLAAttention.forward_impl`
+  already absorbs/de-absorbs Q around the `forward_mqa` call using the
+  generic (unpacked) `layer.W_UK_T`/`layer._v_up_proj`, so
   `forward_mqa` here only has to invoke the decode kernel.
 """
 

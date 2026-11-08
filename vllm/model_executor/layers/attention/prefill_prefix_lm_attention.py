@@ -24,9 +24,10 @@ class PrefillPrefixLMAttention(Attention):
     Effect by phase:
     - Prefill: query tokens attend to each other bidirectionally -- this is
       where the Prefix LM (non-causal) behavior actually takes effect.
-    - Single-token decode: `causal=False` is a no-op. The one new query attends to the
-      whole (frozen) KV cache exactly as a causal decode would, and cached tokens cannot
-      attend back to it, so the output is identical to a causal decoder.
+    - Single-token decode: `causal=False` is a no-op. The one new query
+      attends to the whole (frozen) KV cache exactly as a causal decode
+      would, and cached tokens cannot attend back to it, so the output is
+      identical to a causal decoder.
     """
 
     def __init__(

@@ -531,11 +531,12 @@ class PoolsideV1ToolParser(ToolParser):
 
         Returns (formatted_prefix, parsed_dict) or None on failure.
 
-        Note: `partial_json_parser` strips trailing whitespace before parsing
-        (`complete.py:20`), which means the returned slice is shorter than `json_prefix`
-        when it has trailing whitespace. Since the parser controls the construction of
-        the json_prefix value, this code relies on it being a valid prefix and we only
-        use the fix for the completion of the JSON object.
+        Note: `partial_json_parser` strips trailing whitespace before
+        parsing (`complete.py:20`), which means the returned slice is
+        shorter than `json_prefix` when it has trailing whitespace.
+        Since the parser controls the construction of the json_prefix value,
+        this code relies on it being a valid prefix and we only use the fix for
+        the completion of the JSON object.
         """
         try:
             _, partial_str_completion = partial_json_parser.core.complete.fix(

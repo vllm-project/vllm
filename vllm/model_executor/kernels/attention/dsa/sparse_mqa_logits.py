@@ -3,11 +3,12 @@
 """DeepGEMM sparse MQA-logits path for the DeepSeek V4.1 two-level indexer.
 
 The candidate-source indexer publishes the top candidate blocks (in units of
-`candidate_block_size` compressed positions). Instead of scoring every KV position and
-masking the dense logits down to those blocks, this path scores only the candidate
-tokens with DeepGEMM's sparse MQA logits kernels (`fp8_fp4_(paged_)sparse_mqa_logits`,
-DeepGEMM >= 2.8, SM100 only), runs DeepSelect's top-k directly on the bf16 logits they
-produce, and remaps the selected columns back to request-local positions.
+`candidate_block_size` compressed positions). Instead of scoring every KV
+position and masking the dense logits down to those blocks, this path scores
+only the candidate tokens with DeepGEMM's sparse MQA logits kernels
+(`fp8_fp4_(paged_)sparse_mqa_logits`, DeepGEMM >= 2.8, SM100 only), runs
+DeepSelect's top-k directly on the bf16 logits they produce, and remaps the
+selected columns back to request-local positions.
 
 The kernels take UE8M0-packed (granularity-32) Q/KV scales, which both
 indexer caches provide on SM100: MXFP4 stores them natively, and the FP8 cache
@@ -94,10 +95,11 @@ def _expand_candidates_kernel(
 ):
     """One program per row: expand + filter + sort candidate blocks.
 
-    Each row's valid sparse blocks come out sorted ascending (no dedup pass: production
-    candidates are unique, and the kernel tolerates repeats), padded by repeating the
-    last valid block — DeepGEMM's padding convention. `end` counts valid sparse-token
-    columns; valid columns form a prefix because block ids are sorted.
+    Each row's valid sparse blocks come out sorted ascending (no dedup pass:
+    production candidates are unique, and the kernel tolerates repeats),
+    padded by repeating the last valid block — DeepGEMM's padding convention.
+    `end` counts valid sparse-token columns; valid columns form a prefix
+    because block ids are sorted.
     """
     row = tl.program_id(0)
     ks = tl.load(ks_ptr + row * ks_stride)
@@ -196,7 +198,8 @@ def candidate_blocks_to_sparse_indices(
         row_ks: [rows] int32 per-row K range start; bounds are in the same
             (packed-workspace) coordinates the sparse kernel iterates over.
             Pass zeros for the paged path, whose blocks are context-relative.
-        row_ke: [rows] int32 per-row K range end, in the same coordinates as `row_ks`.
+        row_ke: [rows] int32 per-row K range end, in the same coordinates as
+            `row_ks`.
         candidate_block_size: Positions per candidate block.
         sparse_block_kv: Positions per sparse block (8 or 16).
         out: Optional `(sparse_indices, end)` buffers to write into,
@@ -266,12 +269,14 @@ def sparse_topk_remap(
 ) -> None:
     """Row top-k over sparse logits, remapped to request-local positions.
 
-    Column `j * sparse_block_kv + o` of `logits` scores the token at request-local
-    position `(sparse_indices[row, j] - ks // sparse_block_kv) * sparse_block_kv + o`.
+    Column `j * sparse_block_kv + o` of `logits` scores the token at
+    request-local position
+    `(sparse_indices[row, j] - ks // sparse_block_kv) * sparse_block_kv + o`.
 
-    DeepSelect consumes the bf16 logits as they come out of the sparse kernels; the
-    valid columns form a prefix (block ids are sorted), so the per-row `end` bounds
-    drive it directly. Slots beyond a row's valid count come back as -1.
+    DeepSelect consumes the bf16 logits as they come out of the sparse
+    kernels; the valid columns form a prefix (block ids are sorted), so the
+    per-row `end` bounds drive it directly. Slots beyond a row's valid
+    count come back as -1.
 
     Args:
         logits: [rows, width] bf16 sparse logits, as produced by the sparse

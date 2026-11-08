@@ -336,7 +336,8 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build the combined sparse-index tensors for the mixed batch.
 
-        Returns `(compressed_kv_cache, seq_lens, sparse_indices, sparse_topk_lens)`.
+        Returns `(compressed_kv_cache, seq_lens, sparse_indices,
+        sparse_topk_lens)`.
         """
         num_decodes = swa_metadata.num_decodes
         num_prefills = swa_metadata.num_prefills

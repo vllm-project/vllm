@@ -206,7 +206,8 @@ def _resolve_gdn_prefill_backend(
 
     In-tree CuteDSL GDN prefill kernel is chosen when:
     * "cutedsl" is requested; (opt-in only)
-    * Blackwell (SM10.x or SM11.x) with `head_k_dim == 128`, `cuda_runtime >= 13`;
+    * Blackwell (SM10.x or SM11.x) with `head_k_dim == 128`,
+      `cuda_runtime >= 13`;
 
     AITER FlyDSL GDN prefill kernels are chosen when:
     * "aiter_flydsl" is requested, or "auto" is requested on gfx942/gfx950;
@@ -1203,10 +1204,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def rearrange_mixed_qkv(self, mixed_qkv):
         """Split packed qkv into contiguous (1, seq, heads, dim) tensors.
 
-        The original code used `rearrange(x, "l (h d) -> 1 l h d", d=...)` followed by
-        `.contiguous()` on each tensor. This version flattens all three splits into a
-        single buffer via `torch.cat` so that torch.compile emits one Triton copy kernel
-        instead of three separate contiguous() calls.
+        The original code used `rearrange(x, "l (h d) -> 1 l h d", d=...)`
+        followed by `.contiguous()` on each tensor.  This version flattens
+        all three splits into a single buffer via `torch.cat` so that
+        torch.compile emits one Triton copy kernel instead of three separate
+        contiguous() calls.
         """
         if mixed_qkv is None:
             return None, None, None
@@ -1515,17 +1517,19 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
         """Warm up GDN prefill kernels during V1 profiling.
 
-        During V1 profile runs, `_forward_core` returns early because `attn_metadata` is
-        `None`, so the autotuned kernels used by `chunk_gated_delta_rule` (e.g.
-        `solve_tril`, `chunk_scaled_dot_kkt`) are never invoked. After profiling, vLLM
-        allocates KV cache using most of the remaining GPU memory. When the first real
-        inference triggers the autotuner it OOMs because there is not enough memory left
-        for benchmarking.
+        During V1 profile runs, `_forward_core` returns early because
+        `attn_metadata` is `None`, so the autotuned kernels used by
+        `chunk_gated_delta_rule` (e.g. `solve_tril`,
+        `chunk_scaled_dot_kkt`) are never invoked.  After profiling,
+        vLLM allocates KV cache using most of the remaining GPU memory.
+        When the first real inference triggers the autotuner it OOMs
+        because there is not enough memory left for benchmarking.
 
-        This method runs minimal forward passes through `chunk_gated_delta_rule` with
-        small dummy tensors to force autotuning while GPU memory is still plentiful. The
-        autotuner results are cached globally, so only the first layer incurs actual
-        benchmarking cost.
+        This method runs minimal forward passes through
+        `chunk_gated_delta_rule` with small dummy tensors to force
+        autotuning while GPU memory is still plentiful.  The autotuner
+        results are cached globally, so only the first layer incurs
+        actual benchmarking cost.
 
         All kernels including `chunk_fwd_kernel_o` now use a fixed
         `BT = chunk_size` (64).  A single warmup pass with T = 64
@@ -2126,8 +2130,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """FlashInfer chunked prefill of the batch's prefill rows.
 
-        Writes the output into `output` when given and exports the batch's internal
-        prefill checkpoints. Returns the output and the rows' final states.
+        Writes the output into `output` when given and exports the
+        batch's internal prefill checkpoints. Returns the output and the
+        rows' final states.
         """
         has_initial_state = attn_metadata.prefill_has_initial_state
         state_indices = attn_metadata.prefill_state_indices

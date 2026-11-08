@@ -580,9 +580,10 @@ def _strip_claude_code_billing_header(
 ) -> list[ChatCompletionContentPartParam]:
     """Drop Claude Code's attribution header line from system text parts.
 
-    Its `cch` value changes on every request, so a prompt that keeps it misses the
-    prefix cache from the header on. Gateways that translate Anthropic requests to chat
-    completions keep it; `/v1/messages` drops the same block.
+    Its `cch` value changes on every request, so a prompt that keeps it
+    misses the prefix cache from the header on. Gateways that translate
+    Anthropic requests to chat completions keep it; `/v1/messages` drops
+    the same block.
     """
     out: list[ChatCompletionContentPartParam] = []
     for part in parts:

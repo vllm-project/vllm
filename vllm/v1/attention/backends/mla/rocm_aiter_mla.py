@@ -99,11 +99,12 @@ def _segmented_mla_page_size(block_size: int) -> int:
     """Largest supported power-of-two subpage dividing a physical KV block.
 
     The subpage size becomes the segmented kernel's `TILE_SIZE`: the cache is
-    reinterpreted as `(-1, page_size, 1, head_dim)` before the call. It must divide the
-    physical block and be a power of two, since the kernel walks a tile with
-    `tl.arange(0, TILE_SIZE)`. 128 is the largest tile that tiling supports -- a tile
-    holds `TILE_SIZE x kv_lora_rank` keys and its scores are `BLOCK_M x TILE_SIZE` -- so
-    a larger manager block is split into several subpages instead of widening the tile.
+    reinterpreted as `(-1, page_size, 1, head_dim)` before the call. It must
+    divide the physical block and be a power of two, since the kernel walks a
+    tile with `tl.arange(0, TILE_SIZE)`. 128 is the largest tile that tiling
+    supports -- a tile holds `TILE_SIZE x kv_lora_rank` keys and its scores
+    are `BLOCK_M x TILE_SIZE` -- so a larger manager block is split into
+    several subpages instead of widening the tile.
     """
     assert block_size > 0
     return min(128, largest_power_of_2_divisor(block_size))
@@ -358,10 +359,11 @@ def _aiter_mla_non_causal_asm_kernels() -> bool:
 def _gluon_mla_decode_supported() -> bool:
     """The small-head Gluon MLA decode kernel only has a gfx950 (CDNA4) build.
 
-    Its tiling needs ~160 KiB of LDS, which exceeds CDNA3's 64 KiB, so on gfx942 there
-    is no kernel to fall through to and selecting it asserts
-    (`mla_gluon requires gfx950`). Restrict Gluon decode to gfx950; other archs use the
-    asm persistent decode, which `get_mla_padded_q` makes correct for any 1..15 heads.
+    Its tiling needs ~160 KiB of LDS, which exceeds CDNA3's 64 KiB, so on
+    gfx942 there is no kernel to fall through to and selecting it asserts
+    (`mla_gluon requires gfx950`). Restrict Gluon decode to gfx950; other
+    archs use the asm persistent decode, which `get_mla_padded_q` makes
+    correct for any 1..15 heads.
     """
     try:
         from vllm.platforms.rocm import on_gfx950
@@ -654,9 +656,10 @@ def _aiter_mla_small_head_mode() -> str:
 
     Controlled by `VLLM_ROCM_AITER_MLA_ASM_PADDING`:
 
-    - `"auto"` (default): let the arch decide -- divisor head counts keep the Gluon
-      decode where a build exists (gfx950), everything else (non-divisor counts and all
-      counts on gfx942) uses the padded persistent-scheduling ASM decode.
+    - `"auto"` (default): let the arch decide -- divisor head counts keep the
+      Gluon decode where a build exists (gfx950), everything else (non-divisor
+      counts and all counts on gfx942) uses the padded persistent-scheduling
+      ASM decode.
     - `"gluon"`: prefer the Gluon path wherever a build exists.
     - `"asm"`: force the padded persistent-scheduling ASM decode.
 
@@ -1596,8 +1599,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     ) -> None:
         """Build per-batch FP8 MLA prefill PS metadata and attach to *metadata*.
 
-        Called from `build()` when prefill tokens are present and FP8 MLA prefill is
-        enabled (auto-detected via `_fp8_mla_prefill_supported()`).
+        Called from `build()` when prefill tokens are present and
+        FP8 MLA prefill is enabled (auto-detected via
+        `_fp8_mla_prefill_supported()`).
         """
         from aiter import get_ps_metadata_v1
 
@@ -2587,11 +2591,12 @@ class AiterMLAHelper:
     ) -> bool:
         """Whether a small-head multi-token verify uses native Gluon MTP.
 
-        bf16 has no gqa<16, qseqlen>1 asm kernel, so verify goes through `mla_gluon`'s
-        4-D MTP entry (`q` shaped `[batch, qlen, nhead, dim]`) with `use_2d_view=False`.
-        fp8 has one via the q-row fold and must not come here: the MTP path hands Gluon
-        the batch size its fp8 regime asserts against. A predicate rather than inline in
-        forward_mqa so the builder sees the same answer the impl acts on.
+        bf16 has no gqa<16, qseqlen>1 asm kernel, so verify goes through
+        `mla_gluon`'s 4-D MTP entry (`q` shaped `[batch, qlen, nhead, dim]`)
+        with `use_2d_view=False`. fp8 has one via the q-row fold and must not
+        come here: the MTP path hands Gluon the batch size its fp8 regime
+        asserts against. A predicate rather than inline in forward_mqa so the
+        builder sees the same answer the impl acts on.
 
         DCP verify is excluded: its per-row causal windows are served by the
         segmented path, which Gluon's MTP entry cannot express.
@@ -2999,10 +3004,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     ) -> None:
         """Run FP8 MLA prefill via mla_prefill_ps_asm_fwd + mla_reduce_v1.
 
-        Q, K, V are already decompressed (post-kv_b_proj), so K and V have `num_heads`
-        heads (same as Q) and gqa_ratio=1. Writes the result in-place to `out`, which is
-        the [total_q, nhead * v_head_dim] output buffer supplied by `forward_mha`; no
-        extra allocation or copy is required.
+        Q, K, V are already decompressed (post-kv_b_proj), so K and V have
+        `num_heads` heads (same as Q) and gqa_ratio=1.  Writes the
+        result in-place to `out`, which is the [total_q, nhead * v_head_dim]
+        output buffer supplied by `forward_mha`; no extra allocation or
+        copy is required.
         """
         from vllm.platforms import current_platform
         from vllm.v1.worker.workspace import current_workspace_manager

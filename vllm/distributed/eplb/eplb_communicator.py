@@ -637,10 +637,11 @@ class NixlEplbCommunicator(EplbCommunicator):
     def _post_read_barrier(self) -> None:
         """Correctness fence: prevents overwrite-while-remote-read race.
 
-        We avoid `torch.distributed.monitored_barrier` because it calls
-        `get_backend(group)` which fails for stateless groups (elastic EP). An async
-        `all_reduce` + `wait(timeout)` works with both regular and stateless groups and
-        provides equivalent timeout detection.
+        We avoid `torch.distributed.monitored_barrier` because it
+        calls `get_backend(group)` which fails for stateless groups
+        (elastic EP).  An async `all_reduce` + `wait(timeout)`
+        works with both regular and stateless groups and provides
+        equivalent timeout detection.
         """
         _dummy = torch.zeros(1, dtype=torch.int32)
         work = torch.distributed.all_reduce(
@@ -737,9 +738,10 @@ class PyNcclEplbCommunicator(EplbCommunicator):
 class SymmMemEplbCommunicator(EplbCommunicator):
     """Push expert rows into peers' receive buffers over symmetric memory.
 
-    Senders copy from their live weights into the receiver's `expert_buffer` row, which
-    every rank derives from the global placements; `execute` is collective. CPU barriers
-    only: GPU spin barriers can deadlock MegaMoE cooperative launches.
+    Senders copy from their live weights into the receiver's `expert_buffer`
+    row, which every rank derives from the global placements; `execute` is
+    collective. CPU barriers only: GPU spin barriers can deadlock MegaMoE
+    cooperative launches.
     """
 
     def __init__(
@@ -857,17 +859,21 @@ def create_eplb_communicator(
     Args:
         group_coordinator: Process-group coordinator that provides the
             device and CPU communication groups.
-        backend: Communicator backend name (`"torch_nccl"`, `"torch_gloo"`, `"pynccl"`,
-            `"nixl"`, or `"symm_mem"`). Falls back to `"torch_nccl"` when *None*.
-            Stateless (elastic EP) groups support `"torch_nccl"`, `"pynccl"`, and
-            `"nixl"`; `"torch_nccl"` is silently promoted to `"pynccl"`. When tensors
-            reside on CPU, `"torch_gloo"` or `"torch_nccl"` are used via the CPU process
-            group.
-        expert_weights: Expert weight tensors for *all* MoE layers. Shape
-            `(num_layers)(num_tensors_per_layer)`. NixlEplbCommunicator registers all
-            layers with NIXL for zero-copy RDMA reads.
-        expert_buffer: Pre-allocated receive buffer tensors (one per weight tensor in a
-            single layer). `symm_mem` ignores it and uses its own `owned_expert_buffer`.
+        backend: Communicator backend name (`"torch_nccl"`,
+            `"torch_gloo"`, `"pynccl"`, `"nixl"`, or `"symm_mem"`).
+            Falls back to `"torch_nccl"` when *None*.
+            Stateless (elastic EP) groups support `"torch_nccl"`,
+            `"pynccl"`, and `"nixl"`; `"torch_nccl"` is silently
+            promoted to `"pynccl"`.  When tensors reside on CPU,
+            `"torch_gloo"` or
+            `"torch_nccl"` are used via the CPU process group.
+        expert_weights: Expert weight tensors for *all* MoE layers.
+            Shape `(num_layers)(num_tensors_per_layer)`.
+            NixlEplbCommunicator registers all layers with NIXL for
+            zero-copy RDMA reads.
+        expert_buffer: Pre-allocated receive buffer tensors (one per
+            weight tensor in a single layer). `symm_mem` ignores it and
+            uses its own `owned_expert_buffer`.
 
     """
     first_layer = expert_weights[0] if expert_weights else []

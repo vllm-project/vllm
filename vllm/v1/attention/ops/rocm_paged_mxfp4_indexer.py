@@ -666,8 +666,9 @@ def rocm_mxfp4_sparse_attn_indexer(
     candidate_write: bool = False,
 ) -> torch.Tensor:
     """Dense indexer: every layer that scores the whole context, the
-    candidate source included. With `candidate_blocks` and not `candidate_write` the
-    scores are masked to the pool first, as the shared path does.
+    candidate source included. With `candidate_blocks` and not
+    `candidate_write` the scores are masked to the pool first, as the
+    shared path does.
 
     The model supplies `q_values` [T, H, D // 2] packed e2m1, `q_scale`
     holding each head's D // 32 ue8m0 bytes (one int32 per head at D = 128),

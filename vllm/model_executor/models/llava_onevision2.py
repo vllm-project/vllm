@@ -8,7 +8,8 @@ Architecture notes:
   * Vision tower removes the CLS token (no class_embedding/class_pos_emb).
   * Vision RoPE is 3-D (T:H:W) with a 4:6:6 head_dim split and uses
     `patch_positions` instead of grid_thw to compute per-token freqs.
-  * `rotate_half` is *interleaved* (`(::2, 1::2)`) rather than split-half.
+  * `rotate_half` is *interleaved* (`(::2, 1::2)`) rather than
+    split-half.
   * Vision attention uses windowed `cu_seqlens` (`frame_windows_size`
     in T-dim); two backends implemented (SDPA + flash_attn varlen).
   * `patch_positions: [total_patches, 3]` is plumbed as a first-class
@@ -208,12 +209,13 @@ def _pack_timestamps(per_video: list[list[float]]) -> torch.Tensor:
 def _validate_video_source(path: str, model_config) -> str:
     """Confine a codec video path to `--allowed-local-media-path`.
 
-    The codec backend keeps the raw path string alive past vLLM's `MultiModalDataParser`
-    and hands it to the trust-remote-code codec module, which opens it directly via
-    `cv2.VideoCapture` / ffmpeg. That bypasses both `MediaConnector`'s access controls
-    and its redirect handling (`VLLM_MEDIA_URL_ALLOW_REDIRECTS`), so we restrict the
-    codec backend to **local files only**: remote `http(s)` / `data` URLs are rejected
-    here and must instead go through the frame backend (a registered
+    The codec backend keeps the raw path string alive past vLLM's
+    `MultiModalDataParser` and hands it to the trust-remote-code codec
+    module, which opens it directly via `cv2.VideoCapture` / ffmpeg. That
+    bypasses both `MediaConnector`'s access controls and its redirect
+    handling (`VLLM_MEDIA_URL_ALLOW_REDIRECTS`), so we restrict the codec
+    backend to **local files only**: remote `http(s)` / `data` URLs are
+    rejected here and must instead go through the frame backend (a registered
     `VIDEO_LOADER_REGISTRY` loader), which rides vLLM's connector and its
     domain/redirect gates.
 
@@ -564,7 +566,8 @@ def _expand_video_markers_in_prompt(
     sequence of `<{t:.Nf} seconds><|vision_start|><|image_pad|><|vision_end|>`
     blocks -- one per frame -- matching `vllm_hf_chat._build_prompt`.
 
-    Replacement is positional: the *i*-th marker consumes `per_video_timestamps[i]`.
+    Replacement is positional: the *i*-th marker consumes
+    `per_video_timestamps[i]`.
     """
     parts: list[str] = []
     cursor = 0
@@ -738,9 +741,10 @@ class LlavaOnevision2InputsByModality(TypedDict, total=False):
 class LlavaOnevision2VisionRotaryEmbedding(nn.Module):
     """3-D rotary frequency constructor with 4:6:6 (T:H:W) split.
 
-    Mirrors `VisionRotaryEmbedding` in the HF reference (`modeling_llava_onevision2.py`
-    L79-L210). The three `inv_freq_*` buffers are non-persistent — they are *not* in the
-    checkpoint and must be reconstructed at module init time (which we do here).
+    Mirrors `VisionRotaryEmbedding` in the HF reference
+    (`modeling_llava_onevision2.py` L79-L210). The three `inv_freq_*`
+    buffers are non-persistent — they are *not* in the checkpoint and must
+    be reconstructed at module init time (which we do here).
 
     Public entry points used by the vision tower:
       * `forward_from_positions(patch_positions)` — per-patch (t,h,w)
@@ -2015,9 +2019,10 @@ class LlavaOnevision2ForConditionalGeneration(
       mirror HF names verbatim, so no substring rules are needed. Substring
       rules would otherwise collide with the Qwen3 text-path `self_attn`
       modules and break the language-model loader.
-        `model.language_model.` → `language_model.model.` `model.visual.` → `visual.`
-        `lm_head.` → `language_model.lm_head.` `model.` (fallback) →
-        `language_model.model.`
+        `model.language_model.`        → `language_model.model.`
+        `model.visual.`                → `visual.`
+        `lm_head.`                     → `language_model.lm_head.`
+        `model.` (fallback)            → `language_model.model.`
     """
 
     hf_to_vllm_mapper = WeightsMapper(

@@ -25,11 +25,12 @@ AMM) and AMDGPUUsage "Execution Barriers":
   previous launch's writes to the location are ordered before it by the
   kernel boundary).
 
-The av operations are lowered with the agent-scope cache bits (`sc1`) and the av-none
-fences to waits only, so no L2 write-back or invalidate is emitted. The GFX942 workgroup
-release waits `lgkmcnt(0)` only outside tgsplit mode, so a publishing CTA also has every
-wave wait for its own stores before the barrier (`cta_sync(drain=True)`). The step-end
-fault handshake uses plain system release / acquire once a step.
+The av operations are lowered with the agent-scope cache bits (`sc1`) and
+the av-none fences to waits only, so no L2 write-back or invalidate is
+emitted. The GFX942 workgroup release waits `lgkmcnt(0)` only outside
+tgsplit mode, so a publishing CTA also has every wave wait for its own stores
+before the barrier (`cta_sync(drain=True)`). The step-end fault handshake
+uses plain system release / acquire once a step.
 
 A poll gives up after `ticks` of the 100 MHz clock or once any rank has set
 the error word; a timeout sets `[1, rank, epoch, site]` on every rank.
@@ -287,8 +288,9 @@ class Mailbox:
 
     def poll(self, specs, batch=POLL_MAX, site=0, triples=False):
         """Pairs `specs` = [(Addr, pair index, npairs in {1, 2})], all of one
-        space, re-loaded together until every tag is this launch's. Returns the value
-        words; `triples`: of triple pairs (`put_triple`), both words."""
+        space, re-loaded together until every tag is this launch's. Returns the
+        value words; `triples`: of triple pairs (`put_triple`), both
+        words."""
         if const_expr(len(specs) == 0):
             return []
         if const_expr(len(specs) > batch):

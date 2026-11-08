@@ -436,15 +436,16 @@ class WaveMoeTail(MoeTail):
     warps (TP16: two sets taking alternate groups) run two seven-step BF16 MMA chains
     per 8-token group, and each 64-row output line has one owner CTA and one multicast
     writer. Past one group (and at TP16) each cluster instead all-reduces every seventh
-    token of its slices once and shares them as BF16 rows through `reduced`, so all 112
-    CTAs must be co-resident; RS lines spread over warp pairs, every group's RMS sums
-    travel as one vector per peer, all groups normalize before any MMA, the groups' MMA
-    chains interleave per K step, and the previous layer's rows are re-armed after the
-    output multicast. `twoshot` (B9+): the latent mailbox is this rank's
-    `common.twoshot` receive slots [3, TP, capacity, 3584/TP] (pushed by the experts),
-    the CTAs of its owned slices reduce them like TP16 but multicast the rows into every
-    rank's `reduced` (the gather; its multicast address replaces the latent one), so
-    each GPU receives 2 x B x 7 KB of latent instead of TP x B x 7 KB."""
+    token of its slices once and shares them as BF16 rows through `reduced`, so all
+    112 CTAs must be co-resident; RS lines spread over warp pairs, every group's RMS
+    sums travel as one vector per peer, all groups normalize before any MMA, the
+    groups' MMA chains interleave per K step, and the previous layer's rows are
+    re-armed after the output multicast. `twoshot` (B9+): the latent
+    mailbox is this rank's `common.twoshot` receive slots [3, TP, capacity, 3584/TP]
+    (pushed by the experts), the CTAs of its owned slices reduce them like TP16 but
+    multicast the rows into every rank's `reduced` (the gather; its multicast
+    address replaces the latent one), so each GPU receives 2 x B x 7 KB of latent
+    instead of TP x B x 7 KB."""
 
     threads, options = 256, dict(min_blocks_per_mp=1)
 

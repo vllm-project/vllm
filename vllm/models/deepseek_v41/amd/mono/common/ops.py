@@ -16,11 +16,12 @@ and aiter's vendored `buffer_ops` / `dpp_utils` are used.
 
 Every function but `kernel_symbol` is traced inside a `@flyc.kernel` body.
 
-Raw boundaries kept, for want of an equivalent on the pinned FlyDSL: `buffer_ops` loads
-/ stores (the kernels take raw Int64 addresses, no tensors for `make_buffer_tensor`);
-raw MFMA intrinsics (hand-laid operands: permlane transposes, fp8 packing, MXFP4
-scales); the LLVM intrinsics here (`expect`, `s_memrealtime`, the approximate rsq / rcp
-/ exp2) and the struct unpacking of `permlane*_swap`.
+Raw boundaries kept, for want of an equivalent on the pinned FlyDSL:
+`buffer_ops` loads / stores (the kernels take raw Int64 addresses, no tensors
+for `make_buffer_tensor`); raw MFMA intrinsics (hand-laid operands: permlane
+transposes, fp8 packing, MXFP4 scales); the LLVM intrinsics here (`expect`,
+`s_memrealtime`, the approximate rsq / rcp / exp2) and the struct unpacking of
+`permlane*_swap`.
 
 Also the TP group seen from inside a kernel (every rank's peer buffer, an
 all-reduce's rank-ordered sum) and a timeline build's phase stamps."""

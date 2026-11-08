@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CuteDSL BF16x3 router GEMM for Hopper (SM90).
 
-Computes fp32 `x @ w.T` for bf16 `x` [M, K] and fp32 router weights `w` [E, K]. The MMA
-warpgroup splits each fp32 weight fragment into three bf16 terms in registers and issues
-register-A wgmma with experts as the MMA M dimension. The first term accumulates per
-K-tile and is promoted into an fp32 register accumulator; the other two accumulate
-across K. Split-K reduces in rank order over the cluster's distributed shared memory.
+Computes fp32 `x @ w.T` for bf16 `x` [M, K] and fp32 router weights `w`
+[E, K]. The MMA warpgroup splits each fp32 weight fragment into three bf16
+terms in registers and issues register-A wgmma with experts as the MMA M
+dimension. The first term accumulates per K-tile and is promoted into an fp32
+register accumulator; the other two accumulate across K. Split-K reduces in
+rank order over the cluster's distributed shared memory.
 """
 
 import math

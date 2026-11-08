@@ -41,12 +41,13 @@ def build_per_request_timing_metrics(
 ) -> PerRequestMetrics:
     """Build per-request timing metrics from `RequestStateStats`.
 
-    `generation_time_ms` is the decode interval only (first output token to last output
-    token); it excludes both queue wait and prefill/TTFT. `tokens_per_second` is overall
-    output throughput: all generated tokens over the inference interval (scheduling to
-    last output token), so it counts the prefill/TTFT phase and is not simply the
-    reciprocal of `mean_itl_ms`. Each field is left `None` when the timestamps it
-    depends on are unavailable.
+    `generation_time_ms` is the decode interval only (first output token to
+    last output token); it excludes both queue wait and prefill/TTFT.
+    `tokens_per_second` is overall output throughput: all generated tokens
+    over the inference interval (scheduling to last output token), so it counts
+    the prefill/TTFT phase and is not simply the reciprocal of `mean_itl_ms`.
+    Each field is left `None` when the timestamps it depends on are
+    unavailable.
     """
     if metrics is None:
         return PerRequestMetrics()
@@ -93,7 +94,8 @@ def build_spec_decoding_metrics(
     final_res: "RequestOutput | None",
 ) -> SpeculativeDecodingMetrics | None:
     """Build per-request spec-decode acceptance metrics from the single output
-    sequence, or `None` when unavailable (metrics disabled, or no sequence yet).
+    sequence, or `None` when unavailable (metrics disabled, or no sequence
+    yet).
 
     Only meaningful for single-sequence requests; callers suppress it for n>1.
     """
@@ -344,9 +346,10 @@ def completion_top_logprobs_limit(
     logprobs: int | None, return_all: bool = False
 ) -> int | None:
     """How many of a position's logprob candidates `/v1/completions` returns:
-    the first `logprobs + 1` (the OpenAI completions convention), and all of them
-    (`None`) for `logprobs=-1`, `logprob_token_ids` (`return_all`) or when `logprobs` is
-    unset. Shared with completions derender so the two cannot drift."""
+    the first `logprobs + 1` (the OpenAI completions convention), and all of
+    them (`None`) for `logprobs=-1`, `logprob_token_ids` (`return_all`)
+    or when `logprobs` is unset. Shared with completions derender so the two
+    cannot drift."""
     if return_all or logprobs is None or logprobs == -1:
         return None
     return max(logprobs + 1, 0)

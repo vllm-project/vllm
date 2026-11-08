@@ -769,7 +769,8 @@ def run_kda_projection_overlap(
 
     Args:
         hidden_states: Packed BF16 input with shape `[M, 7168]`.
-        packed_weight: Existing Q/K/V/G/F_A/beta/pad weight with shape `[6288, 7168]`.
+        packed_weight: Existing Q/K/V/G/F_A/beta/pad weight with shape
+            `[6288, 7168]`.
         f_b_weight: F_B weight with shape `[1536, 128]`.
         aux_stream: Stream for the F_A/beta then F_B branch.
         events: Start and completion events for the stream fork and join.

@@ -6,9 +6,10 @@
 """The mono layer's MoE stages: one layer's FFN, from the FFN seam's normed rows
 to the reduced output (its TP all-reduce in-kernel, `allreduce`).
 
-One launch a layer and rank, `BLOCKS` x `THREADS`, S = `tokens` rows, E = 384 routed
-experts, top-6. The rank holds every routed expert's 1/TP of the intermediate width
-(TP-sharded MoE) and the shared expert's 1/TP (`Dims`). Stages, with TP8's task counts:
+One launch a layer and rank, `BLOCKS` x `THREADS`, S = `tokens` rows,
+E = 384 routed experts, top-6. The rank holds every routed expert's 1/TP of the
+intermediate width (TP-sharded MoE) and the shared expert's 1/TP (`Dims`).
+Stages, with TP8's task counts:
 
     xq      (S): the row as MXFP8 for the routed experts (aiter
             ``fused_mx_quant_moe_sort``: amax seeded 1e-10) and for the shared
@@ -318,12 +319,13 @@ def put_mxfp8_group_vllm(c, words_mb, codes_mb, t, g, v, amax):
 @traced
 def stage_router(c, task):
     """Router task (token group, row tile, K part): K part `part` of rows
-    16 `tile` .. of the bf16 gate weight [experts, hidden] times the group's tokens
-    (`RouteShape.router_groups`), a token tile at a time -- the decode router's tile
-    (`router`), the same tiles in the same order -> the part's f32 sum (`route` sums the
-    parts in order, rounds to bf16). Every tile's x loads issue first: a task over every
-    token's tiles in series read their x serially (48 rows: a router CTA 9 us, 8 of them
-    x)."""
+    16 `tile` .. of the bf16 gate weight [experts, hidden] times the group's
+    tokens (`RouteShape.router_groups`), a token tile at a time -- the
+    decode router's tile (`router`), the
+    same tiles in the same order -> the part's f32 sum (`route` sums the
+    parts in order, rounds to bf16). Every tile's x loads issue first: a task
+    over every token's tiles in series read their x serially (48 rows: a router
+    CTA 9 us, 8 of them x)."""
     s, tid, red, lane, wave = c["S"], c["tid"], c["red"], c["lane"], c["wave"]
     a = c["args"]
     experts = c["rs"].experts
@@ -414,8 +416,9 @@ def stage_route(c, t):
 
 def _hash_picks(c, t, logits):
     """A hash layer's picks of token t: lane k < topk's expert, given (the
-    bias argument holds the step's [S, topk] ids), and its score from the logits (expert
-    e's on lane e % 64, `logits[e // 64]`); the scores' sum in top-k order."""
+    bias argument holds the step's [S, topk] ids), and its score from the
+    logits (expert e's on lane e % 64, `logits[e // 64]`); the scores' sum
+    in top-k order."""
     lane, topk = c["lane"], c["rs"].topk
     eid = fx.Int32(
         bo.buffer_load(
@@ -954,10 +957,11 @@ def stage_ug(c, task):
 
 def ug_wave_pair(c, part0):
     """This wave's share of an ug task from group `part0`: group p of its
-    `ug_groups` (wave / (2 slices)), its 16-column half bb = wave % 2 -- w13's gate tile
-    2 b and up tile 2 b + 1 (aiter GUGU interleaves them a 16-row tile; b = 2 (part0 +
-    p) + bb), one 32-row scale block -- over K slice ks = wave / 2 % slices
-    (`gemv_fp4_pair`): (p, 2 b, ks, whether the group is in the real width)."""
+    `ug_groups` (wave / (2 slices)), its 16-column half bb = wave % 2 -- w13's
+    gate tile 2 b and up tile 2 b + 1 (aiter GUGU interleaves them a 16-row
+    tile; b = 2 (part0 + p) + bb), one 32-row scale block -- over K slice ks =
+    wave / 2 % slices (`gemv_fp4_pair`): (p, 2 b, ks, whether the group is in
+    the real width)."""
     wave, slices = c["wave"], c["rs"].ug_k_slices
     p = wave // (2 * slices)
     b = (part0 + p) * 2 + wave % 2

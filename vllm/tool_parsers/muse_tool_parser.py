@@ -17,10 +17,11 @@ Muse emits tool calls in an XML-ish ATEM format inside channel-scoped messages:
         </atem:function_calls><|eom|>            # non-final call
     <|start|>assistant to=user<|message|>...final answer...<|eot|>
 
-`to=commentary` messages are user-visible updates between tool calls, and like `to=user`
-messages they are content; `to=developer` messages are dropped. Channel scoping is
-essential: an `<atem:invoke>` echoed inside a `to=self` reasoning block or a `to=user`
-final answer must NOT be parsed as a real tool call.
+`to=commentary` messages are user-visible updates between tool calls, and
+like `to=user` messages they are content; `to=developer` messages are
+dropped. Channel scoping is essential: an `<atem:invoke>` echoed inside a
+`to=self` reasoning block or a `to=user` final answer must NOT be parsed as
+a real tool call.
 
 Rather than *subtracting* reasoning/answer spans with regex substitutions (the
 approach the HF `response_schema` uses, which is safe only on a complete,
@@ -121,10 +122,11 @@ def _iter_messages(text: str) -> Iterator[tuple[str | None, str, bool]]:
     `None` for a bare `<|message|>` header and `closed` is False for a
     message that has not (yet) seen `<|eom|>` / `<|eot|>`.
 
-    A message is also terminated by the start of the NEXT header. Without that, a
-    reasoning block whose `<|eom|>` is missing (truncation, or a chunk dropped at the
-    reasoning -> tool transition) would absorb the tool-call message that follows it and
-    the call would be lost -- the same defect the subtractive regexes have.
+    A message is also terminated by the start of the NEXT header. Without that,
+    a reasoning block whose `<|eom|>` is missing (truncation, or a chunk
+    dropped at the reasoning -> tool transition) would absorb the tool-call
+    message that follows it and the call would be lost -- the same defect the
+    subtractive regexes have.
     """
     pos = 0
     while pos < len(text):
@@ -213,13 +215,14 @@ class MuseToolParser(ToolParser):
     ) -> ChatCompletionRequest | ResponsesRequest:
         """Force special tokens through, and keep JSON guided decoding off.
 
-        `skip_special_tokens` defaults to True on both ChatCompletionRequest and
-        ResponsesRequest. Every rule in this parser keys off `<|message|>` / `<|eom|>` /
-        `<|eot|>` / `<|start|>`, so with the default the channel framing is stripped
-        before we see it: message segmentation finds nothing, reasoning-channel invokes
-        are indistinguishable from real ones, and the raw ATEM markup falls through to
-        the client as content. Set it unconditionally and FIRST -- not only for tools
-        requests, and not relying on the reasoning parser to have set it.
+        `skip_special_tokens` defaults to True on both ChatCompletionRequest
+        and ResponsesRequest. Every rule in this parser keys off `<|message|>`
+        / `<|eom|>` / `<|eot|>` / `<|start|>`, so with the default the
+        channel framing is stripped before we see it: message segmentation
+        finds nothing, reasoning-channel invokes are indistinguishable from real
+        ones, and the raw ATEM markup falls through to the client as content.
+        Set it unconditionally and FIRST -- not only for tools requests, and not
+        relying on the reasoning parser to have set it.
 
         For required/named `tool_choice` the base hook installs a JSON schema
         constraint (ToolParser.adjust_request -> get_json_schema_from_tools).
@@ -328,10 +331,11 @@ class MuseToolParser(ToolParser):
     def _normalize_name(emitted: str, registered: set[str]) -> str:
         """Map an emitted ATEM invoke name back to a registered tool name.
 
-        When a client registers a BARE name (e.g. `get_weather`) the shipped chat
-        template renders the valid recipient as `"get_weather.*"`, and the model duly
-        emits `get_weather.get_weather`. Collapsing that doubled form is safe: head and
-        tail are identical and the collapsed name is registered.
+        When a client registers a BARE name (e.g. `get_weather`) the shipped
+        chat template renders the valid recipient as `"get_weather.*"`, and
+        the model duly emits `get_weather.get_weather`. Collapsing that
+        doubled form is safe: head and tail are identical and the collapsed
+        name is registered.
 
         Anything else is passed through unchanged. Matching on the trailing
         segment alone is NOT safe -- an emitted `weather.get` against a

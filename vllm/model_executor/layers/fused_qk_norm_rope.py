@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused QK-RMSNorm + (partial) RoPE + gate copy Triton kernel.
 
-Currently used by the Qwen3.5 attention path (`attn_output_gate` with NeoX-style partial
-RoPE). The unfused reference sequence is `split -> GemmaRMSNorm -> RoPE -> gate chunk`;
-this collapses it into a single Triton launch. See `fused_qk_rmsnorm_rope_gate`.
+Currently used by the Qwen3.5 attention path (`attn_output_gate` with
+NeoX-style partial RoPE). The unfused reference sequence is
+`split -> GemmaRMSNorm -> RoPE -> gate chunk`; this collapses it into a
+single Triton launch. See `fused_qk_rmsnorm_rope_gate`.
 """
 
 import torch

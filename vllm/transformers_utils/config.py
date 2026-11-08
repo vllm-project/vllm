@@ -254,11 +254,12 @@ def _install_hf_config_validator(
 ) -> None:
     """Replace a `PreTrainedConfig` validator on every `@strict` snapshot.
 
-    `@strict` snapshots each `validate_*` method into `__class_validators__` at class
-    creation and automatic post-`__init__` validation dispatches off that frozen list,
-    so assigning the class attribute alone only affects explicit `config.validate_*()`
-    calls. Every `@strict`-decorated config class owns a snapshot, so rewrite them all,
-    matching `supersedes` by identity to leave a genuine per-model override in place.
+    `@strict` snapshots each `validate_*` method into `__class_validators__`
+    at class creation and automatic post-`__init__` validation dispatches off
+    that frozen list, so assigning the class attribute alone only affects
+    explicit `config.validate_*()` calls. Every `@strict`-decorated config
+    class owns a snapshot, so rewrite them all, matching `supersedes` by
+    identity to leave a genuine per-model override in place.
     """
     setattr(PreTrainedConfig, name, validator)
 

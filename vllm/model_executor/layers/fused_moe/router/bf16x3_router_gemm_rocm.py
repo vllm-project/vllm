@@ -46,8 +46,9 @@ def split_bf16x3(weight: torch.Tensor) -> torch.Tensor:
     round-to-nearest bf16 terms carry 24 mantissa bits, matching fp32's 24, so
     the reconstruction is bit-exact for finite normals down to `2**-108`.
 
-    Raises ValueError on non-finite input: `inf` rounds to bf16 `inf` and `inf - inf` is
-    NaN, which would poison every logit rather than just the affected experts.
+    Raises ValueError on non-finite input: `inf` rounds to bf16 `inf` and
+    `inf - inf` is NaN, which would poison every logit rather than just the
+    affected experts.
     """
     if weight.dtype != torch.float32:
         raise ValueError(f"expected fp32 weight, got {weight.dtype}")

@@ -68,10 +68,11 @@ else:
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
     """Merged projection with multiple replicated output shards.
 
-    Extends K3's `_KimiGDNMergedColumnParallelLinear` to support two replicated shards
-    (f_a, g_a) instead of one. Pre-multiplies each replicated entry's output_size by
-    tp_size so the per-rank shard divides back to the full size, and forces tp_rank=0
-    during weight loading for replicated shards.
+    Extends K3's `_KimiGDNMergedColumnParallelLinear` to support two
+    replicated shards (f_a, g_a) instead of one. Pre-multiplies each
+    replicated entry's output_size by tp_size so the per-rank shard
+    divides back to the full size, and forces tp_rank=0 during weight
+    loading for replicated shards.
     """
 
     def __init__(
@@ -412,10 +413,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         recurrent_state: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Fused KDA chunked prefill (FlashKDA). Takes the raw gate logits `g`
-        and raw `beta` logits, l2-normalizes q/k in-kernel and applies the bounded gate
-        `lower_bound * sigmoid(exp(A_log) * (g + dt_bias))`, matching
-        `chunk_kda_with_fused_gate(..., safe_gate=True)`. Writes the attention output
-        into `out` (a workspace buffer when `None`) and returns `(out, final_state)`."""
+        and raw `beta` logits, l2-normalizes q/k in-kernel and applies the
+        bounded gate `lower_bound * sigmoid(exp(A_log) * (g + dt_bias))`,
+        matching `chunk_kda_with_fused_gate(..., safe_gate=True)`. Writes the
+        attention output into `out` (a workspace buffer when `None`) and
+        returns `(out, final_state)`."""
         assert self._flashkda_buffer_specs is not None
         final_state, checkpoint_state, workspace, workspace_out = (
             current_workspace_manager().get_simultaneous(*self._flashkda_buffer_specs)

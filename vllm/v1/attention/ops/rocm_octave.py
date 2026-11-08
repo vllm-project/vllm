@@ -13,11 +13,12 @@ whole; K has two layouts:
   whole head lets them share the 3-bit budget.
 * V: sign flips plus one Hadamard transform over all dims, `v_bits` codes.
 
-The rotated coordinates are close to Gaussian, so each code indexes a Lloyd-Max codebook
-for N(0, 1), stored as int8 (`LUT`): a code `c` of a block with scale `s` stands for
-`LUT[c] * s / LUT_ONE`. The scale makes `x . x_hat = |x|^2`: a least-squares fit would
-shrink every reconstructed vector, which flattens the softmax and scales down the
-attention output. Everything is computed on the fly; there is no calibration.
+The rotated coordinates are close to Gaussian, so each code indexes a
+Lloyd-Max codebook for N(0, 1), stored as int8 (`LUT`): a code `c` of a
+block with scale `s` stands for `LUT[c] * s / LUT_ONE`. The scale makes
+`x . x_hat = |x|^2`: a least-squares fit would shrink every reconstructed
+vector, which flattens the softmax and scales down the attention output.
+Everything is computed on the fly; there is no calibration.
 
 Scores are computed in the rotated space (the query is rotated like K) and
 the attention output is rotated back once per query head.
@@ -364,8 +365,9 @@ def reference_attention(
 ) -> torch.Tensor:
     """Per-query-token attention over a Octave paged cache.
 
-    query: (Q, Hq, D). cache: (num_blocks, Hkv, block_size, slot) uint8. Query token i
-    attends to the first `q_to_klen[i]` tokens of request `q_to_req[i]`.
+    query: (Q, Hq, D). cache: (num_blocks, Hkv, block_size, slot) uint8.
+    Query token i attends to the first `q_to_klen[i]` tokens of request
+    `q_to_req[i]`.
     """
     num_q, hq, d = query.shape
     _, hkv, block_size, _ = cache.shape

@@ -422,9 +422,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def drain_jobs(self) -> None:
         """Block until every submitted transfer has completed or failed.
 
-        nixl exposes only `check_xfer_state` (poll-based), so this loops until
-        `_transfers` is empty. Results accumulate in `_pending_results` and are surfaced
-        by the next `get_finished_jobs()` call.
+        nixl exposes only `check_xfer_state` (poll-based), so this loops
+        until `_transfers` is empty. Results accumulate in
+        `_pending_results` and are surfaced by the next
+        `get_finished_jobs()` call.
         """
         start = time.monotonic()
         warned = False
