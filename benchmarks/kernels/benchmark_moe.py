@@ -918,6 +918,12 @@ def get_model_params(config):
         topk = text_config.top_k_experts
         intermediate_size = text_config.moe_intermediate_size
         hidden_size = text_config.hidden_size
+    elif architecture == "Glm5NextForConditionalGeneration":
+        text_config = config.get_text_config()
+        E = text_config.n_routed_experts
+        topk = text_config.num_experts_per_tok
+        intermediate_size = text_config.moe_intermediate_size
+        hidden_size = text_config.hidden_size
     elif architecture == "HunYuanMoEV1ForCausalLM":
         E = config.num_experts
         topk = config.moe_topk[0]
