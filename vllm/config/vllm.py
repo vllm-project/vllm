@@ -122,7 +122,7 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "KimiLinearForCausalLM",
         "MiniMaxM3SparseForCausalLM",
         "MiniMaxM3SparseForConditionalGeneration",
-        "MuseSpark1xForCausalLM",
+        "MuseSparkForCausalLM",
         "MuseSparkForConditionalGeneration",
         "Qwen4ExpForCausalLM",
         "Qwen4ExpForConditionalGeneration",
@@ -3190,6 +3190,7 @@ class VllmConfig:
         may pick a different runner, and must not revisit the decision.
         """
         from vllm.platforms import current_platform
+        from vllm.utils.vmm_driver import imex_channel_available
 
         cache_config = self.cache_config
         if cache_config._extensible_kv_cache_resolved:
@@ -3241,10 +3242,29 @@ class VllmConfig:
                 "on ROCm, UCX and RDMA cannot yet register driver-mapped memory, "
                 "which the NIXL, Mooncake, MoRIIO and UMBP connectors require"
             )
+        # NIXL within a host reaches driver-mapped memory through a FABRIC handle.
+        nixl_would_use_tcp = (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.uses_nixl_on_device_memory()
+            and not imex_channel_available()
+        )
         if requested is None:
-            cache_config.enable_extensible_kv_cache = unsupported is None
+            cache_config.enable_extensible_kv_cache = (
+                unsupported is None and not nixl_would_use_tcp
+            )
+            if unsupported is None and nixl_would_use_tcp:
+                logger.info(
+                    "Extensible KV cache off: without an IMEX channel, NIXL within "
+                    "a host would lose NVLink and fall back to RDMA or TCP. If "
+                    "transfers only cross hosts, pass --enable-extensible-kv-cache."
+                )
         elif requested and unsupported is not None:
             raise ValueError(f"enable_extensible_kv_cache: {unsupported}.")
+        elif requested and nixl_would_use_tcp:
+            logger.warning(
+                "No IMEX channel: with the extensible KV cache, NIXL within a host "
+                "falls back to TCP. Transfers across hosts use RDMA."
+            )
 
     def _validate_adaptive_verification(self) -> None:
         spec_config = self.speculative_config
@@ -3452,7 +3472,7 @@ class VllmConfig:
         """Resolve the NIXL P/D DCP interleave from the global KV cache groups.
 
         Called once by the engine core before profiling; workers only assign the
-        result via ``set_kv_cache_layout``.
+        result via `set_kv_cache_layout`.
         """
         if (
             not kv_cache_groups
