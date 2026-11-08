@@ -1260,7 +1260,6 @@ def _build_mtp_model(
         "draft_model_config": SimpleNamespace(**draft_model_config),
         "method": "mtp",
         "speculator_config": SimpleNamespace(speculator_class="MTP"),
-        "parallel_drafting": False,
         "enable_adaptive_verification": False,
         "use_dspark": lambda: False,
         "use_multi_module_mtp": lambda: False,
