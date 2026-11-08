@@ -90,17 +90,17 @@ from __future__ import annotations
 
 import copy
 import json
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from vllm.config import VllmConfig
-from vllm.entrypoints.chat_utils import (
+from vllm.logger import init_logger
+from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.logger import init_logger
 from vllm.tokenizers.hf import HfTokenizer
 from vllm.utils.async_utils import make_async
 
@@ -116,7 +116,7 @@ _DEFAULT_FORMAT = "cmd4"
 _VALID_FORMATS = ("cmd3", "cmd4")
 
 
-class MelodyContentType(str, Enum):
+class MelodyContentType(StrEnum):
     """Wire-format discriminator for melody content blocks.
 
     These strings are what the cmd3 / cmd4 Jinja templates check against
@@ -165,7 +165,7 @@ POSITION_TO_SOURCE_KEY = "_position_to_source"
 # melody-shape content list the renderer emits.
 #
 # Motivation: OpenAI's ``ChatCompletionContentPartParam`` union (in
-# ``vllm/entrypoints/chat_utils.py``) only allows ``text`` / ``image_url``
+# ``vllm/renderers/chat_utils.py``) only allows ``text`` / ``image_url``
 # / ``audio`` / ``video`` / ``file`` content parts on tool messages, so
 # ``{"type": "document", "document": {...}}`` blocks -- valid in Cohere
 # v2 -- get rejected by vLLM's shared chat validator before they can

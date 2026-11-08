@@ -105,12 +105,15 @@ class EncoderOnlyModelState(DefaultModelState):
         if pooling_params is None or pooling_params.extra_kwargs is None:
             return
 
-        token_type_start = pooling_params.extra_kwargs.get("compressed_token_type_ids")
-        if token_type_start is not None:
+        token_type_range = pooling_params.extra_kwargs.get("compressed_token_type_ids")
+        if token_type_range is not None:
             assert new_req_data.prompt_token_ids is not None
+            token_type_start, token_type_end = token_type_range
+            positions = torch.arange(
+                len(new_req_data.prompt_token_ids), dtype=torch.int32
+            )
             self.token_type_ids[new_req_data.req_id] = (
-                torch.arange(len(new_req_data.prompt_token_ids), dtype=torch.int32)
-                >= token_type_start
+                (positions >= token_type_start) & (positions < token_type_end)
             ).to(torch.int32)
 
     def remove_request(self, req_id: str) -> None:
@@ -196,7 +199,10 @@ class EncoderOnlyModelState(DefaultModelState):
         else:
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
-        max_query_len = int(input_batch.num_scheduled_tokens.max())
+        # Use the promised max_query_len so FULL graphs don't bake in the dummy's.
+        max_query_len = input_batch.max_query_len or int(
+            input_batch.num_scheduled_tokens.max()
+        )
         if for_capture:
             max_seq_len = self.max_model_len
         else:

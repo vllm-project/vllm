@@ -10,15 +10,15 @@ import uvloop
 import vllm
 import vllm.envs as envs
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
-from vllm.entrypoints.launchers.cli_args import (
+from vllm.entrypoints.common.cli_args import (
     make_arg_parser,
     propagate_flash_late_interaction,
     validate_parsed_serve_args,
 )
+from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
 from vllm.entrypoints.launchers.dp_supervisor import run_dp_supervisor
 from vllm.entrypoints.launchers.launcher import create_server_socket
-from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.usage.usage_lib import UsageContext
@@ -243,16 +243,21 @@ def run_headless(args: argparse.Namespace):
         handshake_address,
     )
 
+    # A colocated frontend that serves only these engines (the Rust frontend in
+    # hybrid or external DP LB) also handshakes with them for their I/O.
+    client_handshake_address = args.headless_client_handshake_address
+
     # Create the engines.
     engine_manager = CoreEngineProcManager(
         local_engine_count=local_engine_count,
         start_index=vllm_config.parallel_config.data_parallel_rank,
         local_start_index=0,
         vllm_config=vllm_config,
-        local_client=False,
+        local_client=client_handshake_address is not None,
         handshake_address=handshake_address,
         executor_class=Executor.get_class(vllm_config),
         log_stats=not engine_args.disable_log_stats,
+        client_handshake_address=client_handshake_address,
     )
 
     try:
@@ -328,19 +333,10 @@ def run_multi_api_server(args: argparse.Namespace):
         None
     )
 
-    from vllm.v1.engine.utils import get_engine_zmq_addresses
+    from vllm.v1.engine.utils import bind_engine_zmq_listeners
 
-    # Defer port allocation to the child's bind() to avoid TOCTOU, except
-    # for Rust front-end and Ray DP, which can't see the post-bind rebind
-    # (CLI-arg subprocess / pickled-into-actor snapshot respectively) and
-    # so pre-allocate driver-side -- reintroducing the original race only
-    # there.
-    is_ray_dp = parallel_config.data_parallel_backend == "ray"
-    addresses = get_engine_zmq_addresses(
-        vllm_config,
-        num_api_servers,
-        defer_api_server_ports=not (rust_frontend_path or is_ray_dp),
-    )
+    zmq_listeners = bind_engine_zmq_listeners(vllm_config, num_api_servers)
+    addresses = zmq_listeners.addresses
 
     with launch_core_engines(
         vllm_config, executor_class, log_stats, addresses
@@ -365,8 +361,8 @@ def run_multi_api_server(args: argparse.Namespace):
                 sock=sock,
                 grpc_sock=grpc_sock,
                 args=args,
-                input_address=addresses.inputs[0],
-                output_address=addresses.outputs[0],
+                input_listener=zmq_listeners.inputs[0],
+                output_listener=zmq_listeners.outputs[0],
                 engine_start_index=expected_engine_start_index,
                 engine_count=expected_engine_count,
                 data_parallel_size=parallel_config.data_parallel_size,
@@ -379,21 +375,11 @@ def run_multi_api_server(args: argparse.Namespace):
                 sock=sock,
                 args=args,
                 num_servers=num_api_servers,
-                input_addresses=addresses.inputs,
-                output_addresses=addresses.outputs,
+                input_listeners=zmq_listeners.inputs,
+                output_listeners=zmq_listeners.outputs,
                 stats_update_address=stats_update_address,
                 tensor_queue=engine_launch.tensor_queue,
             )
-
-            if not is_ray_dp:
-                # Forward each child's bound endpoints to the engine handshake
-                # (runs on ``with`` exit). Skipped for Ray DP, where addresses
-                # are pre-allocated above and Ray actors already hold them.
-                actual_inputs, actual_outputs = (
-                    api_server_manager.gather_actual_addresses()
-                )
-                addresses.inputs = actual_inputs
-                addresses.outputs = actual_outputs
 
         # Set frontend processes to watch during engine startup.
         # If any of these processes exit before the engines are up, the engine startup

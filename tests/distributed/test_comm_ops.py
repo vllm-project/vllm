@@ -432,15 +432,88 @@ def test_deepep_destroy(monkeypatch: pytest.MonkeyPatch, suspended: bool) -> Non
     assert not communicator.all2all_manager.handle_cache._cache
 
 
+def _fi_ar_communicator(
+    monkeypatch: pytest.MonkeyPatch, group: object, normal: Mock, quant: Mock
+) -> CudaCommunicator:
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace", normal)
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_quant_workspace", quant)
+    monkeypatch.setattr(
+        flashinfer_all_reduce,
+        "_fi_ar_workspace_groups",
+        {id(normal): group, id(quant): group},
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "TorchDistBackend", lambda group: group, raising=False
+    )
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.cpu_group = group
+    communicator.pynccl_comm = Mock()
+    communicator.all2all_manager = None
+    return communicator
+
+
+def _symm_mem_workspace() -> Mock:
+    workspace = Mock()
+    workspace.checkpoint_prepare.side_effect = NotImplementedError
+    workspace.checkpoint_restore.side_effect = NotImplementedError
+    return workspace
+
+
+@pytest.mark.parametrize("symm_mem", [False, True], ids=["mnnvl", "symm-mem+mnnvl"])
+def test_cuda_communicator_suspend_detaches_flashinfer_workspaces(
+    monkeypatch: pytest.MonkeyPatch,
+    symm_mem: bool,
+) -> None:
+    group = object()
+    workspaces = (_symm_mem_workspace() if symm_mem else Mock(), Mock())
+    communicator = _fi_ar_communicator(monkeypatch, group, *workspaces)
+    communicator.suspend()
+    communicator.resume()
+
+    for workspace in workspaces:
+        workspace.checkpoint_prepare.assert_called_once_with()
+        workspace.checkpoint_restore.assert_called_once_with(group)
+    communicator.pynccl_comm.suspend.assert_called_once_with()
+    communicator.pynccl_comm.resume.assert_called_once_with()
+
+
+def test_cuda_communicator_checkpoint_rejects_symm_mem_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    communicator = _fi_ar_communicator(
+        monkeypatch, object(), _symm_mem_workspace(), Mock()
+    )
+    with pytest.raises(NotImplementedError):
+        communicator.checkpoint_prepare()
+    with pytest.raises(NotImplementedError):
+        communicator.checkpoint_restore()
+
+
+def test_cuda_communicator_resume_retries_failed_restore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Mock()
+    workspace.checkpoint_restore.side_effect = [RuntimeError("cuMemCreate"), None]
+    communicator = _fi_ar_communicator(monkeypatch, object(), workspace, Mock())
+    communicator.suspend()
+    with pytest.raises(RuntimeError):
+        communicator.resume()
+    communicator.resume()
+
+    assert workspace.checkpoint_restore.call_count == 2
+
+
 @pytest.mark.parametrize(
     ("backend", "capability", "world_size", "nodes", "expected"),
     [
-        ("mnnvl", 103, 4, 1, 80 * flashinfer_all_reduce.MiB - 1),
-        ("mnnvl", 103, 8, 2, 64 * flashinfer_all_reduce.MiB - 1),
-        ("mnnvl", 103, 16, 4, 8 * flashinfer_all_reduce.MiB - 1),
+        ("mnnvl", 100, 8, 1, 128 * flashinfer_all_reduce.MiB),
+        ("mnnvl", 100, 8, 2, 128 * flashinfer_all_reduce.MiB),
+        ("mnnvl", 103, 4, 1, 80 * flashinfer_all_reduce.MiB),
+        ("mnnvl", 103, 8, 2, 128 * flashinfer_all_reduce.MiB),
+        ("mnnvl", 103, 16, 4, 8 * flashinfer_all_reduce.MiB),
         ("mnnvl", 103, 2, 1, None),
         ("mnnvl", 103, 12, 3, None),
-        ("mnnvl", 103, 8, 1, 64 * flashinfer_all_reduce.MiB - 1),
+        ("mnnvl", 103, 8, 1, 128 * flashinfer_all_reduce.MiB),
         ("trtllm", 103, 8, 2, None),
         ("mnnvl", 90, 8, 2, None),
     ],
@@ -468,9 +541,12 @@ def test_flashinfer_standalone_size_tuning(
     )
 
 
-@pytest.mark.parametrize(("enabled", "expected"), [(True, 4681), (False, 128)])
+@pytest.mark.parametrize(
+    ("enabled", "hidden_dim", "expected"),
+    [(True, 7168, 9362), (True, 4096, 16384), (False, 4096, 128)],
+)
 def test_flashinfer_standalone_workspace_size(
-    monkeypatch: pytest.MonkeyPatch, enabled: bool, expected: int
+    monkeypatch: pytest.MonkeyPatch, enabled: bool, hidden_dim: int, expected: int
 ) -> None:
     create_workspace = Mock(return_value=Mock(backend="mnnvl"))
     monkeypatch.setattr(
@@ -486,32 +562,42 @@ def test_flashinfer_standalone_workspace_size(
     monkeypatch.setattr(
         flashinfer_all_reduce,
         "_get_tuned_standalone_max_size",
-        Mock(return_value=64 * flashinfer_all_reduce.MiB - 1),
+        Mock(return_value=128 * flashinfer_all_reduce.MiB),
     )
     monkeypatch.setattr(flashinfer_all_reduce, "_create_workspace", create_workspace)
 
-    flashinfer_all_reduce.get_fi_ar_workspace(8, 0, 128, 7168, torch.bfloat16, Mock())
+    flashinfer_all_reduce.get_fi_ar_workspace(
+        8, 0, 128, hidden_dim, torch.bfloat16, Mock()
+    )
 
     assert create_workspace.call_args.args[3] == expected
 
 
 @pytest.mark.parametrize(
-    ("node_count", "is_blackwell", "expected"),
+    ("node_count", "is_blackwell", "hisparse", "expected"),
     [
-        (1, False, ("trtllm", False)),
-        (1, True, ("trtllm", False)),
-        (2, False, (None, False)),
-        (2, True, ("mnnvl", False)),
+        (1, False, False, ("mnnvl", True)),
+        (1, True, False, ("mnnvl", True)),
+        (2, False, False, (None, False)),
+        (2, True, False, ("mnnvl", False)),
+        (1, True, True, ("trtllm", False)),
+        (2, True, True, (None, False)),
     ],
 )
 def test_flashinfer_auto_backend_uses_group_topology(
     monkeypatch: pytest.MonkeyPatch,
     node_count: int,
     is_blackwell: bool,
+    hisparse: bool,
     expected: tuple[str | None, bool],
 ) -> None:
     monkeypatch.setattr(
         flashinfer_all_reduce.envs, "VLLM_FLASHINFER_ALLREDUCE_BACKEND", "auto"
+    )
+    config = Mock()
+    config.attention_config.hisparse_config = Mock() if hisparse else None
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "get_current_vllm_config_or_none", lambda: config
     )
     monkeypatch.setattr(flashinfer_all_reduce, "_node_count", lambda _: node_count)
     monkeypatch.setattr(
@@ -586,6 +672,61 @@ def test_aiter_all_gather_precedes_pynccl(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(communicator, "_can_use_aiter_ag_rs", Mock(return_value=True))
 
     assert communicator.all_gatherv(torch.empty(1)) is output
+
+
+@pytest.mark.parametrize(
+    ("enabled", "world_size", "shape", "dim", "dtype", "transpose", "aiter_args"),
+    [
+        (True, 4, (7, 1296), 0, torch.bfloat16, False, ((7, 1296), 0)),
+        (True, 4, (7, 6, 256), 1, torch.bfloat16, False, ((7, 1536), -1)),
+        (True, 8, (7, 6400), -1, torch.float32, False, ((7, 6400), -1)),
+        (False, 4, (7, 6400), -1, torch.bfloat16, False, None),
+        (True, 4, (8, 12), 1, torch.bfloat16, False, None),
+        (True, 4, (0, 1536), 1, torch.bfloat16, False, None),
+        (True, 4, ((1 << 19) + 8,), 0, torch.bfloat16, False, None),
+        (True, 4, (7, 64), 0, torch.int32, False, None),
+        (True, 4, (64, 7), -1, torch.bfloat16, True, None),
+    ],
+)
+def test_rocm_tp_all_gather_uses_aiter(
+    monkeypatch: pytest.MonkeyPatch,
+    enabled,
+    world_size,
+    shape,
+    dim,
+    dtype,
+    transpose,
+    aiter_args,
+) -> None:
+    def gather(inp: torch.Tensor, dim: int) -> torch.Tensor:
+        return torch.cat([inp + rank for rank in range(world_size)], dim=dim)
+
+    aiter_comm = Mock()
+    aiter_comm.should_custom_ag.side_effect = lambda inp: inp.nbytes <= 1 << 20
+    aiter_comm.all_gather_unreg.side_effect = gather
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.world_size = world_size
+    communicator.use_aiter_tp_all_gather = enabled
+    communicator.aiter_ar_comm = aiter_comm
+    communicator.pynccl_comm = Mock(disabled=False)
+    module = "vllm.distributed.device_communicators"
+    monkeypatch.setattr(
+        f"{module}.cuda_communicator.current_platform.is_rocm", lambda: True
+    )
+    monkeypatch.setattr(
+        f"{module}.base_device_communicator.DeviceCommunicatorBase.all_gather",
+        Mock(side_effect=gather),
+    )
+
+    inp = (torch.randn(shape) * 100).to(dtype)
+    if transpose:
+        inp = inp.t()
+    assert torch.equal(communicator.all_gather(inp, dim), gather(inp, dim))
+    if aiter_args is None:
+        aiter_comm.all_gather_unreg.assert_not_called()
+    else:
+        (aiter_inp,), kwargs = aiter_comm.all_gather_unreg.call_args
+        assert (aiter_inp.shape, kwargs["dim"]) == aiter_args
 
 
 def test_isend_object_posts_size_then_object_and_releases_on_wait(

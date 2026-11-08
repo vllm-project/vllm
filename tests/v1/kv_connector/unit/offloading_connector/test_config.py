@@ -17,10 +17,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     SchedulerOffloadConfig,
 )
 from vllm.platforms import current_platform
-from vllm.v1.core.kv_cache_utils import (
-    generate_scheduler_kv_cache_config,
-    kv_cache_groups_tp_replicas,
-)
+from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
+from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -50,12 +48,14 @@ def _make_vllm_config(
     decode_context_parallel_size: int = 1,
 ) -> VllmConfig:
     config = MagicMock()
+    config.num_hash_lookahead_tokens = 0
     config.cache_config.block_size = 16
     config.cache_config.enable_prefix_caching = True
     config.cache_config.prefix_match_unit = None
     config.cache_config.cache_dtype = torch.float16
     config.cache_config.prefix_cache_retention_interval = None
     config.model_config.model = "test-model"
+    config.model_config.max_model_len = 4096
     config.model_config.use_mla = False
     # _full_attention_spec's heads at tp=1: the parallelism-agnostic gate
     # requires the head shard to cover the model's KV heads exactly
@@ -71,7 +71,6 @@ def _make_vllm_config(
             decode_context_parallel_size=decode_context_parallel_size,
         )
     config.kv_events_config = None
-    config.use_v2_model_runner = False
     config.kv_transfer_config = KVTransferConfig(
         kv_connector="OffloadingConnector",
         kv_role="kv_both",
@@ -173,6 +172,23 @@ def _mla_spec(
         tokens_per_state=tokens_per_state,
     )
 
+
+def _swa_spec(sliding_window: int = 128) -> SlidingWindowSpec:
+    return SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=128,
+        dtype=torch.float32,
+        sliding_window=sliding_window,
+    )
+
+
+_HIDDEN_STATE_KWARGS: dict[str, Any] = {
+    "block_size": 16,
+    "num_kv_heads": 1,
+    "head_size": 512,
+    "dtype": torch.float32,
+}
 
 _MAMBA_SPEC = MambaSpec(
     block_size=16,
@@ -284,12 +300,10 @@ def _parallelism_agnostic(
     kv_cache_groups: list[KVCacheGroupSpec],
     *,
     canonical: bool = False,
-    v2: bool = False,
 ) -> bool:
     config = _make_vllm_config(
         extra_config={"canonical_layout": True} if canonical else None
     )
-    config.use_v2_model_runner = v2
     kv_cache_config = KVCacheConfig(
         num_blocks=0,
         kv_cache_tensors=[],
@@ -308,7 +322,6 @@ def _replicated_layout(
     prefill_context_parallel_size: int = 1,
     decode_context_parallel_size: int = 1,
     use_mla: bool = True,
-    use_v2_model_runner: bool = False,
     distributed_executor_backend: Any = "mp",
     nnodes: int = 1,
     world_size: int | None = None,
@@ -320,7 +333,6 @@ def _replicated_layout(
         decode_context_parallel_size=decode_context_parallel_size,
     )
     config.model_config.use_mla = use_mla
-    config.use_v2_model_runner = use_v2_model_runner
     config.parallel_config.distributed_executor_backend = distributed_executor_backend
     config.parallel_config.nnodes = nnodes
     if world_size is not None:
@@ -729,6 +741,74 @@ def test_dcp_scales_uniform_type_group_alongside_mamba(spec_kind, expected):
     )
 
 
+@pytest.mark.parametrize(
+    "kv_cache_spec,window_chunks",
+    [
+        (_full_attention_spec(), None),
+        (_mla_spec(), None),
+        (HiddenStateCacheSpec(**_HIDDEN_STATE_KWARGS), None),
+        (_MAMBA_SPEC, 1),
+        (_swa_spec(), 8),
+        (
+            UniformTypeKVCacheSpecs(
+                block_size=16,
+                kv_cache_specs={
+                    "mla": _mla_spec(),
+                    "hidden": HiddenStateCacheSpec(**_HIDDEN_STATE_KWARGS),
+                },
+            ),
+            None,
+        ),
+        (
+            UniformTypeKVCacheSpecs(
+                block_size=16,
+                kv_cache_specs={"swa0": _swa_spec(), "swa1": _swa_spec()},
+            ),
+            8,
+        ),
+    ],
+)
+def test_group_carries_the_chunks_the_tier_keeps_per_request(
+    kv_cache_spec: KVCacheSpec, window_chunks: int | None
+):
+    """The group reports how far back its attention reaches, counted in chunks.
+
+    A capacity estimate needs that bound: a windowed or recurrent group keeps a
+    fixed number of chunks however long the request grows, while an unbounded
+    group keeps one for every chunk of the request. A worker-side group hands
+    over an aggregate of its layers, which must resolve to the same bound as the
+    single layer it wraps.
+    """
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
+    )
+
+    offloading_config = build_offloading_config(_make_vllm_config(), kv_cache_config)
+
+    assert offloading_config.groups[0].sliding_window_size_in_chunks == window_chunks
+
+
+def test_model_config_carries_the_longest_request():
+    """The capacity estimate of a tier holds at max_model_len, so it must travel.
+
+    CPUOffloadingInfo.from_config in vllm/v1/kv_offload/cpu/common.py reads it.
+    A model config without it leaves the estimate unknown.
+    """
+    vllm_config = _make_vllm_config()
+    vllm_config.model_config.max_model_len = 32768
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], _full_attention_spec())],
+    )
+
+    offloading_config = build_offloading_config(vllm_config, kv_cache_config)
+
+    assert offloading_config.model.max_model_len == 32768
+
+
 def test_preserves_data_parallel_config():
     config = _make_vllm_config()
     config.parallel_config.data_parallel_index = 2
@@ -757,15 +837,9 @@ def test_resolves_heterogeneous_hybrid_block_sizes():
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
-@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
-def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
-    world_size: int,
-    use_v2_model_runner: bool,
-):
+def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(world_size: int):
     assert _replicated_layout(
-        _make_mla_kv_cache_config(),
-        tensor_parallel_size=world_size,
-        use_v2_model_runner=use_v2_model_runner,
+        _make_mla_kv_cache_config(), tensor_parallel_size=world_size
     )
 
 
@@ -1104,17 +1178,7 @@ def test_replicated_layout_parallel_gate(kwargs: dict[str, Any], case: str):
     assert not _replicated_layout(_make_mla_kv_cache_config(), **kwargs), case
 
 
-def test_parallelism_agnostic_for_single_full_attention_group():
-    assert _parallelism_agnostic([KVCacheGroupSpec(["l0"], _full_attention_spec())])
-
-
-_SWA_SPEC = SlidingWindowSpec(
-    block_size=16,
-    num_kv_heads=4,
-    head_size=128,
-    dtype=torch.float32,
-    sliding_window=128,
-)
+_SWA_SPEC = _swa_spec()
 _SWA_MLA_SPEC = SlidingWindowMLASpec(
     block_size=16,
     num_kv_heads=1,
@@ -1147,6 +1211,7 @@ def _uniform_group(*specs: KVCacheSpec) -> KVCacheGroupSpec:
     ],
 )
 def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
+    # The direct layout is never parallelism-agnostic.
     assert not _parallelism_agnostic(kv_cache_groups)
 
 
@@ -1233,7 +1298,7 @@ def test_canonical_layout_certifies_v2_model_runner():
     registration, so the static gate must not depend on the model-runner
     version — the v2 runner is the case the canonical layout exists for."""
     groups = _groups(_full_attention_spec())
-    assert _parallelism_agnostic(groups, canonical=True, v2=True)
+    assert _parallelism_agnostic(groups, canonical=True)
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
@@ -1275,7 +1340,6 @@ def test_canonical_mla_dsa_rows_are_tp_independent(tp_size, scheduler):
 
 def test_parallelism_agnostic_disabled_on_v2_model_runner():
     config = _make_vllm_config()
-    config.use_v2_model_runner = True
     kv_cache_config = KVCacheConfig(
         num_blocks=0,
         kv_cache_tensors=[],

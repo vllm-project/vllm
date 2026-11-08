@@ -3,10 +3,9 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Self
 
 import torch
-from typing_extensions import Self
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -183,8 +182,10 @@ class Fp8BlockScaledDynamicMMLinearKernel(Fp8BlockScaledMMLinearKernel, ABC):
         if not is_base_supported and not is_fallback_supported:
             return (
                 False,
-                f"base is not supported due to {reason_1}; "
-                f"fallback is not supported due to {reason_2}",
+                (
+                    f"base is not supported due to {reason_1}; "
+                    f"fallback is not supported due to {reason_2}"
+                ),
             )
         if not is_base_supported:
             return False, f"base is not supported due to {reason_1}"
@@ -201,8 +202,10 @@ class Fp8BlockScaledDynamicMMLinearKernel(Fp8BlockScaledMMLinearKernel, ABC):
         if not can_implement_base and not can_implement_fallback:
             return (
                 False,
-                f"base cannot implement due to {reason_1}; "
-                f"fallback cannot implement due to {reason_2}",
+                (
+                    f"base cannot implement due to {reason_1}; "
+                    f"fallback cannot implement due to {reason_2}"
+                ),
             )
         if not can_implement_base:
             return False, f"base cannot implement due to {reason_1}"
