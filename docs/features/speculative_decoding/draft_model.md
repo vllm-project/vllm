@@ -76,34 +76,6 @@ The code used to request completions as a client remains unchanged:
         print(completion)
     ```
 
-## Draft Model Method with heterogeneous vocabs
-
-  By default, vLLM requires the draft and target models to share the same vocabulary. Setting `use_heterogeneous_vocab: true` enables the **Token-Level Intersection (TLI)** algorithm, which allows draft models from a different model family with a different tokenizer.
-  
-  Currently, `use_heterogeneous_vocab` requires `draft_sample_method='greedy'` (the default). Probabilistic draft sampling is not yet supported and will be added in a
-  future release.
-
-  ```python
-  from vllm import LLM, SamplingParams
-
-  llm = LLM(
-      model="Qwen/Qwen3-8B",
-      speculative_config={                               
-          "method": "draft_model",
-          "model": "HuggingFaceTB/SmolLM2-135M-Instruct",
-          "num_speculative_tokens": 3,
-          "use_heterogeneous_vocab": True,
-      },
-      gpu_memory_utilization=0.5,
-  )
-outputs = llm.generate(prompts, sampling_params)
-
-for output in outputs:
-      prompt = output.prompt
-      generated_text = output.outputs[0].text
-      print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-```
-
 ## Draft Models with Pipeline Parallelism
 
 With pipeline parallelism (`pipeline_parallel_size > 1`), the draft model runs as a whole model on the last pipeline stage. This requires a draft model with the `LlamaForCausalLM`, `Qwen2ForCausalLM` or `Qwen3ForCausalLM` architecture; other draft architectures fail at startup with `NotImplementedError`. A custom `VLLM_PP_LAYER_PARTITION` applies only to the target model.

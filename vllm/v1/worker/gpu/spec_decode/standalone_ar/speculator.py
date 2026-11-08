@@ -15,8 +15,8 @@ from vllm.model_executor.model_loader.utils import (
     get_model_cls,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.spec_decode.utils import next_power_of_2
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
