@@ -34,6 +34,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64
 
 from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import back as k2a
+from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_attn as dsa
 from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import mla_attn as m1c
 from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import mla_back as m1b
 from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
@@ -168,9 +169,10 @@ class K2Build:
     m1c_wide: bool = False  # M1c's ``wide`` (its KV pool over 4 GiB, ``k2_launch``)
     # Kimi-K3.1's DSA layers (``dsa_attn``'s dsa_p slices a token, M1b's
     # splits): 1 its partials from a launch before this one (stream-ordered,
-    # no poll), 2 (M3) ``dsa_attn.cta`` in this launch, a flag a (token,
-    # slice). ``dsa_fold``: the index fold in-kernel (M3b); ``dsa_tile`` its
-    # tokens a tile.
+    # no poll), 2 ``dsa_attn.cta`` in this launch, first, on CTAs
+    # 256 - S dsa_p .. 255, a flag a (token, slice) (``ardy``) the combine
+    # polls. ``dsa_fold`` (2 only): the top-k index conversion in-kernel;
+    # ``dsa_tile`` its tokens a tile.
     dsa: int = 0
     dsa_p: int = 0
     dsa_fold: bool = False
@@ -305,6 +307,8 @@ ABI = KernelAbi(
         "m1c_indptr",
         "m1c_scale",
         "m1c_vscale",
+        "dsa_bt",
+        "dsa_bsr",
         "w_o",
         "prefix",
         "blocks",
@@ -379,6 +383,25 @@ def m1b_post(key: K2Build) -> m1b.MlaPostBuild:
     )
 
 
+def dsa_build(key: K2Build) -> dsa.DsaAttnBuild:
+    """The DSA attention stage's build (``dsa`` 2)."""
+    return dsa.DsaAttnBuild(
+        tokens=key.tokens,
+        splits=key.dsa_p,
+        chunk=dsa.TOPK // max(key.dsa_p, 1),
+        fold=key.dsa_fold,
+        standalone=False,
+        part_fp32=key.part_fp32,
+    )
+
+
+def dsa_stage(c: dict, dk, item, tid, lds, args) -> None:
+    """The DSA attention's item ``item`` (``dsa.cta``), then its ``ardy``
+    flag (the publish's barrier: every wave done with the LDS)."""
+    dsa.cta({"tid": tid, "lds": lds, "args": args}, dk, item)
+    publish(c["put"], c["ardy"], item, 1, tid == 0)
+
+
 def m1b_ctok(key: K2Build) -> int:
     """The fused M1b's tokens a combine task (over its NA CTAs)."""
     if not key.m1b_qlen:
@@ -437,13 +460,16 @@ def build(key: K2Build):
     assert not fused or (s % key.m1b_qlen == 0 and key.m1b_ranks in (1, TP_))
     assert not (key.m1c or key.dsa) or (fused and key.m1b_ranks == 1 and key.m1b_splits)
     assert key.m1c or not key.m1c_wide
-    assert not (key.m1c and key.dsa) and key.dsa in (0, 1)  # 2: M3
+    assert not (key.m1c and key.dsa) and key.dsa in (0, 1, 2)
     if key.m1c:
         m1c.check(s, key.m1b_qlen)
         assert key.m1b_splits == m1c.splits(key.m1b_qlen)
     if key.dsa:
-        assert key.m1b_splits == key.dsa_p
-        assert s == key.m1b_qlen and s * key.dsa_p <= BLOCKS and not key.dsa_fold
+        assert key.m1b_splits == key.dsa_p and key.dsa_tile == dsa.TILE
+        assert s == key.m1b_qlen and s * key.dsa_p <= BLOCKS
+        assert key.dsa == 2 or not key.dsa_fold
+    if key.dsa == 2:
+        dsa.check(dsa_build(key))
     assert key.dsa or not (key.dsa_p or key.dsa_fold or key.part_fp32)
     # the AttnRes stages' delta tile beside their slices
     vextra = s * COLS * 4
@@ -521,6 +547,12 @@ def build(key: K2Build):
 
     M1cLds = m1c.smem(key.m1b_qlen) if key.m1c else NoLds
 
+    @fx.struct
+    class DsaLds:
+        raw: fx.Array[fx.Uint8, dsa.lds_bytes(dsa_build(key)), 16]
+
+    DsaAttnLds = DsaLds if key.dsa == 2 else NoLds
+
     @fx.union
     class StageLds:
         early: EarlyLds
@@ -529,8 +561,8 @@ def build(key: K2Build):
         down: DownLds
         m1b: M1bLds
 
-    # the stages' LDS: M1c runs first in a CTA and is done (a barrier) before
-    # any of it is touched, so M1c's LDS shares it all
+    # the stages' LDS: M1c (or the DSA attention) runs first in a CTA and is
+    # done (a barrier) before any of it is touched, so its LDS shares it all
     @fx.struct
     class K2Lds:
         red: RedLds
@@ -541,6 +573,7 @@ def build(key: K2Build):
     class MainLds:
         k2: K2Lds
         m1c: M1cLds  # type: ignore[valid-type]
+        dsa: DsaAttnLds  # type: ignore[valid-type]
 
     @fx.struct
     class Smem:
@@ -562,6 +595,7 @@ def build(key: K2Build):
         name += "_c" if key.m1c else ""
         name += "w" if key.m1c_wide else ""
         name += f"_d{key.dsa}" if key.dsa else ""
+        name += "f" if key.dsa_fold else ""
         name += m1b.suffix(m1b_post(key))
     if key.opt:
         name += f"_o{key.opt}"
@@ -595,6 +629,8 @@ def build(key: K2Build):
         m1c_indptr: Int64,
         m1c_scale: Int32,
         m1c_vscale: Int32,
+        dsa_bt: Int64,
+        dsa_bsr: Int32,
         w_o: Int64,
         prefix: Int64,
         blocks: Int64,
@@ -643,6 +679,8 @@ def build(key: K2Build):
                 rank,
                 epoch,
                 layer,
+                # a DSA item's CTA (the last), its ``ardy`` flag late
+                BLOCKS - 1 if key.dsa == 2 else 0,
             )
         mb = Mailbox(step_tag(epoch, layer) - 1, health, alarm, region_ids(REGIONS))
         par = uniform(ld_i32(epoch, 0)) % 2
@@ -848,6 +886,34 @@ def build(key: K2Build):
                 # M1c's LDS is the stages' (``MainLds``): its last DMAs (a
                 # block past its end, prefetched) landed, every wave done
                 m1c.wait_dma()
+            if const_expr(key.dsa == 2):
+                # the DSA attention's items on the top CTAs, waves 0 .. 3 (its
+                # 4-wave body), a flag an item; its LDS the stages' (the
+                # publish's barrier: every wave done with it)
+                c["ardy"] = sreg(scratch, lay["ardy"][0], "ardy")
+                dk = dsa_build(key)
+                _, cta0 = dsa.geometry(dk)
+                # outside the dynamic if: a method call's base there is
+                # carried as its state (the LDS storage has no IR value)
+                dlds = main.dsa.peek().raw.ptr
+                dargs = {
+                    "q": m1c_q,
+                    "stride_q": dsa.NH * dsa.ENTRY,
+                    "stride_qh": dsa.ENTRY,
+                    "kv": m1c_kv,
+                    "idx": m1c_pages,
+                    "iptr": m1c_indptr,
+                    "topk": m1c_pages,
+                    "topk_st": dsa.TOPK,
+                    "bt": dsa_bt,
+                    "part_o": o,
+                    "part_lse": lse,
+                    "c_log2": m1c_scale,
+                    "idx_bytes": m1c_vscale,
+                    "bsr": dsa_bsr,
+                }
+                if bid >= cta0:
+                    dsa_stage(c, dk, bid - cta0, tid, dlds, dargs)
             if const_expr(R > 1):
                 m1b.stage_push(c)
             stamp(on, tls, tid, 14)
@@ -987,6 +1053,8 @@ def build(key: K2Build):
         m1c_indptr: Int64,
         m1c_scale: Int32,
         m1c_vscale: Int32,
+        dsa_bt: Int64,
+        dsa_bsr: Int32,
         w_o: Int64,
         prefix: Int64,
         blocks: Int64,
@@ -1042,6 +1110,8 @@ def build(key: K2Build):
             m1c_indptr,
             m1c_scale,
             m1c_vscale,
+            dsa_bt,
+            dsa_bsr,
             w_o,
             prefix,
             blocks,
@@ -1084,6 +1154,27 @@ def ptr(t):
     return 0 if t is None else t.data_ptr()
 
 
+def dsa_args(key: K2Build, m1b_in, dsa_in) -> list:
+    """The DSA stage's ABI words (M1c's slots, then ``dsa_bt`` / ``dsa_bsr``):
+    q, kv, idx (or with the fold the top-k), iptr, c_log2, idx's bytes (the
+    block table's), bt, bsr; zeros without it."""
+    if dsa_in is None:
+        return [0] * 8
+    dk = dsa_build(key)
+    a = dsa.host_args(dk, **dsa_in)
+    # the stage's strides are the build's constants (``layer.build``)
+    q = dsa_in["q"]
+    assert q.stride(0) == dsa.NH * dsa.ENTRY and q.stride(1) == dsa.ENTRY
+    assert not key.dsa_fold or a["topk_st"] == dsa.TOPK
+    so, sl = dsa.partial_shapes(dk)
+    o, lse = m1b_in["o"], m1b_in["lse"]
+    assert o.stride(0) == so[2] * so[3] and lse.stride(0) == sl[2]
+    assert lse.dtype == torch.float32
+    pages = a["topk"] if key.dsa_fold else a["idx"]
+    return [a["q"], a["kv"], pages, a["iptr"], a["c_log2"], a["idx_bytes"],
+            a["bt"], a["bsr"]]  # fmt: skip
+
+
 def k2_launch(
     key: K2Build,
     *,
@@ -1116,6 +1207,7 @@ def k2_launch(
     tl=None,
     m1b_in=None,
     m1c_in=None,
+    dsa_in=None,
 ):
     """Host launcher: ``core`` [S, 1536] (o_proj's input), ``prefix`` updated in
     place, ``out`` the MoE output [S, 7168]; MoE weights as ``moe``. With
@@ -1125,9 +1217,12 @@ def k2_launch(
     scale, kv_scale), its partials M1b's o / lse (split 0's views). With
     ``key.dsa`` 1 ``m1b_in``'s o / lse are ``dsa_attn``'s partials (split 0's
     views), launched before this, and with ``uv_bf16`` its ``w_v`` the bf16
-    [12, 128, 512] and ``w_v_scale`` None."""
+    [12, 128, 512] and ``w_v_scale`` None; with ``key.dsa`` 2 this launch runs
+    the attention first, ``dsa_in`` ``dsa_attn.host_args``' inputs (a
+    contiguous query)."""
     assert (m1b_in is not None) == (key.m1b_qlen > 0)
     assert (m1c_in is not None) == key.m1c
+    assert (dsa_in is not None) == (key.dsa == 2)
     # the regions the OPT_* bits use exist
     assert SENT_READY or not (k2_sent(key) or k2_rlogp(key)), (
         "OPT_SENTS / OPT_RLOG_PARTS without the runner's peer regions"
@@ -1142,7 +1237,11 @@ def k2_launch(
         f,
         core.data_ptr(),
         *(m1b.host_args(key.m1b_ranks, **m1b_in) if m1b_in is not None else [0] * 16),
-        *(m1c.host_args(**m1c_in) if m1c_in is not None else [0] * 6),
+        *(
+            [*m1c.host_args(**m1c_in), 0, 0]
+            if m1c_in is not None
+            else dsa_args(key, m1b_in, dsa_in)
+        ),
         w_o.data_ptr(),
         prefix.data_ptr(),
         blocks.data_ptr(),

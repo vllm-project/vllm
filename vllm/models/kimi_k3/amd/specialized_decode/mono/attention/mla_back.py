@@ -355,7 +355,7 @@ def combine_splits(c, t0, h):
                     acc[2 * k + 1] = acc[2 * k + 1] + bf_hi(o[k]) * wt
         return acc
 
-    if const_expr("ardy" in c):
+    if const_expr("ardy" in c and c["src"] != "dsa"):
         # with M1c: unrolled, a load a batch (a loop, or wider batches, spill
         # M1c's Q fragment in its loop)
         for j0 in range_constexpr(nj):

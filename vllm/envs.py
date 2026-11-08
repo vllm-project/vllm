@@ -222,9 +222,9 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
-    VLLM_KIMI_SD_DSA: Literal["off", "split", "fused", "auto"] = "off"
+    VLLM_KIMI_SD_DSA: Literal["off", "split", "fused", "auto"] = "auto"
     VLLM_KIMI_SD_DSA_SPLITS: int = 16
-    VLLM_KIMI_SD_DSA_FOLD: bool = False
+    VLLM_KIMI_SD_DSA_FOLD: bool = True
     VLLM_KIMI_SD_DSA_PART_FP32: bool = False
     VLLM_KIMI_SD_DSA_VERIFY: bool = False
     VLLM_ENABLE_GEMM_RS: bool = False
@@ -1745,15 +1745,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Kimi-K3.1 specialized decode on MI355X: how the DSA layers' sparse
     # attention runs. "off" keeps vLLM's attention ops then K2; "split" runs
     # it as a split-K launch whose partials K2 combines (with W_UV and the
-    # gate); "fused" runs it inside K2 (not implemented yet); "auto" picks the
-    # best served mode and falls back to "off" with a log line.
+    # gate); "fused" runs it inside K2's launch, on its top CTAs; "auto" picks
+    # "fused" when served and falls back to "off" with a log line (the default).
     "VLLM_KIMI_SD_DSA": env_with_choices(
-        "VLLM_KIMI_SD_DSA", "off", ["off", "split", "fused", "auto"]
+        "VLLM_KIMI_SD_DSA", "auto", ["off", "split", "fused", "auto"]
     ),
     # The DSA sparse attention's KV splits a query row: 16 or 32.
     "VLLM_KIMI_SD_DSA_SPLITS": lambda: int(os.getenv("VLLM_KIMI_SD_DSA_SPLITS", "16")),
-    # Fold the top-k index conversion into the attention (not implemented yet).
-    "VLLM_KIMI_SD_DSA_FOLD": lambda: bool(int(os.getenv("VLLM_KIMI_SD_DSA_FOLD", "0"))),
+    # "fused": the attention reads the indexer's top-k and the block table
+    # itself (no index conversion launch).
+    "VLLM_KIMI_SD_DSA_FOLD": lambda: bool(int(os.getenv("VLLM_KIMI_SD_DSA_FOLD", "1"))),
     # Debug: f32 attention partials (isolates the partials' bf16 rounding).
     "VLLM_KIMI_SD_DSA_PART_FP32": lambda: bool(
         int(os.getenv("VLLM_KIMI_SD_DSA_PART_FP32", "0"))

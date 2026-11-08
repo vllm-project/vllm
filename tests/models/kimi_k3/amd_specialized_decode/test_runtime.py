@@ -786,11 +786,17 @@ def test_mla_weight_views_fall_back_per_model():
     )
 
 
+def _dsa_impl(topk=None):
+    """A DSA layer's MLA impl as ``dsa.dsa_reasons`` sees it."""
+    return SimpleNamespace(
+        get_fp8_ds_mla_row_bytes=lambda: 656, sinks=None, topk_indices_buffer=topk
+    )
+
+
 def _dsa_layer(**over):
     """A Kimi-K3.1 DSA layer as ``dsa.dsa_reasons`` sees it (TP8, DCP1)."""
-    impl = SimpleNamespace(get_fp8_ds_mla_row_bytes=lambda: 656, sinks=None)
     a = SimpleNamespace(
-        impl=impl, num_heads=12, kv_lora_rank=512, qk_rope_head_dim=64,
+        impl=_dsa_impl(), num_heads=12, kv_lora_rank=512, qk_rope_head_dim=64,
         qk_nope_head_dim=128, v_head_dim=128, kv_cache_dtype="fp8_ds_mla",
         is_aiter_triton_fp4_bmm_enabled=False,
         is_aiter_triton_fp8_bmm_enabled=False, q_pad_num_heads=None,
@@ -810,14 +816,31 @@ def _dsa_layer(**over):
     [
         ({"VLLM_KIMI_SD_DSA": "split"}, 1, {}, None),
         ({"VLLM_KIMI_SD_DSA": "auto"}, 1, {}, None),
-        ({}, 1, {}, "VLLM_KIMI_SD_DSA=off"),
+        ({}, 1, {}, None),
+        ({"VLLM_KIMI_SD_DSA": "off"}, 1, {}, "VLLM_KIMI_SD_DSA=off"),
         ({"VLLM_KIMI_SD_DSA": "split"}, 8, {}, "DCP8 (DCP1 only)"),
-        ({"VLLM_KIMI_SD_DSA": "fused"}, 1, {}, "VLLM_KIMI_SD_DSA=fused"),
+        ({"VLLM_KIMI_SD_DSA": "fused"}, 1, {}, None),
+        ({"VLLM_KIMI_SD_DSA": "fused", "VLLM_KIMI_SD_DSA_FOLD": "1"}, 1, {}, None),
+        # the fold reads the top-k rows as they are: TOPK wide
+        (
+            {"VLLM_KIMI_SD_DSA": "auto", "VLLM_KIMI_SD_DSA_FOLD": "1"},
+            1,
+            {"impl": _dsa_impl(torch.empty(8, 4096, dtype=torch.int32))},
+            "wider than the top-k",
+        ),
+        # the defaults: auto, the fold
+        (
+            {},
+            1,
+            {"impl": _dsa_impl(torch.empty(8, 4096, dtype=torch.int32))},
+            "wider than the top-k",
+        ),
+        # split converts the indices regardless
         (
             {"VLLM_KIMI_SD_DSA": "split", "VLLM_KIMI_SD_DSA_FOLD": "1"},
             1,
-            {},
-            "VLLM_KIMI_SD_DSA_FOLD=1",
+            {"impl": _dsa_impl(torch.empty(8, 4096, dtype=torch.int32))},
+            None,
         ),
         (
             {"VLLM_KIMI_SD_DSA": "split", "VLLM_KIMI_SD_DSA_SPLITS": "8"},
@@ -932,8 +955,8 @@ def test_k2build_dsa_asserts(monkeypatch):
     bad = (
         dict(dsa=1, dsa_p=32),  # M1b's splits are the slices
         dict(dsa=1, dsa_p=16, m1c=True),
-        dict(dsa=2, dsa_p=16),  # fused: M3
-        dict(dsa=1, dsa_p=16, dsa_fold=True),
+        dict(dsa=2, dsa_p=32),
+        dict(dsa=1, dsa_p=16, dsa_fold=True),  # the fold: fused only
         dict(dsa=0, part_fp32=True),
         dict(dsa=1, dsa_p=16, m1b_ranks=8),
     )

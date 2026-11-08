@@ -200,7 +200,13 @@ class SpecializedDecode:
         m1c = [w for w in config.widths if m1c_at(runner, w)]
         mla = f"M1 (M1c in K2 at widths {m1c})" if m1c else "M1"
         if not m1 and dsa:
-            mla = f"DSA split-K attention, then K2, at widths {dsa}; else vLLM's ops"
+            k = self.kernels[dsa[0]][ffn[0]].key  # type: ignore[union-attr]
+            how = "its own launch" if k.standalone else "in K2"
+            how += ", the top-k fold" if k.fold else ""
+            mla = (
+                f"DSA split-K attention ({k.splits} splits, {how}), then K2, at "
+                f"widths {dsa}; else vLLM's ops"
+            )
         elif not m1:
             mla = "vLLM's ops"
         logger.info(

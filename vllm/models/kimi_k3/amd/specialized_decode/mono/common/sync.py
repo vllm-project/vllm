@@ -79,15 +79,15 @@ def _spin(load_all, pending, health, alarm, region_id, index, tag):
 
 
 @traced
-def stall(fault_rank, fault_epoch, fault_layer, ticks, rank, epoch, layer):
-    """The fault hook (tests only): CTA 0 of rank ``fault_rank`` stalls ``ticks``
-    once, in the launch for slot ``fault_layer`` of the step at epoch
+def stall(fault_rank, fault_epoch, fault_layer, ticks, rank, epoch, layer, cta=0):
+    """The fault hook (tests only): CTA ``cta`` of rank ``fault_rank`` stalls
+    ``ticks`` once, in the launch for slot ``fault_layer`` of the step at epoch
     ``fault_epoch``."""
     if (
         (rank == fault_rank)
         & (uniform(ld_i32(epoch, 0)) == fault_epoch)
         & (layer == fault_layer)
-        & (fx.block_idx.x == 0)
+        & (fx.block_idx.x == cta)
     ):
         t0 = memrealtime()
         now = memrealtime()

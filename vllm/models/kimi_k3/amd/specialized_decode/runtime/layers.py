@@ -35,7 +35,7 @@ def _k2_key(
 ):
     """``m1b``: an MLA layer's K2 that runs its M1b first (``runner.fuse_m1b``).
     ``dsa``: a DSA layer's ``DsaAttnBuild``, its M1b merging that launch's
-    slices (``dsa.DsaM1Layer``)."""
+    slices, or (not ``standalone``) running it first (``dsa.DsaM1Layer``)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
 
     m = layer.mlp
@@ -55,8 +55,9 @@ def _k2_key(
         fused.update(
             m1b_splits=dsa.splits,
             m1c=False,
-            dsa=1,
+            dsa=1 if dsa.standalone else 2,
             dsa_p=dsa.splits,
+            dsa_fold=dsa.fold,
             uv_bf16=True,
             part_fp32=dsa.part_fp32,
         )
@@ -104,12 +105,14 @@ def _k2(
     m1b_in=None,
     m1c_in=None,
     dsa=None,
+    dsa_in=None,
 ):
     """K2 from ``core`` (o_proj's input): ``prefix`` updated in place (written,
     when ``reset``), the MoE output returned. ``m1b_in``: ``mla_post``'s inputs,
     when this launch runs M1b and writes ``core`` itself; ``m1c_in``: M1c's
     (``mla_attn.host_args``'s), when it runs M1c before; ``dsa``: a DSA
-    layer's ``DsaAttnBuild``, its slices M1b's o / lse (``_k2_key``)."""
+    layer's ``DsaAttnBuild``, its slices M1b's o / lse (``_k2_key``), and
+    ``dsa_in`` its inputs when this launch runs it."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import HIDDEN
     from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import moe
@@ -144,6 +147,7 @@ def _k2(
         layer=128 + layer.layer_idx,
         m1b_in=m1b_in,
         m1c_in=m1c_in,
+        dsa_in=dsa_in,
         **runner.launch_args(),
         **runner.peer_args(),
     )

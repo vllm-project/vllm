@@ -12,12 +12,18 @@ TP8 + DCP1 shapes (12 heads a rank, the fp8_ds_mla cache's 656 B records).
 - U4: -1 indices (``has_invalid``) masked.
 - U10: M1b's combine + bf16 W_UV + the gate (``mla_post``, ``uv``) against
   torch on the same partials.
+- U7: the in-kernel top-k fold against the converter's rows, bit for bit.
+- U6 / U8 / U9 (eight GPUs): K2 with the DSA stage (``dsa`` 2, the fold or
+  not) bit-equal to the split launches over graph replays, across the epoch
+  tag's wrap, and a stalled DSA CTA failing the step without a hang.
 """
 
 import pytest
+import ray
 import torch
 import torch.nn.functional as F
 
+from tests.utils import multi_gpu_test, multi_process_parallel
 from vllm.platforms import current_platform
 
 bf = torch.bfloat16
@@ -430,3 +436,321 @@ def test_dsa_graph_replay(splits):
         lat = _merge(e_po, e_pl)[0]
         assert _cos(lat, ref_o) > COS_MIN, lens
     assert not health.any() and not flags.any()
+
+
+# ---------------------------------------------------------------- U7
+
+
+BS = 64  # the KV cache's block size
+
+
+def _paged(
+    nblk: int, bsr: int, lens, g: torch.Generator, invalid: float = 0.0, bs: int = BS
+):
+    """A paged step: (rec, bt, topk, iptr). The flat cache ``rec`` of ``nblk``
+    blocks of ``bsr`` rows (the first ``bs`` a block's tokens), the request's
+    block table ``bt`` (a permutation), the indexer's logical top-k [S + 3,
+    2048] (row t's first ``lens[t]`` distinct positions, then -1; ``invalid``
+    of them -1 and one past the table)."""
+    rec = _cache(nblk * bsr, g)
+    bt = torch.randperm(nblk, generator=g).to(torch.int32)
+    topk = torch.full((S + 3, TOPK), -1, dtype=torch.int32)
+    for t, n in enumerate(lens):
+        topk[t, :n] = torch.randperm(nblk * bs, generator=g)[:n].to(torch.int32)
+        if invalid and n > 2:
+            topk[t, :n][torch.rand(n, generator=g) < invalid] = -1
+            topk[t, 1] = nblk * bs + 5  # block nblk: past the table
+    iptr = torch.zeros(len(lens) + 1, dtype=torch.int32)
+    iptr[1:] = torch.tensor(lens).cumsum(0)
+    return rec, bt.cuda(), topk.cuda(), iptr.cuda()
+
+
+def _convert(bt, topk, iptr, bsr: int, invalid: int = 0, bs: int = BS):
+    """The converter's rows in torch (an invalid position ``invalid``)."""
+    rows = []
+    for t in range(iptr.numel() - 1):
+        tok = topk[t, : int(iptr[t + 1] - iptr[t])].long()
+        blk = tok // bs
+        ok = (tok >= 0) & (blk < bt.numel())
+        row = bt[blk.clamp(0, bt.numel() - 1)].long() * bsr + tok % bs
+        rows.append(torch.where(ok, row, invalid).to(torch.int32))
+    return torch.cat(rows)
+
+
+@needs_gfx950
+@pytest.mark.parametrize("splits", [16, 32])
+@pytest.mark.parametrize("has_invalid", [False, True])
+@pytest.mark.parametrize("bs,nblk,bsr", [(BS, 80, 80), (2048, 4, 2100)])
+@torch.inference_mode()
+def test_dsa_fold_matches_converter(splits, has_invalid, bs, nblk, bsr):
+    """U7: the in-kernel fold (the indexer's top-k, the block table, the flat
+    pitch) against ``dsa_attn`` on the converter's rows, bit for bit: a pitch
+    past the block size (64, and the hybrid engine's 2048), rows of every length, -1 and out-of-table positions
+    (the converter's row 0, or with ``has_invalid`` masked)."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.dsa_attn import (
+        DsaAttnBuild,
+    )
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        triton_convert_req_index_to_global_index,
+    )
+
+    g = torch.Generator().manual_seed(70 + splits + has_invalid)
+    lens = [TOPK, 1, 2047, 129, 128, 700, TOPK, 3]
+    rec, bt, topk, iptr = _paged(nblk, bsr, lens, g, invalid=0.2, bs=bs)
+    q, scale = _q(g), _scale()
+    idx = torch.full((S * TOPK,), 7, dtype=torch.int32, device="cuda")
+    triton_convert_req_index_to_global_index(
+        torch.zeros(S, dtype=torch.int32, device="cuda"), bt[None], topk[:S],
+        iptr, idx, BLOCK_STRIDE_ROWS=bsr, BLOCK_SIZE=bs, NUM_TOPK_TOKENS=TOPK,
+    )  # fmt: skip
+    n = int(iptr[-1])
+    assert torch.equal(idx[:n], _convert(bt, topk, iptr, bsr, bs=bs))
+    if has_invalid:
+        idx[:n] = _convert(bt, topk, iptr, bsr, invalid=-1, bs=bs)
+    kw = dict(splits=splits, chunk=TOPK // splits, has_invalid=has_invalid)
+    want = _split(DsaAttnBuild(**kw), q, rec, iptr, idx[:n].contiguous(), scale)
+    key = DsaAttnBuild(fold=True, **kw)
+    so, sl = want[0].shape, want[1].shape
+    po = torch.full(so, float("nan"), dtype=bf, device="cuda")
+    pl = torch.full(sl, float("nan"), dtype=torch.float32, device="cuda")
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_attn
+
+    dsa_attn.dsa_attn_launch(
+        key, part_o=po, part_lse=pl, q=q, kv=rec, iptr=iptr, scale=scale,
+        topk=topk, bt=bt, bsr=bsr, bs=bs,
+    )  # fmt: skip
+    torch.accelerator.synchronize()
+    assert torch.equal(po, want[0]) and torch.equal(pl, want[1])
+
+
+@needs_gfx950
+@pytest.mark.parametrize("splits", [16, 32])
+@pytest.mark.parametrize("fold", [False, True])
+@torch.inference_mode()
+def test_dsa_stage_matches_standalone(splits, fold):
+    """U6 (one GPU): K2's DSA stage (``standalone`` False: 512 threads, waves
+    4 .. 7 the body's barriers only) in a launch of its own gives the
+    standalone kernel's partials, bit for bit."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_attn
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.dsa_attn import (
+        DsaAttnBuild,
+    )
+
+    g = torch.Generator().manual_seed(60 + splits + fold)
+    nblk, bsr = 80, 80
+    rec, bt, topk, iptr = _paged(nblk, bsr, [TOPK, 1, 2047, 129, 128, 700, TOPK, 3], g)
+    q, scale = _q(g), _scale()
+    ins = dict(q=q, kv=rec, iptr=iptr, scale=scale)
+    if fold:
+        ins.update(topk=topk, bt=bt, bsr=bsr, bs=BS)
+    else:
+        ins.update(idx=_convert(bt, topk, iptr, bsr))
+    got = []
+    for standalone in (True, False):
+        key = DsaAttnBuild(
+            splits=splits, chunk=TOPK // splits, fold=fold, standalone=standalone
+        )
+        so, sl = dsa_attn.partial_shapes(key)
+        po = torch.full(so, float("nan"), dtype=bf, device="cuda")
+        pl = torch.full(sl, float("nan"), dtype=torch.float32, device="cuda")
+        dsa_attn.dsa_attn_launch(key, part_o=po, part_lse=pl, **ins)
+        torch.accelerator.synchronize()
+        got.append((po, pl))
+    assert torch.equal(got[0][0], got[1][0]) and torch.equal(got[0][1], got[1][1])
+
+
+# ---------------------------------------------------------------- U6, U8, U9
+
+
+DSA_LAYERS = (3, 5)
+DSA_LENS = {3: [TOPK] * S, 5: [TOPK, 100, 2047, 1, 129, TOPK, 64, 65]}
+DSA_STALLED = 3  # U8's stalled rank
+
+
+def _dsa_k2(runner, P: int, dsa: int, fold: bool):
+    from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
+
+    return k2.K2Build(
+        tokens=S, nblocks=5, reset=True, m1b_qlen=S, m1b_ranks=1,
+        m1b_off=runner.mla_post_off, m1b_splits=P, dsa=dsa, dsa_p=P,
+        dsa_fold=fold, uv_bf16=True, **runner.fault,
+    )  # fmt: skip
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _dsa_k2_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+) -> None:
+    from tests.models.kimi_k3.amd_specialized_decode.test_numerics import (
+        _init_worker,
+        _k2_inputs,
+        _moe_args,
+        _moe_weights,
+    )
+
+    device = _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
+
+    import torch.distributed as dist
+
+    from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_attn
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import HIDDEN
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import GROWS
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.common.debug import (
+        given_up_waits,
+    )
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.common.sync import WAIT_TICKS
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
+
+    runner = MonoRunner(device)
+    mw = _moe_weights(rank, device)
+    g = torch.Generator().manual_seed(600 + rank)
+    nblk, bsr = 80, 80
+    qsl = torch.tensor([0, S], dtype=torch.int32, device=device)
+    ins = {}
+    for layer in DSA_LAYERS:
+        rec, bt, topk, iptr = _paged(nblk, bsr, DSA_LENS[layer], g)
+        ins[layer] = dict(
+            w=_k2_inputs(rank, device, S, seed=layer),
+            rec=rec, bt=bt, topk=topk, iptr=iptr,
+            idx=_convert(bt, topk, iptr, bsr),
+            q=_q(g),
+            gate=torch.sigmoid(torch.randn(S, GROWS, generator=g)).to(device, bf),
+            w_v=_w_uv(g).transpose(1, 2),
+        )  # fmt: skip
+
+    def launch(layer, P, dsa, fold, outs):
+        x = ins[layer]
+        key = _dsa_k2(runner, P, dsa, fold)
+        dk = dsa_attn.DsaAttnBuild(tokens=S, splits=P, chunk=TOPK // P, fold=fold)
+        so, sl = dsa_attn.partial_shapes(dk)
+        po = torch.empty(so, dtype=bf, device=device)
+        pl = torch.empty(sl, dtype=torch.float32, device=device)
+        dsa_in = dict(q=x["q"], kv=x["rec"], iptr=x["iptr"], scale=_scale())
+        if fold:
+            dsa_in.update(topk=x["topk"], bt=x["bt"], bsr=bsr, bs=BS)
+        else:
+            dsa_in.update(idx=x["idx"])
+        if dsa == 1:
+            dsa_attn.dsa_attn_launch(dk, part_o=po, part_lse=pl, **dsa_in)
+        core, prefix, out = outs
+        m1b_in = dict(
+            o=po[0], lse=pl[0], seq_lens=qsl, qsl=qsl, w_v=x["w_v"],
+            w_v_scale=None, gate=x["gate"],
+        )  # fmt: skip
+        w = x["w"]
+        k2.k2_launch(
+            key, core=core, w_o=w["w_o"], prefix=prefix, blocks=w["blocks"],
+            ares_nw=w["ares_nw"], ares_qk=w["ares_qk"], in_nw=w["in_nw"],
+            out=out, layer=128 + layer, m1b_in=m1b_in,
+            dsa_in=dsa_in if dsa == 2 else None,
+            **_moe_args(mw), **runner.launch_args(), **runner.peer_args(),
+        )  # fmt: skip
+        return po, pl
+
+    def buffers():
+        return {
+            layer: (
+                torch.empty(S, GROWS, dtype=bf, device=device),
+                torch.empty(S, HIDDEN, dtype=bf, device=device),
+                torch.empty(S, HIDDEN, dtype=bf, device=device),
+            )
+            for layer in DSA_LAYERS
+        }
+
+    def capture(P, dsa, fold):
+        bufs = buffers()
+        runner.step_begin()
+        for layer in DSA_LAYERS:  # compiled and warm before the capture
+            launch(layer, P, dsa, fold, bufs[layer])
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            runner.step_begin()
+            for layer in DSA_LAYERS:
+                launch(layer, P, dsa, fold, bufs[layer])
+        return graph, bufs
+
+    def clone(bufs):
+        return {k: [t.clone() for t in v] for k, v in bufs.items()}
+
+    def same(a, b):
+        return all(torch.equal(x, y) for k in a for x, y in zip(a[k], b[k]))
+
+    # U6: the split launches, the fused stage, the fused stage + the fold
+    graphs = {}
+    for P in (16, 32):
+        got = {}
+        for dsa, fold in ((1, False), (2, False), (2, True)):
+            graph, bufs = capture(P, dsa, fold)
+            graph.replay()
+            torch.accelerator.synchronize()
+            want = clone(bufs)
+            for _ in range(200):
+                graph.replay()
+            torch.accelerator.synchronize()
+            assert same(bufs, want), (P, dsa, fold)
+            assert not runner.health.any() and not runner.flags.any(), (P, dsa, fold)
+            got[dsa, fold] = want
+            graphs[P, dsa, fold] = graph, bufs, want
+        for v in ((2, False), (2, True)):
+            assert same(got[v], got[1, False]), (P, v)
+        core = got[1, False][3][0]
+        assert torch.isfinite(core.float()).all() and core.float().abs().sum() > 0
+        outs = [torch.empty_like(got[2, True][5][2]) for _ in range(tp_size)]
+        dist.all_gather(outs, got[2, True][5][2])
+        assert all(torch.equal(outs[0], o) for o in outs), "ranks disagree"
+
+    # U9: the epoch's tag wraps (2^22) under the fused graphs' replays
+    runner.epoch.fill_(2**22 - 2)
+    for _ in range(4):
+        for (P, dsa, fold), (graph, bufs, want) in graphs.items():
+            if dsa == 2:
+                graph.replay()
+                torch.accelerator.synchronize()
+                assert same(bufs, want), ("wrap", P, fold, runner.epoch.item())
+    assert runner.epoch.item() > 2**22 + 2
+    assert not runner.health.any() and not runner.flags.any()
+
+    # U8: the last DSA CTA (an ``ardy`` flag) stalls past every wait's bound
+    e = runner.epoch.item() + 2
+    runner.fault = {
+        "fault_rank": DSA_STALLED,
+        "fault_epoch": e,
+        "fault_layer": 128 + 3,
+        "fault_ticks": WAIT_TICKS * 3 // 2,
+    }
+    bufs = buffers()
+    runner.step_begin()  # no stall
+    launch(3, 16, 2, True, bufs[3])
+    torch.accelerator.synchronize()
+    assert not runner.flags.any()
+    runner.step_begin()  # epoch e: rank DSA_STALLED's CTA 255 stalls
+    assert runner.epoch.item() == e
+    launch(3, 16, 2, True, bufs[3])
+    torch.accelerator.synchronize()
+    waits = given_up_waits(runner.health.cpu(), k2.REGIONS)
+    if waits:
+        print(f"rank {rank}: {waits[:3]}")
+    gave_up = torch.tensor([int(bool(waits))], device=device)
+    dist.all_reduce(gave_up)
+    assert gave_up.item() > 0, "no rank's wait gave up"
+    if rank == 0:
+        assert runner.flags.any(), "the output rank's flags missed the failure"
+
+
+@needs_gfx950
+@multi_gpu_test(num_gpus=8)
+def test_dsa_fused_tp8_bit_equal_replays_and_faults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U6: K2 with the DSA stage (``dsa`` 2, with and without the fold) gives
+    the split launches' (``dsa`` 1) bits, P = 16 and 32, over 200 replays of a
+    graph of two layers. U9: the fused graphs replayed across the epoch tag's
+    wrap. U8: a DSA CTA stalled past the bounds: the combine's ``ardy`` waits
+    give up, the step fails, no hang."""
+    multi_process_parallel(monkeypatch, 8, 1, _dsa_k2_worker)

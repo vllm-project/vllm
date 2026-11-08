@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi-K3.1's DSA layers at DCP1 (``VLLM_KIMI_SD_DSA``): vLLM's query, KV and
-indexer ops, then the sparse attention as ``dsa_attn``'s split-K launch, and
-K2, which merges its slices, runs W_UV and the gate (its fused M1b), then
-o_proj and the MoE.
+indexer ops, then the sparse attention split-K -- ``split``: as ``dsa_attn``'s
+own launch; ``fused`` (``auto``): in K2's launch, on its top CTAs -- and K2,
+which merges its slices, runs W_UV and the gate (its fused M1b), then o_proj
+and the MoE. ``VLLM_KIMI_SD_DSA_FOLD`` (fused): the attention reads the
+indexer's logical top-k and the block table itself (no converter launch).
 
 ``prologue`` is ``MultiHeadLatentAttentionWrapper.forward`` and
 ``MLAAttention.forward`` up to the attention, op for op, writing the attention's
@@ -43,15 +45,24 @@ def mode() -> str:
     return envs.VLLM_KIMI_SD_DSA
 
 
+def fused() -> bool:
+    """The attention in K2's launch: ``fused``, and ``auto``'s pick."""
+    return mode() in (FUSED, AUTO)
+
+
 def dsa_key(runner: MonoRunner, width: int):
-    """The sparse attention's build at this width (one request: width rows)."""
+    """The sparse attention's build at this width (one request: width rows):
+    its own launch (``split``) or K2's stage (``fused``, with the fold)."""
     import vllm.envs as envs
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_attn
 
+    stage = fused()
     return dsa_attn.DsaAttnBuild(
         tokens=width,
         splits=envs.VLLM_KIMI_SD_DSA_SPLITS,
         chunk=dsa_attn.TOPK // envs.VLLM_KIMI_SD_DSA_SPLITS,
+        fold=stage and envs.VLLM_KIMI_SD_DSA_FOLD,
+        standalone=not stage,
         part_fp32=envs.VLLM_KIMI_SD_DSA_PART_FP32,
     )
 
@@ -85,9 +96,16 @@ def dsa_reasons(runner: MonoRunner, layer) -> list[str]:
     if a is None or w.indexer is None or not w.is_sparse:
         return ["a layer without DSA's sparse MLA"]
     shapes = layer_shapes(layer)
+    topk = getattr(a.impl, "topk_indices_buffer", None)
     checks = (
-        (m == FUSED, "VLLM_KIMI_SD_DSA=fused (not implemented yet; use split)"),
-        (envs.VLLM_KIMI_SD_DSA_FOLD, "VLLM_KIMI_SD_DSA_FOLD=1 (not implemented yet)"),
+        (
+            fused()
+            and envs.VLLM_KIMI_SD_DSA_FOLD
+            and topk is not None
+            and topk.size(-1) != DSA_SHAPES[5],
+            f"a top-k buffer {tuple(topk.shape) if topk is not None else ()} "
+            "wider than the top-k (VLLM_KIMI_SD_DSA_FOLD=0 converts it)",
+        ),
         (
             envs.VLLM_KIMI_SD_DSA_SPLITS not in SPLITS,
             f"VLLM_KIMI_SD_DSA_SPLITS={envs.VLLM_KIMI_SD_DSA_SPLITS} (16 or 32)",
@@ -228,7 +246,9 @@ def _flat(kv_cache, block_size: int):
 
 def dsa_inputs(w, key, sd_q, kv_cache, md, idx):
     """``dsa_attn``'s inputs (``host_args``') and new partials, o
-    [splits, S, 12, 512] and LSE [splits, S, 12] (M1b merges the splits)."""
+    [splits, S, 12, 512] and LSE [splits, S, 12] (M1b merges the splits).
+    ``idx`` the converter's rows, or with the fold None: the indexer's top-k
+    and the request's block table row (one request a step)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_attn
 
     a = w.mla_attn
@@ -236,10 +256,20 @@ def dsa_inputs(w, key, sd_q, kv_cache, md, idx):
     dsa_in = dict(
         q=sd_q,
         kv=dsa_attn.kv_rows(kv_cache, md.block_size),
-        idx=idx,
         iptr=md.paged_kv_indptr,
         scale=a.impl.scale,
     )
+    if key.fold:
+        # the engine sets the block size after the builds: a launch argument
+        assert md.topk_tokens == dsa_attn.TOPK
+        dsa_in.update(
+            topk=a.impl.topk_indices_buffer,
+            bt=md.block_table[0],
+            bsr=_flat(kv_cache, md.block_size)[1],
+            bs=md.block_size,
+        )
+    else:
+        dsa_in.update(idx=idx)
     dt = torch.float32 if key.part_fp32 else torch.bfloat16
     po = sd_q.new_empty(so, dtype=dt)
     return dsa_in, po, torch.empty(sl, dtype=torch.float32, device=sd_q.device)
@@ -258,7 +288,7 @@ class DsaM1Layer(MlaOpsLayer):
 
     def builds(self) -> list:
         k2 = _k2_key(self.layer, self.runner, self.width, False, True, self.key)
-        return [self.key, k2]
+        return [k2] if not self.key.standalone else [self.key, k2]
 
     def w_v(self) -> torch.Tensor:
         """W_UV as M1b's bf16 [12, 128 v, 512 k], k dense: a view of vLLM's
@@ -301,9 +331,13 @@ class DsaM1Layer(MlaOpsLayer):
         sd_q = prefix_sum.new_empty(s, dsa_attn.NH, dsa_attn.ENTRY)
         gate = prefix_sum.new_empty(s, dsa_attn.NH * a.v_head_dim)
         prologue(w, positions, hidden_states, sd_q, gate, md, kv_cache, slots)
-        idx = convert_indices(a, md, kv_cache, s)
+        if self.key.fold:
+            idx = None
+        else:
+            idx = convert_indices(a, md, kv_cache, s)
         dsa_in, po, pl = dsa_inputs(w, self.key, sd_q, kv_cache, md, idx)
-        dsa_attn.dsa_attn_launch(self.key, part_o=po, part_lse=pl, **dsa_in)
+        if self.key.standalone:
+            dsa_attn.dsa_attn_launch(self.key, part_o=po, part_lse=pl, **dsa_in)
         core = torch.empty_like(gate)
         m1b_in = dict(
             o=po[0],
@@ -317,7 +351,7 @@ class DsaM1Layer(MlaOpsLayer):
         )
         out = _k2(
             layer, runner, core, prefix_sum, block_residual, m1b_in=m1b_in,
-            dsa=self.key,
+            dsa=self.key, dsa_in=None if self.key.standalone else dsa_in,
         )  # fmt: skip
         if verify_on() and not torch.cuda.is_current_stream_capturing():
             self.verify(positions, hidden_states, sd_q, core, kv_cache, md, slots)
