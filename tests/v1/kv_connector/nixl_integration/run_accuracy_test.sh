@@ -257,8 +257,10 @@ run_tests_for_model() {
     fi
 
     DECODER_EAGER_ARG=""
+    DECODER_CUDAGRAPH_ENV=""
     if [[ "$ENFORCE_EAGER" == "1" && "$DECODER_CUDAGRAPH" == "1" ]]; then
-      DECODER_EAGER_ARG="-cc.mode=NONE -cc.cudagraph_mode=FULL_DECODE_ONLY"
+      DECODER_CUDAGRAPH_ENV="VLLM_USE_BREAKABLE_CUDAGRAPH=1"
+      DECODER_EAGER_ARG="-cc.cudagraph_mode=FULL_DECODE_ONLY"
     elif [[ "$ENFORCE_EAGER" == "1" ]]; then
       DECODER_EAGER_ARG="--enforce-eager"
     fi
@@ -269,6 +271,7 @@ run_tests_for_model() {
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
     ${DECODER_KV_LAYOUT:+VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT} \
     $DECODER_INTERNAL_PORT_ENV \
+    $DECODER_CUDAGRAPH_ENV \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $model_name \
