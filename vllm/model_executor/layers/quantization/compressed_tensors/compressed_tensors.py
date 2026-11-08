@@ -270,6 +270,11 @@ def _pattern_for_ignore_group(paths: set[tuple[str, ...]]) -> str:
 def _consolidate_ignore_names(ignore: list[str]) -> list[str]:
     """Fold concrete ignore names into exact regexes after vLLM renaming.
 
+    The result is stored on the loaded config only. Quantization still saves
+    a list of concrete checkpoint names. Older vLLM rewrites those names and
+    leaves ``re:`` entries unchanged, so a regex saved at quantization time
+    would miss the renamed module when those versions load the checkpoint.
+
     ``apply_vllm_mapper`` rewrites checkpoint names first. This function then
     runs on those vLLM names. Folding first would turn a name into a ``re:``
     pattern, and ``hf_to_vllm_mapper`` would leave that pattern unchanged, so
@@ -397,8 +402,10 @@ class CompressedTensorsConfig(QuantizationConfig):
           rules. Stacked fusion (q_proj -> qkv_proj) is not applied.
 
         Concrete ignore names are rewritten first. Names that then share a
-        path shape are folded into one anchored regex. Folding before this
-        rewrite would hide those names from the mapper.
+        path shape are folded into one anchored regex on this loaded config.
+        The checkpoint list is unchanged, so older vLLM still rewrites every
+        concrete name. Folding before the rewrite would hide those names from
+        the mapper.
         """
 
         def _map_target(target: str) -> str | None:
