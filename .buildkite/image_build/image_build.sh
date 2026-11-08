@@ -232,6 +232,45 @@ resolve_merge_base_cache_commit() {
     fi
 }
 
+build_thin_image_if_python_only() {
+    # A PR that changes no build input skips the bake: its changed files go
+    # as one layer on top of a finished main image of its merge base (or a
+    # few commits before it), pushed under the same tag. COPY --link only,
+    # so the builder never pulls the base. VLLM_CI_FULL_IMAGE=1 opts out.
+    if [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ||
+        "${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-}" != "main" ||
+        "${VLLM_CI_FULL_IMAGE:-0}" == "1" ||
+        "${VLLM_KERNEL_SYMBOL_MAP:-0}" == "1" ]]; then
+        return 1
+    fi
+    resolve_merge_base_cache_commit
+    local commit base="" context
+    for commit in $(git rev-list --first-parent --max-count=5 "${VLLM_CACHE_MERGE_BASE_COMMIT:-}" 2>/dev/null); do
+        if docker manifest inspect "${REGISTRY}/vllm-ci-postmerge-repo:${commit}" >/dev/null 2>&1; then
+            base="${commit}"
+            break
+        fi
+    done
+    if [[ -z "${base}" ]]; then
+        echo "No main image near the merge base yet; full build"
+        return 1
+    fi
+    echo "--- :zap: Checking for a thin build over main ${base}"
+    context="$(mktemp -d)"
+    python3 .buildkite/image_build/python_only_overlay.py "${base}" "${context}" || return 1
+    setup_buildx_builder || return 1
+    docker buildx build --progress plain -f - "${context}" \
+        --build-arg "BASE_IMAGE=${REGISTRY}/vllm-ci-postmerge-repo:${base}" \
+        --build-arg "PYTHON_VERSION=$(sed -n 's/^ARG PYTHON_VERSION=//p' docker/Dockerfile)" \
+        --tag "${IMAGE_TAG}" --output type=registry,compression=zstd,oci-mediatypes=true <<'EOF' || return 1
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+ARG PYTHON_VERSION
+COPY --link vllm-workspace/ /vllm-workspace/
+COPY --link vllm-workspace/src/vllm/ /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/
+EOF
+}
+
 print_bake_config() {
     echo "--- :page_facing_up: Resolved bake configuration"
     # Write to a temp directory to avoid polluting the repo root (which is the
@@ -397,6 +436,11 @@ echo "CACHE_FROM_BASE_BRANCH: ${CACHE_FROM_BASE_BRANCH}"
 echo "CACHE_FROM_MAIN: ${CACHE_FROM_MAIN}"
 
 check_and_skip_if_image_exists
+
+if build_thin_image_if_python_only; then
+    annotate_image_tags
+    exit 0
+fi
 
 echo "--- :docker: Setting up Docker buildx bake"
 echo "Target: ${TARGET}"
