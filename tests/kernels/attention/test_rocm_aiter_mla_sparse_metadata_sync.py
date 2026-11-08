@@ -315,7 +315,8 @@ def test_sink_build_skips_persistent_metadata(monkeypatch):
     assert builder._prev_metadata_key is None
 
 
-def test_sparse_persistent_metadata_syncs_only_after_recompute(monkeypatch):
+def test_sparse_persistent_metadata_recomputes_without_host_sync(monkeypatch):
+    """The metadata kernel and its consumers share torch's current stream."""
     builder = _make_builder()
     common_metadata = _make_common_metadata()
     events: list[str] = []
@@ -342,7 +343,7 @@ def test_sparse_persistent_metadata_syncs_only_after_recompute(monkeypatch):
 
     builder.build(common_prefix_len=0, common_attn_metadata=common_metadata)
 
-    assert events == ["metadata", "sync"]
+    assert events == ["metadata"]
     assert fake_get_mla_metadata_v1_mock.call_count == 1
     assert fake_get_mla_metadata_v1_mock.call_args.kwargs["max_split_per_batch"] == 1
     assert fake_get_mla_metadata_v1_mock.call_args.kwargs["dtype_q"] == torch.bfloat16
@@ -641,17 +642,20 @@ def test_forward_mqa_slices_decode_subset_for_bf16_and_fp8(monkeypatch, kv_cache
     assert captured["token_indices"].shape == (2, 4)
 
 
+@pytest.mark.parametrize("gfx942", [False, True])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("length_relation", ["short", "long"])
 @pytest.mark.parametrize("workload", ["prefill", "mixed", "decode"])
 def test_sparse_metadata_workload_length_dtype_matrix(
-    monkeypatch, workload, length_relation, kv_cache_dtype
+    monkeypatch, workload, length_relation, kv_cache_dtype, gfx942
 ):
     """Cover routing and persistent metadata across the ROCm support matrix.
 
     The matrix crosses pure prefill, mixed prefill/decode, and decode-only
     workloads with sequence lengths below/above top-k and BF16/FP8 KV cache.
+    Only gfx942 drops persistent metadata for long BF16 prefills (Triton).
     """
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: gfx942)
     builder = _make_builder()
     builder.vllm_config = SimpleNamespace(
         attention_config=SimpleNamespace(sparse_mla_force_mqa=False)
@@ -739,7 +743,9 @@ def test_sparse_metadata_workload_length_dtype_matrix(
     assert result.qo_indptr.numel() == expected_sparse_tokens + 1
     assert result.paged_kv_indptr.numel() == expected_sparse_tokens + 1
 
-    uses_fallback = workload == "prefill" and is_long and kv_cache_dtype == "auto"
+    uses_fallback = (
+        gfx942 and workload == "prefill" and is_long and kv_cache_dtype == "auto"
+    )
     if expected_sparse_tokens == 0 or uses_fallback:
         get_persistent_metadata.assert_not_called()
     else:
