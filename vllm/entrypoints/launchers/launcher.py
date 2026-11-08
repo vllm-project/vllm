@@ -50,7 +50,7 @@ class NoSignalServer(uvicorn.Server):
     Callers register their own handlers on the event loop for graceful
     shutdown; uvicorn's would race with and override them (see #49668).
 
-    With ``peer_loads`` (several API workers on one shared socket: a shared
+    With `peer_loads` (several API workers on one shared socket: a shared
     array with one slot per worker, and this worker's index), each worker
     publishes its number of open connections, and a pending connection is
     accepted by the least loaded worker. The event loop's own server would

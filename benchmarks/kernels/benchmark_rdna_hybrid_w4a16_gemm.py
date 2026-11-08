@@ -60,7 +60,7 @@ def prepare_hybrid_weights(K, N, group_size, dtype=torch.float16, device="cuda")
     Returns (w_q_skinny, w_s_skinny, w_fp16, w_zp). The triton path derives
     its int32 view from w_q_skinny, so no separate int32 buffer is returned.
 
-    Weights go through ``pack_skinny_int4``, the packer the layer uses, so the
+    Weights go through `pack_skinny_int4`, the packer the layer uses, so the
     benchmark sees the production row stride rather than an always-dense one.
     """
     num_groups = K // group_size
@@ -107,7 +107,7 @@ PROVIDERS = ["torch-fp16", "hybrid-w4a16", "hybrid-w4a16-zp"]
 def benchmark(batch_size, provider, N, K, group_size, dtype, weights):
     """Time one GEMM.
 
-    ``do_bench`` rather than ``do_bench_cudagraph``: it zeroes a 256 MB buffer
+    `do_bench` rather than `do_bench_cudagraph`: it zeroes a 256 MB buffer
     between reps, so the weight is read from DRAM as it would be in a model.
     With a cudagraph replay the weight stays resident in the 32 MB MALL, which
     flatters wide-BLOCK_N tiles and hides row-stride effects entirely.
