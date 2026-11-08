@@ -1,0 +1,270 @@
+meta:
+  title: "Qwen3.5-122B-A10B"
+  slug: "qwen3.5-122b-a10b"
+  provider: "Qwen"
+  description: "Mid-size Qwen3.5 multimodal MoE (122B total / 10B active) with gated delta networks, 256 experts, and 262K context"
+  date_added: 2026-04-22
+  date_updated: 2026-10-07
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "Qwen3.5 mid-tier MoE — fits on 4x H200 BF16 or 2x H200 FP8"
+  related_recipes:
+    - "Qwen/Qwen3.5-397B-A17B"
+    - "Qwen/Qwen3.5-35B-A3B"
+  hardware:
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "Qwen/Qwen3.5-122B-A10B"
+  min_vllm_version: "0.17.0"
+  default_frontend: rust
+  docker_image:
+    # Stable release the AMD numbers in the guide were measured on (2026-10-07).
+    amd: "vllm/vllm-openai-rocm:v0.31.0"
+  architecture: moe
+  parameter_count: "122B"
+  active_parameters: "10B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with Qwen3 Coder parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+  reasoning:
+    description: "Enable chain-of-thought reasoning with Qwen3 parser"
+    args:
+      - "--reasoning-parser"
+      - "qwen3"
+  spec_decoding:
+    description: "Multi-token prediction speculative decoding for lower latency"
+    args:
+      - "--speculative-config"
+      - '{"method":"mtp","num_speculative_tokens":1}'
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+  long_context:
+    description: "YaRN RoPE scaling past the native 262,144-token window to ~1,010,000 tokens. Static YaRN holds the scaling factor constant regardless of input length, so leave this off unless you actually serve long prompts; for ~524K, halve the factor to 2.0."
+    args:
+      - "--hf-overrides"
+      - '{"text_config": {"rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10], "rope_type": "yarn", "rope_theta": 10000000, "partial_rotary_factor": 0.25, "factor": 4.0, "original_max_position_embeddings": 262144}}}'
+      - "--max-model-len"
+      - "1010000"
+    env:
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+
+opt_in_features:
+  - spec_decoding
+  - text_only
+  - long_context
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 293
+    description: "Full precision BF16 — requires 4x H200 or equivalent"
+  fp8:
+    model_id: "Qwen/Qwen3.5-122B-A10B-FP8"
+    precision: fp8
+    vram_minimum_gb: 147
+    description: "Qwen official FP8 checkpoint — fits on 2x H200"
+    hardware_overrides:
+      amd:
+        # fp8 KV keeps MTP's gain flat across context on ROCm (with a bf16 KV cache
+        # MTP decode slows down as the prompt grows), and it is what the AMD numbers
+        # in the guide were measured with.
+        extra_args:
+          - "--kv-cache-dtype"
+          - "fp8"
+  nvfp4:
+    model_id: "RedHatAI/Qwen3.5-122B-A10B-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 74
+    description: "RedHatAI compressed-tensors NVFP4 quantization for Blackwell GPUs"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+  gptq_int4:
+    model_id: "Qwen/Qwen3.5-122B-A10B-GPTQ-Int4"
+    precision: int4
+    vram_minimum_gb: 74
+    description: "GPTQ Int4 checkpoint — single-GPU serving on 80GB hardware"
+
+  redhat_fp8:
+    model_id: "RedHatAI/Qwen3.5-122B-A10B-FP8-dynamic"
+    precision: fp8
+    label: "FP8 Dynamic (RedHat)"
+    vram_minimum_gb: 147
+    description: "RedHatAI FP8 (E4M3) with dynamic per-token activation quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
+
+hardware_overrides:
+  amd:
+    # AITER is opt-in on ROCm and the image does not set it; without these two the
+    # server runs ROCM_ATTN + the Triton FP8 MoE and single-stream decode of this
+    # hybrid GDN model drops 4x from ~200 to ~12k prompt tokens. With AITER on, the
+    # auto-selection still picks ROCM_ATTN, so name the backend. ROCM_AITER_FA rather
+    # than ROCM_AITER_UNIFIED_ATTN: on gfx950 with v0.31.0 the unified backend runs
+    # AITER's new Gluon kernel, ~20% slower and with MTP decode that slows down as
+    # the prompt grows. Verified 2026-10-07 on one MI325X and one MI355X with the FP8
+    # checkpoint (see the AMD section of the guide).
+    extra_args:
+      - "--attention-backend"
+      - "ROCM_AITER_FA"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+
+strategy_overrides:
+  pd_cluster:
+    prefill:
+      env:
+        VLLM_SSM_CONV_STATE_LAYOUT: "DS"
+    decode:
+      env:
+        VLLM_SSM_CONV_STATE_LAYOUT: "DS"
+
+guide: |
+  ## Overview
+
+  [Qwen3.5-122B-A10B](https://huggingface.co/Qwen/Qwen3.5-122B-A10B) is a mid-tier
+  member of the Qwen3.5 family, sharing the gated delta networks MoE architecture
+  with 122B total parameters and 10B activated per token (256 experts). It is
+  multimodal (vision + text) and natively supports 262K context.
+
+  ## Prerequisites
+
+  - **vLLM version:** >= 0.17.0
+  - **Hardware (BF16):** 4x H200 or 8x H100
+  - **Hardware (FP8):** 2x H200 or 4x H100
+  - **Hardware (Int4):** single 80 GB GPU
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend=auto
+  ```
+
+  ## Launching the Server
+
+  ### BF16 on 4xH200 (TP4)
+
+  ```bash
+  vllm serve Qwen/Qwen3.5-122B-A10B \
+    --tensor-parallel-size 4 \
+    --max-model-len 262144 \
+    --reasoning-parser qwen3
+  ```
+
+  ### FP8 on 2xH200 (TP2)
+
+  ```bash
+  vllm serve Qwen/Qwen3.5-122B-A10B-FP8 \
+    --tensor-parallel-size 2 \
+    --max-model-len 262144 \
+    --reasoning-parser qwen3
+  ```
+
+  ### Throughput-focused (text-only, EP)
+
+  ```bash
+  vllm serve Qwen/Qwen3.5-122B-A10B-FP8 \
+    -dp 4 --enable-expert-parallel \
+    --language-model-only \
+    --reasoning-parser qwen3 \
+    --enable-prefix-caching
+  ```
+
+  ### MTP speculative decoding
+
+  ```bash
+  vllm serve Qwen/Qwen3.5-122B-A10B-FP8 \
+    --tensor-parallel-size 2 \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 1}' \
+    --reasoning-parser qwen3
+  ```
+
+  ### AMD (MI325X / MI355X, single GPU, FP8)
+
+  The FP8 checkpoint fits one MI300X-class GPU. Three settings matter on ROCm and none is on by
+  default: `VLLM_ROCM_USE_AITER=1` switches the MoE to the AITER FP8 kernels,
+  `--attention-backend ROCM_AITER_FA` keeps decode flat across context (the auto-selected
+  `ROCM_ATTN` decays with prompt length on this hybrid GDN model), and `--kv-cache-dtype fp8`
+  keeps MTP flat across context too.
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 vllm serve Qwen/Qwen3.5-122B-A10B-FP8 \
+    --attention-backend ROCM_AITER_FA \
+    --kv-cache-dtype fp8 --max-num-seqs 64 \
+    --reasoning-parser qwen3
+  ```
+
+  `--max-num-seqs 64` because the default exceeds the Mamba block budget on 192 GB. MTP
+  (`--speculative-config '{"method":"mtp","num_speculative_tokens":1}'`) works with the same
+  flags. Single-stream decode (tokens/s at ~200 / ~2k / ~12k / ~30k prompt tokens, 128 output
+  tokens, prefix caching off), measured 2026-10-07 on `vllm/vllm-openai-rocm:v0.31.0`:
+
+  | | MI325X | MI355X |
+  |---|---|---|
+  | AITER + `ROCM_AITER_FA` | 128 / 127 / 127 / 127 | 143 / 143 / 143 / 143 |
+  | + MTP | 184 / 169 / 172 / 164 | 204 / 193 / 195 / 190 |
+
+  This recipe used `ROCM_AITER_UNIFIED_ATTN` before v0.31.0. Avoid it on MI350X/MI355X with
+  v0.31.0: there it runs AITER's new gfx950 Gluon kernel, which decodes at 110 tokens/s and,
+  with MTP, falls from 200 to 72 tokens/s between ~200 and ~30k prompt tokens
+  ([vllm-project/vllm#60408](https://github.com/vllm-project/vllm/issues/60408)). MI325X is
+  unaffected (126 tokens/s; 182 to 162 with MTP).
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  resp = client.chat.completions.create(
+      model="Qwen/Qwen3.5-122B-A10B",
+      messages=[{"role": "user", "content": "Summarize the gated delta networks paper."}],
+      max_tokens=512,
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ## Troubleshooting
+
+  - **CUDA graph / Mamba cache size error:** reduce `--max-cudagraph-capture-size`
+    (default 512). See [vLLM PR #34571](https://github.com/vllm-project/vllm/pull/34571).
+  - **Disable reasoning:** add `--default-chat-template-kwargs '{"enable_thinking": false}'`.
+  - **Prefix Caching (Mamba):** currently experimental in "align" mode.
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3.5-122B-A10B)
+  - [FP8 checkpoint](https://huggingface.co/Qwen/Qwen3.5-122B-A10B-FP8)
+  - [GPTQ-Int4 checkpoint](https://huggingface.co/Qwen/Qwen3.5-122B-A10B-GPTQ-Int4)
+  - [Qwen3.5-397B-A17B recipe](../Qwen3.5-397B-A17B)

@@ -66,7 +66,7 @@ class CudaRTLibrary:
             cudaError_t,
             [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, cudaMemcpyKind],
         ),
-        # cudaError_t cudaIpcGetMemHandle ( cudaIpcMemHandle_t* handle, void* devPtr ) # noqa
+        # cudaError_t cudaIpcGetMemHandle ( cudaIpcMemHandle_t* handle, void* devPtr )
         Function(
             "cudaIpcGetMemHandle",
             cudaError_t,
@@ -78,6 +78,8 @@ class CudaRTLibrary:
             cudaError_t,
             [ctypes.POINTER(ctypes.c_void_p), cudaIpcMemHandle_t, ctypes.c_uint],
         ),
+        # cudaError_t cudaIpcCloseMemHandle ( void* devPtr )
+        Function("cudaIpcCloseMemHandle", cudaError_t, [ctypes.c_void_p]),
         # cudaError_t cudaHostRegister ( void* ptr, size_t size, unsigned int flags )
         Function(
             "cudaHostRegister",
@@ -90,7 +92,7 @@ class CudaRTLibrary:
         Function("cudaGetLastError", cudaError_t, []),
     ]
 
-    # https://rocm.docs.amd.com/projects/HIPIFY/en/latest/tables/CUDA_Runtime_API_functions_supported_by_HIP.html # noqa
+    # https://rocm.docs.amd.com/projects/HIPIFY/en/latest/tables/CUDA_Runtime_API_functions_supported_by_HIP.html
     cuda_to_hip_mapping = {
         "cudaSetDevice": "hipSetDevice",
         "cudaDeviceSynchronize": "hipDeviceSynchronize",
@@ -102,6 +104,7 @@ class CudaRTLibrary:
         "cudaMemcpy": "hipMemcpy",
         "cudaIpcGetMemHandle": "hipIpcGetMemHandle",
         "cudaIpcOpenMemHandle": "hipIpcOpenMemHandle",
+        "cudaIpcCloseMemHandle": "hipIpcCloseMemHandle",
         "cudaHostRegister": "hipHostRegister",
         "cudaHostUnregister": "hipHostUnregister",
         "cudaGetLastError": "hipGetLastError",
@@ -198,6 +201,9 @@ class CudaRTLibrary:
             )
         )
         return devPtr
+
+    def cudaIpcCloseMemHandle(self, devPtr: ctypes.c_void_p) -> None:
+        self.CUDART_CHECK(self.funcs["cudaIpcCloseMemHandle"](devPtr))
 
     def cudaHostRegister(self, ptr: int, size: int, flags: int = 0) -> int:
         """Return the raw error code instead of raising, since callers can

@@ -169,7 +169,7 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
             if mm_data is None
             else mm_data
         )
-        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
         dummy_audios = (
             [] if "audio" not in dummy_mm_data else dummy_mm_items["audio"].get_all()
         )
@@ -197,6 +197,7 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
             # whixtral tokenizer adds padding to the audio
             # so we need to update the audio arrays
             {**dummy_mm_data, "audio": [a.audio_array for a in res.audios]},
+            validate=False,
         )
 
         return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_items)

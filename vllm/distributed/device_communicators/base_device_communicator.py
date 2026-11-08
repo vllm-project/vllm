@@ -136,6 +136,10 @@ class All2AllManagerBase:
         """
         raise NotImplementedError
 
+    def update_mask(self, rank: int, masked: bool = True) -> None:
+        """Set the mask for a specific EP rank. Used during scale-down."""
+        raise NotImplementedError
+
     def set_num_sms(self, num_sms: int):
         pass
 
@@ -260,7 +264,7 @@ class DeviceCommunicatorBase:
         """Release reclaimable communicator memory (default: no-op)."""
 
     def resume(self) -> None:
-        """Restore memory released by ``suspend`` (default: no-op)."""
+        """Restore memory released by `suspend` (default: no-op)."""
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         if dim < 0:

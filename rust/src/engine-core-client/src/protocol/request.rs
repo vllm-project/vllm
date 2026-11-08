@@ -7,10 +7,12 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
+use serde_with::serde_as;
 
 use crate::protocol::kv_hints::KvHintsEnvelope;
 use crate::protocol::multimodal::MmFeatures;
 use crate::protocol::sampling::EngineCoreSamplingParams;
+use crate::protocol::tensor::WireNdArray;
 use crate::protocol::{OpaqueValue, lora};
 use crate::{Error, Result};
 
@@ -64,6 +66,7 @@ impl EngineCoreRequestType {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReasoningParserKwargs {
     /// Effective kwargs visible to the chat template for this request.
+    #[serde(default)]
     pub chat_template_kwargs: HashMap<String, serde_json::Value>,
 }
 
@@ -74,7 +77,9 @@ pub struct ReasoningParserKwargs {
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 pub struct EngineCoreRequest {
     pub request_id: String,
-    pub prompt_token_ids: Option<Vec<u32>>,
+    /// A rank-1 uint32 array, so that a long prompt goes in its own auxiliary
+    /// frame and the engine copies it into a buffer, not one int per token.
+    pub prompt_token_ids: Option<WireNdArray>,
     /// Multimodal features attached to the request.
     pub mm_features: Option<MmFeatures>,
     pub sampling_params: Option<EngineCoreSamplingParams>,
@@ -130,7 +135,19 @@ pub struct EngineCoreRequest {
     pub session_id: Option<String>,
     #[serde(default)]
     pub kv_hints: Option<KvHintsEnvelope>,
+    /// Hashes of the prompt's full blocks, computed with the engine's
+    /// [`PrefixHashConfig`](crate::protocol::handshake::PrefixHashConfig) so
+    /// the engine doesn't hash the prompt itself. They must include any extra
+    /// keys the engine would add (LoRA, multimodal, cache salt).
+    #[serde(default)]
+    pub block_hashes: Option<Vec<BlockHash>>,
 }
+
+/// A prefix-cache block hash, carried as msgpack bin like Python `bytes`.
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BlockHash(#[serde_as(as = "serde_with::Bytes")] pub Vec<u8>);
 
 impl EngineCoreRequest {
     /// Validate fields intentionally not supported in the first-stage client.
@@ -147,6 +164,9 @@ impl EngineCoreRequest {
     /// Extract large request tensors into ordered auxiliary frames.
     pub(crate) fn extract_aux_frames(&mut self, threshold: usize) -> Vec<Bytes> {
         let mut aux_frames = Vec::new();
+        if let Some(ids) = &mut self.prompt_token_ids {
+            ids.extract_aux_frame(&mut aux_frames, threshold);
+        }
         if let Some(features) = &mut self.mm_features {
             for feature in features {
                 feature.extract_aux_frames(&mut aux_frames, threshold);
@@ -175,6 +195,7 @@ mod tests {
     use crate::protocol::sampling::EngineCoreSamplingParams;
     use crate::protocol::tensor::{WireArrayData, WireNdArray, WireTensor};
     use crate::protocol::{decode_value, encode_msgpack};
+    use crate::test_utils::{decode_add_request, decode_prompt_token_ids};
 
     const AUX_FRAME_THRESHOLD: usize = 256;
 
@@ -182,7 +203,7 @@ mod tests {
     fn engine_core_request_serializes_as_full_array() {
         let request = EngineCoreRequest {
             request_id: "req-1".to_string(),
-            prompt_token_ids: Some(vec![1, 2, 3]),
+            prompt_token_ids: Some(vec![1, 2, 3].into()),
             sampling_params: Some(EngineCoreSamplingParams {
                 max_tokens: 8,
                 ..EngineCoreSamplingParams::for_test()
@@ -210,7 +231,7 @@ mod tests {
             other => panic!("expected array, got {other:?}"),
         };
 
-        assert_eq!(array.len(), 22);
+        assert_eq!(array.len(), 23);
         assert_eq!(array[0], Value::from("req-1"));
         assert_eq!(array[2], Value::Nil);
         assert_eq!(array[4], Value::Nil);
@@ -218,6 +239,63 @@ mod tests {
         assert_eq!(array[11], Value::from(7));
         assert_eq!(array[20], Value::from("session-1"));
         assert!(matches!(&array[21], Value::Map(_)));
+        // `block_hashes`, filled in by the client.
+        assert_eq!(array[22], Value::Nil);
+    }
+
+    #[test]
+    fn engine_core_request_sends_prompt_token_ids_as_ndarray() {
+        let ids = vec![1u32, 70_000, 129_279];
+        let request = EngineCoreRequest {
+            request_id: "req-1".to_string(),
+            prompt_token_ids: Some(ids.clone().into()),
+            ..EngineCoreRequest::default()
+        };
+        // A short prompt stays inline as a uint32 ndarray tuple.
+        let mut short = request.clone();
+        assert!(short.extract_aux_frames(AUX_FRAME_THRESHOLD).is_empty());
+        let encoded = encode_msgpack(&short).unwrap();
+        let Value::Array(array) = decode_value(&encoded).unwrap() else {
+            panic!("expected array");
+        };
+        let Value::Array(wire) = &array[1] else {
+            panic!("expected ndarray tuple");
+        };
+        assert_eq!(wire[0], Value::from("=u4"));
+        assert_eq!(wire[1], Value::from(vec![Value::from(3)]));
+        let decoded: EngineCoreRequest = rmp_serde::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, request);
+        assert_eq!(decode_prompt_token_ids(&decoded), Some(ids));
+
+        // A long prompt goes in its own auxiliary frame, without a copy.
+        let long_ids: Vec<u32> = (0..AUX_FRAME_THRESHOLD as u32).collect();
+        let mut long = EngineCoreRequest {
+            prompt_token_ids: Some(long_ids.clone().into()),
+            ..request
+        };
+        let aux_frames = long.extract_aux_frames(AUX_FRAME_THRESHOLD);
+        assert_eq!(aux_frames.len(), 1);
+        assert_eq!(
+            aux_frames[0].as_ref(),
+            bytemuck::cast_slice::<u32, u8>(&long_ids)
+        );
+        let encoded = encode_msgpack(&long).unwrap();
+        let Value::Array(array) = decode_value(&encoded).unwrap() else {
+            panic!("expected array");
+        };
+        let Value::Array(wire) = &array[1] else {
+            panic!("expected ndarray tuple");
+        };
+        assert_eq!(wire[2], Value::from(1));
+        let frames = [
+            Bytes::from_static(b"\x00"),
+            encoded.into(),
+            aux_frames[0].clone(),
+        ];
+        assert_eq!(
+            decode_prompt_token_ids(&decode_add_request(&frames)),
+            Some(long_ids)
+        );
     }
 
     #[test]

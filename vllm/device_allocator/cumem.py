@@ -10,13 +10,19 @@
 # the only successful approach is to call cuda driver API in C.
 import atexit
 import gc
-from collections.abc import Callable, Iterator
+import mmap
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from typing import Any
 
 import torch
 
-from vllm.device_allocator import DEFERRABLE_TAGS, AllocationData, HandleType
+from vllm.device_allocator import (
+    DEFERRABLE_TAGS,
+    AllocationData,
+    HandleType,
+    discardable_allocations,
+)
 from vllm.device_allocator.alloc_conf import (
     EXPANDABLE_SEGMENTS,
     conf_flag_enabled,
@@ -61,6 +67,27 @@ def unmap_and_release(allocation_handle: HandleType) -> None:
     python_unmap_and_release(*allocation_handle)
 
 
+def create_cpu_backup(size_in_bytes: int) -> torch.Tensor:
+    backup = torch.frombuffer(
+        mmap.mmap(-1, size_in_bytes, flags=mmap.MAP_PRIVATE), dtype=torch.uint8
+    )
+    if PIN_MEMORY:
+        error = libcudart.cudaHostRegister(backup.data_ptr(), size_in_bytes)
+        if error:
+            libcudart.cudaGetLastError()
+            logger.warning_once(
+                "cudaHostRegister failed (error %d); sleep mode CPU backups "
+                "fall back to pageable memory.",
+                error,
+            )
+    return backup
+
+
+def release_cpu_backup(backup: torch.Tensor) -> None:
+    if backup.is_pinned() and libcudart.cudaHostUnregister(backup.data_ptr()):
+        libcudart.cudaGetLastError()
+
+
 def get_pluggable_allocator(
     python_malloc_fn: Callable[[HandleType], None],
     python_free_func: Callable[[int], HandleType],
@@ -98,7 +125,7 @@ class CuMemAllocator:
     offloaded to CPU memory, and the rest of the tensors will be discarded.
     When we call `wake_up`, all tensors that are previously offloaded
     will be loaded back to GPU memory, and the rest of the tensors will
-    have empty memory.
+    have empty memory (zeroed on ROCm).
 
     Why it needs to be a singleton?
     When allocated tensors are garbage collected, PyTorch will call
@@ -149,14 +176,14 @@ class CuMemAllocator:
     def release_pools(self) -> None:
         """Drop Python references to MemPool/pluggable allocators eagerly.
 
-        A cumem ``MemPool`` outlives the ``use_memory_pool`` context (a strong
-        reference is kept in ``allocator_and_pools`` to work around
+        A cumem `MemPool` outlives the `use_memory_pool` context (a strong
+        reference is kept in `allocator_and_pools` to work around
         pytorch/pytorch#146431), and a captured CUDA graph can keep it alive
-        longer still. ``MemPool`` only holds a non-owning pointer to the
+        longer still. `MemPool` only holds a non-owning pointer to the
         allocator, whose owning reference lives in the Python
-        ``CUDAPluggableAllocator``. If both are instead dropped during
+        `CUDAPluggableAllocator`. If both are instead dropped during
         interpreter shutdown, GC may finalize the allocator first; the eventual
-        ``~MemPool`` -> ``emptyCache`` -> ``release_block`` then makes a virtual
+        `~MemPool` -> `emptyCache` -> `release_block` then makes a virtual
         call into the freed allocator -- aborting the process with "pure virtual
         method called" (pytorch/pytorch#145168).
 
@@ -207,6 +234,7 @@ class CuMemAllocator:
         """
         data = self.pointer_to_data.pop(ptr)
         if data.cpu_backup_tensor is not None:
+            release_cpu_backup(data.cpu_backup_tensor)
             data.cpu_backup_tensor = None
         if data.is_asleep and current_platform.is_rocm():
             # On ROCm, sleep() already unmapped and released this allocation's
@@ -221,7 +249,7 @@ class CuMemAllocator:
         # regular caching allocator, so without this, in-flight work
         # (e.g. quant helpers' transient tensors during weight loading)
         # races the unmap and surfaces as CUDA_ERROR_ILLEGAL_ADDRESS.
-        torch.cuda.synchronize(data.handle[0])
+        torch.accelerator.synchronize(data.handle[0])
         logger.debug(
             "Freed %s bytes for %s with address %s from cumem allocator",
             data.handle[1],
@@ -230,7 +258,11 @@ class CuMemAllocator:
         )
         return data.handle
 
-    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
+    def sleep(
+        self,
+        offload_tags: tuple[str, ...] | str | None = None,
+        discardable: Collection[int] = (),
+    ) -> None:
         """Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be
         offloaded to CPU memory, and others will be discarded.
@@ -238,6 +270,8 @@ class CuMemAllocator:
         Args:
             offload_tags: The tags of the memory allocation that will be
                 offloaded. The rest of the memory allocation will be discarded.
+            discardable: Addresses of tensors the caller rewrites after waking.
+                Weights allocations holding nothing else are discarded too.
 
         """
         if offload_tags is None:
@@ -252,32 +286,18 @@ class CuMemAllocator:
         total_bytes = 0
         backup_bytes = 0
         has_policy_conflict = False
+        discarded = discardable_allocations(self.allocator_and_pools, discardable)
 
         for ptr, data in self.pointer_to_data.items():
+            offload = data.tag in offload_tags and ptr not in discarded
             if data.is_asleep:
-                requests_offload = data.tag in offload_tags
-                was_offloaded = data.cpu_backup_tensor is not None
-                if requests_offload != was_offloaded:
+                if offload != (data.cpu_backup_tensor is not None):
                     has_policy_conflict = True
                 continue
-            handle = data.handle
-            total_bytes += handle[1]
-            if data.tag in offload_tags:
-                backup_bytes += handle[1]
-                size_in_bytes = handle[1]
-                cpu_backup_tensor = torch.empty(
-                    size_in_bytes,
-                    dtype=torch.uint8,
-                    device="cpu",
-                    pin_memory=PIN_MEMORY,
-                )
-                cpu_ptr = cpu_backup_tensor.data_ptr()
-                libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
-                data.cpu_backup_tensor = cpu_backup_tensor
-            try:
-                unmap_and_release(handle)
-            finally:
-                data.is_asleep = True
+            total_bytes += data.handle[1]
+            if offload:
+                backup_bytes += data.handle[1]
+            self._put_to_sleep(ptr, data, offload)
 
         logger.info(
             "CuMemAllocator: sleep freed %.2f GiB memory in total, of which "
@@ -295,7 +315,21 @@ class CuMemAllocator:
             )
 
         gc.collect()
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
+
+    def _put_to_sleep(self, ptr: int, data: AllocationData, offload: bool) -> None:
+        if offload:
+            if data.cpu_backup_tensor is None:
+                data.cpu_backup_tensor = create_cpu_backup(data.handle[1])
+            cpu_ptr = data.cpu_backup_tensor.data_ptr()
+            libcudart.cudaMemcpy(cpu_ptr, ptr, data.handle[1])
+        elif data.cpu_backup_tensor is not None:
+            release_cpu_backup(data.cpu_backup_tensor)
+            data.cpu_backup_tensor = None
+        try:
+            unmap_and_release(data.handle)
+        finally:
+            data.is_asleep = True
 
     def discard(self, tags: tuple[str, ...] | str) -> None:
         """Discard mapped allocations with the given tags without CPU backup."""
@@ -304,7 +338,7 @@ class CuMemAllocator:
 
         discarded_bytes = 0
         has_policy_conflict = False
-        for data in self.pointer_to_data.values():
+        for ptr, data in self.pointer_to_data.items():
             if data.tag not in tags:
                 continue
             if data.is_asleep:
@@ -312,8 +346,7 @@ class CuMemAllocator:
                     has_policy_conflict = True
                 continue
             torch.accelerator.synchronize(data.handle[0])
-            unmap_and_release(data.handle)
-            data.is_asleep = True
+            self._put_to_sleep(ptr, data, offload=False)
             discarded_bytes += data.handle[1]
 
         logger.info(
@@ -331,7 +364,7 @@ class CuMemAllocator:
     def wake_up(self, tags: list[str] | None = None) -> None:
         """Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
-        memory, and the rest of the data will have empty memory.
+        memory, and the rest will have empty memory (zeroed on ROCm).
 
         Args:
             tags: The deferrable tags (weights, kv_cache) to load back to GPU
@@ -350,14 +383,12 @@ class CuMemAllocator:
                 create_and_map(handle)
                 data.is_asleep = False
                 if data.cpu_backup_tensor is not None:
-                    cpu_backup_tensor = data.cpu_backup_tensor
-                    if cpu_backup_tensor is not None:
-                        size_in_bytes = (
-                            cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
-                        )
-                        cpu_ptr = cpu_backup_tensor.data_ptr()
-                        libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
-                        data.cpu_backup_tensor = None
+                    cpu_ptr = data.cpu_backup_tensor.data_ptr()
+                    libcudart.cudaMemcpy(ptr, cpu_ptr, handle[1])
+                elif current_platform.is_rocm():
+                    # amdgpu <6.14 may return stale VRAM (#44972); drop with its support
+                    libcudart.cudaMemset(ptr, 0, handle[1])
+                    torch.accelerator.synchronize()
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
@@ -406,8 +437,8 @@ class CuMemAllocator:
                 # see https://github.com/pytorch/pytorch/issues/146431 .
                 self.allocator_and_pools.setdefault(tag, []).append(data)
                 yield
-                # PyTorch's bug, calling torch.cuda.empty_cache() will error
-                # when using pluggable allocator, see
+                # PyTorch's bug, torch.accelerator.empty_cache() does not
+                # release memory held by a pluggable allocator, see
                 # https://github.com/pytorch/pytorch/issues/145168 .
                 # if we have some memory allocated and then freed,
                 # the memory will not be released, e.g. in online
@@ -450,7 +481,7 @@ class CuMemAllocator:
     def get_current_usage(self) -> int:
         """Get the total number of bytes allocated in the memory pool."""
         sum_bytes: int = 0
-        for ptr, data in self.pointer_to_data.items():
+        for data in self.pointer_to_data.values():
             handle = data.handle
             sum_bytes += handle[1]
         return sum_bytes

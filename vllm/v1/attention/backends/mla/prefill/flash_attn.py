@@ -427,13 +427,13 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             kwargs["return_softmax_lse"] = return_softmax_lse
             kwargs["out"] = out
             kwargs["output_scale"] = output_scale
+            if envs.VLLM_BATCH_INVARIANT:
+                kwargs["num_splits"] = 1
         else:
             # ROCm leverages the upstream flash_attn, which takes a parameter
             # called "return_attn_probs" instead of return_softmax_lse
             kwargs["return_attn_probs"] = return_softmax_lse
             assert out is None and output_scale is None
-        if envs.VLLM_BATCH_INVARIANT:
-            kwargs["num_splits"] = 1
 
         attn_out = _FA4_MLA_PREFILL_KERNEL(
             q=q,
@@ -448,6 +448,11 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         lse = None
         if isinstance(attn_out, tuple):
             attn_out, lse = attn_out[0], attn_out[1]
+
+        # Upstream flash_attn on ROCm may return a head-major output.
+        # merge_attn_states needs token-major partials, so normalize it here.
+        if attn_out.stride(0) != attn_out.shape[1] * attn_out.stride(1):
+            attn_out = attn_out.contiguous()
 
         # Remain consistent with old `flash_attn_varlen_func` where there
         # is only one output tensor if `return_softmax_lse` is False.

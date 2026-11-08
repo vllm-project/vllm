@@ -51,7 +51,7 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import async_tensor_h2d, token_ids_to_tensor
 
 from .base import Base
 
@@ -1128,7 +1128,12 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             vision_embeddings = self._get_features(modality, pixel_values, **kwargs)
             if isinstance(vision_embeddings, torch.Tensor):
                 return self._split_embeddings(vision_embeddings, split_sizes)
-            return list(vision_embeddings)
+            if len(vision_embeddings) == len(split_sizes):
+                return list(vision_embeddings)
+            # Encoders which return one entry per batch row (Transformers >= 5.20.1)
+            return self._split_embeddings(
+                torch.cat(list(vision_embeddings)), split_sizes
+            )
 
         # Items the processor left un-padded arrive as a list once their
         # shapes differ. Encode them one at a time so that none of them is
@@ -1257,7 +1262,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             kwargs["mm_token_type_ids"] = mm_token_type_ids.unsqueeze(0)
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
-            input_ids=torch.tensor(input_tokens).unsqueeze(0),
+            input_ids=token_ids_to_tensor(input_tokens).unsqueeze(0),
             **kwargs,
         )
 

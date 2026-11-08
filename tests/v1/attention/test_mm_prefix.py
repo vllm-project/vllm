@@ -6,12 +6,12 @@ The metadata tests run anywhere. The FA4 tests need SM100 and run the real
 kernel against a dense float32 reference, which is the only way to check what
 cannot be reasoned about from the Python side:
 
-* ``q_ranges[token_idx, 0]`` indexing an aux tensor with a runtime ``Int32``.
-* ``cu_seqlens_q[b] + q_local`` matching FA4's own packing of a varlen batch.
+* `q_ranges[token_idx, 0]` indexing an aux tensor with a runtime `Int32`.
+* `cu_seqlens_q[b] + q_local` matching FA4's own packing of a varlen batch.
 
-The mask_mod is the *entire* mask (``(causal ∧ window) ∨ mm_prefix``), so
-callers must pass ``causal=False`` and no FA-layer window. FA #155 stopped
-auto-clearing those when ``mask_mod`` is set; leaving ``causal=True`` would
+The mask_mod is the *entire* mask (`(causal ∧ window) ∨ mm_prefix`), so
+callers must pass `causal=False` and no FA-layer window. FA #155 stopped
+auto-clearing those when `mask_mod` is set; leaving `causal=True` would
 short out the mask_mod on SM90 and clip bidirectional ranges on SM100.
 """
 
@@ -100,9 +100,9 @@ def _query_ranges(mm_ranges, query_lens, seq_lens):
 def test_matches_range_scan_semantics_with_context_offset():
     """Pin the equivalence the O(1) lookup rests on.
 
-    The kernel checks ``r_start <= kv_idx <= r_end`` for the range containing
+    The kernel checks `r_start <= kv_idx <= r_end` for the range containing
     the query token, which is only equal to the old scan's
-    ``any(q in r and kv in r)`` because ranges never overlap.  Request 1 carries
+    `any(q in r and kv in r)` because ranges never overlap.  Request 1 carries
     a context offset so the local-to-absolute query mapping is exercised too.
     """
     mm_ranges = {0: [(1, 3), (5, 7)], 1: [(2, 4), (9, 12)]}
@@ -131,7 +131,7 @@ def test_matches_range_scan_semantics_with_context_offset():
 def test_ranges_beyond_scheduled_chunk_are_clipped():
     """Chunked prefill must not error or produce a wrong mask.
 
-    ``disable_chunked_mm_input`` keeps a single mm item intact but still splits
+    `disable_chunked_mm_input` keeps a single mm item intact but still splits
     a prompt across steps, so a request's ranges routinely sit entirely past the
     tokens scheduled so far.  Sizing by query token makes the out-of-chunk part
     a no-op rather than an out-of-bounds condition.
@@ -151,7 +151,7 @@ def test_ranges_beyond_scheduled_chunk_are_clipped():
 
 def test_buffer_reuse_does_not_leak_previous_rows():
     """The staging buffer persists across steps, so every reported row must be
-    rewritten. Guards against dropping the ``-1`` fill as an optimization: a
+    rewritten. Guards against dropping the `-1` fill as an optimization: a
     step whose ranges shrink would otherwise expose the prior step's bounds and
     silently widen the bidirectional mask.
     """
@@ -178,7 +178,7 @@ def test_buffer_reuse_does_not_leak_previous_rows():
 def test_returns_none_when_no_range_covers_a_query_token():
     """No aux tensor means forward() skips the mask_mod entirely.
 
-    Returning None rather than an all-``-1`` tensor is what keeps text-only and
+    Returning None rather than an all-`-1` tensor is what keeps text-only and
     decode-only batches off the fill path.
     """
     # Text-only batch on an mm_prefix model: every request present, no ranges.
@@ -212,10 +212,10 @@ def _dense_reference(
     scale,
     mm_clamp_sw=0,
 ):
-    """Dense float32 ``(causal AND window) OR mm_prefix`` per request.
+    """Dense float32 `(causal AND window) OR mm_prefix` per request.
 
-    ``mm_clamp_sw`` confines the bidirectional block to the window, reproducing
-    Gemma4's ``mm_prefix_clamp_sliding_window``. Only the past bound applies, so
+    `mm_clamp_sw` confines the bidirectional block to the window, reproducing
+    Gemma4's `mm_prefix_clamp_sliding_window`. Only the past bound applies, so
     future keys inside a range still pass.
     """
     out = torch.empty_like(q, dtype=torch.float32)
@@ -445,8 +445,8 @@ PAGED_MM_RANGES = {
 def _enable_mm_prefix(vllm_config):
     """Flip stock Gemma4's null use_bidirectional_attention to "vision".
 
-    ``ModelConfig.__init__`` derives ``model_arch_config`` once from
-    ``hf_text_config``, and ``is_mm_prefix_lm`` is a ``cached_property`` that
+    `ModelConfig.__init__` derives `model_arch_config` once from
+    `hf_text_config`, and `is_mm_prefix_lm` is a `cached_property` that
     may already hold False from that first derivation, so re-derive and drop
     the cache.
     """
@@ -462,7 +462,7 @@ def test_decode_only_batch_reports_no_ranges():
     """Decode-only steps must carry no mm_prefix metadata at all.
 
     This is what makes FULL CUDA graph capture consistent for this feature.
-    Capture runs through ``_dummy_run`` with no multimodal requests, so no
+    Capture runs through `_dummy_run` with no multimodal requests, so no
     mask_mod is attached to the captured graph; a decode-only replay must
     therefore also want no mask_mod, or the captured graph would silently drop
     it. Indexing by query token gives that for free, because a generated token
@@ -513,12 +513,12 @@ def test_mm_prefix_kv_cache_path(head_size: int):
 
     Use head_size=128 on B200/H100 (FA4 + paged/`seqused_k` supported) and
     512 on H100 only (Blackwell FA4 rejects 512 via TMEM). Avoid 256: SM100's
-    dedicated hd256 2CTA kernel asserts away ``seqused_k``, which paged KV
+    dedicated hd256 2CTA kernel asserts away `seqused_k`, which paged KV
     requires.
 
     Tensors, kv_cache_spec, and FlashAttentionImpl must all use the same
-    ``head_size`` — ``run_attention_backend`` / ``create_standard_kv_cache_spec``
-    read ``get_head_size()`` (=512 for Gemma4), so this test builds them
+    `head_size` — `run_attention_backend` / `create_standard_kv_cache_spec`
+    read `get_head_size()` (=512 for Gemma4), so this test builds them
     explicitly. The sliding window is set on the impl; mm_prefix encodes it in
     mask_mod and clears FA's built-in window at forward time.
     """
@@ -640,7 +640,6 @@ def test_mm_prefix_kv_cache_path(head_size: int):
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA backend imports")
 @pytest.mark.parametrize(
     "query_len,seq_len,spans,expected,unclamped_expected",
     [
@@ -727,6 +726,7 @@ def test_composite_shared_cache_across_image_and_causal_steps(
         backend = TritonFlashInferBackend
         causal_metadata_type = FlashInferMetadata
         block_size = backend.get_supported_kernel_block_sizes()[0]
+        assert isinstance(block_size, int)
     else:
         backend = TritonFlashAttentionBackend
         causal_metadata_type = FlashAttentionMetadata
@@ -805,7 +805,6 @@ def test_composite_shared_cache_across_image_and_causal_steps(
             )
             layer.mm_prefix_clamp_sliding_window = True
         builder = backend.get_builder_cls()(spec, ["composite_test"], cfg, DEVICE)
-        builder.set_kernel_block_size(block_size)
         # Match production, where unwritten page tails are zero-initialized.
         cache = torch.zeros(
             num_blocks,

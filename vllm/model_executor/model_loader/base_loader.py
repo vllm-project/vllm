@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Generator
 
 import torch
 import torch.nn as nn
@@ -58,6 +60,18 @@ class BaseModelLoader(ABC):
         log_model_inspection(model)
         return model
 
+    def get_all_weights(
+        self,
+        model_config: ModelConfig,
+        model: nn.Module,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        """Iterate over all weights by checkpoint name, for filtered
+        partial reloads (e.g. FT expert reload after scale_down)."""
+        raise NotImplementedError(
+            f"load_format={self.load_config.load_format!r} does not support "
+            "iterating weights by checkpoint name"
+        )
+
     @instrument(span_name="Load model")
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
@@ -86,6 +100,11 @@ class BaseModelLoader(ABC):
             logger.debug("Loading weights on %s ...", load_device)
             self.load_weights(model, model_config)
 
+            # Release transient tensors held by PyTorch's caching allocator
+            # before weight post-processing and raw CUDA driver allocations.
+            gc.collect()
+            torch.accelerator.empty_cache()
+
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.
             if current_platform.is_cuda_alike() or current_platform.is_xpu():
@@ -102,6 +121,9 @@ class BaseModelLoader(ABC):
 
             process_weights_after_loading(model, model_config, target_device)
             log_online_quantization_time(vllm_config)
+
+            gc.collect()
+            torch.accelerator.empty_cache()
 
         return model.eval()
 

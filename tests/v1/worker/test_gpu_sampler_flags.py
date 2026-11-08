@@ -50,32 +50,36 @@ def _make_sampler(custom_logits_processors: Sequence[LogitsProcessor] = ()) -> S
 
 
 @pytest.mark.parametrize(
-    ("sampling_params", "expected"),
+    ("sampling_params", "expected", "may_mask"),
     [
-        pytest.param(SamplingParams(), False, id="defaults"),
-        pytest.param(SamplingParams(temperature=0.0), False, id="greedy"),
+        pytest.param(SamplingParams(), False, False, id="defaults"),
+        pytest.param(SamplingParams(temperature=0.0), False, False, id="greedy"),
         pytest.param(
-            SamplingParams(thinking_token_budget=3), True, id="thinking-budget"
+            SamplingParams(thinking_token_budget=3), True, True, id="thinking-budget"
         ),
-        pytest.param(SamplingParams(logit_bias={1: 1.0}), True, id="logit-bias"),
-        pytest.param(SamplingParams(frequency_penalty=0.1), True, id="penalty"),
-        pytest.param(SamplingParams(_bad_words_token_ids=[[1]]), True, id="bad-words"),
-        pytest.param(SamplingParams(temperature=0.7), True, id="temperature"),
-        pytest.param(SamplingParams(min_p=0.1), True, id="min-p"),
-        pytest.param(SamplingParams(top_k=10), True, id="top-k"),
-        pytest.param(SamplingParams(top_p=0.9), True, id="top-p"),
+        pytest.param(SamplingParams(logit_bias={1: 1.0}), True, True, id="logit-bias"),
+        pytest.param(SamplingParams(frequency_penalty=0.1), True, True, id="penalty"),
         pytest.param(
-            SamplingParams.for_sampler_warmup(), True, id="all-logits-processors"
+            SamplingParams(_bad_words_token_ids=[[1]]), True, True, id="bad-words"
+        ),
+        pytest.param(SamplingParams(temperature=0.7), True, False, id="temperature"),
+        pytest.param(SamplingParams(min_p=0.1), True, True, id="min-p"),
+        pytest.param(SamplingParams(top_k=10), True, True, id="top-k"),
+        pytest.param(SamplingParams(top_p=0.9), True, True, id="top-p"),
+        pytest.param(
+            SamplingParams.for_sampler_warmup(), True, True, id="all-logits-processors"
         ),
     ],
 )
 def test_logits_processing_cache_matches_request_features(
-    sampling_params: SamplingParams, expected: bool
+    sampling_params: SamplingParams, expected: bool, may_mask: bool
 ):
     sampler = _make_sampler()
     sampler.add_request(3, sampling_params=sampling_params)
 
     assert sampler.needs_logits_processing[3] == expected
+    # Temperature alone only scales the logits, so it never leaves -inf behind.
+    assert sampler.may_mask_logits[3] == may_mask
 
 
 def test_logits_processing_cache_is_overwritten_when_slot_is_reused():
@@ -107,6 +111,30 @@ def test_custom_processor_add_request_gates_pipeline_flag(admitted: bool):
     sampler.add_request(3, SamplingParams())
 
     assert sampler.needs_logits_processing[3] == admitted
+
+
+def test_has_topp_only_rows():
+    """A row is top-p-only when it has top-p and no effective top-k; top_k
+    of 0 (the default) or at least the logits width disables top-k."""
+    sampler = _make_sampler()
+    sampler.add_request(0, SamplingParams(top_k=10, top_p=0.9))
+    sampler.add_request(1, SamplingParams(top_k=10))
+    sampler.add_request(2, SamplingParams(top_p=0.9))
+    sampler.add_request(3, SamplingParams(top_k=VOCAB_SIZE + 1, top_p=0.9))
+    states = sampler.sampling_states
+    states.apply_staged_writes()
+
+    def has_topp_only_rows(idx: list[int], vocab_size: int = VOCAB_SIZE) -> bool:
+        idx_np = np.array(idx, dtype=np.int32)
+        idx_gpu = torch.from_numpy(idx_np).to(DEVICE)
+        return states.get_top_k_top_p(idx_gpu, idx_np, vocab_size)[2]
+
+    assert not has_topp_only_rows([0, 1])
+    assert has_topp_only_rows([0, 2])
+    assert has_topp_only_rows([3])
+    # The kernel compares top_k against the logits width, so a top_k at or
+    # above a narrower logits width counts as no top-k.
+    assert has_topp_only_rows([0], vocab_size=10)
 
 
 def test_logits_processing_cache_only_checks_active_requests():

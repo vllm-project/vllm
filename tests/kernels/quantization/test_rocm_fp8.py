@@ -30,7 +30,7 @@ fp8_only = pytest.mark.skipif(
 
 ENV_DEFAULTS = {
     "VLLM_ROCM_FP8_PADDING": True,
-    "VLLM_ROCM_USE_AITER_FP8BMM": True,
+    "VLLM_ROCM_USE_AITER_FP8BMM": False,
     "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": False,
 }
 
@@ -51,8 +51,8 @@ def _reload_envs():
 def _restore_rocm_env_state():
     """Restore global env + AITER flag state after every test.
 
-    Tests here reload ``vllm.envs`` (a module singleton) and refresh the
-    cached ``rocm_aiter_ops`` env flags. Restoring in a fixture teardown
+    Tests here reload `vllm.envs` (a module singleton) and refresh the
+    cached `rocm_aiter_ops` env flags. Restoring in a fixture teardown
     guarantees cleanup even when an assertion fails mid-test, preventing
     state from leaking into other tests in the same worker.
     """

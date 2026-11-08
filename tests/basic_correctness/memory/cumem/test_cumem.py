@@ -10,10 +10,12 @@ import vllm.device_allocator.cumem as cumem
 from vllm import LLM, SamplingParams
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import PIN_MEMORY
 
 from ....utils import create_new_process_for_each_test
 
 DEVICE_TYPE = current_platform.device_type
+OFFLOAD_TAGS = {1: {"weights", "runtime", "cudagraph"}, 2: {"runtime", "cudagraph"}}
 
 
 def mapped_usage(allocator) -> int:
@@ -29,6 +31,71 @@ def mapped_usage(allocator) -> int:
         for data in allocator.pointer_to_data.values()
         if not data.is_asleep
     )
+
+
+def host_cache_bytes() -> int:
+    if not current_platform.is_cuda_alike():
+        return 0
+    return torch.cuda.host_memory_stats()["allocated_bytes.allocated"]
+
+
+def cpu_backups(allocator, tags, pinned=PIN_MEMORY) -> dict[int, torch.Tensor]:
+    backups = {
+        ptr: data.cpu_backup_tensor
+        for ptr, data in allocator.pointer_to_data.items()
+        if data.cpu_backup_tensor is not None
+    }
+    assert backups.keys() == {
+        ptr for ptr, data in allocator.pointer_to_data.items() if data.tag in tags
+    }
+    for ptr, backup in backups.items():
+        assert backup.nbytes == allocator.pointer_to_data[ptr].handle[1]
+        assert backup.is_pinned() == pinned
+    return backups
+
+
+def data_ptrs(backups: dict[int, torch.Tensor]) -> dict[int, int]:
+    return {ptr: backup.data_ptr() for ptr, backup in backups.items()}
+
+
+def assert_released(backups: dict[int, torch.Tensor]) -> None:
+    assert backups
+    if current_platform.is_cuda_alike():
+        assert not any(backup.is_pinned() for backup in backups.values())
+
+
+def backup_state(worker) -> tuple[dict[int, tuple], int]:
+    allocator = get_mem_allocator_instance()
+    state = {}
+    for ptr, data in allocator.pointer_to_data.items():
+        backup = data.cpu_backup_tensor
+        state[ptr] = (data.tag, data.handle[1], None, 0, False)
+        if backup is not None:
+            state[ptr] = (
+                data.tag,
+                data.handle[1],
+                backup.data_ptr(),
+                backup.nbytes,
+                backup.is_pinned(),
+            )
+    return state, host_cache_bytes()
+
+
+def sleep_and_check_backups(llm, level: int) -> dict[int, tuple]:
+    host_before = llm.collective_rpc(backup_state)[0][1]
+    llm.sleep(level=level)
+    state, host_after = llm.collective_rpc(backup_state)[0]
+    assert host_after == host_before
+    for tag, size, backup_ptr, backup_bytes, pinned in state.values():
+        # Level 2 keeps the weights allocations holding more than parameters.
+        if tag in OFFLOAD_TAGS[level] or (tag == "weights" and backup_ptr is not None):
+            assert backup_ptr is not None
+            assert (backup_bytes, pinned) == (size, PIN_MEMORY)
+        else:
+            assert backup_ptr is None
+    weights_backed_up = [s[2] is not None for s in state.values() if s[0] == "weights"]
+    assert weights_backed_up and (level == 1 or not all(weights_backed_up))
+    return {ptr: s for ptr, s in state.items() if s[2] is not None}
 
 
 def _wake_up_with_poisoned_mappings(allocator, byte_value: int = 0xA5) -> None:
@@ -72,8 +139,9 @@ def test_python_error():
         allocator.wake_up()
 
 
+@pytest.mark.parametrize("register_error", [0, 1], ids=["pinned", "register-fails"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
-def test_basic_cumem():
+def test_basic_cumem(register_error, monkeypatch):
     # some tensors from default memory pool
     shape = (1024, 1024)
     x = torch.empty(shape, device=DEVICE_TYPE)
@@ -97,14 +165,84 @@ def test_basic_cumem():
     # Track the allocator's own mapped bytes, not device-wide free memory.
     mapped_bytes = mapped_usage(allocator)
     assert mapped_bytes >= y.nbytes + z.nbytes
-    allocator.sleep()
-    assert mapped_usage(allocator) == 0
-    allocator.wake_up()
-    assert mapped_usage(allocator) == mapped_bytes
 
-    # they can be used together
-    output = x + y + z
-    assert torch.allclose(output, torch.ones_like(output) * 3)
+    empty_cache_calls = []
+    original_empty_cache = torch.accelerator.empty_cache
+
+    def record_empty_cache():
+        empty_cache_calls.append(True)
+        return original_empty_cache()
+
+    monkeypatch.setattr(torch.accelerator, "empty_cache", record_empty_cache)
+    if register_error:
+        monkeypatch.setattr(
+            cumem.libcudart, "cudaHostRegister", lambda *args: register_error
+        )
+    unregistered = []
+    original_unregister = cumem.libcudart.cudaHostUnregister
+
+    def record_unregister(ptr):
+        unregistered.append(ptr)
+        return original_unregister(ptr)
+
+    monkeypatch.setattr(cumem.libcudart, "cudaHostUnregister", record_unregister)
+    warnings = []
+    monkeypatch.setattr(
+        cumem.logger, "warning_once", lambda msg, *args: warnings.append(msg % args)
+    )
+    pinned = PIN_MEMORY and not register_error
+    backup_ptrs = None
+    for _ in range(3):
+        host_before = host_cache_bytes()
+        empty_cache_calls.clear()
+        allocator.sleep()
+        assert len(empty_cache_calls) == 1
+        assert mapped_usage(allocator) == 0
+        assert host_cache_bytes() == host_before
+        backups = cpu_backups(allocator, {"default"}, pinned)
+        assert backup_ptrs in (None, data_ptrs(backups))
+        backup_ptrs = data_ptrs(backups)
+        allocator.wake_up()
+        assert mapped_usage(allocator) == mapped_bytes
+        assert data_ptrs(cpu_backups(allocator, {"default"}, pinned)) == backup_ptrs
+
+        # they can be used together
+        output = x + y + z
+        assert torch.allclose(output, torch.ones_like(output) * 3)
+        y.add_(1)
+        z.sub_(1)
+
+    # Freeing a cuMem allocation synchronizes its device through the accelerator.
+    sync_devices = []
+    original_synchronize = torch.accelerator.synchronize
+
+    def record_synchronize(device=None):
+        sync_devices.append(device)
+        return original_synchronize(device)
+
+    monkeypatch.setattr(torch.accelerator, "synchronize", record_synchronize)
+    with allocator.use_memory_pool("free-test"):
+        temp = torch.full((4 << 20,), 7, dtype=torch.uint8, device=DEVICE_TYPE)
+    allocator.sleep(offload_tags="free-test")
+    assert_released(backups)
+    temp_backups = cpu_backups(allocator, {"free-test"}, pinned)
+    allocator.wake_up()
+    assert torch.equal(temp, torch.full_like(temp, 7))
+    device_index = torch.accelerator.current_device_index()
+    del temp
+    gc.collect()
+    # Re-entering the tag trims the freed block and runs the free callback.
+    with allocator.use_memory_pool("free-test"):
+        pass
+    assert device_index is not None
+    assert device_index in sync_devices
+    assert_released(temp_backups)
+    assert not cpu_backups(allocator, set())
+    assert backup_ptrs is not None
+    released = [*backup_ptrs.values(), *data_ptrs(temp_backups).values()]
+    assert sorted(unregistered) == (sorted(released) if pinned else [])
+    assert bool(warnings) == (PIN_MEMORY and bool(register_error))
+    assert all("pageable" in warning for warning in warnings)
 
 
 @pytest.mark.parametrize("full_sleep", [0, 1, 2], ids=["kv-only", "sleep-1", "sleep-2"])
@@ -144,25 +282,33 @@ def test_release_kv_cache_memory_preserves_generation(full_sleep, monkeypatch):
     assert not llm.llm_engine.is_sleeping()
     assert llm.generate(prompt, sampling_params)[0].outputs[0].token_ids == expected
 
-    llm.sleep(level=0)
-    llm.release_kv_cache_memory()
-    mapped_after, kv_cache_after = llm.collective_rpc(get_mapped_bytes_by_tag)[0]
-    assert kv_cache_before > 0
-    assert kv_cache_after == 0
-    assert mapped_before - mapped_after >= kv_cache_before
-    assert mapped_after > 0
-    assert llm.llm_engine.is_sleeping()
+    backups = None
+    for _ in range(3):
+        llm.sleep(level=0)
+        llm.release_kv_cache_memory()
+        mapped_after, kv_cache_after = llm.collective_rpc(get_mapped_bytes_by_tag)[0]
+        assert kv_cache_before > 0
+        assert kv_cache_after == 0
+        assert mapped_before - mapped_after >= kv_cache_before
+        assert mapped_after > 0
+        assert llm.llm_engine.is_sleeping()
 
-    if full_sleep:
-        llm.sleep(level=full_sleep)
-        assert llm.collective_rpc(get_mapped_bytes_by_tag)[0][0] == 0
-    llm.wake_up(tags=None if full_sleep else ["kv_cache"])
-    if full_sleep == 2:
-        llm.collective_rpc("reload_weights")
-    assert llm.collective_rpc(get_mapped_bytes_by_tag)[0][0] == mapped_before
-    assert not llm.llm_engine.is_sleeping()
-    actual = llm.generate(prompt, sampling_params)[0].outputs[0].token_ids
-    assert actual == expected
+        if full_sleep:
+            cycle_backups = sleep_and_check_backups(llm, full_sleep)
+            assert backups in (None, cycle_backups)
+            backups = cycle_backups
+            assert llm.collective_rpc(get_mapped_bytes_by_tag)[0][0] == 0
+        llm.wake_up(tags=None if full_sleep else ["kv_cache"])
+        if full_sleep == 2:
+            llm.collective_rpc("reload_weights")
+        if full_sleep:
+            assert backups is not None
+            state = llm.collective_rpc(backup_state)[0][0]
+            assert {ptr: state[ptr] for ptr in backups} == backups
+        assert llm.collective_rpc(get_mapped_bytes_by_tag)[0][0] == mapped_before
+        assert not llm.llm_engine.is_sleeping()
+        actual = llm.generate(prompt, sampling_params)[0].outputs[0].token_ids
+        assert actual == expected
 
 
 @pytest.mark.parametrize("first_level", [1, 2])
@@ -187,18 +333,26 @@ def test_sleep_with_only_weights_asleep(first_level, second_level, monkeypatch):
     def get_mapped_bytes(worker):
         return mapped_usage(get_mem_allocator_instance())
 
-    llm.sleep(level=first_level)
-    llm.wake_up(tags=["kv_cache"])
-    mapped_before = llm.collective_rpc(get_mapped_bytes)[0]
-    assert mapped_before > 0
-    llm.sleep(level=second_level)
-    assert llm.collective_rpc(get_mapped_bytes)[0] == mapped_before
-    llm.wake_up(tags=["weights"])
-    if first_level == 2:
-        llm.collective_rpc("reload_weights")
-    assert not llm.llm_engine.is_sleeping()
-    actual = llm.generate(prompt, sampling_params)[0].outputs[0].token_ids
-    assert actual == expected
+    backups_by_level: dict[int, dict[int, tuple]] = {}
+    for level, other_level in (
+        (first_level, second_level),
+        (second_level, first_level),
+    ):
+        backups = sleep_and_check_backups(llm, level)
+        assert backups_by_level.setdefault(level, backups) == backups
+        llm.wake_up(tags=["kv_cache"])
+        mapped_before = llm.collective_rpc(get_mapped_bytes)[0]
+        assert mapped_before > 0
+        llm.sleep(level=other_level)
+        assert llm.collective_rpc(get_mapped_bytes)[0] == mapped_before
+        state = llm.collective_rpc(backup_state)[0][0]
+        assert {ptr: s for ptr, s in state.items() if s[2] is not None} == backups
+        llm.wake_up(tags=["weights"])
+        if level == 2:
+            llm.collective_rpc("reload_weights")
+        assert not llm.llm_engine.is_sleeping()
+        actual = llm.generate(prompt, sampling_params)[0].outputs[0].token_ids
+        assert actual == expected
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
@@ -214,9 +368,21 @@ def test_discard_tags():
         kv = torch.ones(512, 512, device=DEVICE_TYPE)
 
     mapped_bytes = mapped_usage(allocator)
+    allocator.sleep(offload_tags=("weights", "kv_cache"))
+    allocator.wake_up()
+    assert torch.equal(kv, torch.ones_like(kv))
+    backups = cpu_backups(allocator, {"weights", "kv_cache"})
+    kv_backups = {
+        ptr: backup
+        for ptr, backup in backups.items()
+        if allocator.pointer_to_data[ptr].tag == "kv_cache"
+    }
 
     # Discard kv_cache only — weights should remain valid
     allocator.discard("kv_cache")
+    assert_released(kv_backups)
+    weight_ptrs = data_ptrs(cpu_backups(allocator, {"weights"}))
+    assert weight_ptrs.items() <= data_ptrs(backups).items()
 
     mapped_bytes_after_discard = mapped_usage(allocator)
     assert mapped_bytes - mapped_bytes_after_discard >= kv.nbytes
@@ -228,11 +394,14 @@ def test_discard_tags():
     # Wake up and verify kv_cache is remapped; discarded contents are undefined.
     allocator.wake_up()
     assert kv.shape == (512, 512)
+    assert data_ptrs(cpu_backups(allocator, {"weights"})) == weight_ptrs
 
     # Full sleep/wake cycle still works after discard
+    weights.fill_(2)
     allocator.sleep(offload_tags="weights")
+    assert data_ptrs(cpu_backups(allocator, {"weights"})) == weight_ptrs
     allocator.wake_up()
-    assert torch.allclose(weights, torch.ones_like(weights))
+    assert torch.equal(weights, torch.full_like(weights, 2))
 
 
 @pytest.mark.parametrize("tag", ["workspace", None], ids=["workspace", "default"])
@@ -277,7 +446,7 @@ def test_workspace_scratch_discarded_on_sleep():
         scratch.add_(1)
 
     backend = CuMemBackend()
-    backend.suspend(level=1)
+    backend.suspend()
     assert mapped_usage(allocator) == 0
     # Discarded, not copied.
     assert all(
@@ -296,7 +465,7 @@ def test_workspace_scratch_discarded_on_sleep():
     del small
     (big,) = manager.get_simultaneous(((128 << 20,), torch.uint8))
     assert mapped_usage(allocator) == scratch.nbytes + big.nbytes
-    backend.suspend(level=1)
+    backend.suspend()
     backend.resume(tags=["weights"])
     assert mapped_usage(allocator) == scratch.nbytes + big.nbytes
 
@@ -324,32 +493,68 @@ def test_reentered_tag(free_x_early):
     allocator.sleep(offload_tags="t")
     allocator.wake_up()
     assert int(y.sum()) == y.numel()
+    backups = cpu_backups(allocator, {"t"})
+    del y
+    gc.collect()
+    with allocator.use_memory_pool("t"):
+        pass
+    assert not allocator.pointer_to_data
+    assert_released(backups)
     allocator.release_pools()
 
 
-@pytest.mark.parametrize("level", [1, 2], ids=["sleep-1", "sleep-2"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
-def test_runtime_state_survives_sleep(level):
-    """Runtime state is offloaded at both levels and restored by the first
+def test_runtime_state_survives_sleep():
+    """What the model runner allocates while the worker builds it (e.g. a
+    drafter's buffers) is runtime state: offloaded and restored by the first
     selective wake; a nested kv_cache pool keeps its own tag."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
     from vllm.device_allocator.sleep_mode_backend import CuMemBackend
+    from vllm.v1.worker import gpu_worker
 
     allocator = get_mem_allocator_instance()
-    with allocator.use_memory_pool("runtime"):
-        state = torch.arange(1 << 20, device=DEVICE_TYPE)
+    built = {}
+
+    def make_runner():
+        built["state"] = torch.arange(1 << 20, device=DEVICE_TYPE)
         with allocator.use_memory_pool("kv_cache"):
-            kv = torch.zeros(1 << 20, device=DEVICE_TYPE)
+            built["kv"] = torch.zeros(1 << 20, device=DEVICE_TYPE)
+        return SimpleNamespace()
+
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(enable_dbo=False),
+            model_config=SimpleNamespace(enable_cumem_allocator=True),
+            speculative_config=None,
+        ),
+        device=torch.device(DEVICE_TYPE, torch.accelerator.current_device_index()),
+        use_v2_model_runner=True,
+        rank=1,
+        _make_model_runner=make_runner,
+    )
+    worker._maybe_get_memory_pool_context = lambda tag: (
+        gpu_worker.Worker._maybe_get_memory_pool_context(worker, tag)
+    )
+    with patch.object(gpu_worker, "init_workspace_manager"):
+        gpu_worker.Worker._init_workspace_and_model_runner(worker)
+    state, kv = built["state"], built["kv"]
     assert {d.tag for d in allocator.pointer_to_data.values()} == {
         "runtime",
         "kv_cache",
     }
 
     backend = CuMemBackend()
-    backend.suspend(level=level)
+    host_before = host_cache_bytes()
+    backend.suspend()
     assert mapped_usage(allocator) == 0
+    assert host_cache_bytes() == host_before
+    backups = cpu_backups(allocator, {"runtime"})
 
     backend.resume(tags=["weights"])
+    assert data_ptrs(cpu_backups(allocator, {"runtime"})) == data_ptrs(backups)
     assert torch.equal(state, torch.arange(1 << 20, device=DEVICE_TYPE))
     backend.resume(tags=["kv_cache"])
     kv.fill_(1)
@@ -357,9 +562,34 @@ def test_runtime_state_survives_sleep(level):
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+def test_level2_keeps_what_the_update_does_not_rewrite():
+    """Only allocations holding nothing but discardable tensors are discarded."""
+    from vllm.device_allocator.sleep_mode_backend import CuMemBackend
+
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool("weights"):
+        weight = torch.zeros(32 << 20, dtype=torch.uint8, device=DEVICE_TYPE)
+        small_weight = torch.zeros(4096, dtype=torch.uint8, device=DEVICE_TYPE)
+        table = torch.arange(4096, device=DEVICE_TYPE)
+
+    # ``weight`` has its own allocation; ``table`` shares one with ``small_weight``.
+    weight_data = allocator.pointer_to_data[weight.data_ptr()]
+    backend = CuMemBackend()
+    backend.suspend({weight.data_ptr(), small_weight.data_ptr()})
+    assert mapped_usage(allocator) == 0
+    assert weight_data.cpu_backup_tensor is None
+    assert any(
+        d.cpu_backup_tensor is not None for d in allocator.pointer_to_data.values()
+    )
+
+    backend.resume(tags=["weights"])
+    assert torch.equal(table, torch.arange(4096, device=DEVICE_TYPE))
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
 def test_level2_discards_ordinary_tensor_with_weights_tag():
-    """Reproduce the level-2 variant for an ordinary tensor in weights."""
+    """Discarded weights-tag memory is remapped; ROCm zeroes it over stale pages."""
     allocator = get_mem_allocator_instance()
 
     with allocator.use_memory_pool("weights"):
@@ -369,13 +599,20 @@ def test_level2_discards_ordinary_tensor_with_weights_tag():
         )
 
     pointers = (fake_weight.data_ptr(), ordinary_tensor.data_ptr())
+    allocator.sleep(offload_tags="weights")
+    allocator.wake_up()
+    assert torch.all(fake_weight == 0x44)
+    backups = cpu_backups(allocator, {"weights"})
     allocator.sleep(offload_tags=())
+    assert_released(backups)
+    assert not cpu_backups(allocator, set())
     _wake_up_with_poisoned_mappings(allocator)
     torch.accelerator.synchronize()
 
     assert (fake_weight.data_ptr(), ordinary_tensor.data_ptr()) == pointers
-    assert torch.all(fake_weight == 0xA5)
-    assert torch.all(ordinary_tensor == 0xA5)
+    expected = 0 if current_platform.is_rocm() else 0xA5
+    assert torch.all(fake_weight == expected)
+    assert torch.all(ordinary_tensor == expected)
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
@@ -427,7 +664,9 @@ def test_cumem_with_cudagraph():
 
 @pytest.mark.parametrize("level", [1, 2], ids=["sleep-1", "sleep-2"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="cuMem CUDA graph pool"
+)
 def test_cudagraph_pool_sleep(level):
     """Routing, and the graph pool backed up at both sleep levels and restored
     in place by any wake."""
@@ -471,7 +710,7 @@ def test_cudagraph_pool_sleep(level):
 
     held, backend = capture(), CuMemBackend()
     mapped = graph_pool()
-    backend.suspend(level=level)
+    backend.suspend({weight.data_ptr()} if level == 2 else ())
     backend.resume(tags=["kv_cache"])
     assert graph_pool() == mapped
     backend.resume(tags=["weights"])

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the Triton DiffKV unified-attention kernel."""
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -16,6 +18,7 @@ from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
     is_flash_attn_varlen_func_available,
 )
+from vllm.v1.attention.ops import triton_unified_attention_diffkv as diffkv_module
 from vllm.v1.attention.ops.triton_unified_attention_diffkv import (
     unified_attention_diffkv,
 )
@@ -238,8 +241,8 @@ def test_triton_unified_attn_diffkv_vs_reference(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
-    reason="FP8 query requires CUDA SM89+",
+    not current_platform.is_cuda_alike() or not current_platform.supports_fp8(),
+    reason="FP8 query requires FP8 support",
 )
 @pytest.mark.parametrize(
     "seq_lens,seq_threshold_3D",
@@ -258,6 +261,98 @@ def test_triton_unified_attn_diffkv_fp8_query(seq_lens, seq_threshold_3D):
         seq_threshold_3D=seq_threshold_3D,
         quant_query=True,
     )
+
+
+def _capture_diffkv_launch(
+    query_lens: list[int], max_seqlen_q: int, segm_first_dim: int
+):
+    """Run the launcher with both Triton kernels mocked; return grid/kwargs."""
+    num_query_heads, num_kv_heads = 8, 2
+    head_size_qk, head_size_v = 128, 128
+    num_seqs = len(query_lens)
+    num_tokens = sum(query_lens)
+
+    query = torch.zeros(
+        num_tokens, num_query_heads, head_size_qk, dtype=torch.bfloat16, device="cpu"
+    )
+    kv_cache = torch.zeros(
+        NUM_BLOCKS,
+        BLOCK_SIZES[0],
+        num_kv_heads,
+        head_size_qk + head_size_v,
+        dtype=torch.bfloat16,
+        device="cpu",
+    )
+    key_cache = kv_cache[..., :head_size_qk]
+    value_cache = kv_cache[..., head_size_qk:]
+    out = torch.zeros(
+        num_tokens, num_query_heads, head_size_v, dtype=torch.bfloat16, device="cpu"
+    )
+    cu_seqlens_q = torch.tensor(
+        [0] + query_lens, dtype=torch.int32, device="cpu"
+    ).cumsum(dim=0, dtype=torch.int32)
+    seqused_k = torch.full((num_seqs,), 512, dtype=torch.int32, device="cpu")
+    block_tables = torch.zeros(num_seqs, 32, dtype=torch.int32, device="cpu")
+    segm_output, segm_max, segm_expsum = _alloc_segm_buffers(
+        segm_first_dim, num_query_heads, head_size_v
+    )
+
+    with (
+        patch.object(diffkv_module, "kernel_unified_attention_diffkv") as mock_kernel,
+        patch.object(diffkv_module, "kernel_reduce_segments_diffkv") as mock_reduce,
+    ):
+        unified_attention_diffkv(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=out,
+            cu_seqlens_q=cu_seqlens_q,
+            seqused_k=seqused_k,
+            softmax_scale=head_size_qk**-0.5,
+            causal=True,
+            window_size=(-1, -1),
+            block_table=block_tables,
+            softcap=0,
+            max_seqlen_q=max_seqlen_q,
+            seq_threshold_3D=8,
+            num_par_softmax_segments=NUM_PAR_SOFTMAX_SEGMENTS,
+            softmax_segm_output=segm_output,
+            softmax_segm_max=segm_max,
+            softmax_segm_expsum=segm_expsum,
+        )
+
+    grid = mock_kernel.__getitem__.call_args.args[0]
+    kwargs = mock_kernel.__getitem__.return_value.call_args.kwargs
+    return grid, kwargs, mock_reduce.__getitem__.called
+
+
+def test_spec_verify_block_m_grouping_and_launch_kwargs() -> None:
+    """Pin program granularity for verify/decode without launching Triton."""
+    verify_grid, verify_kwargs, verify_reduce = _capture_diffkv_launch(
+        query_lens=[8, 8], max_seqlen_q=8, segm_first_dim=16
+    )
+    num_queries_per_kv = 4
+    expected_block_m = min(128, next_power_of_2(8 * num_queries_per_kv))
+    assert verify_grid == (4, 2, NUM_PAR_SOFTMAX_SEGMENTS)
+    assert verify_kwargs["IS_3D"] is True
+    assert verify_kwargs["BLOCK_M"] == expected_block_m
+    assert verify_kwargs["BLOCK_Q"] == expected_block_m // num_queries_per_kv
+    assert verify_kwargs["TILE_SIZE"] == 16
+    assert verify_kwargs["num_warps"] == 4
+    assert "num_stages" not in verify_kwargs
+    assert verify_reduce
+
+    decode_grid, decode_kwargs, decode_reduce = _capture_diffkv_launch(
+        query_lens=[1], max_seqlen_q=1, segm_first_dim=8
+    )
+    assert decode_grid == (1, 2, NUM_PAR_SOFTMAX_SEGMENTS)
+    assert decode_kwargs["IS_3D"] is True
+    assert decode_kwargs["BLOCK_M"] == 16
+    assert decode_kwargs["BLOCK_Q"] == 4
+    assert decode_kwargs["TILE_SIZE"] == 16
+    assert "num_warps" not in decode_kwargs
+    assert "num_stages" not in decode_kwargs
+    assert decode_reduce
 
 
 def _decode_batch(kv_lens, num_query_heads, num_kv_heads, head_sizes):
@@ -285,10 +380,13 @@ def _decode_batch(kv_lens, num_query_heads, num_kv_heads, head_sizes):
     return query, kv_cache, block_tables
 
 
-def _run_decode(query, kv_cache, block_tables, kv_lens, window, sinks, num_segments):
-    num_seqs, num_query_heads, head_size_qk = query.shape
+def _run_decode(
+    query, kv_cache, block_tables, kv_lens, window, sinks, num_segments, query_len=1
+):
+    num_tokens, num_query_heads, head_size_qk = query.shape
+    num_seqs = len(kv_lens)
     head_size_v = kv_cache.shape[-1] - head_size_qk
-    out = torch.empty(num_seqs, num_query_heads, head_size_v, dtype=query.dtype)
+    out = torch.empty(num_tokens, num_query_heads, head_size_v, dtype=query.dtype)
     segm_output, segm_max, segm_expsum = _alloc_segm_buffers(
         num_seqs, num_query_heads, head_size_v
     )
@@ -297,13 +395,14 @@ def _run_decode(query, kv_cache, block_tables, kv_lens, window, sinks, num_segme
         k=kv_cache[..., :head_size_qk],
         v=kv_cache[..., head_size_qk:],
         out=out,
-        cu_seqlens_q=torch.arange(num_seqs + 1, dtype=torch.int32),
+        cu_seqlens_q=torch.arange(num_seqs + 1, dtype=torch.int32) * query_len,
         seqused_k=torch.tensor(kv_lens, dtype=torch.int32),
         softmax_scale=head_size_qk**-0.5,
         causal=True,
         window_size=(window - 1, 0),
         block_table=block_tables,
         softcap=0,
+        max_seqlen_q=query_len,
         sinks=sinks,
         seq_threshold_3D=num_seqs if num_segments else 0,
         num_par_softmax_segments=num_segments or NUM_PAR_SOFTMAX_SEGMENTS,
@@ -339,8 +438,11 @@ def _ref_window_decode(query, kv_cache, block_tables, kv_lens, window, sinks):
 @pytest.mark.parametrize("sliding_window", [128, 1024])
 @pytest.mark.parametrize("use_sinks", [False, True])
 @pytest.mark.parametrize("num_segments", [4, 16])
+@pytest.mark.parametrize("tuned_arch", [False, True])
 @torch.inference_mode()
 def test_triton_unified_attn_diffkv_3d_decode_past_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tuned_arch: bool,
     num_heads: tuple[int, int],
     sliding_window: int,
     use_sinks: bool,
@@ -349,6 +451,7 @@ def test_triton_unified_attn_diffkv_3d_decode_past_window(
     """Window-relative 3D segments must cover exactly the window, however far
     past it the context runs. Blocks before the window may be freed and reused,
     so they are poisoned: any read outside the window yields NaN."""
+    monkeypatch.setattr(diffkv_module, "_is_tuned_arch", lambda: tuned_arch)
     torch.set_default_device(DEVICE_TYPE)
     set_random_seed(0)
     w = sliding_window
@@ -366,9 +469,11 @@ def test_triton_unified_attn_diffkv_3d_decode_past_window(
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
+@pytest.mark.parametrize("query_len", [1, 37])
+@pytest.mark.parametrize("window", [0, 128])
 @torch.inference_mode()
 def test_triton_unified_attn_diffkv_launch_config_is_bitwise_invariant(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, query_len: int, window: int
 ) -> None:
     """The single-wave 2D launch is chosen by grid occupancy, so it must not
     change numerics, or outputs would depend on batch composition."""
@@ -377,14 +482,19 @@ def test_triton_unified_attn_diffkv_launch_config_is_bitwise_invariant(
     torch.set_default_device(DEVICE_TYPE)
     set_random_seed(0)
     kv_lens = [2000, 9000, 131, 4096]
-    query, kv_cache, block_tables = _decode_batch(kv_lens, 16, 2, (192, 128))
+    _, kv_cache, block_tables = _decode_batch(kv_lens, 16, 2, (192, 128))
+    query = torch.randn(len(kv_lens) * query_len, 16, 192, dtype=torch.bfloat16)
 
     outs = []
     for single_wave in (False, True):
         monkeypatch.setattr(
             diffkv, "_use_single_wave_2d", lambda *_, sw=single_wave: sw
         )
-        outs.append(_run_decode(query, kv_cache, block_tables, kv_lens, 128, None, 0))
+        outs.append(
+            _run_decode(
+                query, kv_cache, block_tables, kv_lens, window, None, 0, query_len
+            )
+        )
     assert torch.equal(outs[0], outs[1])
 
 
@@ -409,3 +519,43 @@ def test_num_kv_segments(monkeypatch: pytest.MonkeyPatch, tuned_arch: bool) -> N
     counts = [segments(b, 1024) for b in (1, 8, 16, 32, 64, 128)]
     assert counts == sorted(counts, reverse=True)
     assert segments(64, 128) == 0
+
+
+@pytest.mark.parametrize("tuned_arch", [False, True])
+def test_window_split_is_gated_to_tuned_arch(
+    monkeypatch: pytest.MonkeyPatch, tuned_arch: bool
+) -> None:
+    """Off CDNA4 both kernels keep the whole-sequence split (`WINDOW_SPLIT=0`)."""
+    monkeypatch.setattr(diffkv_module, "_is_tuned_arch", lambda: tuned_arch)
+    monkeypatch.setattr(diffkv_module, "_num_compute_units", lambda _: 256)
+    num_query_heads, num_kv_heads, head_size = 8, 1, 128
+    query = torch.zeros(1, num_query_heads, head_size, device="cpu")
+    kv_cache = torch.zeros(4, BLOCK_SIZES[0], num_kv_heads, 2 * head_size, device="cpu")
+    segm = _alloc_segm_buffers(1, num_query_heads, head_size)
+    with (
+        patch.object(diffkv_module, "kernel_unified_attention_diffkv") as attn,
+        patch.object(diffkv_module, "kernel_reduce_segments_diffkv") as reduce,
+    ):
+        unified_attention_diffkv(
+            q=query,
+            k=kv_cache[..., :head_size],
+            v=kv_cache[..., head_size:],
+            out=torch.zeros(1, num_query_heads, head_size, device="cpu"),
+            cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+            seqused_k=torch.tensor([64], dtype=torch.int32),
+            softmax_scale=head_size**-0.5,
+            causal=True,
+            window_size=(127, 0),
+            block_table=torch.zeros(1, 4, dtype=torch.int32),
+            softcap=0,
+            seq_threshold_3D=1,
+            num_par_softmax_segments=NUM_PAR_SOFTMAX_SEGMENTS,
+            softmax_segm_output=segm[0],
+            softmax_segm_max=segm[1],
+            softmax_segm_expsum=segm[2],
+        )
+    attn_kwargs = attn.__getitem__.return_value.call_args.kwargs
+    reduce_kwargs = reduce.__getitem__.return_value.call_args.kwargs
+    assert attn_kwargs["SLIDING_WINDOW"] == 128
+    expected = 128 if tuned_arch else 0
+    assert attn_kwargs["WINDOW_SPLIT"] == reduce_kwargs["WINDOW_SPLIT"] == expected
