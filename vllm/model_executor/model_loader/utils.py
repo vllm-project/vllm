@@ -161,11 +161,8 @@ def process_weights_after_loading(
         record_checkpoint_layout,
     )
 
-    # Reclaim memory when an explicit lm_head has been
-    # loaded, but it is identical to the input embeddings.
-    # Cold start only: a reload keeps the tying the model started with. Re-tying
-    # would make lm_head the input embeddings, so every later update's lm_head
-    # would be dropped.
+    # Reclaim memory when an explicit lm_head has been loaded, but it is
+    # identical to the input embeddings. A reload keeps the cold-start tying.
     if not reload:
         maybe_retie_word_embeddings(model, model_config)
 

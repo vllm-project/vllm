@@ -1473,6 +1473,51 @@ def test_reload_weights(
         assert add_perp < mul_perp
 
 
+def _lm_head_state(worker) -> tuple[bool, bool]:
+    """Whether lm_head shares the input embeddings, and equals their negation."""
+    model = worker.get_model()
+    lm_head, embed = model.lm_head.weight, model.model.embed_tokens.weight
+    return lm_head.data_ptr() == embed.data_ptr(), torch.equal(lm_head, -embed)
+
+
+def test_direct_reload_keeps_lm_head_untied(vllm_runner, monkeypatch, tmp_path):
+    """An update whose lm_head equals the input embeddings must not tie them,
+    or every later update's lm_head is dropped."""
+    from safetensors.torch import load_file, save_file
+
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    src = Path(hf_api().snapshot_download("Qwen/Qwen3-0.6B"))
+    weights = load_file(src / "model.safetensors")
+    embed = weights["model.embed_tokens.weight"]
+
+    def checkpoint(name: str, lm_head: torch.Tensor) -> str:
+        # The config ties the word embeddings, the checkpoint has its own lm_head
+        path = tmp_path / name
+        path.mkdir()
+        for f in src.iterdir():
+            if f.is_file() and f.suffix != ".safetensors":
+                (path / f.name).write_bytes(f.read_bytes())
+        weights["lm_head.weight"] = lm_head
+        save_file(weights, path / "model.safetensors")
+        return str(path)
+
+    untied = checkpoint("untied", -embed)
+    tied = checkpoint("tied", embed.clone())
+    with vllm_runner(
+        model_name=untied,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        max_model_len=16,
+        max_num_seqs=1,
+        gpu_memory_utilization=CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION,
+    ) as llm:
+        assert llm.collective_rpc(_lm_head_state) == [(False, True)]
+        for path in (tied, untied):
+            llm.collective_rpc("reload_weights", kwargs={"weights_path": path})
+        assert llm.collective_rpc(_lm_head_state) == [(False, True)]
+
+
 def _reload_with_lora_expert_names(worker) -> None:
     """Reload the checkpoint under the names that LoRA-wrapped experts load."""
 
