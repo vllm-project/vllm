@@ -36,6 +36,8 @@ if TYPE_CHECKING:
 
 
 class CausalMixin(VllmModelForTextGeneration, Base):
+    embedding_modules = Base.embedding_modules | {"lm_head": "output_embeddings"}
+
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip VllmModelForTextGeneration.__init__ and call the next class in MRO
         super(VllmModelForTextGeneration, self).__init__(

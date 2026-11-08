@@ -1658,7 +1658,11 @@ class EagleModelMixin:
         residual: torch.Tensor | None,
     ) -> list[torch.Tensor]:
         if layer_idx in self.aux_hidden_state_layers:
-            value = hidden_states + residual if residual is not None else hidden_states
+            if residual is None:
+                # The first layer updates its residual (the embeddings) in place
+                value = hidden_states.clone()
+            else:
+                value = hidden_states + residual
             aux_hidden_states.append(value)
         return aux_hidden_states
 
