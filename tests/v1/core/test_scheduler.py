@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 import random
+import time
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -1451,6 +1452,106 @@ def test_cache_aware_admission_prefers_cached_prefix():
 
     output = scheduler.schedule()
     assert [r.req_id for r in output.scheduled_new_reqs] == ["warm", "cold"]
+
+
+@pytest.fixture
+def scheduler_clock(monkeypatch):
+    """Drive the monotonic clock seen by the Scheduler module only."""
+    clock = SimpleNamespace(now=100.0)
+    fake_time = SimpleNamespace(**vars(time))
+    fake_time.monotonic = lambda: clock.now
+    monkeypatch.setattr("vllm.v1.core.sched.scheduler.time", fake_time)
+    return clock
+
+
+@pytest.mark.parametrize("max_wait_ms", [0, 1000])
+def test_cache_aware_admission_aging_bounds_cold_bypass(scheduler_clock, max_wait_ms):
+    """Arriving warm requests pass a cold one until it has waited max_wait_ms;
+    with aging disabled they pass it indefinitely.
+    """
+    scheduler, _, cold = _setup_cache_aware(
+        cache_aware_admission_window=4,
+        cache_aware_admission_max_wait_ms=max_wait_ms,
+        max_num_seqs=1,
+    )
+    scheduler.add_request(cold)
+
+    admitted = []
+    for now in (100.0, 100.5, 100.999, 101.0, 160.0):
+        scheduler_clock.now = now
+        (warm,) = create_requests(
+            num_requests=1,
+            num_tokens=48,
+            same_prompt=True,
+            max_tokens=1,
+            req_ids=[f"warm@{now}"],
+        )
+        scheduler.add_request(warm)
+        output = scheduler.schedule()
+        admitted += [r.req_id for r in output.scheduled_new_reqs]
+        if warm.request_id in output.num_scheduled_tokens:
+            # Admitted on its prefix-cache hit, not as a full prefill.
+            assert output.num_scheduled_tokens[warm.request_id] == 16
+        _decode_one(scheduler, output, list(output.num_scheduled_tokens))
+
+    warms = ["warm@100.0", "warm@100.5", "warm@100.999"]
+    if max_wait_ms:
+        assert admitted == [*warms, "cold"]
+        assert cold.status == RequestStatus.RUNNING
+        assert cold.num_computed_tokens == 49
+    else:
+        assert admitted == [*warms, "warm@101.0", "warm@160.0"]
+        assert cold.status == RequestStatus.WAITING
+        assert cold.num_computed_tokens == 0
+        assert not scheduler.cache_aware_received
+
+
+def test_cache_aware_admission_aging_restores_arrival_order(scheduler_clock):
+    """Expired requests go first in the order the scheduler received them, even
+    when they share a timestamp and cache ranking displaced them. Younger ones
+    keep cache order.
+    """
+    scheduler, warm, cold = _setup_cache_aware(
+        cache_aware_admission_window=4, cache_aware_admission_max_wait_ms=1000
+    )
+    (late_warm,) = create_requests(
+        num_requests=1, num_tokens=48, same_prompt=True, req_ids=["late_warm"]
+    )
+    late_cold = Request(
+        request_id="late_cold",
+        prompt_token_ids=[2] * 48,
+        sampling_params=cold.sampling_params,
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(16, sha256),
+    )
+    # Only the scheduler's own clock counts, not the frontend's arrival_time.
+    cold.arrival_time += 3600
+    scheduler.add_request(cold)
+    scheduler.add_request(warm)
+    scheduler_clock.now = 100.5
+    scheduler.add_request(late_cold)
+    scheduler.add_request(late_warm)
+
+    scheduler_clock.now = 100.999
+    scheduler._reorder_waiting_by_cached_prefix()
+    assert [r.request_id for r in scheduler.waiting] == [
+        "warm",
+        "late_warm",
+        "cold",
+        "late_cold",
+    ]
+
+    scheduler_clock.now = 101.0
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == [
+        "cold",
+        "warm",
+        "late_warm",
+        "late_cold",
+    ]
+
+    scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+    assert not scheduler.cache_aware_received
 
 
 @pytest.mark.parametrize("window", [0, 4])

@@ -232,7 +232,21 @@ class SchedulerConfig:
     its position and nothing is moved past it. Requires prefix caching and the
     "fcfs" policy; it is ignored otherwise. Costs one prefix-cache lookup per
     request in the window per step, so prefer the smallest window that spans
-    the usual queue depth."""
+    the usual queue depth. A cold request can be passed indefinitely while
+    cached peers keep arriving; see `cache_aware_admission_max_wait_ms`."""
+
+    cache_aware_admission_max_wait_ms: int = Field(default=0, ge=0)
+    """Aging threshold in milliseconds for cache-aware admission. 0 (the
+    default) disables aging, so cached peers can pass a request indefinitely.
+    Applies only when `cache_aware_admission_window` is greater than 0.
+
+    Within the window, requests that have waited at least this long go first,
+    in arrival order, and younger ones are still ranked by cached prefix. The
+    wait is measured on the scheduler's monotonic clock from when it receives
+    the request. A low value can admit cold requests that evict resident
+    prefixes when the queue is long. This only stops cached peers from passing
+    a request; it does not admit a request that lacks KV cache space or a
+    running slot, and it is not a time-to-first-token guarantee."""
 
     cache_aware_admission_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     """KV cache usage below which `cache_aware_admission_window` is not applied.
@@ -325,6 +339,7 @@ class SchedulerConfig:
             "scheduler_reserve_full_isl",
             "watermark",
             "prefill_schedule_interval",
+            "cache_aware_admission_max_wait_ms",
             "async_scheduling",
             "stream_interval",
         }

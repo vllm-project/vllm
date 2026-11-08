@@ -436,6 +436,15 @@ class Scheduler(SchedulerInterface):
         self.cache_aware_threshold = (
             self.scheduler_config.cache_aware_admission_threshold
         )
+        self.cache_aware_max_wait = (
+            self.scheduler_config.cache_aware_admission_max_wait_ms / 1000
+            if self.cache_aware_window
+            else 0
+        )
+        # req_id -> (monotonic time, sequence number) when the scheduler
+        # received it. Only kept while cache-aware aging is enabled.
+        self.cache_aware_received: dict[str, tuple[float, int]] = {}
+        self.cache_aware_seq = itertools.count()
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
@@ -2811,10 +2820,21 @@ class Scheduler(SchedulerInterface):
         if len(slots) < 2:
             return
 
-        # Deepest cached prefix first, arrival order breaking ties.
+        # Requests waiting at least cache_aware_max_wait go first, in arrival
+        # order. The rest go deepest cached prefix first, position breaking ties.
+        expired: dict[int, tuple[float, int]] = {}
+        if self.cache_aware_max_wait:
+            cutoff = time.monotonic() - self.cache_aware_max_wait
+            for i in slots:
+                received = self.cache_aware_received[head[i].request_id]
+                if received[0] <= cutoff:
+                    expired[i] = received
         get_num_cached = self.kv_cache_manager.get_num_cached_tokens
         cached = {i: get_num_cached(head[i]) for i in slots}
-        order = sorted(slots, key=lambda i: (-cached[i], i))
+        order = sorted(
+            slots,
+            key=lambda i: (0, expired[i]) if i in expired else (1, -cached[i], i),
+        )
         if order == slots:
             return
 
@@ -3082,6 +3102,11 @@ class Scheduler(SchedulerInterface):
             if self.connector is not None:
                 # Before enqueueing: may_load_async can use what this records.
                 self.connector.on_new_request(request)
+            if self.cache_aware_max_wait:
+                self.cache_aware_received[request.request_id] = (
+                    time.monotonic(),
+                    next(self.cache_aware_seq),
+                )
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             if self.spec_decode_metrics_level != "none":
@@ -3190,6 +3215,7 @@ class Scheduler(SchedulerInterface):
 
         self.encoder_cache_manager.free(request)
         self._pending_encoder_input_ids.pop(request.request_id, None)
+        self.cache_aware_received.pop(request.request_id, None)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:

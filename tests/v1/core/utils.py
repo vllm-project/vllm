@@ -85,6 +85,7 @@ def create_scheduler(
     runner: RunnerOption = "auto",
     per_request_spec_decode_metrics: str = "none",
     cache_aware_admission_window: int = 0,
+    cache_aware_admission_max_wait_ms: int = 0,
     cache_aware_admission_threshold: float = 0.5,
     prefill_schedule_interval: int = 1,
     scheduling_policy: SchedulerPolicy = "fcfs",
@@ -139,6 +140,7 @@ def create_scheduler(
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,
         cache_aware_admission_window=cache_aware_admission_window,
+        cache_aware_admission_max_wait_ms=cache_aware_admission_max_wait_ms,
         cache_aware_admission_threshold=cache_aware_admission_threshold,
         prefill_schedule_interval=prefill_schedule_interval,
         # Ensure admission/preemption mechanics are deterministic
