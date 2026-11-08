@@ -7,22 +7,23 @@ Currently only the FS secondary tier is supported.
 Starts a vLLM server with a TieringOffloadingSpec config,
 drives it with `guidellm`, and records per-run metrics.
 
-Single run:
-    python benchmarks/kv_offload/benchmark_tiering.py <fs-dir> \
-        <prefill|decode|prefill-decode> <concurrency> <small|large> \
-        [--files small|large] [--prompt small|medium|large]
+Quick sweep (~1 hour):
+    python benchmarks/kv_offload/benchmark_tiering.py bench <fs-dir> --quick
 
-Presets:
-    python benchmarks/kv_offload/benchmark_tiering.py <fs-dir> --small
-    python benchmarks/kv_offload/benchmark_tiering.py <fs-dir> --full
+Full sweep:
+    python benchmarks/kv_offload/benchmark_tiering.py bench <fs-dir>
+
+Single run:
+    python benchmarks/kv_offload/benchmark_tiering.py run <fs-dir> \
+        <concurrency> <small|large> [<prefill|decode|prefill-decode>] \
+        [--files small|large] [--prefix-tokens small|medium|large]
 
 Compare two session dirs:
-    python benchmarks/kv_offload/benchmark_tiering.py --compare main_dir pr_dir
+    python benchmarks/kv_offload/benchmark_tiering.py compare main_dir pr_dir
 """
 
 import argparse
 import contextlib
-import csv
 import json
 import os
 import shutil
@@ -87,7 +88,7 @@ class RunSpec:
 
 
 def build_sweeps(mode: str) -> list[RunSpec]:
-    if mode == "small":
+    if mode == "quick":
         # ~1 hour: 8 runs x ~7.5 min (bench + startup + teardown).
         return [
             RunSpec(p, f, "medium", 64, cpu)
@@ -122,16 +123,14 @@ def kill_vllm(proc: subprocess.Popen) -> None:
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=5)
     if proc.poll() is None:
-        sys.exit(
-            f"FATAL: vLLM process ({proc.pid}) could NOT be killed; GPU VRAM is "
+        raise RuntimeError(
+            f"vLLM process ({proc.pid}) could NOT be killed; GPU VRAM is "
             "likely still locked. Aborting to prevent cascading failures."
         )
     print("      vLLM successfully terminated.")
 
 
 def cleanup(fs_dir: Path) -> None:
-    for shm in Path("/dev/shm").glob("vllm_offload*"):
-        shm.unlink()
     for entry in fs_dir.iterdir():
         if entry.is_dir():
             shutil.rmtree(entry)
@@ -186,14 +185,14 @@ def wait_for_vllm(proc: subprocess.Popen, log_path: Path, timeout: int = 1800) -
     url = f"http://127.0.0.1:{PORT}/v1/models"
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            sys.exit(_crash_report(proc.pid, log_path))
+            raise RuntimeError(_crash_report(proc.pid, log_path))
         try:
             urlopen(url, timeout=5)
             print("      vLLM is ready!")
             return
         except OSError:
             time.sleep(5)
-    sys.exit(
+    raise RuntimeError(
         _crash_report(proc.pid, log_path, "timed out waiting to accept connections")
     )
 
@@ -275,11 +274,17 @@ def run_one(spec: RunSpec, fs_dir: Path, session_dir: Path) -> dict:
     write_kv_config(config_path, spec, fs_dir)
     print("  [3/5] Starting vLLM server...")
     proc = start_vllm(config_path, vllm_log)
-    wait_for_vllm(proc, vllm_log)
-    print("  [4/5] Running guidellm benchmark...")
-    result = {"spec": asdict(spec), "status": "ok", **run_guidellm(spec, guidellm_log)}
-    print("  [5/5] Teardown: stopping vLLM...")
-    kill_vllm(proc)
+    try:
+        wait_for_vllm(proc, vllm_log)
+        print("  [4/5] Running guidellm benchmark...")
+        result = {
+            "spec": asdict(spec),
+            "status": "ok",
+            **run_guidellm(spec, guidellm_log),
+        }
+    finally:
+        print("  [5/5] Teardown: stopping vLLM...")
+        kill_vllm(proc)
     time.sleep(5)
     return result
 
@@ -310,87 +315,103 @@ def preflight(fs_dir: Path) -> None:
             .lower()
         )
         if answer != "y":
-            sys.exit("Install guidellm and re-run: pip install guidellm")
+            raise RuntimeError("Install guidellm and re-run: pip install guidellm")
         subprocess.run([sys.executable, "-m", "pip", "install", "guidellm"], check=True)
         if shutil.which("guidellm") is None:
-            sys.exit(
+            raise RuntimeError(
                 "guidellm was installed but is not on PATH; "
                 "check that it landed in this environment's bin dir."
             )
     if shutil.which("vllm") is None:
-        sys.exit("vllm not found on PATH")
+        raise RuntimeError("vllm not found on PATH")
     fs_dir.mkdir(parents=True, exist_ok=True)
 
 
 def main() -> None:
+    try:
+        _main()
+    except (RuntimeError, subprocess.CalledProcessError) as e:
+        sys.exit(f"ERROR: {e}")
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument(
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    bench = subparsers.add_parser(
+        "bench", help="run the sweep matrix against a vLLM server"
+    )
+    bench.add_argument(
         "fs_dir",
-        nargs="?",
         type=Path,
         help="folder backing the tier store (wiped between runs)",
     )
-    parser.add_argument(
+    bench.add_argument(
+        "--quick",
+        action="store_true",
+        help="pre-selected sweep, completes in about an hour",
+    )
+
+    run = subparsers.add_parser("run", help="run a single benchmark configuration")
+    run.add_argument(
+        "fs_dir",
+        type=Path,
+        help="folder backing the tier store (wiped between runs)",
+    )
+    run.add_argument("concurrency", type=int)
+    run.add_argument("cpu_size", choices=sorted(CPU_SIZES))
+    run.add_argument(
         "config_tag",
         nargs="?",
         choices=sorted(PHASES),
-        help="phase tag: prefill, decode, or prefill-decode",
+        default="prefill",
+        help="phase tag: prefill, decode, or prefill-decode (default: prefill)",
     )
-    parser.add_argument("concurrency", nargs="?", type=int)
-    parser.add_argument("cpu_size", nargs="?", choices=sorted(CPU_SIZES))
-    parser.add_argument(
+    run.add_argument(
         "--files",
         choices=sorted(FILE_SIZES),
         default="block1024",
         help="file granularity (block_size 16 vs 1024)",
     )
-    parser.add_argument(
-        "--prompt",
+    run.add_argument(
+        "--prefix-tokens",
         choices=sorted(PROMPT_SIZES),
         default="medium",
-        help="shared prefix length",
+        help="turn-0 prompt length (shared prefix driven into the FS tier)",
     )
-    parser.add_argument(
-        "--small",
-        action="store_true",
-        help="pre-selected sweeps, completes in about an hour",
-    )
-    parser.add_argument(
-        "--full",
-        action="store_true",
-        help="entire sweep matrix (prefill-decode excluded; "
-        "run that phase explicitly when needed)",
-    )
-    parser.add_argument("--compare", nargs=2, type=Path, metavar=("MAIN_DIR", "PR_DIR"))
-    args = parser.parse_args()
 
-    if args.compare:
-        compare(*args.compare)
+    compare_parser = subparsers.add_parser("compare", help="compare two session dirs")
+    compare_parser.add_argument("session_a", type=Path, metavar="MAIN_DIR")
+    compare_parser.add_argument("session_b", type=Path, metavar="PR_DIR")
+    return parser
+
+
+def _main() -> None:
+    args = build_parser().parse_args()
+
+    if args.command == "compare":
+        compare(args.session_a, args.session_b)
         return
-
-    if args.small or args.full:
-        if not args.fs_dir:
-            parser.error("--small/--full requires <fs-dir>")
-        specs = build_sweeps("small" if args.small else "full")
-    elif args.fs_dir and args.config_tag and args.concurrency and args.cpu_size:
+    if args.command == "run":
         specs = [
             RunSpec(
                 args.config_tag,
                 args.files,
-                args.prompt,
+                args.prefix_tokens,
                 args.concurrency,
                 args.cpu_size,
             )
         ]
     else:
-        parser.error(
-            "provide <fs-dir> <config-tag> <concurrency> <cpu-size>, "
-            "or --small/--full, or --compare"
-        )
+        specs = build_sweeps("quick" if args.quick else "full")
 
-    preflight(args.fs_dir)
+    try:
+        preflight(args.fs_dir)
+    except (RuntimeError, subprocess.CalledProcessError) as e:
+        sys.exit(f"Preflight failed: {e}")
+
     session_dir = Path(f"benchmark_session_{datetime.now():%Y%m%d_%H%M%S}")
     session_dir.mkdir()
     print(f"Session dir: {session_dir}/")
@@ -404,28 +425,12 @@ def main() -> None:
     results = []
     for i, spec in enumerate(specs, 1):
         print(f"\n[{i}/{len(specs)}]")
-        try:
-            results.append(run_one(spec, args.fs_dir, session_dir))
-        except subprocess.CalledProcessError as e:
-            results.append({"spec": asdict(spec), "status": f"failed: {e}"})
+        r = run_one(spec, args.fs_dir, session_dir)
+        results.append(r)
         (session_dir / "results.json").write_text(json.dumps(results, indent=2))
-        with (session_dir / "summary.csv").open("w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "phase",
-                    "files",
-                    "prompt",
-                    "concurrency",
-                    "cpu_size",
-                    "status",
-                    *METRICS,
-                ]
-            )
-            for r in results:
-                writer.writerow(
-                    [*r["spec"].values(), r["status"], *(r.get(m, "") for m in METRICS)]
-                )
+        print(f"{spec.name}: {r['status']}")
+        for m in METRICS:
+            print(f"  {m}: {r.get(m, 'n/a')}")
     print(f"\nAll runs complete. Results in {session_dir}/")
 
 
