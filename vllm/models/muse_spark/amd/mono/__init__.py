@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlyDSL decode monokernel for MuseSpark1x on MI355X (``--monokernel``)."""
+"""FlyDSL decode monokernel for Muse Spark on MI355X (``--monokernel``)."""
 
 import importlib
 import os

@@ -6,7 +6,7 @@ selected sigmoid scores renormalized and scaled. Writes the global expert ids
 (int32 [b, 8]) and the routing weights (FP32 [b, 8]) that the routed MoE op
 takes.
 
-The result is bitwise equal to ``fused_musespark1x_routing``
+The result is bitwise equal to ``fused_muse_spark_routing``
 (vllm/models/muse_spark/common/ops/fused_routing.py: on CUDA the
 ``muse_spark_routing`` op, written to match its Triton ``_routing_kernel`` bit
 for bit) as Muse Spark calls it:
@@ -72,7 +72,7 @@ THREADS = WARP * MAX_TOKENS
 EXPERTS_PER_LANE = EXPERTS // WARP
 WARPS = THREADS // WARP
 ROUTES = MAX_TOKENS * TOP_K
-# Muse Spark's router_score_division_eps (MuseSpark1xMoE builds its router
+# Muse Spark's router_score_division_eps (MuseSparkMoE builds its router
 # with 1e-15), rounded to FP32 as the Triton kernel receives it.
 DIVISION_EPS = 1e-15
 _DIVISION_EPS_F32 = fp32(DIVISION_EPS)

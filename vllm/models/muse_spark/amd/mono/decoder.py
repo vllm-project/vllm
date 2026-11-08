@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MuseSpark1x decode monokernel: layers 1-60 of a verify step as FlyDSL launches.
+"""Muse Spark decode monokernel: layers 1-60 of a verify step as FlyDSL launches.
 
 See README.md. Every rank must take the same path (the kernel waits on its
 peers), so the decision uses only rank-invariant data: the static deployment
@@ -21,8 +21,8 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.models.muse_spark.common.layers import (
-    MuseSpark1xNormPreservingResidualConnection,
-    MuseSpark1xRMSNormWithInputScale,
+    MuseSparkNormPreservingResidualConnection,
+    MuseSparkRMSNormWithInputScale,
     norm_then_gated_residual,
 )
 
@@ -332,12 +332,12 @@ def layer_refusals(model: nn.Module, dims: MonoDims) -> list[str]:
         for name in ("add_attn", "add_ffn"):
             conn = getattr(layer, name)
             if not isinstance(
-                conn, MuseSpark1xNormPreservingResidualConnection
+                conn, MuseSparkNormPreservingResidualConnection
             ) or not getattr(conn, "_coefficients_ready", False):
                 bad(f"layer {i}: {name} coefficients not materialized")
         if layer.post_attn_norm.has_weight:
             bad(f"layer {i}: post_attn_norm has a weight")
-        if not isinstance(layer.post_ffn_norm, MuseSpark1xRMSNormWithInputScale):
+        if not isinstance(layer.post_ffn_norm, MuseSparkRMSNormWithInputScale):
             bad(f"layer {i}: post_ffn_norm type")
         if not getattr(layer, "is_moe_layer", False):
             bad(f"layer {i}: dense FFN")
