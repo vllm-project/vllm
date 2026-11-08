@@ -83,6 +83,7 @@ class SessionPollResult(NamedTuple):
     loads: list[LoadResult]
     stores: list[StoreResult]
     new_fetch_ids: list[str]
+    terminal_fetch_ids: frozenset[str] = frozenset()
 
 
 class SessionCloseResult(NamedTuple):
@@ -162,6 +163,7 @@ class P2PSession:
         # manager can bind kv_request_id → session and replay any
         # submit_store batches parked before the binding existed.
         self._new_fetch_ids: list[str] = []
+        self._terminal_fetch_ids: set[str] = set()
 
         # In-flight peer registration started by _on_connect. Registration
         # is O(num_blocks) and runs off this thread, so ConnectAckMsg is
@@ -295,6 +297,10 @@ class P2PSession:
         self._client.finish(kv_request_id)
         self._server.finish(kv_request_id)
 
+    def abort_loads(self) -> None:
+        """Abort every inbound load, failing each now; see ``ClientRole``."""
+        self._client.abort_loads()
+
     def register_lookup(self, kv_request_id: str, key: bytes) -> bool | None:
         """Register or resolve one (kv_request_id, key) probe.
 
@@ -389,8 +395,13 @@ class P2PSession:
 
         new_fetch_ids = self._new_fetch_ids
         self._new_fetch_ids = []
+        terminal_fetch_ids = frozenset(self._terminal_fetch_ids)
+        self._terminal_fetch_ids.clear()
         return SessionPollResult(
-            loads=loads, stores=stores, new_fetch_ids=new_fetch_ids
+            loads=loads,
+            stores=stores,
+            new_fetch_ids=new_fetch_ids,
+            terminal_fetch_ids=terminal_fetch_ids,
         )
 
     def close(self) -> SessionCloseResult:
@@ -584,6 +595,10 @@ class P2PSession:
             # the demand recorded here and submit transfers immediately.
             self._server.on_fetch(kv_request_id, keys, block_indexes, round_seq)
             self._new_fetch_ids.append(kv_request_id)
+            if block_indexes:
+                self._terminal_fetch_ids.discard(kv_request_id)
+            else:
+                self._terminal_fetch_ids.add(kv_request_id)
         elif msg_type == AbortFetchMsg.TYPE:
             AbortFetchMsg.validate(msg)
             self._server.on_abort_fetch(
@@ -763,6 +778,18 @@ class P2PSession:
 
     def _do_send(self, msg: dict) -> None:
         if self._conn is None:
+            return
+        if (
+            msg[TYPE_KEY] == FetchMsg.TYPE
+            and msg[FetchMsg.BLOCK_INDEXES]
+            and (not self._conn.alive or not self._client.mark_fetch_sent(msg))
+        ):
+            return
+        if (
+            msg[TYPE_KEY] == FetchMsg.TYPE
+            and not msg[FetchMsg.BLOCK_INDEXES]
+            and not self._client.can_send_terminal_fetch(msg[FetchMsg.KV_REQUEST_ID])
+        ):
             return
         try:
             self._conn.send(msg)

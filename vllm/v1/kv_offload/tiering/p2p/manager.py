@@ -699,15 +699,19 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         accumulate in ``_finished_jobs`` and are surfaced by the next
         ``get_finished_jobs()`` call.
 
-        A load already failed with a deferred release stays pending until
-        its AbortAck, or until a missed AbortAck disconnects the session and
-        the reap's close() sets the event, so every event is set on return.
+        Inbound loads are aborted up front rather than waited out: a peer
+        that never writes would otherwise block the reset for the full load
+        timeout. Each is failed at once with a deferred release and stays
+        pending until its AbortAck, or until a missed AbortAck disconnects
+        the session and the reap's close() sets the event, so every event
+        is set on return.
         """
         start = time.monotonic()
         self._reap_unbound_stores(force=True)
         self._kv_to_session.clear()
         for session in self._sessions.values():
             self._drain_session_stores(session)
+            session.abort_loads()
 
         warned = False
         while True:
@@ -1184,6 +1188,13 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             # inline in dispatch, so the replayed add_stored_blocks calls
             # match that demand and submit transfers immediately.
             for kv_request_id in result.new_fetch_ids:
+                if kv_request_id in result.terminal_fetch_ids:
+                    self._kv_to_session.pop(kv_request_id, None)
+                    for batch in self._unbound_stores.pop(kv_request_id, ()):
+                        self._finished_jobs.append(
+                            JobResult(job_id=batch.job_id, success=False)
+                        )
+                    continue
                 if kv_request_id in self._reaped_stores:
                     # This id's blocks were already reaped, so no
                     # submit_store will ever satisfy the demand on_fetch
