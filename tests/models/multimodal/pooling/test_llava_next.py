@@ -51,7 +51,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
     }
 )
 
-MODELS = ["royokong/e5-v"]
+MODELS = ["vllm-project/e5-v"]
 
 
 def _run_test(

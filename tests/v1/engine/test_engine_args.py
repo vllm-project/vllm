@@ -402,7 +402,6 @@ def test_extensible_kv_cache_off_with_elastic_ep(monkeypatch, requested):
             kv_cache_memory_bytes=None,
             num_gpu_blocks_override=None,
         ),
-        use_v2_model_runner=True,
         attention_config=SimpleNamespace(hisparse_config=None),
         parallel_config=SimpleNamespace(enable_elastic_ep=True),
         kv_transfer_config=None,
@@ -477,7 +476,6 @@ def _nixl_config_for_extensible_kv_cache(monkeypatch, *, rocm, requested, imex_c
             kv_cache_memory_bytes=None,
             num_gpu_blocks_override=None,
         ),
-        use_v2_model_runner=True,
         attention_config=SimpleNamespace(hisparse_config=None),
         parallel_config=SimpleNamespace(enable_elastic_ep=False),
         kv_transfer_config=KVTransferConfig(
@@ -560,7 +558,6 @@ def test_extensible_kv_cache_off_with_lmcache_mp(monkeypatch, multi, requested):
             kv_cache_memory_bytes=None,
             num_gpu_blocks_override=None,
         ),
-        use_v2_model_runner=True,
         attention_config=SimpleNamespace(hisparse_config=None),
         parallel_config=SimpleNamespace(enable_elastic_ep=False),
         kv_transfer_config=transfer,

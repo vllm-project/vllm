@@ -7,7 +7,6 @@ from collections.abc import Callable, Iterable, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, cast
 
-from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.logger import init_logger
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_plugin
@@ -15,8 +14,10 @@ from vllm.utils.import_utils import import_plugin
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.entrypoints.generate.base.protocol import DeltaMessage
+    from vllm.entrypoints.mcp.tool_server import ToolServer
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+    from vllm.parser.engine.parser_engine import ReasoningEnd
     from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
@@ -54,6 +55,28 @@ class ReasoningParser:
     def reasoning_end_str(self) -> str | None:
         """Set `reasoning_end_str` to the strings that delimit
         the reasoning block (e.g. `""</seed:think>""` and `"</think>"`).
+        """
+        return None
+
+    @property
+    def reasoning_end_token_ids(self) -> frozenset[int]:
+        """Every token id that alone ends reasoning.
+
+        Empty if reasoning can also end in a way that is not a single token.
+        """
+        return frozenset()
+
+    @property
+    def implicit_reasoning_end_token_ids(self) -> frozenset[int]:
+        """Reasoning-end tokens that are also content, e.g. a tool-call start."""
+        return frozenset()
+
+    def find_reasoning_end(self, token_ids: Sequence[int]) -> "ReasoningEnd | None":
+        """Find the first reasoning end in `token_ids`.
+
+        Returns its offset and whether its token is content, or
+        `ReasoningEnd(len(token_ids), False)` if there is none. Returns `None`
+        if the parser cannot locate reasoning ends by token id.
         """
         return None
 
@@ -216,7 +239,7 @@ class ReasoningParser:
     def prepare_structured_tag(
         self,
         original_tag: str | None,
-        tool_server: ToolServer | None,
+        tool_server: "ToolServer | None",
     ) -> str | None:
         """Instance method that is implemented for preparing the structured tag"""
         return original_tag
