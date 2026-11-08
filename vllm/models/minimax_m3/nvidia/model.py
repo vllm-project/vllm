@@ -978,7 +978,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.attn_backend, impl_cls = select_main_backend_and_impl_cls(
             topk_blocks=config.index_topk_blocks,
             kv_cache_dtype=self.kv_cache_dtype,
-            num_kv_heads=self.num_kv_heads,
         )
         self.impl: MiniMaxM3SparseImpl = impl_cls(  # type: ignore[assignment]
             self.num_heads,
