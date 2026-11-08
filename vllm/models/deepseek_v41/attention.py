@@ -552,13 +552,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 candidate_write=is_candidate_source,
             )
 
-        self._prepare_and_attn_fn = self._prepare_and_attn
-        if not vllm_config.use_v2_model_runner:
-            # MRV1's piecewise capture only tolerates the wide eager region: with
-            # the narrow one the attention input preparation stays in the captured
-            # graph and MRV1 produces garbage (#51430).
-            self._prepare_and_attn_fn = self._prepare_and_attn_eager
-
         self.aux_stream_list = aux_stream_list
         # [0]: GEMM start / post-GEMM event0. [1..3]: GEMM done events;
         # [1] doubles as post-GEMM event1. Reuse is safe: GEMM fully joins
@@ -598,13 +591,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             )
 
         swa_bounded_replay = cache_config.swa_bounded_replay
-        if swa_bounded_replay and not vllm_config.use_v2_model_runner:
-            logger.warning_once(
-                "SWA bounded replay needs model runner V2 (only it skips the "
-                "paged-KV writes of replayed tokens); the sliding-window cache "
-                "takes part in prefix caching instead."
-            )
-            swa_bounded_replay = False
         if (
             swa_bounded_replay
             and vllm_config.parallel_config.prefill_context_parallel_size > 1
@@ -612,19 +598,18 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         ):
             logger.warning_once("SWA bounded replay with PCP requires prefix caching.")
             swa_bounded_replay = False
-        # CDNA4 (MI350/MI355, gfx950) is where prefix-cache SWA replay is
-        # validated. The AITER sparse-MLA path and the default Triton gather
-        # path both clamp to replay_start. CDNA3 and other ROCm archs have
-        # not been validated, so the sliding-window cache stays in the prefix
-        # cache there. The CDNA version is imported only on ROCm: loading the
-        # ROCm platform resolves the GPU arch and fails when no GPU is visible.
+        # Replay relies on the AITER sparse-MLA and Triton gather paths
+        # clamping to replay_start, validated on a compatible CDNA version
+        # only. The import is ROCm-only: it resolves the GPU arch and fails
+        # with no GPU visible.
         if swa_bounded_replay and current_platform.is_rocm():
             from vllm.platforms.rocm import get_cdna_version
 
-            if get_cdna_version() != 4:
+            if get_cdna_version() not in (3, 4):
                 logger.warning_once(
-                    "Prefix-cache SWA replay is only enabled on ROCm CDNA4; the "
-                    "sliding-window cache takes part in prefix caching instead."
+                    "Prefix-cache SWA replay is only enabled on a compatible "
+                    "ROCm CDNA version; the sliding-window cache takes part "
+                    "in prefix caching instead."
                 )
                 swa_bounded_replay = False
         self.swa_cache_layer = DeepseekV4SWACache(
@@ -771,7 +756,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
 
-        self._prepare_and_attn_fn(
+        self._prepare_and_attn(
             hidden_states,
             qr,
             kv,
@@ -912,34 +897,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self.eps,
         )
         return qr, None, kv
-
-    @eager_break_during_capture
-    def _prepare_and_attn_eager(
-        self,
-        hidden_states: torch.Tensor,
-        qr: torch.Tensor | QuantizedActivation,
-        kv: torch.Tensor,
-        qr_scale: torch.Tensor | None,
-        kv_score: torch.Tensor,
-        indexer_weights: torch.Tensor,
-        positions: torch.Tensor,
-        attn_out: "torch.Tensor | QuantizedActivation",
-    ) -> None:
-        """Wide eager region: the whole of ``_prepare_and_attn`` runs eagerly.
-
-        The nested ``_sparse_indexer_and_attn`` break runs inline, since
-        ``add_eager`` clears ``_capturing`` before invoking this.
-        """
-        self._prepare_and_attn(
-            hidden_states,
-            qr,
-            kv,
-            qr_scale,
-            kv_score,
-            indexer_weights,
-            positions,
-            attn_out,
-        )
 
     def _prepare_and_attn(
         self,

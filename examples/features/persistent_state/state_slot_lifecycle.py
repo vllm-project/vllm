@@ -114,7 +114,6 @@ def run_worker(step: SchedulerOutput, token: int) -> ModelRunnerOutput:
     assert step.state_cleanup_handles is not None
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
         sampled_token_ids=[[token] for _ in req_ids],
         state_completion=StateCompletion(
             step.state_step_seq,

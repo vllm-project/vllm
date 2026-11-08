@@ -6,6 +6,12 @@ from PIL import Image, ImageDraw, ImageFont
 
 from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
+from vllm.platforms import current_platform
+
+# Should be fixed by https://github.com/vllm-project/vllm/pull/66031
+pytestmark = pytest.mark.skipif(
+    current_platform.is_rocm(), reason="Unlimited-OCR-2 DASH attention is CUDA-only"
+)
 
 
 def _attention_class_names(model):
@@ -56,7 +62,6 @@ def test_unlimited_ocr2_batched_pages(
     vllm_runner, graph_mode, backend, crop_mode, monkeypatch
 ):
     """Load DASH weights and preserve page content across batched requests."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     enforce_eager = graph_mode == "eager"
     prefill_graph = graph_mode == "prefill"
     chunked_prefill = graph_mode != "decode"
@@ -207,7 +212,6 @@ def test_unlimited_ocr2_chunked_prefill_under_encoder_pressure(
     vllm_runner, monkeypatch, backend
 ):
     """Queue distinct cropped pages beyond the encoder cache's token budget."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     requests = []
     expected = ["The invoice total is 125 dollars.", "The access code is ORANGE 2468."]
     font = ImageFont.load_default(size=40)
@@ -261,7 +265,6 @@ def test_unlimited_ocr2_excess_markers_survive_preemption(
     """Recomputation preserves raw logits after routing passes the last page."""
     import torch
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     requests = []
     for idx in range(2):
         pages = []

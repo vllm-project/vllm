@@ -444,7 +444,7 @@ def test_indexer_k_inserts_only_valid_groups_into_padded_pages(
     torch.testing.assert_close(storage, expected, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA kernel")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm kernel")
 @pytest.mark.parametrize("use_fp4", [False, True])
 @torch.inference_mode()
 def test_indexer_k_cuda_graph_replay_reads_current_projection(use_fp4):

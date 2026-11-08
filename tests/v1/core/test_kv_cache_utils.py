@@ -1200,14 +1200,10 @@ def test_lookahead_block_hash_keeps_mm_inputs_for_next_block(
         pytest.param({"method": None}, 0, id="no-speculation"),
     ],
 )
-def test_num_hash_lookahead_tokens(
-    overrides: dict[str, Any], expected: int, monkeypatch
-):
+def test_num_hash_lookahead_tokens(overrides: dict[str, Any], expected: int):
     """Resolve hash lookahead during config construction, without loading weights."""
     num_lookahead = overrides.get("num_prefill_lookahead_tokens", 1)
     method = overrides.get("method", "mtp")
-    if method == "dspark":
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     speculative_config = None
     if method is not None:
         speculative_config = SpeculativeConfig(
@@ -2561,7 +2557,6 @@ def test_persistent_state_requires_one_worker(num_specs, budgets):
 
 @pytest.mark.parametrize("wrap", [False, True])
 def test_persistent_state_plans_through_platform_builder(monkeypatch, wrap):
-    import vllm.v1.core.kv_cache_config_builder as kv_cache_config_builder
     from tests.v1.core.utils import create_scheduler, create_state_spec
 
     config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
@@ -2583,7 +2578,7 @@ def test_persistent_state_plans_through_platform_builder(monkeypatch, wrap):
             )
 
     monkeypatch.setattr(
-        kv_cache_config_builder,
+        kv_cache_planning,
         "get_kv_cache_config_builder",
         lambda vllm_config: RecordingBuilder(),
     )

@@ -229,7 +229,6 @@ steps:
     - vllm/v1/worker/extensible_kv_cache.py
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/
-    - vllm/v1/worker/gpu_model_runner.py
     - vllm/v1/worker/gpu_worker.py
   commands:
     - VLLM_TEST_REQUIRE_REPLAYSSM=1 pytest -v -s v1/e2e/test_replayssm_decode.py
@@ -303,7 +302,6 @@ steps:
   source_file_dependencies:
     - vllm/v1/attention/backends/utils.py
     - vllm/v1/core/
-    - vllm/v1/worker/gpu_model_runner.py
     - tests/v1/e2e/test_hybrid_chunked_prefill.py
   commands:
     - pytest -v -s v1/e2e/test_hybrid_chunked_prefill.py

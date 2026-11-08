@@ -20,8 +20,6 @@ class PersistentStateLayerBase(nn.Module):
     ) -> None:
         super().__init__()
         config = vllm_config or get_current_vllm_config()
-        if not config.use_v2_model_runner:
-            raise ValueError("Persistent state layers require Model Runner V2")
         if not prefix:
             raise ValueError("persistent-state layer prefix must be nonempty")
         self._persistent_state_spec = spec

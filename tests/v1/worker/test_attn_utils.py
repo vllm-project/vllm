@@ -102,9 +102,9 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
     monkeypatch.setattr(
         attn_utils,
         "get_layers_from_vllm_config",
-        lambda config, layer_type: {}
-        if layer_type is PersistentStateLayerBase
-        else layers,
+        lambda config, layer_type: (
+            {} if layer_type is PersistentStateLayerBase else layers
+        ),
     )
     monkeypatch.setattr(
         attn_utils_module, "get_hisparse_kv_cache_groups", lambda *_: []
@@ -144,9 +144,9 @@ def test_get_kv_cache_spec_tags_draft_layers(monkeypatch):
     monkeypatch.setattr(
         attn_utils,
         "get_layers_from_vllm_config",
-        lambda config, layer_type: {}
-        if layer_type is PersistentStateLayerBase
-        else layers,
+        lambda config, layer_type: (
+            {} if layer_type is PersistentStateLayerBase else layers
+        ),
     )
     config = SimpleNamespace(attention_config=SimpleNamespace(hisparse_config=None))
 
@@ -291,9 +291,9 @@ def test_flashinfer_sparse_full_graphs_exclude_prefill_keep_varlen_decode(
     backend = FlashInferMLASparseTRTLLMBackend
     config: Any = SimpleNamespace(
         speculative_config=SimpleNamespace(
-            num_speculative_tokens=num_speculative_tokens, parallel_drafting=False
+            num_speculative_tokens=num_speculative_tokens,
+            max_num_new_slots_for_drafting=0,
         ),
-        use_v2_model_runner=True,
     )
     spec = MLAAttentionSpec(
         block_size=64, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
@@ -307,7 +307,6 @@ def test_flashinfer_sparse_full_graphs_exclude_prefill_keep_varlen_decode(
         support.min_cg_support,
         support.min_cg_attn_backend,
         uniform_decode_query_len=1 + num_speculative_tokens,
-        use_v2_model_runner=True,
     )
     assert mode.mixed_mode() != CUDAGraphMode.FULL
     assert mode.decode_mode() == CUDAGraphMode.FULL
@@ -353,9 +352,8 @@ def test_dsv41_sparse_builders_keep_varlen_decode_graphs_only(
     config: Any = SimpleNamespace(
         speculative_config=SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
-            parallel_drafting=False,
+            max_num_new_slots_for_drafting=0,
         ),
-        use_v2_model_runner=True,
     )
     spec = MLAAttentionSpec(
         block_size=64, num_kv_heads=1, head_size=576, dtype=torch.bfloat16

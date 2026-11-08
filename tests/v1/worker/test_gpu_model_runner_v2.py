@@ -716,10 +716,6 @@ def test_state_only_cache_reaches_mrv2_initialization(monkeypatch):
     state = create_state_spec()
     plan = _state_plan(config)
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-    with pytest.raises(ValueError, match="require Model Runner V2"):
-        PersistentStateLayerBase(state, prefix="state", vllm_config=config)
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     PersistentStateLayerBase(state, prefix="state", vllm_config=config)
     assert get_kv_cache_spec(config)["state"] == state
 
@@ -1184,7 +1180,6 @@ def warmup_worker(monkeypatch):
         worker.parallel_config = config.parallel_config
         worker.scheduler_config = config.scheduler_config
         worker.model_runner = runner
-        worker.use_v2_model_runner = True
         worker.device = torch.device("cpu")
         monkeypatch.setattr(
             worker, "_get_cudagraph_capture_context", contextlib.nullcontext
