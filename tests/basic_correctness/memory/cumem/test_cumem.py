@@ -535,8 +535,8 @@ def test_runtime_state_survives_sleep():
         rank=1,
         _make_model_runner=make_runner,
     )
-    worker._maybe_get_memory_pool_context = (
-        lambda tag: gpu_worker.Worker._maybe_get_memory_pool_context(worker, tag)
+    worker._maybe_get_memory_pool_context = lambda tag: (
+        gpu_worker.Worker._maybe_get_memory_pool_context(worker, tag)
     )
     with patch.object(gpu_worker, "init_workspace_manager"):
         gpu_worker.Worker._init_workspace_and_model_runner(worker)
