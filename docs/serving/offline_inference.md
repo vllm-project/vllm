@@ -73,16 +73,11 @@ For further details on Weight Transfer, please refer to [this page](../training/
 - `LLM.collective_rpc` - Executes a method or callable collectively across all workers.
 - `LLM.apply_model` - Applies a function directly to the model inside each worker.
 
-## Model Inspection
+## Model Inspection APIs
 
-`repr(llm)` and `print(llm)` display a local summary such as
-`LLM(model='Qwen/Qwen3-0.6B')` without querying workers. To print the model
-hierarchy, call `LLM.get_model_inspection()`. It queries workers on the first
-call and caches the result:
-
-```python
-print(llm.get_model_inspection())
-```
+- `LLM.get_model_inspection` - Returns a hierarchical view of the model, querying workers on the first call and caching the result.
+- `repr(llm)` - Returns a local model summary without querying workers.
+- `print(llm)` - Prints that summary.
 
 ## API Reference
 
