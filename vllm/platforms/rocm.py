@@ -6,8 +6,10 @@ import os
 import platform
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+import psutil
 import regex as re
 import torch
 from torch.distributed import PrefixStore, ProcessGroup
@@ -195,6 +197,85 @@ def _query_total_memory_from_amdsmi(physical_device_id: int) -> int:
     handles = amdsmi_get_processor_handles()
     handle = handles[physical_device_id]
     return amdsmi_get_gpu_memory_total(handle, AmdSmiMemoryType.VRAM)
+
+
+_PCI_DEVICES_PATH = Path("/sys/bus/pci/devices")
+
+
+@cache
+def _query_apu_pool_sizes(device_id: int) -> tuple[int, int] | None:
+    """(VRAM carve-out, GTT) sizes in bytes from amdgpu sysfs, or None.
+
+    Reads sysfs because amdsmi reports KFD's pool size when VRAM total is 0.
+    The PCI address comes from HIP itself, so the device always matches even
+    when HIP and amdsmi enumerate GPUs differently.
+    """
+    try:
+        props = torch.cuda.get_device_properties(device_id)
+        bdf = (
+            f"{props.pci_domain_id:04x}:{props.pci_bus_id:02x}:"
+            f"{props.pci_device_id:02x}.0"
+        )
+        device_path = _PCI_DEVICES_PATH / bdf
+        vram_total = int((device_path / "mem_info_vram_total").read_text())
+        gtt_total = int((device_path / "mem_info_gtt_total").read_text())
+    except Exception as e:
+        logger.warning(
+            "Could not read the APU memory pool sizes from amdgpu sysfs (%s); "
+            "assuming GTT-backed allocations and bounding device memory by "
+            "host memory.",
+            e,
+        )
+        return None
+    return vram_total, gtt_total
+
+
+_TTM_PAGES_LIMIT_PATH = Path("/sys/module/ttm/parameters/pages_limit")
+
+
+@cache
+def _query_ttm_limit() -> int | None:
+    """The TTM page limit in bytes, which KFD reports as the GTT pool size,
+    or None if it is unset or unreadable."""
+    try:
+        pages = int(_TTM_PAGES_LIMIT_PATH.read_text())
+    except Exception:
+        return None
+    return pages * os.sysconf("SC_PAGE_SIZE") if pages > 0 else None
+
+
+# HIP reports the backing pool's size exactly; allow a little slack.
+_APU_POOL_MATCH_TOLERANCE = 0.01
+
+
+def _apu_allocates_from_gtt(device_id: int, device_total: int) -> bool:
+    """Whether an APU serves device allocations from GTT rather than VRAM.
+
+    Which pool amdgpu uses depends on the kernel version (always VRAM before
+    6.10, always GTT from 6.10, and from 6.15 GTT only when it is larger than
+    the carve-out), so compare the pool size HIP reports against both instead
+    of predicting it. Native MI300A has no carve-out.
+
+    Only a match with the carve-out counts as carve-out-backed; anything
+    else, including unreadable sysfs or equal pool sizes, is treated as
+    GTT-backed. HIP reports the GTT pool as ``ttm.pages_limit``, while sysfs
+    reports the deprecated ``amdgpu.gttsize`` when it is set, so the TTM
+    limit is checked as well. Erring towards GTT bounds the device by host
+    memory, which can only make startup stricter, never cause an OOM.
+    """
+    pool_sizes = _query_apu_pool_sizes(device_id)
+    if pool_sizes is None:
+        return True
+    vram_total, gtt_total = pool_sizes
+    if vram_total == 0:
+        return True
+    gtt_sizes = [gtt_total]
+    if (ttm_limit := _query_ttm_limit()) is not None:
+        gtt_sizes.append(ttm_limit)
+    vram_distance = abs(device_total - vram_total)
+    gtt_distance = min(abs(device_total - size) for size in gtt_sizes)
+    matches_vram = vram_distance <= _APU_POOL_MATCH_TOLERANCE * vram_total
+    return not (matches_vram and vram_distance < gtt_distance)
 
 
 def _get_gcn_arch() -> str:
@@ -1130,6 +1211,10 @@ class RocmPlatform(Platform):
         return torch.cuda.get_device_properties(device_id).total_memory
 
     @classmethod
+    def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:
+        return bool(torch.cuda.get_device_properties(device_id).is_integrated)
+
+    @classmethod
     def pre_register_and_update(
         cls, parser: "FlexibleArgumentParser | None" = None
     ) -> None:
@@ -1138,6 +1223,25 @@ class RocmPlatform(Platform):
         # registration's MMU notifier makes KFD suspend our queues. In KB, so
         # 4 GiB.
         os.environ.setdefault("GPU_PINNED_MIN_XFER_SIZE", str(4 * 1024 * 1024))
+
+    @classmethod
+    def get_integrated_gpu_memory_info(
+        cls, device_id: int | None, free_memory: int, total_memory: int
+    ) -> tuple[int, int]:
+        # The carve-out is hidden from the OS, so HIP's numbers are exact when
+        # it backs allocations. GTT pages are system RAM, but HIP reports the
+        # GTT limit as total and ignores host usage, so bound both by what the
+        # OS actually has.
+        if device_id is None:
+            device_id = torch.cuda.current_device()
+        if not _apu_allocates_from_gtt(device_id, total_memory):
+            return free_memory, total_memory
+
+        host_memory = psutil.virtual_memory()
+        return (
+            min(free_memory, host_memory.available),
+            min(total_memory, host_memory.total),
+        )
 
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:

@@ -104,15 +104,11 @@ class DeviceMemoryProfiler:
 
 def device_memory_info(device: torch.types.Device = None) -> tuple[int, int]:
     """Free and total device memory in bytes, like
-    `torch.accelerator.get_memory_info`, with the free memory corrected on
-    integrated GPUs.
+    `torch.accelerator.get_memory_info`, corrected on integrated GPUs.
 
-    On UMA (Unified Memory Architecture) platforms where CPU and GPU share
-    physical memory (e.g. GH200, DGX Spark, Jetson Orin), cudaMemGetInfo
-    underreports free memory because it does not account for reclaimable OS
-    memory (page cache, buffers), which a device allocation does reclaim.
-    psutil reports the true available memory there.
-    https://docs.nvidia.com/cuda/cuda-for-tegra-appnote/#estimating-total-allocatable-device-memory-on-an-integrated-gpu-device
+    On UMA (Unified Memory Architecture) platforms the CPU and GPU share
+    physical memory, so the device runtime's numbers need platform-specific
+    correction; see `Platform.get_integrated_gpu_memory_info`.
     """
     free_memory, total_memory = torch.accelerator.get_memory_info(device)
     index = torch.device(device).index if device is not None else None
@@ -120,7 +116,9 @@ def device_memory_info(device: torch.types.Device = None) -> tuple[int, int]:
     if current_platform.is_integrated_gpu(index) and not (
         current_platform.is_cuda() and in_wsl()
     ):
-        free_memory = psutil.virtual_memory().available
+        free_memory, total_memory = current_platform.get_integrated_gpu_memory_info(
+            index, free_memory, total_memory
+        )
     return free_memory, total_memory
 
 
