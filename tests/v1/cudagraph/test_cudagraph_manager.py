@@ -321,6 +321,7 @@ def _create_decode_vllm_config(
     num_speculative_tokens: int = 0,
     dynamic_spec_schedule: list[tuple[int, int, int]] | None = None,
     max_num_seqs: int = 8,
+    use_kda_recoverssm: bool = False,
     decode_sizes: list[int] | None = None,
     max_decode_tokens: int | None = None,
 ) -> MagicMock:
@@ -345,6 +346,7 @@ def _create_decode_vllm_config(
         max_num_seqs=max_num_seqs
     )
     vllm_config.parallel_config = ParallelConfig()
+    vllm_config.cache_config = SimpleNamespace(use_kda_recoverssm=use_kda_recoverssm)
     vllm_config.num_speculative_tokens = num_speculative_tokens
     if dynamic_spec_schedule is None:
         vllm_config.speculative_config = None
@@ -361,13 +363,11 @@ def _create_decode_vllm_config(
 def _split_capture_sizes(vllm_config: MagicMock, legacy_sizes: bool) -> None:
     """Resolve the prefill and decode sizes, as config resolution does."""
     vllm_config.uniform_decode_query_len = vllm_config.num_speculative_tokens + 1
-    vllm_config.get_decode_cudagraph_query_lens = (
-        lambda decode_query_len: VllmConfig.get_decode_cudagraph_query_lens(
-            vllm_config, decode_query_len
-        )
+    vllm_config.get_decode_cudagraph_query_lens = lambda decode_query_len: (
+        VllmConfig.get_decode_cudagraph_query_lens(vllm_config, decode_query_len)
     )
-    vllm_config.get_varlen_decode_cudagraph_token_sizes = (
-        lambda decode_query_len: VllmConfig.get_varlen_decode_cudagraph_token_sizes(
+    vllm_config.get_varlen_decode_cudagraph_token_sizes = lambda decode_query_len: (
+        VllmConfig.get_varlen_decode_cudagraph_token_sizes(
             vllm_config, decode_query_len
         )
     )
@@ -388,6 +388,7 @@ def _make_spec_decode_manager(
     num_speculative_tokens: int | None = None,
     dynamic_spec_schedule: list[tuple[int, int, int]] | None = None,
     max_num_seqs: int = 8,
+    use_kda_recoverssm: bool = False,
     varlen_decode: bool = False,
 ) -> gpu_cudagraph_utils.CudaGraphManager:
     if num_speculative_tokens is None:
@@ -407,6 +408,7 @@ def _make_spec_decode_manager(
         num_speculative_tokens=num_speculative_tokens,
         dynamic_spec_schedule=dynamic_spec_schedule,
         max_num_seqs=max_num_seqs,
+        use_kda_recoverssm=use_kda_recoverssm,
     )
     manager = gpu_cudagraph_utils.CudaGraphManager(
         vllm_config=vllm_config,
@@ -559,8 +561,8 @@ def test_deepseek_v41_metadata_graphs_match_the_forward_graphs(
         decode_sizes=[1, 2, 4, 8, 12, 16],
         max_decode_tokens=max_decode_tokens,
     )
-    vllm_config.get_decode_cudagraph_query_lens = (
-        lambda q: VllmConfig.get_decode_cudagraph_query_lens(vllm_config, q)
+    vllm_config.get_decode_cudagraph_query_lens = lambda q: (
+        VllmConfig.get_decode_cudagraph_query_lens(vllm_config, q)
     )
     manager = gpu_cudagraph_utils.CudaGraphManager(
         vllm_config=vllm_config,

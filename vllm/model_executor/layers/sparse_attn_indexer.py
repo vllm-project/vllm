@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+from vllm import _cpu_ops as cpu_ops
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -577,11 +578,7 @@ def sparse_attn_indexer(
     )
 
     # assert isinstance(attn_metadata, dict)
-    # kv_cache is an empty placeholder until bind_kv_cache runs after memory
-    # profiling; a cudagraph memory-profiling capture arrives with real
-    # (dict) metadata but the placeholder cache, and must only reserve
-    # workspace -- exactly like a dummy run.
-    if not isinstance(attn_metadata, dict) or kv_cache.numel() == 0:
+    if not isinstance(attn_metadata, dict):
         # Reserve workspace for indexer during profiling run
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
@@ -699,9 +696,7 @@ def sparse_attn_indexer(
             num_tokens //= get_pcp_group().world_size
         k = k[:num_tokens]
 
-    if not skip_k_cache_insert and kv_cache.numel() > 0:
-        # kv_cache is an empty placeholder during CUDA-graph memory profiling
-        # (before the real cache is allocated); there is nothing to write into.
+    if not skip_k_cache_insert:
         assert k is not None
         k, slot_mapping_for_cache = maybe_gather_indexer_k(
             k,
@@ -1576,7 +1571,7 @@ class SparseAttnIndexer(CustomOp):
                 # flat-gather buffer this paged path no longer allocates).
                 max_seq_len = int(local_seq_lens.max().item())
 
-                logits = ops.fp8_paged_mqa_logits_cpu(
+                logits = cpu_ops.fp8_paged_mqa_logits_cpu(
                     q_slice,
                     kv_view,
                     weights[chunk.token_start : chunk.token_end],
@@ -1590,7 +1585,7 @@ class SparseAttnIndexer(CustomOp):
                     dtype=torch.int32,
                     device=kv_cache.device,
                 )
-                ops.topk_transform_512_cpu(
+                cpu_ops.topk_transform_512_cpu(
                     logits,
                     local_seq_lens,
                     page_table,
@@ -1627,7 +1622,7 @@ class SparseAttnIndexer(CustomOp):
                 block_size = kv_cache.shape[1]
                 kv_view = kv_cache.view(kv_cache.shape[0], -1)
 
-                logits = ops.fp8_paged_mqa_logits_cpu(
+                logits = cpu_ops.fp8_paged_mqa_logits_cpu(
                     q_quant[:num_decode_tokens],
                     kv_view,
                     weights[:num_decode_tokens],
@@ -1647,7 +1642,7 @@ class SparseAttnIndexer(CustomOp):
                     dtype=torch.int32,
                     device=kv_cache.device,
                 )
-                ops.topk_transform_512_cpu(
+                cpu_ops.topk_transform_512_cpu(
                     logits,
                     seq_lens,
                     block_table,

@@ -57,7 +57,7 @@ def flashinfer_bf16_mm(
 
 # This is the storage path for the cubins, it can be replaced
 # with a local path for testing.
-# Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35  # noqa: E501
+# Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35
 FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
     "FLASHINFER_CUBINS_REPOSITORY",
     "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/",  # noqa: E501
@@ -519,24 +519,6 @@ def has_flashinfer_prims_ts_sparse_mla() -> bool:
     # q_dtype); 0.7.3's prims_ts still names them max_seq_len_q, q_data_type.
     plan_args = inspect.signature(BatchSparseMLADecodePagedTSWrapper.plan).parameters
     return "max_q_len" in plan_args
-
-
-@functools.cache
-def prims_ts_sparse_mla_schedules_native_heads() -> bool:
-    """Whether FlashInfer's prims_ts sparse MLA schedules a head count between
-    its qualified 8/16/32/64/128 on the next qualified count's tile (e.g. 96
-    heads on the 2-CTA 128-head schedule), flashinfer-ai/flashinfer#7984.
-    Older builds run 65..127 heads as two M64 tiles that load every KV row
-    twice, so their callers pad such queries to 128 heads instead."""
-    if not has_flashinfer_prims_ts_sparse_mla():
-        return False
-    try:
-        from flashinfer.attention.prims_ts.kernels.mla_decode.sparse_policy import (
-            sparse_policy_heads,
-        )
-    except ImportError:
-        return False
-    return "rope_dim" in inspect.signature(sparse_policy_heads).parameters
 
 
 @functools.cache

@@ -1866,7 +1866,7 @@ def run_layer_step(
     from vllm.v1.attention.backends.mla.indexer import (
         DeepseekV32IndexerMetadataBuilder,
     )
-    from vllm.v1.worker.block_table import get_block_table_width
+    from vllm.v1.kv_cache_interface import get_block_table_width
 
     cache_dtype, _, kernel = LAYER_CORES[core]
     config = layer_config(core, q, world, index_dtype)
