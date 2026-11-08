@@ -378,8 +378,6 @@ class HfRunner:
         auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
         tokenizer_name: str | None = None,
         processor: Any | None = None,
-        # Preserve loaded buffer dtypes when aligning parameter dtypes.
-        preserve_buffer_dtype: bool = False,
         # Set this to avoid hanging issue
         default_torch_num_threads: int | None = None,
     ) -> None:
@@ -402,7 +400,6 @@ class HfRunner:
                 auto_cls=auto_cls,
                 tokenizer_name=tokenizer_name,
                 processor=processor,
-                preserve_buffer_dtype=preserve_buffer_dtype,
             )
 
     def _init(
@@ -419,7 +416,6 @@ class HfRunner:
         auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
         tokenizer_name: str | None = None,
         processor: Any | None = None,
-        preserve_buffer_dtype: bool = False,
     ) -> None:
         model_name = maybe_model_redirect(model_name)
         self.model_name = model_name
@@ -532,12 +528,9 @@ class HfRunner:
             if getattr(model, "quantization_method", None) is None and any(
                 p.dtype != self.dtype for p in model.parameters()
             ):
-                if preserve_buffer_dtype:
-                    for parameter in model.parameters():
-                        if parameter.is_floating_point() or parameter.is_complex():
-                            parameter.data = parameter.data.to(dtype=self.dtype)
-                else:
-                    model = model.to(dtype=self.dtype)
+                for parameter in model.parameters():
+                    if parameter.is_floating_point() or parameter.is_complex():
+                        parameter.data = parameter.data.to(dtype=self.dtype)
 
             if len({p.device for p in model.parameters()}) < 2:
                 model = model.to(device=self.device)

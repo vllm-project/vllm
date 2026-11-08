@@ -181,8 +181,6 @@ def test_openai_privacy_filter(
         model,
         dtype=dtype,
         auto_cls=AutoModelForTokenClassification,
-        # Preserve the original RoPE frequency buffers on XPU.
-        preserve_buffer_dtype=current_platform.is_xpu(),
     ) as hf_model:
         tokenizer = hf_model.tokenizer
         hf_outputs = []
