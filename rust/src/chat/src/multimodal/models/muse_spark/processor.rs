@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! MuseSpark1x Omni vision preprocessing for the NaViT encoder.
+//! Muse Spark Omni vision preprocessing for the NaViT encoder.
 //!
 //! Ports the native preprocessing from vLLM's
 //! `models/muse_spark/common/processor.py`:
@@ -378,7 +378,7 @@ fn linspace_indices(last: usize, num: usize) -> Vec<usize> {
         .collect()
 }
 
-/// MuseSpark1x Omni NaViT image/video preprocessor.
+/// Muse Spark Omni NaViT image/video preprocessor.
 ///
 /// Owns the parameters resolved from the checkpoint's processor config at
 /// construction; request methods take no per-call config.

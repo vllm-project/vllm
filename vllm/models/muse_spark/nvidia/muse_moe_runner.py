@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MuseSpark1x MoE: routing, experts and the post-expert-norm finalize.
+"""Muse Spark MoE: routing, experts and the post-expert-norm finalize.
 
 Every expert backend stops after GEMM2 and hands its rows to the finalizer.
 """
@@ -60,8 +60,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.model_executor.utils import refill_derived, replace_parameter
 from vllm.models.muse_spark.common.moe import (  # noqa: F401 re-exported
-    MuseSpark1xRouter,
     MuseSparkConsolidatedRoutedExperts,
+    MuseSparkRouter,
     needs_pre_norm_all_reduce,
 )
 from vllm.models.muse_spark.common.moe import (
@@ -110,7 +110,7 @@ def validate_deployment(moe_config: FusedMoEConfig, *, kernel_routes: bool) -> N
     routing_method = moe_config.routing_method
     if kernel_routes and routing_method != RoutingMethodType.MiniMax2:
         raise NotImplementedError(
-            "MuseSpark1x on the monolithic TRT-LLM kernel needs it to run the "
+            "Muse Spark on the monolithic TRT-LLM kernel needs it to run the "
             "router, which requires the routing to classify as MiniMax2 "
             "(sigmoid + expert bias + sum-renormalize, no expert groups, "
             f"route_scale == 1.0); this checkpoint classifies as "
@@ -118,20 +118,20 @@ def validate_deployment(moe_config: FusedMoEConfig, *, kernel_routes: bool) -> N
         )
     if moe_config.is_lora_enabled:
         raise NotImplementedError(
-            "MuseSpark1x post-expert norm does not support MoE LoRA: the LoRA "
+            "Muse Spark post-expert norm does not support MoE LoRA: the LoRA "
             "path applies the top-k weights alongside GEMM2."
         )
     if parallel_config.enable_eplb:
-        raise NotImplementedError("MuseSpark1x post-expert norm does not support EPLB.")
+        raise NotImplementedError("Muse Spark post-expert norm does not support EPLB.")
     if parallel_config.is_sequence_parallel and not parallel_config.use_all2all_kernels:
         # Without an all2all combine the pre-norm all-reduce would mix tokens.
         raise NotImplementedError(
-            "MuseSpark1x post-expert norm does not support sequence-parallel "
+            "Muse Spark post-expert norm does not support sequence-parallel "
             "MoE without an all2all combine."
         )
     if moe_config.skip_final_all_reduce:
         raise NotImplementedError(
-            "MuseSpark1x post-expert norm all-reduces TP partials before the "
+            "Muse Spark post-expert norm all-reduces TP partials before the "
             "norm, so it cannot hand back an un-reduced output for a fused "
             "downstream all-reduce."
         )
@@ -142,7 +142,7 @@ def _validate_route_major_deployment(moe_config: FusedMoEConfig) -> None:
     parallel_config = moe_config.moe_parallel_config
     if parallel_config.dp_size != 1 or parallel_config.pcp_size != 1:
         raise NotImplementedError(
-            "MuseSpark1x Triton/Marlin currently requires DP1 and PCP1."
+            "Muse Spark Triton/Marlin currently requires DP1 and PCP1."
         )
 
 
@@ -809,7 +809,7 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
 
 
 class MuseMoERunner(MoERunner):
-    """MoE runner that splices MuseSpark1x's post-expert norm into the experts."""
+    """MoE runner that splices Muse Spark's post-expert norm into the experts."""
 
     def __init__(
         self,
