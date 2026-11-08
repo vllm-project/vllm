@@ -764,7 +764,7 @@ class TailConstants(NamedTuple):
 
 def tail_constants(norm) -> TailConstants:
     """The constants the stock post-expert finalize passes for `norm` (a
-    MuseSpark1xRMSNorm over the pooled width)."""
+    MuseSparkRMSNorm over the pooled width)."""
     if norm.hidden_size != POOLED:
         raise ValueError(f"the post-expert norm must span {POOLED} columns")
     if norm.variance_size_override is not None:

@@ -103,8 +103,8 @@ WEIGHT_DTYPES = (torch.bfloat16, torch.float32, torch.float16)
 
 def draft_boundary_constants(post, connection, pre) -> DraftBoundaryConstants:
     """The constants of the stock draft boundary `post` -> `connection` ->
-    `pre` (MuseSpark1xRMSNorm or its input-scaled variant,
-    MuseSpark1xNormPreservingResidualConnection), or ValueError where the
+    `pre` (MuseSparkRMSNorm or its input-scaled variant,
+    MuseSparkNormPreservingResidualConnection), or ValueError where the
     kernels do not reproduce it."""
     if not getattr(connection, "_coefficients_ready", True):
         raise ValueError("residual coefficients are not materialized")

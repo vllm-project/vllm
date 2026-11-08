@@ -292,7 +292,7 @@ class RowNormConstants(NamedTuple):
 
 
 def row_norm_constants(norm, *, width: int = H, enable_pdl: bool, **layout):
-    """The constants of the stock norm `norm` (a MuseSpark1xRMSNorm or its
+    """The constants of the stock norm `norm` (a MuseSparkRMSNorm or its
     input-scaled variant: the arguments its forward hands fused_rmsnorm_fwd)
     over rows of `width`, with the `layout` fields of RowNormConstants;
     ValueError where the kernel does not reproduce it or does not take its

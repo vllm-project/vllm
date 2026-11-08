@@ -90,8 +90,8 @@ class DualNormConstants(NamedTuple):
 
 def boundary_constants(post_norm, connection, pre_norm) -> DualNormConstants:
     """The constants of the stock boundary `post_norm` -> `connection` ->
-    `pre_norm` (MuseSpark1xRMSNorm, MuseSpark1xNormPreservingResidualConnection
-    with materialized coefficients, MuseSpark1xRMSNorm), as the stock forward
+    `pre_norm` (MuseSparkRMSNorm, MuseSparkNormPreservingResidualConnection
+    with materialized coefficients, MuseSparkRMSNorm), as the stock forward
     passes them to the dual-norm kernel."""
     if not getattr(connection, "_coefficients_ready", False):
         raise ValueError("residual coefficients are not materialized")

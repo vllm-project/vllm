@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Multimodal preprocessing for MuseSpark1x Omni checkpoints."""
+"""Multimodal preprocessing for Muse Spark Omni checkpoints."""
 
 import itertools
 import math
@@ -446,7 +446,7 @@ VIDEO_PROCESSOR_MAPPING_NAMES.setdefault("muse_spark", "MuseSparkVideoProcessor"
     "muse_spark",
     video_processor="MuseSparkVideoProcessor",
 )
-class MuseSpark1xOmniVideoBackend(VideoBackend):
+class MuseSparkOmniVideoBackend(VideoBackend):
     """Video loader that applies the model's frame sampling at load time.
 
     The connector's default `num_frames=32` is indistinguishable from an
@@ -481,7 +481,7 @@ class MuseSpark1xOmniVideoBackend(VideoBackend):
         return np.linspace(0, total - 1, n, dtype=int).tolist()
 
 
-class MuseSpark1xOmniProcessingInfo(BaseProcessingInfo):
+class MuseSparkOmniProcessingInfo(BaseProcessingInfo):
     def get_placeholder(self, modality: str) -> str:
         if modality == "image":
             return "<|patch|>"
@@ -568,8 +568,8 @@ class MuseSpark1xOmniProcessingInfo(BaseProcessingInfo):
         )
 
 
-class MuseSpark1xOmniDummyInputsBuilder(
-    BaseDummyInputsBuilder[MuseSpark1xOmniProcessingInfo]
+class MuseSparkOmniDummyInputsBuilder(
+    BaseDummyInputsBuilder[MuseSparkOmniProcessingInfo]
 ):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         parts: list[str] = ["Question:"]
@@ -623,8 +623,8 @@ class MuseSpark1xOmniDummyInputsBuilder(
         return data
 
 
-class MuseSpark1xOmniMultiModalProcessor(
-    BaseMultiModalProcessor[MuseSpark1xOmniProcessingInfo]
+class MuseSparkOmniMultiModalProcessor(
+    BaseMultiModalProcessor[MuseSparkOmniProcessingInfo]
 ):
     """Omni processor using native preprocessing instead of an HF processor."""
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CuTeDSL fused MoE finalize with MuseSpark1x's post-expert RMSNorm."""
+"""CuTeDSL fused MoE finalize with Muse Spark's post-expert RMSNorm."""
 
 import operator
 from typing import Any

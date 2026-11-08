@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Muse-Spark QK-norm + RoPE + KV-cache insert as one launch.
 
-Not a custom op since `MuseSpark1xModel` is `@ignore_torch_compile`;
+Not a custom op since `MuseSparkModel` is `@ignore_torch_compile`;
 re-enabling compile requires hiding the forward-context lookup from dynamo.
 """
 

@@ -49,7 +49,7 @@ class Step(NamedTuple):
 class BuildContext(NamedTuple):
     """What `Provider.build` receives, once, after the weights are loaded."""
 
-    # The stock MuseSpark1xModel; providers read it and never modify it.
+    # The stock MuseSparkModel; providers read it and never modify it.
     backbone: nn.Module
     tp: int
     rank: int
@@ -135,7 +135,7 @@ class MoEProvider(Provider, Protocol):
 class RoutedTopk(NamedTuple):
     """Exactly the pair the stock layer hands the routed experts op: global
     expert ids and their renormalized, scaled weights, as
-    fused_musespark1x_routing returns them."""
+    fused_muse_spark_routing returns them."""
 
     # int32 [b, TOP_K]
     ids: torch.Tensor

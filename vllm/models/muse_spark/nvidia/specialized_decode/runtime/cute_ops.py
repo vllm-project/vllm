@@ -21,7 +21,7 @@ checks that decide where each one runs.
 
 `MuseRouting` (`cutedsl/moe/routing.py`)
     Muse Spark routing for decode batches of at most 8 tokens. It writes, bit
-    for bit, the expert ids and weights `fused_musespark1x_routing` writes
+    for bit, the expert ids and weights `fused_muse_spark_routing` writes
     for Muse Spark's router: sigmoid scores, the correction bias for the
     selection only, top-8 of 256 experts, weights
     `score * route_scale / (sum + 1e-15)`. The router's output multiplier
@@ -46,7 +46,7 @@ from typing import NamedTuple
 import torch
 
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.models.muse_spark.common.moe import MuseSpark1xRouter
+from vllm.models.muse_spark.common.moe import MuseSparkRouter
 from vllm.platforms import current_platform
 
 from ..cutedsl.attention import attn2 as _attn2
@@ -131,7 +131,7 @@ def unavailable(kernel: str) -> str:
 
 
 def unsupported_attn2(layer: torch.nn.Module) -> str | None:
-    """Why the kernel cannot compute this MuseSpark1xAttention layer, or None."""
+    """Why the kernel cannot compute this MuseSparkAttention layer, or None."""
     if not (layer.use_o_norm and layer.use_o_gate):
         return "the layer has no o-norm with a sigmoid o-gate"
     if layer.head_dim != HEAD_DIM:
@@ -193,7 +193,7 @@ def split_qkv(
     return qkv[:, :q_width], qkv[:, q_width + 2 * kv_width :]
 
 
-def unsupported_router(router: MuseSpark1xRouter) -> str | None:
+def unsupported_router(router: MuseSparkRouter) -> str | None:
     """Why the kernel cannot reproduce `router`'s routing, or None if it
     can."""
     if router.router_score_normalization != "sigmoid":
@@ -261,7 +261,7 @@ class MuseRouting:
     router's bias and route scale at build time, when the kernel compiles. A
     call allocates nothing, so it can be captured in a CUDA graph."""
 
-    def __init__(self, router: MuseSpark1xRouter):
+    def __init__(self, router: MuseSparkRouter):
         reason = unsupported_router(router)
         if reason is not None:
             raise ValueError(f"Muse Spark routing does not support {reason}")

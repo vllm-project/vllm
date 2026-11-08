@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Platform-neutral MuseSpark1x MoE pieces: routing, config, expert loading."""
+"""Platform-neutral Muse Spark MoE pieces: routing, config, expert loading."""
 
 from collections.abc import Iterable
 
@@ -14,12 +14,12 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 from vllm.models.muse_spark.common.ops.fused_routing import (
-    fused_musespark1x_routing,
+    fused_muse_spark_routing,
 )
 
 
-class MuseSpark1xRouter(BaseRouter):
-    """MuseSpark1x top-k router.
+class MuseSparkRouter(BaseRouter):
+    """Muse Spark top-k router.
 
     Optional metap output multiplier -> sigmoid/softmax -> add expert bias for
     SELECTION only -> top-k -> gather UNBIASED scores -> divide by
@@ -74,7 +74,7 @@ class MuseSpark1xRouter(BaseRouter):
                 ids = ids.masked_fill(is_padding[:, None], -1)
             return weights, ids
 
-        topk_weights, topk_ids = fused_musespark1x_routing(
+        topk_weights, topk_ids = fused_muse_spark_routing(
             router_logits,
             self.expert_bias,
             self.top_k,
@@ -128,7 +128,7 @@ def needs_pre_norm_all_reduce(moe_config: FusedMoEConfig) -> bool:
 class MuseSparkMoEConfig(FusedMoEConfig):
     """MoE config whose top-k finalize is always deferred (except empty batches).
 
-    MuseSpark1x normalizes every expert's output before the weighted top-k
+    Muse Spark normalizes every expert's output before the weighted top-k
     reduction, so the kernel must always stop after GEMM2.
     """
 
@@ -200,7 +200,7 @@ class MuseSparkConsolidatedRoutedExperts(RoutedExperts):
 
 
 __all__ = [
-    "MuseSpark1xRouter",
+    "MuseSparkRouter",
     "MuseSparkConsolidatedRoutedExperts",
     "MuseSparkMoEConfig",
     "needs_pre_norm_all_reduce",

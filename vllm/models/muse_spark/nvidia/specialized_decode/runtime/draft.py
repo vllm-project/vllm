@@ -46,8 +46,8 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.model_executor.models.llama import LlamaMLP
 from vllm.models.muse_spark.common.layers import (
-    MuseSpark1xNormPreservingResidualConnection,
-    MuseSpark1xRMSNorm,
+    MuseSparkNormPreservingResidualConnection,
+    MuseSparkRMSNorm,
 )
 from vllm.platforms import current_platform
 
@@ -93,13 +93,13 @@ _T = TypeVar("_T")
 
 def _norm_unsupported(norm: nn.Module, hidden_size: int) -> str | None:
     """Why the fused kernels do not take this norm as the stock one, or None:
-    the stock MuseSpark1xRMSNorm forward over all `hidden_size` columns,
+    the stock MuseSparkRMSNorm forward over all `hidden_size` columns,
     its weight (if any) a contiguous `[hidden_size]`."""
     if (
-        not isinstance(norm, MuseSpark1xRMSNorm)
-        or type(norm).forward is not MuseSpark1xRMSNorm.forward
+        not isinstance(norm, MuseSparkRMSNorm)
+        or type(norm).forward is not MuseSparkRMSNorm.forward
     ):
-        return f"a norm other than the stock MuseSpark1xRMSNorm ({type(norm).__name__})"
+        return f"a norm other than the stock MuseSparkRMSNorm ({type(norm).__name__})"
     if norm.variance_size_override is not None or norm.hidden_size != hidden_size:
         return f"a norm over other than all {hidden_size} columns"
     weight = norm.weight if norm.has_weight else None
@@ -115,8 +115,8 @@ def _connection_unsupported(conn: nn.Module, hidden_size: int) -> str | None:
     None: the stock norm-preserving connection with materialized contiguous
     FP32 `[hidden_size]` coefficients."""
     if (
-        not isinstance(conn, MuseSpark1xNormPreservingResidualConnection)
-        or type(conn).forward is not MuseSpark1xNormPreservingResidualConnection.forward
+        not isinstance(conn, MuseSparkNormPreservingResidualConnection)
+        or type(conn).forward is not MuseSparkNormPreservingResidualConnection.forward
     ):
         return (
             "a residual connection other than the stock norm-preserving one "
@@ -680,9 +680,9 @@ def all_reduce_unsupported(model: "MuseSparkDSparkModel") -> str | None:
     for layer in model.layers:
         attn, mlp = layer.self_attn, layer.feed_forward
         if not (
-            isinstance(attn, muse_model.MuseSpark1xAttention)
+            isinstance(attn, muse_model.MuseSparkAttention)
             and type(attn)._project_output
-            is muse_model.MuseSpark1xAttention._project_output
+            is muse_model.MuseSparkAttention._project_output
             and not attn.is_sequence_parallel_output
             and _plain_row_parallel(attn.o_proj, tp, width)
         ):
@@ -858,7 +858,7 @@ def _attention(
     )
     # The front inserted K/V; the attention layer must not rewrite them.
     attn_output = attn.attn(q, None, None, output_dtype=qkv.dtype)
-    # The o-norm and sigmoid gate of MuseSpark1xAttention.forward.
+    # The o-norm and sigmoid gate of MuseSparkAttention.forward.
     attn_output = attn_output.reshape(-1, attn.num_heads, attn.head_dim)
     og = og.reshape(-1, attn.num_heads, attn.head_dim)
     # (The front needs the o-gate, so the o-norm is fused with it if set.)

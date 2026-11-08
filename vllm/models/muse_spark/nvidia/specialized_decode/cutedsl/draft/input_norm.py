@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DSpark draft's first norm (its first layer's pre_qkv_proj_norm of the
 BF16 input rows) as one CuTe kernel, bit for bit the stock norm
-(`MuseSpark1xRMSNorm.forward`: `fused_rmsnorm_fwd` into BF16).
+(`MuseSparkRMSNorm.forward`: `fused_rmsnorm_fwd` into BF16).
 
 It is the row norm of `common/row_norm.py` at 8192 columns, one CTA of 256
 threads per row; the weight loads before the PDL wait and the dependents
@@ -17,7 +17,7 @@ from ..common.row_norm import H, RowNorm, RowNormConstants, row_norm_constants
 
 
 def input_norm_constants(norm: nn.Module, *, enable_pdl: bool) -> RowNormConstants:
-    """The constants of the stock norm `norm` (a MuseSpark1xRMSNorm or its
+    """The constants of the stock norm `norm` (a MuseSparkRMSNorm or its
     input-scaled variant over 8192 columns), or ValueError where the kernel
     does not reproduce it or does not take its weight."""
     return row_norm_constants(norm, enable_pdl=enable_pdl)
