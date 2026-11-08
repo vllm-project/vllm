@@ -679,3 +679,97 @@ def test_count_reasoning_tokens(raw, expected):
     tok = _CharTokenizer()
     parser = MuseReasoningParser(tok)
     assert parser.count_reasoning_tokens(tok.encode(raw)) == expected
+
+
+# ------------------------------------------------- stray (missampled) recipient
+
+# Observed in serving: the model opened its reply with ``to=s`` (a missampled
+# recipient) and wrote ordinary text; the parser dropped the whole reply.
+STRAY_BODY = (
+    "We need to produce architecture review of FastAPI? User provided context "
+    "about normalized config, commit. We should give review."
+)
+RAW_STRAY_OPEN = f" to=s<|message|>{STRAY_BODY}"
+RAW_STRAY_CLOSED = f" to=s<|message|>{STRAY_BODY}<|eot|>"
+
+
+@pytest.mark.parametrize("raw", [RAW_STRAY_OPEN, RAW_STRAY_CLOSED])
+def test_stray_recipient_text_is_content(raw):
+    reasoning, content = MuseReasoningParser.extract_reasoning(R, raw, _NO_REQ)
+    assert reasoning is None
+    assert content == STRAY_BODY
+
+
+@pytest.mark.parametrize("chunk", [1, 7, 40])
+def test_stray_recipient_streams_as_content_once_closed(chunk):
+    reasoning, content, tcs = _stream(RAW_STRAY_CLOSED, chunk)
+    assert (reasoning, content, tcs) == ("", STRAY_BODY, [])
+
+
+@pytest.mark.parametrize("chunk", [1, 7, 40])
+def test_stray_recipient_open_body_surfaces_at_finalize(chunk):
+    # While open it could still turn into a tool channel: held back until the
+    # generation ends, then promoted by the finalize hook.
+    reasoning, content, tcs = _stream(RAW_STRAY_OPEN, chunk)
+    assert (reasoning, content, tcs) == ("", "", [])
+    assert R.get_streaming_fallback_content(RAW_STRAY_OPEN, _fake_req()) == STRAY_BODY
+
+
+def test_stray_recipient_with_tool_markup_still_hands_off():
+    raw = (
+        " to=s<|message|>"
+        '<atem:function_calls>\n<atem:invoke name="read.read">\n'
+        '<atem:parameter name="path">/etc/hostname</atem:parameter>\n'
+        "</atem:invoke>\n</atem:function_calls>"
+    )
+    reasoning, content = MuseReasoningParser.extract_reasoning(R, raw, _NO_REQ)
+    assert reasoning is None
+    assert content is not None and "<atem:invoke" in content
+    _, streamed, tcs = _stream(raw, 5)
+    assert streamed == "" and len(tcs) == 1
+
+
+# ------------------------------------------ tool call cut by max_tokens
+
+# Observed in serving (finish_reason=length inside the call): the non-streaming
+# path returned the framed channels as content while streaming returned the
+# clean commentary. Both must return the commentary and no tool call.
+RAW_TRUNCATED_CALL = (
+    "<|start|>assistant to=commentary<|message|>I'll run those system checks "
+    "and summarize the results.<|eom|>"
+    "<|start|>assistant to=run_shell<|message|><atem:function_calls>\n"
+    '<atem:invoke name="run_shell">\n<atem:parameter name'
+)
+TRUNCATED_COMMENTARY = "I'll run those system checks and summarize the results."
+
+
+def test_truncated_tool_call_non_streaming_returns_clean_commentary():
+    reasoning, content = MuseReasoningParser.extract_reasoning(
+        R, RAW_TRUNCATED_CALL, _NO_REQ
+    )
+    assert reasoning is None
+    assert content == TRUNCATED_COMMENTARY
+    info = MuseToolParser.extract_tool_calls(T, content, _fake_req())
+    assert not info.tools_called and info.tool_calls == []
+    assert info.content == TRUNCATED_COMMENTARY
+
+
+@pytest.mark.parametrize("chunk", [1, 5, 33])
+def test_truncated_tool_call_streaming_parity(chunk):
+    reasoning, content, tcs = _stream(RAW_TRUNCATED_CALL, chunk)
+    assert (reasoning, content, tcs) == ("", TRUNCATED_COMMENTARY, [])
+
+
+def test_complete_call_after_commentary_still_hands_off():
+    raw = (
+        "<|start|>assistant to=commentary<|message|>Checking.<|eom|>"
+        "<|start|>assistant to=read.read<|message|>"
+        '<atem:function_calls>\n<atem:invoke name="read.read">\n'
+        '<atem:parameter name="path">/etc/hostname</atem:parameter>\n'
+        "</atem:invoke>\n</atem:function_calls>"
+    )
+    reasoning, content = MuseReasoningParser.extract_reasoning(R, raw, _NO_REQ)
+    assert content is not None and "<atem:invoke" in content
+    info = MuseToolParser.extract_tool_calls(T, content, _fake_req())
+    assert info.tools_called and len(info.tool_calls) == 1
+    assert info.content == "Checking."
