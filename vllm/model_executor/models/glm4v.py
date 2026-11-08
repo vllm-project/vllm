@@ -89,7 +89,9 @@ class EVA2CLIPPatchEmbedding(nn.Module):
         self.position_embedding = nn.Embedding(config.num_positions, config.hidden_size)
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        """Args:
+        """Embed image patches and prepend the class embedding.
+
+        Args:
             images: Input image tensor with shape (B, C, H, W)
 
         Returns:
@@ -345,7 +347,9 @@ class EVA2CLIPModel(nn.Module):
         self.scaling_factor = vision_config.scaling_factor
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        """Args:
+        """Encode images into language-model embeddings.
+
+        Args:
             images: Input image tensor with shape (B, C, H, W)
 
         Returns:

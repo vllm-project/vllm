@@ -12,7 +12,7 @@ generic passthrough for template-time inputs). It is fed by two
 different code paths, which speak different vocabularies:
 
 1. `vllm.entrypoints.cohere.serving.CohereServingChatV2` -- translates a native
-   `Cohere Chat v2 request <https://docs.cohere.com/reference/chat>`__ into
+   [Cohere Chat v2 request](https://docs.cohere.com/reference/chat) into
    `chat_template_kwargs`.
 2. `OpenAIServingChat` -- forwards whatever the client puts in
    `request.chat_template_kwargs` directly, without translation.

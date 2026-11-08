@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Causal target verify under DCP on gfx942 (MI300/MI325).
+r"""Causal target verify under DCP on gfx942 (MI300/MI325).
 
 Reproduces the attention shape of
 
@@ -15,9 +15,9 @@ Triton split-KV kernel. DeepSeek-V3 with MTP and an fp8 KV cache at DCP 8 hits
 the same limit through its 128 gathered heads. Shapes segmented MLA fits stay
 on it.
 
-The real metadata builder and ``forward_mqa`` run on one GPU with the DCP ranks
+The real metadata builder and `forward_mqa` run on one GPU with the DCP ranks
 simulated one after another. That is sound because this path has no
-collective: the query all-gather happens in the layer, before ``forward_mqa``.
+collective: the query all-gather happens in the layer, before `forward_mqa`.
 """
 
 from types import SimpleNamespace

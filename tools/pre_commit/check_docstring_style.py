@@ -6,8 +6,13 @@
 - Python Sphinx roles become code spans of the text Sphinx would display, e.g.
   :class:`~vllm.LLM` is rewritten to `LLM`. Other roles must be fixed by hand.
 - Sections are Google style (`Args:`), not NumPy style (`Parameters` + `---`).
-- Admonitions and code blocks are Markdown (`!!! note`, fences), not
-  reStructuredText directives (`.. note::`, `.. code-block::`).
+- Admonitions, code blocks and links are Markdown (`!!! note`, fences,
+  `[text](url)`), not reStructuredText (`.. note::`, `.. code-block::`,
+  `` `text <url>`_ ``).
+- Code spans do not start with a space or start or end at a line break, which
+  is how a span broken across lines or missing its closing backtick shows up.
+- Docstrings with escapes or line continuations cannot be fixed in place, so
+  any of the above in them is reported; a raw string fixes that.
 - `[a][b]` is a reference link that mkdocs-autorefs tries to resolve, so shapes
   and indexing written outside code spans produce broken cross-references:
 
@@ -54,6 +59,9 @@ NUMPY_SECTION = re.compile(
     re.MULTILINE,
 )
 RST_DIRECTIVE = re.compile(r"^[ \t]*\.\. ([a-z][a-z-]*)::", re.MULTILINE)
+RST_LINK = re.compile(r"`([^`<>]+?) ?<https?://[^<>`]+>`__?")
+# What `fix_code_spans` would rewrite, for docstrings it cannot edit
+RST_MARKUP = re.compile(r"``[^`]|:(?:[a-z]+:)?[a-z]+:`")
 QUOTE = re.compile(r"""^[rRuU]?("{3}|'{3}|"|')""")
 # Fully qualified Python paths, e.g. `vllm.LLM` or `torch.Tensor`
 TARGET = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)+")
@@ -248,6 +256,12 @@ def fix_code_spans(
     unfixable = []
     for node in docstrings(tree, rendered_only=False):
         if (parts := segment(lines, node)) is None:
+            if match := RST_MARKUP.search(node.value):
+                lineno = node.lineno + node.value.count("\n", 0, match.start())
+                unfixable.append(
+                    f"{filepath}:{lineno}: reStructuredText markup in a docstring "
+                    "with escapes or line continuations; make it a raw string"
+                )
             continue
         head, body, tail = parts
         crs = [line.endswith("\r") for line in body]
@@ -259,6 +273,14 @@ def fix_code_spans(
                 content = text[start + width : end - width]
                 lineno = node.lineno + a + text.count("\n", 0, start)
                 if "`" in content:
+                    continue
+                lead = content[: len(content) - len(content.lstrip())]
+                trail = content[len(content.rstrip()) :]
+                if content.strip() and ("\n" in lead + trail or (lead and not trail)):
+                    unfixable.append(
+                        f"{filepath}:{lineno}: code span starts or ends with "
+                        "whitespace in a docstring; check for a misplaced backtick"
+                    )
                     continue
                 if role := ROLE.search(text, pos, start):
                     if role.group(1) not in PY_ROLES or "\n" in content:
@@ -326,6 +348,7 @@ def section_violations(filepath: str, tree: ast.Module) -> list[str]:
         for pattern, found, fix in (
             (NUMPY_SECTION, "NumPy-style `{}` section", "use Google style"),
             (RST_DIRECTIVE, "reStructuredText `.. {}::`", "use `!!!` or a fence"),
+            (RST_LINK, "reStructuredText link `{}`", "use `[text](url)`"),
         ):
             for match in pattern.finditer(node.value):
                 lineno = node.lineno + node.value.count("\n", 0, match.start())

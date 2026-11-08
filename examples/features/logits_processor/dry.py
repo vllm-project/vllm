@@ -1,24 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""This example implements the DRY (Don't Repeat Yourself) repetition penalty as
-a Model Runner V2 custom logits processor, ``DryState``.
+r"""This example implements the DRY (Don't Repeat Yourself) repetition penalty as
+a Model Runner V2 custom logits processor, `DryState`.
 
-A token that would extend a repeat of at least ``allowed_length`` tokens loses
-``multiplier * base ** (repeat_length - allowed_length)`` from its logit, with the
+A token that would extend a repeat of at least `allowed_length` tokens loses
+`multiplier * base ** (repeat_length - allowed_length)` from its logit, with the
 exponent clamped as in llama.cpp.
 Parameter names and matching semantics follow llama.cpp's
-``llama_sampler_dry_apply``. llama.cpp's version is itself ported from pi6am's
+`llama_sampler_dry_apply`. llama.cpp's version is itself ported from pi6am's
 koboldcpp implementation of p-e-w's scheme for text-generation-webui.
 
-Pass the class to ``LLM`` and configure it per request through ``extra_args``::
+Pass the class to `LLM` and configure it per request through `extra_args`::
 
     LLM(..., logits_processors=[DryState])
     SamplingParams(extra_args={"dry_multiplier": 0.8})
 
-The recognized keys are ``dry_multiplier`` (0.0, off), ``dry_base`` (1.75),
-``dry_allowed_length`` (2), ``dry_penalty_last_n`` (-1, the whole context)
-and ``dry_sequence_breakers``. This processor claims the ``dry_*`` namespace,
-so any other ``dry_*`` key fails the request. Speculative decoding is not
+The recognized keys are `dry_multiplier` (0.0, off), `dry_base` (1.75),
+`dry_allowed_length` (2), `dry_penalty_last_n` (-1, the whole context)
+and `dry_sequence_breakers`. This processor claims the `dry_*` namespace,
+so any other `dry_*` key fails the request. Speculative decoding is not
 supported and is refused at construction.
 
 Run the example with::

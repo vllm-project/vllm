@@ -130,16 +130,16 @@ def _resolve_layer_attention(
     """Resolve `(sliding_window, causal)` for one DFlash draft layer.
 
     +----------------------+-------------------------+--------------------------------+
-    | Config               | `layer_type`          | *`causal`                    |
+    | Config               | `layer_type`            | *`causal`                      |
     +======================+=========================+================================+
-    | `layer_types`      | SWA if `use_swa`      | True if `layer_types[i]=SWA` |
-    |                      | else `layer_types[i]` | else False                     |
+    | `layer_types`        | SWA if `use_swa`        | True if `layer_types[i]=SWA`   |
+    |                      | else `layer_types[i]`   | else False                     |
     +----------------------+-------------------------+--------------------------------+
-    | `layer_types=None` | SWA                     | False                          |
-    | + `use_swa=True`   |                         |                                |
+    | `layer_types=None`   | SWA                     | False                          |
+    | + `use_swa=True`     |                         |                                |
     +----------------------+-------------------------+--------------------------------+
-    | `layer_types=None` | Full                    | False                          |
-    | + `use_swa=False`  |                         |                                |
+    | `layer_types=None`   | Full                    | False                          |
+    | + `use_swa=False`    |                         |                                |
     +----------------------+-------------------------+--------------------------------+
     * If `dflash_config.causal` is set, its value overrides `causal` for all layers.
 

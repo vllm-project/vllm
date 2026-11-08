@@ -185,7 +185,9 @@ def triton_bf16_mla_sparse_interface(
     d_v: int = 512,
     block_dpe: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Args:
+    """Sparse MLA attention over a BF16 latent KV cache, using Triton.
+
+    Args:
         q: Query tensor, [num_tokens, num_heads_q, dim_qk].
         kv: Latent KV cache tensor.
         indices: Sparse KV indices selected for each query token.

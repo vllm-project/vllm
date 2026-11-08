@@ -33,7 +33,7 @@ logger = init_logger(__name__)
 # Install: git clone git@github.com:taco-project/FlexKV.git \
 #          && cd FlexKV && bash build.sh
 class FlexKVConnectorV1(KVConnectorBase_V1):
-    """KV Connector that offloads KV cache to FlexKV.
+    r"""KV Connector that offloads KV cache to FlexKV.
 
     FlexKV is a distributed KV Store and multi-level cache management system
     designed for ultra-large-scale LLM inference. It supports offloading KV
@@ -47,7 +47,7 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
             cd FlexKV && bash build.sh
 
     Configuration:
-        Pass ``kv_connector="FlexKVConnectorV1"`` via ``--kv-transfer-config``::
+        Pass `kv_connector="FlexKVConnectorV1"` via `--kv-transfer-config`::
 
             --kv-transfer-config \
             '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'

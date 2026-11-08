@@ -334,13 +334,15 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         num_global_experts: int,
         num_local_experts: int,
     ) -> dict[Any, Any]:
-        """Args:
-        max_num_tokens_per_dp_rank: The maximum number of tokens a DP rank can
-            dispatch. All the ranks must hold the same value.
-        token_hidden_size: The hidden dimension of each token.
-        num_ep_ranks: The number of EP group ranks.
-        num_global_experts: Number of experts in the model.
-        num_local_experts: Number of experts in an EP rank.
+        """Build the kwargs for the DeepEP low-latency buffer.
+
+        Args:
+            max_num_tokens_per_dp_rank: The maximum number of tokens a DP rank can
+                dispatch. All the ranks must hold the same value.
+            token_hidden_size: The hidden dimension of each token.
+            num_ep_ranks: The number of EP group ranks.
+            num_global_experts: Number of experts in the model.
+            num_local_experts: Number of experts in an EP rank.
 
         """
         import deep_ep  # type: ignore[import-not-found]

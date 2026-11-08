@@ -29,8 +29,8 @@ class KVCacheConfigBuilder(ABC):
     builder supplies the placement decisions: how layers are split into groups and how a
     group list is materialized into tensors for a given block count. Grouping
     coordination lives in `DefaultKVCacheConfigBuilder` (a model implementing
-    ` SupportsKVCacheGrouping` owns its
-    grouping there); a platform that replaces the builder fully owns its own grouping.
+    `SupportsKVCacheGrouping` owns its grouping there); a platform that replaces the
+    builder fully owns its own grouping.
     """
 
     @abstractmethod
