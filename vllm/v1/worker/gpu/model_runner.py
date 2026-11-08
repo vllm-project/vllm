@@ -55,7 +55,10 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
-from vllm.model_executor.models.interfaces import requires_raw_input_tokens
+from vllm.model_executor.models.interfaces import (
+    requires_raw_input_tokens,
+    supports_audio_alignment,
+)
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -63,6 +66,7 @@ from vllm.model_executor.offloader import (
 )
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.audio_alignment import AUDIO_ALIGNMENT_HANDLE_KEY
 from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
 )
@@ -1102,6 +1106,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def reset_encoder_cache(self) -> None:
         if self.encoder_cache is not None:
             self.encoder_cache.reset_encoder_cache()
+        if supports_audio_alignment(self.model):
+            self.model.reset_audio_alignment()
         if self.pooling_runner is not None:
             self.pooling_runner.clear()
 
@@ -1256,6 +1262,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.encoder_cache is not None:
             for mm_hash in scheduler_output.free_encoder_mm_hashes:
                 self.encoder_cache.free_encoder_cache(mm_hash)
+                if supports_audio_alignment(self.model):
+                    self.model.on_audio_alignment_cache_evicted(mm_hash)
 
     def update_pp_decode_requests(self):
         # For non-last PP ranks, update decode requests with sampler output from
@@ -1300,6 +1308,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if self.encoder_cache is not None:
                 self.encoder_cache.add_request(req_id, new_req_data.mm_features)
+
+            if (
+                supports_audio_alignment(self.model)
+                and sampling_params is not None
+                and sampling_params.extra_args is not None
+                and (
+                    handle := sampling_params.extra_args.get(AUDIO_ALIGNMENT_HANDLE_KEY)
+                )
+                is not None
+            ):
+                if not isinstance(handle, str):
+                    raise ValueError("Audio alignment handle must be a string")
+                self.model.register_audio_alignment(
+                    handle,
+                    [
+                        feature.identifier
+                        for feature in new_req_data.mm_features
+                        if feature.modality == "audio"
+                    ],
+                )
 
             self.model_state.add_request(req_index, new_req_data)
             self.block_tables.append_block_ids(
@@ -2486,6 +2514,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 clear_layer_kv_caches(draft_model.modules())
             self.speculator = None
         if hasattr(self, "model"):
+            if supports_audio_alignment(self.model):
+                self.model.reset_audio_alignment()
             clear_layer_kv_caches(self.model.modules())
             del self.model
         # Its views do not keep it alive, and the runner can outlive shutdown

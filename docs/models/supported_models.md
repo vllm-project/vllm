@@ -800,6 +800,10 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
     bfloat16, its output can depend on that backend and on the other clips in the batch: small rounding
     differences can flip the thresholded speaker features on some frames.
 
+    BF16 offline callers can opt into [CTC word timestamps](../features/audio_word_timestamps.md),
+    including with MTP, using the bundled timestamp head. This does not enable timestamps
+    on the HTTP transcription endpoint.
+
 !!! note
     `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.
 

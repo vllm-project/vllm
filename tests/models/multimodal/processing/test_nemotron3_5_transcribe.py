@@ -4,11 +4,25 @@
 """Nemotron-3.5-Transcribe config checks, audio limits and the audio tower."""
 
 import json
+from io import BytesIO
 from typing import Any
 
+import numpy as np
 import pytest
 import torch
 
+from vllm.model_executor.models.nemotron3_5_transcribe_alignment import (
+    MultiSpeakerSOTWordTimestampAligner,
+    _banded_ctc_search,
+    _ctc_banded_forward,
+    _ctc_banded_forward_numpy,
+    _timestamp_units,
+)
+from vllm.model_executor.models.nemotron3_5_transcribe_ctc import (
+    CTCTokenizer,
+    NemotronCTCHead,
+    alignment_speaker_priors,
+)
 from vllm.transformers_utils.configs.nemotron3_5_transcribe import (
     SPEECHLM_EMBED_EXTRA_ROWS,
     Nemotron3_5TranscribeConfig,
@@ -529,3 +543,260 @@ def test_fp8_encoder_attention_is_refused(tmp_path):
         pytest.raises(ValueError, match=r"Nemotron-3\.5-Transcribe does not support"),
     ):
         Nemotron3_5TranscribeAudioTower(TINY_AUDIO_CONFIG)
+
+
+TINY_CTC_CONFIG = {
+    "feat_in": 32,
+    "num_classes": 3,
+    "vocabulary": ["a", "b", "c"],
+    "n_heads": 4,
+    "n_layers": 2,
+    "ff_expansion": 0.5,
+    "residual": True,
+    "upsampling_factor": 2,
+}
+
+
+def test_capture_preserves_embeddings_and_compacts_each_audio(tiny_tower):
+    clips = [torch.randn(length) * 0.1 for length in (20801, 24003, 48001)]
+    lengths = torch.tensor([clip.numel() for clip in clips])
+    with torch.inference_mode():
+        ordinary = tiny_tower.encode(clips, lengths)
+        captured, sidecars = tiny_tower.encode(
+            clips, lengths, capture_flags=[True, False, True]
+        )
+    for expected, actual in zip(ordinary, captured):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert sidecars[1] is None
+    for index in (0, 2):
+        sidecar = sidecars[index]
+        mel_len = int(lengths[index]) // 160
+        encoded_len = (mel_len + 7) // 8
+        assert sidecar["asr_encoded"].shape == (1, 32, encoded_len)
+        assert sidecar["sortformer_sigmoids"].shape == (1, encoded_len, 4)
+        assert sidecar["diarization_labels"].shape == (1, 4, mel_len)
+        assert sidecar["diarization_labels"].dtype == torch.bool
+        assert sidecar["asr_encoded_lengths"].tolist() == [encoded_len]
+        assert sidecar["diarization_lengths"].tolist() == [mel_len]
+
+
+def test_repeated_ctc_tokens_need_a_blank_frame():
+    logp = np.array([[-10, 0], [0, -10], [-10, 0]], dtype=np.float32)
+    labels = np.array([0, 1, 0, 1, 0], dtype=np.int64)
+    path, score, _ = _banded_ctc_search(logp, labels, np.arange(3), None)
+    assert path.tolist() == [1, 2, 3]
+    assert score == 0
+    impossible, score, _ = _banded_ctc_search(logp[:2], labels, np.arange(2), None)
+    assert impossible.tolist() == [-1, -1]
+    assert score == -np.inf
+
+
+@pytest.mark.parametrize("prior_dtype", [np.float32, np.float64])
+def test_compiled_search_keeps_reference_scores_and_tie_order(prior_dtype):
+    rng = np.random.default_rng(42)
+    logp = rng.integers(-5, 1, size=(36, 5)).astype(np.float32)
+    labels = np.array([0, 1, 0, 2, 0, 2, 0, 3, 0], dtype=np.int64)
+    positions = np.arange(36)
+    starts = np.zeros(36, dtype=np.int64)
+    prior = np.linspace(-1, 0, 36).astype(prior_dtype)
+    actual = _ctc_banded_forward(logp, labels, positions, prior, starts, len(labels))
+    expected = _ctc_banded_forward_numpy(
+        logp, labels, positions, prior, starts, len(labels)
+    )
+    assert np.array_equal(actual[0], expected[0])
+    assert np.array_equal(actual[1], expected[1])
+
+
+@pytest.mark.parametrize(
+    ("text", "language", "units"),
+    [
+        ("你好AB", "zh", ["你", "好", "A", "B"]),
+        ("こんにちは", "ja", list("こんにちは")),
+        ("한국어 문장", "ko", ["한국어", "문장"]),
+        ("Hello world!", "en", ["Hello", "world!"]),
+        ("สวัสดีครับ", "th", ["สวัสดี", "ครับ"]),
+    ],
+)
+def test_timestamp_units_follow_the_reference_language_policy(text, language, units):
+    words = MultiSpeakerSOTWordTimestampAligner.parse_sot_words(text)
+    assert [word["word"] for word in _timestamp_units(words, language)] == units
+
+
+def test_language_units_keep_event_tags_and_speaker_turns():
+    words = MultiSpeakerSOTWordTimestampAligner.parse_sot_words(
+        "<spk:0> 你好 <ev:breath> <spk:1> 世界"
+    )
+    actual = _timestamp_units(words, "zh")
+    assert [w["word"] for w in actual] == ["你", "好", "<ev:breath>", "世", "界"]
+    assert [w["speaker_tag"] for w in actual] == [0, 0, 0, 1, 1]
+
+
+def test_cpu_speaker_resampling_ignores_the_default_device():
+    probabilities = torch.tensor([[0.0, 1.0], [1.0, 0.0]])
+    with torch.device("meta"):
+        actual = MultiSpeakerSOTWordTimestampAligner._resample_speaker_probs(
+            probabilities, 3
+        )
+    assert actual.device.type == "cpu"
+    torch.testing.assert_close(
+        actual, torch.tensor([[0.0, 1.0], [0.5, 0.5], [1.0, 0.0]]), rtol=0, atol=0
+    )
+
+
+@pytest.mark.usefixtures("dist_init")
+def test_windowed_head_keeps_exact_full_softmax_columns_on_the_cpu():
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    head = NemotronCTCHead(TINY_CTC_CONFIG).eval()
+    torch.manual_seed(123)
+    for module in head.modules():
+        if isinstance(module, ReplicatedLinear):
+            with torch.no_grad():
+                module.weight.normal_(0, 0.1)
+                if module.bias is not None:
+                    module.bias.zero_()
+            module.quant_method.process_weights_after_loading(module)
+    states = torch.randn(1, 32, 7)
+    lengths = torch.tensor([7])
+    with torch.inference_mode():
+        full = head.classify(head.trunk(states, lengths))[0, :, [3, 1]].float()
+        kept = head.read_columns(
+            {"asr_encoded": states, "asr_encoded_lengths": lengths},
+            [[3, 1]],
+            [14],
+            core_length=3,
+            left_context=7,
+            right_context=7,
+        )[0]
+    assert kept.device.type == "cpu" and kept.dtype == torch.float32
+    torch.testing.assert_close(kept, full, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "offload_kwargs",
+    [
+        {"uva": {"cpu_offload_gb": 1}},
+        {"prefetch": {"offload_group_size": 1}},
+    ],
+)
+def test_ctc_cpu_weight_offloading_is_refused_before_model_allocation(
+    tmp_path, offload_kwargs
+):
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config.offload import OffloadConfig
+    from vllm.model_executor.models.nemotron3_5_transcribe import (
+        Nemotron3_5TranscribeForConditionalGeneration,
+    )
+
+    checkpoint = CHECKPOINT_CONFIG | {
+        "enable_ctc_timestamps": True,
+        "ctc_timestamps": {"decoder_config": TINY_CTC_CONFIG | {"feat_in": 64}},
+    }
+    (tmp_path / "config.json").write_text(json.dumps(checkpoint))
+    config = VllmConfig(
+        model_config=ModelConfig(str(tmp_path)),
+        offload_config=OffloadConfig(**offload_kwargs),
+    )
+    with pytest.raises(
+        ValueError,
+        match="CTC timestamps currently do not support CPU weight offloading",
+    ):
+        Nemotron3_5TranscribeForConditionalGeneration(vllm_config=config)
+
+
+@pytest.mark.parametrize("duration", [0.0004, 1.0006])
+def test_rounded_timestamps_stay_inside_the_audio(duration):
+    from vllm.model_executor.models.nemotron3_5_transcribe_ctc import public_words
+
+    result = {
+        "speaker_word_timestamps": {
+            0: [{"word": "last", "start": 0.0, "end": duration}]
+        }
+    }
+    word = public_words(result, duration)["words"][0]
+    assert 0 <= word["start"] <= word["end"] <= duration
+
+
+@pytest.fixture
+def two_speaker_alignment():
+    import sentencepiece as spm
+
+    model = BytesIO()
+    spm.SentencePieceTrainer.train(
+        sentence_iterator=iter(["one two"]),
+        model_writer=model,
+        model_type="word",
+        vocab_size=3,
+        bos_id=-1,
+        eos_id=-1,
+        num_threads=1,
+        minloglevel=2,
+    )
+    proto = model.getvalue()
+    pieces = spm.SentencePieceProcessor(model_proto=proto)
+    tokenizer = CTCTokenizer(proto, [pieces.id_to_piece(i) for i in range(3)])
+    aligner = MultiSpeakerSOTWordTimestampAligner(
+        tokenizer=tokenizer, blank_id=3, ctc_frame_seconds=0.04
+    )
+    logits = torch.full((40, 4), -8.0)
+    logits[:, 3] = 0
+    logits[4:6, tokenizer.text_to_ids("one")[0]] = 8
+    logits[30:32, tokenizer.text_to_ids("two")[0]] = 8
+    log_probs = logits.log_softmax(dim=-1)
+    probabilities = torch.zeros(1, 20, 8)
+    probabilities[:, :8, 0] = 1
+    probabilities[:, 12:, 1] = 1
+    labels = torch.zeros(1, 8, 160, dtype=torch.bool)
+    labels[:, 0, :64] = True
+    labels[:, 1, 96:] = True
+
+    def align(text, speaker_probs, diarization):
+        def read_columns(columns, lengths):
+            assert lengths == [40]
+            return [log_probs[:, columns[0]]]
+
+        prepared = aligner._prepare(
+            (1, 40, 4),
+            read_columns,
+            speaker_probs,
+            [text],
+            ctc_lengths=torch.tensor([40]),
+            sortformer_lengths=torch.tensor([20]),
+            audio_durations=[1.6],
+            diarization_labels=diarization,
+            diarization_lengths=torch.tensor([160]),
+        )
+        return aligner.align_prepared(prepared)[0]
+
+    return align, probabilities, labels
+
+
+def test_untagged_transcript_follows_activity_across_speakers(two_speaker_alignment):
+    """An unlabelled transcript must use both speakers' disjoint speech regions."""
+    align, probabilities, labels = two_speaker_alignment
+    captured_probabilities, captured_labels = probabilities.clone(), labels.clone()
+    priors = alignment_speaker_priors("one two", probabilities, labels)
+    result = align("one two", *priors)
+    assert result["alignment_diagnostics"]["failed_streams"] == []
+    words = result["speaker_word_timestamps"][0]
+    assert [word["word"] for word in words] == ["one", "two"]
+    assert 0 <= words[0]["start"] < words[0]["end"] <= 0.64
+    assert 0.96 <= words[1]["start"] < words[1]["end"] <= 1.6
+    assert torch.equal(probabilities, captured_probabilities)
+    assert torch.equal(labels, captured_labels)
+
+
+@pytest.mark.parametrize("tag", ["spk", "SPK"])
+def test_explicit_speaker_tags_keep_identity_priors(two_speaker_alignment, tag):
+    align, probabilities, labels = two_speaker_alignment
+    text = f"<{tag}:0> one <{tag}:1> two"
+    priors = alignment_speaker_priors(text, probabilities, labels)
+    assert priors[0] is probabilities
+    assert priors[1] is labels
+    result = align(text, *priors)
+    assert result["alignment_diagnostics"]["failed_streams"] == []
+    assert result["speaker_tag_to_sortformer_column"] == {0: 0, 1: 1}
+    first, second = (result["speaker_word_timestamps"][i][0] for i in (0, 1))
+    assert first["word"] == "one" and second["word"] == "two"
+    assert 0 <= first["start"] < first["end"] <= 0.64
+    assert 0.96 <= second["start"] < second["end"] <= 1.6

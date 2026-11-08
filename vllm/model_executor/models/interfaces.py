@@ -1334,6 +1334,35 @@ def supports_realtime(
 
 
 @runtime_checkable
+class SupportsAudioAlignment(Protocol):
+    """Retain encoder state for explicit, deferred word alignment requests."""
+
+    supports_audio_alignment: ClassVar[Literal[True]] = True
+
+    def embed_multimodal_with_alignment(
+        self, mm_hashes: Sequence[str], **kwargs: object
+    ) -> MultiModalEmbeddings: ...
+
+    def register_audio_alignment(
+        self, handle: str, mm_hashes: Sequence[str]
+    ) -> None: ...
+
+    def on_audio_alignment_cache_evicted(self, mm_hash: str) -> None: ...
+
+    def reset_audio_alignment(self) -> None: ...
+
+    def align_audio(self, handle: str, text: str) -> dict[str, Any]: ...
+
+    def release_audio_alignment(self, handles: Sequence[str]) -> None: ...
+
+    def get_audio_alignment_stats(self) -> dict[str, Any]: ...
+
+
+def supports_audio_alignment(model: object) -> TypeIs[SupportsAudioAlignment]:
+    return getattr(model, "supports_audio_alignment", False)
+
+
+@runtime_checkable
 class SupportsTranscription(Protocol):
     """The interface required for all models that support transcription."""
 

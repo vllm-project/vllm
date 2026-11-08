@@ -1729,6 +1729,7 @@ setup(
             "soxr",
             "mistral_common[audio]",
         ],  # Required for audio processing
+        "audio-alignment": ["numba==0.65.0", "pythainlp==5.3.4", "scipy"],
         "video": [],  # Kept for backwards compatibility
         # NVIDIA DeepStream (NVDEC) GPU video-decode backend. Linux x86-64
         # only; also needs system GStreamer + libv4l (see docs).
