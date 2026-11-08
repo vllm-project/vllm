@@ -30,7 +30,12 @@ from vllm.model_executor.models.bailing_moe_linear import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
+from .utils import (
+    PPMissingLayer,
+    is_pp_missing_parameter,
+    maybe_prefix,
+    should_torch_compile_mtp_drafter,
+)
 
 
 def _get_draft_hf_config(vllm_config: VllmConfig) -> PreTrainedConfig:
@@ -195,7 +200,7 @@ class BailingMoeV25MultiTokenPredictor(nn.Module):
         )
 
 
-@support_torch_compile
+@support_torch_compile(enable_if=should_torch_compile_mtp_drafter)
 class BailingMoeV25MTPModel(nn.Module):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],

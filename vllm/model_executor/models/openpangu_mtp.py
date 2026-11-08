@@ -42,7 +42,10 @@ from vllm.model_executor.models.deepseek_mtp import (
     DeepSeekMultiTokenPredictorLayer,
     SharedHead,
 )
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import (
+    maybe_prefix,
+    should_torch_compile_mtp_drafter,
+)
 from vllm.sequence import IntermediateTensors
 
 from .openpangu import OpenPanguDecoderLayer
@@ -94,7 +97,7 @@ class OpenPanguMultiTokenPredictor(DeepSeekMultiTokenPredictor):
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
 
-@support_torch_compile
+@support_torch_compile(enable_if=should_torch_compile_mtp_drafter)
 class OpenPanguMTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

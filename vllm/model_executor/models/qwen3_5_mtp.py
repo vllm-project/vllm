@@ -28,10 +28,10 @@ from vllm.model_executor.models.qwen3_next import (
     Qwen3NextSparseMoeBlock,
     QwenNextMixtureOfExperts,
 )
-from vllm.model_executor.models.qwen3_next_mtp import (
+from vllm.model_executor.models.utils import (
+    sequence_parallel_chunk,
     should_torch_compile_mtp_drafter,
 )
-from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import (

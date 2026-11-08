@@ -42,6 +42,7 @@ from .utils import (
     get_spec_layer_idx_from_weight_name,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
+    should_torch_compile_mtp_drafter,
 )
 
 
@@ -233,7 +234,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         return logits
 
 
-@support_torch_compile
+@support_torch_compile(enable_if=should_torch_compile_mtp_drafter)
 class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

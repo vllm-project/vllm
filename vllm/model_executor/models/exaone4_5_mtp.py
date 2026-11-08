@@ -34,6 +34,7 @@ from .utils import (
     AutoWeightsLoader,
     _merge_multimodal_embeddings,
     maybe_prefix,
+    should_torch_compile_mtp_drafter,
 )
 
 logger = init_logger(__name__)
@@ -41,7 +42,7 @@ logger = init_logger(__name__)
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
-@support_torch_compile
+@support_torch_compile(enable_if=should_torch_compile_mtp_drafter)
 class Exaone4_5MultiTokenPredictor(ExaoneMoeMultiTokenPredictor):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
@@ -132,7 +133,7 @@ class Exaone4_5MultiTokenPredictor(ExaoneMoeMultiTokenPredictor):
         return hidden_states
 
 
-@support_torch_compile
+@support_torch_compile(enable_if=should_torch_compile_mtp_drafter)
 class Exaone4_5_MTP(ExaoneMoeMTP, SupportsMultiModal):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config

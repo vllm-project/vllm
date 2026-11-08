@@ -21,14 +21,19 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.exaone_moe import ExaoneMoeDecoderLayer
 from vllm.sequence import IntermediateTensors
 
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    maybe_prefix,
+    should_torch_compile_mtp_drafter,
+)
 
 logger = init_logger(__name__)
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
-@support_torch_compile
+@support_torch_compile(enable_if=should_torch_compile_mtp_drafter)
 class ExaoneMoeMultiTokenPredictor(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
@@ -131,7 +136,7 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-@support_torch_compile
+@support_torch_compile(enable_if=should_torch_compile_mtp_drafter)
 class ExaoneMoeMTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config

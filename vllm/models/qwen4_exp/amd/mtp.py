@@ -42,6 +42,7 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     maybe_fuse_shared_experts,
     maybe_prefix,
+    should_torch_compile_mtp_drafter,
 )
 from vllm.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 from vllm.sequence import IntermediateTensors
@@ -179,7 +180,8 @@ def _make_draft_vllm_config(
         "intermediate_tensors": 0,
         "inputs_embeds": 0,
         "hidden_states": 0,
-    }
+    },
+    enable_if=should_torch_compile_mtp_drafter,
 )
 class Qwen4ExpMultiTokenPredictor(nn.Module):
     hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _EXTRA_WEIGHTS_MAPPER
@@ -404,7 +406,8 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         "intermediate_tensors": 0,
         "inputs_embeds": 0,
         "hidden_states": 0,
-    }
+    },
+    enable_if=should_torch_compile_mtp_drafter,
 )
 class Qwen4ExpMTP(nn.Module, SupportsHCSP, SupportsPP, Qwen4ExpMixtureOfExperts):
     packed_modules_mapping = {
