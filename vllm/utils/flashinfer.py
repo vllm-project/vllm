@@ -92,6 +92,27 @@ def has_flashinfer_cubin() -> bool:
     return False
 
 
+def has_matching_flashinfer_cubin() -> bool:
+    """Return `True` if flashinfer-cubin is installed AND matches flashinfer.
+
+    FlashInfer silently ignores a mismatched flashinfer-cubin wheel and falls
+    back to JIT-compiling every kernel, so a present-but-outdated cubin package
+    does not make the sampler usable without a CUDA toolkit. Mirrors
+    FlashInfer's own ``_check_cubin_version`` rule (exact version match).
+    """
+    if not has_flashinfer_cubin():
+        return False
+    if os.environ.get("FLASHINFER_DISABLE_VERSION_CHECK"):
+        return True
+    cubin_version = _installed_version("flashinfer-cubin")
+    flashinfer_version = _installed_version("flashinfer-python")
+    return (
+        cubin_version is not None
+        and flashinfer_version is not None
+        and cubin_version == flashinfer_version
+    )
+
+
 @functools.cache
 def has_flashinfer() -> bool:
     """Return `True` if flashinfer-python package is available."""
