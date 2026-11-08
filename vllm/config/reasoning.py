@@ -37,7 +37,8 @@ class ReasoningConfig:
     ``max_tokens`` or a ``thinking_token_budget`` — and then answers normally.
     Set to 0 (the default) to disable. Detection semantics match
     ``SamplingParams.repetition_detection``, which by contrast finishes the
-    whole request."""
+    whole request. The CPU model runner without Triton rejects a config with
+    this set."""
 
     loop_break_min_pattern_size: int = 0
     """Minimum N-gram pattern size for reasoning loop breaking. If 0, it
