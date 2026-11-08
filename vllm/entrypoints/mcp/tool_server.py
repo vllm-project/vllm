@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 async def list_server_and_tools(server_url: str):
     from mcp import ClientSession
     from mcp.client.sse import sse_client
+    from mcp.types import PaginatedRequestParams
 
     async with (
         sse_client(url=server_url) as streams,
@@ -27,6 +28,18 @@ async def list_server_and_tools(server_url: str):
     ):
         initialize_response = await session.initialize()
         list_tools_response = await session.list_tools()
+        tools = list(list_tools_response.tools)
+        cursor = list_tools_response.next_cursor
+
+        while cursor:
+            next_page = await session.list_tools(
+                params=PaginatedRequestParams(cursor=cursor)
+            )
+            tools.extend(next_page.tools)
+            cursor = next_page.next_cursor
+
+        list_tools_response.tools = tools
+        list_tools_response.next_cursor = None
         return initialize_response, list_tools_response
 
 
