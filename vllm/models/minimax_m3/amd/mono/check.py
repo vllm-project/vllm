@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Debug tooling for the mono path.
 
-``forward_checked`` (``VLLM_ROCM_MINIMAX_M3_MONO_CHECK=1``, meant for
-``--enforce-eager``) runs every sparse layer twice on the same (ar, res): first
+`forward_checked` (`VLLM_ROCM_MINIMAX_M3_MONO_CHECK=1`, meant for
+`--enforce-eager`) runs every sparse layer twice on the same (ar, res): first
 the mono layer kernel, then the original decoder layer. Both insert the same cache
 slots (the kernel writes the same bytes up to the re-quantized attention weights),
 so running both is side-effect free. Rank 0 logs, per layer and token, the
@@ -31,7 +31,7 @@ def forward_checked(
     positions: torch.Tensor,
     inputs_embeds: torch.Tensor | None,
 ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-    """``runner.forward`` with the original decoder layer run beside every mono
+    """`runner.forward` with the original decoder layer run beside every mono
     layer; the mono chain's output is returned."""
     aux_hidden_states: list[torch.Tensor] | None = (
         [] if runner.model.aux_hidden_state_layers else None

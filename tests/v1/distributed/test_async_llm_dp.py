@@ -322,7 +322,7 @@ async def _consume(generator) -> None:
 
 
 async def _poll_flag(engine: AsyncLLM, want: bool, timeout: float) -> bool:
-    """Wait for the front-end's view of the DP engines to reach ``want``."""
+    """Wait for the front-end's view of the DP engines to reach `want`."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if engine.engine_core.dp_engines_running() == want:

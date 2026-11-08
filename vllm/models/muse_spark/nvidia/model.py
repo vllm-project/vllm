@@ -285,7 +285,7 @@ def norm_residual_then_norm(
     out_dtype: torch.dtype,
     router_input: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Post-norm, blend and pre-norm; returns ``(out, new_stream)``.
+    """Post-norm, blend and pre-norm; returns `(out, new_stream)`.
 
     If supplied, router_input receives the unrounded FP32 pre-norm result.
     """
@@ -792,7 +792,7 @@ class MuseSparkMoE(nn.Module):
         defer_column_gather: bool = False,
         sp_active: bool = True,
     ) -> torch.Tensor:
-        """With ``defer_column_gather``, returns only this rank's unpooler columns."""
+        """With `defer_column_gather`, returns only this rank's unpooler columns."""
         return self._routed_forward(
             hidden_states, router_input, defer_column_gather, sp_active
         )
@@ -1259,7 +1259,7 @@ class MuseSparkAttention(nn.Module):
         floor_scale: float,
         q_scale: float,
     ) -> torch.Tensor:
-        """Query scale: 1.0 up to ``floor_scale``, logarithmic above it."""
+        """Query scale: 1.0 up to `floor_scale`, logarithmic above it."""
         scaling = torch.log((positions.float() + 1.0) / floor_scale) * q_scale + 1.0
         return scaling.clamp_min(1.0).unsqueeze(-1)
 
@@ -1283,7 +1283,7 @@ class MuseSparkAttention(nn.Module):
     def _qk_norm_rope_kv_insert(
         self, qkv: torch.Tensor, positions: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """QK-norm, temperature scale and RoPE; returns ``(q, k, v, o_gate)``."""
+        """QK-norm, temperature scale and RoPE; returns `(q, k, v, o_gate)`."""
         cos_sin_cache = None
         rotary_dim = 0
         if self.use_rope:
@@ -1346,7 +1346,7 @@ class MuseSparkAttention(nn.Module):
     ) -> torch.Tensor:
         """Attention over an input the caller has already normalized.
 
-        With ``gather_input``, ``hidden_states`` is this rank's sequence shard;
+        With `gather_input`, `hidden_states` is this rank's sequence shard;
         the all-gather is fused into the QKV GEMM.
         """
         if gather_input:
