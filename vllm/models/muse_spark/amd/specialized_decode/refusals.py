@@ -16,7 +16,7 @@ from vllm.model_executor.kernels.linear import (
     AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
 )
 from vllm.models.muse_spark.common.layers import (
-    MuseSpark1xNormPreservingResidualConnection,
+    MuseSparkNormPreservingResidualConnection,
 )
 
 from ..mono.decoder import _routed_experts, config_refusals
@@ -164,7 +164,7 @@ def layer_refusals(model: nn.Module) -> list[str]:
         moe = layer.feed_forward
         experts = _routed_experts(layer)
         for conn, name in ((layer.add_attn, "add_attn"), (layer.add_ffn, "add_ffn")):
-            if not isinstance(conn, MuseSpark1xNormPreservingResidualConnection):
+            if not isinstance(conn, MuseSparkNormPreservingResidualConnection):
                 bad.append(f"{name} not a gated residual")
             elif not all(
                 isinstance(v := getattr(conn, a, None), torch.Tensor)

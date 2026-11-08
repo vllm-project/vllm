@@ -189,7 +189,7 @@ def _attend(attn: nn.Module, qkv: torch.Tensor, positions: torch.Tensor):
 
 class SpecializedDecode:
     """Runs decoder layers 1-60 of eligible decode steps through the kernels
-    (the ``MuseSpark1xModel.mono`` interface)."""
+    (the ``MuseSparkModel.mono`` interface)."""
 
     def __init__(
         self,

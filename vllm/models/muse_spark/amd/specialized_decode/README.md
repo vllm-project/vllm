@@ -1,6 +1,6 @@
 # Muse Spark specialized decode (MI300X / MI325X, FlyDSL)
 
-`--monokernel` for `MuseSpark1xForCausalLM` (Quark PTPC FP8) on MI300X / MI325X:
+`--monokernel` for `MuseSparkForCausalLM` (Quark PTPC FP8) on MI300X / MI325X:
 decoder layers 1-60 of a plain decode step of 1-16 rows run as persistent
 FlyDSL launches, one a layer, from the layer's attention output to the next
 layer's QKV + o-gate. vLLM's QK-norm / RoPE / KV insert and attention op run

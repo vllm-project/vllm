@@ -52,7 +52,7 @@ def boundary(branch, stream, post_w, post_input_scale, alpha, beta, pre_w, post_
 
 
 def route(logits, bias, topk: int, route_scale: float = 1.0):
-    """``fused_musespark1x_routing``: top-k of ``sigmoid(l) + bias`` (ties: the
+    """``fused_muse_spark_routing``: top-k of ``sigmoid(l) + bias`` (ties: the
     lowest id), weights ``score * (route_scale / (sum + 1e-15))``."""
     scores = sigmoid(logits)
     biased = scores + bias[None, :]
