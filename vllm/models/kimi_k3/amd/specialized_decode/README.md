@@ -154,11 +154,15 @@ runtime/
     layers.py    the layer kernels: vLLM tensors -> launches
     mla.py       the MLA layers' decode as vLLM ops: the step's context,
                  AITER's decode (the M1a / M1b reference)
+    dsa.py       the DSA layers: dsa_reasons(), DsaM1Layer (vLLM's prologue
+                 and indexer, then K2 with the split-K sparse MLA)
     runner.py    per-rank launch state: scratch, step epoch, health, peers
     peer.py      peer memory and TP agreement (adapted from ROCm/ATOM, MIT)
 mono/            kernel source
     layer.py     K2
-    attention/   kda.py (K1), mla.py (M1a), mla_back.py (M1b), back.py
+    attention/   kda.py (K1), mla.py (M1a), mla_back.py (M1b),
+                 mla_attn.py + mla_attn_geom.py (M1c), dsa_attn.py (DSA
+                 split-K sparse MLA), back.py
     stages/      moe.py, gemv.py
     common/      device ops, mailbox sync, MX helpers, plan / build keys
                  (adapted from ROCm/ATOM atom/mono, MIT)

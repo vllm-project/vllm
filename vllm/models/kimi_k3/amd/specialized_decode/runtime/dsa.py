@@ -342,10 +342,7 @@ class DsaM1Layer(MlaOpsLayer):
         sd_q = prefix_sum.new_empty(s, dsa_attn.NH, dsa_attn.ENTRY)
         gate = prefix_sum.new_empty(s, dsa_attn.NH * a.v_head_dim)
         prologue(w, positions, hidden_states, sd_q, gate, md, kv_cache, slots)
-        if self.key.fold:
-            idx = None
-        else:
-            idx = convert_indices(a, md, kv_cache, s)
+        idx = None if self.key.fold else convert_indices(a, md, kv_cache, s)
         dsa_in, po, pl = dsa_inputs(w, self.key, sd_q, kv_cache, md, idx)
         if self.key.standalone:
             dsa_attn.dsa_attn_launch(self.key, part_o=po, part_lse=pl, **dsa_in)
