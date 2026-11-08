@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import lm_eval
+from lm_eval.models.vllm_causallms import VLLM
 
 from ...utils import RemoteOpenAIServer
 
@@ -23,9 +24,13 @@ NUM_CONCURRENT = 100
 
 
 def test_prompt_logprobs_e2e():
-    results = lm_eval.simple_evaluate(
-        model="vllm", model_args=MODEL_ARGS, tasks=TASK, batch_size="auto"
-    )
+    lm = VLLM.create_from_arg_string(MODEL_ARGS, {"batch_size": "auto"})
+    try:
+        results = lm_eval.simple_evaluate(model=lm, tasks=TASK)
+    finally:
+        # Free the GPU memory now rather than whenever the garbage collector
+        # runs: the next test starts a server that needs the same memory.
+        lm.model.llm_engine.engine_core.shutdown()
 
     measured_value = results["results"][TASK][FILTER]
     assert (
