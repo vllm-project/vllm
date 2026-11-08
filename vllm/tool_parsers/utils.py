@@ -712,20 +712,30 @@ def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
     while index < length:
         char = text[index]
         if quote is not None:
+            qlen = len(quote)
+            if text[index:index + qlen] == quote:
+                out.append(quote)
+                last_sig = quote[-1]
+                index += qlen
+                quote = None
+                continue
             out.append(char)
             if char == "\\" and index + 1 < length:
                 out.append(text[index + 1])
                 index += 2
                 continue
-            if char == quote:
-                quote = None
             index += 1
             continue
         if char in {"'", '"'}:
-            quote = char
-            out.append(char)
-            last_sig = char
-            index += 1
+            if text[index:index + 3] == char * 3:
+                quote = char * 3
+                out.append(quote)
+                index += 3
+            else:
+                quote = char
+                out.append(char)
+                index += 1
+            last_sig = quote[-1]
             continue
         if char.isalpha() or char == "_":
             end = index
