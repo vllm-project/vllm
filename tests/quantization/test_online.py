@@ -2858,9 +2858,11 @@ def test_log_online_quantization(
     log_online_quantization(default_vllm_config)
 
     assert logged_messages == [
-        "Quantizing 3 layers of types: block_sparse_moe.experts: 1 (from targets: "
-        f"*experts*, {expected_target_summary}); mlp.down_proj: 2 (from linear: "
-        "fp8_per_tensor)"
+        (
+            "Quantizing 3 layers of types: block_sparse_moe.experts: 1 (from "
+            f"targets: *experts*, {expected_target_summary}); mlp.down_proj: 2 "
+            "(from linear: fp8_per_tensor)"
+        )
     ]
 
 
