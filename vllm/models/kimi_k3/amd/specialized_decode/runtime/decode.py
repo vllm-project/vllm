@@ -29,6 +29,16 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
     dsa_model,
     layer_kinds,
 )
+from vllm.models.kimi_k3.amd.specialized_decode.runtime.dsa import (
+    AUTO,
+    OFF,
+    DsaM1Layer,
+    dsa_reasons,
+    width_served,
+)
+from vllm.models.kimi_k3.amd.specialized_decode.runtime.dsa import (
+    mode as dsa_mode,
+)
 from vllm.models.kimi_k3.amd.specialized_decode.runtime.guards import (
     FailStop,
     cache_reasons,
@@ -47,7 +57,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
 
 logger = init_logger(__name__)
 
-Kernel = WholeLayer | FfnLayer | MlaOpsLayer
+Kernel = WholeLayer | FfnLayer | MlaOpsLayer | DsaM1Layer
 
 
 class Step(NamedTuple):
@@ -154,12 +164,17 @@ class SpecializedDecode:
             # the M1 layers' metadata: their MLAAttention's
             wrapper = backbone.layers[ffn[0]].self_attn.mla_attn
             runner.mla_prefix = wrapper.mla_attn.layer_name
+        dsa = self._dsa_widths(ffn, config.widths)
         mla_kernel = FfnLayer if m1 else MlaOpsLayer
         self.kernels: dict[int, dict[int, Kernel]] = {
             w: {
-                i: (WholeLayer if kind == WHOLE else mla_kernel)(
-                    backbone.layers[i], runner, w
-                )
+                i: (
+                    WholeLayer
+                    if kind == WHOLE
+                    else DsaM1Layer
+                    if w in dsa
+                    else mla_kernel
+                )(backbone.layers[i], runner, w)
                 for i, kind in kinds.items()
             }
             for w in config.widths
@@ -184,14 +199,54 @@ class SpecializedDecode:
         self._kv: tuple[int, int] | None = None
         m1c = [w for w in config.widths if m1c_at(runner, w)]
         mla = f"M1 (M1c in K2 at widths {m1c})" if m1c else "M1"
+        if not m1 and dsa:
+            mla = f"DSA split-K attention, then K2, at widths {dsa}; else vLLM's ops"
+        elif not m1:
+            mla = "vLLM's ops"
         logger.info(
             "Kimi-K3 specialized decode: %d layers (MLA: %s), widths %s, %d "
             "builds; other steps run vLLM's decode",
             len(kinds),
-            mla if m1 else "vLLM's ops",
+            mla,
             list(config.widths),
             len(builds),
         )
+
+    def _dsa_widths(self, ffn: list[int], widths) -> list[int]:
+        """The widths whose DSA layers run ``DsaM1Layer`` (``VLLM_KIMI_SD_DSA``):
+        every TP rank's DSA layers served (``dsa.dsa_reasons``), one request a
+        step. ``auto`` logs why not and runs vLLM's ops, ``split`` raises."""
+        runner, cpu = self.runner, get_tp_group().cpu_group
+        mode = dsa_mode()
+        if mode == OFF or not ffn or not dsa_model(self.backbone.config):
+            return []
+        why = list(
+            dict.fromkeys(
+                r for i in ffn for r in dsa_reasons(runner, self.backbone.layers[i])
+            )
+        )
+        if not tp_agree(not why, cpu):
+            why = why or ["another TP rank's DSA layers"]
+            if mode != AUTO:
+                raise ValueError(
+                    f"Kimi-K3 specialized decode: VLLM_KIMI_SD_DSA={mode} does not "
+                    "support: " + "; ".join(why) + " (VLLM_KIMI_SD_DSA=off runs "
+                    "vLLM's attention ops)"
+                )
+            logger.info(
+                "Kimi-K3 specialized decode: the DSA layers run vLLM's attention "
+                "ops (VLLM_KIMI_SD_DSA=auto: %s)",
+                "; ".join(why),
+            )
+            return []
+        served = [w for w in widths if width_served(runner, w)]
+        if not served and mode != AUTO:
+            raise ValueError(
+                f"Kimi-K3 specialized decode: VLLM_KIMI_SD_DSA={mode} serves "
+                f"one request a step ({runner.num_spec + 1} rows), none of the "
+                f"widths {list(widths)}"
+            )
+        return served
 
     def _kv_key(self) -> tuple[int, int] | None:
         state = self.kda[0].layer.self_attn.kv_cache

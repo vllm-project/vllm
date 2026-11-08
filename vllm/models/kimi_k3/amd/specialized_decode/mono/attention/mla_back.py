@@ -23,7 +23,13 @@ At DCP1 (``ranks`` 1) ``o`` [S, 12, 512] is already the attention's output, as
 vLLM hands it to ``_v_up_proj``: no push, no LSE; the combine stage loads it.
 With ``splits`` (M1c ``mla_attn``'s partials: ``o`` / ``lse`` split 0 of dense
 [splits, S, 12, 512] bf16 / [splits, S, 12] f32) the combine stage merges a
-token's request's splits, LSE-weighted.
+token's request's splits, LSE-weighted. ``src`` names their producer: M1c in
+the same launch (its flags polled), ``dsa`` (Kimi-K3.1's DSA layers'
+``dsa_attn`` in the same launch, a (token, slice) flag each) or ``stream`` (a
+launch before this one, ordered by the stream: no poll).
+
+``uv`` ``bf16``: W_UV the checkpoint's bf16 (K3.1's ``W_UV``, [12, 512, 128]),
+a bf16 MFMA on the bf16 latents (``_v_up_proj``'s bmm) instead of MXFP4.
 
 K2 (``layer``, ``K2Build.m1b_qlen``) runs these stages in its own launch.
 """
@@ -71,6 +77,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ops import (
     hw_rcp,
     ld_i32,
     load_ptr64,
+    mfma_bf16,
     rsrc,
     traced,
     uniform,
@@ -114,6 +121,9 @@ class MlaPostBuild:
     timeline: bool = False
     splits: int = 0  # DCP1: M1c's KV splits (0: ``o`` the attention's output)
     ctok: int = 0  # tokens a combine task (0: ``ctok``'s)
+    src: str = "m1c"  # the splits' producer: "m1c" | "dsa" | "stream"
+    uv: str = "fp4"  # W_UV: "fp4" (MXFP4 + e8m0 scales) | "bf16"
+    part_fp32: bool = False  # the splits' o f32 (debug)
 
 
 ABI = KernelAbi(
@@ -244,6 +254,23 @@ def stage_combine(c, h, t0):
 
 
 @traced
+def ardy_poll(c, t0, h, per, sp0):
+    """The flags of the splits this task merges, a thread each: M1c's CTAs
+    (split, head group of its ``ht`` heads), or ``dsa_attn``'s (token t, slice
+    j), flag t P + j, of the task's tc tokens."""
+    tid = c["tid"]
+    if const_expr("src" in c and c["src"] == "dsa"):
+        p, tc = c["splits"], c["TC"]
+        t = fx.min(t0 + tid // p, c["S"] - 1)
+        if tid < tc * p:
+            c["poll"]([(c["ardy"], t * p + tid % p, 1)])
+    else:
+        ht = c["m1c_ht"]
+        if tid < per:
+            c["poll"]([(c["ardy"], (sp0 + tid) * (NH // ht) + h // ht, 1)])
+
+
+@traced
 def combine_splits(c, t0, h):
     """``stage_combine`` at DCP1 over M1c's partials: token t's request's splits
     (``splits / requests`` of them, request-major), LSE-weighted. Wave tt < tc
@@ -256,12 +283,10 @@ def combine_splits(c, t0, h):
     sp0 = t0 // q * per
     wv, lane = tid // 64, tid % 64
     if const_expr("ardy" in c):
-        # M1c in this launch (its VGPRs at the limit): the wave index scalar
+        # the producer in this launch (M1c: its VGPRs at the limit): the wave
+        # index scalar
         wv = uniform(wv)
-        # its CTAs' flags (split, head group of M1c's ``ht`` heads), a thread each
-        ht = c["m1c_ht"]
-        if tid < per:
-            c["poll"]([(c["ardy"], (sp0 + tid) * (NH // ht) + h // ht, 1)])
+        ardy_poll(c, t0, h, per, sp0)
         gpu.barrier()
     if wv < tc:
         t = fx.min(t0 + wv, s - 1)
@@ -296,32 +321,38 @@ def combine_splits(c, t0, h):
     part, tt = wv // tc, wv % tc
     t = fx.min(t0 + tt, s - 1)
     nj = per // parts  # splits a part
-    src = (((sp0 + part) * s + t) * NH + h) * (KVL // 2) + 4 * lane
+    f32 = "part_fp32" in c and c["part_fp32"]
+    eb = 4 if f32 else 2  # an o element's bytes
+    src = (((sp0 + part) * s + t) * NH + h) * (KVL * eb // 4) + 8 * eb // 4 * lane
     wrow = c["cw"] + tt * WMAX + part
-    stride = parts * s * NH * KVL * 2  # bytes between a part's splits
+    stride = parts * s * NH * KVL * eb  # bytes between a part's splits
     acc = [fx.Float32(0.0)] * 8
 
-    def batch(acc, j0, nb):
-        os_ = [
-            fx.Vector(
-                bo.buffer_load(
-                    rsrc(a["o"]),
-                    src,
-                    vec_width=4,
-                    dtype=T.i32,
-                    soffset_bytes=(j0 + j) * stride,
-                )
+    def load(j, at):
+        return fx.Vector(
+            bo.buffer_load(
+                rsrc(a["o"]), at, vec_width=4, dtype=T.i32, soffset_bytes=j * stride
             )
-            for j in range(nb)
-        ]
+        )
+
+    def batch(acc, j0, nb):
+        if const_expr(f32):
+            os_ = [[load(j0 + j, src), load(j0 + j, src + 4)] for j in range(nb)]
+        else:
+            os_ = [load(j0 + j, src) for j in range(nb)]
         # an empty split: weight 0, its o 0
         wts = [fx.ptr_load(wrow + (j0 + j) * parts) for j in range(nb)]
         acc = list(acc)
         for j in range_constexpr(nb):
             o, wt = os_[j], wts[j]
-            for k in range_constexpr(4):
-                acc[2 * k] = acc[2 * k] + bf_lo(o[k]) * wt
-                acc[2 * k + 1] = acc[2 * k + 1] + bf_hi(o[k]) * wt
+            if const_expr(f32):
+                for k in range_constexpr(8):
+                    x = o[k // 4][k % 4].bitcast(fx.Float32)
+                    acc[k] = acc[k] + x * wt
+            else:
+                for k in range_constexpr(4):
+                    acc[2 * k] = acc[2 * k] + bf_lo(o[k]) * wt
+                    acc[2 * k + 1] = acc[2 * k + 1] + bf_hi(o[k]) * wt
         return acc
 
     if const_expr("ardy" in c):
@@ -441,7 +472,7 @@ def wv_loads(c, h):
 def stage_uv(c, h, t0, ops):
     """The LDS latents of tokens t0 .. t0 + 4 against W_V[h]'s 16 rows of this
     wave -> bf16, times the gate -> ``core``."""
-    s, lane, wave, a, tc = c["S"], c["lane"], c["wave"], c["args"], c["TC"]
+    lane, tc = c["lane"], c["TC"]
     tl = lane % 16
     kb = lane // 16
     row = c["lat"] + fx.min(tl, tc - 1) * LROW
@@ -466,6 +497,61 @@ def stage_uv(c, h, t0, ops):
         xv = fx.Vector.from_elements(xs, fx.Int32)
         wv, sa = ops[st]
         acc = mfma_scaled(wv, xv, acc, sa, code, FP4, FP4, 0, 0)
+    store_core(c, h, t0, acc)
+
+
+KB = KVL // 32  # bf16 W_UV's 32-k MFMA steps
+
+
+def wv_loads_bf16(c, h):
+    """``wv_loads`` for a bf16 W_UV ([12, 128 v, 512 k] strided, k dense):
+    this lane's 8 k a step of v row wave 16 + lane % 16, 16 B each (the 16
+    steps 64 VGPRs), issued before the combine."""
+    a, lane, wave = c["args"], c["lane"], c["wave"]
+    v = wave * 16 + lane % 16
+    kb = lane // 16
+    row = h * a["wv_sh"] + v * a["wv_sn"]  # elements
+    return [
+        fx.Vector(
+            bo.buffer_load(
+                rsrc(a["w_v"]), (row + st * 32 + kb * 8) // 2, vec_width=4, dtype=T.i32
+            )
+        )
+        for st in range(KB)
+    ]
+
+
+@traced
+def stage_uv_bf16(c, h, t0, ops):
+    """``stage_uv`` on a bf16 W_UV: the LDS latents (bf16, B: token lane % 16,
+    k 8 (lane // 16) ..) against the wave's 16 v rows (A), fp32 accumulation
+    (``_v_up_proj``'s bmm), rounded to bf16, times the gate -> ``core``."""
+    lane, tc = c["lane"], c["TC"]
+    tl = lane % 16
+    kb = lane // 16
+    live = tl < tc
+    row = c["lat"] + fx.min(tl, tc - 1) * LROW
+    acc = fx.Vector.filled(4, 0.0, fx.Float32)
+    for st in range_constexpr(KB):
+        xb = fx.Vector(
+            fx.ptr_load(
+                row + st * 16 + kb * 4, result_type=fx.Vector.make_type(4, fx.Int32)
+            )
+        )
+        xb = fx.Vector.from_elements(
+            [live.select(xb[d], fx.Int32(0)) for d in range(4)], fx.Int32
+        )
+        acc = mfma_bf16(ops[st].bitcast(fx.BFloat16), xb.bitcast(fx.BFloat16), acc)
+    store_core(c, h, t0, acc)
+
+
+@traced
+def store_core(c, h, t0, acc):
+    """Token t0 + lane % 16's W_UV rows 4 (lane // 16) .. of the wave's 16
+    (``acc``) -> bf16, times the gate -> ``core``."""
+    s, lane, wave, a, tc = c["S"], c["lane"], c["wave"], c["args"], c["TC"]
+    tl = lane % 16
+    kb = lane // 16
     t = t0 + tl
     v0 = wave * 16 + 4 * kb
     col = h * VD + v0
@@ -513,9 +599,14 @@ def combine_tasks(c, ctas=BLOCKS, done=None):
     for task in range(first_task(bid, 0), tasks(s, tc), ctas):
         h = task % NH
         t0 = task // NH * tc
-        ops = wv_loads(c, h)
-        stage_combine(c, h, t0)
-        stage_uv(c, h, t0, ops)
+        if const_expr("uv" in c and c["uv"] == "bf16"):
+            ops = wv_loads_bf16(c, h)
+            stage_combine(c, h, t0)
+            stage_uv_bf16(c, h, t0, ops)
+        else:
+            ops = wv_loads(c, h)
+            stage_combine(c, h, t0)
+            stage_uv(c, h, t0, ops)
         if const_expr(done is not None):
             done(task)
 
@@ -543,7 +634,10 @@ def build(key: MlaPostBuild):
         not key.splits or key.splits // (s // key.qlen) % (WAVES // tc) == 0
     )
     name += f"_sp{key.splits}_c{tc}" if key.splits else ""
+    name += suffix(key)
     assert not key.splits or (R == 1 and key.splits % (s // key.qlen) == 0)
+    assert key.src in ("m1c", "dsa", "stream") and key.uv in ("fp4", "bf16")
+    assert not key.part_fp32 or key.splits
     assert key.splits // (s // key.qlen) % 2 == 0
     assert key.splits // (s // key.qlen) <= WMAX
 
@@ -587,6 +681,9 @@ def build(key: MlaPostBuild):
             "Q": key.qlen,
             "R": R,
             "splits": key.splits,
+            "src": key.src,
+            "uv": key.uv,
+            "part_fp32": key.part_fp32,
             "TC": tc,
             "tid": tid,
             "bid": bid,
@@ -689,10 +786,24 @@ def build(key: MlaPostBuild):
     return launch
 
 
+def suffix(key: MlaPostBuild) -> str:
+    """The kernel name's part for ``src`` / ``uv`` / ``part_fp32`` (none at the
+    defaults)."""
+    out = "" if key.src == "m1c" else f"_{key.src}"
+    out += "" if key.uv == "fp4" else f"_uv{key.uv}"
+    return out + ("_f32" if key.part_fp32 else "")
+
+
 def host_args(ranks, o, lse, seq_lens, qsl, w_v, w_v_scale, gate) -> list:
-    """ABI's ``o`` .. ``gate`` (``mla_post``'s, or K2's fused M1b's)."""
+    """ABI's ``o`` .. ``gate`` (``mla_post``'s, or K2's fused M1b's). A bf16
+    ``w_v`` ([12, 128 v, 512 k], k dense; its strides in elements) has no
+    ``w_v_scale``. ``o`` f32: ``part_fp32`` partials."""
     assert o.stride(-1) == 1 and w_v.stride(-1) == 1
-    assert o.dtype == torch.bfloat16
+    assert o.dtype in (torch.bfloat16, torch.float32)
+    assert (w_v.dtype == torch.bfloat16) == (w_v_scale is None)
+    if w_v_scale is None:
+        assert w_v.shape == (NH, VD, KVL) and w_v.data_ptr() % 16 == 0
+        assert w_v.stride(0) % 8 == 0 and w_v.stride(1) % 8 == 0
     assert lse is not None or ranks == 1  # DCP1: M1c's partials carry one
     assert lse is None or lse.dtype == torch.float32
     assert seq_lens.dtype == torch.int32 and qsl.dtype == torch.int32
@@ -709,10 +820,16 @@ def host_args(ranks, o, lse, seq_lens, qsl, w_v, w_v_scale, gate) -> list:
         w_v.data_ptr(),
         w_v.stride(0),
         w_v.stride(1),
-        w_v_scale.data_ptr(),
-        w_v_scale.stride(0),
-        w_v_scale.stride(1),
-        w_v_scale.stride(2),
+        *(
+            [0, 0, 0, 0]
+            if w_v_scale is None
+            else [
+                w_v_scale.data_ptr(),
+                w_v_scale.stride(0),
+                w_v_scale.stride(1),
+                w_v_scale.stride(2),
+            ]
+        ),
         gate.data_ptr(),
     ]
 
@@ -742,7 +859,8 @@ def mla_post(
     may be None); ``seq_lens`` [requests] and ``qsl``
     [requests + 1] int32 (the local KV lengths, the query starts); ``w_v`` (12,
     128, 256) u8 MXFP4 and ``w_v_scale`` (12, 128, 16) e8m0, any strides but
-    W_V's last; ``gate`` / ``core`` [S, 1536] bf16, dense."""
+    W_V's last (``uv`` bf16: ``w_v`` (12, 128, 512) bf16, no scale); ``gate`` /
+    ``core`` [S, 1536] bf16, dense."""
     del scratch
     assert core.is_contiguous()
     f = build(key)

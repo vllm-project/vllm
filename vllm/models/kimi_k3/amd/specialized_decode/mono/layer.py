@@ -21,6 +21,8 @@ An MLA layer's K2 runs its M1b (``mla_back``) first, in the same launch: every
 CTA pushes, CTAs 0 .. 55 combine and write ``core`` (a flag a head and 4
 tokens), and the o_proj CTAs, their weights in flight, poll the flags of a core
 tile before they load it. That removes the M1b -> K2 launch boundary.
+Kimi-K3.1's DSA layers (``dsa``) take the same combine over ``dsa_attn``'s
+slices, W_UV the checkpoint's bf16 (``uv_bf16``).
 """
 
 from dataclasses import dataclass, replace
@@ -164,6 +166,17 @@ class K2Build:
     # partials stored device-scope, a flag a CTA (``ardy``) the combine polls
     m1c: bool = False
     m1c_wide: bool = False  # M1c's ``wide`` (its KV pool over 4 GiB, ``k2_launch``)
+    # Kimi-K3.1's DSA layers (``dsa_attn``'s dsa_p slices a token, M1b's
+    # splits): 1 its partials from a launch before this one (stream-ordered,
+    # no poll), 2 (M3) ``dsa_attn.cta`` in this launch, a flag a (token,
+    # slice). ``dsa_fold``: the index fold in-kernel (M3b); ``dsa_tile`` its
+    # tokens a tile.
+    dsa: int = 0
+    dsa_p: int = 0
+    dsa_fold: bool = False
+    dsa_tile: int = 128
+    uv_bf16: bool = False  # M1b's W_UV bf16 (``MlaPostBuild.uv``)
+    part_fp32: bool = False  # the splits' o f32 (``MlaPostBuild.part_fp32``)
     # the OPT_* bits
     opt: int = K2_OPT
 
@@ -353,6 +366,19 @@ def scratch_layout(key: K2Build) -> dict:
     return lay
 
 
+def m1b_post(key: K2Build) -> m1b.MlaPostBuild:
+    """The fused M1b's build: its splits' producer and W_UV."""
+    return m1b.MlaPostBuild(
+        tokens=key.tokens,
+        qlen=max(key.m1b_qlen, 1),
+        ranks=key.m1b_ranks,
+        splits=key.m1b_splits,
+        src="dsa" if key.dsa == 2 else "stream" if key.dsa == 1 else "m1c",
+        uv="bf16" if key.uv_bf16 else "fp4",
+        part_fp32=key.part_fp32,
+    )
+
+
 def m1b_ctok(key: K2Build) -> int:
     """The fused M1b's tokens a combine task (over its NA CTAs)."""
     if not key.m1b_qlen:
@@ -409,11 +435,16 @@ def build(key: K2Build):
     assert 1 <= s <= k2b.MAX_S
     fused = key.m1b_qlen > 0
     assert not fused or (s % key.m1b_qlen == 0 and key.m1b_ranks in (1, TP_))
-    assert not key.m1c or (fused and key.m1b_ranks == 1 and key.m1b_splits)
+    assert not (key.m1c or key.dsa) or (fused and key.m1b_ranks == 1 and key.m1b_splits)
     assert key.m1c or not key.m1c_wide
+    assert not (key.m1c and key.dsa) and key.dsa in (0, 1)  # 2: M3
     if key.m1c:
         m1c.check(s, key.m1b_qlen)
         assert key.m1b_splits == m1c.splits(key.m1b_qlen)
+    if key.dsa:
+        assert key.m1b_splits == key.dsa_p
+        assert s == key.m1b_qlen and s * key.dsa_p <= BLOCKS and not key.dsa_fold
+    assert key.dsa or not (key.dsa_p or key.dsa_fold or key.part_fp32)
     # the AttnRes stages' delta tile beside their slices
     vextra = s * COLS * 4
     lay = scratch_layout(key)
@@ -530,6 +561,8 @@ def build(key: K2Build):
         name += f"_sp{key.m1b_splits}" if key.m1b_splits else ""
         name += "_c" if key.m1c else ""
         name += "w" if key.m1c_wide else ""
+        name += f"_d{key.dsa}" if key.dsa else ""
+        name += m1b.suffix(m1b_post(key))
     if key.opt:
         name += f"_o{key.opt}"
     if key.fault_rank >= 0:
@@ -749,6 +782,9 @@ def build(key: K2Build):
                 Q=key.m1b_qlen,
                 R=R,
                 splits=key.m1b_splits,
+                src=m1b_post(key).src,
+                uv=m1b_post(key).uv,
+                part_fp32=key.part_fp32,
                 TC=m1b_ctok(key),
                 lat=st.m1b.peek().lat.ptr,
                 cw=st.m1b.peek().cw.ptr,
@@ -1086,7 +1122,10 @@ def k2_launch(
     ``key.m1b_qlen``, ``m1b_in`` is ``mla_back.mla_post``'s (o, lse, seq_lens,
     qsl, w_v, w_v_scale, gate) and this launch writes ``core`` first. With
     ``key.m1c``, ``m1c_in`` is ``mla_attn.mla_attn``'s (q, kv, pages, indptr,
-    scale, kv_scale), its partials M1b's o / lse (split 0's views)."""
+    scale, kv_scale), its partials M1b's o / lse (split 0's views). With
+    ``key.dsa`` 1 ``m1b_in``'s o / lse are ``dsa_attn``'s partials (split 0's
+    views), launched before this, and with ``uv_bf16`` its ``w_v`` the bf16
+    [12, 128, 512] and ``w_v_scale`` None."""
     assert (m1b_in is not None) == (key.m1b_qlen > 0)
     assert (m1c_in is not None) == key.m1c
     # the regions the OPT_* bits use exist

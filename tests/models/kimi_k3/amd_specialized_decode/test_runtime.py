@@ -3,6 +3,7 @@
 """Kimi-K3's specialized decode on CPU: the switch, its widths and layers, its
 refusals (config, loaded weights, caches) and plan() routing."""
 
+import dataclasses
 from types import SimpleNamespace
 
 import pytest
@@ -783,3 +784,158 @@ def test_mla_weight_views_fall_back_per_model():
         reasons[0] == f"layer {ffn[0]}: MLA heads/q_lora/kv_lora/nope/rope/v "
         "(16, 1536, 512, 128, 64, 128)"
     )
+
+
+def _dsa_layer(**over):
+    """A Kimi-K3.1 DSA layer as ``dsa.dsa_reasons`` sees it (TP8, DCP1)."""
+    impl = SimpleNamespace(get_fp8_ds_mla_row_bytes=lambda: 656, sinks=None)
+    a = SimpleNamespace(
+        impl=impl, num_heads=12, kv_lora_rank=512, qk_rope_head_dim=64,
+        qk_nope_head_dim=128, v_head_dim=128, kv_cache_dtype="fp8_ds_mla",
+        is_aiter_triton_fp4_bmm_enabled=False,
+        is_aiter_triton_fp8_bmm_enabled=False, q_pad_num_heads=None,
+        hisparse_cache=None, use_pcp=False,
+    )  # fmt: skip
+    w = SimpleNamespace(
+        mla_attn=a, indexer=object(), is_sparse=True, topk_tokens=2048,
+        q_lora_rank=1536, g_proj=object(), dcp_q_replicate=False,
+    )  # fmt: skip
+    for k, v in over.items():
+        setattr(a if hasattr(a, k) else w, k, v)
+    return SimpleNamespace(self_attn=SimpleNamespace(mla_attn=w))
+
+
+@pytest.mark.parametrize(
+    "env, dcp, over, why",
+    [
+        ({"VLLM_KIMI_SD_DSA": "split"}, 1, {}, None),
+        ({"VLLM_KIMI_SD_DSA": "auto"}, 1, {}, None),
+        ({}, 1, {}, "VLLM_KIMI_SD_DSA=off"),
+        ({"VLLM_KIMI_SD_DSA": "split"}, 8, {}, "DCP8 (DCP1 only)"),
+        ({"VLLM_KIMI_SD_DSA": "fused"}, 1, {}, "VLLM_KIMI_SD_DSA=fused"),
+        (
+            {"VLLM_KIMI_SD_DSA": "split", "VLLM_KIMI_SD_DSA_FOLD": "1"},
+            1,
+            {},
+            "VLLM_KIMI_SD_DSA_FOLD=1",
+        ),
+        (
+            {"VLLM_KIMI_SD_DSA": "split", "VLLM_KIMI_SD_DSA_SPLITS": "8"},
+            1,
+            {},
+            "VLLM_KIMI_SD_DSA_SPLITS=8",
+        ),
+        ({"VLLM_KIMI_SD_DSA": "split"}, 1, {"kv_cache_dtype": "auto"}, "auto KV"),
+        ({"VLLM_KIMI_SD_DSA": "split"}, 1, {"num_heads": 16}, "DSA shapes"),
+        ({"VLLM_KIMI_SD_DSA": "split"}, 1, {"topk_tokens": 1024}, "DSA shapes"),
+        (
+            {"VLLM_KIMI_SD_DSA": "split"},
+            1,
+            {"is_aiter_triton_fp4_bmm_enabled": True},
+            "FP4 / FP8 MLA bmms",
+        ),
+        ({"VLLM_KIMI_SD_DSA": "split"}, 1, {"g_proj": None}, "output gate"),
+        ({"VLLM_KIMI_SD_DSA": "split"}, 1, {"dcp_q_replicate": True}, "replication"),
+        ({"VLLM_KIMI_SD_DSA": "split"}, 1, {"indexer": None}, "without DSA"),
+    ],
+)
+def test_dsa_reasons_fallbacks(monkeypatch, env, dcp, over, why):
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime import dsa
+
+    for k in ("VLLM_KIMI_SD_DSA", "VLLM_KIMI_SD_DSA_FOLD", "VLLM_KIMI_SD_DSA_SPLITS"):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    reasons = dsa.dsa_reasons(SimpleNamespace(dcp=dcp, num_spec=7), _dsa_layer(**over))
+    if why is None:
+        assert reasons == []
+    else:
+        assert any(why in r for r in reasons), reasons
+
+
+def _dsa_decode(monkeypatch, mode: str, agree: bool = True):
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime import dsa
+
+    monkeypatch.setenv("VLLM_KIMI_SD_DSA", mode)
+    monkeypatch.setattr(
+        decode_mod, "get_tp_group", lambda: SimpleNamespace(cpu_group=None)
+    )
+    monkeypatch.setattr(decode_mod, "tp_agree", lambda ok, group: ok and agree)
+    decode = object.__new__(SpecializedDecode)
+    decode.runner = SimpleNamespace(dcp=1, num_spec=7)
+    config = SimpleNamespace(dsa_config={"dsa_layers": [4]})
+    decode.backbone = SimpleNamespace(config=config, layers={4: _dsa_layer()})
+    return decode, dsa
+
+
+def test_dsa_layers_use_dsa_m1_when_eligible(monkeypatch):
+    """VLLM_KIMI_SD_DSA=split: the DSA layers run DsaM1Layer at the one-request
+    width only (c48's and two requests' widths run vLLM's ops); off: none."""
+    pytest.importorskip("flydsl")
+    decode, _ = _dsa_decode(monkeypatch, "split")
+    assert decode._dsa_widths([4], (8, 16)) == [8]
+    decode, _ = _dsa_decode(monkeypatch, "auto")
+    assert decode._dsa_widths([4], (8,)) == [8]
+    decode, _ = _dsa_decode(monkeypatch, "off")
+    assert decode._dsa_widths([4], (8,)) == []
+    decode, _ = _dsa_decode(monkeypatch, "split")
+    assert decode._dsa_widths([], (8,)) == []
+    # 64 rows x 16 slices: more items than CTAs
+    decode.runner.num_spec = 63
+    with pytest.raises(ValueError, match="one request a step"):
+        decode._dsa_widths([4], (64,))
+
+
+def test_dsa_refusal_auto_falls_back_explicit_raises(monkeypatch):
+    """A rank's reasons (here another rank's): auto runs vLLM's ops, split
+    raises at startup."""
+    decode, _ = _dsa_decode(monkeypatch, "auto", agree=False)
+    assert decode._dsa_widths([4], (8,)) == []
+    decode, _ = _dsa_decode(monkeypatch, "split", agree=False)
+    with pytest.raises(ValueError, match="another TP rank's DSA layers"):
+        decode._dsa_widths([4], (8,))
+    monkeypatch.setenv("VLLM_KIMI_SD_DSA", "split")
+    decode.runner.dcp = 8
+    monkeypatch.setattr(decode_mod, "tp_agree", lambda ok, group: ok)
+    with pytest.raises(ValueError, match="DCP8"):
+        decode._dsa_widths([4], (8,))
+
+
+def test_k2build_dsa_asserts(monkeypatch):
+    """A DSA layer's K2 key: M1b over the dsa_attn slices (no M1c), W_UV bf16;
+    K2Build refuses DSA fields that don't fit."""
+    pytest.importorskip("flydsl")
+    from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_attn
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import _k2_key
+
+    eps = SimpleNamespace(variance_epsilon=1e-5)
+    mlp = SimpleNamespace(routed_expert_norm=eps)
+    layer = SimpleNamespace(
+        mlp=mlp, prev_valid_blocks=3, mlp_res_norm=eps, post_attention_layernorm=eps
+    )
+    runner = SimpleNamespace(
+        num_spec=7, dcp=1, mla_post_off=0, m1c=False, fault={}, fuse_m1b=True
+    )
+    for part_fp32 in (False, True):
+        dk = dsa_attn.DsaAttnBuild(tokens=8, splits=32, chunk=64, part_fp32=part_fp32)
+        key = _k2_key(layer, runner, 8, False, True, dk)
+        assert (key.m1b_qlen, key.m1b_ranks, key.m1b_splits) == (8, 1, 32)
+        assert (key.dsa, key.dsa_p, key.uv_bf16) == (1, 32, True)
+        assert not key.m1c and key.part_fp32 == part_fp32
+        post = k2.m1b_post(key)
+        assert (post.src, post.uv, post.splits) == ("stream", "bf16", 32)
+    base = k2.K2Build(tokens=8, nblocks=3, m1b_qlen=8, m1b_ranks=1, m1b_splits=16)
+    bad = (
+        dict(dsa=1, dsa_p=32),  # M1b's splits are the slices
+        dict(dsa=1, dsa_p=16, m1c=True),
+        dict(dsa=2, dsa_p=16),  # fused: M3
+        dict(dsa=1, dsa_p=16, dsa_fold=True),
+        dict(dsa=0, part_fp32=True),
+        dict(dsa=1, dsa_p=16, m1b_ranks=8),
+    )
+    for over in bad:
+        with pytest.raises(AssertionError):
+            k2.build(dataclasses.replace(base, **over))
+    with pytest.raises(AssertionError):  # 16 rows: two requests
+        k2.build(dataclasses.replace(base, tokens=16, dsa=1, dsa_p=16))

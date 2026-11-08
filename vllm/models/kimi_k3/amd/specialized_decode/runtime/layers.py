@@ -12,6 +12,9 @@ prefix_delta)``.
   combine, W_UV and the gate), then K2.
 - ``MlaOpsLayer`` (MLA layers M1 cannot serve, ``m1_reasons``): vLLM's AttnRes
   and MLA attention ops, then K2.
+- ``dsa.DsaM1Layer`` (Kimi-K3.1's DSA layers at DCP1, ``VLLM_KIMI_SD_DSA``):
+  vLLM's query, KV and indexer ops, ``dsa_attn``'s split sparse attention,
+  then K2 merging its slices (W_UV and the gate in its M1b).
 
 Weights are views of the loaded parameters, taken at every launch.
 """
@@ -27,8 +30,12 @@ if TYPE_CHECKING:
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.decode import Step
 
 
-def _k2_key(layer, runner: MonoRunner, tokens: int, reset: bool, m1b: bool = False):
-    """``m1b``: an MLA layer's K2 that runs its M1b first (``runner.fuse_m1b``)."""
+def _k2_key(
+    layer, runner: MonoRunner, tokens: int, reset: bool, m1b: bool = False, dsa=None
+):
+    """``m1b``: an MLA layer's K2 that runs its M1b first (``runner.fuse_m1b``).
+    ``dsa``: a DSA layer's ``DsaAttnBuild``, its M1b merging that launch's
+    slices (``dsa.DsaM1Layer``)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
 
     m = layer.mlp
@@ -43,6 +50,16 @@ def _k2_key(layer, runner: MonoRunner, tokens: int, reset: bool, m1b: bool = Fal
         if m1b
         else {}
     )
+    if dsa is not None:
+        assert m1b and runner.dcp == 1
+        fused.update(
+            m1b_splits=dsa.splits,
+            m1c=False,
+            dsa=1,
+            dsa_p=dsa.splits,
+            uv_bf16=True,
+            part_fp32=dsa.part_fp32,
+        )
     return k2.K2Build(
         tokens=tokens,
         nblocks=layer.prev_valid_blocks + (1 if reset else 0),
@@ -86,11 +103,13 @@ def _k2(
     reset=False,
     m1b_in=None,
     m1c_in=None,
+    dsa=None,
 ):
     """K2 from ``core`` (o_proj's input): ``prefix`` updated in place (written,
     when ``reset``), the MoE output returned. ``m1b_in``: ``mla_post``'s inputs,
     when this launch runs M1b and writes ``core`` itself; ``m1c_in``: M1c's
-    (``mla_attn.host_args``'s), when it runs M1c before."""
+    (``mla_attn.host_args``'s), when it runs M1c before; ``dsa``: a DSA
+    layer's ``DsaAttnBuild``, its slices M1b's o / lse (``_k2_key``)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import HIDDEN
     from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import moe
@@ -102,7 +121,7 @@ def _k2(
         w_up = w_up.narrow(0, runner.rank * moe.UP_N, moe.UP_N)
     out = torch.empty_like(prefix)
     k2.k2_launch(
-        _k2_key(layer, runner, core.size(0), reset, m1b_in is not None),
+        _k2_key(layer, runner, core.size(0), reset, m1b_in is not None, dsa),
         core=core,
         w_o=layer.self_attn.o_proj.weight,
         prefix=prefix,
@@ -133,18 +152,20 @@ def _k2(
 
 def compile_build(key) -> None:
     """Compiles one launch's kernel (a ``K2Build``, ``KdaPreBuild``,
-    ``MlaPreBuild`` or ``MlaPostBuild``) without running it: FlyDSL's
-    compile-only mode returns before the launch."""
+    ``MlaPreBuild``, ``MlaPostBuild`` or ``DsaAttnBuild``) without running it:
+    FlyDSL's compile-only mode returns before the launch."""
     import os
 
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
+        dsa_attn,
         kda,
         mla,
         mla_back,
     )
 
     mod = {
+        dsa_attn.DsaAttnBuild: dsa_attn,
         kda.KdaPreBuild: kda,
         k2.K2Build: k2,
         mla.MlaPreBuild: mla,
