@@ -188,14 +188,22 @@ class Source(TraceInvariant):
     the wait for the loads lands behind the matrix work. ``rows(token)`` maps
     a staged token to its source row (the MoE's gathered routes)."""
 
-    def __init__(self, addr, ld_bytes: int, cm: int = CM_DEV, rows=None):
+    def __init__(
+        self, addr, ld_bytes: int, cm: int = CM_DEV, rows=None, live=None, nbytes=None
+    ):
         self.addr, self.ld, self.cm, self.rows = fx.Int64(addr), ld_bytes, cm, rows
+        # ``live(token)``: tokens past it (a short MoE block's padding) load
+        # nothing (zeros), within ``nbytes`` of ``addr``
+        self.live, self.nbytes = live, nbytes
 
     def prepare(self, token):
-        return token if self.rows is None else self.rows(token)
+        row = token if self.rows is None else self.rows(token)
+        return row if self.live is None else (row, self.live(token))
 
-    def issue(self, row, byte):
-        return [ld_i32x4(self.addr, (row * i32(self.ld) + byte) // i32(4), self.cm)]
+    def issue(self, prep, byte):
+        row, mask = prep if self.live is not None else (prep, None)
+        at = (row * i32(self.ld) + byte) // i32(4)
+        return [ld_i32x4(self.addr, at, self.cm, nbytes=self.nbytes, mask=mask)]
 
     def convert(self, raw, row):
         return raw[0]

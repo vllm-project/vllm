@@ -104,7 +104,7 @@ MT = PIECE // 32  # weight tiles a wave a unit (two waves a half of a piece)
 assert OWNER == 64 * MT
 LINE_GROUPS = POOLED // 64  # the expert sum's 64-column exchange groups
 EXPERT_CM = 0  # plain loads: nt streams the experts ~25% slower on MI300
-EXPERT_CHUNK = 128  # K bytes a step
+EXPERT_CHUNK = 512  # K bytes a step: 256-512 B a row stream fastest on MI300
 UP_CHUNKS = POOLED // EXPERT_CHUNK  # FP8 K
 DOWN_CHUNKS = INTER // EXPERT_CHUNK
 TILE_STRIDE = PIECE + 4  # words a token row of the up epilogue's u tile
@@ -469,7 +469,14 @@ def up_unit(g, sh, lp, b, gemm, unit, units, pending):
     lane, wave = g.lane, g.wave
     blk, w, firsts = up_weights(g, sh, lp, b, unit)
     p = unit % i32(UP_PIECES)
-    src = Source(b.hq, POOLED, 0, rows=lambda i: blk.assignment(i) // TOPK)
+    src = Source(
+        b.hq,
+        POOLED,
+        0,
+        rows=lambda i: blk.assignment(i) // TOPK,
+        live=lambda i: i < blk.n,
+        nbytes=sh.rows * POOLED,
+    )
     half = wave // 2  # 0: gate, 1: up
     # the epilogue's loads before the K loop: waiting for them after it would
     # also wait for the next unit's weights (vmcnt is in order)
@@ -566,20 +573,22 @@ class QuantSource(TraceInvariant):
     """The down GEMM's activations: a route's bf16 ``act`` row quantized to
     FP8 with its scale while it is staged (``tiled.Source`` interface)."""
 
-    def __init__(self, b, blk):
-        self.b, self.blk = b, blk
+    def __init__(self, b, blk, nbytes):
+        self.b, self.blk, self.nbytes = b, blk, nbytes
 
     def prepare(self, token):
-        """The route's assignment and its quant factor."""
+        """The route's assignment, its quant factor and whether it is one of
+        the block's (padding tokens load nothing)."""
         a = self.blk.assignment(token)
         amax = ld(self.b.amax, a, fx.Float32, cm=CM_DEV)
-        return a, quant_factor(quant_scale(amax, MOE_MID_QUANT), MOE_MID_QUANT)
+        f = quant_factor(quant_scale(amax, MOE_MID_QUANT), MOE_MID_QUANT)
+        return a, f, token < self.blk.n
 
     def issue(self, prep, byte):
         at = (prep[0] * i32(2 * INTER) + byte * 2) // 4
         return [
-            ld_i32x4(self.b.act, at),
-            ld_i32x4(self.b.act, at + 4),
+            ld_i32x4(self.b.act, at + 4 * h, nbytes=self.nbytes, mask=prep[2])
+            for h in range(2)
         ]
 
     def convert(self, raw, prep):
@@ -621,7 +630,7 @@ def down_unit(g, sh, lp, b, gemm, unit, units, pending):
         amaxes.append(ld(b.amax, a, fx.Float32, cm=CM_DEV))
         routes.append((i, a))
     acc, pending = gemm.run(
-        QuantSource(b, blk),
+        QuantSource(b, blk, sh.assignments * INTER * 2),
         w,
         lane_rows(g, firsts),
         i32(0),
@@ -678,7 +687,7 @@ def down_units(g, sh, lp, b, gemm):
         pending = down_unit(g, sh, lp, b, gemm, u, units, pending)
 
 
-EXPERT_DEPTH = 4  # chunks in flight: the expert stream's latency
+EXPERT_DEPTH = 1  # chunks a group: deeper groups (more loads in flight) stream slower
 
 
 def expert_gemm(sh, lp, tid):
