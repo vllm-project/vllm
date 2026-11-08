@@ -96,7 +96,7 @@ def build_sweeps(mode: str) -> list[RunSpec]:
             for p in ("prefill", "decode")
             for f in FILE_SIZES
         ]
-    # --full: everything except prefill-decode (run that phase on request).
+    # full: everything except prefill-decode (run that phase on request).
     return [
         RunSpec(p, f, s, c, cpu)
         for p in ("prefill", "decode")
@@ -107,186 +107,248 @@ def build_sweeps(mode: str) -> list[RunSpec]:
     ]
 
 
-def kill_vllm(proc: subprocess.Popen) -> None:
-    """SIGINT x5 (10s waits), then SIGKILL; exit loudly if unkillable."""
-    for attempt in range(1, 6):
-        if proc.poll() is not None:
-            print(f"      vLLM process ({proc.pid}) has exited gracefully.")
-            return
-        print(f"      [Attempt {attempt}/5] Sending SIGINT to PID {proc.pid}...")
-        proc.send_signal(signal.SIGINT)
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=10)
-    if proc.poll() is None:
-        print("      vLLM did not exit after 5 attempts. Force killing...")
-        proc.kill()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=5)
-    if proc.poll() is None:
+class VLLMServer:
+    """Lifecycle of a single `vllm serve` process."""
+
+    def __init__(self, config_path: Path, log_path: Path) -> None:
+        self.config_path = config_path
+        self.log_path = log_path
+        self.proc: subprocess.Popen | None = None
+
+    def start(self) -> None:
+        env = dict(os.environ, PYTHON_HASH_SEED="0")
+        cmd = [
+            "vllm",
+            "serve",
+            MODEL,
+            "--tensor-parallel-size",
+            str(TP_SIZE),
+            "--kv-transfer-config",
+            self.config_path.read_text(),
+            "--enable-prefix-caching",
+            "--no-disable-hybrid-kv-cache-manager",
+            "--port",
+            str(PORT),
+        ]
+        with self.log_path.open("w") as log:
+            self.proc = subprocess.Popen(
+                cmd, stdout=log, stderr=subprocess.STDOUT, env=env
+            )
+
+    def wait_ready(self, timeout: int = 1800) -> None:
+        assert self.proc is not None
+        print(f"      Waiting for vLLM on port {PORT}...")
+        deadline = time.monotonic() + timeout
+        url = f"http://127.0.0.1:{PORT}/v1/models"
+        while time.monotonic() < deadline:
+            if self.proc.poll() is not None:
+                raise RuntimeError(self._crash_report("crashed during startup"))
+            try:
+                urlopen(url, timeout=5)
+                print("      vLLM is ready!")
+                return
+            except OSError:
+                time.sleep(5)
         raise RuntimeError(
-            f"vLLM process ({proc.pid}) could NOT be killed; GPU VRAM is "
-            "likely still locked. Aborting to prevent cascading failures."
+            self._crash_report("timed out waiting to accept connections")
         )
-    print("      vLLM successfully terminated.")
+
+    def stop(self) -> None:
+        """SIGINT x5 (10s waits), then SIGKILL; exit loudly if unkillable."""
+        assert self.proc is not None
+        proc = self.proc
+        for attempt in range(1, 6):
+            if proc.poll() is not None:
+                print(f"      vLLM process ({proc.pid}) has exited gracefully.")
+                return
+            print(f"      [Attempt {attempt}/5] Sending SIGINT to PID {proc.pid}...")
+            proc.send_signal(signal.SIGINT)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
+        if proc.poll() is None:
+            print("      vLLM did not exit after 5 attempts. Force killing...")
+            proc.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=5)
+        if proc.poll() is None:
+            raise RuntimeError(
+                f"vLLM process ({proc.pid}) could NOT be killed; GPU VRAM is "
+                "likely still locked. Aborting to prevent cascading failures."
+            )
+        print("      vLLM successfully terminated.")
+
+    def _crash_report(self, why: str) -> str:
+        assert self.proc is not None
+        tail = "\n".join(self.log_path.read_text().splitlines()[-20:])
+        return (
+            f"vLLM process (PID {self.proc.pid}) {why}.\n"
+            f"Last 20 lines of {self.log_path}:\n{tail}"
+        )
+
+    def __enter__(self) -> "VLLMServer":
+        self.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.stop()
 
 
-def cleanup(fs_dir: Path) -> None:
-    for entry in fs_dir.iterdir():
-        if entry.is_dir():
-            shutil.rmtree(entry)
-        else:
-            entry.unlink()
+class GuideLLM:
+    """Drives the guidellm load against a running server and parses metrics."""
 
-
-def write_kv_config(path: Path, spec: RunSpec, fs_dir: Path) -> None:
-    config = {
-        "kv_connector": "OffloadingConnector",
-        "kv_role": "kv_both",
-        "kv_connector_extra_config": {
-            "spec_name": "TieringOffloadingSpec",
-            "cpu_bytes_to_use": CPU_SIZES[spec.cpu_size],
-            "eviction_policy": "lru",
-            "secondary_tiers": [
+    def run(self, spec: RunSpec, log_path: Path) -> dict:
+        prefix_count = max(4 * spec.concurrency, 256)
+        data = {
+            "kind": "synthetic_text",
+            "prompt_tokens": BENCH_PROMPT_TOKENS,
+            "output_tokens": PHASES[spec.phase],
+            "turns": BENCH_TURNS,
+            "prefix_buckets": [
                 {
-                    "type": "fs",
-                    "root_dir": str(fs_dir) + "/",
+                    "bucket_weight": 100,
+                    "prefix_count": prefix_count,
+                    "prefix_tokens": PROMPT_SIZES[spec.prompt],
                 }
             ],
-            "enable_cross_layers_blocks": "True",
-            "block_size": FILE_SIZES[spec.files],
-        },
-    }
-    path.write_text(json.dumps(config, indent=2))
-
-
-def start_vllm(config_path: Path, log_path: Path) -> subprocess.Popen:
-    env = dict(os.environ, PYTHON_HASH_SEED="0")
-    cmd = [
-        "vllm",
-        "serve",
-        MODEL,
-        "--tensor-parallel-size",
-        str(TP_SIZE),
-        "--kv-transfer-config",
-        config_path.read_text(),
-        "--enable-prefix-caching",
-        "--no-disable-hybrid-kv-cache-manager",
-        "--port",
-        str(PORT),
-    ]
-    with log_path.open("w") as log:
-        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
-    return proc
-
-
-def wait_for_vllm(proc: subprocess.Popen, log_path: Path, timeout: int = 1800) -> None:
-    print(f"      Waiting for vLLM on port {PORT}...")
-    deadline = time.monotonic() + timeout
-    url = f"http://127.0.0.1:{PORT}/v1/models"
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(_crash_report(proc.pid, log_path))
-        try:
-            urlopen(url, timeout=5)
-            print("      vLLM is ready!")
-            return
-        except OSError:
-            time.sleep(5)
-    raise RuntimeError(
-        _crash_report(proc.pid, log_path, "timed out waiting to accept connections")
-    )
-
-
-def _crash_report(pid: int, log_path: Path, why: str = "crashed during startup") -> str:
-    tail = "\n".join(log_path.read_text().splitlines()[-20:])
-    return f"vLLM process (PID {pid}) {why}.\nLast 20 lines of {log_path}:\n{tail}"
-
-
-def run_guidellm(spec: RunSpec, log_path: Path) -> dict:
-    prefix_count = max(4 * spec.concurrency, 256)
-    data = {
-        "kind": "synthetic_text",
-        "prompt_tokens": BENCH_PROMPT_TOKENS,
-        "output_tokens": PHASES[spec.phase],
-        "turns": BENCH_TURNS,
-        "prefix_buckets": [
-            {
-                "bucket_weight": 100,
-                "prefix_count": prefix_count,
-                "prefix_tokens": PROMPT_SIZES[spec.prompt],
-            }
-        ],
-    }
-    cmd = [
-        "guidellm",
-        "run",
-        "--backend",
-        "kind=openai_http,"
-        f"target=http://127.0.0.1:{PORT},"
-        "request_format=/v1/completions",
-        "--profile",
-        f"kind=concurrent,streams={spec.concurrency}",
-        "--constraint",
-        f"kind=max_duration,seconds={BENCH_MAX_SECONDS}",
-        "--seed",
-        f"kind=static,value={BENCH_RANDOM_SEED}",
-        "--data",
-        json.dumps(data),
-    ]
-    with log_path.open("w") as log:
-        subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, check=True)
-    return parse_guidellm_report(log_path.read_text())
-
-
-def parse_guidellm_report(text: str) -> dict:
-    """Extract `Metric: value` pairs from the guidellm stdout report."""
-    metrics = {}
-    for line in text.splitlines():
-        m = re.match(r"\s*([A-Za-z0-9 ()/]+?):\s+([0-9.]+)\s", line + " ")
-        if m:
-            key = (
-                m.group(1)
-                .strip()
-                .lower()
-                .replace(" ", "_")
-                .replace("(", "")
-                .replace(")", "")
-            )
-            metrics[key] = m.group(2)
-    return {k: v for k, v in metrics.items() if k in METRICS}
-
-
-def run_one(spec: RunSpec, fs_dir: Path, session_dir: Path) -> dict:
-    run_dir = session_dir / spec.name
-    run_dir.mkdir(parents=True, exist_ok=True)
-    vllm_log = run_dir / "vllm.log"
-    guidellm_log = run_dir / "guidellm.log"
-
-    print("=" * 70)
-    print(f"Run: {spec.name}")
-    print(f"Logs: {run_dir}/")
-    print("=" * 70)
-
-    print("  [1/5] Cleanup...")
-    cleanup(fs_dir)
-    print("  [2/5] Writing KV transfer config...")
-    config_path = run_dir / "kv_transfer_config.json"
-    write_kv_config(config_path, spec, fs_dir)
-    print("  [3/5] Starting vLLM server...")
-    proc = start_vllm(config_path, vllm_log)
-    try:
-        wait_for_vllm(proc, vllm_log)
-        print("  [4/5] Running guidellm benchmark...")
-        result = {
-            "spec": asdict(spec),
-            "status": "ok",
-            **run_guidellm(spec, guidellm_log),
         }
-    finally:
-        print("  [5/5] Teardown: stopping vLLM...")
-        kill_vllm(proc)
-    time.sleep(5)
-    return result
+        cmd = [
+            "guidellm",
+            "run",
+            "--backend",
+            "kind=openai_http,"
+            f"target=http://127.0.0.1:{PORT},"
+            "request_format=/v1/completions",
+            "--profile",
+            f"kind=concurrent,streams={spec.concurrency}",
+            "--constraint",
+            f"kind=max_duration,seconds={BENCH_MAX_SECONDS}",
+            "--seed",
+            f"kind=static,value={BENCH_RANDOM_SEED}",
+            "--data",
+            json.dumps(data),
+        ]
+        with log_path.open("w") as log:
+            subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, check=True)
+        return self._parse_report(log_path.read_text())
+
+    def _parse_report(self, text: str) -> dict:
+        """Extract `Metric: value` pairs from the guidellm stdout report."""
+        metrics = {}
+        for line in text.splitlines():
+            m = re.match(r"\s*([A-Za-z0-9 ()/]+?):\s+([0-9.]+)\s", line + " ")
+            if m:
+                key = (
+                    m.group(1)
+                    .strip()
+                    .lower()
+                    .replace(" ", "_")
+                    .replace("(", "")
+                    .replace(")", "")
+                )
+                metrics[key] = m.group(2)
+        return {k: v for k, v in metrics.items() if k in METRICS}
+
+
+class BenchmarkRun:
+    """One benchmark run: cleanup, config, server, load, teardown."""
+
+    def __init__(self, spec: RunSpec, fs_dir: Path, session_dir: Path) -> None:
+        self.spec = spec
+        self.fs_dir = fs_dir
+        self.run_dir = session_dir / spec.name
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.guidellm = GuideLLM()
+
+    def execute(self) -> dict:
+        print("=" * 70)
+        print(f"Run: {self.spec.name}")
+        print(f"Logs: {self.run_dir}/")
+        print("=" * 70)
+
+        print("  [1/5] Cleanup...")
+        self._cleanup()
+        print("  [2/5] Writing KV transfer config...")
+        config_path = self.run_dir / "kv_transfer_config.json"
+        self._write_config(config_path)
+        print("  [3/5] Starting vLLM server...")
+        server = VLLMServer(config_path, self.run_dir / "vllm.log")
+        try:
+            server.start()
+            server.wait_ready()
+            print("  [4/5] Running guidellm benchmark...")
+            result = {
+                "spec": asdict(self.spec),
+                "status": "ok",
+                **self.guidellm.run(self.spec, self.run_dir / "guidellm.log"),
+            }
+        finally:
+            print("  [5/5] Teardown: stopping vLLM...")
+            server.stop()
+        time.sleep(5)
+        return result
+
+    def _cleanup(self) -> None:
+        for entry in self.fs_dir.iterdir():
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+
+    def _write_config(self, path: Path) -> None:
+        config = {
+            "kv_connector": "OffloadingConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "spec_name": "TieringOffloadingSpec",
+                "cpu_bytes_to_use": CPU_SIZES[self.spec.cpu_size],
+                "eviction_policy": "lru",
+                "secondary_tiers": [
+                    {
+                        "type": "fs",
+                        "root_dir": str(self.fs_dir) + "/",
+                    }
+                ],
+                "enable_cross_layers_blocks": "True",
+                "block_size": FILE_SIZES[self.spec.files],
+            },
+        }
+        path.write_text(json.dumps(config, indent=2))
+
+
+class BenchmarkSession:
+    """Runs a list of specs and checkpoints results into a session dir."""
+
+    def __init__(self, fs_dir: Path, specs: list[RunSpec]) -> None:
+        self.fs_dir = fs_dir
+        self.specs = specs
+        self.session_dir = Path(f"benchmark_session_{datetime.now():%Y%m%d_%H%M%S}")
+        self.session_dir.mkdir()
+        self.results: list[dict] = []
+
+    def run(self) -> list[dict]:
+        print(f"Session dir: {self.session_dir}/")
+        print(
+            f"{len(self.specs)} runs "
+            f"(~{len(self.specs) * (BENCH_MAX_SECONDS + 120) // 60} min total):"
+        )
+        for spec in self.specs:
+            print(f"  {spec.name}")
+
+        for i, spec in enumerate(self.specs, 1):
+            print(f"\n[{i}/{len(self.specs)}]")
+            result = BenchmarkRun(spec, self.fs_dir, self.session_dir).execute()
+            self.results.append(result)
+            self._checkpoint()
+            print(f"{spec.name}: {result['status']}")
+            for m in METRICS:
+                print(f"  {m}: {result.get(m, 'n/a')}")
+        print(f"\nAll runs complete. Results in {self.session_dir}/")
+        return self.results
+
+    def _checkpoint(self) -> None:
+        (self.session_dir / "results.json").write_text(
+            json.dumps(self.results, indent=2)
+        )
 
 
 def compare(session_a: Path, session_b: Path) -> None:
@@ -412,26 +474,7 @@ def _main() -> None:
     except (RuntimeError, subprocess.CalledProcessError) as e:
         sys.exit(f"Preflight failed: {e}")
 
-    session_dir = Path(f"benchmark_session_{datetime.now():%Y%m%d_%H%M%S}")
-    session_dir.mkdir()
-    print(f"Session dir: {session_dir}/")
-    print(
-        f"{len(specs)} runs "
-        f"(~{len(specs) * (BENCH_MAX_SECONDS + 120) // 60} min total):"
-    )
-    for spec in specs:
-        print(f"  {spec.name}")
-
-    results = []
-    for i, spec in enumerate(specs, 1):
-        print(f"\n[{i}/{len(specs)}]")
-        r = run_one(spec, args.fs_dir, session_dir)
-        results.append(r)
-        (session_dir / "results.json").write_text(json.dumps(results, indent=2))
-        print(f"{spec.name}: {r['status']}")
-        for m in METRICS:
-            print(f"  {m}: {r.get(m, 'n/a')}")
-    print(f"\nAll runs complete. Results in {session_dir}/")
+    BenchmarkSession(args.fs_dir, specs).run()
 
 
 if __name__ == "__main__":
