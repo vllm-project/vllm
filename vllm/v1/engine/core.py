@@ -2565,6 +2565,7 @@ class EngineCoreProc(EngineCore):
     def _send_abort_outputs(self, aborted_reqs: list[Request]) -> None:
         # TODO(nick) this will be moved inside the scheduler
         if aborted_reqs:
+            # Map client_index to the requests that belong to that client.
             by_client = defaultdict[int, dict[str, Request]](dict)
             for request in aborted_reqs:
                 by_client[request.client_index][request.request_id] = request

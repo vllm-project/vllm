@@ -148,8 +148,8 @@ class CachedRequestData:
     # the request's block IDs. For those in the set, new_block_ids will be used as the
     # request's block IDs instead of appending to the existing block IDs.
     resumed_req_ids: set[str]
-    # Scheduled host token slices for synchronous PP and persistent-state
-    # consumers. Empty for ordinary single-rank execution.
+    # NOTE(woosuk): new_token_ids is only used for pipeline parallelism and
+    # persistent-state models. Otherwise, new_token_ids will be empty.
     new_token_ids: list[list[int]]
     # MRV1-only: For requests not scheduled in the last step, propagate the token ids
     # to the connector. Won't contain requests scheduled in the prior step.

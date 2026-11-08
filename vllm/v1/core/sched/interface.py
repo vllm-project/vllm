@@ -146,8 +146,10 @@ class SchedulerInterface(ABC):
 
     @abstractmethod
     def add_request(self, request: "Request") -> AddRequestDisposition | None:
-        """Add a request; REJECTED forbids engine ADD follow-on effects.
+        """Add a new request to the scheduler's internal queue.
 
+        Returns REJECTED when the scheduler refuses the request; the engine
+        core then skips its post-add handling, such as an immediate abort.
         Legacy schedulers may return None for accepted requests.
 
         Args:

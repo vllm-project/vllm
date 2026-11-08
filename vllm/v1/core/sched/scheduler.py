@@ -2029,9 +2029,12 @@ class Scheduler(SchedulerInterface):
             # broadcast path (`input_batch.prev_sampled_token_ids`), so we can
             # omit this payload.
             if self.send_new_token_ids:
-                # With PP the first-stage worker has no direct path from the
-                # last stage; persistent-state models plan rows from the host
-                # token slice. Otherwise the model runner caches the tokens.
+                # When using PP, the scheduler sends the sampled tokens back,
+                # because there's no direct communication between the first-
+                # stage worker and the last-stage worker. Persistent-state
+                # models also plan their rows from this host token slice.
+                # Otherwise, we don't need to send the sampled tokens back
+                # because the model runner will cache them.
                 num_tokens = num_scheduled_tokens[req_id] - len(
                     spec_decode_tokens.get(req_id, ())
                 )
