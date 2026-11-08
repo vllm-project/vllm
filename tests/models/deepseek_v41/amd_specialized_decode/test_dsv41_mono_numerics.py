@@ -1477,18 +1477,23 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
             assert torch.equal(attn_parts[rank], part), tag
             ffn_io(f"{tag} FFN launch", M, *fin, f, case.hard)
             if case.vllm:
-                # vLLM's FFN seam and MoE on the same attention output
+                # vLLM's FFN seam and MoE on the same attention output; the
+                # FFN launch is never tuned and writes the untuned scratch
+                lay = scratch_layout(M, tp, experts, topk_k, runner.ug_groups)
+                off = lay["normed"][0]
+                f_in = runner.scratch(M)[off : off + M * HIDDEN * 2]
+                f_in = f_in.view(bf).view(M, HIDDEN)[:n]
                 L._seam(
                     dict(
                         attn=(_rank_sum(attn_parts)[:n],), attn_vllm=a[:n],
                         res_mid=res[:n], post_a=post[:n], comb_a=comb[:n],
                         pre_a=attn_pre[:n], mono=[t[:n] for t in f],
-                        vllm=vllm_out, moe_in=normed[:n], moe_in_vllm=xf[:n],
+                        vllm=vllm_out, moe_in=f_in, moe_in_vllm=xf[:n],
                         inputs=(None,) * 4,
                     ),
                     consts,
                 )  # fmt: skip
-                L._moe_parity(f[0][:n], moe_out(normed[:n]), normed[:n], consts)
+                L._moe_parity(f[0][:n], moe_out(f_in), f_in, consts)
             ffn = runner._outs(M, fin[0])
         torch.accelerator.synchronize()
 
