@@ -10,7 +10,7 @@ set -euo pipefail
 # engines fit side by side; the TP1/TP1 configs keep one dedicated GPU per
 # side at the utilization the nightly sweep uses for the same model.
 SCRIPT="v1/kv_connector/nixl_integration/run_accuracy_test.sh"
-# Decoders capture decode-only CUDA graphs without torch.compile; see
+# Decoders run breakable CUDA graphs instead of --enforce-eager; see
 # run_accuracy_test.sh.
 export DECODER_CUDAGRAPH=${DECODER_CUDAGRAPH:-1}
 IMPORT_CANARY="v1/kv_connector/nixl_integration/test_nixl_imports.py"
