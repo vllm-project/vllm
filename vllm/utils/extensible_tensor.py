@@ -9,11 +9,14 @@ import itertools
 import sys
 from collections.abc import Sequence
 from contextlib import suppress
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.utils.vmm_driver import get_vmm_driver
+
+if TYPE_CHECKING:
+    from vllm.utils.vmm_peer import VmmPeerMappings
 
 
 def _round_up(value: int, multiple: int) -> int:
@@ -25,9 +28,14 @@ def _round_up(value: int, multiple: int) -> int:
 _MIN_GRANULARITY = 2 << 20
 
 
-def granule_size(device_index: int) -> int:
-    """Commit granule for device_index: driver granularity, floored at 2 MiB."""
-    driver_granularity = get_vmm_driver().granularity(device_index)
+def granule_size(device_index: int, exportable: bool = False) -> int:
+    """Commit granule for ``device_index``: driver granularity, floored at 2 MiB."""
+    driver = get_vmm_driver()
+    driver_granularity = (
+        driver.granularity(device_index, exportable=True)
+        if exportable
+        else driver.granularity(device_index)
+    )
     return _round_up(max(driver_granularity, _MIN_GRANULARITY), driver_granularity)
 
 
@@ -38,12 +46,15 @@ class _VirtualBuffer:
     granules are skipped, so ranges may abut or overlap.
     """
 
-    def __init__(self, max_bytes: int, device_index: int) -> None:
+    def __init__(
+        self, max_bytes: int, device_index: int, exportable: bool = False
+    ) -> None:
         self._driver = get_vmm_driver()
         self._driver.ensure_context(device_index)
         self.device_index = device_index
 
-        self.granularity: int = granule_size(device_index)
+        self.exportable = exportable
+        self.granularity: int = granule_size(device_index, exportable)
         self.reserved_size: int = _round_up(max(max_bytes, 1), self.granularity)
         self.base_ptr: int = self._driver.reserve(self.reserved_size)
 
@@ -113,12 +124,20 @@ class _VirtualBuffer:
         driver = self._driver
         driver.ensure_context(self.device_index)
         try:
-            handle = driver.create(size, self.device_index)
+            handle = (
+                driver.create(size, self.device_index, exportable=True)
+                if self.exportable
+                else driver.create(size, self.device_index)
+            )
         except RuntimeError:
             # The VMM allocator cannot reuse memory idling in torch's
             # caching allocator; return it to the driver and retry once.
             torch.accelerator.empty_cache()
-            handle = driver.create(size, self.device_index)
+            handle = (
+                driver.create(size, self.device_index, exportable=True)
+                if self.exportable
+                else driver.create(size, self.device_index)
+            )
 
         addr = self.base_ptr + offset
         try:
@@ -252,6 +271,7 @@ class ExtensibleTensor:
         device: torch.device | str | int | None = None,
         num_segments: int = 1,
         segment_capacities: Sequence[int] | None = None,
+        exportable: bool = False,
     ) -> None:
         if max_num_bytes < 0:
             raise ValueError("max_num_bytes must be non-negative.")
@@ -289,7 +309,22 @@ class ExtensibleTensor:
             itertools.accumulate([0, *self._segment_capacities[:-1]])
         )
         self._committed: list[int] = [0] * len(self._segment_capacities)
-        self._buffer: _VirtualBuffer = _VirtualBuffer(max_num_bytes, self._device_index)
+        self._buffer: _VirtualBuffer = _VirtualBuffer(
+            max_num_bytes, self._device_index, exportable
+        )
+        self._peer_mappings: VmmPeerMappings | None = None
+
+    def share_with(self, group):
+        """Map exportable storage on same-host peers without moving its VA."""
+        from vllm.utils.vmm_peer import VmmPeerMappings
+
+        if self._peer_mappings is None:
+            self._peer_mappings = VmmPeerMappings(self, group)
+        elif self._peer_mappings.group is not group:
+            raise RuntimeError(
+                "Extensible storage already belongs to another peer group"
+            )
+        return self._peer_mappings
 
     def full_view(self) -> torch.Tensor:
         """Uint8 view spanning the whole reservation."""
@@ -315,6 +350,8 @@ class ExtensibleTensor:
 
     def resize_segments_(self, sizes: Sequence[int], zero_new: bool = False) -> None:
         """Grow each segment's committed prefix; optionally zero the new bytes."""
+        if self._peer_mappings is not None:
+            self._peer_mappings.check_growth(tuple(sizes))
         if len(sizes) != self.num_segments:
             raise ValueError(f"Expected {self.num_segments} sizes, got {len(sizes)}.")
         for old, new, capacity in zip(self._committed, sizes, self._segment_capacities):
@@ -333,16 +370,28 @@ class ExtensibleTensor:
             for start, old, new in zip(self._segment_offsets, self._committed, sizes)
             if new > old
         ]
-        for start, end in grown:
-            self._buffer.ensure_committed_range(start, end)
-        self._committed = list(sizes)
-        if zero_new and grown:
-            full = self.full_view()
+        error = None
+        try:
             for start, end in grown:
-                full[start:end].zero_()
+                self._buffer.ensure_committed_range(start, end)
+            self._committed = list(sizes)
+            if zero_new and grown:
+                full = self.full_view()
+                for start, end in grown:
+                    full[start:end].zero_()
+        except RuntimeError as exc:
+            error = exc
+        if self._peer_mappings is not None:
+            self._peer_mappings._check(error)
+            if grown:
+                self._peer_mappings.refresh()
+        elif error is not None:
+            raise error
 
     def release_physical(self) -> None:
         """Drop all physical pages but keep the reservation and its views."""
+        if self._peer_mappings is not None:
+            self._peer_mappings.release_mappings()
         self._buffer.release_physical()
         self._committed = [0] * self.num_segments
 
@@ -416,5 +465,8 @@ class ExtensibleTensor:
         return torch.device("cuda", self._device_index)
 
     def free(self) -> None:
+        if self._peer_mappings is not None:
+            self._peer_mappings.close()
+            self._peer_mappings = None
         self._buffer.free()
         self._committed = [0] * self.num_segments

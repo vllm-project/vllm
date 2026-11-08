@@ -16,6 +16,42 @@ Depending on the use case, there are two possible strategies:
 
 Both approaches are under active development.
 
+### Direct replicated KV publication (experimental)
+
+`VLLM_USE_PCP_DIRECT_KV=1` enables direct publication of PCP KV updates for
+supported DeepSeek-V3.2 and GLM sparse-MLA layers on a single CUDA host. The
+producer writes final cache rows through peer mappings of the native extensible
+KV allocation. A system-scope device barrier publishes those writes before the
+local attention consumer reads its replica. This avoids the KV-update
+collectives while retaining one complete cache replica per PCP rank.
+
+The default remains the ordinary collective update path. Request direct
+publication with ExtensibleKVCache enabled, PCP greater than one and DCP1:
+
+```bash
+VLLM_USE_PCP_DIRECT_KV=1 vllm serve MODEL \
+    --trust-remote-code \
+    --enable-expert-parallel \
+    --prefill-context-parallel-size 4 \
+    --decode-context-parallel-size 1 \
+    --enable-extensible-kv-cache \
+    --kv-cache-dtype fp8 \
+    --compilation-config '{"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY"}'
+```
+
+Use `--enforce-eager` for eager execution. Qualified CUDA Graph support is
+`FULL_DECODE_ONLY`. BF16, FP8 E4M3 and `fp8_ds_mla` caches are supported, with an
+FP8 Indexer cache. Native padded and unequal segment layouts are supported;
+GLM-5.2 validation uses the default LBNHC layout. Peer virtual addresses remain
+stable through initialization-time physical growth and remapping.
+
+All peers must have identical cache layouts and growth plans. An unsupported
+requested configuration raises an error. Pipeline parallelism, microbatch
+overlap, speculative decoding, KV connectors, HiSparse, sleep mode, NVFP4 KV,
+multi-host PCP and DCP greater than one are outside this initial scope. Direct
+publication preserves replicated-cache capacity and the existing output
+collectives.
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.

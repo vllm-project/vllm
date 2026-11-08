@@ -650,12 +650,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        if getattr(self, "pcp_vmm_domain", None) is not None:
+            raise RuntimeError("Close the direct-final KV domain before reinitializing")
         self.extensible_kv_cache: ExtensibleKVCache | None = None
+        self.pcp_vmm_domain = None
+        if envs.VLLM_USE_PCP_DIRECT_KV and not is_profiling:
+            from vllm.model_executor.layers.attention.direct_kv import (
+                validate_direct_final,
+            )
+
+            validate_direct_final(self.vllm_config, extensible)
         if extensible:
             self.extensible_kv_cache = ExtensibleKVCache(
                 kv_cache_config,
                 self.device,
                 self.cache_config.get_resolved_kv_cache_layout(),
+                exportable=envs.VLLM_USE_PCP_DIRECT_KV and not is_profiling,
             )
 
         block_table_max_model_len = self.max_model_len
@@ -851,6 +861,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.compilation_config.static_forward_context
         )
 
+        if envs.VLLM_USE_PCP_DIRECT_KV and not is_profiling:
+            from vllm.distributed import get_pcp_group
+            from vllm.model_executor.layers.attention.direct_kv import KVCacheVmmDomain
+
+            assert self.extensible_kv_cache is not None
+            self.pcp_vmm_domain = KVCacheVmmDomain(
+                get_pcp_group(), self.extensible_kv_cache.buffer
+            )
+            self.pcp_vmm_domain.bind(
+                kv_caches_dict, self.compilation_config.static_forward_context
+            )
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
@@ -2460,6 +2481,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.aux_output_connector is not None:
             self.aux_output_connector.close()
         set_offloader(None)
+        if domain := getattr(self, "pcp_vmm_domain", None):
+            domain.close()
+            self.pcp_vmm_domain = None
         self.cudagraph_manager = None
         self.fast_prefill = None
         self.pooling_runner = None

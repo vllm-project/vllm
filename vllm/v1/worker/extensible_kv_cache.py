@@ -85,6 +85,8 @@ class ExtensibleKVCache:
         kv_cache_config: KVCacheConfig,
         device: torch.device,
         layout: KVCacheLayout,
+        *,
+        exportable: bool = False,
     ):
         tensors = [
             tensor
@@ -118,6 +120,7 @@ class ExtensibleKVCache:
                 end - start
                 for start, end in pairwise([*self.segment_offsets, self.size])
             ],
+            exportable=exportable,
         )
 
     def _segments(
@@ -191,6 +194,10 @@ class ExtensibleKVCache:
         several allocations.
         """
         num_blocks = min(num_blocks, self.capacity_blocks)
+        if self.buffer._peer_mappings is not None:
+            self.buffer._peer_mappings._identical(
+                ("commit", num_blocks, self.num_committed_blocks, defragment, shrink)
+            )
         sizes = [num_blocks * stride for stride in self.segment_strides]
         remap = (
             defragment and not all(self.buffer.segments_backed_by_one_chunk(sizes))
@@ -545,6 +552,8 @@ def extend_kv_cache(
             runner.replayssm_block_copy_tensors = get_replayssm_block_copy_tensors(
                 forward_context
             )
+    if domain := getattr(runner, "pcp_vmm_domain", None):
+        domain.bind(runner.kv_caches_by_layer, forward_context)
     runner.kv_connector = get_kv_connector(
         runner.vllm_config, runner.kv_caches_by_layer
     )
