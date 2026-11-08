@@ -82,6 +82,7 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from ..common.hyperconnection import is_hc_sequence_parallel_enabled
+from .gdn_decode.config import gdn_decode_enabled, validate_gdn_decode
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .ops.cute_dsl.hc_down_silu import request_hc_down_silu_warmup
@@ -230,7 +231,12 @@ class Qwen4ExpDecoderLayer(nn.Module):
             )
 
         if layer_type == "linear_attention":
-            self.linear_attn = QwenGatedDeltaNetAttention(
+            attention_cls = QwenGatedDeltaNetAttention
+            if gdn_decode_enabled(vllm_config.additional_config):
+                from .gdn_decode.runner import Qwen38GdnNormQuantAttention
+
+                attention_cls = Qwen38GdnNormQuantAttention
+            self.linear_attn = attention_cls(
                 config,
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
@@ -741,6 +747,9 @@ class Qwen4ExpForCausalLM(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+        self._gdn_decode_enabled = gdn_decode_enabled(vllm_config.additional_config)
+        if self._gdn_decode_enabled:
+            validate_gdn_decode(vllm_config)
         config: Qwen4ExpTextConfig = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -775,6 +784,13 @@ class Qwen4ExpForCausalLM(
                 self.config.hc_count,
                 self.config.hidden_size * self.config.hc_count,
             )
+
+    def process_weights_after_loading(self) -> None:
+        # finalize_model_weights visits this child after all quantized layers.
+        if self._gdn_decode_enabled:
+            from .gdn_decode.runner import initialize_gdn_decode
+
+            initialize_gdn_decode(self)
 
     @staticmethod
     def get_model_state_cls():
