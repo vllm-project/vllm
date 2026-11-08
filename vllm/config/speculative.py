@@ -91,7 +91,6 @@ SpeculativeMethod = Literal[
     "ngram",
     "draft_model",
     "suffix",
-    "custom_class",
     EagleModelTypes,
     NgramGPUTypes,
     DSparkModelTypes,
@@ -474,9 +473,9 @@ class SpeculativeConfig:
 
     Besides the built-in methods, this can be a custom method registered with
     `vllm.v1.worker.gpu.spec_decode.speculator_config.register_speculative_method`
-    (e.g. by a vLLM plugin), which requires the V2 model runner. It is then
-    moved to `custom_method`, and this is set to the built-in method that its
-    config is based on (None if it isn't based on one)."""
+    (e.g. by a vLLM plugin). It is then moved to `custom_method`, and this is
+    set to the built-in method that its config is based on (None if it isn't
+    based on one)."""
     custom_method: str | None = field(default=None, init=False)
     """The configured custom speculative method, if any (see `method`)."""
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
@@ -520,11 +519,6 @@ class SpeculativeConfig:
     If `None`, use the value from the draft model's Hugging Face config."""
 
     # Advanced control
-    disable_padded_drafter_batch: bool = False
-    """Disable input padding for speculative decoding. If set to True,
-    speculative input batches can contain sequences of different lengths,
-    which may only be supported by certain attention backends. This currently
-    only affects the EAGLE method of speculation."""
     disable_eagle_block_drop: bool = False
     """Disable dropping the trailing prefix-cache block for EAGLE-like
     speculative methods. This is an experimental option for measuring the
@@ -541,37 +535,25 @@ class SpeculativeConfig:
     and DeepSeek-V4/V4.1 DSpark). "fp8" uses per-row weight and per-token
     activation scales on the platform's FP8 linear kernel; "nvfp4" is
     weight-only on the platform's W4A16 kernel. The target verifies with its
-    own head, so only the acceptance length can change. Model Runner V2 only."""
+    own head, so only the acceptance length can change."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
     O(2 * tp_size) per token. Only applies to greedy draft selection in
     non-tree speculation."""
 
-    use_heterogeneous_vocab: bool = False
-    """Allow draft and target models to use different vocabularies.
-    When enabled, builds a token-level intersection at init and constrains
-    draft logits to shared tokens only (TLI algorithm). Requires
-    method='draft_model'."""
-
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
-    """Maximum size of ngram token window when using Ngram proposer, required
-    when method is set to ngram."""
+    """Maximum size of ngram token window when using Ngram proposer. Defaults
+    to `prompt_lookup_min` if set, otherwise 5."""
     prompt_lookup_min: int | None = Field(default=None, ge=1)
-    """Minimum size of ngram token window when using Ngram proposer, if
-    provided. Defaults to 1."""
+    """Minimum size of ngram token window when using Ngram proposer. Defaults
+    to `prompt_lookup_max` if set, otherwise 5."""
 
     # Alternative drafting strategies
-    parallel_drafting: bool = False
-    """Enable parallel drafting, where all speculative tokens are generated
-    in parallel rather than sequentially. This can improve performance but
-    requires the speculative model be trained to support parallel drafting.
-    Only compatible with EAGLE and draft model methods.
-
-    Deprecated: V1 model runner only (the V2 model runner falls back to V1 for
-    it), and will be removed with it. V2 speculators that draft in parallel,
-    such as DFlash and DSpark, do so without this option."""
+    parallel_drafting: bool | None = None
+    """Deprecated and has no effect. DFlash and DSpark always draft in
+    parallel, and no other method supports it."""
 
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
@@ -595,30 +577,26 @@ class SpeculativeConfig:
 
     # Suffix decoding configuration
     suffix_decoding_max_tree_depth: int = 24
-    """The maximum depth of the suffix decoding global and prompt trees. The
-    tree depth limits the sum of the prefix match and speculation lengths."""
+    """The maximum suffix match length for suffix decoding."""
 
     suffix_decoding_max_cached_requests: int = 10000
-    """The maximum number of requests to cache in the global suffix tree. If
-    exceeded, will trigger eviction in FIFO order. If set to 0, the global
-    suffix tree is disabled and past responses are not cached (prompt trees
-    are still used)."""
+    """Set to 0 to disable the cross-request corpus of finished responses
+    (equivalent to `suffix_decoding_corpus_tokens=0`), so that each request
+    matches only within its own prompt and output."""
 
     suffix_decoding_corpus_tokens: int = 1 << 20
-    """Model Runner V2 only: token capacity of the GPU corpus of finished
-    responses used for cross-request matching. Oldest responses are
-    overwritten first. Set 0 (or `suffix_decoding_max_cached_requests` to 0)
-    to match only within each request's own prompt and output."""
+    """Token capacity of the GPU corpus of finished responses used for
+    cross-request matching. Oldest responses are overwritten first. Set 0 (or
+    `suffix_decoding_max_cached_requests` to 0) to match only within each
+    request's own prompt and output."""
 
     suffix_decoding_max_spec_factor: float = 1.0
-    """The maximum spec factor for suffix decoding. The spec factor controls
-    speculation lengths based on the prefix match length: max_spec_tokens =
-    max_spec_factor * prefix_match_length."""
+    """Deprecated and has no effect: the GPU suffix speculator always drafts
+    `num_speculative_tokens` tokens."""
 
     suffix_decoding_min_token_prob: float = 0.1
-    """The minimum token probability for suffix decoding. Will only speculate
-    tokens with estimated probability (based on frequency counts) greater than
-    or equal to this value."""
+    """Deprecated and has no effect: the GPU suffix speculator always drafts
+    `num_speculative_tokens` tokens."""
 
     draft_load_config: LoadConfig | None = None
     """Load config for the draft model. If not specified, will use the load
@@ -747,12 +725,10 @@ class SpeculativeConfig:
             "revision",
             "code_revision",
             "index_share_for_mtp_iteration",
-            "disable_padded_drafter_batch",
             "disable_eagle_block_drop",
             "disable_lookahead_block_hashes",
             "draft_lm_head_quantization",
             "use_local_argmax_reduction",
-            "use_heterogeneous_vocab",
             "prompt_lookup_max",
             "prompt_lookup_min",
             "parallel_drafting",
@@ -1356,18 +1332,6 @@ class SpeculativeConfig:
             transformers_mtp_overrides=transformers_mtp_overrides,
         )
 
-    @staticmethod
-    def _is_custom_proposer_path(model: str | None) -> bool:
-        """True if ``model`` is a dotted import path (e.g. ``pkg.MyProposer``)."""
-        if model is None:
-            return False
-        if model.startswith(("http://", "https://", "file://")):
-            return False
-        if "/" in model:
-            return False
-        parts = model.split(".")
-        return len(parts) >= 2 and all(part.isidentifier() for part in parts)
-
     def __post_init__(self):
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
@@ -1387,11 +1351,6 @@ class SpeculativeConfig:
             )
             self.custom_method = self.method
             self.method = custom_cls.base_method  # type: ignore[assignment]
-        elif self.method is None and SpeculativeConfig._is_custom_proposer_path(
-            self.model
-        ):
-            # V1 model runner only: a custom proposer's module path.
-            self.method = "custom_class"
         elif self.method is None and self.model in ("ngram", "[ngram]"):
             self.method = "ngram"
         elif self.method is None and self.model is None:
@@ -1699,23 +1658,16 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        if self.use_heterogeneous_vocab and not self.uses_draft_model():
-            raise ValueError(
-                "use_heterogeneous_vocab only works with method='draft_model'"
-            )
-
-        if self.use_heterogeneous_vocab and self.draft_sample_method != "greedy":
-            raise ValueError(
-                "use_heterogeneous_vocab currently only supports greedy draft "
-                "sampling. Set draft_sample_method='greedy' (the default) or "
-                "omit it."
-            )
-
-        if self.use_heterogeneous_vocab and self.use_local_argmax_reduction:
-            raise ValueError(
-                "use_heterogeneous_vocab is not compatible with "
-                "use_local_argmax_reduction because token-level intersection "
-                "requires the full draft logits."
+        if self.parallel_drafting is not None:
+            if self.parallel_drafting and self.method not in ("dflash", "dspark"):
+                raise ValueError(
+                    "parallel_drafting is only supported by the dflash and dspark "
+                    f"methods, not {self.method!r}."
+                )
+            logger.warning_once(
+                "parallel_drafting is deprecated and has no effect: dflash and "
+                "dspark always draft in parallel, and no other method supports "
+                "it. It will be removed in a future release."
             )
 
         if self.rejection_sample_method == "fly":
@@ -1740,8 +1692,7 @@ class SpeculativeConfig:
                 "may degrade model outputs."
             )
 
-        if not self.use_heterogeneous_vocab:
-            self.verify_equal_vocab_size_if_draft_model()
+        self.verify_equal_vocab_size_if_draft_model()
         return self
 
     def verify_equal_vocab_size_if_draft_model(self):
@@ -1766,23 +1717,9 @@ class SpeculativeConfig:
         """Return the maximum additional drafting slots per request.
 
         The scheduler budget already includes one query slot per decoding request.
-        Let K be ``num_speculative_tokens``. Standard configurations require:
-
-        ==================== ============= ======== ================
-        Algorithm            Method        Parallel Additional slots
-        ==================== ============= ======== ================
-        EAGLE3               eagle3        No       0
-        P-EAGLE              eagle3        Yes      K - 1
-        DFlash               dflash        Yes      0
-        DSpark               dspark        Yes      0
-        MTP                  mtp           No       0
-        N-gram               ngram         No       0
-        Draft model          draft_model   No       1
-        PARD                 draft_model   Yes      K
-        ==================== ============= ======== ================
-
-        DFlash and DSpark draft in a separate query pass rather than adding
-        rows to the target batch.
+        Only the autoregressive draft-model input needs one more: it retains one
+        unsliced token. DFlash and DSpark draft in a separate query pass rather
+        than adding rows to the target batch.
         """
         return self.speculator_config.max_num_new_slots_for_drafting
 
@@ -1792,14 +1729,6 @@ class SpeculativeConfig:
             and self.draft_model_config is not None
             and getattr(self.draft_model_config.hf_config, "model_type", None)
             == "gemma4_mtp"
-        )
-
-    def use_step3p5_mtp(self) -> bool:
-        return (
-            self.method == "mtp"
-            and self.draft_model_config is not None
-            and getattr(self.draft_model_config.hf_config, "model_type", None)
-            == "step3p5_mtp"
         )
 
     def use_eagle(self) -> bool:
@@ -1879,7 +1808,6 @@ class SpeculativeConfig:
                 "ngram",
                 "suffix",
                 "extract_hidden_states",
-                "custom_class",
             )
             else self.draft_model_config.model
         )
