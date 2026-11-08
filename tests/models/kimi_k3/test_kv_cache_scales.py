@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Checkpoint FP8 KV-cache scales must reach Kimi-Linear's MLA layers.
 
-Kimi's ``MultiHeadLatentAttention`` owns its KV cache directly (it is neither
-``Attention`` nor ``MLAAttention``), and its scales live at
-``<prefix>.self_attn.{k,v}_scale``.
+Kimi's `MultiHeadLatentAttention` owns its KV cache directly (it is neither
+`Attention` nor `MLAAttention`), and its scales live at
+`<prefix>.self_attn.{k,v}_scale`.
 """
 
 import pytest
@@ -73,7 +73,7 @@ SCALE_NAMES = {
 
 
 class _SelfContainedAttention(torch.nn.Module, AttentionLayerBase):
-    """An attention layer that is neither ``Attention`` nor ``MLAAttention``."""
+    """An attention layer that is neither `Attention` nor `MLAAttention`."""
 
     def get_attn_backend(self):
         raise NotImplementedError
