@@ -7,14 +7,14 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, model_validator
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-)
 from vllm.entrypoints.generate.base.protocol import validate_cache_salt
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+)
 from vllm.tasks import check_removed_pooling_task
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness

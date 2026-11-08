@@ -22,6 +22,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     VllmTritonJitKernel,
     triton_kernel_dispatcher_with_warmup,
+    triton_ptr_range,
     triton_warmup_inputs,
 )
 from vllm.platforms import current_platform
@@ -78,7 +79,7 @@ class _TestTritonKernel(VllmTritonJitKernel["_TestTritonKernel.CompileKey"]):
     class CompileKey:
         value: int
 
-    def dispatch(self, *, value: int) -> CompileKey:
+    def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]  # narrows base **kwargs
         return self.CompileKey(value=value)
 
     def get_warmup_keys(self) -> list[CompileKey]:
@@ -168,23 +169,28 @@ def _warmup_store_kernel(out, VALUE: tl.constexpr):
     not current_platform.is_cuda() or not hasattr(triton, "AsyncCompileMode"),
     reason="Requires CUDA Triton async compilation",
 )
-def test_registered_warmup_parallelizes_compile_only_and_runtime_stays_serial(
+def test_registered_warmup_overlaps_kernels_and_runtime_stays_serial(
     monkeypatch,
 ) -> None:
     from triton.runtime._async_compile import active_mode
 
     monkeypatch.setattr(envs, "VLLM_TRITON_JIT_WARMUP_NUM_THREADS", 2)
 
-    def warmup_inputs():
-        return dict(out=TritonWarmupTensor(torch.int32), value=WarmupChoices(1, 2))
+    def make_store(value):
+        def warmup_inputs():
+            return dict(out=TritonWarmupTensor(torch.int32), value=value)
 
-    @triton_kernel_dispatcher_with_warmup(
-        kernel=_warmup_store_kernel, warmup_inputs=warmup_inputs
-    )
-    def store(out, value):
-        return (1,), dict(VALUE=value)
+        @triton_kernel_dispatcher_with_warmup(
+            kernel=_warmup_store_kernel, warmup_inputs=warmup_inputs
+        )
+        def store(out, value):
+            return (1,), dict(VALUE=value)
 
-    store.get_warmup_keys()  # Initialize Triton's binder before wrapping its compiler.
+        # Initialize Triton's binder before wrapping its compiler.
+        store.get_warmup_keys()
+        return store
+
+    stores = [make_store(value) for value in (1, 2)]
     caller = threading.get_ident()
     barrier = threading.Barrier(2, timeout=10)
     compiled_on = []
@@ -200,14 +206,15 @@ def test_registered_warmup_parallelizes_compile_only_and_runtime_stays_serial(
     monkeypatch.setattr(_warmup_store_kernel, "compile", record_compile)
     registry = JitWarmupRegistry(None)
     with registry.activate():
-        store.register_warmup()
+        for store in stores:
+            store.register_warmup()
     registry.warmup()
 
     assert len(compiled_on) == 2
     assert all(thread != caller for thread in compiled_on)
     assert active_mode.get() is None
     out = torch.empty(1, dtype=torch.int32, device=current_platform.device_type)
-    for value in (1, 2):
+    for store, value in zip(stores, (1, 2)):
         store(out, value)
         assert out.item() == value
     assert len(compiled_on) == 2
@@ -306,7 +313,7 @@ def test_triton_kernel_decorator_returns_launcher(
     ]
     assert launch.__name__ == "launch"
     with pytest.raises(TypeError, match="unexpected keyword"):
-        launch(first, 1, 7, stale_constexpr=True)
+        launch(first, 1, 7, stale_constexpr=True)  # type: ignore[call-arg]  # invalid on purpose
 
 
 def test_triton_kernel_decorator_without_triton(
@@ -473,6 +480,80 @@ def test_triton_warmup_inputs_expands_explicit_pointer_dtypes() -> None:
         )
 
 
+@pytest.mark.parametrize("live_ptr_range", [None, 1 << 32])
+def test_warmup_pointer_specializes_like_the_live_tensor(
+    live_ptr_range: int | None,
+) -> None:
+    """A stand-in must land on the same side of ROCm's 2 GiB buffer-ops window.
+
+    KV-cache views sit in an allocation far past it, so a stand-in that keeps
+    the optimistic default range warms a ``tt.pointer_range`` specialization no
+    launch ever asks for, and the kernel JITs on its first real batch.
+    """
+    backend = pytest.importorskip("triton.backends.amd.compiler").HIPBackend
+    if not hasattr(backend, "is_within_2gb"):
+        # if it ever changes in the future
+        assert not hasattr(backend, "get_tensor_specialization"), (
+            "Triton still specializes tensor arguments but dropped "
+            "is_within_2gb; re-derive TritonWarmupTensor.ptr_range_bytes "
+            "against whatever now decides tt.pointer_range"
+        )
+        pytest.skip("Triton no longer specializes tensor arguments")
+    is_within_2gb = backend.is_within_2gb
+
+    live = torch.empty(64, dtype=torch.uint8)
+    if live_ptr_range is not None:
+        live.ptr_range = lambda: live_ptr_range
+
+    stub = TritonWarmupTensor(torch.bfloat16, ptr_range_bytes=triton_ptr_range(live))
+
+    assert is_within_2gb(stub) == is_within_2gb(live)
+    assert is_within_2gb(stub) is (live_ptr_range is None)
+
+
+def test_warmup_pointer_range_survives_the_fake_tensor_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dispatcher that needs real tensors must not drop ``ptr_range_bytes``.
+
+    A dispatcher touching tensor APIs re-runs its case through fake tensors,
+    so the declared range has to round-trip the stand-in as an attribute and
+    come back out of both conversion points, key derivation and the warmup
+    launch. Dropping it there silently restores the optimistic <2 GiB
+    specialization and the kernel JITs on its first real batch.
+    """
+    kernel = _FakeTritonKernel()
+    over_2gb = 1 << 32
+
+    def warmup_inputs() -> dict[str, Any]:
+        return dict(
+            first=TritonWarmupTensor(
+                torch.bfloat16, shape=(2, 3), ptr_range_bytes=over_2gb
+            ),
+            second=1,
+        )
+
+    @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
+    def dispatch(first: torch.Tensor, second: int) -> LaunchSpec:
+        assert isinstance(first, torch.Tensor)
+        return (first.shape[0],), dict(CONST=first[0].numel())
+
+    derived: list[dict[str, Any]] = []
+
+    def derive(kernel: Any, kwargs: dict[str, Any]) -> set[TritonJitKey]:
+        derived.append(kwargs)
+        return {TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])}
+
+    _patch_key_deriver(monkeypatch, derive)
+
+    keys = dispatch.get_warmup_keys()
+    kernel.warmup_calls.clear()
+    dispatch.compile(keys[0])
+
+    assert [kwargs["first"].ptr_range_bytes for kwargs in derived] == [over_2gb]
+    assert [call["first"].ptr_range_bytes for call in kernel.warmup_calls] == [over_2gb]
+
+
 def test_triton_key_derivation_applies_wrappers_and_runtime_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -544,37 +625,3 @@ def test_triton_key_derivation_covers_autotune_configs_and_jit_identity(
     }
     assert {key.jit_function_id for key in autotune_keys} == {id(_binder_test_kernel)}
     assert autotune_keys.isdisjoint(other_kernel_keys)
-
-
-def test_compute_slot_mapping_uses_named_launcher_inputs(monkeypatch) -> None:
-    from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-    from vllm.v1.worker.block_table import ComputeSlotMappingKernel
-
-    owner = ComputeSlotMappingKernel()
-    compile_key = owner.CompileKey(
-        kv_cache_block_size=16,
-        total_cp_world_size=2,
-        total_cp_rank=1,
-        cp_kv_cache_interleave_size=1,
-        block_table_stride=128,
-    )
-    launches: list[tuple[Any, ...]] = []
-
-    def launch(launch_spec: Any, inputs: Any) -> None:
-        launches.append((launch_spec, inputs))
-
-    monkeypatch.setattr(owner, "launch", launch)
-    owner.compile(compile_key)
-
-    (grid, kwargs), inputs = launches[0]
-    assert grid == (2,)
-    assert inputs["num_tokens"] == 2
-    assert inputs["block_table_stride"] == 128
-    assert kwargs == {
-        "KV_CACHE_BLOCK_SIZE": 16,
-        "TOTAL_CP_WORLD_SIZE": 2,
-        "TOTAL_CP_RANK": 1,
-        "CP_KV_CACHE_INTERLEAVE_SIZE": 1,
-        "PAD_ID": PAD_SLOT_ID,
-        "BLOCK_SIZE": owner.triton_block_size,
-    }

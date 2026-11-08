@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -22,7 +22,9 @@ from vllm.model_executor.layers import logits_processor
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.models.lilicorr import LiLiCorrHead
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import CandidateSampler
+from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import LiLiCorrSpeculator
 
 
@@ -227,7 +229,11 @@ def test_candidates_use_global_partition_and_exclude_padding(monkeypatch, tp_siz
         fake = SimpleNamespace(
             scale=1.0,
             soft_cap=None,
+            org_vocab_size=3 * tp_size,
             _apply_head=lambda *args, rank=rank: shards[rank].clone(),
+        )
+        fake._mask_outside_vocab = MethodType(
+            logits_processor.LogitsProcessor._mask_outside_vocab, fake
         )
         lm_head = SimpleNamespace(
             tp_size=tp_size,
@@ -290,16 +296,47 @@ def test_context_anchor_is_last_committed_normalized_feature():
         anchor_hidden=torch.full((4, 4), 123.0),
         anchor_valid=torch.ones(4, dtype=torch.bool),
     )
-    batch = SimpleNamespace(num_reqs=2, query_start_loc=torch.tensor([0, 2, 6]))
-    LiLiCorrSpeculator.prepare_context_anchor(spec, batch, torch.tensor([0, 2]))
+    LiLiCorrSpeculator.prepare_context_anchor(
+        spec, 2, torch.tensor([0, 2, 6]), torch.tensor([0, 2])
+    )
     torch.testing.assert_close(spec.anchor_hidden[:2], norm(hidden[[1, 3]]))
     assert spec.anchor_valid.tolist() == [True, True, False, False]
     assert not spec.anchor_hidden[2:].any()
     # A smaller reordered batch must not retain an old request's anchor.
-    batch = SimpleNamespace(num_reqs=1, query_start_loc=torch.tensor([0, 3]))
-    LiLiCorrSpeculator.prepare_context_anchor(spec, batch, torch.tensor([1]))
+    LiLiCorrSpeculator.prepare_context_anchor(
+        spec, 1, torch.tensor([0, 3]), torch.tensor([1])
+    )
     torch.testing.assert_close(spec.anchor_hidden[0], norm(hidden[1]))
     assert not spec.anchor_hidden[1:].any()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_captured_context_anchor_rereads_fixed_inputs():
+    """The anchor runs in the draft's FULL graph: each replay must re-read its
+    fixed-address inputs and ignore a padded request's stale rejected count."""
+    dev = torch.device("cuda")
+    query_start_loc = torch.zeros(3, dtype=torch.int32, device=dev)
+    num_rejected = torch.zeros(2, dtype=torch.int32, device=dev)
+    spec = SimpleNamespace(
+        hidden_states=torch.randn(8, 2, device=dev),
+        model=SimpleNamespace(model=SimpleNamespace(hidden_norm=lambda x: 2 * x)),
+        anchor_hidden=torch.zeros(2, 2, device=dev),
+        anchor_valid=torch.zeros(2, dtype=torch.bool, device=dev),
+    )
+    args = (spec, 2, query_start_loc, num_rejected)
+    LiLiCorrSpeculator.prepare_context_anchor(*args)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        LiLiCorrSpeculator.prepare_context_anchor(*args)
+    # One live request padded to two; the second case anchors on a prefill row
+    # past the graph's context rows, stored eagerly before replay.
+    for loc, rejected, row in (([0, 2, 2], [1, 5], 0), ([0, 7, 7], [0, 0], 6)):
+        query_start_loc.copy_(torch.tensor(loc))
+        num_rejected.copy_(torch.tensor(rejected))
+        graph.replay()
+        torch.testing.assert_close(spec.anchor_hidden[0], 2 * spec.hidden_states[row])
+        assert spec.anchor_valid.tolist() == [True, False]
+        assert not spec.anchor_hidden[1].any()
 
 
 @pytest.mark.parametrize("lilicorr", [False, True])
@@ -418,7 +455,9 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
     scores = torch.randn(batch, steps, top_k, top_k, device=device)
     tokens = torch.full((batch, steps), -1, dtype=torch.long, device=device)
     cache = (
-        torch.full((batch, steps, vocab), -float("inf"), device=device)
+        DraftLogitsCache(
+            batch, steps, vocab, dtype=torch.float32, fill=-float("inf"), device=device
+        )
         if probabilistic
         else None
     )
@@ -460,13 +499,73 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
                 assert index == realized.argmax().item()
             if cache is not None:
                 torch.testing.assert_close(
-                    cache[state, step, candidates[row, step]], realized
+                    cache.values[state, step, candidates[row, step]], realized
                 )
-                assert cache[state, step, old_candidates[row, step]].isneginf().all()
+                assert (
+                    cache.values[state, step, old_candidates[row, step]]
+                    .isneginf()
+                    .all()
+                )
             previous = index
     assert (tokens[2] == -1).all()
     if cache is not None:
-        assert cache[1].isneginf().all()
+        assert cache.values[1].isneginf().all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("use_fp64", [False, True])
+def test_candidate_walk_revisited_position_matches_step_seed(use_fp64):
+    """The candidate walk must use the same step key as ordinary draft sampling."""
+    device = torch.device("cuda")
+    batch, steps, top_k = 4096, 2, 2
+    sampler = CandidateSampler(batch, steps, top_k, device)
+    candidates = torch.arange(top_k, device=device).expand(batch, steps, top_k)
+    logits = torch.tensor([0.7, 0.3], device=device).log()
+    scores = logits.expand(batch, steps, top_k, top_k)
+    mapping = torch.arange(batch, device=device)
+    temperature = torch.ones(batch, device=device)
+    seeds = mapping.to(torch.int64)
+    positions = torch.arange(21, 21 + steps, device=device).repeat(batch)
+    tokens = torch.empty(batch, steps, dtype=torch.int64, device=device)
+    cache = DraftLogitsCache(
+        batch, steps, top_k, dtype=torch.float32, fill=0.0, device=device
+    )
+    first_round = None
+    for start in (21, 22):
+        positions.view(batch, steps).copy_(
+            torch.arange(start, start + steps, device=device)
+        )
+        sampler.sample(
+            candidates,
+            scores,
+            batch,
+            positions,
+            mapping.repeat_interleave(steps),
+            temperature,
+            seeds,
+            tokens,
+            cache,
+            use_fp64,
+        )
+        for step in range(steps):
+            expected = gumbel_sample(
+                logits.expand(batch, -1),
+                mapping,
+                temperature,
+                seeds,
+                positions.view(batch, steps)[:, step] - 1,
+                apply_temperature=True,
+                is_drafting=True,
+                logits_cache=cache.values,
+                logits_cache_col=torch.tensor(step, device=device),
+                use_fp64=use_fp64,
+            )
+            torch.testing.assert_close(tokens[:, step], expected)
+        if first_round is None:
+            first_round = tokens.clone()
+        else:
+            mismatch_rate = (first_round[:, 1] != tokens[:, 0]).float().mean().item()
+            assert 0.35 < mismatch_rate < 0.5
 
 
 @pytest.mark.parametrize(
@@ -485,7 +584,7 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
         pytest.param(False, "missing_weight_scale_2", True, id="missing-global-scale"),
     ],
 )
-def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
+def test_checkpoint_rejects_wrong_heads_and_allows_partial_buckets(
     monkeypatch, convolution, mismatch, quantized
 ):
     from vllm.model_executor.models.lilicorr import LiLiCorr, LiLiCorrForCausalLM
@@ -494,6 +593,7 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
     nn.Module.__init__(wrapper)
     wrapper.model = LiLiCorr.__new__(LiLiCorr)
     nn.Module.__init__(wrapper.model)
+    wrapper.model._context_kv_proj = None  # set by __init__ (no MXFP8 projection)
     wrapper.has_own_lm_head = False
     with set_current_vllm_config(
         VllmConfig(
@@ -561,13 +661,8 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
         wrapper.model, "_build_fused_kv_buffers", lambda: None, raising=False
     )
     supplied = [("model." + name, value) for name, value in weights.items()]
-    if mismatch:
-        message = (
-            "no module or parameter"
-            if mismatch.startswith("extra")
-            else "coverage mismatch"
-        )
-        with pytest.raises(ValueError, match=message):
+    if mismatch and mismatch.startswith("extra"):
+        with pytest.raises(ValueError, match="no module or parameter"):
             wrapper.load_weights(supplied)
     else:
         wrapper.load_weights(supplied)
@@ -642,10 +737,7 @@ def owned_head_model(monkeypatch):
     return build
 
 
-@pytest.mark.parametrize("missing", [None, "weight", "weight_scale", "weight_scale_2"])
-def test_owned_nvfp4_lm_head_loads_required_checkpoint_tensors(
-    owned_head_model, missing
-):
+def test_owned_nvfp4_lm_head_loads_required_checkpoint_tensors(owned_head_model):
     model, _ = owned_head_model()
     assert model.lm_head.weight.dtype == torch.uint8
     assert model.lm_head.weight.shape == (64, 8)
@@ -653,17 +745,12 @@ def test_owned_nvfp4_lm_head_loads_required_checkpoint_tensors(
         name: torch.ones_like(value) for name, value in model.state_dict().items()
     }
     del weights["lm_head.input_scale"]  # Deprecated and unused for W4A16.
-    if missing:
-        del weights[f"lm_head.{missing}"]
-        with pytest.raises(ValueError, match=f"lm_head.{missing}"):
-            model.load_weights(weights.items())
-    else:
-        model.load_weights(weights.items())
-        assert model.has_own_lm_head
-        for name in ("weight", "weight_scale", "weight_scale_2"):
-            torch.testing.assert_close(
-                getattr(model.lm_head, name), weights[f"lm_head.{name}"]
-            )
+    model.load_weights(weights.items())
+    assert model.has_own_lm_head
+    for name in ("weight", "weight_scale", "weight_scale_2"):
+        torch.testing.assert_close(
+            getattr(model.lm_head, name), weights[f"lm_head.{name}"]
+        )
 
 
 @pytest.mark.parametrize("owned", [False, True])

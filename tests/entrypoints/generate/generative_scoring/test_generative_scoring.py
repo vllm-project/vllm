@@ -207,7 +207,7 @@ class TestProbabilityComputation:
             max_lp = max(label_logprobs.values())
             exp_vals = {k: math.exp(v - max_lp) for k, v in label_logprobs.items()}
             sum_exp = sum(exp_vals.values())
-            for tid, lp in label_logprobs.items():
+            for tid in label_logprobs:
                 assert abs(probs[tid] - exp_vals[tid] / sum_exp) < 1e-9
         else:
             for tid, lp in label_logprobs.items():
@@ -343,6 +343,35 @@ class TestGeneration:
         assert len(result.data) == 2
         for item_result in result.data:
             assert 0.0 <= item_result.score <= 1.0
+
+    @pytest.mark.asyncio
+    async def test_missing_read_returns_server_error_without_traceback(
+        self, monkeypatch
+    ):
+        mock_engine = _create_mock_engine()
+        serving = _create_serving(mock_engine)
+
+        async def mock_generate(*args, **kwargs):
+            if False:
+                yield None
+
+        mock_engine.generate = mock_generate
+        log_exception = MagicMock()
+        monkeypatch.setattr(
+            "vllm.entrypoints.generate.generative_scoring.serving.logger.exception",
+            log_exception,
+        )
+        request = GenerativeScoringRequest(
+            model=MODEL_NAME,
+            query=[100],
+            items=[[200]],
+            label_token_ids=[1234, 5678],
+        )
+        result = await serving.create_generative_scoring(request, None)
+
+        assert isinstance(result, ErrorResponse)
+        assert result.error.code == 500
+        log_exception.assert_not_called()
 
 
 if __name__ == "__main__":

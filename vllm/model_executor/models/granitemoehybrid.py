@@ -42,7 +42,6 @@ from .interfaces import (
     HasInnerState,
     IsHybrid,
     SupportsLoRA,
-    SupportsMambaPrefixCaching,
     SupportsPP,
     SupportsQuant,
 )
@@ -391,7 +390,7 @@ class GraniteMoeHybridModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         num_attn = 0
-        for i, layer in enumerate(self.layers):
+        for layer in self.layers:
             if isinstance(layer, GraniteMoeHybridAttentionDecoderLayer):
                 num_attn += 1
             hidden_states, residual = layer(
@@ -587,7 +586,6 @@ class GraniteMoeHybridForCausalLM(
     SupportsPP,
     IsHybrid,
     SupportsQuant,
-    SupportsMambaPrefixCaching,
 ):
     packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": [
