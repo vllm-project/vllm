@@ -799,7 +799,7 @@ def test_lookup_key_client_reset_uses_typed_protocol():
     # ACK path: server returns RESP_OK -> client returns True.
     fake_socket.recv.return_value = protocol.RESP_OK
     assert client.reset() is True
-    assert fake_socket.send.call_args[0][0] == protocol.RESET_MSG
+    assert fake_socket.send_multipart.call_args[0][0] == (protocol.RESET_MSG,)
 
     # NACK path: server returns RESP_ERR -> client returns False.
     fake_socket.recv.return_value = protocol.RESP_ERR
@@ -821,7 +821,7 @@ def _gated_recv(gate: threading.Event, value: int):
     """Mock recv side-effect that blocks until ``gate`` is set, so the
     executor's lookup can be held pending deterministically."""
 
-    def recv():
+    def recv(flags: int = 0) -> bytes:
         gate.wait()
         return value.to_bytes(4, "big")
 
@@ -1007,7 +1007,10 @@ def test_lookup_client_refreshes_changed_or_expired_query(monkeypatch, change):
 def test_pending_lookup_is_not_restarted_by_ttl(monkeypatch, prefetched):
     """A lookup still queued past the TTL is kept, not resubmitted behind
     the backlog it is waiting on."""
-    client, sock = _make_lookup_client({"lookup_prefetch_limit": 1})
+    # Keep the RPC deadline beyond the clock advance that expires the result TTL.
+    client, sock = _make_lookup_client(
+        {"lookup_prefetch_limit": 1, "lookup_timeout_s": 5.0}
+    )
     gate = threading.Event()
     sock.recv.side_effect = _gated_recv(gate, 32)
     clock = [0.0]
