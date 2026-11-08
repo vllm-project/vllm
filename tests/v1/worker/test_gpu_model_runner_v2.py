@@ -722,8 +722,10 @@ def test_state_kv_allocation_failure_names_memory_contributors(
 ):
     """A failed state allocation keeps its exception and notes the contributors.
 
-    The allocation precedes every model-state hook, so core attributes it, and
-    neither hook runs for the failing call.
+    The allocation precedes the model state's initialization hooks, so core
+    attributes it, and neither hook runs for the failing call. The profiling
+    pool and the serving pool are both allocated through this call, so both are
+    covered.
     """
     import traceback
 
@@ -743,13 +745,17 @@ def test_state_kv_allocation_failure_names_memory_contributors(
 
     error = failure("injected allocation failure")
 
-    def fail(*args, **kwargs):
+    @contextlib.contextmanager
+    def failing_pool():
+        # The pool the worker allocates in fails before any KV cache tensor exists.
         raise error
+        yield
 
-    monkeypatch.setattr(model_runner_module, "init_kv_cache", fail)
     runner = _state_only_runner(monkeypatch, config, _ModelState())
     with pytest.raises(failure) as raised:
-        runner.initialize_kv_cache(plan, is_profiling=is_profiling)
+        runner.initialize_kv_cache(
+            plan, is_profiling=is_profiling, kv_cache_allocation_context=failing_pool()
+        )
     assert raised.value is error
     assert str(error) == "injected allocation failure"
     assert calls == []

@@ -209,8 +209,8 @@ def _note_memory_contributors(
 ) -> Iterator[None]:
     """Note a persistent-state model's memory contributors on a failure.
 
-    The KV cache allocation precedes every model-state hook, so core names the
-    options the model says also consume device memory.
+    The KV cache allocation precedes the model state's initialization hooks, so
+    core names the options the model says also consume device memory.
     """
     try:
         yield
