@@ -41,6 +41,11 @@ from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
 )
+from vllm.model_executor.layers.fusion.residual_stream import (
+    ResidualStream,
+    Scatter,
+    finalize_norm,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -86,6 +91,7 @@ class Qwen2MLP(nn.Module):
         hidden_act: str,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -100,6 +106,7 @@ class Qwen2MLP(nn.Module):
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
@@ -394,6 +401,9 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         else:
             self.norm = PPMissingLayer()
 
+        self.supports_residual_stream = False
+        self.vllm_config = vllm_config
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -410,25 +420,48 @@ class Qwen2Model(nn.Module, EagleModelMixin):
             else:
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
+            if self.supports_residual_stream:
+                residual_stream = ResidualStream(
+                    residual=None,
+                    vllm_config=self.vllm_config,
+                )
+
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+            if self.supports_residual_stream:
+                residual_stream = ResidualStream.from_handoff(
+                    hidden_states, residual, Scatter.FULL, self.vllm_config
+                )
 
         remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
         aux_hidden_states: list[torch.Tensor] = []
         if get_pp_group().is_first_rank:
             self._maybe_add_hidden_state(
-                aux_hidden_states, self.start_layer, hidden_states, residual
+                aux_hidden_states,
+                self.start_layer,
+                hidden_states,
+                residual,
+                residual_stream if self.supports_residual_stream else None,
             )
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            if self.supports_residual_stream:
+                hidden_states, residual = layer(
+                    positions, hidden_states, residual, residual_stream
+                )
+            else:
+                hidden_states, residual = layer(positions, hidden_states, residual)
             self._maybe_add_hidden_state(
-                aux_hidden_states, idx + 1, hidden_states, residual
+                aux_hidden_states,
+                idx + 1,
+                hidden_states,
+                residual,
+                residual_stream if self.supports_residual_stream else None,
             )
 
         if not get_pp_group().is_last_rank:
@@ -440,7 +473,15 @@ class Qwen2Model(nn.Module, EagleModelMixin):
                 }
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        # Route the final norm through the residual-stream finalizer: it reduces
+        # only when the last decoder left its output PARTIAL.
+        last_layer = self.layers[self.end_layer - 1]
+        hidden_states = finalize_norm(
+            self.norm,
+            hidden_states,
+            residual,
+            incoming=getattr(last_layer, "output_scatter", Scatter.FULL),
+        )
 
         aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:

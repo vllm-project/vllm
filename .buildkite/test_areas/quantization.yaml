@@ -64,6 +64,9 @@ steps:
   - vllm/model_executor/kernels/linear
   - vllm/model_executor/layers/quantization/compressed_tensors
   - vllm/model_executor/layers/quantization/modelopt.py
+  - vllm/model_executor/models/qwen2.py
+  - vllm/model_executor/models/qwen3.py
+  - vllm/model_executor/models/interfaces.py
   commands:
     - pytest -v -s fusion/
   mirror:
@@ -82,6 +85,9 @@ steps:
       - vllm/model_executor/kernels/linear
       - vllm/model_executor/layers/quantization/compressed_tensors
       - vllm/model_executor/layers/quantization/modelopt.py
+      - vllm/model_executor/models/qwen2.py
+      - vllm/model_executor/models/qwen3.py
+      - vllm/model_executor/models/interfaces.py
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (B200) Quantized MoE"

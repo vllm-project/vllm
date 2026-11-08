@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
 )
+from vllm.model_executor.layers.fusion.residual_stream import ResidualStream
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -835,13 +836,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         layer_idx: int,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        residual_stream: "ResidualStream | None" = None,
     ) -> list[torch.Tensor]:
         if self.config.attn_res_block_size is not None:
             # attn-res `residual` is a block-state bank, not an additive
             # residual; None makes the mixin capture the prefix sum directly.
             residual = None
         return super()._maybe_add_hidden_state(
-            aux_hidden_states, layer_idx, hidden_states, residual
+            aux_hidden_states, layer_idx, hidden_states, residual, residual_stream
         )
 
     def forward(

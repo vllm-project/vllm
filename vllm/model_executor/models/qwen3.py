@@ -38,6 +38,10 @@ from vllm.model_executor.layers.attention.encoder_only_attention import (
     Attention,
     EncoderOnlyAttention,
 )
+from vllm.model_executor.layers.fusion.residual_stream import (
+    ResidualStream,
+    Scatter,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -80,6 +84,7 @@ class Qwen3Attention(nn.Module):
         dual_chunk_attention_config: dict[str, Any] | None = None,
         per_layer_sliding_window: int | None = None,
         mrope_positions_factor: int = 4,
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -117,6 +122,7 @@ class Qwen3Attention(nn.Module):
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            reduce_results=reduce_results,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -190,6 +196,9 @@ class Qwen3DecoderLayer(nn.Module):
             config, "dual_chunk_attention_config", None
         )
 
+        is_pp_enable = get_pp_group().world_size > 1
+        self_defer = not is_pp_enable
+
         # By default, Qwen3 uses causal attention as it is a decoder-only model.
         # You can override the HF config with `is_causal=False` to enable
         # bidirectional attention, which is used in some embedding models
@@ -215,6 +224,7 @@ class Qwen3DecoderLayer(nn.Module):
             dual_chunk_attention_config=dual_chunk_attention_config,
             per_layer_sliding_window=per_layer_sliding_window,
             mrope_positions_factor=mrope_positions_factor,
+            reduce_results=is_pp_enable,
         )
         self.mlp = Qwen3MLP(
             hidden_size=self.hidden_size,
@@ -222,32 +232,47 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_act=config.hidden_act,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
+            reduce_results=is_pp_enable,
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        self.output_scatter = Scatter.PARTIAL if self_defer else Scatter.FULL
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        residual_stream: ResidualStream,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Self Attention
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states, residual = residual_stream.prepare(
+            hidden_states, self.input_layernorm, self.self_attn.qkv_proj
+        )
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
+        residual_stream.record(
+            hidden_states,
+            Scatter.PARTIAL
+            if residual_stream.defer_attn(self.self_attn.o_proj)
+            else Scatter.FULL,
+        )
+
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = residual_stream.prepare(
+            hidden_states, self.post_attention_layernorm, self.mlp.gate_up_proj
+        )
         hidden_states = self.mlp(hidden_states)
+        residual_stream.record(
+            hidden_states,
+            Scatter.PARTIAL
+            if residual_stream.defer_mlp(self.mlp.down_proj)
+            else Scatter.FULL,
+        )
         return hidden_states, residual
 
 
@@ -275,6 +300,7 @@ class Qwen3Model(Qwen2Model):
             prefix=prefix,
             decoder_layer_type=self.decoder_layer_type,
         )
+        self.supports_residual_stream = True
 
 
 class Qwen3ForCausalLM(

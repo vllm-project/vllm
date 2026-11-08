@@ -236,10 +236,14 @@ steps:
     - vllm/v1/attention/
     - vllm/compilation/
     - tests/compile/fusions_e2e/
+    - tests/fusion/
   commands:
     - nvidia-smi
     # Run all models and attn backends but only Inductor partition and native custom ops
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"
+    # Manual fusion: the deferred all-reduce is issued by model code, so this
+    # needs its own end-to-end check (the compiler-pass fusion tests skip it).
+    - pytest -v -s tests/fusion/test_qwen3_deferred_allreduce_e2e.py
   mirror:
     amd:
       automatic_shard: true

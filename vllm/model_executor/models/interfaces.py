@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from vllm.inputs import PromptType, TokensPrompt
     from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
+    from vllm.model_executor.layers.fusion.residual_stream import ResidualStream
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
     from vllm.model_executor.layers.mamba.mamba_utils import (
         MambaStateCopyFunc,
@@ -1656,9 +1657,15 @@ class EagleModelMixin:
         layer_idx: int,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        residual_stream: "ResidualStream | None" = None,
     ) -> list[torch.Tensor]:
         if layer_idx in self.aux_hidden_state_layers:
-            value = hidden_states + residual if residual is not None else hidden_states
+            if residual_stream is not None:
+                value = residual_stream.snapshot(hidden_states)
+            else:
+                value = (
+                    hidden_states + residual if residual is not None else hidden_states
+                )
             aux_hidden_states.append(value)
         return aux_hidden_states
 
