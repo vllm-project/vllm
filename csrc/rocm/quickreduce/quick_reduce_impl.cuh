@@ -749,7 +749,7 @@ struct AllReduceTwoshot {
     // rank responsible for this segment.
     uint32_t comm_data0_offset =
         data_offset + block_id * Codec::kTransmittedTileSize;
-    uint32_t comm_data1_offset = data_size_per_phase + comm_data0_offset;
+    int64_t comm_data1_offset = data_size_per_phase + comm_data0_offset;
 
     uint32_t comm_flags0_offset = block_id * (kWorldSize * sizeof(uint32_t));
     uint32_t comm_flags1_offset = (data_offset / 2) + comm_flags0_offset;
