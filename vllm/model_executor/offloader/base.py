@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Generator
 from typing import TYPE_CHECKING
 
+import torch
 import torch.nn as nn
 
 import vllm.envs as envs
@@ -91,6 +92,22 @@ class BaseOffloader(ABC):
         """
         return
 
+    def maybe_stage(
+        self, weight: torch.Tensor, num_tokens: int, slot: str
+    ) -> torch.Tensor:
+        """Return the tensor a kernel should read `weight` from in a step of
+        `num_tokens` tokens: `weight` itself, or a device copy of it.
+
+        Weights passed to the same kernel call must use different `slot`s.
+        The default never copies.
+        """
+        return weight
+
+    def invalidate_staged(self) -> None:  # noqa: B027
+        """Weights returned by `maybe_stage` were changed in place: copies
+        made ahead of time (prefetch) must be made again."""
+        pass
+
     def sync_prev_onload(self) -> None:  # noqa: B027
         """Sync previous onload operations. Override in subclasses."""
         pass
@@ -173,6 +190,8 @@ def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
         return UVAOffloader(
             cpu_offload_max_bytes=int(uva.cpu_offload_gb * 1024**3),
             cpu_offload_params=uva.cpu_offload_params,
+            stage_min_tokens=uva.cpu_offload_stage_min_tokens,
+            stage_prefetch=uva.cpu_offload_stage_prefetch,
         )
     else:
         return NoopOffloader()
