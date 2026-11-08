@@ -7,10 +7,10 @@ reduction, the shared-expert add and the all-reduce to the next boundary's
 fused kernel, including the layers before an Engram layer and the last one,
 whose boundaries take the kernel's residual-only variant:
 
-- up to ``routed_expert_gemm.MAX_ROWS`` rows, on the low-batch routed-expert
-  GEMMs (``routed_expert_gemm``);
-- above that, on the runner's own ``_forward_impl`` with the deferral raised to
-  the step's rows for the call (``deferred_finalize``).
+- up to `routed_expert_gemm.MAX_ROWS` rows, on the low-batch routed-expert
+  GEMMs (`routed_expert_gemm`);
+- above that, on the runner's own `_forward_impl` with the deferral raised to
+  the step's rows for the call (`deferred_finalize`).
 """
 
 from collections.abc import Iterator
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 @contextmanager
 def deferred_finalize(config: FusedMoEConfig, max_num_tokens: int) -> Iterator[None]:
     """Within the block, let the experts leave the top-k reduction of calls of
-    up to ``max_num_tokens`` tokens to the caller; then restore the layer's own
+    up to `max_num_tokens` tokens to the caller; then restore the layer's own
     deferral, which the stock forward reads."""
     saved = config._defer_moe_finalize, config.defer_moe_finalize_max_num_tokens
     config._defer_moe_finalize = True
@@ -55,7 +55,7 @@ def deferred_finalize(config: FusedMoEConfig, max_num_tokens: int) -> Iterator[N
 
 
 def defers_finalize(ffn: "DeepseekV4MoE", max_num_tokens: int) -> bool:
-    """Whether ``ffn``'s experts can leave the top-k reduction to the fused
+    """Whether `ffn`'s experts can leave the top-k reduction to the fused
     all-reduce + mHC: the modular TRT-LLM MXFP4 experts without routed scaling,
     on a TP-only deployment."""
     runner = ffn.experts
@@ -109,7 +109,7 @@ class MoEStep:
         hidden_states: torch.Tensor,
         input_ids: torch.Tensor | None,
     ) -> tuple[UnfinalizedMoEOutput, torch.Tensor]:
-        """The runner's ``_forward_impl`` with the routed experts on the
+        """The runner's `_forward_impl` with the routed experts on the
         low-batch GEMMs; the gate and the shared experts run as the runner runs
         them. Returns the unfinalized routed output and the shared output."""
         runner = self.runner

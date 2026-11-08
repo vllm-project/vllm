@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the replicated-embedding fused gather/norm kernels
-(``vllm.model_executor.layers.fused_embed_norm``).
+(`vllm.model_executor.layers.fused_embed_norm`).
 
-The guarantee: enabling ``VLLM_REPLICATE_EMBED`` (replicated table + fused
+The guarantee: enabling `VLLM_REPLICATE_EMBED` (replicated table + fused
 kernels) must not change model outputs. The gathered residual is bit-exact and
 the fused norms match the unfused reference.
 """
@@ -61,7 +61,7 @@ def test_fused_embed_norm_matches_reference():
 @torch.inference_mode()
 def test_fused_embed_eh_norm_matches_reference():
     """MTP fusion (folded gather) is bit-exact vs gathering the embeds and
-    feeding the untouched model-local ``fused_eh_norm``."""
+    feeding the untouched model-local `fused_eh_norm`."""
     set_random_seed(13)
     table = torch.randn(VOCAB, HIDDEN, dtype=DTYPE, device=DEVICE)
     ids = torch.randint(0, VOCAB, (NUM_TOKENS,), dtype=torch.int32, device=DEVICE)
