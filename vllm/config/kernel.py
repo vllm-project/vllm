@@ -194,14 +194,14 @@ FLASHINFER_MOE_EP_ARCHITECTURES = frozenset(
 def bind_passthrough_all2all_backend(
     moe_backend: str, parallel_config: "ParallelConfig"
 ) -> None:
-    """Bind ``all2all_backend="passthrough"`` to MoE backends that own their
+    """Bind `all2all_backend="passthrough"` to MoE backends that own their
     expert-parallel communication (currently the FlashInfer MoE-EP megakernels).
 
-    Such a deployment gets ``passthrough`` when the all2all backend is left at
+    Such a deployment gets `passthrough` when the all2all backend is left at
     its default and rejects any other explicit choice; the value is meaningless
     with a MoE backend that relies on the framework to communicate. The CLI does
     not offer the value; the early return keeps repeated
-    ``set_platform_defaults`` calls idempotent.
+    `set_platform_defaults` calls idempotent.
     """
     a2a = parallel_config.all2all_backend
     if moe_backend in FLASHINFER_MOE_EP_BACKENDS:
@@ -409,8 +409,8 @@ class KernelConfig:
         default=None, min_length=1
     )
     """Backend overrides keyed by linear quantization scheme. Overrides take
-    precedence over ``linear_backend``; for example,
-    ``{"nvfp4_w4a16": "humming"}``."""
+    precedence over `linear_backend`; for example,
+    `{"nvfp4_w4a16": "humming"}`."""
 
     rdna_hybrid_w4a16_prefill_dequant: RDNAHybridW4A16PrefillDequantMode = "disable"
     """Cache a dense dequantized copy of each weight for the RDNA hybrid W4A16

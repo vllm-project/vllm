@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Examples of batched chat completions via the vLLM OpenAI-compatible API.
 
-The /v1/chat/completions/batch endpoint accepts ``messages`` as a list of
+The /v1/chat/completions/batch endpoint accepts `messages` as a list of
 conversations.  Each conversation is processed independently and the response
 contains one choice per conversation, indexed 0, 1, ..., N-1.
 

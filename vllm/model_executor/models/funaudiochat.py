@@ -571,8 +571,8 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
     def get_max_speech_frames(self) -> int:
         """Maximum 25 Hz speech frames admitted for one audio item.
 
-        The discrete encoder emits ``max_source_positions`` replacement tokens
-        after grouping frames by ``group_size`` (1500 * 5 = 7500 frames, 300s).
+        The discrete encoder emits `max_source_positions` replacement tokens
+        after grouping frames by `group_size` (1500 * 5 = 7500 frames, 300s).
         """
         cfg = self.get_hf_config()
         audio_cfg = getattr(cfg, "audio_config", None)
