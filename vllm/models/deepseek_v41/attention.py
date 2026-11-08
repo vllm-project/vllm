@@ -25,7 +25,10 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.sparse_mqa_indexer import SparseMQAIndexer
-from vllm.model_executor.model_loader.weight_utils import make_attention_sink
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    make_attention_sink,
+)
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -176,6 +179,15 @@ def _replace_layer_index(prefix: str, layer_id: int) -> str:
     new_prefix, n = re.subn(r"\.layers\.\d+\.", f".layers.{layer_id}.", prefix)
     assert n == 1, f"Cannot locate layer index in prefix {prefix}"
     return new_prefix
+
+
+def _load_replicated_attention_sink(
+    param: torch.Tensor, loaded_weight: torch.Tensor
+) -> None:
+    """Load every head of a global sink; padded heads are set to -inf."""
+    heads = loaded_weight.numel()
+    default_weight_loader(param[:heads], loaded_weight)
+    param.data[heads:].fill_(-float("inf"))
 
 
 def _indexer_k_cache_head_dim(index_head_dim: int, use_fp4_kv: bool) -> int:
@@ -348,12 +360,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         topk_indices_buffer: torch.Tensor | None = None,
         aux_stream_list: list[torch.cuda.Stream] | None = None,
         candidate_block_buffer: torch.Tensor | None = None,
+        replicate: bool = False,
     ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
-        tp_size = get_tensor_model_parallel_world_size()
+        # replicate: every rank holds all heads, wo_b output is complete.
+        tp_size = 1 if replicate else get_tensor_model_parallel_world_size()
         layer_id = extract_layer_index(prefix)
         self.layer_id = layer_id
 
@@ -428,6 +442,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # Sink padded to the same head count, initialized to -inf (no sink
         # effect). Weight loading fills the first n_local_heads slots.
         self.attn_sink = make_attention_sink(self.padded_heads, torch.float32)
+        if replicate:
+            self.attn_sink.weight_loader = _load_replicated_attention_sink
 
         self.fused_wqa_wkv = MergedColumnParallelLinear(
             self.hidden_size,
@@ -445,6 +461,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             quant_config=quant_config,
             return_bias=False,
             prefix=f"{prefix}.wq_b",
+            disable_tp=replicate,
         )
 
         self.kv_norm = RMSNorm(self.head_dim, self.eps)
@@ -456,6 +473,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             quant_config=quant_config,
             return_bias=False,
             prefix=f"{prefix}.wo_a",
+            disable_tp=replicate,
         )
         self.wo_a.is_bmm = True
         self.wo_a.bmm_batch_size = self.n_local_groups
@@ -469,6 +487,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             quant_config=quant_config,
             return_bias=False,
             prefix=f"{prefix}.wo_b",
+            disable_tp=replicate,
         )
         # Set by ``bind_gemm_rs`` when the decoder layer runs sequence
         # parallel and the fused GEMM + reduce-scatter kernel accepts wo_b.
