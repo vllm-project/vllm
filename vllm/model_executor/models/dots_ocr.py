@@ -41,7 +41,6 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.models.qwen2_vl import (
-    Qwen2VisionAttention,
     Qwen2VLDummyInputsBuilder,
     Qwen2VLMultiModalProcessor,
     Qwen2VLProcessingInfo,
@@ -279,8 +278,18 @@ class DotsVisionAttention(nn.Module):
         # [S, C] -> [S, B=1, C]
         x = hidden_states.unsqueeze(1)
         x, _ = self.qkv(x)
-        q, k, v = Qwen2VisionAttention.split_qkv(self, x)
+        # self.qkv is a QKVParallelLinear, so this is already the local
+        # [q | k | v] shard. Qwen2VisionAttention.split_qkv() assumes the
+        # all-gathered ColumnParallelLinear layout and would scramble it.
+        q, k, v = x.chunk(3, dim=-1)
         bs = q.shape[1]
+        new_shape = (
+            q.shape[0],
+            bs,
+            self.num_attention_heads_per_partition,
+            self.hidden_size_per_attention_head,
+        )
+        q, k, v = (t.view(*new_shape) for t in (q, k, v))
         # [S,B,H,D] -> [B,S,H,D]
         q = q.permute(1, 0, 2, 3).contiguous()
         k = k.permute(1, 0, 2, 3).contiguous()
