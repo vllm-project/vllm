@@ -80,7 +80,6 @@ def _replay_scheduler(
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
-    scheduler.use_v2_model_runner = True
     assert scheduler.prefix_replay_tokens == (replay_tokens or WINDOW)
     return scheduler
 
@@ -100,7 +99,6 @@ def _step_output(out, requests) -> ModelRunnerOutput:
     scheduled = [r for r in requests if r.request_id in out.num_scheduled_tokens]
     return ModelRunnerOutput(
         req_ids=[r.request_id for r in scheduled],
-        req_id_to_index={r.request_id: i for i, r in enumerate(scheduled)},
         sampled_token_ids=[
             [1000] if r.num_computed_tokens >= r.num_prompt_tokens else []
             for r in scheduled
