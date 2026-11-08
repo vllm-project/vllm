@@ -1944,6 +1944,10 @@ class SupportsEncoderCudaGraph(Protocol):
         Override this for models that require additional processing on the raw
         encoder output prior to scattering, e.g. Step3-VL, which merges features
         according to dynamic patch counts before scattering.
+
+        With ``clone=True``, the tensors written to ``dest`` must not alias
+        ``outputs``: they are graph output buffers, shared across the token
+        budgets of a path, that the next replay overwrites.
         """
         from vllm.model_executor.models.utils import scatter_output_slices
 
@@ -1985,7 +1989,12 @@ class SupportsEncoderCudaGraph(Protocol):
         max_frames_per_batch: int,
         path: str = "default",
     ) -> "EncoderCudaGraphReplayBuffers":
-        """Compute buffer values from actual batch inputs for replay."""
+        """Compute buffer values from actual batch inputs for replay.
+
+        Must provide every capture buffer that smaller budgets share as a prefix
+        view: other budgets' captures overwrite its capture-time contents, so
+        the manager raises if replay omits it.
+        """
         ...
 
     def encoder_cudagraph_forward(
