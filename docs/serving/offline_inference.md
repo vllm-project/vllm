@@ -73,6 +73,10 @@ For further details on Weight Transfer, please refer to [this page](../training/
 - `LLM.collective_rpc` - Executes a method or callable collectively across all workers.
 - `LLM.apply_model` - Applies a function directly to the model inside each worker.
 
+## Model Inspection APIs
+
+- `LLM.get_model_inspection` - Returns a hierarchical view of the model, querying workers on the first call and caching the result.
+
 ## API Reference
 
 [Offline Inference](../api/README.md#offline-inference)
