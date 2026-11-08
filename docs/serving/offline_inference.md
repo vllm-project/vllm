@@ -76,8 +76,6 @@ For further details on Weight Transfer, please refer to [this page](../training/
 ## Model Inspection APIs
 
 - `LLM.get_model_inspection` - Returns a hierarchical view of the model, querying workers on the first call and caching the result.
-- `repr(llm)` - Returns a local model summary without querying workers.
-- `print(llm)` - Prints that summary.
 
 ## API Reference
 
