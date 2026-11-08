@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV cache helper for store."""
 
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from itertools import chain
@@ -678,3 +679,54 @@ class TransferTopology:
             f"local_rank={self.tp_rank}, "
             f"remote_block_len={info.remote_block_len})"
         )
+
+
+class CircuitBreaker:
+    """Opens for ``cooldown_s`` after ``failure_threshold`` consecutive
+    failures; callers skip requests while it is open. After the cooldown,
+    ``allow()`` admits a single probe and holds others for ``probe_window_s``:
+    a failed probe reopens the breaker, a success closes it, and a probe that
+    never reports back lets the next request probe once the window passes."""
+
+    def __init__(
+        self,
+        name: str,
+        cooldown_s: float,
+        failure_threshold: int,
+        probe_window_s: float,
+    ):
+        assert cooldown_s > 0 and failure_threshold > 0 and probe_window_s > 0
+        self.name = name
+        self.cooldown_s = cooldown_s
+        self.failure_threshold = failure_threshold
+        self.probe_window_s = probe_window_s
+        self._failures = 0
+        self._open_until = 0.0
+
+    @property
+    def is_open(self) -> bool:
+        return time.monotonic() < self._open_until
+
+    def allow(self) -> bool:
+        now = time.monotonic()
+        if now < self._open_until:
+            return False
+        if self._failures >= self.failure_threshold:
+            self._open_until = now + self.probe_window_s
+        return True
+
+    def record_failure(self) -> None:
+        self._failures += 1
+        if self._failures >= self.failure_threshold:
+            self._open_until = time.monotonic() + self.cooldown_s
+            logger.warning(
+                "%s circuit breaker opened after %d consecutive failures; "
+                "skipping requests for %s seconds",
+                self.name,
+                self._failures,
+                self.cooldown_s,
+            )
+
+    def record_success(self) -> None:
+        self._failures = 0
+        self._open_until = 0.0

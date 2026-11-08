@@ -37,6 +37,9 @@ CaptureAxisKeys: TypeAlias = tuple[Hashable, ...]
 
 BudgetGraphMapKey: TypeAlias = int | tuple[int, CaptureAxisKeys]
 
+# Auto-generated budgets step by 128 tokens up to this size, then by 1/8 octave.
+_LINEAR_GRID_END = 2560
+
 # Warn when capture axes multiply the captured graph count past this point.
 _CAPTURE_GRAPH_COUNT_WARNING_THRESHOLD = 64
 
@@ -88,6 +91,7 @@ class EncoderCudaGraphManager:
         user_budgets = comp_config.encoder_cudagraph_token_budgets
         user_max_vision_items = comp_config.encoder_cudagraph_max_vision_items_per_batch
         user_max_frames = comp_config.encoder_cudagraph_max_frames_per_batch
+        max_token_budget = comp_config.encoder_cudagraph_max_token_budget
 
         multimodal_config = vllm_config.model_config.multimodal_config
 
@@ -149,6 +153,7 @@ class EncoderCudaGraphManager:
                 self.token_budgets = self._generate_budgets(
                     effective_min,
                     max_budget,
+                    max_token_budget,
                 )
             elif user_budgets:
                 # User provided budgets only; cap auto-inferred
@@ -163,6 +168,7 @@ class EncoderCudaGraphManager:
                 self.token_budgets = self._generate_budgets(
                     min_budget,
                     max_budget,
+                    max_token_budget,
                 )
                 self.max_batch_size = min(
                     max_budget // min_budget,
@@ -242,25 +248,33 @@ class EncoderCudaGraphManager:
     def _generate_budgets(
         min_budget: int,
         max_budget: int,
+        cap: int | None = None,
     ) -> list[int]:
-        """Generate token budgets from min_budget to max_budget.
+        """Generate token budgets from min_budget up to max_budget or cap.
 
-        Subdivided grid: quarter-octave steps up to 1024, half-octave steps
-        above. Capture buffers are shared across budgets (see
-        ``_capture_budget_graph``), so extra graphs cost no buffer memory
-        and the finer table only cuts padding waste.
+        Quarter-octave steps up to 1024 tokens, steps of 128 up to 2560, then
+        1/8-octave steps (rounded up to 128), so a replay pads at most ~25%
+        below 1024, ~12% up to 2560 and ~9% above. Capture buffers are shared
+        across budgets (see ``_capture_budget_graph``), so extra graphs cost
+        no buffer memory. Batches above the largest budget run eagerly.
         """
+        if cap is not None:
+            max_budget = min(max_budget, max(cap, min_budget))
         points = {min_budget, max_budget}
         base = 1
-        while base < max_budget:
-            # Quarter-octave grid below 1024, half-octave above.
-            steps = 4 if base < 1024 else 2
-            step = base // steps
-            for k in range(steps):
-                point = base + k * step
+        while base < min(max_budget, 1024):
+            for k in range(4):
+                point = base + k * (base // 4)
                 if min_budget <= point <= max_budget:
                     points.add(point)
             base *= 2
+        linear_end = min(max_budget, _LINEAR_GRID_END)
+        points.update(p for p in range(1024, linear_end + 1, 128) if p >= min_budget)
+        point = _LINEAR_GRID_END
+        while point < max_budget:
+            point = -(-int(point * 2 ** (1 / 8)) // 128) * 128
+            if min_budget <= point <= max_budget:
+                points.add(point)
         return sorted(points)
 
     @staticmethod
@@ -578,7 +592,7 @@ class EncoderCudaGraphManager:
         self,
         mm_kwargs: dict[str, Any],
     ) -> list[torch.Tensor]:
-        """Execute locally using greedy packing across all configured paths."""
+        """Execute the local batch with at most one replay per path."""
         item_specs = self._get_item_specs(mm_kwargs)
         num_items = len(item_specs)
         paths = tuple(self.path_token_budgets)
@@ -587,100 +601,57 @@ class EncoderCudaGraphManager:
             for path in paths
         }
         per_item_out_tokens = [spec.output_tokens for spec in item_specs]
-        max_path_budgets = {path: max(self.path_token_budgets[path]) for path in paths}
 
-        sorted_indices = sorted(range(num_items), key=lambda i: per_item_out_tokens[i])
-        batches: list[tuple[list[int], dict[str, int | None]]] = []
-        current_batch: list[int] = []
-        current_tokens = dict.fromkeys(paths, 0)
+        if num_items == 0:
+            return []
+        # One replay per path: the smallest budget that holds the whole batch.
+        # A batch beyond the captured range runs eagerly in one forward.
+        fits = num_items <= self.max_batch_size
+        # Largest items first: varlen attention schedules long sequences first,
+        # which balances its tiles better on mixed batches.
+        batch_indices = sorted(
+            range(num_items), key=lambda i: per_item_out_tokens[i], reverse=True
+        )
+        batch_mm_kwargs, axis_keys = self._select_items(mm_kwargs, batch_indices)
+        graph_outputs: dict[str, torch.Tensor] = {}
+        all_eager = True
 
-        def append_current_batch() -> None:
-            if not current_batch:
-                return
-            path_budgets = {
-                path: self._path_fitting_budget(path, current_tokens[path])
-                for path in paths
-            }
-            batches.append((list(current_batch), path_budgets))
+        for path, tokens in per_item_path_tokens.items():
+            if sum(tokens) == 0:
+                continue
 
-        def should_defer_item(item_tokens: dict[str, int]) -> bool:
-            """Whether closing the batch strictly reduces summed budgets."""
-            for path in paths:
-                item = item_tokens[path]
-                if item == 0:
-                    continue
-                cur = current_tokens[path]
-                b_cur = self._path_fitting_budget(path, cur)
-                b_alone = self._path_fitting_budget(path, item)
-                b_merged = self._path_fitting_budget(path, cur + item)
-                # Only called when the item fits; lookups land on a budget.
-                assert (
-                    b_cur is not None and b_alone is not None and b_merged is not None
-                )
-                # Only defer items that alone outweigh the whole current
-                # batch; splitting smaller ones fragments flood packing.
-                if b_cur + b_alone < b_merged and b_alone >= b_cur:
-                    return True
-            return False
-
-        for orig_idx in sorted_indices:
-            item_tokens = {path: per_item_path_tokens[path][orig_idx] for path in paths}
-            fits = len(current_batch) < self.max_batch_size and all(
-                current_tokens[path] + item_tokens[path] <= max_path_budgets[path]
-                for path in paths
+            token_budget = (
+                self._path_fitting_budget(path, sum(tokens)) if fits else None
             )
-            if current_batch and (not fits or should_defer_item(item_tokens)):
-                append_current_batch()
-                current_batch = []
-                current_tokens = dict.fromkeys(paths, 0)
+            if token_budget is None:
+                with torch.inference_mode():
+                    output = self.model.encoder_eager_forward(
+                        batch_mm_kwargs, path=path
+                    )
+            else:
+                all_eager = False
+                graph_output = self._run_budget_graph(
+                    batch_mm_kwargs,
+                    token_budget,
+                    path=path,
+                    axis_keys=axis_keys,
+                )
+                assert graph_output is not None
+                output = graph_output
+            graph_outputs[path] = output
 
-            current_batch.append(orig_idx)
-            for path in paths:
-                current_tokens[path] += item_tokens[path]
-
-        append_current_batch()
+        if all_eager:
+            self.graph_misses += num_items
 
         outputs_by_orig_idx: dict[int, torch.Tensor] = {}
-        for batch_indices, path_budgets in batches:
-            batch_mm_kwargs, axis_keys = self._select_items(mm_kwargs, batch_indices)
-            graph_outputs: dict[str, torch.Tensor] = {}
-            all_eager = True
-
-            for path in paths:
-                path_tokens = sum(per_item_path_tokens[path][i] for i in batch_indices)
-                if path_tokens == 0:
-                    continue
-
-                token_budget = path_budgets[path]
-                if token_budget is None:
-                    with torch.inference_mode():
-                        output = self.model.encoder_eager_forward(
-                            batch_mm_kwargs, path=path
-                        )
-                else:
-                    all_eager = False
-                    graph_output = self._run_budget_graph(
-                        batch_mm_kwargs,
-                        token_budget,
-                        path=path,
-                        axis_keys=axis_keys,
-                    )
-                    assert graph_output is not None
-                    output = graph_output
-                graph_outputs[path] = output
-
-            if all_eager:
-                self.graph_misses += len(batch_indices)
-
-            self.model.postprocess_encoder_output(
-                graph_outputs,
-                batch_indices,
-                per_item_out_tokens,
-                outputs_by_orig_idx,
-                clone=True,
-                batch_mm_kwargs=batch_mm_kwargs,
-            )
-
+        self.model.postprocess_encoder_output(
+            graph_outputs,
+            batch_indices,
+            per_item_out_tokens,
+            outputs_by_orig_idx,
+            clone=True,
+            batch_mm_kwargs=batch_mm_kwargs,
+        )
         return [outputs_by_orig_idx[i] for i in range(num_items)]
 
     def _dp_shard(
