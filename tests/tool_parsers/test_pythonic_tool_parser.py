@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -252,3 +253,49 @@ def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLik
         assert content == fake_problematic_input
         assert len(tool_calls) == 0
         mock_regex.match.assert_called_once()
+
+
+def test_reserved_keyword_triple_quotes(default_tokenizer: TokenizerLike):
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+        default_tokenizer
+    )
+    # Triple quotes with apostrophes and keyword-like substrings
+    output1 = "[f(text='''User\\'s data, from=1''')]"
+    content1, tool_calls1 = run_tool_extraction(
+        tool_parser, output1, streaming=False
+    )
+    assert content1 is None
+    assert len(tool_calls1) == 1
+    assert json.loads(tool_calls1[0].function.arguments) == {
+        "text": "User's data, from=1"
+    }
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_reserved_keyword_provenance(
+    streaming: bool, default_tokenizer: TokenizerLike
+):
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+        default_tokenizer
+    )
+    # Per-call provenance: parameter with rename suffix must not be mangled
+    output2 = "[f(from=1), g(from_pyreservedkw_=2)]"
+    content2, tool_calls2 = run_tool_extraction(
+        tool_parser, output2, streaming=streaming
+    )
+    assert content2 is None
+    assert len(tool_calls2) == 2
+    assert json.loads(tool_calls2[0].function.arguments) == {"from": 1}
+    assert json.loads(tool_calls2[1].function.arguments) == {"from_pyreservedkw_": 2}
+
+    # Single call containing both reserved keyword and parameter with suffix
+    output3 = "[f(from=1, from_pyreservedkw_=2)]"
+    content3, tool_calls3 = run_tool_extraction(
+        tool_parser, output3, streaming=streaming
+    )
+    assert content3 is None
+    assert len(tool_calls3) == 1
+    assert json.loads(tool_calls3[0].function.arguments) == {
+        "from": 1,
+        "from_pyreservedkw_": 2,
+    }

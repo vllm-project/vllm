@@ -688,32 +688,37 @@ def escape_ctrl_chars_in_strings(text: str) -> str:
     return "".join(out)
 
 
-_RESERVED_KW_SUFFIX = "_pyreservedkw_"
+_RESERVED_KW_PREFIX = "_vllm_kw_"
 
 
-def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
-    """Rename Python-keyword parameter names so pythonic tool text parses.
+def rename_reserved_kwargs(
+    text: str,
+) -> tuple[str, dict[int, dict[str, str]]]:
+    """Rename Python-keyword parameter names per function call.
 
     Tools legitimately name parameters ``from``, ``in``, ``class`` — but
     ``memory_get(from=1)`` is a Python ``SyntaxError``, so the whole call
-    would be dropped. Rename ``from=`` to ``from_pyreservedkw_=`` (outside
-    string literals only, and only in keyword-argument position: preceded by
-    ``(`` or ``,`` and followed by a single ``=``), parse, then restore the
-    original name with :func:`restore_reserved_kwarg_names`.
+    would be dropped. We assign generated, collision-free parameter aliases
+    scoped per function call, parse with ``ast.parse``, and restore only
+    the generated aliases using the per-call provenance map returned.
 
-    Returns (rewritten_text, changed). Keyword *values* (``x=True``) and
-    keywords inside string arguments are never touched.
+    Returns (rewritten_text, call_renames) where call_renames maps
+    call_index -> {alias: original_keyword}.
     """
     out: list[str] = []
     quote: str | None = None
-    changed = False
+    call_idx = -1
+    paren_depth = 0
+    call_stack: list[tuple[int, int]] = []
+    call_mappings: dict[int, dict[str, str]] = {}
     last_sig = ""
     index, length = 0, len(text)
+
     while index < length:
         char = text[index]
         if quote is not None:
             qlen = len(quote)
-            if text[index:index + qlen] == quote:
+            if text[index : index + qlen] == quote:
                 out.append(quote)
                 last_sig = quote[-1]
                 index += qlen
@@ -726,8 +731,9 @@ def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
                 continue
             index += 1
             continue
+
         if char in {"'", '"'}:
-            if text[index:index + 3] == char * 3:
+            if text[index : index + 3] == char * 3:
                 quote = char * 3
                 out.append(quote)
                 index += 3
@@ -737,6 +743,26 @@ def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
                 index += 1
             last_sig = quote[-1]
             continue
+
+        if char == "(":
+            paren_depth += 1
+            if last_sig == "IDENT":
+                call_idx += 1
+                call_stack.append((paren_depth, call_idx))
+                call_mappings[call_idx] = {}
+            out.append(char)
+            last_sig = "("
+            index += 1
+            continue
+        elif char == ")":
+            if call_stack and call_stack[-1][0] == paren_depth:
+                call_stack.pop()
+            paren_depth -= 1
+            out.append(char)
+            last_sig = ")"
+            index += 1
+            continue
+
         if char.isalpha() or char == "_":
             end = index
             while end < length and (text[end].isalnum() or text[end] == "_"):
@@ -745,41 +771,51 @@ def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
             look = end
             while look < length and text[look].isspace():
                 look += 1
+
+            current_call_id = call_stack[-1][1] if call_stack else None
             if (
-                _python_keyword.iskeyword(name)
+                current_call_id is not None
+                and _python_keyword.iskeyword(name)
                 and look < length
                 and text[look] == "="
                 and (look + 1 >= length or text[look + 1] != "=")
                 and last_sig in {"(", ","}
             ):
-                out.append(name + _RESERVED_KW_SUFFIX)
-                changed = True
+                alias_idx = len(call_mappings[current_call_id])
+                alias = f"{_RESERVED_KW_PREFIX}{alias_idx}_{name}_"
+                while alias in text:
+                    alias = f"{_RESERVED_KW_PREFIX}{alias_idx}_x_{name}_"
+                call_mappings[current_call_id][alias] = name
+                out.append(alias)
             else:
                 out.append(name)
-            last_sig = name[-1]
+            last_sig = "IDENT"
             index = end
             continue
+
         out.append(char)
         if not char.isspace():
             last_sig = char
         index += 1
-    return "".join(out), changed
+
+    return "".join(out), call_mappings
 
 
-def restore_reserved_kwarg_names(arguments: dict) -> dict:
-    """Undo :func:`rename_reserved_kwargs` on a decoded arguments dict.
+def restore_reserved_kwarg_names(
+    arguments: dict,
+    call_rename_map: dict[str, str] | None = None,
+) -> dict:
+    """Undo parameter renaming on a decoded arguments dict.
 
-    Only keys that carry the rename suffix *and* whose stem is a Python
-    keyword are restored, making this an exact inverse of the rename.
+    If ``call_rename_map`` is provided, restores only the exact aliases
+    recorded for this specific function call.
     """
+    if not call_rename_map:
+        return arguments
     restored = {}
     for key, value in arguments.items():
-        if (
-            isinstance(key, str)
-            and key.endswith(_RESERVED_KW_SUFFIX)
-            and _python_keyword.iskeyword(key[: -len(_RESERVED_KW_SUFFIX)])
-        ):
-            restored[key[: -len(_RESERVED_KW_SUFFIX)]] = value
+        if key in call_rename_map:
+            restored[call_rename_map[key]] = value
         else:
             restored[key] = value
     return restored

@@ -71,10 +71,12 @@ class Olmo3PythonicToolParser(ToolParser):
         self.current_tool_id = value
 
     @staticmethod
-    def _restore_reserved(tool_call):
+    def _restore_reserved(tool_call, call_rename_map=None):
         """Restore parameter names renamed by ``rename_reserved_kwargs``."""
+        if not call_rename_map:
+            return tool_call
         arguments = json.loads(tool_call.function.arguments)
-        restored = restore_reserved_kwarg_names(arguments)
+        restored = restore_reserved_kwarg_names(arguments, call_rename_map)
         if restored != arguments:
             tool_call.function.arguments = json.dumps(restored, ensure_ascii=False)
         return tool_call
@@ -116,18 +118,19 @@ class Olmo3PythonicToolParser(ToolParser):
             )
 
         try:
-            renamed_output, kw_renamed = rename_reserved_kwargs(model_output)
+            renamed_output, call_renames = rename_reserved_kwargs(model_output)
             module = ast.parse(renamed_output)
             parsed = getattr(module.body[0], "value", None)
             if isinstance(parsed, ast.List) and all(
                 isinstance(e, ast.Call) for e in parsed.elts
             ):
                 tool_calls = [
-                    handle_single_tool(e)  # type: ignore
-                    for e in parsed.elts
+                    self._restore_reserved(
+                        handle_single_tool(e),  # type: ignore
+                        call_renames.get(i),
+                    )
+                    for i, e in enumerate(parsed.elts)
                 ]
-                if kw_renamed:
-                    tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
@@ -164,7 +167,7 @@ class Olmo3PythonicToolParser(ToolParser):
             if current_text.endswith("</function_calls>"):
                 current_text = current_text[: -len("</function_calls>")]
 
-            renamed_text, kw_renamed = rename_reserved_kwargs(current_text)
+            renamed_text, call_renames = rename_reserved_kwargs(current_text)
             valid_and_added_text = make_valid_python(renamed_text)
             if valid_and_added_text is None:
                 return None
@@ -184,11 +187,12 @@ class Olmo3PythonicToolParser(ToolParser):
                     "Tool output must be a sequence of newline-separated calls"
                 )
             tool_calls = [
-                handle_single_tool(e)  # type: ignore
-                for e in parsed.elts
+                self._restore_reserved(
+                    handle_single_tool(e),  # type: ignore
+                    call_renames.get(i),
+                )
+                for i, e in enumerate(parsed.elts)
             ]
-            if kw_renamed:
-                tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
             tool_deltas = []
             for index, new_call in enumerate(tool_calls):
                 if index < self.current_tool_index:
