@@ -160,6 +160,38 @@ async def test_long_audio_request(mary_had_lamb, whisper_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response_format", "stream"),
+    [("json", False), ("json", True), ("verbose_json", False)],
+)
+async def test_long_audio_text_is_single_spaced(
+    mary_had_lamb, whisper_client, response_format, stream
+):
+    mary_had_lamb.seek(0)
+    audio, sr = load_audio(mary_had_lamb)
+    audio = np.pad(audio, (0, 1600))
+    buffer = io.BytesIO()
+    sf.write(buffer, np.tile(audio, 3), sr, format="WAV")
+    buffer.seek(0)
+    response = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=buffer,
+        language="en",
+        response_format=response_format,
+        temperature=0.0,
+        stream=stream,
+    )
+    if stream:
+        text = "".join(
+            [chunk.choices[0]["delta"]["content"] async for chunk in response]
+        )
+    else:
+        text = response.text
+    assert "Mary had a little lamb" in text
+    assert "  " not in text
+
+
+@pytest.mark.asyncio
 async def test_invalid_audio_file(whisper_client):
     """Corrupted audio should surface as HTTP 400."""
     invalid_audio = io.BytesIO(b"not a valid audio file")

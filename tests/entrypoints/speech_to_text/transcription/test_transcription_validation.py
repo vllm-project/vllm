@@ -6,6 +6,7 @@ from io import BytesIO
 
 import httpx
 import numpy as np
+import openai
 import pytest
 import soundfile as sf
 from fastapi import UploadFile
@@ -174,6 +175,21 @@ async def test_basic_audio(mary_had_lamb, model_name):
             expected_seconds=16,
             extra_body=extra_body,
         )
+
+
+@pytest.mark.asyncio
+async def test_verbose_json_rejected_without_segment_timestamps(mary_had_lamb):
+    model_name = "FunAudioLLM/Fun-ASR-Nano-2512-vllm"
+    server_args = ["--enforce-eager", "--trust-remote-code", *ROCM_EXTRA_ARGS]
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        with pytest.raises(openai.BadRequestError, match="do not support verbose_json"):
+            await client.audio.transcriptions.create(
+                model=model_name,
+                file=mary_had_lamb,
+                language="en",
+                response_format="verbose_json",
+            )
 
 
 @pytest.mark.asyncio

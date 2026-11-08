@@ -640,8 +640,11 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 for segment_parts in chunk_segment_parts
                 for segment in segment_parts
             ]
-            text_parts = [text for text_part in chunk_text_parts for text in text_part]
-            text = separator.join(text_parts)
+            text = ""
+            for text_part in (part for parts in chunk_text_parts for part in parts):
+                if text and text_part and not text_part[0].isspace():
+                    text += separator
+                text += text_part
             if self.task_type == "transcribe":
                 final_response: ResponseType
                 # add usage in TranscriptionResponse.
@@ -775,7 +778,8 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         and beginning_of_chunk
                         and output_text
                     ):
-                        output_text = separator + output_text
+                        if not output_text[0].isspace():
+                            output_text = separator + output_text
                         beginning_of_chunk = False
 
                     if output.finish_reason is None and not output_text:
