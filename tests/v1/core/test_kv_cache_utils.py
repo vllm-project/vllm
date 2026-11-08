@@ -2661,6 +2661,9 @@ def _state_rejection(spec, budget_pages, override, auto_fit):
 
     config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
     config.cache_config.kv_cache_layout = "LBNHC"
+    # The executor turns the extensible KV cache off for persistent state
+    # before planning; the config defaults it on for a CUDA host.
+    config.cache_config.enable_extensible_kv_cache = False
     config.cache_config.num_gpu_blocks_override = override
     if auto_fit:
         config.model_config.original_max_model_len = -1
