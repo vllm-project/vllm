@@ -67,7 +67,10 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    REGION_SEGMENTS,
+    SharedOffloadRegion,
+)
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import (
     TIER_LABEL,
@@ -408,12 +411,15 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             try:
                 # Create scheduler-side SharedOffloadRegion (rank=None) so the
                 # primary tier can eagerly create a memoryview over _base.
+                # Workers already pre-fault every page.
                 scheduler_mmap = SharedOffloadRegion(
                     engine_id=self._engine_id,
                     num_chunks=self.num_chunks,
                     rank=None,
                     kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                     cpu_page_size=self.cpu_page_size_per_worker,
+                    num_segments=REGION_SEGMENTS,
+                    populate=False,
                 )
                 self._scheduler_mmap = scheduler_mmap
 
@@ -549,6 +555,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             rank=rank,
             kv_bytes_per_chunk=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
+            num_segments=REGION_SEGMENTS,
         )
         try:
             if self.config.canonical_layout:
