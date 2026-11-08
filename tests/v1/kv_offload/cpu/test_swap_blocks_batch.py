@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the ``ops.swap_blocks_batch`` C++ (cuMemcpyBatchAsync) path."""
+"""Unit tests for the `ops.swap_blocks_batch` C++ (cuMemcpyBatchAsync) path."""
 
 import pytest
 import torch

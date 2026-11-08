@@ -479,25 +479,25 @@ class Ernie4_5_VisionTransformer(nn.Module):
     ) -> dict[str, torch.Tensor]:
         """Compute encoder metadata outside the CUDA graph.
 
-        Splits the rotary embeddings, ``cu_seqlens`` and ``max_seqlen`` out of
+        Splits the rotary embeddings, `cu_seqlens` and `max_seqlen` out of
         `forward` so they can be precomputed on the host side and fed into a
         captured graph through fixed buffers. Shared by the eager path, CUDA
         graph capture and CUDA graph replay
 
         Args:
-            grid_thw: Per-frame grid sizes as a ``[num_frames, 3]`` tensor or
-                an equivalent list of ``[t, h, w]``.
-            num_pad: Legacy ``cu_seqlens`` padding
-            max_batch_size: If set, pad ``cu_seqlens`` to ``max_batch_size + 1``
+            grid_thw: Per-frame grid sizes as a `[num_frames, 3]` tensor or
+                an equivalent list of `[t, h, w]`.
+            num_pad: Legacy `cu_seqlens` padding
+            max_batch_size: If set, pad `cu_seqlens` to `max_batch_size + 1`
                 entries for a fixed graph buffer shape.
-            max_seqlen_override: If set, use this value for ``max_seqlen``
-                instead of deriving it from ``cu_seqlens``. CUDA graph capture
-                bakes ``max_seqlen`` at capture time, so it must cover the
+            max_seqlen_override: If set, use this value for `max_seqlen`
+                instead of deriving it from `cu_seqlens`. CUDA graph capture
+                bakes `max_seqlen` at capture time, so it must cover the
                 worst-case replay.
-            device: Device for the returned tensors. Defaults to ``self.device``.
+            device: Device for the returned tensors. Defaults to `self.device`.
 
         Returns:
-            Dict with ``rotary_pos_emb``, ``cu_seqlens`` and ``max_seqlen``.
+            Dict with `rotary_pos_emb`, `cu_seqlens` and `max_seqlen`.
 
         """
         if device is None:

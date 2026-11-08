@@ -977,8 +977,8 @@ def _reference_aiter_sparse_table(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Page table and context the AITER top-k emits for the sparse attend.
 
-    One row per (token, kv head), head minor; index head ``h`` drives kv head
-    ``h``. Full blocks keep their top-k order and the query's own block goes
+    One row per (token, kv head), head minor; index head `h` drives kv head
+    `h`. Full blocks keep their top-k order and the query's own block goes
     last, since only it is partially visible.
     """
     pages_per_block = BLOCK_SIZE // 16
@@ -1192,7 +1192,7 @@ _requires_q8_indexer = pytest.mark.skipif(
 def _random_nvfp4_index_pages(
     num_pages: int, scale_max: float = 0.5, page_pad: int = 0
 ) -> torch.Tensor:
-    """``[num_pages, 128, 72]`` uint8 pages: random E2M1 codes, then E4M3 scales."""
+    """`[num_pages, 128, 72]` uint8 pages: random E2M1 codes, then E4M3 scales."""
     data_bytes = BLOCK_SIZE * HEAD_DIM // 2
     page_bytes = BLOCK_SIZE * _NVFP4_PAGE_WIDTH
     raw = torch.zeros(
@@ -1207,7 +1207,7 @@ def _random_nvfp4_index_pages(
 
 
 def _dequant_nvfp4_index_pages(pages: torch.Tensor) -> torch.Tensor:
-    """Reference ``[P, 128, 128]`` e4m3: e2m1 * scale, clamped, rounded once."""
+    """Reference `[P, 128, 128]` e4m3: e2m1 * scale, clamped, rounded once."""
     num_pages = pages.shape[0]
     flat = pages.reshape(num_pages, -1)
     data = flat[:, : BLOCK_SIZE * HEAD_DIM // 2].view(num_pages, BLOCK_SIZE, -1)
@@ -1273,10 +1273,10 @@ def test_gather_nvfp4_index_k_fp8_bitwise(
 def _assert_forced_tail_topk(
     actual: torch.Tensor, scores: torch.Tensor, lengths: torch.Tensor
 ) -> None:
-    """Check the Q8 top-k contract on ``[rows, 16]`` output.
+    """Check the Q8 top-k contract on `[rows, 16]` output.
 
-    ``scores[row, :lengths[row] - 1]`` are the reference history-page scores.
-    Rows with <= 16 candidates are ``0 .. length - 1`` then ``-1``. Longer rows
+    `scores[row, :lengths[row] - 1]` are the reference history-page scores.
+    Rows with <= 16 candidates are `0 .. length - 1` then `-1`. Longer rows
     hold 15 distinct history pages, then the local page. The ranked pages must
     be the top 15 up to the kernel's 16-bit score-key quantization.
     """
@@ -2569,7 +2569,7 @@ def _fake_aiter_qknorm_args(kv_cache_dtype: str = "auto") -> dict:
 
 
 def _install_fake_aiter_qknorm(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
-    """Stub ``aiter.fused_qknorm_idxrqknorm`` so mapping tests run without AITER."""
+    """Stub `aiter.fused_qknorm_idxrqknorm` so mapping tests run without AITER."""
     import sys
     import types
     from typing import Any
@@ -3027,7 +3027,7 @@ def test_aiter_decode_sparse_block_table_supports_spec_decode():
     """AITER sparse PA needs one compact page-16 table per speculative query.
 
     The decode indexer flattens speculative rows as
-    ``req_id * decode_query_len + local_q``. This verifies that the ROCm AITER
+    `req_id * decode_query_len + local_q`. This verifies that the ROCm AITER
     block-table adapter uses the same mapping before handing rows to Gluon.
     """
     from vllm.models.minimax_m3.amd.ops.sparse_pa import (

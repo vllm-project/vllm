@@ -643,9 +643,9 @@ _MAX_VIDEO_TOKENS = 30000
 class Glm5NextProcessingInfo(Glm4vProcessingInfo):
     """Token-budget geometry for the multimodal checkpoint.
 
-    This checkpoint's ``processor_config.json`` ships the token-budget style
-    (``min_image_tokens`` / ``max_image_tokens``) with no ``size`` key, so the
-    inherited Glm4v ``size.longest_edge`` path does not apply.
+    This checkpoint's `processor_config.json` ships the token-budget style
+    (`min_image_tokens` / `max_image_tokens`) with no `size` key, so the
+    inherited Glm4v `size.longest_edge` path does not apply.
     """
 
     def get_hf_processor(self, **kwargs: object):
@@ -659,13 +659,13 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
 
     @staticmethod
     def _alignment_factor(proc) -> int:
-        """Spatial factor canvases align to, as ``smart_resize`` takes it."""
+        """Spatial factor canvases align to, as `smart_resize` takes it."""
         return proc.patch_size * proc.merge_size * proc.patch_expand_factor
 
     @classmethod
     def _pixels_per_token(cls, proc) -> int:
-        """Pixels one vision token covers, matching ``smart_resize``'s own
-        ``temporal_factor * factor ** 2``."""
+        """Pixels one vision token covers, matching `smart_resize`'s own
+        `temporal_factor * factor ** 2`."""
         return proc.temporal_patch_size * cls._alignment_factor(proc) ** 2
 
     def _processor_pixel_budget(self, proc) -> tuple[int, int]:
@@ -722,10 +722,10 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
         """Timestamps for the video placeholder, from the pixel path's sampler.
 
         The inherited GLM-4.6V timestamp sampling uses different constants
-        than this checkpoint's ``Glm5NextVideoProcessor`` pixel sampling, so
-        placeholder count and ``video_grid_thw`` disagree outside 30-300s
+        than this checkpoint's `Glm5NextVideoProcessor` pixel sampling, so
+        placeholder count and `video_grid_thw` disagree outside 30-300s
         durations. Sampling with the pixel path's own policy makes one
-        timestamp per temporal patch == ``grid_t``.
+        timestamp per temporal patch == `grid_t`.
         """
         video_processor = self.get_video_processor()
         temporal_patch_size = int(
@@ -788,9 +788,9 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
         """GLM-5.3-Flash canvas geometry for token budgeting and dummy inputs.
 
         The inherited Glm4v path resolves the pixel budget from
-        ``size.longest_edge`` and resizes with GLM-4V's ``smart_resize``. This
+        `size.longest_edge` and resizes with GLM-4V's `smart_resize`. This
         checkpoint ships token bounds instead, and the alignment factor carries
-        ``patch_expand_factor`` — resolve both from the processor so profiling
+        `patch_expand_factor` — resolve both from the processor so profiling
         matches runtime geometry.
         """
         from transformers.models.glm5_next.image_processing_glm5_next import (
@@ -839,7 +839,7 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
 
 
 class Glm5NextMultiModalProcessor(Glm4vMultiModalProcessor):
-    """``Glm5NextProcessor`` extracts image/video features
+    """`Glm5NextProcessor` extracts image/video features
     only and passes the prompt text through unchanged, so prompt expansion
     is owned by the inherited GLM-4V prompt-update machinery."""
 

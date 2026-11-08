@@ -235,7 +235,7 @@ def test_megakernels_are_oracle_backends():
 
 
 def test_megakernel_is_a_modular_kernel_with_pass_through_stages():
-    """The megakernel plugs into ``FusedMoEKernel`` like any other experts impl.
+    """The megakernel plugs into `FusedMoEKernel` like any other experts impl.
 
     Routing stays outside (top-k ids in), dispatch and combine happen inside,
     so prepare passes tokens through untouched and finalize has nothing to do.
@@ -275,7 +275,7 @@ def test_megakernel_is_a_modular_kernel_with_pass_through_stages():
 
 
 def test_epilogue_takes_the_weight_global_scales_from_the_quant_config():
-    """The canonical ``g1/g2_alphas`` become the per-expert fc1/fc2 alphas and
+    """The canonical `g1/g2_alphas` become the per-expert fc1/fc2 alphas and
     keep aliasing the layer's tensors, so EPLB permutations reach the kernel."""
     g1_alphas = torch.tensor([1.0, 2.0])
     g2_alphas = torch.tensor([3.0, 4.0])
@@ -330,7 +330,7 @@ def test_nvfp4_kernel_format_passes_megakernel_weights_through():
 
 
 def test_passthrough_all2all_backend_selects_the_pass_through_stages():
-    """``all2all_backend="passthrough"`` is how the oracles get the
+    """`all2all_backend="passthrough"` is how the oracles get the
     pass-through prepare/finalize."""
     moe = make_dummy_moe_config(
         num_experts=8, experts_per_token=2, hidden_dim=256, intermediate_size=128

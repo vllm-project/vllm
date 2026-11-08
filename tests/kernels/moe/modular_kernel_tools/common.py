@@ -256,7 +256,7 @@ class Config:
     def fp8_quant_key_pair(self) -> tuple[QuantKey, QuantKey]:
         """Derive the (weight_quant_key, activation_quant_key) pair an FP8
         quant config of this shape corresponds to (either OCP or FNUZ FP8,
-        see ``current_platform.fp8_dtype()``)."""
+        see `current_platform.fp8_dtype()`)."""
         if self.quant_block_shape is not None:
             return kFp8Static128BlockSym, kFp8Dynamic128Sym
         if self.is_per_out_ch_quant:

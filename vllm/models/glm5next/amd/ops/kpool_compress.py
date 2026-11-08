@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """kpool (key-pooling) Triton kernels for the sparse-attention indexer.
 
-The cache stores POOLS (1 entry per ``pool_size`` consecutive tokens) rather
-than individual tokens. ``compress_ratio == pool_size`` on the kv_cache_spec
+The cache stores POOLS (1 entry per `pool_size` consecutive tokens) rather
+than individual tokens. `compress_ratio == pool_size` on the kv_cache_spec
 makes the metadata builder emit pool-granular slot_mapping / seq_lens /
 cu_seq_lens / page_table for free; this file supplies the compress-write
-kernel (replacing ``indexer_k_quant_and_cache``) and the pool-level topk
+kernel (replacing `indexer_k_quant_and_cache`) and the pool-level topk
 helpers (select pools -> expand to tokens -> append tail).
 """
 
@@ -106,7 +106,7 @@ def _kpool_softmax_rotate_write_cache_kernel(
     BLOCK_D: tl.constexpr,
 ):
     """One program per pool. softmax(slot_score+ape)-weighted sum of slot_k ->
-    Hadamard-128 -> per-vector fp8 absmax quant -> write to cache at ``loc``."""
+    Hadamard-128 -> per-vector fp8 absmax quant -> write to cache at `loc`."""
     row = tl.program_id(0)
     do_write = True
     if HAS_WRITE_MASK:
@@ -287,20 +287,20 @@ def kpool_compress_and_write_cache(
     return_compressed: bool = False,
     write_cache: bool = True,
 ):
-    """Compress ``pool_size`` tokens into one fp8 K and write at ``loc``.
+    """Compress `pool_size` tokens into one fp8 K and write at `loc`.
 
     Args:
-        kv_cache: indexer K cache ``[num_blocks, block_size, head_dim+4]`` uint8.
-        slot_k: ``[n_pools, pool_size, head_dim]`` bf16 — raw per-token K.
-        slot_score: ``[n_pools, pool_size, head_dim]`` — per-token gate score.
-        ape: ``[pool_size, head_dim]`` fp32 — per-slot position bias.
-        loc: ``[n_pools]`` int64 — flat physical slot per pool.
+        kv_cache: indexer K cache `[num_blocks, block_size, head_dim+4]` uint8.
+        slot_k: `[n_pools, pool_size, head_dim]` bf16 — raw per-token K.
+        slot_score: `[n_pools, pool_size, head_dim]` — per-token gate score.
+        ape: `[pool_size, head_dim]` fp32 — per-slot position bias.
+        loc: `[n_pools]` int64 — flat physical slot per pool.
         pool_size: Number of tokens compressed into one cache entry.
         head_dim: Indexer head dimension.
-        write_mask: ``[n_pools]`` bool — pools to write, or None for all.
+        write_mask: `[n_pools]` bool — pools to write, or None for all.
         round_scale: Round each fp8 scale down to a power of two.
         return_compressed: Also return the compressed K and scales.
-        write_cache: Write the compressed result into ``kv_cache``.
+        write_cache: Write the compressed result into `kv_cache`.
 
     """
     assert slot_k.ndim == 3
@@ -404,12 +404,12 @@ def _kpool_tail_seed_kernel(
     RING: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    """Copy token ``i``'s raw K + gate into its request's tail ring.
+    """Copy token `i`'s raw K + gate into its request's tail ring.
 
-    Token ``i`` is among its request's last KPOOL tokens iff the token KPOOL
+    Token `i` is among its request's last KPOOL tokens iff the token KPOOL
     ahead belongs to a different tail block (or is past the batch / padding,
-    slot < 0). ``tslot = block * RING + pos % RING``; the destination is
-    ``tail[block, {0:K, 1:score}, pos % RING, :]``.
+    slot < 0). `tslot = block * RING + pos % RING`; the destination is
+    `tail[block, {0:K, 1:score}, pos % RING, :]`.
     """
     i = tl.program_id(0)
     t = tl.load(tslot_ptr + i).to(tl.int64)
@@ -552,7 +552,7 @@ def _kpool_decode_update_batched_kernel(
     Replaces the caller's per-token sequential launch loop. The intra-request
     iteration MUST stay in position order: a pool-completion at token t* reads
     the tail-ring slots that tokens t < t* (same request) just stashed in this
-    same invocation. ``tl.range`` iterates sequentially within the program, so
+    same invocation. `tl.range` iterates sequentially within the program, so
     those stashes are visible to the later completion read. Cross-request
     programs are independent (distinct tail blocks). RING >= POOL_SIZE.
     """
@@ -702,26 +702,26 @@ def kpool_decode_update_and_maybe_write_cache_batched(
     head_dim: int = INDEX_HEAD_DIM,
     round_scale: bool = True,
 ) -> None:
-    """Batched decode-step kpool update for spec verify (``next_n > 1``).
+    """Batched decode-step kpool update for spec verify (`next_n > 1`).
 
     One launch replaces the caller's per-token loop. Inputs are grouped per
-    request: ``[num_requests, next_n, ...]``. Each program handles one
-    request's ``next_n`` tokens in position order (see the kernel docstring for
+    request: `[num_requests, next_n, ...]`. Each program handles one
+    request's `next_n` tokens in position order (see the kernel docstring for
     why ordering is required for pool-completion correctness).
 
-    Plain decode (``next_n == 1``) is handled here too — the kernel collapses
+    Plain decode (`next_n == 1`) is handled here too — the kernel collapses
     to a single-iteration loop.
 
     Args:
-        kv_cache: indexer K cache ``[num_blocks, block_size, head_dim+4]`` uint8.
-        tail_kv_cache: paged tail cache ``[num_blocks, 2, pool_size, head_dim]``
+        kv_cache: indexer K cache `[num_blocks, block_size, head_dim+4]` uint8.
+        tail_kv_cache: paged tail cache `[num_blocks, 2, pool_size, head_dim]`
             bf16 (K at half 0, gate score at half 1).
-        tail_slot_mapping: ``[num_requests, next_n]`` int32.
-        key: ``[num_requests, next_n, head_dim]`` bf16.
-        slot_score: ``[num_requests, next_n, head_dim]`` bf16.
-        ape: ``[pool_size, head_dim]`` fp32.
-        slot_mapping: ``[num_requests, next_n]`` int32.
-        positions: ``[num_requests, next_n]`` int32.
+        tail_slot_mapping: `[num_requests, next_n]` int32.
+        key: `[num_requests, next_n, head_dim]` bf16.
+        slot_score: `[num_requests, next_n, head_dim]` bf16.
+        ape: `[pool_size, head_dim]` fp32.
+        slot_mapping: `[num_requests, next_n]` int32.
+        positions: `[num_requests, next_n]` int32.
         pool_size: Number of tokens compressed into one cache entry.
         head_dim: Indexer head dimension.
         round_scale: Round each fp8 scale down to a power of two.
@@ -798,7 +798,7 @@ def kpool_decode_update_and_maybe_write_cache_batched(
 
 
 def history_group_budget_for_topk(topk: int, pool_size: int) -> int:
-    """Number of pools to select so that expanding yields ``topk`` tokens."""
+    """Number of pools to select so that expanding yields `topk` tokens."""
     assert topk % pool_size == 0
     return topk // pool_size
 
@@ -853,7 +853,7 @@ def append_tail_to_topk(
 ) -> torch.Tensor:
     """Append non-pooled tail tokens after expanded history tokens.
 
-    ``index_kpool_always_select_tail`` keeps the (incomplete) trailing pool so
+    `index_kpool_always_select_tail` keeps the (incomplete) trailing pool so
     the most recent tokens are always attended to.
     """
     assert topk_result.dtype == torch.int32
@@ -955,12 +955,12 @@ def expand_pools_and_append_tail(
     seq_lens: torch.Tensor,
     pool_size: int,
 ) -> torch.Tensor:
-    """Fuse ``expand_pools_to_tokens`` + ``append_tail_to_topk`` (identity path).
+    """Fuse `expand_pools_to_tokens` + `append_tail_to_topk` (identity path).
 
-    Produces the same ``[rows, topk + pool_size - 1]`` int32 output as calling
-    the two functions in sequence when neither ``page_table`` nor
-    ``topk_offsets`` is passed — the only path used by the GLM-5.3-Flash indexer.
-    The kernel derives ``pool_len = seq_len // pool_size`` internally, so the
+    Produces the same `[rows, topk + pool_size - 1]` int32 output as calling
+    the two functions in sequence when neither `page_table` nor
+    `topk_offsets` is passed — the only path used by the GLM-5.3-Flash indexer.
+    The kernel derives `pool_len = seq_len // pool_size` internally, so the
     caller no longer needs to precompute it. Replaces ~25 elementwise kernels
     with one Triton launch.
     """

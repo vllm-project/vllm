@@ -253,10 +253,10 @@ def _fx_view_to_reshape(gm: fx.GraphModule) -> None:
 def fold_consecutive_reshapes(gm: fx.GraphModule) -> None:
     """Fold consecutive reshape ops into a single reshape.
 
-    ``make_fx`` faithfully records every view/reshape the Python code performs,
-    so patterns like ``x.reshape(a, b).reshape(c, d)`` produce two reshape
+    `make_fx` faithfully records every view/reshape the Python code performs,
+    so patterns like `x.reshape(a, b).reshape(c, d)` produce two reshape
     nodes.  Inductor's own optimisation would fold these, but
-    ``pm.register_replacement``'s ``trace_fn`` runs before Inductor, so we
+    `pm.register_replacement`'s `trace_fn` runs before Inductor, so we
     must fold them ourselves for the pattern to match the compiled graph.
 
     When reshape(A, shape1) feeds only into reshape(result, shape2),
@@ -280,7 +280,7 @@ def fold_consecutive_reshapes(gm: fx.GraphModule) -> None:
 def remove_noop_reshapes(gm: fx.GraphModule) -> None:
     """Drop reshape ops whose output shape equals their input shape.
 
-    Companion to :func:`fold_consecutive_reshapes`. ``make_fx`` records a
+    Companion to `fold_consecutive_reshapes`. `make_fx` records a
     reshape to the shape the input already has; the compiled graph has already
     dropped it, so the pattern only matches once we drop it too.
     """

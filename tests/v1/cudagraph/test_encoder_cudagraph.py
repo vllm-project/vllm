@@ -1835,7 +1835,7 @@ class TestSharedCaptureBuffers:
 class VarShapeMockViTModel(SimpleMockViTModel):
     """Adds capture buffers that exercise the sharing fallback.
 
-    ``scalar`` is 0-dim and holds its budget, and ``odd_buf`` changes its
+    `scalar` is 0-dim and holds its budget, and `odd_buf` changes its
     trailing dimension per budget; both must keep their own allocation.
     """
 

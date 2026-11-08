@@ -303,9 +303,9 @@ def test_deepseek_v41_mxfp8_scale_loading(
 def test_deepseek_v41_vl_mapper_routes_linear_scales(
     weight_block_size, expert_dtype, scale_name
 ):
-    """The VL wrapper must map ``.scale`` keys to the parameter the linear
+    """The VL wrapper must map `.scale` keys to the parameter the linear
     quant method registers, as the text model does. A hardcoded
-    ``weight_scale_inv`` raised KeyError for native MXFP8 checkpoints."""
+    `weight_scale_inv` raised KeyError for native MXFP8 checkpoints."""
     from vllm.models.deepseek_v41.nvidia import model as model_module
     from vllm.models.deepseek_v41.nvidia import vl_model as vl_module
 
@@ -333,9 +333,9 @@ def test_deepseek_v41_vl_mapper_routes_linear_scales(
 
 
 def test_deepseek_v41_vl_exposes_quant_mappings_on_class():
-    """``configure_quant_config`` reads both mappings off the class, before
-    ``__init__`` builds the instance mapper. Without them a Quark config's
-    per-layer keys never match this wrapper's ``language_model.``-rooted
+    """`configure_quant_config` reads both mappings off the class, before
+    `__init__` builds the instance mapper. Without them a Quark config's
+    per-layer keys never match this wrapper's `language_model.`-rooted
     prefixes and every attention shard falls back to the global spec."""
     from vllm.models.deepseek_v41.amd.vl_model import DeepseekV41ForCausalLM
 
@@ -347,8 +347,8 @@ def test_deepseek_v41_vl_exposes_quant_mappings_on_class():
 
 
 def test_deepseek_v41_engram_scale_accepts_quark_name():
-    """Quark exports name the engram scale ``embed.weight_scale``; the
-    ``\\.scale$`` rules only match a literal ``.scale`` suffix, so without an
+    """Quark exports name the engram scale `embed.weight_scale`; the
+    `\\.scale$` rules only match a literal `.scale` suffix, so without an
     explicit rule the tensor is never routed and loading fails."""
     from vllm.models.deepseek_v41.amd import model as model_module
 
@@ -370,7 +370,7 @@ def test_deepseek_v41_engram_scale_accepts_quark_name():
 
 
 def test_deepseek_v41_declines_quark_configs():
-    """``from_config`` rewrites a Quark config into a single global FP8 scheme,
+    """`from_config` rewrites a Quark config into a single global FP8 scheme,
     which would discard the per-layer specs of a mixed-precision export (MXFP4
     experts + 2-D block MXFP8 attention in DeepSeek-V4.1-Flash). QuarkConfig
     knows how to dispatch each scheme, so it must handle every Quark export."""
@@ -455,10 +455,10 @@ _DSV4_NVFP4_DSPARK = {
 def test_deepseek_v41_nvfp4_export_keeps_ignored_experts_mxfp4(
     monkeypatch, ckpt_quant_cfg, prefix, expected
 ):
-    """NVFP4 exports keep the routed experts they ``ignore`` in MXFP4, e.g. the
-    bundled DSpark draft (``mtp.*``, built as ``layers.{40 + k}``) of
+    """NVFP4 exports keep the routed experts they `ignore` in MXFP4, e.g. the
+    bundled DSpark draft (`mtp.*`, built as `layers.{40 + k}`) of
     DeepSeek-V4.1-Flash-NVFP4. The ignore list is read from the checkpoint
-    passed to ``from_config``: the current hf_config below carries none."""
+    passed to `from_config`: the current hf_config below carries none."""
     import vllm.model_executor.layers.quantization.modelopt as modelopt
     import vllm.models.deepseek_v41.quant_config as dsv41_qc
     from vllm.model_executor.layers.fused_moe import RoutedExperts

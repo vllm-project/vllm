@@ -288,9 +288,9 @@ def _sync_retry(
 ) -> Callable[_P, _T]:
     """Add retry logic with exponential backoff to a sync method.
 
-    The decorated method must accept ``timeout`` as a keyword argument.
+    The decorated method must accept `timeout` as a keyword argument.
     The decorator replaces it with a per-attempt timeout that grows by
-    ``_RETRY_BACKOFF_FACTOR`` on each retry so transient slowness on busy
+    `_RETRY_BACKOFF_FACTOR` on each retry so transient slowness on busy
     hosts is absorbed.
     """
 
@@ -334,9 +334,9 @@ def _async_retry(
 ) -> Callable[_P, Coroutine[Any, Any, _T]]:
     """Add retry logic with exponential backoff to an async method.
 
-    The decorated method must accept ``timeout`` as a keyword argument.
+    The decorated method must accept `timeout` as a keyword argument.
     The decorator replaces it with a per-attempt timeout that grows by
-    ``_RETRY_BACKOFF_FACTOR`` on each retry so transient slowness on busy
+    `_RETRY_BACKOFF_FACTOR` on each retry so transient slowness on busy
     hosts is absorbed.
     """
 

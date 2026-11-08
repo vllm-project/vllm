@@ -27,10 +27,10 @@ def fused_allreduce_rms_norm(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """All-reduce + add residual + (standard) RMSNorm, fused via flashinfer.
 
-    ``hidden_states`` is the per-rank *partial* output of a row-parallel linear
-    run with ``reduce_results=False``; ``norm`` is the RMSNorm applied right
-    after. Returns ``(normed_output, new_residual)``, equivalent to
-    ``norm(all_reduce(hidden_states), residual)``. Falls back to an explicit
+    `hidden_states` is the per-rank *partial* output of a row-parallel linear
+    run with `reduce_results=False`; `norm` is the RMSNorm applied right
+    after. Returns `(normed_output, new_residual)`, equivalent to
+    `norm(all_reduce(hidden_states), residual)`. Falls back to an explicit
     all-reduce + RMSNorm when the flashinfer fast path is unavailable.
     """
     tp_size = get_tensor_model_parallel_world_size()

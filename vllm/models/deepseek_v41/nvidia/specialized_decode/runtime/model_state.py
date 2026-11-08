@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The model state of the specialized decode.
 
-``DeepseekV41SpecializedDecodeModelState`` is ``DeepseekV41ModelState`` plus:
+`DeepseekV41SpecializedDecodeModelState` is `DeepseekV41ModelState` plus:
 
 - the decode executor, built and warmed up once the weights are loaded (the
   model runner creates the model state after loading the target and draft
   models, and before memory profiling);
 - CUDA graphs of the attention metadata builds of FULL decode steps
-  (``metadata_graphs``), recorded with the inner CUDA graphs and replayed in
+  (`metadata_graphs`), recorded with the inner CUDA graphs and replayed in
   place of the eager build. A step that replays one gathers its engram
   lookback windows on a side stream beside it, so the metadata graph hands
   off to the forward's graph with no eager kernel between them;
@@ -39,7 +39,7 @@ from .warmup import warm_up
 def padded_decode_batch(
     key: GraphKey, input_buffers: InputBuffers, max_model_len: int
 ) -> InputBatch:
-    """A dummy uniform decode batch padded like a runtime step of ``key``. Like
+    """A dummy uniform decode batch padded like a runtime step of `key`. Like
     a capture, it takes worst-case sequence lengths, which bound host values
     only, so its recorded build serves every step of the key."""
     num_reqs, num_reqs_padded, num_tokens, num_tokens_padded = key

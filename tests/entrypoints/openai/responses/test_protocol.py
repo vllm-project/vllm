@@ -49,9 +49,9 @@ def test_serialize_messages() -> None:
 def test_normalize_openresponses_input_item_stamps_type() -> None:
     """A typeless assistant item must keep its role and content.
 
-    ``type`` is optional in the OpenResponses schema, but filling in
-    ``id``/``status`` without it makes the item match ``ItemReference`` in the
-    input union, which collapses it to ``{"id": ...}`` and silently drops the
+    `type` is optional in the OpenResponses schema, but filling in
+    `id`/`status` without it makes the item match `ItemReference` in the
+    input union, which collapses it to `{"id": ...}` and silently drops the
     assistant turn from the conversation. Regression test for that.
     """
     item = {

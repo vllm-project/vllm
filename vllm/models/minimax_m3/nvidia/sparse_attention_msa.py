@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MSA (SM100 family) block-sparse attention for MiniMax M3.
 
-``MiniMaxM3SparseMSAImpl`` serves BF16 and FP8 KV caches: prefill attends with
-``fmha_sm100`` (``build_k2q_csr`` + ``sparse_atten_func``), and decode uses the
-CUTLASS ``fmha_sm100`` path by default for regular decode and speculative
+`MiniMaxM3SparseMSAImpl` serves BF16 and FP8 KV caches: prefill attends with
+`fmha_sm100` (`build_k2q_csr` + `sparse_atten_func`), and decode uses the
+CUTLASS `fmha_sm100` path by default for regular decode and speculative
 verification, with Triton split-K as the fallback.
 
-``MiniMaxM3SparseMSANvfp4Impl`` serves NVFP4 KV caches, reading vLLM's packed
+`MiniMaxM3SparseMSANvfp4Impl` serves NVFP4 KV caches, reading vLLM's packed
 pages directly with only the E4M3 query: decode and prefill both run the CUTLASS
 Q8KV4 kernels.
 """
@@ -88,7 +88,7 @@ def _get_msa_cutlass_min_batch_size() -> int | None:
 def _dequantize_query(
     query_fp8: torch.Tensor, q_scale: float, dtype: torch.dtype
 ) -> torch.Tensor:
-    """``query_fp8 * q_scale`` in ``dtype`` (E4M3 is exact in BF16)."""
+    """`query_fp8 * q_scale` in `dtype` (E4M3 is exact in BF16)."""
     out = query_fp8.to(dtype)
     if q_scale != 1.0:
         out.mul_(q_scale)
@@ -111,7 +111,7 @@ class MiniMaxM3SparseMSANvfp4Backend(MiniMaxM3SparseMSABackend):
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
         """Store each head's K and V as two slots of packed data + block scales
-        (see ``nvfp4_kv_cache_views``)."""
+        (see `nvfp4_kv_cache_views`)."""
         if spec.state_content_bytes is not None or not spec.kv_quant_mode.is_nvfp4:
             return spec
         return replace(
@@ -175,7 +175,7 @@ def _shared_prefill_workspace(
 
 
 class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
-    """Prepare MSA plans only for decode shapes supported by ``fmha_sm100``."""
+    """Prepare MSA plans only for decode shapes supported by `fmha_sm100`."""
 
     def __init__(
         self,

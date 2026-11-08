@@ -181,7 +181,7 @@ def test_b12x_attention_impl_accepts_default_block_size(workspace_init) -> None:
     """The impl is constructed with the model, before the platform applies
     get_preferred_block_size(); it must not reject the default block size.
 
-    Regression test: ``--attention-backend b12x`` without ``--block-size``
+    Regression test: `--attention-backend b12x` without `--block-size`
     used to fail with "b12x requires --block-size in (64, 128), got 16".
     """
     _require_b12x_paged_attention()

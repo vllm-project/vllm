@@ -136,7 +136,7 @@ def _manifest(metadata: Iterable[ParamMeta]) -> Manifest:
 
 
 def _dtype_name(dtype: torch.dtype) -> str:
-    """The wire name of ``dtype`` (``torch.bfloat16`` -> ``"bfloat16"``)."""
+    """The wire name of `dtype` (`torch.bfloat16` -> `"bfloat16"`)."""
     return str(dtype).split(".")[-1]
 
 

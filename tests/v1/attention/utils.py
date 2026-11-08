@@ -395,7 +395,7 @@ def dense_kv_cache_tensor(
     layout: KVCacheLayout,
     layer_names: list[str] | None = None,
 ) -> KVCacheTensor:
-    """The ``KVCacheTensor`` for a dense allocation of ``num_layers`` layers."""
+    """The `KVCacheTensor` for a dense allocation of `num_layers` layers."""
     layer_stride, block_stride, _, _, _ = compute_layout_strides(
         spec, num_blocks, num_layers, layout
     )
@@ -415,7 +415,7 @@ def dense_kv_cache_views(
     layout: KVCacheLayout,
     kernel_block_size: int | None = None,
 ) -> list[torch.Tensor]:
-    """``create_kv_cache_views`` for a dense allocation of ``num_layers`` layers."""
+    """`create_kv_cache_views` for a dense allocation of `num_layers` layers."""
     tensor = dense_kv_cache_tensor(raw, spec, num_blocks, num_layers, layout)
     return create_kv_cache_views(
         raw,

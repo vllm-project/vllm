@@ -1409,9 +1409,9 @@ def test_video_processor_from_model_repo(
     """Test that a model repo resolves to the correct video loader backend.
 
     The test downloads the preprocessor config from HuggingFace Hub,
-    extracts the ``video_processor_type`` field, and verifies it maps
+    extracts the `video_processor_type` field, and verifies it maps
     to the expected backend and loader class.  When a corresponding HF
-    ``VideoProcessor.sample_frames`` implementation exists, the test
+    `VideoProcessor.sample_frames` implementation exists, the test
     also verifies that the vLLM backend produces identical frame indices.
     """
     video_processor = get_video_processor_cls_name_from_config(model_repo)
@@ -1507,7 +1507,7 @@ def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
 def test_video_backend_handles_edit_list_trimmed_video(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """An mp4 edit list (e.g. from a lossless ``ffmpeg -ss ... -c copy`` cut)
+    """An mp4 edit list (e.g. from a lossless `ffmpeg -ss ... -c copy` cut)
     hides the decode lead-in: the header still counts every physical sample
     while sequential decode only yields the visible frames. Sampling over the
     header count used to collapse such videos to the few indices below the
@@ -1545,7 +1545,7 @@ def test_opencv_demux_counts_frames_when_video_header_lacks_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Streamed WebM and raw H.264 carry no frame count/duration in their
-    headers, so OpenCV reports a bogus negative ``CAP_PROP_FRAME_COUNT``.
+    headers, so OpenCV reports a bogus negative `CAP_PROP_FRAME_COUNT`.
     The loader must count the frames via a demux-only pass, without
     decoding.
     """
@@ -1896,7 +1896,7 @@ def test_torchcodec_backend_returns_target_frames_not_keyframes():
     GOP keyframe they seek back to.
 
     A long GOP (single keyframe at frame 0) with a per-frame green-channel
-    marker. With ``seek_mode="exact"`` torchcodec resolves each index to the
+    marker. With `seek_mode="exact"` torchcodec resolves each index to the
     exact frame, so the returned markers must be distinct, ordered, and match
     the requested indices.
     """

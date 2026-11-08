@@ -487,7 +487,7 @@ def test_warmup_pointer_specializes_like_the_live_tensor(
     """A stand-in must land on the same side of ROCm's 2 GiB buffer-ops window.
 
     KV-cache views sit in an allocation far past it, so a stand-in that keeps
-    the optimistic default range warms a ``tt.pointer_range`` specialization no
+    the optimistic default range warms a `tt.pointer_range` specialization no
     launch ever asks for, and the kernel JITs on its first real batch.
     """
     backend = pytest.importorskip("triton.backends.amd.compiler").HIPBackend
@@ -514,7 +514,7 @@ def test_warmup_pointer_specializes_like_the_live_tensor(
 def test_warmup_pointer_range_survives_the_fake_tensor_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A dispatcher that needs real tensors must not drop ``ptr_range_bytes``.
+    """A dispatcher that needs real tensors must not drop `ptr_range_bytes`.
 
     A dispatcher touching tensor APIs re-runs its case through fake tensors,
     so the declared range has to round-trip the stand-in as an attribute and

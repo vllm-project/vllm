@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness tests for the AMX-only CPU MLA backend: the vendored
-decode/extend/bmm kernels, the KV cache write, and the ``AMXMLAImpl``
+decode/extend/bmm kernels, the KV cache write, and the `AMXMLAImpl`
 backend built on top of them.
 """
 
@@ -58,7 +58,7 @@ def _ref_latent_attn(
     """Plain-PyTorch causal-free latent-space MQA attention for one request.
 
     q: (num_heads, head_size); keys: (ctx_len, head_size). Values are the
-    first ``kv_lora_rank`` columns of the same latent rows (MLA's K/V
+    first `kv_lora_rank` columns of the same latent rows (MLA's K/V
     aliasing), matching what decode_attention_cpu/extend_attention_cpu
     compute internally for the MLA-shaped case.
     """

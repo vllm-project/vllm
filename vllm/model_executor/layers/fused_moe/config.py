@@ -322,11 +322,11 @@ class FusedMoEQuantConfig:
         return self.block_shape is not None
 
     def act_scale_is_tensor_wide(self, scale: torch.Tensor | None) -> bool:
-        """Whether ``scale`` is a runtime-reduced, tensor-wide act scale.
+        """Whether `scale` is a runtime-reduced, tensor-wide act scale.
 
         Only native fp8/int8 per-tensor quantization derives its scale from
         every element of the activation, so only that scheme is affected by
-        rows that hold no route (e.g. ``PaddedStandard`` padding) and must be
+        rows that hold no route (e.g. `PaddedStandard` padding) and must be
         masked out of the reduction. Per-token and block scales are row-local,
         and a static scale does not depend on the data at all.
 
@@ -1540,8 +1540,8 @@ class FusedMoEConfig:
     def use_deferred_moe_finalize(self) -> bool:
         """Whether experts may return an unfinalized output on this deployment.
 
-        Evaluated on read rather than in ``__post_init__`` because deferral is
-        requested after construction, like ``skip_final_all_reduce``.
+        Evaluated on read rather than in `__post_init__` because deferral is
+        requested after construction, like `skip_final_all_reduce`.
         """
         # The consumer fuses a TP all-reduce. Other parallel modes require a
         # combine or reduce-scatter after the experts and cannot defer it, and
@@ -1562,23 +1562,23 @@ class FusedMoEConfig:
         A layer whose consumer can fuse the top-k reduction (e.g. into its TP
         all-reduce) calls this once while the model is built, and only when its
         experts are TRTLLM-Gen ones that can stop after GEMM2 (the
-        ``do_finalize=False`` path). Other experts ignore the request and
-        always finalize, which ``should_defer_moe_finalize`` can't see, so the
-        layer checks the quant method's ``experts_cls`` first, as Kimi-K3 does.
+        `do_finalize=False` path). Other experts ignore the request and
+        always finalize, which `should_defer_moe_finalize` can't see, so the
+        layer checks the quant method's `experts_cls` first, as Kimi-K3 does.
         From then on:
 
-        - The experts return an ``UnfinalizedMoEOutput`` instead of finalized
-          states for every call ``should_defer_moe_finalize`` accepts.
-        - ``should_defer_moe_finalize(num_tokens)`` is the answer for a call:
+        - The experts return an `UnfinalizedMoEOutput` instead of finalized
+          states for every call `should_defer_moe_finalize` accepts.
+        - `should_defer_moe_finalize(num_tokens)` is the answer for a call:
           it requires a TP-only deployment without hidden-dim padding
-          (``use_deferred_moe_finalize``), a non-empty call and at most
-          ``defer_moe_finalize_max_num_tokens`` tokens. The cap starts at
-          ``max_num_tokens`` and only ever goes down: experts that would split a
+          (`use_deferred_moe_finalize`), a non-empty call and at most
+          `defer_moe_finalize_max_num_tokens` tokens. The cap starts at
+          `max_num_tokens` and only ever goes down: experts that would split a
           larger call across kernel launches lower it to their single-launch
           size when they are built, since each launch permutes into its own
           buffer.
-        - The model asks ``should_defer_moe_finalize`` before each call and takes
-          the matching path. A deferred call runs the runner's ``_forward_impl``
+        - The model asks `should_defer_moe_finalize` before each call and takes
+          the matching path. A deferred call runs the runner's `_forward_impl`
           directly, since the MoE custom op returns tensors only, and the
           consumer then owns the top-k reduction, the shared-expert add and the
           all-reduce.
@@ -1601,7 +1601,7 @@ class FusedMoEConfig:
         )
 
     def limit_deferred_moe_finalize(self, max_num_tokens: int) -> None:
-        """Finalize calls above ``max_num_tokens`` even when deferring.
+        """Finalize calls above `max_num_tokens` even when deferring.
 
         Negative means no limit, and leaves the current one in place.
         """

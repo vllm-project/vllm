@@ -73,7 +73,7 @@ def resolve_layer_fused_shared_expert(
     Args:
         quant_config: Model quantization configuration.
         prefix: MoE module prefix.
-        shared_expert_name: Shared-expert module name under ``prefix``.
+        shared_expert_name: Shared-expert module name under `prefix`.
         moe_backend: MoE backend that runs the fused shared expert.
         disable_under_ep: Whether this model family does not support FSE under
             expert parallelism. Kept as an explicit call-site policy instead of
@@ -267,18 +267,18 @@ def remap_topk_to_local(
 ) -> torch.Tensor:
     """Map global expert ids to local ids; non-local or invalid routes become -1.
 
-    Replaces ``torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)``
+    Replaces `torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)`
     with one kernel. Returns a NEW tensor -- the caller keeps the original
-    ``topk_ids`` as ``global_topk_ids``, so this must not write in place.
+    `topk_ids` as `global_topk_ids`, so this must not write in place.
 
     Args:
         topk_ids: Global expert ids; -1 marks invalid slots. Must be contiguous;
-            the Triton kernel indexes by flat ``numel()`` offsets.
+            the Triton kernel indexes by flat `numel()` offsets.
         expert_map: Global-to-local mapping; -1 marks non-local experts.
-        out_dtype: Output dtype, ``torch.int32`` or ``torch.int64``.
+        out_dtype: Output dtype, `torch.int32` or `torch.int64`.
 
     Returns:
-        Remapped local expert ids with the same shape as ``topk_ids``.
+        Remapped local expert ids with the same shape as `topk_ids`.
 
     """
     if out_dtype not in (torch.int32, torch.int64):
@@ -515,25 +515,25 @@ def masked_amax_scale(
 ) -> torch.Tensor:
     """Per-tensor activation quant scale that skips rows without a route.
 
-    ``PaddedStandard`` buffers carry rows that hold no route (``topk_ids == -1``)
+    `PaddedStandard` buffers carry rows that hold no route (`topk_ids == -1`)
     and whose contents are uninitialized, so a tensor-wide absmax would be
     poisoned by them. Batched dispatch buffers have the same problem per
-    expert: rows past ``expert_num_tokens[e]`` hold stale tokens. Those rows
+    expert: rows past `expert_num_tokens[e]` hold stale tokens. Those rows
     are dropped from the reduction instead; their quantized values are never
     consumed by an expert GEMM.
 
-    Exactly one of ``row_valid``, ``num_valid`` and ``expert_num_tokens``
+    Exactly one of `row_valid`, `num_valid` and `expert_num_tokens`
     selects the valid rows.
 
     Args:
         x: 2D activations to reduce.
-        quant_dtype: Target quantization dtype (``torch.int8`` or a float8).
-        row_valid: Boolean flags, one per row of ``x``. Use when the valid rows
+        quant_dtype: Target quantization dtype (`torch.int8` or a float8).
+        row_valid: Boolean flags, one per row of `x`. Use when the valid rows
             are not a prefix.
         num_valid: 1-element device tensor holding the number of leading valid
-            rows. Cheaper than ``row_valid`` when padding trails the rows.
+            rows. Cheaper than `row_valid` when padding trails the rows.
         expert_num_tokens: Device tensor of received token counts, one per
-            expert, for a buffer laid out as ``[expert, rows_per_expert, K]``.
+            expert, for a buffer laid out as `[expert, rows_per_expert, K]`.
         rows_per_expert: Row stride between experts, i.e. the worst-case
             per-expert capacity of the buffer.
         eps: Lower bound on the returned scale, matching the dynamic kernels.
@@ -845,17 +845,17 @@ def enable_swap_ab(BLOCK_SIZE_M: int, BLOCK_SIZE_N: int) -> bool:
 
 def moe_use_td_hw_supported() -> bool:
     """Whether the current device can run the TD (gather) path of
-    ``fused_moe_kernel`` (ignores the ``VLLM_TRITON_USE_TD`` override).
+    `fused_moe_kernel` (ignores the `VLLM_TRITON_USE_TD` override).
 
-    The A-load uses ``tensor_descriptor.gather``, which lowers to the PTX
-    ``tile::gather4`` instruction. That instruction is part of the
-    ``tcgen05``/Tensor Memory (TMEM) family introduced with Blackwell and has
+    The A-load uses `tensor_descriptor.gather`, which lowers to the PTX
+    `tile::gather4` instruction. That instruction is part of the
+    `tcgen05`/Tensor Memory (TMEM) family introduced with Blackwell and has
     no Hopper (sm90) equivalent -- ptxas rejects it there ("Feature
     '.tile::gather4 ...' requires .target sm_100 or higher"). Unlike
-    ``scatter4``, ``gather4`` is supported across the whole sm100+ range
+    `scatter4`, `gather4` is supported across the whole sm100+ range
     including consumer Blackwell (sm120/sm121): see triton-lang/triton#8498,
-    which enables ``gather4`` on sm120/sm121 while leaving ``scatter4``
-    unsupported there. So this gates on a blanket ``has_device_capability(100)``
+    which enables `gather4` on sm120/sm121 while leaving `scatter4`
+    unsupported there. So this gates on a blanket `has_device_capability(100)`
     rather than the sm100 *family* check used for the scatter store path.
     """
     if current_platform.is_xpu():
@@ -866,12 +866,12 @@ def moe_use_td_hw_supported() -> bool:
 
 
 def resolve_moe_use_td() -> bool:
-    """Tri-state resolver for ``VLLM_TRITON_USE_TD``.
+    """Tri-state resolver for `VLLM_TRITON_USE_TD`.
 
     Unset auto-selects the TD path on XPU only, mirroring the attention
-    dispatcher in ``triton_attn.py``. ``1``/``0`` force it on/off regardless
-    of hardware; forcing ``1`` where it cannot compile (see
-    ``moe_use_td_hw_supported``) fails at ptxas. Blackwell CUDA (sm100+) can
+    dispatcher in `triton_attn.py`. `1`/`0` force it on/off regardless
+    of hardware; forcing `1` where it cannot compile (see
+    `moe_use_td_hw_supported`) fails at ptxas. Blackwell CUDA (sm100+) can
     compile it but is opt-in only, pending validation.
     """
     override = envs.VLLM_TRITON_USE_TD
@@ -886,7 +886,7 @@ _warned_moe_use_td_ineffective = False
 def warn_if_moe_use_td_ineffective(
     active_backend: str, is_quantized: bool = False
 ) -> None:
-    """One-shot warning when ``VLLM_TRITON_USE_TD`` is set but ignored.
+    """One-shot warning when `VLLM_TRITON_USE_TD` is set but ignored.
 
     Fires when the user set the env explicitly and either (a) the active
     MoE backend is not the fused Triton kernel, or (b) the model is

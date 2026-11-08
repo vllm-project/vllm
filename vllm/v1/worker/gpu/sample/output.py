@@ -40,7 +40,7 @@ def _compact_sampling_mask_kernel(
     ROWS_PER_REQUEST: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Per row: first ``max_num_kept`` finite-logit ids, the full count, the bitmask."""
+    """Per row: first `max_num_kept` finite-logit ids, the full count, the bitmask."""
     output_row = tl.program_id(0)
     req_idx = output_row // ROWS_PER_REQUEST
     slot_idx = output_row % ROWS_PER_REQUEST
@@ -85,7 +85,7 @@ MAX_COMPACT_SUPPORT = 2048
 
 class SamplingMaskTensors(NamedTuple):
     """Device-side masks pending async D2H: compact ids, plus the bitmask as
-    the exact fallback for rows wider than ``max_num_kept``."""
+    the exact fallback for rows wider than `max_num_kept`."""
 
     # [num_requests * rows_per_request, max_num_kept]
     token_ids: torch.Tensor

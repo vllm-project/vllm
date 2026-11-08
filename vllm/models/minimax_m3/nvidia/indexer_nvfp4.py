@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NVFP4 index-cache indexer impl for MiniMax M3 (SM100/SM103/SM107).
 
-The index-K side cache holds packed NVFP4 pages ``[num_blocks, 128, 72]`` (E2M1
+The index-K side cache holds packed NVFP4 pages `[num_blocks, 128, 72]` (E2M1
 codes, then E4M3 block scales, no global scale) written by the fused
 qk-norm/rope insert, and index-Q is E4M3. Both sides use the MSA paged indexers
-of ``fmha_sm100`` with fused top-k, which write 15 score-ranked history pages
-plus the query's local page last (``init_blocks=0, local_blocks=1``) as
+of `fmha_sm100` with fused top-k, which write 15 score-ranked history pages
+plus the query's local page last (`init_blocks=0, local_blocks=1`) as
 logical block ids:
 
 * Decode scores the NVFP4 pages with the Q8KV4 decode indexer, which reads the
@@ -71,7 +71,7 @@ DECODE_NUM_HEADS = (1, 2, 4)
 def _msa_indexers():
     """Import the MSA indexer wrappers.
 
-    Through ``fmha_sm100.sparse``, which binds the package's csrc JIT loader.
+    Through `fmha_sm100.sparse`, which binds the package's csrc JIT loader.
     """
     from vllm.third_party.fmha_sm100.sparse import (
         BatchDecodeIndexerQ8KV4Wrapper,
@@ -122,7 +122,7 @@ class MiniMaxM3IndexerNvfp4PrefillChunk:
 
 @dataclass
 class MiniMaxM3IndexerNvfp4Metadata(MiniMaxM3IndexerMetadata):
-    """The base ``prefill``/``decode`` fields are unused on this path."""
+    """The base `prefill`/`decode` fields are unused on this path."""
 
     decode_q8kv4: MiniMaxM3IndexerNvfp4DecodeMetadata | None = None
     prefill_chunks: list[MiniMaxM3IndexerNvfp4PrefillChunk] = field(

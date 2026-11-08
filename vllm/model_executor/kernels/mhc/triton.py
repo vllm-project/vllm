@@ -49,7 +49,7 @@ def _rmsnorm_nw_kernel(
 def rmsnorm_nw(x: Tensor, eps: float) -> Tensor:
     """Weight-free RMSNorm over the last dimension.
 
-    Treats *x* as ``[num_rows, D]`` where ``num_rows = product(shape[:-1])``.
+    Treats *x* as `[num_rows, D]` where `num_rows = product(shape[:-1])`.
     Returns a contiguous tensor with the same shape and dtype as *x*.
     """
     orig_shape = x.shape
@@ -178,7 +178,7 @@ def _mhc_post_collapse_rms_norm_kernel(
     BLOCK_H: tl.constexpr,
 ):
     """The post-mix and collapse keep the expression order of aiter's
-    ``_mhc_fused_post_pre_delayed_rmsnorm_main_kernel``, so the new residual is
+    `_mhc_fused_post_pre_delayed_rmsnorm_main_kernel`, so the new residual is
     bit-identical to it."""
     t = tl.program_id(0).to(tl.int64)
     cols = tl.arange(0, BLOCK_H)
@@ -284,8 +284,8 @@ def mhc_post_collapse_rms_norm_triton(
     """The layer-input half of a delayed mHC seam, without the gate projection.
 
     Applies the post block and returns the new residual and the RMSNorm of its
-    collapse with the carried ``pre_mix``, which is what
-    ``mhc_fused_post_pre_delayed_rms_norm_aiter`` returns besides the gates.
+    collapse with the carried `pre_mix`, which is what
+    `mhc_fused_post_pre_delayed_rms_norm_aiter` returns besides the gates.
 
     Args:
         residual: [T, 4, H] bf16 residual streams entering the seam.
@@ -385,8 +385,8 @@ def mhc_pre_mix_triton(
 ) -> Tensor:
     """Pre-mix gate for the delayed mHC pre, from AITER's split-k GEMM output.
 
-    AITER's ``mhc_pre_big_fuse`` consumes the unreduced ``[splitk, tokens,
-    hc_mult3]`` GEMM output and the matching row square-sums, but only returns
+    AITER's `mhc_pre_big_fuse` consumes the unreduced `[splitk, tokens,
+    hc_mult3]` GEMM output and the matching row square-sums, but only returns
     the post and comb gates. The delayed formulation also needs the pre gate,
     to carry into the next sublayer seam. It is the same slice of the same
     numbers, so recover it here rather than repeating the projection.

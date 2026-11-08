@@ -230,7 +230,7 @@ class TestCMakeGuards:
 
     def test_rdna3_cu_files_inside_gfx1100_conditional(self):
         """All RDNA3 .cu files must be listed inside the
-        ``if(VLLM_GPU_ARCHES MATCHES "gfx1100")`` block, not unconditionally.
+        `if(VLLM_GPU_ARCHES MATCHES "gfx1100")` block, not unconditionally.
         """
         cmake = self._read_cmake()
         for cu_file in RDNA3_CU_FILES:
@@ -363,7 +363,7 @@ class TestCustomOpsGuards:
             )
 
     def test_no_toplevel_rocm_c_import(self):
-        """No top-level ``from vllm._rocm_C import`` — would crash on CDNA."""
+        """No top-level `from vllm._rocm_C import` — would crash on CDNA."""
         src = self._read_custom_ops()
         for line in src.splitlines():
             stripped = line.strip()

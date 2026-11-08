@@ -871,14 +871,14 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     ) -> dict[str, object]:
         """Complete missing Qwen-VL size aliases.
 
-        Qwen-VL accepts ``size.shortest_edge`` / ``min_pixels`` and
-        ``size.longest_edge`` / ``max_pixels`` as equivalent controls. When
-        only one representation is provided with a non-``None`` value, add the
+        Qwen-VL accepts `size.shortest_edge` / `min_pixels` and
+        `size.longest_edge` / `max_pixels` as equivalent controls. When
+        only one representation is provided with a non-`None` value, add the
         missing equivalent representation. If both are already present, leave
         them unchanged even when their values conflict.
 
         Apply this independently to the flat kwargs and to each existing
-        ``images_kwargs`` / ``videos_kwargs`` mapping. Values are not propagated
+        `images_kwargs` / `videos_kwargs` mapping. Values are not propagated
         between these mappings.
         """
 
@@ -935,10 +935,10 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         self,
         mm_kwargs: Mapping[str, object],
     ) -> dict[str, Any]:
-        """Merge configured and request Qwen-VL ``mm_processor_kwargs``.
+        """Merge configured and request Qwen-VL `mm_processor_kwargs`.
 
-        Request-side ``size.shortest_edge`` / ``min_pixels`` and
-        ``size.longest_edge`` / ``max_pixels`` aliases are completed before the
+        Request-side `size.shortest_edge` / `min_pixels` and
+        `size.longest_edge` / `max_pixels` aliases are completed before the
         merge so request precedence is preserved across equivalent
         representations.
         """
@@ -955,8 +955,8 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     ) -> dict[str, int]:
         """Resolve Qwen-VL vision size kwargs with optional processor defaults.
 
-        ``size`` overrides any processor defaults, then ``min_pixels`` and
-        ``max_pixels`` override the corresponding size edges.
+        `size` overrides any processor defaults, then `min_pixels` and
+        `max_pixels` override the corresponding size edges.
         """
         size = dict(default_size) if default_size is not None else {}
 

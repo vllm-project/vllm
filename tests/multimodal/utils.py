@@ -111,7 +111,7 @@ def create_live_webm_video(
 ) -> bytes:
     """Encode a WebM stream without container duration or frame-count metadata.
 
-    The ``live`` muxing option mimics writing to a pipe: the Segment size is
+    The `live` muxing option mimics writing to a pipe: the Segment size is
     unknown and no Duration or Cues elements are written, so decoder backends
     cannot learn the frame count from the header.
     """
@@ -168,11 +168,11 @@ def create_edit_list_trimmed_video(
     """Stream-copy-cut a long-GOP clip so an mp4 edit list hides the lead-in.
 
     Remuxes the tail of a single-keyframe clip without re-encoding, rebasing
-    timestamps at ``trim_start_frame``: the lead-in packets are still needed
+    timestamps at `trim_start_frame`: the lead-in packets are still needed
     to decode, so they stay in the file at negative pts and the muxer records
-    an edit list. The header sample count stays ``num_frames`` while only the
+    an edit list. The header sample count stays `num_frames` while only the
     trailing frames are presentable — the shape produced by lossless trims
-    (e.g. ``ffmpeg -ss ... -c copy``). Returns (video_bytes, visible_frames).
+    (e.g. `ffmpeg -ss ... -c copy`). Returns (video_bytes, visible_frames).
     """
     import av
 

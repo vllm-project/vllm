@@ -704,7 +704,7 @@ ATTENTION_STORE_LAYOUTS: dict[KVCacheLayout, type[AttentionStoreLayout]] = {
 
 
 class MambaStoreLayout(TPShardedStoreLayout):
-    """Store descriptors for cache groups represented by ``MambaSpec``.
+    """Store descriptors for cache groups represented by `MambaSpec`.
 
     This includes Mamba and GDN convolution/recurrent state caches.
     """

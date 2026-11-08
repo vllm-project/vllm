@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Engram: n-gram hash lookups gated into the hyper-connection stream.
 
-Port of the reference ``inference/engram.py`` + ``Engram`` /
-``ParallelEngramEmbedding`` from ``inference/model.py`` (DeepSeek V4.1
+Port of the reference `inference/engram.py` + `Engram` /
+`ParallelEngramEmbedding` from `inference/model.py` (DeepSeek V4.1
 checkpoint layout). Engram modules live on the backbone layers listed in
-``engram_layer_ids`` only.
+`engram_layer_ids` only.
 
-An n-gram at position ``p`` needs the token ids at ``p-1..p-3`` while vLLM
+An n-gram at position `p` needs the token ids at `p-1..p-3` while vLLM
 streams tokens chunk-by-chunk:
 
-- ``token_map``: token id -> compressed vocab id, built once from the
+- `token_map`: token id -> compressed vocab id, built once from the
   model's tokenizer at init (deterministic; asserted against
-  ``engram_compressed_vocab_size``).
-- ``lookback_token_ids``: the ids just before each request's chunk start,
+  `engram_compressed_vocab_size`).
+- `lookback_token_ids`: the ids just before each request's chunk start,
   which the runner reads from its device-resident token history.
 """
 

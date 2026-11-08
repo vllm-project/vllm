@@ -222,7 +222,7 @@ def reply_label_ids(
     labels: Sequence[str] = LABELS,
 ) -> tuple[list[int], list[int]]:
     """The prompt's ids after its last added token, and the token each of
-    ``labels`` adds after them as the first token of the reply. Raises
+    `labels` adds after them as the first token of the reply. Raises
     ValueError if a label is not one distinct token there."""
     tail = prompt_tail(tokenizer, prompt_ids)
     text = tokenizer.decode(tail)
@@ -251,7 +251,7 @@ def type_label_ids(
 
 
 def cap_pixels(image: Image.Image, max_pixels: int) -> Image.Image:
-    """Shrink ``image`` to at most ``max_pixels`` pixels (bicubic)."""
+    """Shrink `image` to at most `max_pixels` pixels (bicubic)."""
     w, h = image.size
     if w * h <= max_pixels:
         return image
@@ -439,7 +439,7 @@ class NextTokenStrategy(ReadStrategy):
         position: int = 0,
         usage: bool = True,
     ) -> QuestionRead:
-        """The answer at ``position``. Only a read with ``usage`` counts tokens."""
+        """The answer at `position`. Only a read with `usage` counts tokens."""
         token_ids = result.outputs[0].token_ids
         remaining = iter(logprobs)
         read = QuestionRead(
@@ -843,7 +843,7 @@ class JointSchemaStrategy(ReadStrategy):
     question with its options, as the model was trained to read them. The
     model's joint schema head scores each option, so a read has no labels.
 
-    Mirrors ``encode_record`` in the checkpoint's ``joint_schema_model.py``.
+    Mirrors `encode_record` in the checkpoint's `joint_schema_model.py`.
     Each piece is tokenized on its own, so the spans of the questions and the
     options are known. The spans count from the end of the prompt, so they
     hold after the media placeholders, which come before the state, expand."""
@@ -996,7 +996,7 @@ class JointSchemaStrategy(ReadStrategy):
         return engine_input
 
     def _options(self, q: Question) -> list[tuple[int, str, Any]]:
-        """Each option's index in ``q.options``, id and description, in the
+        """Each option's index in `q.options`, id and description, in the
         model's order: choices sorted by name, noul true then false, score
         levels by index."""
         if q.type.name == "noul":
@@ -1023,7 +1023,7 @@ class JointSchemaStrategy(ReadStrategy):
         self, questions: list[Question], state: str, prefix: list[int] | None = None
     ) -> tuple[list[int], dict[str, list[Any]], list[list[int]]]:
         """The prompt, the schema for the pooler, and each question's option
-        indices in the order of the output. ``prefix`` is what precedes the
+        indices in the order of the output. `prefix` is what precedes the
         state: the system prompt, and the media if there are any."""
         prefix = self.prefix if prefix is None else prefix
         schema_ids = self._tokens("\n\nSCHEMA FIELDS:\n")
@@ -1239,7 +1239,7 @@ class D3Strategy(ReadStrategy):
 
     def _options(self, q: Question) -> tuple[list[str], list[int]]:
         """Each option's line in the model's order, and the index of each of
-        ``q.options`` in that order."""
+        `q.options` in that order."""
         if q.type.name == "noul":
             yes, no = q.options
             texts = [

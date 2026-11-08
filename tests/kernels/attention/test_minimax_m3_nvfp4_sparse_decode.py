@@ -244,7 +244,7 @@ def test_decode_block_outer_pages_bitwise(num_kv_heads, decode_query_len):
 
 
 def _quantized_decode(q, cache, topk, table, seq_lens, qlen, extra_rows=0, **kw):
-    """The kernel's MXFP8 output (values, scales) of the rows plus ``extra_rows``
+    """The kernel's MXFP8 output (values, scales) of the rows plus `extra_rows`
     sentinel rows that must stay untouched."""
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
         MXFP8_BLOCK_SIZE,
@@ -309,7 +309,7 @@ def _assert_multi_request_mxfp8(num_reqs, qlen, ctx, **kw):
 @pytest.mark.parametrize("qlen", [4, 8])
 @pytest.mark.parametrize("num_reqs", [1, 2, 3, 5, 8, 12, 16, 24])
 def test_decode_mxfp8_output_matches_quantized_bf16(num_reqs, qlen, ctx):
-    """The MXFP8 epilogue equals ``mxfp8_e4m3_quantize`` of the same kernel's
+    """The MXFP8 epilogue equals `mxfp8_e4m3_quantize` of the same kernel's
     bf16 output, bit for bit, at the default split choice for each batch."""
     _assert_multi_request_mxfp8(num_reqs, qlen, ctx)
 

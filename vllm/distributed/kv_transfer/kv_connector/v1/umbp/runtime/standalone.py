@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Standalone UMBP runtime backed by a node-local ``umbp_standalone_server``.
+"""Standalone UMBP runtime backed by a node-local `umbp_standalone_server`.
 
 The server owns one DRAM pool per host. Every engine, data-parallel rank, and
 worker on that host attaches to it over a Unix-domain socket, so KV stored by

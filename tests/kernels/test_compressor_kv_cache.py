@@ -278,7 +278,7 @@ def test_v41_fused_save_compress_and_insert(
 ):
     """Ring states: a group boundary whose previous token is outside the chunk
     pools the ring row that chunk left behind, even when this chunk overwrites
-    that row; only the last ``capacity`` tokens of a chunk are stored.
+    that row; only the last `capacity` tokens of a chunk are stored.
 
     Exercise historical group starts, adjacent requests, a chunk longer than
     the ring, single-token decode pairs, empty requests, wrap thresholds at
@@ -454,7 +454,7 @@ def _mxfp8_record_reference(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Reference V4.1 record for one token: 512 fp8 bytes + 16 UE8M0 scales.
 
-    Mirrors FlashMLA's ``KVCacheLayout.V41_FP8Sparse`` quantizer: rotate the
+    Mirrors FlashMLA's `KVCacheLayout.V41_FP8Sparse` quantizer: rotate the
     RoPE tail first, then scale every 32-dim tile, RoPE tiles included.
     """
     rotated = _rotate_rope_tail(latent_row, cos_sin_row)
@@ -466,7 +466,7 @@ def _mxfp8_record_reference(
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 def test_v41_rope_insert_mxfp8_record(compress_ratio: int):
     """The 528-byte V4.1 record quantizes the RoPE dims instead of keeping them
-    in bf16, so a token is [512 fp8][16 UE8M0].
+    in bf16, so a token is `[512 fp8][16 UE8M0]`.
 
     Byte-exact against the reference quantizer, including the rows and page
     padding the kernel must leave alone.
@@ -671,9 +671,9 @@ def test_v41_rope_insert_nvfp4_record(compress_ratio: int):
     """The 288-byte V4.1 NVFP4 record: 256 B of e2m1 pairs then 32 e4m3 scales
     per token.
 
-    Scales are byte-exact against the reference (``amax / 6`` clamped to the
+    Scales are byte-exact against the reference (`amax / 6` clamped to the
     e4m3 range); values are checked as round-to-nearest on the e2m1 grid, whose
-    coarsest step is 2 between 4 and 6, so half a step is ``1.0 * scale``.
+    coarsest step is 2 between 4 and 6, so half a step is `1.0 * scale`.
     """
     from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
         rope_quant_insert,
@@ -1100,8 +1100,8 @@ def test_v41_rope_insert_plain_row(compress_ratio: int, store_fp8: bool):
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Triton kernel")
 def test_v41_compressor_metadata_maps_tokens_to_their_ring():
     """The ring group's generic slot mapping is disabled (all PAD), so the
-    builder must map every real token to ``ring_block * capacity + pos %
-    capacity``. Padding tokens and requests on the null block (block 0, as in
+    builder must map every real token to `ring_block * capacity + pos %
+    capacity`. Padding tokens and requests on the null block (block 0, as in
     dummy batches) must stay at PAD."""
     from unittest.mock import MagicMock
 

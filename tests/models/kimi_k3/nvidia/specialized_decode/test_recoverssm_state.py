@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The runner side of the deferred RecoverSSM (``DeferredRecoverSSMState``) and how
-the specialized decode installs it on ``KimiK3ModelState`` and the KDA metadata
+"""The runner side of the deferred RecoverSSM (`DeferredRecoverSSMState`) and how
+the specialized decode installs it on `KimiK3ModelState` and the KDA metadata
 builders: CPU only, the hybrid state's base class mocked."""
 
 from types import SimpleNamespace

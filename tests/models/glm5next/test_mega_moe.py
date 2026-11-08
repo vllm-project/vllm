@@ -39,7 +39,7 @@ def sm100_mega_moe_layout(monkeypatch):
 
 
 def _block_fp8(real: torch.Tensor, power_of_two: bool = False):
-    """Quantize ``(..., mn, k)`` to E4M3 with one float32 scale per 128x128."""
+    """Quantize `(..., mn, k)` to E4M3 with one float32 scale per 128x128."""
     *lead, mn, k = real.shape
     blocks = real.reshape(*lead, mn // 128, 128, k // 128, 128)
     scale = blocks.abs().amax(dim=(-3, -1)) / 448.0
@@ -106,7 +106,7 @@ def _checkpoint(seed: int) -> dict[str, torch.Tensor]:
 
 
 def _load_shuffled(experts, ckpt, seed, suffix="") -> None:
-    """Load the checkpoint tensors whose names end in ``suffix``, shuffled."""
+    """Load the checkpoint tensors whose names end in `suffix`, shuffled."""
     shards = []
     for expert_id in range(NUM_EXPERTS):
         for name, tensor in ckpt.items():

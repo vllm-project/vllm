@@ -16,8 +16,8 @@
 Every Lamport kernel of the package (the boundary gathers, the attention
 boundary, the MoE tail and the unpooler's zero-copy epilogue) is built from
 these. BF16 negative zero (0x8000) marks a slot that has not been written yet;
-a three-generation stage state (``NEXT_STAGE`` written by the consumer,
-``ACTIVE_STAGE`` by the publisher) lets a fast rank publish the next call while
+a three-generation stage state (`NEXT_STAGE` written by the consumer,
+`ACTIVE_STAGE` by the publisher) lets a fast rank publish the next call while
 a slow one still reads the current one.
 """
 
@@ -108,7 +108,7 @@ def _ordered(text, constraints, operands, loc, ip, result=None):
 
 
 def _clobbered(constraints: str, clobber_memory: bool) -> str:
-    """``constraints`` with a memory clobber added when ``clobber_memory``."""
+    """`constraints` with a memory clobber added when `clobber_memory`."""
     return f"{constraints},~{{memory}}" if clobber_memory else constraints
 
 
@@ -447,7 +447,7 @@ def pack_bf16x2_rn(lo: Float32, hi: Float32, *, loc=None, ip=None) -> Uint32:
 
 @dsl_user_op
 def bf16x2_to_f32x2(word: Uint32, *, loc=None, ip=None) -> tuple[Float32, Float32]:
-    """The BF16 pair in ``word`` widened to FP32 (exact): (bits 0-15, 16-31)."""
+    """The BF16 pair in `word` widened to FP32 (exact): (bits 0-15, 16-31)."""
     pair = _asm(
         ir.Type.parse("!llvm.struct<(f32, f32)>"),
         [Uint32(word).ir_value(loc=loc, ip=ip)],
@@ -686,8 +686,8 @@ def map_shared_to_peer(
 def map_shared_address_to_peer(
     address: Int32, peer_rank: Int32, *, loc=None, ip=None
 ) -> Int32:
-    """The shared::cluster address of this CTA's shared ``address`` in the
-    cluster's CTA ``peer_rank``."""
+    """The shared::cluster address of this CTA's shared `address` in the
+    cluster's CTA `peer_rank`."""
     return Int32(
         _asm(
             T.i32(),
@@ -717,7 +717,7 @@ def store_shared_cluster_f32(
 
 
 def _load_shared_u32x4(address, loc, ip):
-    """Four words at the shared ``address``, the struct of one ld.shared.v4;
+    """Four words at the shared `address`, the struct of one ld.shared.v4;
     side-effecting, so it does not move across the barriers and mbarrier waits
     that guard the data."""
     return _ordered(
@@ -738,13 +738,13 @@ def load_shared_u32x4(pointer: cute.Pointer, *, loc=None, ip=None):
 
 @dsl_user_op
 def load_shared_u32x4_address(address: Int32, *, loc=None, ip=None):
-    """``load_shared_u32x4`` by address."""
+    """`load_shared_u32x4` by address."""
     return _words(_load_shared_u32x4(address, loc, ip), 4, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def load_shared_u32x4_unpacked(address: Int32, *, loc=None, ip=None) -> tuple:
-    """``load_shared_u32x4_address`` as a tuple of four Uint32."""
+    """`load_shared_u32x4_address` as a tuple of four Uint32."""
     return _unpack(_load_shared_u32x4(address, loc, ip), Uint32, 4, loc=loc, ip=ip)
 
 
@@ -822,7 +822,7 @@ def remote_release_add1_u32(address: Int64, *, loc=None, ip=None) -> None:
 
 @dsl_user_op
 def atomic_add1_acq_rel_u32(pointer: cute.Pointer, *, loc=None, ip=None) -> Uint32:
-    """Add 1 to the global word at ``pointer`` and return its value before
+    """Add 1 to the global word at `pointer` and return its value before
     (acquire-release, GPU scope): a ticket."""
     address = pointer.toint(loc=loc, ip=ip)
     return Uint32(
@@ -982,7 +982,7 @@ def load_bf16x8_as_f32(base: cute.Tensor, offset: Int64):
 
 @cute.jit
 def load_f16x8_as_f32(base: cute.Tensor, offset: Int64):
-    """8 FP16 elements from element ``offset`` of ``base`` (one 16-byte
+    """8 FP16 elements from element `offset` of `base` (one 16-byte
     access), converted exactly to FP32."""
     pointer = cute.make_ptr(
         Float16,
@@ -994,7 +994,7 @@ def load_f16x8_as_f32(base: cute.Tensor, offset: Int64):
 
 
 def regs(values) -> list:
-    """An 8-wide FP32 TensorSSA (``load_f32x8``, ``load_bf16x8_as_f32``) as
+    """An 8-wide FP32 TensorSSA (`load_f32x8`, `load_bf16x8_as_f32`) as
     its 8 scalars (traced inline)."""
     fragment = cute.make_rmem_tensor(cute.make_layout((VEC_BF16,)), Float32)
     fragment.store(values)
@@ -1012,7 +1012,7 @@ def pack_bf16x8_rn(values: list):
 
 def store_bf16x8_rn(base: cute.Tensor, offset: Int64, values: list) -> None:
     """8 FP32 scalars rounded to nearest-even BF16 and stored as one 16-byte
-    access at element ``offset`` of the BF16 ``base`` (traced inline)."""
+    access at element `offset` of the BF16 `base` (traced inline)."""
     store_global_u32x4(
         Int64((base.iterator + offset).toint()), pack_bf16x8_rn(values).load()
     )
@@ -1123,7 +1123,7 @@ def load_global_s64_address(
 
 @dsl_user_op
 def atomic_add1_acq_rel_u32_address(address: Int64, *, loc=None, ip=None) -> Uint32:
-    """``atomic_add1_acq_rel_u32`` of the global word at ``address``."""
+    """`atomic_add1_acq_rel_u32` of the global word at `address`."""
     return Uint32(
         _asm(
             T.i32(),
@@ -1145,9 +1145,9 @@ def load_global_f32x4_address(
     loc=None,
     ip=None,
 ) -> tuple[Float32, Float32, Float32, Float32]:
-    """Four FP32 at the 16-byte aligned ``address`` in one load; ``ordered``
-    as for ``load_global_u32_address``. A coherent load, not ``ld.global.nc``:
-    ptxas moves read-only-path loads across ``griddepcontrol.wait`` either way,
+    """Four FP32 at the 16-byte aligned `address` in one load; `ordered`
+    as for `load_global_u32_address`. A coherent load, not `ld.global.nc`:
+    ptxas moves read-only-path loads across `griddepcontrol.wait` either way,
     so they cannot read what the PDL primary grid writes."""
     loaded = _asm(
         llvm.StructType.get_literal([T.f32()] * 4),
@@ -1172,8 +1172,8 @@ def f32_bits(value: Float32, *, loc=None, ip=None) -> Int32:
 
 @dsl_user_op
 def lowest_set_bit(mask: Uint32, *, loc=None, ip=None) -> Int32:
-    """The index of the lowest set bit of a nonzero ``mask`` (CUDA's
-    ``__ffs(mask) - 1``)."""
+    """The index of the lowest set bit of a nonzero `mask` (CUDA's
+    `__ffs(mask) - 1`)."""
     return Int32(
         _asm(
             T.i32(),
@@ -1193,7 +1193,7 @@ def lowest_set_bit(mask: Uint32, *, loc=None, ip=None) -> Int32:
 
 @dsl_user_op
 def sigmoid_f32(x: Float32, *, loc=None, ip=None) -> Float32:
-    """``tl.sigmoid(x)``: x * -log2(e), ex2.approx, + 1, then 1 / that with
+    """`tl.sigmoid(x)`: x * -log2(e), ex2.approx, + 1, then 1 / that with
     div.full."""
     return _f32_op(
         "{\n\t.reg .f32 a, e, d;\n\tmul.f32 a, $1, 0fBFB8AA3B;\n\t"
@@ -1208,7 +1208,7 @@ def sigmoid_f32(x: Float32, *, loc=None, ip=None) -> Float32:
 
 @dsl_user_op
 def div_full_f32(a: Float32, b: Float32, *, loc=None, ip=None) -> Float32:
-    """A / b as ``div.full.f32`` (Triton's FP32 division)."""
+    """A / b as `div.full.f32` (Triton's FP32 division)."""
     return _f32_op("div.full.f32 $0, $1, $2;", "=f,f,f", (a, b), loc, ip)
 
 
@@ -1230,7 +1230,7 @@ def mbarrier_init_address(
     loc=None,
     ip=None,
 ) -> None:
-    """Initialize the shared mbarrier at ``bar`` for ``count`` arrivals (a
+    """Initialize the shared mbarrier at `bar` for `count` arrivals (a
     Python int is an immediate operand, an Int32 a register)."""
     operands = [Int32(bar)]
     if isinstance(count, int):
@@ -1252,7 +1252,7 @@ def mbarrier_arrive_expect_tx_address(
     loc=None,
     ip=None,
 ) -> None:
-    """Arrive on the shared mbarrier at ``bar`` expecting ``num_bytes``
+    """Arrive on the shared mbarrier at `bar` expecting `num_bytes`
     transaction bytes."""
     _ordered(
         "mbarrier.arrive.expect_tx.shared::cta.b64 _, [$0], $1;",
@@ -1282,7 +1282,7 @@ def _mbarrier_wait(bar, parity, semantics, loc, ip):
 
 @dsl_user_op
 def mbarrier_wait_address(bar: Int32, parity: Int32, *, loc=None, ip=None) -> None:
-    """Spin until the phase of ``parity`` completes (acquire, CTA scope)."""
+    """Spin until the phase of `parity` completes (acquire, CTA scope)."""
     _mbarrier_wait(bar, parity, "", loc, ip)
 
 
@@ -1290,14 +1290,14 @@ def mbarrier_wait_address(bar: Int32, parity: Int32, *, loc=None, ip=None) -> No
 def mbarrier_wait_cluster_address(
     bar: Int32, parity: Int32, *, loc=None, ip=None
 ) -> None:
-    """``mbarrier_wait_address`` with cluster-scope acquire: for a phase that
+    """`mbarrier_wait_address` with cluster-scope acquire: for a phase that
     peers complete (st.async complete_tx, release at cluster scope)."""
     _mbarrier_wait(bar, parity, ".acquire.cluster", loc, ip)
 
 
 @dsl_user_op
 def mbarrier_try_wait_phase0_cluster(address: Int32, *, loc=None, ip=None) -> Int32:
-    """1 once phase 0 of the shared mbarrier at ``address`` has completed
+    """1 once phase 0 of the shared mbarrier at `address` has completed
     (acquire at cluster scope: the stores that completed it are visible), 0
     when the bounded wait ends first."""
     return Int32(
@@ -1331,8 +1331,8 @@ def tma_load_2d(
     loc=None,
     ip=None,
 ) -> None:
-    """The box of ``tensor_map`` at (c0, c1) (inner coordinate first) into
-    shared ``dst``, its bytes completing on mbarrier ``bar``."""
+    """The box of `tensor_map` at (c0, c1) (inner coordinate first) into
+    shared `dst`, its bytes completing on mbarrier `bar`."""
     _ordered(
         "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx"
         "::bytes [$0], [$1, {$2, $3}], [$4];",
@@ -1347,7 +1347,7 @@ def tma_load_2d(
 def tma_prefetch_2d_l2(
     tensor_map: Int64, c0: Int32, c1: Int32, *, loc=None, ip=None
 ) -> None:
-    """Prefetch the box of ``tensor_map`` at (c0, c1) into L2."""
+    """Prefetch the box of `tensor_map` at (c0, c1) into L2."""
     _ordered(
         "cp.async.bulk.prefetch.tensor.2d.L2.global.tile [$0, {$1, $2}];",
         "l,r,r",
@@ -1369,9 +1369,9 @@ def store_async_cluster_f32x2(
     loc=None,
     ip=None,
 ) -> None:
-    """Store (lo, hi) at cluster address ``remote``
-    (``map_shared_address_to_peer``), completing 8 transaction bytes on the
-    peer's mbarrier at cluster address ``remote_bar``; with a ``predicate``,
+    """Store (lo, hi) at cluster address `remote`
+    (`map_shared_address_to_peer`), completing 8 transaction bytes on the
+    peer's mbarrier at cluster address `remote_bar`; with a `predicate`,
     only if it is true."""
     text = (
         "st.async.shared::cluster.mbarrier::complete_tx::bytes.v2.f32 [$0], "
@@ -1391,8 +1391,8 @@ def store_async_cluster_f32x4(
     address: Int32, values, mbarrier: Int32, *, loc=None, ip=None
 ) -> None:
     """Four FP32 into a cluster CTA's shared memory
-    (``map_shared_address_to_peer``), completing 16 transaction bytes on that
-    CTA's mbarrier (``mbarrier``, mapped the same way)."""
+    (`map_shared_address_to_peer`), completing 16 transaction bytes on that
+    CTA's mbarrier (`mbarrier`, mapped the same way)."""
     _ordered(
         "st.async.shared::cluster.mbarrier::complete_tx::bytes.v4.f32 [$0], "
         "{$1, $2, $3, $4}, [$5];",
@@ -1424,7 +1424,7 @@ def load_global_nc_f32_address(address: Int64, *, loc=None, ip=None) -> Float32:
 
 @dsl_user_op
 def rsqrt_approx_f32(a: Float32, *, loc=None, ip=None) -> Float32:
-    """rsqrt.approx with subnormal inputs kept (``rsqrtf`` without fast math)."""
+    """rsqrt.approx with subnormal inputs kept (`rsqrtf` without fast math)."""
     return _f32_op("rsqrt.approx.f32 $0, $1;", "=f,f", (a,), loc, ip)
 
 
@@ -1453,7 +1453,7 @@ def mma_m16n8k16_bf16(
 ) -> tuple:
     """mma.sync m16n8k16 row.col with BF16 operands and FP32 accumulation: the
     four accumulators of A (four words) x B (b0, b1) + C (four FP32).
-    ``ordered`` makes it side-effecting asm, kept in program order with the
+    `ordered` makes it side-effecting asm, kept in program order with the
     other side-effecting operations; otherwise the compiler schedules it."""
     struct = _asm(
         llvm.StructType.get_literal([T.f32()] * 4),
@@ -1523,8 +1523,8 @@ def scale_or_neg_inf(
     loc=None,
     ip=None,
 ) -> Float32:
-    """``scale * x`` (round to nearest, subnormals flushed) for a ``key`` in
-    [first, last] (no lower bound without ``first``), else -inf."""
+    """`scale * x` (round to nearest, subnormals flushed) for a `key` in
+    [first, last] (no lower bound without `first`), else -inf."""
     operands = [Float32(scale), Float32(x), Int32(key), Int32(last)]
     test = "setp.le.s32 p, $3, $4;"
     if first is not None:
@@ -1578,7 +1578,7 @@ def load_global_nc_u32x4_address(address: Int64, *, loc=None, ip=None) -> tuple:
 def load_global_nc_s32_or(
     address: Int64, predicate: Int32, other: Int32, *, loc=None, ip=None
 ) -> Int32:
-    """The read-only word at ``address`` if ``predicate``, else ``other``."""
+    """The read-only word at `address` if `predicate`, else `other`."""
     return Int32(
         _ordered(
             "{\n\t.reg .pred p;\n\tsetp.ne.s32 p, $2, 0;\n\tmov.b32 $0, $3;\n\t"
@@ -1604,7 +1604,7 @@ def load_global_cg_f32_address(address: Int64, *, loc=None, ip=None) -> Float32:
 
 @dsl_user_op
 def load_global_cg_f32x2_address(address: Int64, *, loc=None, ip=None) -> tuple:
-    """``load_global_cg_f32_address`` of two FP32."""
+    """`load_global_cg_f32_address` of two FP32."""
     struct = _ordered(
         "ld.global.cg.v2.f32 {$0, $1}, [$2];",
         "=f,=f,l",
@@ -1620,7 +1620,7 @@ def load_global_cg_f32x2_address(address: Int64, *, loc=None, ip=None) -> tuple:
 def store_global_f32_address(
     address: Int64, value: Float32, predicate: Int32, *, loc=None, ip=None
 ) -> None:
-    """Store ``value`` at global ``address`` if ``predicate``."""
+    """Store `value` at global `address` if `predicate`."""
     _ordered(
         "{\n\t.reg .pred p;\n\tsetp.ne.s32 p, $2, 0;\n\t"
         "@p st.global.f32 [$0], $1;\n\t}",
@@ -1646,13 +1646,13 @@ def store_global_f32x2_address(
 
 @dsl_user_op
 def membar_gl(*, loc=None, ip=None) -> None:
-    """The fence of ``__threadfence()``."""
+    """The fence of `__threadfence()`."""
     _ordered("membar.gl;", "~{memory}", (), loc, ip)
 
 
 @dsl_user_op
 def atomic_add1_u32_address(address: Int64, *, loc=None, ip=None) -> Uint32:
-    """``atomicAdd(address, 1)`` (relaxed, GPU scope): the word before."""
+    """`atomicAdd(address, 1)` (relaxed, GPU scope): the word before."""
     return Uint32(
         _ordered(
             "atom.global.add.u32 $0, [$1], 1;",
@@ -1667,7 +1667,7 @@ def atomic_add1_u32_address(address: Int64, *, loc=None, ip=None) -> Uint32:
 
 @dsl_user_op
 def atomic_exch_zero_u32_address(address: Int64, *, loc=None, ip=None) -> None:
-    """``atomicExch(address, 0)`` (relaxed, GPU scope)."""
+    """`atomicExch(address, 0)` (relaxed, GPU scope)."""
     _ordered(
         "{\n\t.reg .b32 old;\n\tatom.global.exch.b32 old, [$0], 0;\n\t}",
         "l,~{memory}",
@@ -1714,7 +1714,7 @@ def load_shared_f32_address(address: Int32, *, loc=None, ip=None) -> Float32:
 def load_shared_f32_or(
     address: Int32, predicate: Int32, other: Float32, *, loc=None, ip=None
 ) -> Float32:
-    """The FP32 at shared ``address`` if ``predicate``, else ``other``."""
+    """The FP32 at shared `address` if `predicate`, else `other`."""
     return Float32(
         _ordered(
             "{\n\t.reg .pred p;\n\tsetp.ne.s32 p, $2, 0;\n\tmov.f32 $0, $3;\n\t"
@@ -1743,7 +1743,7 @@ def store_shared_f32x4_address(address: Int32, values, *, loc=None, ip=None) -> 
 def store_shared_f32_address(
     address: Int32, value: Float32, predicate: Int32, *, loc=None, ip=None
 ) -> None:
-    """Store ``value`` at shared ``address`` if ``predicate``."""
+    """Store `value` at shared `address` if `predicate`."""
     _ordered(
         "{\n\t.reg .pred p;\n\tsetp.ne.s32 p, $2, 0;\n\t"
         "@p st.shared.f32 [$0], $1;\n\t}",
@@ -1768,8 +1768,8 @@ def cluster_wait_aligned(*, loc=None, ip=None) -> None:
 def cp_async_cg_16(
     destination: Int32, source: Int64, predicate: Int32, *, loc=None, ip=None
 ) -> None:
-    """Copy 16 bytes from global ``source`` to this CTA's shared
-    ``destination`` asynchronously, bypassing L1, if ``predicate``."""
+    """Copy 16 bytes from global `source` to this CTA's shared
+    `destination` asynchronously, bypassing L1, if `predicate`."""
     _ordered(
         "{\n\t.reg .pred p;\n\tsetp.ne.s32 p, $2, 0;\n\t"
         "@p cp.async.cg.shared.global [$0], [$1], 16;\n\t}",
@@ -1787,6 +1787,6 @@ def cp_async_commit(*, loc=None, ip=None) -> None:
 
 @dsl_user_op
 def cp_async_wait(pending: cutlass.Constexpr[int], *, loc=None, ip=None) -> None:
-    """Wait until at most ``pending`` of this thread's cp.async groups are in
+    """Wait until at most `pending` of this thread's cp.async groups are in
     flight."""
     _ordered(f"cp.async.wait_group {pending};", "~{memory}", (), loc, ip)

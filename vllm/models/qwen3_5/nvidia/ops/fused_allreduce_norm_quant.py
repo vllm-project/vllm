@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TP all-reduce + residual add + Gemma RMSNorm + consumer input quant.
 
-Calls FlashInfer's ``kARResidualRMSNormOut{FP8,FP4}Quant`` patterns directly
+Calls FlashInfer's `kARResidualRMSNormOut{FP8,FP4}Quant` patterns directly
 (no torch.compile custom op). The kernel writes the bf16 normed activation
-(GDN's ``in_proj_ba`` reads it) next to the static FP8 / NVFP4 codes; its
+(GDN's `in_proj_ba` reads it) next to the static FP8 / NVFP4 codes; its
 outputs are bitwise identical to FlashInfer AR+norm followed by
-``scaled_fp8_quant`` / ``scaled_fp4_quant``.
+`scaled_fp8_quant` / `scaled_fp4_quant`.
 
 Returns None when the fused kernel does not apply (FlashInfer or a supported
 workspace unavailable, or a batch above the workspace budget); the caller
@@ -42,7 +42,7 @@ _workspace_unsupported = False
 
 
 def _get_workspace(hidden_states: torch.Tensor, tp_size: int):
-    """The FlashInfer quant workspace if it can take ``hidden_states``, else
+    """The FlashInfer quant workspace if it can take `hidden_states`, else
     None."""
     global _workspace_unsupported
     if not fi_ar.fi_ar_available or _workspace_unsupported:
@@ -100,13 +100,13 @@ def fused_allreduce_gemma_rms_norm_quant(
     scale: torch.Tensor,
     key: QuantKey,
 ) -> tuple[QuantizedActivation, torch.Tensor, torch.Tensor] | None:
-    """Fused ``gemma_rms_norm(all_reduce(hidden_states) + residual)`` + quant.
+    """Fused `gemma_rms_norm(all_reduce(hidden_states) + residual)` + quant.
 
-    ``hidden_states`` is the per-rank partial of a row-parallel linear;
-    ``scale`` is the consumer's static FP8 input scale or NVFP4 global scale
+    `hidden_states` is the per-rank partial of a row-parallel linear;
+    `scale` is the consumer's static FP8 input scale or NVFP4 global scale
     inverse. Returns the quantized normed activation, the normed activation in
-    ``hidden_states``' dtype, and the new residual (written into the
-    ``hidden_states`` buffer), or None when the fused kernel does not apply.
+    `hidden_states`' dtype, and the new residual (written into the
+    `hidden_states` buffer), or None when the fused kernel does not apply.
     """
     tp_size = get_tensor_model_parallel_world_size()
     workspace = _get_workspace(hidden_states, tp_size)

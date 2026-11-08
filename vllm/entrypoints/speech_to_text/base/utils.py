@@ -18,18 +18,18 @@ async def read_upload_with_limit(
     """Read an uploaded file enforcing a size limit *before* full
     materialization.
 
-    The function first checks the Content-Length header (``file.size``) when
+    The function first checks the Content-Length header (`file.size`) when
     available.  Regardless, it then performs a chunked read that stops as soon
     as the accumulated bytes exceed the limit, ensuring that an oversized
     upload never fully materializes in memory.
 
     Args:
-        file: The FastAPI/Starlette ``UploadFile`` object.
+        file: The FastAPI/Starlette `UploadFile` object.
         max_size_mb: Maximum allowed compressed file size in megabytes.
-            Defaults to ``envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB``.
+            Defaults to `envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB`.
 
     Returns:
-        The file content as ``bytes``.
+        The file content as `bytes`.
 
     Raises:
         VLLMValidationError: If the file exceeds the configured size limit.

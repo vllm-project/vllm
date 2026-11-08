@@ -94,9 +94,9 @@ def _tilelang_call_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 def compile_tilelang(jit_impl: Any, *args: Any, **kwargs: Any) -> None:
     """Compile one TileLang specialization and populate its call cache.
 
-    TileLang's ``compile()`` materializes the kernel without launching it.
-    We also store the compiled kernel in ``_kernel_cache`` using the same
-    parsed key as ``__call__`` so runtime does not report a cache miss for an
+    TileLang's `compile()` materializes the kernel without launching it.
+    We also store the compiled kernel in `_kernel_cache` using the same
+    parsed key as `__call__` so runtime does not report a cache miss for an
     already materialized specialization.
     """
     with _quiet_tilelang_warmup_logs():

@@ -161,7 +161,7 @@ class ParallelConfig:
     externally (see `ParallelConfig.__post_init__`)."""
     data_parallel_rank: int = Field(default=0, ge=0)
     """Rank of the data parallel group. The runtime check at
-    ``__post_init__`` further bounds this by ``data_parallel_size``."""
+    `__post_init__` further bounds this by `data_parallel_size`."""
     data_parallel_rank_local: int | None = None
     """Local rank of the data parallel group, set only in SPMD mode."""
     data_parallel_master_ip: str = "127.0.0.1"
@@ -260,13 +260,13 @@ class ParallelConfig:
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
     enable_shm_tensor_arena: bool = False
-    """Route large CPU tensors (e.g. multimodal ``pixel_values``) in the
+    """Route large CPU tensors (e.g. multimodal `pixel_values`) in the
     engine→worker broadcast through a zero-copy shared-memory arena instead of
     sending a copy to every reader. **Experimental**: may be reconciled with
     vLLM's existing multimodal shm tensor caching in a future release. Opt-in;
     most beneficial for multimodal serving with large images and tensor
     parallelism. Active only when all queue readers are node-local; reserves
-    slots in ``/dev/shm``."""
+    slots in `/dev/shm`."""
 
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
@@ -393,7 +393,7 @@ class ParallelConfig:
     assigned_physical_gpu_ids: list[int] | None = None
     """Mapping from vLLM-local logical GPU IDs to physical GPU IDs.
 
-    For example, ``[2, 3]`` means logical GPU 0 maps to physical GPU 2,
+    For example, `[2, 3]` means logical GPU 0 maps to physical GPU 2,
     and logical GPU 1 maps to physical GPU 3. Physical IDs are used only
     at platform/topology boundaries such as NVML, NIC affinity, P2P
     checks, and final CUDA device selection when needed. When None,
@@ -765,11 +765,11 @@ class ParallelConfig:
         return answer
 
     def _pick_stateless_dp_port(self) -> tuple[int, socket.socket | None]:
-        """Return ``(port, listen_socket)`` for DP group init.
+        """Return `(port, listen_socket)` for DP group init.
 
         With a coord store, rank 0 binds a socket and publishes the port;
         others read it.  Without one, pops a pre-allocated port and
-        returns ``listen_socket=None``.
+        returns `listen_socket=None`.
         """
         if not self._coord_store_port:
             return self.get_next_dp_init_port(), None
@@ -904,7 +904,7 @@ class ParallelConfig:
     def nnodes_within_dp(self) -> int:
         """Number of nodes one DP replica spans.
 
-        External LB pins ``data_parallel_size_local`` to 1, so the ratio
+        External LB pins `data_parallel_size_local` to 1, so the ratio
         rounds down to 0 once DP replicas outnumber nodes. A replica that
         does not span nodes still occupies exactly one.
         """

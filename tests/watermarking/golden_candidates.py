@@ -304,7 +304,7 @@ class WatermarkingCandidate:
     ) -> dict:
         """Generate, detect and trace this candidate into one golden entry.
 
-        ``detection_token_ids`` runs detection over stored tokens instead of
+        `detection_token_ids` runs detection over stored tokens instead of
         the freshly generated ones, so a token drift and a detection drift are
         reported independently.
         """
@@ -860,7 +860,7 @@ def compare_entries(produced: dict, golden: dict) -> list[str]:
 
 
 def compare_golden(candidate: WatermarkingCandidate, golden: dict) -> list[str]:
-    """Return one line per field of ``candidate`` that drifted from ``golden``."""
+    """Return one line per field of `candidate` that drifted from `golden`."""
     return compare_entries(candidate.golden_entry(golden["generation"]), golden)
 
 

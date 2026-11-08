@@ -415,7 +415,7 @@ def split_kv_b_proj(
     qk_nope_head_dim: int,
     v_head_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Dequantize ``kv_b_proj`` and return ``W_UK [L,N,P]``, ``W_UV [L,N,V]``."""
+    """Dequantize `kv_b_proj` and return `W_UK [L,N,P]`, `W_UV [L,N,V]`."""
     weight = get_and_maybe_dequant_weights(kv_b_proj, out_dtype=out_dtype).T
     assert weight.shape == (
         kv_lora_rank,
@@ -1700,7 +1700,7 @@ class MLACommonBackend(AttentionBackend):
     @classmethod
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
         """Per-token-head modes pack an inline fp32 scale pair after the
-        latent data (single-sided: ``head_size_v == 0`` for MLA)."""
+        latent data (single-sided: `head_size_v == 0` for MLA)."""
         spec = super().customize_spec(spec)
         mode = spec.kv_quant_mode
         if spec.state_content_bytes is not None or not mode.is_per_token_head:
@@ -2154,11 +2154,11 @@ def build_mla_chunked_context_metadata(
         chunked_prefill_workspace: Scratch buffer the context gather writes to.
         chunked_prefill_workspace_size: Row capacity of the workspace.
         block_size: KV cache page size for chunk-start alignment.
-        align_chunk_to_block: Round the chunk size down to ``block_size``.
+        align_chunk_to_block: Round the chunk size down to `block_size`.
         device: Target device for the returned tensors.
         dcp_world_size: Decode-context-parallel world size (1 if disabled).
         dcp_local_block_size: Per-rank interleave block size for DCP.
-        dcp_virtual_block_size: ``dcp_local_block_size * dcp_world_size``.
+        dcp_virtual_block_size: `dcp_local_block_size * dcp_world_size`.
         dcp_manager: Shared MLA DCP collective manager.
         align_indptr: Align packed int32 indptr slices to 16 bytes for CuTe DSL.
 
@@ -2911,7 +2911,7 @@ def neutralize_empty_context_partials(
     """Neutralize the partial of every prefill that no chunk covers.
 
     A prefill without context is never gathered, so nothing would write its rows;
-    a zero output with an ``-inf`` lse carries no weight into the final merge
+    a zero output with an `-inf` lse carries no weight into the final merge
     against the suffix partial.
     """
     for token_slice in chunked_context.empty_token_slices:
@@ -2929,8 +2929,8 @@ def init_mla_context_partial(
 
     Laid out like the chunk partials so the final whole-batch merge against the
     suffix partial sees matching head strides. Callers whose backend honors an
-    ``out`` tensor already know that layout and can allocate directly, pairing it
-    with ``neutralize_empty_context_partials``.
+    `out` tensor already know that layout and can allocate directly, pairing it
+    with `neutralize_empty_context_partials`.
     """
     output = torch.empty(
         (num_tokens, *attn_output.shape[1:]),
@@ -2966,8 +2966,8 @@ def accumulate_mla_context_chunk(
         output: Running context partial, updated in place.
         output_lse: Running log-sum-exp, updated in place.
         output_written: The chunk's attention output already landed in
-            ``output[chunk.token_slice]`` because the backend was handed it as
-            ``out``, leaving only the lse to fold. Invalid for a continuation
+            `output[chunk.token_slice]` because the backend was handed it as
+            `out`, leaving only the lse to fold. Invalid for a continuation
             chunk, whose leading tokens must be merged rather than overwritten.
 
     """
@@ -2998,7 +2998,7 @@ def accumulate_mla_context_chunk(
 class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
     """Shared MLA base providing dense-MHA prefill (via the selected
     MLAPrefillBackend) for both dense and sparse impls; subclasses add decode
-    (``forward_mqa``).
+    (`forward_mqa`).
     """
 
     _use_flashinfer_concat_mla_k: bool

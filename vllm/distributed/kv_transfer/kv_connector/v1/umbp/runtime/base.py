@@ -78,7 +78,7 @@ class IUMBPRuntime(Protocol):
     ) -> UMBPSchedulerHandle:
         """Create a scheduler-side handle.
 
-        ``layout`` carries no regions: the scheduler's KV cache config
+        `layout` carries no regions: the scheduler's KV cache config
         flattens per-layer specs, so only worker handles receive byte ranges.
         """
 

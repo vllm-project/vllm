@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tuning and compiling the specialized decode's kernels.
 
-The model state calls ``warm_up`` once the executor is built, before memory
+The model state calls `warm_up` once the executor is built, before memory
 profiling and CUDA graph capture, so no kernel compiles or tunes inside a
 capture. FlashInfer's tuner times each tactic on every TP rank and reduces the
 timings over the TP group, so every rank makes the same calls in the same
@@ -91,8 +91,8 @@ def warm_up(decode: SpecializedDecode, vllm_config: VllmConfig) -> None:
 
 
 def _decode_topk_variants(steps: list[AttentionStep]) -> set[tuple[int, int, bool]]:
-    """(logits width, k, block mode) of every ``decode_topk`` call the dense
-    indexers can make: the paged MQA logits are ``max_model_len`` wide."""
+    """(logits width, k, block mode) of every `decode_topk` call the dense
+    indexers can make: the paged MQA logits are `max_model_len` wide."""
     variants: set[tuple[int, int, bool]] = set()
     for step in steps:
         op = None if step.attn.indexer is None else step.attn.indexer.indexer_op
@@ -119,7 +119,7 @@ def _tuning() -> Iterator[None]:
 
 
 def _aux_weights(steps: list[AttentionStep]) -> list[torch.Tensor]:
-    """The weights the layers run on ``ll_bf16``."""
+    """The weights the layers run on `ll_bf16`."""
     weights = [w for step in steps if step.aux_gemm for w in side_weights(step.attn)]
     for step in steps:
         wk = key_weight(step.attn)
@@ -131,7 +131,7 @@ def _aux_weights(steps: list[AttentionStep]) -> list[torch.Tensor]:
 def _deferred_moe(
     decode: SpecializedDecode, vllm_config: VllmConfig, rows: int, tune: bool
 ) -> None:
-    """One deferring MoE layer on ``rows`` random rows with the finalize
+    """One deferring MoE layer on `rows` random rows with the finalize
     deferred, as the executor runs it above the routed-expert GEMMs' rows:
     tunes its experts over the serving buckets, and allocates what the
     deferred launch allocates on first use before memory profiling."""

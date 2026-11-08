@@ -83,18 +83,18 @@ class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
 
     Provide exactly one rendezvous mode:
 
-    * ``master_address`` + ``master_port`` -- TCPStore / ``StatelessProcessGroup``
+    * `master_address` + `master_port` -- TCPStore / `StatelessProcessGroup`
       rendezvous (requires torch on every rank, including the trainer), or
-    * ``nccl_unique_id_b64`` -- standard (RFC 4648, *not* URL-safe) base64 of the
-      128 raw bytes from ``ncclGetUniqueId``, for torch-free trainers (e.g. JAX)
+    * `nccl_unique_id_b64` -- standard (RFC 4648, *not* URL-safe) base64 of the
+      128 raw bytes from `ncclGetUniqueId`, for torch-free trainers (e.g. JAX)
       that mint the unique id out of band and share it (over HTTP, etc.). Note a
-      JAX peer must use ``base64.b64encode``, not ``urlsafe_b64encode``.
+      JAX peer must use `base64.b64encode`, not `urlsafe_b64encode`.
 
     On the unique-id path all ranks must enter init concurrently (there is no
     store barrier), and every peer must honor the warm-up handshake: the
-    worker's communicator issues a one-element ``all_reduce`` immediately after
-    ``ncclCommInitRank`` (see ``PyNcclCommunicator.from_unique_id_bytes``), so a
-    foreign peer must issue a matching one-element ``all_reduce`` before any
+    worker's communicator issues a one-element `all_reduce` immediately after
+    `ncclCommInitRank` (see `PyNcclCommunicator.from_unique_id_bytes`), so a
+    foreign peer must issue a matching one-element `all_reduce` before any
     other collective or all ranks deadlock.
     """
 
@@ -243,7 +243,7 @@ def uid_init_process_group(
     world_size: int,
     device,
 ) -> "PyNcclCommunicator":
-    """Join the NCCL group from pre-shared ``ncclUniqueId`` bytes.
+    """Join the NCCL group from pre-shared `ncclUniqueId` bytes.
 
     The torch-free rendezvous alternative to `stateless_init_process_group`: no
     TCPStore, and therefore no barrier -- every rank must enter concurrently.

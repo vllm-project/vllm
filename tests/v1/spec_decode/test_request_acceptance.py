@@ -3,8 +3,8 @@
 """Unit tests for per-request speculative-decoding metrics accumulation.
 
 These cover the pure histogram/per-step math (no GPU / no model): the engine-core
-accumulator ``RequestSpecDecodeMetrics`` and its ``to_dict`` payload surfaced in the
-response as ``metrics.speculative_decoding``.
+accumulator `RequestSpecDecodeMetrics` and its `to_dict` payload surfaced in the
+response as `metrics.speculative_decoding`.
 """
 
 import msgspec

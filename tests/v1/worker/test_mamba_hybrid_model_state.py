@@ -41,7 +41,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 
 def _recoverssm_attn_groups(layer_name: str) -> list[list[AttentionGroup]]:
-    """RecoverSSMState.record_step reads only each group's ``layer_names``."""
+    """RecoverSSMState.record_step reads only each group's `layer_names`."""
     group = SimpleNamespace(layer_names=[layer_name])
     return [[group]]  # type: ignore[list-item]  # layer_names-only stand-in
 

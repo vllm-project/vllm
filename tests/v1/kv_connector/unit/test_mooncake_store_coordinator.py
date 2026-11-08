@@ -40,7 +40,7 @@ def _make_coord(
     num_hash_lookahead_tokens=0,
 ):
     """Construct a coordinator using the natural LCM of group block sizes as
-    the scheduler block size — mirrors ``resolve_kv_cache_block_sizes`` for
+    the scheduler block size — mirrors `resolve_kv_cache_block_sizes` for
     the test fixtures."""
     block_sizes = [g.kv_cache_spec.block_size for g in groups]
     scheduler_block_size = lcm(*block_sizes)
@@ -427,8 +427,8 @@ def test_store_mask_retention_interval_zero_keeps_only_replay_boundary():
 
 def test_store_mask_retention_interval_zero_eagle_keeps_lookup_tail():
     """With EAGLE the replay boundary sits one scheduler block lower, as in
-    core's ``replay_boundaries``: the lookup matches that block and drops
-    back from it. The retained SWA tail must span the ``need`` contiguous
+    core's `replay_boundaries`: the lookup matches that block and drops
+    back from it. The retained SWA tail must span the `need` contiguous
     blocks the lookup requires (cdiv(8 - 1, 8) + 1 = 2 here); the non-EAGLE
     boundary leaves only one of them inside the saved prefix."""
     coord = _make_coord(
@@ -584,10 +584,10 @@ def test_lookup_with_eagle_pops_last_full_attention_block():
 def test_load_mask_with_eagle_does_not_double_prune_full_attention():
     """Regression for silent KV corruption with MTP/EAGLE-3.
 
-    The recv side calls ``load_mask(block_hashes, token_len)`` where
-    ``token_len`` is already the eagle-pruned hit length from ``lookup``.
+    The recv side calls `load_mask(block_hashes, token_len)` where
+    `token_len` is already the eagle-pruned hit length from `lookup`.
     A second eagle pop here used to shorten the mask by one extra block;
-    ``process_tokens`` then yielded a chunk past the mask, which the worker
+    `process_tokens` then yielded a chunk past the mask, which the worker
     silently skipped — leaving the trailing block of the loaded prefix
     uninitialized in local KV.
     """
@@ -660,13 +660,13 @@ def _mamba(block_size=16):
 def test_lookup_with_eagle_hybrid_full_plus_mamba_no_overrun():
     """Full+Mamba with eagle must not overrun the attention-verified hit.
 
-    ``MambaManager`` ignores ``drop_eagle_block`` (a Mamba block at position
+    `MambaManager` ignores `drop_eagle_block` (a Mamba block at position
     p IS the recurrent state after (p + 1) * block_size tokens; there is
     nothing to recompute), so granting the Mamba group the one-block eagle
     peek margin lets it match one block PAST the eagle-pruned full-attention
     hit, and adopting that length resumes the recurrent state ahead of the
-    verified token prefix (#43559). Gating the margin on ``not
-    isinstance(spec, MambaSpec)`` pins the hit to the attention-verified 48.
+    verified token prefix (#43559). Gating the margin on `not
+    isinstance(spec, MambaSpec)` pins the hit to the attention-verified 48.
     """
     groups = [
         KVCacheGroupSpec(["L0"], _full(16)),
@@ -687,7 +687,7 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
     """Regression for MTP x PD external-store 0% prefix hit.
 
     DSV4 splits SWA layers into several KV cache groups sharing one spec, and
-    only the group containing the MTP layer is annotated ``is_eagle_group``.
+    only the group containing the MTP layer is annotated `is_eagle_group`.
     The lookup merges equal-spec groups, applies the eagle drop to the merged
     group, and requires each chunk hash to exist in EVERY member group — so
     the save-side masks must eagle-shift every member, not just the annotated

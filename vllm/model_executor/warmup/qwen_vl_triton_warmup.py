@@ -109,7 +109,7 @@ def _synchronize_device(device: torch.device) -> None:
 
 @torch.inference_mode()
 def qwen_vl_triton_warmup(runner: "GPUModelRunner") -> None:
-    """Warm Qwen3-VL ViT kernels and M-RoPE for ``SupportsMRoPE`` models."""
+    """Warm Qwen3-VL ViT kernels and M-RoPE for `SupportsMRoPE` models."""
     model = runner.get_model()
     _warm_vision(model, runner.device)
     _warm_mrope(runner, model)

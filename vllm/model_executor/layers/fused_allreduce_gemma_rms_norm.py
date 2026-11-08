@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Manual fusion of tensor-parallel all-reduce with the following GemmaRMSNorm.
 
-Under tensor parallelism a ``RowParallelLinear`` (e.g. attention ``o_proj``)
+Under tensor parallelism a `RowParallelLinear` (e.g. attention `o_proj`)
 produces a per-rank partial sum that is all-reduced, and the result is then fed
-into a ``GemmaRMSNorm`` that adds the residual and normalizes. flashinfer ships a
+into a `GemmaRMSNorm` that adds the residual and normalizes. flashinfer ships a
 kernel that fuses all-reduce + residual-add + RMSNorm into a single launch; this
 helper drives it directly (no torch.compile pass) for models that run eager.
 
 Scope: attention output only, no quantization. When the flashinfer fast path is
 not applicable (TP==1, flashinfer/NVSwitch unavailable, unsupported dtype, or an
-oversize batch) it falls back to ``all_reduce`` + ``GemmaRMSNorm``, which is
+oversize batch) it falls back to `all_reduce` + `GemmaRMSNorm`, which is
 numerically identical to the unfused model path.
 """
 
@@ -55,7 +55,7 @@ _FI_SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
 
 def _max_token_num(tp_size: int, hidden_size: int, dtype: torch.dtype) -> int | None:
     """Workspace token budget for flashinfer fused all-reduce, or None if the
-    current world size / device is unsupported. Mirrors ``FlashInferAllReduce``."""
+    current world size / device is unsupported. Mirrors `FlashInferAllReduce`."""
     from vllm.config.compilation import PassConfig
 
     max_size_mb = PassConfig.default_fi_allreduce_fusion_max_size_mb().get(tp_size)
@@ -141,12 +141,12 @@ def fused_allreduce_gemma_rms_norm(
     residual: torch.Tensor,
     norm: GemmaRMSNorm,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """All-reduce ``hidden_states`` + add ``residual`` + GemmaRMSNorm, fused.
+    """All-reduce `hidden_states` + add `residual` + GemmaRMSNorm, fused.
 
-    ``hidden_states`` is the per-rank *partial* (un-reduced) output of a
-    row-parallel linear; ``norm`` is the GemmaRMSNorm applied right after.
-    Returns ``(normed_output, new_residual)``, equivalent to
-    ``norm(all_reduce(hidden_states), residual)``.
+    `hidden_states` is the per-rank *partial* (un-reduced) output of a
+    row-parallel linear; `norm` is the GemmaRMSNorm applied right after.
+    Returns `(normed_output, new_residual)`, equivalent to
+    `norm(all_reduce(hidden_states), residual)`.
     """
     tp_size = get_tensor_model_parallel_world_size()
     if tp_size == 1:
@@ -198,15 +198,15 @@ def allreduce_gemma_rms_norm_mxfp8(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor] | None:
     """All-reduce + residual add + GemmaRMSNorm with MXFP8-quantized output.
 
-    ``fused_allreduce_gemma_rms_norm`` followed by an MXFP8 activation quant,
+    `fused_allreduce_gemma_rms_norm` followed by an MXFP8 activation quant,
     with the quant as an epilogue of the Triton norm instead of its own launch.
     The fused all-reduce + norm kernels have no quantized output, so this only
     covers the plain collective + Triton norm; when one of them would run it
-    returns ``None`` and the caller keeps the unfused path.
+    returns `None` and the caller keeps the unfused path.
 
-    Returns ``(x_q, x_scale, normed, residual_out)``: float8_e4m3fn values
-    ``[M, N]``, row-major E8M0 scales ``[M, N // 32]``, the bf16 normed rows
-    (only if ``return_normed``, else ``None``) and the new residual.
+    Returns `(x_q, x_scale, normed, residual_out)`: float8_e4m3fn values
+    `[M, N]`, row-major E8M0 scales `[M, N // 32]`, the bf16 normed rows
+    (only if `return_normed`, else `None`) and the new residual.
     """
     from vllm.models.minimax_m3.amd.ops import (
         gemma_fused_add_rmsnorm_mxfp8,

@@ -188,7 +188,7 @@ class KVTransferConfig:
         )
 
     def has_connector(self, connector_name: str) -> bool:
-        """Whether ``connector_name`` is configured, directly or in MultiConnector."""
+        """Whether `connector_name` is configured, directly or in MultiConnector."""
         if self.kv_connector == connector_name:
             return True
         return self.kv_connector == "MultiConnector" and any(

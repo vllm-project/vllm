@@ -415,15 +415,15 @@ class TritonAttentionImpl(AttentionImpl):
         """Extract per-head scale views from the padded content dimension.
 
         The KV cache is packed as logical shape
-        ``(num_blocks, nkv, block_size, 2 * (hs + pad))`` where
-        ``pad = sizeof(float32) / sizeof(cache_dtype)``.  The content dim holds
-        ``[K(hs) | K_scale(pad) | V(hs) | V_scale(pad)]`` per (head, slot); the
-        last ``pad`` elements of each half hold one float32 scale.  We create
-        strided float32 views over those bytes.  ``kv_cache`` must be the
+        `(num_blocks, nkv, block_size, 2 * (hs + pad))` where
+        `pad = sizeof(float32) / sizeof(cache_dtype)`.  The content dim holds
+        `[K(hs) | K_scale(pad) | V(hs) | V_scale(pad)]` per (head, slot); the
+        last `pad` elements of each half hold one float32 scale.  We create
+        strided float32 views over those bytes.  `kv_cache` must be the
         packed logical tensor (call before any transpose), but may have HND or
         NHD physical strides.
 
-        Scale shape: ``(num_blocks, block_size, num_kv_heads)``
+        Scale shape: `(num_blocks, block_size, num_kv_heads)`
         """
         if self._k_scale_cache is not None:
             return

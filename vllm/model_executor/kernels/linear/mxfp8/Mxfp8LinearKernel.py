@@ -33,7 +33,7 @@ class Mxfp8LinearKernel(ABC):
     """
 
     supports_pre_processed_weights: bool = False
-    """True if ``process_weights_after_loading`` only rewrites parameters, so
+    """True if `process_weights_after_loading` only rewrites parameters, so
     weights exported by the weight cache daemon can be used as-is."""
 
     def __init__(self, c: Mxfp8LinearLayerConfig) -> None:

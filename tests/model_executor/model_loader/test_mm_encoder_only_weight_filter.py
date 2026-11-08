@@ -127,7 +127,7 @@ def test_resolve_returns_module_prefixes_without_hf_hardcode():
 
 
 def test_resolve_empty_language_model_names_fail_closed():
-    """Missing/empty ``_language_model_names`` → None (no language_model. default)."""
+    """Missing/empty `_language_model_names` → None (no language_model. default)."""
     assert resolve_mm_encoder_only_lm_prefixes(None) is None
     assert resolve_mm_encoder_only_lm_prefixes([]) is None
     assert resolve_mm_encoder_only_lm_prefixes(()) is None

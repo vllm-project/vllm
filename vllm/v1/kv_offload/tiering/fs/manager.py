@@ -95,13 +95,13 @@ class FileSystemTierManager(SecondaryTierManager):
 
     Cross-process sharing:
         KV cache sharing between multiple vLLM instances using the same
-        ``root_dir`` (e.g., via a shared PVC) works by default: ``NONE_HASH``
+        `root_dir` (e.g., via a shared PVC) works by default: `NONE_HASH`
         (the chain-hash seed for block content hashes) is derived from a fixed
         default seed, so identical token content produces identical block
-        filenames across instances. Setting the ``PYTHONHASHSEED`` environment
+        filenames across instances. Setting the `PYTHONHASHSEED` environment
         variable to the same value on all instances overrides the default seed,
         and is required to share a cache when using a non-cryptographic
-        prefix-caching hash algorithm, which seeds ``NONE_HASH`` randomly.
+        prefix-caching hash algorithm, which seeds `NONE_HASH` randomly.
     """
 
     medium: ClassVar[Medium] = Medium.STORAGE

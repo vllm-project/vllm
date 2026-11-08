@@ -288,7 +288,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
             layer_cls: Type of the layer that will use the resolved method.
 
         Returns:
-            The matching method class, or None when ``spec`` has no weight
+            The matching method class, or None when `spec` has no weight
             quantization.
 
         """

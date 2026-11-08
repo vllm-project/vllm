@@ -4,9 +4,9 @@
 
 MoNE (https://arxiv.org/abs/2507.00390) replaces redundant experts with
 "novices" that return a constant vector. Checkpoints list the replaced experts
-per decoder layer either in ``config.approximate_experts``, with constants named
-``<experts prefix>.<expert id>.approx_value``, or in
-``compression_config.transform_config.expert_substitution``, with explicitly
+per decoder layer either in `config.approximate_experts`, with constants named
+`<experts prefix>.<expert id>.approx_value`, or in
+`compression_config.transform_config.expert_substitution`, with explicitly
 named constants. Retained experts keep their logical checkpoint names and are
 loaded into compact physical rows.
 """
@@ -142,7 +142,7 @@ def get_expert_substitution_spec(model_config: Any) -> ExpertSubstitutionSpec | 
 class ConstantExpertSubstitution(nn.Module):
     """Constant outputs for the substituted experts of one MoE layer.
 
-    Router outputs keep logical expert IDs. ``transform_routes`` maps retained
+    Router outputs keep logical expert IDs. `transform_routes` maps retained
     experts to compact physical rows and turns substituted routes into
     zero-weight routes to physical expert 0, so any decomposed MoE backend can
     run them unchanged.

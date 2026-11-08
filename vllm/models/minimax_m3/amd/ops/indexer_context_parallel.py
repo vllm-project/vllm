@@ -26,7 +26,7 @@ _SCORE_SHAPE_ARGS = (
 def _decode_score_chunks(batch: int, local_blocks: int) -> int:
     """Chunks one score row is split across.
 
-    A count, not a size: the grid is ``(request, chunk)``, so this is the
+    A count, not a size: the grid is `(request, chunk)`, so this is the
     second grid dim. The round trip through the size drops chunk counts that
     do not divide the blocks and would launch programs that only return.
     """
@@ -115,7 +115,7 @@ def check_context_score_inputs(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
 ) -> None:
-    """Validate the layout ``indexer_context_scores`` assumes; call once.
+    """Validate the layout `indexer_context_scores` assumes; call once.
 
     These hold for every step of a served model, so they are not re-checked
     on the hot path.
@@ -171,14 +171,14 @@ def indexer_context_scores(
 ):
     """Return [heads,tokens,ceil(blocks/world)] with round-robin logical blocks.
 
-    ``max_seq_len`` sizes the grid and must be a capture-stable bound, not the
-    batch's own longest sequence: the grid and ``CHUNK`` are baked into a CUDA
+    `max_seq_len` sizes the grid and must be a capture-stable bound, not the
+    batch's own longest sequence: the grid and `CHUNK` are baked into a CUDA
     graph at capture, where the dummy batch is one token long, and a replay
     sized off that would score only the first block of each shard. Pass
-    ``max_model_len``; the per-request causal bound clips the real work and
+    `max_model_len`; the per-request causal bound clips the real work and
     chunks past the end return immediately.
 
-    ``out``, when given, is a ``[heads, >=tokens, >=local]`` buffer written in
+    `out`, when given, is a `[heads, >=tokens, >=local]` buffer written in
     place (stable address for CUDA graph capture).
     """
     tokens, heads, _ = idx_q.shape

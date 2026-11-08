@@ -2,19 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Hardware-fair request routing in the MoRIIO toy P/D proxy.
 
-Exercises the REAL ``flat_interleaved_dp_route`` from the toy proxy (loaded from
-its ``examples/`` path with heavy deps stubbed) — no routing logic is copied
+Exercises the REAL `flat_interleaved_dp_route` from the toy proxy (loaded from
+its `examples/` path with heavy deps stubbed) — no routing logic is copied
 here. This is the request-distribution half of end-to-end fairness: the proxy
 must hand every prefill/decode (instance, dp_rank) slot an equal share so no GPU
 is starved. The connector-side read routing is covered in
-``test_moriio_routing_fairness.py``.
+`test_moriio_routing_fairness.py`.
 
-Regression target: the previous scheme derived ``instance = req % n_instances``
-and ``dp_rank = req % dp_size`` from the same counter, so when
-``n_instances | dp_size`` each instance was locked to a stride-``n`` subset of
+Regression target: the previous scheme derived `instance = req % n_instances`
+and `dp_rank = req % dp_size` from the same counter, so when
+`n_instances | dp_size` each instance was locked to a stride-`n` subset of
 its ranks — e.g. 2 prefill instances x DP8 stranded 4 of every node's 8 GPUs.
-``flat_interleaved_dp_route`` walks ONE counter over the full
-``(instance, dp_rank)`` slot space, so the two selections can never alias.
+`flat_interleaved_dp_route` walks ONE counter over the full
+`(instance, dp_rank)` slot space, so the two selections can never alias.
 
 Role shapes below are exactly those in the RFC (#46107) deployments:
     (1, 1) 1P/1D TP8      (2, 1) 2P/2D TP8      (4, 1) 4D TP8

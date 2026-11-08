@@ -167,14 +167,14 @@ def create_and_prepopulate_kv_cache(
         num_blocks: Total number of blocks in the cache
         common_attn_metadata: Provides seq lens, block table and slot mapping
         layout: Physical layout to allocate in; the cache is returned as the
-                logical ``[B, H, N, C]`` view (as ``create_kv_cache_views`` does)
+                logical `[B, H, N, C]` view (as `create_kv_cache_views` does)
         randomize_blocks: Whether to randomly permute blocks
                           or use sequential order
         kv_cache_dtype: Cache dtype string; fp8 caches use fp8 storage
 
     Returns:
-        A 4D tensor in logical ``(num_blocks, num_kv_heads, block_size,
-        2 * head_size)`` order with strides determined by ``layout``.
+        A 4D tensor in logical `(num_blocks, num_kv_heads, block_size,
+        2 * head_size)` order with strides determined by `layout`.
 
     """
     batch_size = len(k_contexts)

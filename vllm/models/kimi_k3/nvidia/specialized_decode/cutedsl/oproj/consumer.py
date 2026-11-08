@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""O-projection all-reduce consumer (``groups`` 128-thread groups poll disjoint
+"""O-projection all-reduce consumer (`groups` 128-thread groups poll disjoint
 rank slots, group 0 sums in rank order into the AttnRes) and TP16 fused producer +
-consumer. With ``twoshot`` the mailbox is the one-slot gather row of
-``common.twoshot``: the threads owning this rank's columns first reduce their
+consumer. With `twoshot` the mailbox is the one-slot gather row of
+`common.twoshot`: the threads owning this rank's columns first reduce their
 receive slots into it (args 11-13: receive view, gather multicast address, rank)."""
 
 import cutlass
@@ -74,7 +74,7 @@ def dot8(a, b):
 
 @cute.jit
 def reduce_scatter(values, size: cutlass.Constexpr[int], lane):
-    """Warp-reduce ``size`` values; returns the index of the one this lane holds."""
+    """Warp-reduce `size` values; returns the index of the one this lane holds."""
     for shift in cutlass.range_constexpr(4, -1, -1):
         live: cutlass.Constexpr = max(1, size >> (4 - shift))
         half: cutlass.Constexpr = max(1, live // 2)

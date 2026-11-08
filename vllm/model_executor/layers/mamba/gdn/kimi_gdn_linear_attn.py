@@ -96,8 +96,8 @@ def _make_fused_conv1d_weight_loader(
 class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
     """Merged projection with one output replicated across TP ranks.
 
-    The replicated shard is represented as ``size * tp_size`` so the merged
-    parameter reserves ``size`` local rows on every rank. Loading that shard
+    The replicated shard is represented as `size * tp_size` so the merged
+    parameter reserves `size` local rows on every rank. Loading that shard
     from rank zero then gives every rank the complete checkpoint weight.
     """
 

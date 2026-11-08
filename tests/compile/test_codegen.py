@@ -3,9 +3,9 @@
 """Tests for vllm.compilation.codegen — execution code generation.
 
 Each test runs a real Python function through the same pipeline vLLM uses
-in production: ``make_fx`` to obtain an aten-level fx graph, ``split_graph``
+in production: `make_fx` to obtain an aten-level fx graph, `split_graph`
 to split it into the stitching layer + submodules, and then
-``generate_execution_code``/``compile_execution_fn`` for codegen.
+`generate_execution_code`/`compile_execution_fn` for codegen.
 """
 
 from collections.abc import Callable
@@ -31,19 +31,19 @@ def _trace_and_split(
     example_inputs: tuple[torch.Tensor, ...],
     split_ops: list[str],
 ) -> fx.GraphModule:
-    """Trace ``model_fn`` with make_fx, then split on the named aten ops."""
+    """Trace `model_fn` with make_fx, then split on the named aten ops."""
     gm = make_fx(model_fn)(*example_inputs)
     split_gm, _ = split_graph(gm, split_ops)
     return split_gm
 
 
 def _to_copy_model(x: torch.Tensor) -> torch.Tensor:
-    """Traces to ``aten._to_copy.default`` with device + dtype kwargs."""
+    """Traces to `aten._to_copy.default` with device + dtype kwargs."""
     return x.to(device=torch.device("cpu"), dtype=torch.float16)
 
 
 def _empty_model(x: torch.Tensor) -> torch.Tensor:
-    """Traces to ``aten.empty.memory_format`` with device + dtype kwargs."""
+    """Traces to `aten.empty.memory_format` with device + dtype kwargs."""
     buf = torch.empty(x.shape, device=torch.device("cpu"), dtype=torch.float16)
     return buf.fill_(0).add(x.to(dtype=torch.float16))
 
@@ -66,17 +66,17 @@ def test_non_primitive_kwargs_lifted_to_consts(
     split_ops: list[str],
     x: torch.Tensor,
 ) -> None:
-    """Regression: arguments whose ``repr()`` is not a valid Python
+    """Regression: arguments whose `repr()` is not a valid Python
     expression in the generated function's namespace (notably
-    ``torch.device``) used to be inlined via ``repr()``, producing source
+    `torch.device`) used to be inlined via `repr()`, producing source
     like
 
         out = torch.ops.aten._to_copy.default(x, device=device(type='cpu'))
 
-    which fails at call time — only ``torch`` and ``operator`` are imported
-    into the namespace, so ``device`` is unbound. The fix collects such
-    objects into ``__vllm_consts__`` and references them by index. The
-    unqualified ``device(type=...)`` form must never appear in the
+    which fails at call time — only `torch` and `operator` are imported
+    into the namespace, so `device` is unbound. The fix collects such
+    objects into `__vllm_consts__` and references them by index. The
+    unqualified `device(type=...)` form must never appear in the
     generated source."""
     split_gm = _trace_and_split(model_fn, (x,), split_ops)
     code, submod_names, consts = generate_execution_code(split_gm)
@@ -95,9 +95,9 @@ def test_non_primitive_kwargs_lifted_to_consts(
 
 
 def test_dtype_singleton_deduped(x: torch.Tensor) -> None:
-    """``torch.float16`` is a process-wide singleton, so two ops referring
-    to it in the traced graph share a single consts slot via ``id()``-based
-    dedup. Distinct expressions (``x.to(...)`` vs ``(x*2).to(...)``) ensure
+    """`torch.float16` is a process-wide singleton, so two ops referring
+    to it in the traced graph share a single consts slot via `id()`-based
+    dedup. Distinct expressions (`x.to(...)` vs `(x*2).to(...)`) ensure
     the tracer can't CSE the two ops into a single node."""
 
     def model_fn(x: torch.Tensor) -> torch.Tensor:
@@ -183,8 +183,8 @@ def test_consts_shared_across_split_submods(x: torch.Tensor) -> None:
     """Dedup must apply across inlined submodules, not just within one.
 
     The function below splits into three inlined submods, two of which
-    independently reference ``torch.float16``. The shared ``const_index``
-    threaded through recursive ``generate_execution_code_with_name`` calls
+    independently reference `torch.float16`. The shared `const_index`
+    threaded through recursive `generate_execution_code_with_name` calls
     must collapse the dtype to a single slot used from both submods."""
 
     def model_fn(x: torch.Tensor) -> torch.Tensor:
@@ -227,10 +227,10 @@ def test_consts_shared_across_split_submods(x: torch.Tensor) -> None:
 
 
 def test_non_graphmodule_submod_uses_indexed_callable(x: torch.Tensor) -> None:
-    """When a child of split_gm is *not* a ``torch.fx.GraphModule`` — as
-    happens in production once ``PiecewiseBackend`` replaces submods —
-    codegen emits ``__vllm_submods__[idx](...)`` instead of inlining, and
-    the runtime callable is bound from ``submod_callables``."""
+    """When a child of split_gm is *not* a `torch.fx.GraphModule` — as
+    happens in production once `PiecewiseBackend` replaces submods —
+    codegen emits `__vllm_submods__[idx](...)` instead of inlining, and
+    the runtime callable is bound from `submod_callables`."""
 
     def model_fn(x: torch.Tensor) -> torch.Tensor:
         return x.relu().sigmoid()
@@ -278,8 +278,8 @@ def test_non_graphmodule_submod_uses_indexed_callable(x: torch.Tensor) -> None:
     reason="split_module tuple_return requires PyTorch >= 2.12",
 )
 def test_getitem_in_stitching_graph(x: torch.Tensor) -> None:
-    """``operator.getitem`` on submod tuple returns is the ``call_function``
-    special case at codegen.py — emitted as ``name = source[index]``
+    """`operator.getitem` on submod tuple returns is the `call_function`
+    special case at codegen.py — emitted as `name = source[index]`
     rather than a function call."""
 
     def model_fn(x: torch.Tensor) -> torch.Tensor:
@@ -296,7 +296,7 @@ def test_getitem_in_stitching_graph(x: torch.Tensor) -> None:
 
 
 def test_del_emitted_for_intermediate_values(x: torch.Tensor) -> None:
-    """The codegen schedules ``del`` after a value's last use to free
+    """The codegen schedules `del` after a value's last use to free
     memory early. Multi-submod splits naturally have intermediates whose
     last use is not the output node."""
 
@@ -315,9 +315,9 @@ def test_del_emitted_for_intermediate_values(x: torch.Tensor) -> None:
 
 
 def test_with_submod_false_rejects_call_module() -> None:
-    """``generate_execution_code_with_name(with_submod=False)`` is the
+    """`generate_execution_code_with_name(with_submod=False)` is the
     recursive entry for inlining a GraphModule into its parent. It must
-    refuse a graph that itself contains ``call_module`` nodes — the parent
+    refuse a graph that itself contains `call_module` nodes — the parent
     is responsible for handling those."""
     g = fx.Graph()
     x_node = g.placeholder("x")
@@ -332,7 +332,7 @@ def test_with_submod_false_rejects_call_module() -> None:
 
 
 def test_node_ref_recurses_through_containers() -> None:
-    """``_node_ref`` is the recursive walker that lifts non-primitives
+    """`_node_ref` is the recursive walker that lifts non-primitives
     nested inside list/tuple/dict args. Real aten ops rarely produce such
     structures, but the path is needed for DTensor placement lists and
     other future cases — unit-test the walker directly."""
@@ -357,8 +357,8 @@ def test_node_ref_recurses_through_containers() -> None:
 
 
 def test_legacy_code_without_consts() -> None:
-    """``compile_execution_fn(consts=None)`` must still load code that has
-    no ``__vllm_consts__`` reference, so older serialized cache artifacts
+    """`compile_execution_fn(consts=None)` must still load code that has
+    no `__vllm_consts__` reference, so older serialized cache artifacts
     keep working."""
     # Pre-consts codegen: no __vllm_consts__ reference, only torch/operator.
     legacy_code = (

@@ -2,26 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DCP top-k candidate exchange over NVLink and its exact merge (K3.1 DSA decode).
 
-The #63 one-round merge (``vllm/models/kimi_k3/nvidia/ops/dcp_topk_merge``) all-gathers
+The #63 one-round merge (`vllm/models/kimi_k3/nvidia/ops/dcp_topk_merge`) all-gathers
 every rank's local top-N B' rows with NCCL (a 1-CTA ring all-gather of ~19 us
 at DCP8 plus its launch gap), then selects (one kernel) and rescues saturated
 rows (a second kernel). Here, instead:
 
-  push   ``IndexerLocalTopk``'s epilogue (indexer.py, ``exchange``) stores its
-         row's B' words into every rank's symmetric ``TopkExchange`` slot
+  push   `IndexerLocalTopk`'s epilogue (indexer.py, `exchange`) stores its
+         row's B' words into every rank's symmetric `TopkExchange` slot
          [parity, source rank, row] as NCCL-LL pairs: each 16-byte store
-         carries two words and the call's epoch twice, ``(w0, e, w1, e)``, so
+         carries two words and the call's epoch twice, `(w0, e, w1, e)`, so
          a reader checks each 8-byte half's epoch instead of a flag behind a
          system fence.
-  merge  ``ExchangeMerge`` (one 512-thread CTA per row, launched early by PDL)
+  merge  `ExchangeMerge` (one 512-thread CTA per row, launched early by PDL)
          polls the W ranks' LL words of its row, then runs the #63 merge's
-         own select (``_make_radix_select``: the same keys, threshold and tie
+         own select (`_make_radix_select`: the same keys, threshold and tie
          rule, so the same ids and rows in the same order), its saturation
          word and saturated-rank push (the rescue workspace of
-         ``init_dcp_topk_merge``, the same seq2 / flag protocol), and the
+         `init_dcp_topk_merge`, the same seq2 / flag protocol), and the
          rescue's second round in the same CTA.
 
-The epoch of row t is ``epoch[t] + 1`` (``epoch``: per rank, bumped by the
+The epoch of row t is `epoch[t] + 1` (`epoch`: per rank, bumped by the
 merge after it read the row); every rank runs the same calls over the same
 rows, so the epochs agree. The slot parity is the epoch's low bit: a rank can
 store call n + 1's words while a peer still reads call n's.
@@ -56,20 +56,20 @@ def ll_pairs(local_topk: int) -> int:
 
 @cute.jit
 def ll_push(dst: Int64, w0, w1, epoch: Uint32):
-    """One LL store: words ``w0``, ``w1`` tagged with ``epoch``."""
+    """One LL store: words `w0`, `w1` tagged with `epoch`."""
     store_words(dst, (Uint32(w0), epoch, Uint32(w1), epoch), scope="sys")
 
 
 def ll_offset(j):
-    """Byte offset of B' word ``j`` in a row's LL pairs."""
+    """Byte offset of B' word `j` in a row's LL pairs."""
     return Int64(j >> 1) * 16 + Int64(j & 1) * 8
 
 
 class TopkExchange:
-    """The symmetric LL slots of the exchange over the DCP ``group``: int32
+    """The symmetric LL slots of the exchange over the DCP `group`: int32
     [2, W, rows, 4 * ll_pairs(N)] (parity, source rank, row, (word, epoch)
-    pairs), every rank's address in ``peers``, and this rank's per-row
-    ``epoch``. One per device, shared by every DSA layer."""
+    pairs), every rank's address in `peers`, and this rank's per-row
+    `epoch`. One per device, shared by every DSA layer."""
 
     def __init__(self, group, device, world, rank, rows, local_topk):
         import torch.distributed._symmetric_memory as symm_mem
@@ -99,7 +99,7 @@ _EXCHANGES: dict = {}
 
 
 def reserve(group, device, world, rank, rows, local_topk):
-    """The device's ``TopkExchange`` of at least ``rows`` rows (collective on
+    """The device's `TopkExchange` of at least `rows` rows (collective on
     first use: every DCP rank builds its DSA layers in the same order)."""
     key = (torch.device(device), local_topk)
     ex = _EXCHANGES.get(key)
@@ -111,7 +111,7 @@ def reserve(group, device, world, rank, rows, local_topk):
 
 @functools.cache
 def build_merge(rows, topk, local_topk, world, block_size, emit_ids):
-    """``ExchangeMerge`` of ``rows`` rows (see the module docstring)."""
+    """`ExchangeMerge` of `rows` rows (see the module docstring)."""
     from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import kernels as stock
 
     assert world <= 16 and local_topk < topk and block_size > 0
@@ -133,7 +133,7 @@ def build_merge(rows, topk, local_topk, world, block_size, emit_ids):
 
     @cute.jit
     def ll_word(address: Int64, epoch: Uint32) -> Uint32:
-        """The word of the LL half at ``address`` once its tag is ``epoch``."""
+        """The word of the LL half at `address` once its tag is `epoch`."""
         word, tag = load_words(address, count=2, volatile=True)
         if tag != epoch:
             start = stock._globaltimer()
@@ -160,9 +160,9 @@ def build_merge(rows, topk, local_topk, world, block_size, emit_ids):
         slot, dcp_rank, seq2, peer_recv, peer_flags, max_rows,
     ):  # fmt: skip
         """The #63 select's push of a saturated rank (DCPTopkSelectKernel,
-        ``push_local_topk``, verbatim): this rank's local top-min(K, valid)
-        of ``logits[row]`` in the B' layout -> every rank's
-        ``recv[row, slot]``; then the flag."""
+        `push_local_topk`, verbatim): this rank's local top-min(K, valid)
+        of `logits[row]` in the B' layout -> every rank's
+        `recv[row, slot]`; then the flag."""
         end = Int32(logits.shape[1])
         if end > Int32(1 << LOCAL_INDEX_BITS):
             end = Int32(1 << LOCAL_INDEX_BITS)
@@ -508,7 +508,7 @@ def build_merge(rows, topk, local_topk, world, block_size, emit_ids):
 
 @functools.cache
 def compile_merge(rows, topk, local_topk, world, block_size, emit_ids, device):
-    """The compiled ``ExchangeMerge`` of ``rows`` rows (shared by every layer)."""
+    """The compiled `ExchangeMerge` of `rows` rows (shared by every layer)."""
     entry = build_merge(rows, topk, local_topk, world, block_size, emit_ids)
     i32 = torch.int32
     vec, mat = dynamic_fake(1, i32), dynamic_fake(2, i32)
@@ -554,11 +554,11 @@ class ExchangeMerge:
         self, logits, row_ends, req_id, block_table, stride_rows, rows_out,
         valid_out, ids_out=None,
     ):  # fmt: skip
-        """Every rank's pushed B' rows of the ``rows`` rows -> this rank's
-        compacted KV rows ``rows_out`` [rows, >= K], counts ``valid_out``
-        and, compiled with ``emit_ids``, the global ids ``ids_out`` [rows, K].
-        ``logits`` / ``row_ends``: this rank's (a saturated rank re-reads
-        its row), bounded as the #63 merge's (``_bound_logits``)."""
+        """Every rank's pushed B' rows of the `rows` rows -> this rank's
+        compacted KV rows `rows_out` [rows, >= K], counts `valid_out`
+        and, compiled with `emit_ids`, the global ids `ids_out` [rows, K].
+        `logits` / `row_ends`: this rank's (a saturated rank re-reads
+        its row), bounded as the #63 merge's (`_bound_logits`)."""
         ex, ws, rows = self.exchange, self.ws, self.rows
         assert rows_out.shape[0] >= rows and valid_out.shape[0] >= rows
         assert (ids_out is not None) == self.emit_ids

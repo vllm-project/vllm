@@ -757,7 +757,7 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
 
 
 def test_resolve_host_ip_prefers_extra_config():
-    """An explicit ``host_ip`` in kv_connector_extra_config overrides get_ip()
+    """An explicit `host_ip` in kv_connector_extra_config overrides get_ip()
     (so an external router can advertise a routable/internal address); an
     absent or empty value falls back to get_ip()."""
     assert resolve_host_ip({"host_ip": "10.0.0.7"}) == "10.0.0.7"

@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The specialized KDA core at every head count and batch regime against the stock
 composed decode (DS conv layout): TP8 / DCP8 (12 heads) and DEP's TP1 attention
-(96 heads), BF16 and FP32 conv state (``--mamba-cache-dtype float32``), plain and
+(96 heads), BF16 and FP32 conv state (`--mamba-cache-dtype float32`), plain and
 RecoverSSM verify steps and q = 1 steps, from one request to the wide batches the
 per-batch policy hands to the wide kernel.
 
-Stock: Triton ``causal_conv1d_update`` -> ``fused_recurrent_kda`` (verify),
-``kda_recoverssm_verify`` (RecoverSSM verify) or
-``fused_recurrent_kda_packed_decode`` (q = 1) -> gated RMSNorm. The specialized core
+Stock: Triton `causal_conv1d_update` -> `fused_recurrent_kda` (verify),
+`kda_recoverssm_verify` (RecoverSSM verify) or
+`fused_recurrent_kda_packed_decode` (q = 1) -> gated RMSNorm. The specialized core
 runs every stage at stock precision; only FP32 reduction order differs."""
 
 from types import SimpleNamespace
@@ -108,7 +108,7 @@ def _inputs(heads, seed, rows, slots, window, conv_dtype):
 
 
 def _stock(attention, heads, projected, conv, state, table, accepted, q):
-    """``table``: [B, q] (plain verify), [B, 1] (RecoverSSM: the checkpoints) or [B]
+    """`table`: [B, q] (plain verify), [B, 1] (RecoverSSM: the checkpoints) or [B]
     (q = 1)."""
     dim, n = heads * D, projected.shape[0]
     weight = attention.conv1d.weight.view(3 * dim, 4)

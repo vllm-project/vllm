@@ -88,7 +88,7 @@ def _fields(out, n, mlir_ty, wrap, loc, ip):
 
 @dsl_user_op
 def _ldg_s32(addr, pred, fill, *, loc=None, ip=None) -> Int32:
-    """4-byte global load; ``fill`` where ``pred`` is 0 (no access then)."""
+    """4-byte global load; `fill` where `pred` is 0 (no access then)."""
     out = _asm(
         T.i32(),
         [_v(addr, Int64, loc, ip), _v(pred, Int32, loc, ip), _v(fill, Int32, loc, ip)],
@@ -104,7 +104,7 @@ def _ldg_s32(addr, pred, fill, *, loc=None, ip=None) -> Int32:
 
 @dsl_user_op
 def _ldg_v4(addr, pred, *, loc=None, ip=None):
-    """16-byte global load without L1 allocation; zeros where ``pred`` is 0."""
+    """16-byte global load without L1 allocation; zeros where `pred` is 0."""
     out = _asm(
         llvm.StructType.get_literal([T.i32()] * 4),
         [_v(addr, Int64, loc, ip), _v(pred, Int32, loc, ip)],
@@ -121,7 +121,7 @@ def _ldg_v4(addr, pred, *, loc=None, ip=None):
 
 @dsl_user_op
 def _ldg_f32x4(addr, pred, fill: float, *, loc=None, ip=None):
-    """16-byte fp32 global load; ``fill`` in every lane where ``pred`` is 0."""
+    """16-byte fp32 global load; `fill` in every lane where `pred` is 0."""
     bits = f"0f{struct.unpack('>I', struct.pack('>f', fill))[0]:08X}"
     out = _asm(
         llvm.StructType.get_literal([T.f32()] * 4),
@@ -323,7 +323,7 @@ def _lds_s32(addr, *, loc=None, ip=None) -> Int32:
 
 @dsl_user_op
 def _ld_peer_f32(addr, rank, *, loc=None, ip=None) -> Float32:
-    """Load an fp32 from cluster peer ``rank``'s SMEM at this CTA's ``addr``."""
+    """Load an fp32 from cluster peer `rank`'s SMEM at this CTA's `addr`."""
     return Float32(
         _asm(
             T.f32(),
@@ -340,7 +340,7 @@ def _ld_peer_f32(addr, rank, *, loc=None, ip=None) -> Float32:
 
 @dsl_user_op
 def _ld_peer_f32x4(addr, rank, pred, *, loc=None, ip=None):
-    """16-byte DSMEM load from peer ``rank``; zeros where ``pred`` is 0."""
+    """16-byte DSMEM load from peer `rank`; zeros where `pred` is 0."""
     out = _asm(
         llvm.StructType.get_literal([T.f32()] * 4),
         [_v(addr, Int32, loc, ip), _v(rank, Int32, loc, ip), _v(pred, Int32, loc, ip)],
@@ -445,7 +445,7 @@ def _fp4x8_to_bf16x8(w, scale_bf16x2, *, loc=None, ip=None):
     """Eight e2m1 (even element in the low nibble) times a bf16 e4m3 scale.
 
     e2m1 -> bf16 is exact and e2m1 * e4m3 has at most 6 significant bits, so the
-    bf16 product is exact: ``bf16(E2M1[code] * fp32(scale))``.
+    bf16 product is exact: `bf16(E2M1[code] * fp32(scale))`.
     """
     out = _asm(
         llvm.StructType.get_literal([T.i32()] * 4),
@@ -464,7 +464,7 @@ def _fp4x8_to_bf16x8(w, scale_bf16x2, *, loc=None, ip=None):
 
 
 def _make_sdesc_64B_swizzle(SBO: int):
-    """``_tcgen05.make_sdesc_128B_swizzle`` for the 16-head P tile's 64 B rows."""
+    """`_tcgen05.make_sdesc_128B_swizzle` for the 16-head P tile's 64 B rows."""
     return Uint64((SBO >> 4 << 32) | (1 << 46) | (4 << 61))
 
 
@@ -550,7 +550,7 @@ class SwapABDecodeKernel(VllmCuTeDSLJitKernel["SwapABDecodeKernel.CompileKey"]):
         ):
             """Issue every global load, then Q RoPE -> SMEM and KV dequant -> SMEM.
 
-            ``rows`` (128 or 64) slots of the list start at ``row0``; with 64 the
+            `rows` (128 or 64) slots of the list start at `row0`; with 64 the
             tile's upper half is left unwritten and flagged invalid. Returns 1 if
             the tile has any candidate slot (CTA-uniform).
             """
@@ -1208,16 +1208,16 @@ class SwapABDecodeKernel(VllmCuTeDSLJitKernel["SwapABDecodeKernel.CompileKey"]):
         out_data: torch.Tensor,
         out_scale: torch.Tensor,
     ) -> CuTeDSLLaunchSpec["SwapABDecodeKernel.CompileKey"]:
-        """Decode attention of ``heads`` live heads, in place into ``out_*``.
+        """Decode attention of `heads` live heads, in place into `out_*`.
 
-        The arguments are those of the mega kernel's decode call: ``q`` is
-        ``[s_q, padded_heads, 512]`` bf16 in its chunk-interleaved layout, not
-        yet RoPEd; the caches are ``[num_blocks, page, record]`` uint8 views
+        The arguments are those of the mega kernel's decode call: `q` is
+        `[s_q, padded_heads, 512]` bf16 in its chunk-interleaved layout, not
+        yet RoPEd; the caches are `[num_blocks, page, record]` uint8 views
         of V4.1 records (a token's data, then its scales) whose pages may be
-        further apart than ``page * record`` bytes; the slot lists are
-        ``[s_q, width]`` int32 slot ids (``block * page + offset``, ``-1``
-        invalid) with ``[s_q]`` int32 lengths; ``positions`` is int64. Only
-        the live heads' groups of ``out_data`` / ``out_scale`` are written.
+        further apart than `page * record` bytes; the slot lists are
+        `[s_q, width]` int32 slot ids (`block * page + offset`, `-1`
+        invalid) with `[s_q]` int32 lengths; `positions` is int64. Only
+        the live heads' groups of `out_data` / `out_scale` are written.
         """
         assert q.shape[1] >= heads
         compile_key = self.dispatch(

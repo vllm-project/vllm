@@ -4,22 +4,22 @@
 package names the library:
 
 - the routed experts: the TRT-LLM-gen MoE op the stock layer runs, with the stock
-  layer's own weights and arguments, stopping after GEMM2 (``do_finalize=False``)
+  layer's own weights and arguments, stopping after GEMM2 (`do_finalize=False`)
   so that the tail kernel finalizes. NVFP4 layers take routing prepared by the
   caller; the BF16 layers route inside the op from the router logits, as the
   stock layer does.
 - on NVFP4 layers, the op's own runner at the op's tactic, run from routing
-  metadata the routing kernel wrote (``MuseRouting``) instead
+  metadata the routing kernel wrote (`MuseRouting`) instead
   of the op's routing kernel, so the output is the op's bit for bit; a tactic
   without a prepared body takes the public op.
 - the TP16 all-reduce, through vLLM's own wrapper (the TP communicator's MNNVL
   all-reduce). TP4 and TP8 fuse their all-reduce into the attention boundary,
   summing in the order of the backend vLLM's FlashInfer all-reduce resolved to;
   across trays (TP8) build() still checks that it is the MNNVL one.
-- with expert TP (``build(..., use_expert_tp=True)``), the NVFP4 layers' routed
+- with expert TP (`build(..., use_expert_tp=True)`), the NVFP4 layers' routed
   op runs on TP experts (all experts at 1/tp of the intermediate width,
-  resharded by ``expert_tp``) at one pinned tactic (``EXPERT_TP_TACTICS``); their
-  GEMM2 rows are K-partials, which ``TpTail`` sums across ranks.
+  resharded by `expert_tp`) at one pinned tactic (`EXPERT_TP_TACTICS`); their
+  GEMM2 rows are K-partials, which `TpTail` sums across ranks.
 
 The library is imported lazily inside the expert calls, as the stock experts do,
 so the package imports without it.
@@ -112,7 +112,7 @@ def check_attention(attention: nn.Module) -> None:
 
 def bf16_kv_insert(attn: nn.Module, num_kv_heads: int, head_dim: int) -> bool:
     """Whether this attention layer stores K/V with FlashInfer's bf16
-    ``reshape_and_cache_flash`` (``FlashInferImpl.do_kv_cache_update``), whose
+    `reshape_and_cache_flash` (`FlashInferImpl.do_kv_cache_update`), whose
     HND cache layout the draft's fused context K/V store writes."""
     from vllm.v1.attention.backends.flashinfer import FlashInferImpl
 
@@ -211,7 +211,7 @@ def nvfp4_arguments(experts, routed: nn.Module) -> dict[str, Any]:
 
 
 def stock_shards(args: dict[str, Any], experts) -> expert_tp.StockNvfp4:
-    """One NVFP4 layer's stock EP experts, as ``nvfp4_arguments`` bound them,
+    """One NVFP4 layer's stock EP experts, as `nvfp4_arguments` bound them,
     for the expert-TP reshard."""
     quant = experts.quant_config
     return expert_tp.StockNvfp4(
@@ -229,9 +229,9 @@ def stock_shards(args: dict[str, Any], experts) -> expert_tp.StockNvfp4:
 
 
 def tp_arguments(args: dict[str, Any], tp: expert_tp.TpExperts) -> dict[str, Any]:
-    """``args`` (``nvfp4_arguments``) on the layer's TP experts: their weights,
+    """`args` (`nvfp4_arguments`) on the layer's TP experts: their weights,
     block scales and per-expert scalars, every expert local, the intermediate
-    slice, and ``tune_max_num_tokens`` at ROUTING_MAX_TOKENS, the most tokens
+    slice, and `tune_max_num_tokens` at ROUTING_MAX_TOKENS, the most tokens
     the executor runs them at. The rest (routing, activation, global expert
     count) is the stock layer's."""
     return {
@@ -308,8 +308,8 @@ def gemm2_rows(num_tokens: int, tile: int, hidden_out: int) -> int:
 class Nvfp4Call:
     """One NVFP4 layer's routed experts op as the op runs them: its runner,
     inputs, tuning config and runner kwargs, built as
-    ``trtllm_fp4_block_scale_moe_op`` builds them for the arguments
-    ``nvfp4_arguments`` binds, so the autotuner picks the op's tactic and the
+    `trtllm_fp4_block_scale_moe_op` builds them for the arguments
+    `nvfp4_arguments` binds, so the autotuner picks the op's tactic and the
     runner launches the op's GEMMs."""
 
     def __init__(self, args: dict[str, Any]) -> None:
@@ -321,8 +321,8 @@ class Nvfp4Call:
         self.fixed: dict[int, tuple[torch.Tensor, Any]] = {}
 
     def bind(self, device: torch.device, max_tokens: int) -> None:
-        """Builds the runner and, for 1 to ``max_tokens`` tokens, the
-        output placeholder and tuning config, so that ``prepare`` only
+        """Builds the runner and, for 1 to `max_tokens` tokens, the
+        output placeholder and tuning config, so that `prepare` only
         assembles a call's inputs."""
         for b in range(1, max_tokens + 1):
             self.prepare(
@@ -342,7 +342,7 @@ class Nvfp4Call:
         self, inputs: ExpertsInput, topk: RoutedTopk
     ) -> tuple[Any, list, Any, dict[str, Any]]:
         """(runner, inputs, tuning config, runner kwargs) for these inputs;
-        allocates and builds nothing for a token count ``bind`` covered."""
+        allocates and builds nothing for a token count `bind` covered."""
         from flashinfer.fused_moe import core
         from flashinfer.fused_moe.shared.inputs import MoeRunnerInputs
         from flashinfer.tllm_enums import (
@@ -551,8 +551,8 @@ def stock_all_reduce(communicator) -> tuple[Any, str | None]:
 
 
 def stock_sum_order(communicator) -> str:
-    """The sum order of the stock TP all-reduce (``stock_all_reduce``'s backend,
-    ``BACKEND_SUM_ORDERS``), the one the fused all-reduces over the TP group
+    """The sum order of the stock TP all-reduce (`stock_all_reduce`'s backend,
+    `BACKEND_SUM_ORDERS`), the one the fused all-reduces over the TP group
     take. Raises for a backend whose order they do not reproduce. Collective
     over the TP group on the process's first call."""
     _, backend = stock_all_reduce(communicator)
@@ -568,7 +568,7 @@ def stock_sum_order(communicator) -> str:
 def bind_all_reduce(communicator):
     """The TP communicator's FlashInfer all-reduce wrapper, checked to be the MNNVL
     all-reduce the stock layers take for [PREPARED_MAX, HIDDEN] bf16
-    (``stock_all_reduce``)."""
+    (`stock_all_reduce`)."""
     backend = envs.VLLM_FLASHINFER_ALLREDUCE_BACKEND
     if backend not in ALL_REDUCE_BACKENDS:
         raise RuntimeError(
@@ -591,7 +591,7 @@ def tp_coordinator(group):
 
 
 def _finite(rows: torch.Tensor) -> str:
-    """How finite ``rows`` are, and their largest finite magnitude."""
+    """How finite `rows` are, and their largest finite magnitude."""
     finite = torch.isfinite(rows)
     largest = rows.float().abs().masked_fill(~finite, 0).max() if rows.numel() else 0
     return f"{int(finite.sum())}/{rows.numel()} finite (max |x| {float(largest):.3g})"
@@ -604,7 +604,7 @@ EXPERT_TP_PROBE_MAX = 1e-2
 
 
 class FlashInferOps:
-    """``RoutedExpertsOps``: the routed experts of every MoE layer and the TP16
+    """`RoutedExpertsOps`: the routed experts of every MoE layer and the TP16
     all-reduce.
 
     build() binds every per-layer argument and checks every requirement once, then
@@ -636,9 +636,9 @@ class FlashInferOps:
     def build(
         self, group, layers: tuple[nn.Module, ...], use_expert_tp: bool = False
     ) -> None:
-        """``layers``: the stock decoder layers (layer_idx, feed_forward).
+        """`layers`: the stock decoder layers (layer_idx, feed_forward).
 
-        With ``use_expert_tp`` (collective over the TP group, which must equal the
+        With `use_expert_tp` (collective over the TP group, which must equal the
         stock layers' EP group), every NVFP4 layer runs on TP experts resharded
         from the stock ones (finalized by the package's TP tail); BF16 layers
         stay EP (stock weights, the EP tail)."""
@@ -693,7 +693,7 @@ class FlashInferOps:
     def shard_experts(self, tp, layers: tuple[nn.Module, ...]) -> None:
         """Replaces every NVFP4 layer's arguments by its TP experts': reshard
         (collective) and a probe against the stock EP op. Collective over
-        ``tp``: the placement check is agreed across the ranks before any
+        `tp`: the placement check is agreed across the ranks before any
         rank raises, so none is left waiting in the reshard."""
         if not self.nvfp4:
             raise RuntimeError("Expert TP needs NVFP4 layers.")
@@ -766,7 +766,7 @@ class FlashInferOps:
         self, device: torch.device, global_scale: torch.Tensor
     ) -> tuple[ExpertsInput, RoutedTopk]:
         """The build probe's input at the decode batch, the same on every rank
-        (seeded): unit-RMS rows quantized with ``global_scale`` (the layer's
+        (seeded): unit-RMS rows quantized with `global_scale` (the layer's
         NVFP4 input global scale), so they stay in the range the layer's scales
         were calibrated for, and routes spread over all experts, so every EP
         rank serves some."""
@@ -828,7 +828,7 @@ class FlashInferOps:
         """The TP experts' tactic: the first of expert_tp_tactics() that the op
         takes for 1 to ROUTING_MAX_TOKENS tokens and that has a prepared body,
         on every rank of the TP group, else the op's untuned default.
-        Collective over ``tp``'s CPU group (every rank runs the same FlashInfer
+        Collective over `tp`'s CPU group (every rank runs the same FlashInfer
         build, so the same list); nothing is timed, so the same weights and
         FlashInfer build take the same tactic at every start."""
         self.tp_preferred = self.expert_tp_tactics()
@@ -869,7 +869,7 @@ class FlashInferOps:
     def public_routed_experts(
         self, args: dict[str, Any], inputs: ExpertsInput, topk: RoutedTopk
     ) -> UnfinalizedMoEOutput:
-        """The public routed op on ``args``."""
+        """The public routed op on `args`."""
         import flashinfer
 
         num_tokens = inputs.a.shape[0]
@@ -991,7 +991,7 @@ class FlashInferOps:
 
     def slot(self, metadata: RoutingMetadata, weights: torch.Tensor) -> list:
         """The op's nine routing metadata tensors, in its order, for the
-        tokens of ``weights`` (fp32 [b, TOP_K], the routing's)."""
+        tokens of `weights` (fp32 [b, TOP_K], the routing's)."""
         f = metadata.fields(weights.shape[0])
         return [
             f["total_num_padded_tokens"],
@@ -1039,8 +1039,8 @@ class FlashInferOps:
 
     def is_bf16(self, layer: int) -> bool:
         """Whether the layer's experts are BF16 (they take normed BF16 rows and
-        the router logits) rather than NVFP4 (``ExpertsInput`` and
-        ``RoutedTopk``)."""
+        the router logits) rather than NVFP4 (`ExpertsInput` and
+        `RoutedTopk`)."""
         return layer in self.bf16
 
     def routed_experts(
@@ -1051,7 +1051,7 @@ class FlashInferOps:
         plan: Nvfp4Plan | None = None,
     ) -> UnfinalizedMoEOutput:
         """The NVFP4 expert input and its routed top-k -> the unfinalized
-        expert output, on an NVFP4 layer. With ``plan`` (``nvfp4_plan`` for
+        expert output, on an NVFP4 layer. With `plan` (`nvfp4_plan` for
         these inputs), from the metadata the routing wrote for it."""
         if plan is not None:
             return self.routed_experts_from_metadata(inputs, topk, plan)
@@ -1109,7 +1109,7 @@ class FlashInferOps:
 def build(
     group, layers: tuple[nn.Module, ...], use_expert_tp: bool = False
 ) -> FlashInferOps:
-    """The routed expert ops for ``layers`` (the stock decoder layers), built
+    """The routed expert ops for `layers` (the stock decoder layers), built
     and warmed up."""
     ops = FlashInferOps()
     ops.build(group, layers, use_expert_tp=use_expert_tp)

@@ -251,13 +251,13 @@ def _mistral_patch_hf_hub_constants() -> Iterator[None]:
 def _install_hf_config_validator(
     name: str, validator: Callable, supersedes: Callable
 ) -> None:
-    """Replace a ``PreTrainedConfig`` validator on every ``@strict`` snapshot.
+    """Replace a `PreTrainedConfig` validator on every `@strict` snapshot.
 
-    ``@strict`` snapshots each ``validate_*`` method into ``__class_validators__``
-    at class creation and automatic post-``__init__`` validation dispatches off
+    `@strict` snapshots each `validate_*` method into `__class_validators__`
+    at class creation and automatic post-`__init__` validation dispatches off
     that frozen list, so assigning the class attribute alone only affects
-    explicit ``config.validate_*()`` calls. Every ``@strict``-decorated config
-    class owns a snapshot, so rewrite them all, matching ``supersedes`` by
+    explicit `config.validate_*()` calls. Every `@strict`-decorated config
+    class owns a snapshot, so rewrite them all, matching `supersedes` by
     identity to leave a genuine per-model override in place.
     """
     setattr(PreTrainedConfig, name, validator)
@@ -309,11 +309,11 @@ def _patch_hf_transformers_validate_rope():
 
 
 def _patch_hf_transformers_nested_rope_validation() -> None:
-    """Drop shared entries sitting alongside a nested ``rope_parameters`` dict.
+    """Drop shared entries sitting alongside a nested `rope_parameters` dict.
 
     Transformers validates a dict with any layer-type key by iterating all of
     its values, so a shared entry next to the per-layer dicts raises an
-    ``AttributeError``. The per-layer dicts already carry their own defaults by
+    `AttributeError`. The per-layer dicts already carry their own defaults by
     the time validation runs, so the shared entries can be dropped.
     """
     if hasattr(PreTrainedConfig.validate_rope, "__vllm_nested_rope_patched__"):

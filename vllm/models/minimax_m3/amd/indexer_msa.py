@@ -4,10 +4,10 @@
 
 Scores index blocks and selects the top-k with AITER's fp8 MFMA kernels. Prefill
 and decode differ only in the scorer -- ragged rows against uniform ones -- and
-share one ``pa_sparse_block_topk``, which also emits the attend's page table in
+share one `pa_sparse_block_topk`, which also emits the attend's page table in
 one numbering for both. Under indexer CP, decode instead scores this rank's
 stride of the blocks, cuts it to the full top-k, exchanges the candidates and
-merges them, over those same kernels at ``world`` > 1.
+merges them, over those same kernels at `world` > 1.
 """
 
 import math
@@ -74,8 +74,8 @@ def _score_width(max_seq_len: int, block_size: int, world: int = 1) -> int:
     power-of-two count of them, so the block axis is padded past the block
     count the context actually needs.
 
-    ``world`` is the block shard the row holds: a context-parallel row covers
-    only this rank's ``1/world`` of the blocks, so the padding is reached from
+    `world` is the block shard the row holds: a context-parallel row covers
+    only this rank's `1/world` of the blocks, so the padding is reached from
     that count and not from the context's.
     """
     blocks = cdiv(cdiv(max(max_seq_len, 1), block_size), world)
@@ -90,7 +90,7 @@ def _score_buffer(
     device: torch.device,
     world: int = 1,
 ) -> torch.Tensor:
-    """Score buffer for ``rows`` query rows, padded as the top-k requires.
+    """Score buffer for `rows` query rows, padded as the top-k requires.
 
     Left uninitialized on purpose: the score pass writes every block up to the
     longest row it covers and the top-k reads only the blocks its own row can
@@ -133,7 +133,7 @@ class MiniMaxM3IndexerMSABackend(MiniMaxM3IndexerBackend):
 class MiniMaxM3IndexerMSAMetadata(MiniMaxM3IndexerMetadata):
     """Adds the per-row shape the ragged top-k needs.
 
-    The uniform decode rows are recovered inside the kernel from ``seq_lens`` and
+    The uniform decode rows are recovered inside the kernel from `seq_lens` and
     the shared query length, which also clamps cudagraph padding rows to nothing.
     Prefill rows have no such shape, so it is materialized here once per forward
     and shared by every layer -- which is also where the emitted page table's
@@ -312,13 +312,13 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
     def init_cp(self) -> None:
         """Resolve the CP decode pass and allocate its buffers.
 
-        Separate from ``__init__`` because the topology is assigned after it,
+        Separate from `__init__` because the topology is assigned after it,
         and persistent because the decode path is captured: a replay reuses the
         addresses it recorded, so the chain has to hand back the same ones.
 
-        Every shape is taken from ``max_model_len`` rather than the batch, for
+        Every shape is taken from `max_model_len` rather than the batch, for
         the same reason. Capture goes through a dummy batch one token long, so a
-        width derived from that batch's own ``max_seq_len`` would bake a
+        width derived from that batch's own `max_seq_len` would bake a
         one-block shard into the graph and then replay it at full context. The
         per-request causal bound clips the real work at runtime instead.
         """
@@ -372,7 +372,7 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
 
         Under CP the scoring pass runs every head on every rank, but the merge
         leaves each rank only the run it owns -- so this, not
-        ``num_index_heads``, is the width of the top-k the attend reads and of
+        `num_index_heads`, is the width of the top-k the attend reads and of
         everything downstream of the exchange. It equals this rank's KV head
         count, which is what the emitted page table is laid out against.
         """
@@ -384,10 +384,10 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
         return self.block_size // ASM_PAGE_SIZE
 
     def _table_rows(self, lo: int, hi: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """The page table and context rows covering score rows ``[lo, hi)``.
+        """The page table and context rows covering score rows `[lo, hi)`.
 
         One table row per (token, kv head), head minor, which is the order
-        ``pa_decode_gluon`` reads once it flattens the cache. Slices of the
+        `pa_decode_gluon` reads once it flattens the cache. Slices of the
         shared buffers rather than copies, so the attend sees the writes; a
         model that reserved no buffers gets throwaway ones, and the attend
         rebuilds the table itself in that case.
@@ -423,7 +423,7 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
 
         Two kernels: the selector nominates, exchanges over the IPC mapping and
         merges in one launch, with no collective between the halves. Both bound
-        the context by ``cp_max_seq_len`` so capture cannot specialize a shard
+        the context by `cp_max_seq_len` so capture cannot specialize a shard
         width. Every rank must reach this with the same row count or it hangs.
         """
         from aiter.ops.msa_attention import (
@@ -694,7 +694,7 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
 
 
 class MiniMaxM3MSAIndexer(nn.Module):
-    """``MiniMaxM3Indexer``'s surface over the MSA impl.
+    """`MiniMaxM3Indexer`'s surface over the MSA impl.
     Fp8 score + top-k for both prefill and decode.
     """
 
@@ -762,7 +762,7 @@ def msa_indexer_unsupported_reason(
 
     Checks platform (ROCm/gfx950), the AITER sparse PA attend, index-cache
     dtype, the kernels' shape contract and the max context in blocks. The
-    default ``cp_world=1`` ignores every argument below it and asks about the
+    default `cp_world=1` ignores every argument below it and asks about the
     unsharded indexer; above one it adds the checks sharding brings. Callers
     fall back on a reason rather than raise.
     """
@@ -882,7 +882,7 @@ def msa_indexer_cp_enabled(
 ) -> bool:
     """Whether to run the selected MSA indexer context-parallel.
 
-    ``select_msa_indexer_impl_cls``'s gate re-asked at the CP world. Call once
+    `select_msa_indexer_impl_cls`'s gate re-asked at the CP world. Call once
     per model: the projection layout and head count are decided off one answer.
     """
     if not vllm_config.attention_config.minimax_m3_indexer_cp:

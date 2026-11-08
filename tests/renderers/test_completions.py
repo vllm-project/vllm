@@ -541,7 +541,7 @@ class TestRenderPrompt:
 class TestMaxTokensNotReservation:
     """Regression tests for GitHub issue #42474.
 
-    ``max_tokens`` must be treated as an upper bound on generation length, not
+    `max_tokens` must be treated as an upper bound on generation length, not
     as a hard reservation that is subtracted from the available input space.
     """
 

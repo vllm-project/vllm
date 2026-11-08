@@ -77,7 +77,7 @@ def init_mhc_all_reduce(vllm_config: VllmConfig) -> None:
     """Build the fused all-reduce + mHC kernel the overlap path reduces with.
 
     Collective over the TP group, so every rank must call it, and only when
-    ``supports_mhc_all_reduce`` holds.
+    `supports_mhc_all_reduce` holds.
     """
     global _all_reduce_mhc
     from .cute_dsl import AllReduceMHC
@@ -344,8 +344,8 @@ def _hc_expand_kernel(
 
 
 def hc_expand(x: torch.Tensor, hc_mult: int) -> torch.Tensor:
-    """``x.unsqueeze(1).expand(-1, hc_mult, -1).contiguous()``, reading
-    ``x`` once instead of once per copy."""
+    """`x.unsqueeze(1).expand(-1, hc_mult, -1).contiguous()`, reading
+    `x` once instead of once per copy."""
     m, h = x.shape
     out = x.new_empty(m, hc_mult, h)
     if out.numel():

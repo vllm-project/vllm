@@ -556,7 +556,7 @@ class DeepseekOCRForCausalLM(
     ) -> tuple[int, int, int, int]:
         """Return (num_input_tokens, num_output_tokens, global_output_token,
         local_output_token) for a single image described by
-        ``image_spatial_crop``.
+        `image_spatial_crop`.
         """
         is_tiled = False
         if image_spatial_crop is not None:
@@ -732,7 +732,7 @@ class DeepseekOCRForCausalLM(
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
         """Encode batched global images with newline tokens inserted.
-        Output shape: ``[B * 272, n_embed]``.
+        Output shape: `[B * 272, n_embed]`.
         """
         bsz = pixel_values.shape[0]
         global_features_1 = self.sam_model(pixel_values)
@@ -757,8 +757,8 @@ class DeepseekOCRForCausalLM(
         images_crop: torch.Tensor,
     ) -> torch.Tensor:
         """Encode local patches without newline insertion (newlines are added later
-        in ``postprocess_encoder_output`` via ``_assemble_patch_grid``).
-        Output shape: ``[P * 100, n_embed]``.
+        in `postprocess_encoder_output` via `_assemble_patch_grid`).
+        Output shape: `[P * 100, n_embed]`.
         """
         features_1 = self.sam_model(images_crop)
         features_2 = self.vision_model(images_crop, features_1)
@@ -793,9 +793,9 @@ class DeepseekOCRForCausalLM(
     ) -> torch.Tensor:
         """Eager encoder forward with optional per-path execution.
 
-        ``path="default"``: full forward (global + local + assembly).
-        ``path="global"``: global-only batched forward with newlines.
-        ``path="local"``: local-only batched forward without newlines.
+        `path="default"`: full forward (global + local + assembly).
+        `path="global"`: global-only batched forward with newlines.
+        `path="local"`: local-only batched forward without newlines.
         """
         if path == "default":
             # Original eager implementation: process each image one by one
@@ -828,20 +828,20 @@ class DeepseekOCRForCausalLM(
     ) -> None:
         """Assemble per-image embeddings from global and local encoder outputs.
 
-        ``output['global']`` contains global-image features with newlines already
+        `output['global']` contains global-image features with newlines already
         inserted (from CUDA graph replay or eager fallback):
-        ``[B * 272, n_embed]``.
+        `[B * 272, n_embed]`.
 
-        ``output['local']`` contains local-patch features without
+        `output['local']` contains local-patch features without
         newlines (from CUDA graph replay or eager fallback):
-        ``[P * 100, n_embed]``. May be ``None`` if no patches in batch.
+        `[P * 100, n_embed]`. May be `None` if no patches in batch.
 
         This method:
-        1. Splits ``output['global']`` into per-image global portions.
-        2. Splits ``output['local']`` into per-image patch groups.
+        1. Splits `output['global']` into per-image global portions.
+        2. Splits `output['local']` into per-image patch groups.
         3. For each image: assembles patch grid with newlines via
-           ``_assemble_patch_grid``, then concatenates
-           ``[local_tiled, global, view_seperator]``.
+           `_assemble_patch_grid`, then concatenates
+           `[local_tiled, global, view_seperator]`.
         """
         output = outputs["global"]
         local_output = outputs.get("local")

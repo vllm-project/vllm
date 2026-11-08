@@ -128,7 +128,7 @@ class DSparkDeepseekV4Model(nn.Module):
         """Insert the sliding-window context KV for every draft layer.
 
         Each layer derives its context KV from the SAME projected target hidden
-        ``main_x``, via that layer's own wkv + kv_norm + RoPE + quant, then
+        `main_x`, via that layer's own wkv + kv_norm + RoPE + quant, then
         writes it at the layer's context slots.
         """
         for i, layer in enumerate(self.layers):
@@ -287,7 +287,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     # --- Weight loading ---
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load ``mtp.{0,1,2}.*`` draft weights from the target checkpoint."""
+        """Load `mtp.{0,1,2}.*` draft weights from the target checkpoint."""
         first_layer = self.model.layers[0]
         use_mega_moe = first_layer.ffn.use_mega_moe
         if use_mega_moe:
@@ -396,7 +396,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             layer.ffn.finalize_mega_moe_weights()
 
     def _remap_dspark_name(self, name: str) -> str | None:
-        """Map checkpoint ``mtp.{i}.*`` name to this model's parameter path."""
+        """Map checkpoint `mtp.{i}.*` name to this model's parameter path."""
         m = re.match(r"mtp\.(\d+)\.(.*)", name)
         if m is None:
             return None

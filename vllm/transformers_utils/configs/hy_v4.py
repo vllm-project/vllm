@@ -37,7 +37,7 @@ class HYV4Config(PreTrainedConfig):
         index_head_dim: Hidden dimension of each DSA indexer head.
         index_n_heads: Number of DSA indexer heads.
         enable_lm_head_fp32: Whether the language-model head emits float32
-            logits. Surfaced as ``head_dtype`` so `LogitsProcessor` accumulates
+            logits. Surfaced as `head_dtype` so `LogitsProcessor` accumulates
             the projection into fp32 while the weight stays in the model dtype.
         enable_ihc: Whether independent Hyper-Connections are enabled.
         hc_mult: Number of hidden-state channels maintained by iHC.

@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Gemma (1 + w) add-RMSNorm fused with the consumer linear's input quant.
 
-Replaces ``gemma_fused_add_rmsnorm`` followed by a standalone static FP8
-(``scaled_fp8_quant``) or NVFP4 (``scaled_fp4_quant``) kernel. The quantized
+Replaces `gemma_fused_add_rmsnorm` followed by a standalone static FP8
+(`scaled_fp8_quant`) or NVFP4 (`scaled_fp4_quant`) kernel. The quantized
 values are computed from the bf16-rounded normed activation with the same
 scale arithmetic as those kernels, so codes match the unfused chain.
 """
@@ -148,7 +148,7 @@ def gemma_add_rms_norm_quant(
     nvfp4: bool,
     write_y: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Gemma RMSNorm of ``x (+ residual)`` quantized for the next linear.
+    """Gemma RMSNorm of `x (+ residual)` quantized for the next linear.
 
     Args:
         x: (num_tokens, hidden) bf16/fp16 activation, contiguous. Read only.
@@ -156,15 +156,15 @@ def gemma_add_rms_norm_quant(
         weight: (hidden,) Gemma norm weight; the norm scales by (1 + weight).
         eps: RMS norm epsilon.
         scale: FP8: the static per-tensor input scale. NVFP4: the global
-            scale (``input_global_scale_inv``).
+            scale (`input_global_scale_inv`).
         nvfp4: quantize to NVFP4 with swizzled 128x4 block scales instead of
             static FP8.
         write_y: also return the bf16 normed activation.
 
     Returns:
-        ``(q, block_scale, y)``: quantized data (fp8, or packed fp4 uint8),
-        NVFP4 block scales (fp8, ``(round_up(M, 128), round_up(H // 16, 4))``;
-        rows >= M are left unwritten) or ``scale`` for FP8, and the normed
+        `(q, block_scale, y)`: quantized data (fp8, or packed fp4 uint8),
+        NVFP4 block scales (fp8, `(round_up(M, 128), round_up(H // 16, 4))`;
+        rows >= M are left unwritten) or `scale` for FP8, and the normed
         activation (or None).
 
     """

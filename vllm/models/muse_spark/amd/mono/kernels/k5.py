@@ -45,7 +45,7 @@ partials and the post_expert_proj outputs go to the owner rank of each token, on
 does the whole row (all-reduce sum, both norms, gated residual) and the ffn_in / xn rows are
 all-gathered. The residual stream lives token-sharded (rank r: its S / 8 rows, fp32, all 8192
 columns); HA reads it as rows so the first layer can read a full replicated stream (s_full);
-HB writes it the same way and (``gather``) all-gathers it. S = 32, column blocks: the o_proj
+HB writes it the same way and (`gather`) all-gathers it. S = 32, column blocks: the o_proj
 partials go to the owner of the column block, which reduces and all-gathers them; both
 boundaries run on all 256 CTAs (token groups x column groups, one-hop token norms) and the
 stream is replicated.
@@ -1522,7 +1522,7 @@ def build(key: Build):
     ):
         """CTA j < S / W: token t = W j + rank, all 8192 columns: post_feedforward_layernorm
         (input-scaled, eps 1e-8), gated residual on the mid stream, next input_layernorm ->
-        stream row (token-sharded; ``gather``: to every rank too), xn row to every rank + flag."""
+        stream row (token-sharded; `gather`: to every rank too), xn row to every rank + flag."""
         tid = fresh(tid)
         par = tag_par(tag)
         j = bid

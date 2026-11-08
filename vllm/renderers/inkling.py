@@ -3,13 +3,13 @@
 """Native Inkling chat renderer for the Python frontend.
 
 Mirrors the Rust frontend's native Inkling renderer
-(``rust/src/chat/src/renderer/inkling/mod.rs``): chat messages are rendered
+(`rust/src/chat/src/renderer/inkling/mod.rs`): chat messages are rendered
 directly to token ids — Inkling has no Jinja chat template and no faithful
 text form.
 
-The encoding logic lives in ``inkling_encoding.py`` behind a narrow
+The encoding logic lives in `inkling_encoding.py` behind a narrow
 "OpenAI messages + tools -> token ids" call; see the swap-point comment
-in :meth:`InklingRenderer._render` for adopting a standalone Inkling
+in `InklingRenderer._render` for adopting a standalone Inkling
 input-processing library (mistral-common style) later.
 """
 
@@ -60,7 +60,7 @@ class _HfBackedTmlTokenizer:
 
     Special-token ids are resolved from the tokenizer vocab at
     construction (never hardcoded), trying each known spelling — the Inkling
-    HF vocab exposes some semantic slots as ``<|unused_NNNNNN|>`` tokens.
+    HF vocab exposes some semantic slots as `<|unused_NNNNNN|>` tokens.
     """
 
     def __init__(self, tokenizer: HfTokenizer) -> None:

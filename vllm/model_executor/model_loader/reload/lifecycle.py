@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Begin and complete a checkpoint-format weight update in the reload mode
-``VLLM_RELOAD_MODE`` selects (fixed for the process)."""
+`VLLM_RELOAD_MODE` selects (fixed for the process)."""
 
 import torch
 
@@ -17,7 +17,7 @@ _weight_update_active = False
 
 
 def weight_update_active() -> bool:
-    """Whether a weight update is running, when one ``load_weights`` call may hold
+    """Whether a weight update is running, when one `load_weights` call may hold
     only part of the checkpoint. Process-wide, so a module nested in the model
     passed to `start_reload` sees it too."""
     return _weight_update_active

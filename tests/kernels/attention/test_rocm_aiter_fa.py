@@ -3,7 +3,7 @@
 """ROCm-specific tests for the AITER Flash Attention backend.
 
 This file owns the ROCm backend contract and the ROCm-specific execution paths
-wired through ``vllm.v1.attention.backends.rocm_aiter_fa``:
+wired through `vllm.v1.attention.backends.rocm_aiter_fa`:
 - backend contract and env gating
 - representative prefill, multi-batch, decode, and FP8-KV execution
 - direct kernel stress for large block tables and sliding-window masking

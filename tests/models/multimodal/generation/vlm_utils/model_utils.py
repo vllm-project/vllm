@@ -1122,7 +1122,7 @@ def qwen3_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 def cohere_compass_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Declare the video modality that CohereCompass omits upstream.
 
-    Without it ``generate`` leaves ``pixel_values_videos`` unconsumed and the
+    Without it `generate` leaves `pixel_values_videos` unconsumed and the
     forward pass rejects it, see huggingface/transformers#49320. Drop this once
     the pinned transformers declares the modality itself.
     """
@@ -1137,15 +1137,15 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
 
     Two issues in HfRunner require patching:
 
-    1. VoxtralProcessor requires ``apply_chat_template()`` with conversation
-       dicts (accepting ``url``, ``path``, or ``base64`` audio) rather than
-       the standard ``processor(text=, audio=, sampling_rate=)`` interface.
+    1. VoxtralProcessor requires `apply_chat_template()` with conversation
+       dicts (accepting `url`, `path`, or `base64` audio) rather than
+       the standard `processor(text=, audio=, sampling_rate=)` interface.
     2. HfRunner.get_inputs cannot handle multi-audio per prompt because it
-       incorrectly unpacks ``[(arr1, sr1), (arr2, sr2)]`` via a ``len == 2`` check.
+       incorrectly unpacks `[(arr1, sr1), (arr2, sr2)]` via a `len == 2` check.
 
-    We override ``get_inputs`` to build conversation dicts and call
-    ``apply_chat_template`` directly, bypassing both issues. We also wrap
-    ``model.generate`` to strip prompt tokens before decoding, since
+    We override `get_inputs` to build conversation dicts and call
+    `apply_chat_template` directly, bypassing both issues. We also wrap
+    `model.generate` to strip prompt tokens before decoding, since
     HfRunner.generate calls batch_decode on the full sequence (prompt +
     generated).
     """

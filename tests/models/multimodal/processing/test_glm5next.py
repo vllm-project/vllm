@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Video placeholder accounting for GLM-5.3-Flash.
 
-``Glm4vProcessingInfo._construct_video_placeholder`` emits one frame of
+`Glm4vProcessingInfo._construct_video_placeholder` emits one frame of
 placeholders per timestamp, so the timestamps returned by
-``_get_video_second_idx_glm46v`` decide how many placeholders the prompt gets
-while ``video_grid_thw`` decides how many rows the vision tower produces. If
-the two disagree they collide in ``_merge_multimodal_embeddings``, which raises
+`_get_video_second_idx_glm46v` decide how many placeholders the prompt gets
+while `video_grid_thw` decides how many rows the vision tower produces. If
+the two disagree they collide in `_merge_multimodal_embeddings`, which raises
 inside a worker and takes the engine down with it.
 
 The grid checks below are arithmetic: no weights, no GPU.
-``test_glm5_metadata_only_roundtrip`` loads the processor and compares
+`test_glm5_metadata_only_roundtrip` loads the processor and compares
 raw media with metadata-only prompts.
 """
 
@@ -127,8 +127,8 @@ def test_glm5_metadata_only_roundtrip(modality):
 def test_glm5_raw_video_timestamps_follow_sampled_frames():
     """Input frames_indices are the pre-sample range, not the HF sample.
 
-    32 frames at 8 fps with ``frames_indices=range(32)`` and
-    ``do_sample_frames=True`` used to emit 16 timestamps for ``grid_t=4``.
+    32 frames at 8 fps with `frames_indices=range(32)` and
+    `do_sample_frames=True` used to emit 16 timestamps for `grid_t=4`.
     """
     rng = np.random.RandomState(0)
     num_frames = 32
@@ -219,7 +219,7 @@ def _pixel_path_grid(
     height: int,
     width: int,
 ) -> tuple[int, int, int]:
-    """The ``video_grid_thw`` ``Glm5NextVideoProcessor._preprocess`` builds."""
+    """The `video_grid_thw` `Glm5NextVideoProcessor._preprocess` builds."""
     resized_height, resized_width = smart_resize(
         num_frames=num_frames,
         height=height,

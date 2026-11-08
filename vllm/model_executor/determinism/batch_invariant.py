@@ -507,7 +507,7 @@ def _softmax_kernel(
     BLOCK_SIZE: tl.constexpr,
     LOG: tl.constexpr = False,
 ):
-    """Compute softmax, or log_softmax when ``LOG``, along the last dimension of a
+    """Compute softmax, or log_softmax when `LOG`, along the last dimension of a
     2D tensor. Each block handles one row of the input tensor, in a fixed block
     order, so the result never depends on the row count.
     """
@@ -1094,12 +1094,12 @@ def rms_norm_batch_invariant(
     Args:
         input: Input tensor of shape (..., hidden_size)
         weight: Weight tensor of shape (hidden_size,), or None to skip the
-            per-channel multiply (``RMSNorm(has_weight=False)``)
+            per-channel multiply (`RMSNorm(has_weight=False)`)
         eps: Small constant for numerical stability
         residual: Optional residual tensor fused into the normalization path
 
     Returns:
-        RMS normalized tensor, or ``(output, residual_out)`` when ``residual``
+        RMS normalized tensor, or `(output, residual_out)` when `residual`
         is provided
 
     """
@@ -1161,11 +1161,11 @@ def dequantize_gptq_weight(
     group_size: int,
     zero_bias: int,
 ) -> torch.Tensor:
-    """Unpack a symmetric GPTQ weight (no act-order) to ``scales.dtype``.
+    """Unpack a symmetric GPTQ weight (no act-order) to `scales.dtype`.
 
-    ``qweight`` is in the checkpoint layout: ``[K // pack_factor, N]`` int32
-    with ``pack_factor`` consecutive input rows packed into each element,
-    lowest bits first. Returns ``(q - zero_bias) * scale`` of shape ``[K, N]``.
+    `qweight` is in the checkpoint layout: `[K // pack_factor, N]` int32
+    with `pack_factor` consecutive input rows packed into each element,
+    lowest bits first. Returns `(q - zero_bias) * scale` of shape `[K, N]`.
     """
     packed_rows, output_size = qweight.shape
     pack_factor = 32 // num_bits
@@ -1224,9 +1224,9 @@ def _fixed_order_sum_kernel(
     BLOCK_SIZE: tl.constexpr,
     LARGE: tl.constexpr,
 ):
-    """Sum ``WORLD_SIZE`` contributions in ascending rank order, fp32 accumulator.
+    """Sum `WORLD_SIZE` contributions in ascending rank order, fp32 accumulator.
 
-    An output element sums exactly ``WORLD_SIZE`` values in a compile-time
+    An output element sums exactly `WORLD_SIZE` values in a compile-time
     constant order and rounds once, so the result depends only on the rank
     ordering and never on how many elements are being reduced.
     """
@@ -1255,7 +1255,7 @@ def all_reduce_batch_invariant(
     contributions are summed changes with the number of tokens in the batch.
 
     Instead, all-gather the contributions -- pure data movement, so bitwise
-    reproducible at any size -- and reduce them with ``_fixed_order_sum_kernel``.
+    reproducible at any size -- and reduce them with `_fixed_order_sum_kernel`.
     """
     world_size = dist.get_world_size(group)
     if world_size == 1:
@@ -1288,21 +1288,21 @@ def reduce_scatter_batch_invariant(
 ) -> torch.Tensor:
     """Sum reduce-scatter over dim 0 whose result does not depend on the size.
 
-    ``ncclReduceScatter`` picks its chunking from the message size just as
-    ``ncclAllReduce`` does. Route around it the same way
-    ``all_reduce_batch_invariant`` does: an all-to-all sends rank ``d`` exactly
+    `ncclReduceScatter` picks its chunking from the message size just as
+    `ncclAllReduce` does. Route around it the same way
+    `all_reduce_batch_invariant` does: an all-to-all sends rank `d` exactly
     the rows it owns from every rank -- pure data movement, so bitwise
     reproducible however the library chunks it -- and lands them rank-major,
-    which is the layout ``_fixed_order_sum_kernel`` already consumes.
+    which is the layout `_fixed_order_sum_kernel` already consumes.
 
-    ``sizes`` (the reduce-scatterv case) changes only *which* rows a rank
+    `sizes` (the reduce-scatterv case) changes only *which* rows a rank
     receives, never how the received contributions are summed, so variable
     shard sizes are invariant for the same reason.
 
     Args:
         input_: Contiguous full-size input; dim 0 is the scattered axis.
         group: Process group, defaults to the world group.
-        sizes: Per-rank row counts. Uniform split when ``None``.
+        sizes: Per-rank row counts. Uniform split when `None`.
 
     Returns:
         This rank's shard of the sum.

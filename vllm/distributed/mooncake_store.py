@@ -21,9 +21,9 @@ MooncakeMode = Literal["embedded", "standalone-store"]
 class MooncakeStoreConfig:
     """Configuration for MooncakeDistributedStore.
 
-    ``mode`` selects the topology: ``embedded`` (each rank contributes
-    ``global_segment_size`` in-process) or ``standalone-store`` (rank
-    contributes 0; an external ``mooncake_client`` process owns the pool
+    `mode` selects the topology: `embedded` (each rank contributes
+    `global_segment_size` in-process) or `standalone-store` (rank
+    contributes 0; an external `mooncake_client` process owns the pool
     and the SSD tier).
     """
 

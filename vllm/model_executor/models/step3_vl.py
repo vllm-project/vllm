@@ -903,8 +903,8 @@ class Step3VLForConditionalGeneration(
     ):
         """CPU-side per-item merge after dual-path graph replay.
 
-        ``outputs['global']`` contains global-image features and ``outputs['local']``
-        contains local-patch features (or ``None`` when there are no patches).
+        `outputs['global']` contains global-image features and `outputs['local']`
+        contains local-patch features (or `None` when there are no patches).
         """
         output = outputs["global"]
         local_output = outputs.get("local")

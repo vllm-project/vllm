@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""K1 ``front``: one DeepSeek-V4.1 attention layer from its normed input row to
+"""K1 `front`: one DeepSeek-V4.1 attention layer from its normed input row to
 the rotated query and the step's KV rows in the sliding-window cache.
 
-One launch a layer and rank, ``BLOCKS`` CTAs x ``THREADS`` threads, S rows.
+One launch a layer and rank, `BLOCKS` CTAs x `THREADS` threads, S rows.
 Every CTA issues its weight loads (its wqkv part and its wq_b tasks) at the
 kernel start, before it waits on anything; the stages:
 
@@ -21,10 +21,10 @@ kernel start, before it waits on anything; the stages:
     wq_b   (H x 512 / 16, 16 rows): QX8 times wq_b -> bf16 -> GPT-J RoPE of
            each head's dims 448.. -> q (global, bf16)
 
-Each elementwise step follows vLLM's ROCm path (``mxfp8_quantize``,
-``FusedQKVRMSNorm``, ``fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert``);
+Each elementwise step follows vLLM's ROCm path (`mxfp8_quantize`,
+`FusedQKVRMSNorm`, `fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert`);
 the GEMV reductions differ from the Triton GEMMs' only in their order.
-Adapted from ATOM's V4.1 ``attn_pre`` (K1), less its mHC seam.
+Adapted from ATOM's V4.1 `attn_pre` (K1), less its mHC seam.
 """
 
 from dataclasses import dataclass
@@ -122,7 +122,7 @@ def plus(t0, v):
 @traced
 def publish(c, region, i, stride=0):
     """This CTA's stores visible device-wide, then the flag pair (region, i);
-    a tuned build with ``stride``: each of its copies (``back.publish``)."""
+    a tuned build with `stride`: each of its copies (`back.publish`)."""
     rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
     if const_expr(c["tuned"] and stride):
@@ -134,7 +134,7 @@ def publish(c, region, i, stride=0):
 
 @traced
 def await_flags(c, region, n, index):
-    """Thread u < n polls flag ``index(u)``; then the CTA proceeds."""
+    """Thread u < n polls flag `index(u)`; then the CTA proceeds."""
     tid = c["tid"]
     if tid < n:
         c["mb"].poll([(region, index(fx.min(tid, n - 1)), 1)])
@@ -145,7 +145,7 @@ def await_flags(c, region, n, index):
 
 
 def xq_loads(c, unit, pred):
-    """(token, K half) ``unit``'s bf16 input: its load only, 8 values a thread
+    """(token, K half) `unit`'s bf16 input: its load only, 8 values a thread
     (threads past the half mirror its last item)."""
     a = c["args"]
     xr = rsrc(a["x"], pred.select(fx.Int64(0xFFFFFFFF), fx.Int64(0)))
@@ -156,7 +156,7 @@ def xq_loads(c, unit, pred):
 
 @traced
 def stage_xq(c, unit, w, live):
-    """``xq_loads``' values -> vLLM's MXFP8 -> X8 words / X8S codes of the
+    """`xq_loads`' values -> vLLM's MXFP8 -> X8 words / X8S codes of the
     unit (published by the caller)."""
     tid, lane = c["tid"], c["lane"]
     vals = []
@@ -193,7 +193,7 @@ def stage_xq(c, unit, w, live):
 
 @traced
 def stage_kt(c, t):
-    """Token t's keys for K2: ``KT[t][k] = slot | 1 << 31`` for its top-k compressed
+    """Token t's keys for K2: `KT[t][k] = slot | 1 << 31` for its top-k compressed
     rows (k < ntopk), the window slot for k in [ntopk, kv_len), -1 for an
     invalid or absent key; KLEN[t] = kv_len (0 for a pad row), KLEN[S + t] =
     ntopk."""
@@ -235,7 +235,7 @@ def stage_kt(c, t):
 
 
 def x_half_loads(c, part, pred, t0, n):
-    """Tokens t0 .. t0 + n's bf16 input, K half ``part``: its loads only (16 B a
+    """Tokens t0 .. t0 + n's bf16 input, K half `part`: its loads only (16 B a
     lane-item, 8 values; a thread one column of [2 n half-rows, 160]), masked
     off on CTAs without a wqkv part."""
     a = c["args"]
@@ -252,7 +252,7 @@ def x_half_loads(c, part, pred, t0, n):
 
 @traced
 def quant_x_half(c, regs, n):
-    """``x_half_loads``' values -> vLLM's MXFP8 rows of the K half in LDS (a
+    """`x_half_loads`' values -> vLLM's MXFP8 rows of the K half in LDS (a
     32-group = 4 lanes)."""
     tid, lane = c["tid"], c["lane"]
     x_row, s_row = lds_row(KWORDS), lds_row(KGROUPS)
@@ -288,9 +288,9 @@ def quant_x_half(c, regs, n):
 
 @traced
 def stage_wqkv(c, task, part, ops, t0, n, live, settle=False):
-    """Rows 16 task .. of wqkv over K half ``part`` against tokens t0 .. t0 + n
-    -> fp32 partials QKVP[part] (``live``: a CTA with a wqkv part; ``settle``:
-    ``back.stage_woa``'s)."""
+    """Rows 16 task .. of wqkv over K half `part` against tokens t0 .. t0 + n
+    -> fp32 partials QKVP[part] (`live`: a CTA with a wqkv part; `settle`:
+    `back.stage_woa`'s)."""
     tid, red = c["tid"], c["red"]
     gemv_mfmas(c, HIDDEN, c["xl"], c["xsl"], red, ops, rows=n, nsteps=KSTEPS)
     if const_expr(settle):
@@ -478,8 +478,8 @@ def stage_qkv(c, t):
 
 
 def wqb_rope(c, task0, pos_t, n):
-    """(cos, sin) of this thread's pair in ``stage_wqb``'s epilogue over a tile
-    of n rows (``pos_t``: its token's position; every task of the CTA shares
+    """(cos, sin) of this thread's pair in `stage_wqb`'s epilogue over a tile
+    of n rows (`pos_t`: its token's position; every task of the CTA shares
     the pair's dims: tasks BLOCKS apart are whole heads apart)."""
     a = c["args"]
     rp = c["tid"] % (ROWS // 2)
@@ -491,7 +491,7 @@ def wqb_rope(c, task0, pos_t, n):
 
 
 def wqb_pos(c, t0, n):
-    """This thread's token position for ``stage_wqb``'s epilogue of tile
+    """This thread's token position for `stage_wqb`'s epilogue of tile
     t0 .. t0 + n."""
     per = ROWS * n // 2
     tl = fx.min((c["tid"] % per) // (ROWS // 2), n - 1)
@@ -502,7 +502,7 @@ def wqb_pos(c, t0, n):
 def stage_wqb(c, task0, bops, t0, n, rope, settle=False):
     """Rows 16 (task0 + BLOCKS k) .. of the rank's H x 512 query rows, every
     task k of the CTA: GEMVs -> bf16 -> GPT-J RoPE of a head's dims 448..
-    (fp32) -> bf16 -> q (``settle``: ``back.stage_woa``'s)."""
+    (fp32) -> bf16 -> q (`settle`: `back.stage_woa`'s)."""
     tid, red, d = c["tid"], c["red"], c["d"]
     a = c["args"]
     nt = len(bops)
@@ -555,8 +555,8 @@ def front_lds(s: int, d: Dims):
 
 
 def front_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
-    """The front stages' context: LDS views, mailbox (tag ``tag``), scratch
-    regions, arguments (``args``: the kernel's, by name)."""
+    """The front stages' context: LDS views, mailbox (tag `tag`), scratch
+    regions, arguments (`args`: the kernel's, by name)."""
     s, d = key.tokens, Dims(key.tp)
     tid = fx.thread_idx.x
     c = {
@@ -587,10 +587,10 @@ def front_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
 
 @traced
 def run_front(c, key, bid, x8_given=False, before_wqkv=None, after_wqkv=None):
-    """The front's stages on this CTA. ``x8_given``: a stage before this one
+    """The front's stages on this CTA. `x8_given`: a stage before this one
     (the mono layer's seam norm) publishes X8 / XRDY for every token (no input
-    quantization here). ``before_wqkv()`` runs ahead of the wqkv weights' loads
-    (a latency-critical stage of the caller's), ``after_wqkv()`` right after."""
+    quantization here). `before_wqkv()` runs ahead of the wqkv weights' loads
+    (a latency-critical stage of the caller's), `after_wqkv()` right after."""
     s = key.tokens
     wqb_tasks = Dims(key.tp).wqb_tasks
     a = c["args"]

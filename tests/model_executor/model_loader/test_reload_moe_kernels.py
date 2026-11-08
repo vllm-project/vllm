@@ -19,7 +19,7 @@ PROMPTS = [
 
 
 def _gpu_tensor_ptrs(obj: object, path: str, ptrs: dict, seen: set) -> None:
-    """Record the address of every GPU tensor reachable from ``obj`` through
+    """Record the address of every GPU tensor reachable from `obj` through
     containers and attributes of vLLM objects, such as quant methods, MoE
     kernels and experts."""
     if isinstance(obj, torch.Tensor):

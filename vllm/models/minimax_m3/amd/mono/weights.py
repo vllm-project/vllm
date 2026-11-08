@@ -1,21 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Zero-copy views (and two converted copies) of one vLLM ``MiniMaxM3DecoderLayer``
+"""Zero-copy views (and two converted copies) of one vLLM `MiniMaxM3DecoderLayer`
 for the mono kernels.
 
 The kernels read tensors through raw pointers in fixed layouts: a differently
 laid-out weight would not fault, it would produce plausible garbage. So every
 layout assumption is asserted once and a model that does not match is refused
-(``MonoUnsupported``). The experts already have the kernels' layout (MXFP4, aiter
-``shuffle_weight(16, 16)`` + ``e8m0_shuffle`` scales, fused shared expert in slot
+(`MonoUnsupported`). The experts already have the kernels' layout (MXFP4, aiter
+`shuffle_weight(16, 16)` + `e8m0_shuffle` scales, fused shared expert in slot
 128). The attention linears are MXFP8 in vLLM and the router gate is fp32, so
 those are converted once when the runner is built: MXFP8 -> bf16 -> per-channel
 fp8, preshuffled (16, 16); gate -> bf16.
 
 Without shared-expert fusion the routed table holds the 128 routed experts and
 the shared expert stays the separate MXFP8 MLP; its weights are copied once into
-the f8f6f4 MFMA's fp8 A-operand order (``mxfp8_a_tiles``, the same bytes) with
-``e8m0_shuffle``-ordered scales, so the kernels run it in MXFP8.
+the f8f6f4 MFMA's fp8 A-operand order (`mxfp8_a_tiles`, the same bytes) with
+`e8m0_shuffle`-ordered scales, so the kernels run it in MXFP8.
 """
 
 from dataclasses import dataclass
@@ -135,7 +135,7 @@ def mxfp8_a_tiles(
     linear, rows: int, cols: int, name: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """MXFP8 linear (fp8 [rows, cols], e8m0 [rows, cols/32]) -> its bytes in the
-    f8f6f4 MFMA's fp8 A order and its scales in ``e8m0_shuffle`` order.
+    f8f6f4 MFMA's fp8 A order and its scales in `e8m0_shuffle` order.
 
     A 16-row x 128-k tile is 2 KiB; lane g * 16 + r of a tile holds row r's k
     16 g .. + 16 then 64 + 16 g .. + 16 (the B operand's order), 32 bytes."""
@@ -191,12 +191,12 @@ def _build_cp_qkv(
     linear, rank: int, tp_group, layer_id: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The wider fused projection of indexer context parallelism: every rank's
-    index q head, all-gathered once at build time (``IndexHeads(TP, rank)``).
+    index q head, all-gathered once at build time (`IndexHeads(TP, rank)`).
 
     One rank's rows (2560): q(2048) | k(128) | v(128) | index_q(128) | index_k(128)
     CP rows (2944):         q(2048) | k(128) | v(128) | iq_rank0..3 | index_k(128)
 
-    The gather's list order is the TP group's rank order, which ``IndexHeads.own``
+    The gather's list order is the TP group's rank order, which `IndexHeads.own`
     indexes; the rank's own slot is checked against its local rows."""
     one_rows = (LOCAL_Q_HEADS + 3 + 1) * HEAD_DIM  # 2560
     w = getattr(linear, "weight", None)

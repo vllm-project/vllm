@@ -69,7 +69,7 @@ logger = init_logger(__name__)
 
 class _StreamError(Exception):
     """Carries the ErrorInfo from an upstream ErrorResponse through the stream
-    converter so the SSE ``error`` event can reuse its status code to pick the
+    converter so the SSE `error` event can reuse its status code to pick the
     Anthropic error type."""
 
     def __init__(self, error_info: ErrorInfo) -> None:
@@ -94,18 +94,18 @@ def _build_anthropic_usage(
 ) -> AnthropicUsage:
     """Build an AnthropicUsage from UsageInfo.
 
-    Anthropic defines ``total_input == input_tokens + cache_read +
-    cache_creation``.  vLLM's ``prompt_tokens`` is the total, so
-    ``input_tokens = prompt_tokens - cache_read - cache_creation``.
+    Anthropic defines `total_input == input_tokens + cache_read +
+    cache_creation`.  vLLM's `prompt_tokens` is the total, so
+    `input_tokens = prompt_tokens - cache_read - cache_creation`.
 
-    Cache fields are taken from ``UsageInfo.prompt_tokens_details``.
-    When cache info is absent (e.g. ``--enable-prompt-tokens-details``
+    Cache fields are taken from `UsageInfo.prompt_tokens_details`.
+    When cache info is absent (e.g. `--enable-prompt-tokens-details`
     off, or a streaming chunk that hasn't carried it yet), cache fields
-    are left **unset** so ``exclude_unset=True`` serialization omits them
+    are left **unset** so `exclude_unset=True` serialization omits them
     entirely.
 
-    ``completion_tokens`` follows ``UsageInfo`` and may be ``None`` on
-    intermediate stream chunks; we coerce to ``0`` for the wire format.
+    `completion_tokens` follows `UsageInfo` and may be `None` on
+    intermediate stream chunks; we coerce to `0` for the wire format.
     """
     kwargs = {}
     if usage is None:
@@ -137,13 +137,13 @@ def _to_anthropic_stop_reason(
     Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None,
     str | None,
 ]:
-    """Map an OpenAI finish reason to Anthropic ``(stop_reason, stop_sequence)``.
+    """Map an OpenAI finish reason to Anthropic `(stop_reason, stop_sequence)`.
 
-    Anthropic reports ``tool_use`` whenever the model invoked a tool. The chat
-    layer reports ``finish_reason="stop"`` for a named (forced) tool call, so
-    ``tool_used`` records whether a ``tool_use`` block was produced.
-    ``max_tokens`` always wins. A matched stop string wins unless the tool
-    calls are complete (``tool_complete``): a call it cut short must not run.
+    Anthropic reports `tool_use` whenever the model invoked a tool. The chat
+    layer reports `finish_reason="stop"` for a named (forced) tool call, so
+    `tool_used` records whether a `tool_use` block was produced.
+    `max_tokens` always wins. A matched stop string wins unless the tool
+    calls are complete (`tool_complete`): a call it cut short must not run.
     """
     if finish_reason == "length":
         return "max_tokens", None
@@ -203,10 +203,10 @@ class DisabledThinkingEffortResolver:
         return self._effort
 
     async def _probe(self) -> AnthropicDisabledThinkingEffort:
-        """Use ``low`` if the renderer rejects or ignores ``none``.
+        """Use `low` if the renderer rejects or ignores `none`.
 
-        ``none`` is ignored when it renders the same prompt as a thinking
-        effort, e.g. GLM-5.3 treats unknown efforts as ``max``.
+        `none` is ignored when it renders the same prompt as a thinking
+        effort, e.g. GLM-5.3 treats unknown efforts as `max`.
         """
         none_prompt = await self._render_probe_prompt("none")
         if none_prompt is None:
@@ -331,7 +331,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         """Auto-detect whether the chat template requires system-first ordering.
 
         Renders a [system, user, system, user] conversation against the
-        template; if it raises (e.g. Qwen's ``loop.first`` guard), the
+        template; if it raises (e.g. Qwen's `loop.first` guard), the
         model needs inline system messages merged into the leading block.
         """
         if not chat_template:
@@ -741,7 +741,7 @@ class AnthropicServingMessages(OpenAIServingChat):
     ) -> None:
         """Handle extended-thinking configuration.
 
-        ``display`` is intentionally ignored: suppressing reasoning would mark
+        `display` is intentionally ignored: suppressing reasoning would mark
         it ended for structured outputs and drop it from multi-turn history.
         """
         thinking: AnthropicThinkingConfig | None = anthropic_request.thinking
@@ -825,7 +825,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         cls,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
     ) -> list[AnthropicTool] | None:
-        """Apply tool_addition/tool_removal blocks in ``messages`` to ``tools``.
+        """Apply tool_addition/tool_removal blocks in `messages` to `tools`.
 
         Chat templates see a single tool list, so this resolves the tools in
         effect at the end of the conversation: a tool added by reference is no

@@ -16,7 +16,7 @@ class StubTokenizer:
     """Stands in for the model's TikTokenTokenizer.
 
     Records the kwargs it is called with and returns fixed token ids, so tests
-    can assert how the renderer drives ``apply_chat_template`` without the real
+    can assert how the renderer drives `apply_chat_template` without the real
     (git-LFS) tiktoken vocabulary.
     """
 

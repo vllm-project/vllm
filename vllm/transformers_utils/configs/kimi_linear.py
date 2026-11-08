@@ -18,7 +18,7 @@ class KimiLinearDSAConfig:
 
     Kimi-K3.1 puts DSA on every full-attention (MLA) layer; KDA layers
     are unaffected. The converted checkpoint exports this as a nested
-    ``dsa_config`` sub-structure.
+    `dsa_config` sub-structure.
     """
 
     dsa_layers: list[int]

@@ -39,14 +39,14 @@ def fused_save_compress_norm(
     attention layer schedules on separate streams.
 
     Ratio 2 keeps one ring block per request holding the open group's rows:
-    position ``p`` lives in row ``p % capacity`` and ``slot_mapping`` encodes
-    ``block * capacity + p % capacity``. The grid has one program per request
+    position `p` lives in row `p % capacity` and `slot_mapping` encodes
+    `block * capacity + p % capacity`. The grid has one program per request
     followed by one per pair of packed tokens. A request program handles the
     group that the chunk's first token closes with its predecessor's ring row,
-    then stores the chunk's last ``capacity`` rows to the ring; because the
+    then stores the chunk's last `capacity` rows to the ring; because the
     same program does both, ring reads and writes never race. A pair program
     handles the group that ends inside its pair, reading both rows from the
-    raw input. Ratio 1 has no ring and one program per token; ``slot_mapping``
+    raw input. Ratio 1 has no ring and one program per token; `slot_mapping`
     then only marks valid tokens.
 
     Args:
@@ -61,9 +61,9 @@ def fused_save_compress_norm(
         compress_ratio: Group size, either 1 or 2.
         latent_out: BF16 [tokens, 512], written only at valid group boundaries.
         prev_rows: FP32 [rows, 1024] rows gathered from all PCP ranks (CR2). A
-            chunk reads its predecessor here where ``prev_row_indices`` is set,
-            and the ring is left to ``save_ring_rows``.
-        prev_row_indices: [num_reqs] row in ``prev_rows`` holding the token
+            chunk reads its predecessor here where `prev_row_indices` is set,
+            and the ring is left to `save_ring_rows`.
+        prev_row_indices: [num_reqs] row in `prev_rows` holding the token
             before each chunk's first token, or -1 to read the ring.
 
     """
@@ -305,15 +305,15 @@ def rope_quant_insert(
 
     The BF16 latent supplies both NoPE quantization and RoPE input. It is read
     only for valid slots at group boundaries. The cache dtype selects the
-    layout: ``uint8`` is a paged FlashMLA layout, whose record the per-token
+    layout: `uint8` is a paged FlashMLA layout, whose record the per-token
     byte width names -- 584 B for V4 (576 value bytes and eight segregated
     UE8M0 scale bytes, including one zero padding scale), 528 B for V4.1
     (512 MXFP8 value bytes covering the RoPE dims too, then 16 UE8M0 scales of
     32 dims each), or 288 B for V4.1 NVFP4 (256 bytes of e2m1 pairs then 32
     e4m3 scales of 16 dims each), which only the compressed cache uses. The
     two V4.1 records keep each token's scales right after its own values.
-    ``bfloat16`` and ``float8_e4m3fn`` are the plain [448 NoPE | 64 RoPE] rows
-    read by FlashInfer, the latter scaled by the per-tensor ``fp8_scale``.
+    `bfloat16` and `float8_e4m3fn` are the plain [448 NoPE | 64 RoPE] rows
+    read by FlashInfer, the latter scaled by the per-tensor `fp8_scale`.
     """
     assert compress_ratio in (1, 2)
     assert latent.shape[1] == 512 and latent.dtype == torch.bfloat16
@@ -492,7 +492,7 @@ def _rope_quant_insert_nvfp4_kernel(
 ):
     """V4.1 NVFP4 record: RoPE, then e2m1 with one e4m3 scale per 16 dims.
 
-    The scale is ``amax / 6`` (6 is e2m1's largest magnitude) clamped to the
+    The scale is `amax / 6` (6 is e2m1's largest magnitude) clamped to the
     e4m3 range, with no per-tensor scale on top.
     """
     t = tl.program_id(0)

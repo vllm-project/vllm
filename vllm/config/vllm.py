@@ -3463,7 +3463,7 @@ class VllmConfig:
         """Resolve the NIXL P/D DCP interleave from the global KV cache groups.
 
         Called once by the engine core before profiling; workers only assign the
-        result via ``set_kv_cache_layout``.
+        result via `set_kv_cache_layout`.
         """
         if (
             not kv_cache_groups

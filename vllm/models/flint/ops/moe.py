@@ -17,9 +17,9 @@ shared). The decode, decode-block and grouped paths implement this rule.
 Decode (few tokens): three Triton kernels, (1) router GEMV + top-k, (2) per
 (token, expert) gate/up GEMV + SiLU * up, (3) down GEMV over the top-k experts
 + weighted combine + shared-expert add. Larger batches: cuBLAS router GEMM +
-Triton top-k, FlashInfer's SM100 W4A16 grouped GEMMs (see ``moe_cute``) and a
+Triton top-k, FlashInfer's SM100 W4A16 grouped GEMMs (see `moe_cute`) and a
 Triton combine. Both paths read the same weights in FlashInfer's layout (see
-``FlintMoEWeights.from_modelopt``).
+`FlintMoEWeights.from_modelopt`).
 """
 
 from collections.abc import Iterable
@@ -165,8 +165,8 @@ def _topk_row(
     TOPK_P2: tl.constexpr,
 ):
     """Top-k of one row of bf16 logits (ties -> lowest expert index), fp32
-    sigmoid scores renormalized over the selected experts, ``s / (sum +
-    1e-20)``, rounded to bf16 (the reference packs bf16 routing weights).
+    sigmoid scores renormalized over the selected experts, `s / (sum +
+    1e-20)`, rounded to bf16 (the reference packs bf16 routing weights).
 
     Each logit and its index are packed into one order-preserving int32 key so
     every selection step is a single max-reduction.
@@ -195,7 +195,7 @@ def _topk_row(
 
 @triton.jit
 def _add_rms_norm(a_ptr, r_ptr, w_ptr, t, eps, H: tl.constexpr):
-    """``norm.fused_add_rms_norm`` for row t: (bf16 residual, bf16 out), both
+    """`norm.fused_add_rms_norm` for row t: (bf16 residual, bf16 out), both
     from the unrounded fp32 sum s = a + r."""
     offs = tl.arange(0, H)
     a = tl.load(a_ptr + t * H + offs).to(tl.float32)
@@ -227,7 +227,7 @@ def _router_kernel(
 ):
     """Router GEMV (bf16 logits) of experts [pe * EB, + EB) for token t, then
     top-k by the token's last program. Grid (M, E // EB), or (M * E // EB,)
-    with FUSE_NORM, where the GEMV input is ``norm.fused_add_rms_norm`` of x and
+    with FUSE_NORM, where the GEMV input is `norm.fused_add_rms_norm` of x and
     res (program pe == 0 writes the residual and normed rows). Router weights
     are fetched before the PDL dependency wait.
 
@@ -521,7 +521,7 @@ def trtllm_bf16_row_maps(
     hidden_size: int, intermediate_size: int, device: torch.device | str
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Logical -> physical row maps of the TRTLLM BF16 expert weights as
-    produced by ``convert_moe_weights_to_flashinfer_trtllm_block_layout``
+    produced by `convert_moe_weights_to_flashinfer_trtllm_block_layout`
     (gated gate/up interleave + epilogue-tile shuffle). Returns (w13 map over
     [gate rows; up rows], w2 map over output rows), int32."""
     from flashinfer.fused_moe.core import (
@@ -705,7 +705,7 @@ def flint_moe(
 ) -> torch.Tensor:
     """Routed-expert MoE output + shared_output for BF16 x [M, H].
 
-    counter: buffer from ``make_route_counter``. shared_ready: event the
+    counter: buffer from `make_route_counter`. shared_ready: event the
     current stream waits on before the first read of shared_output (which
     may be produced on another stream).
     """
@@ -873,9 +873,9 @@ class FlintBf16DecodeMoE(nn.Module):
 class FlintNvfp4Experts(nn.Module):
     """Routed experts of one Flint MoE layer (NVFP4 GGUF checkpoints).
 
-    Loads per-expert ModelOpt NVFP4 tensors (``{e}.{gate,up,down}_proj.
-    {weight, weight_scale, weight_scale_2}``) and, once every expert is loaded,
-    repacks them into ``FlintMoEWeights`` and frees the checkpoint layout.
+    Loads per-expert ModelOpt NVFP4 tensors (`{e}.{gate,up,down}_proj.
+    {weight, weight_scale, weight_scale_2}`) and, once every expert is loaded,
+    repacks them into `FlintMoEWeights` and frees the checkpoint layout.
     """
 
     def __init__(
@@ -981,7 +981,7 @@ LL_MOE_MAX_TOKENS = 2
 
 @dataclass
 class LLMoEWeights:
-    """Weights of one NVFP4 MoE layer for ``flint_moe_ll`` (views, no copies).
+    """Weights of one NVFP4 MoE layer for `flint_moe_ll` (views, no copies).
 
     Shared expert: ModelOpt-packed weights (int32 views) with flat
     128x4-swizzled scale bytes and fp32 global scales.
@@ -1008,12 +1008,12 @@ def flint_moe_ll(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Decode MoE block for M <= LL_MOE_MAX_TOKENS tokens.
 
-    Computes ``residual' = attn_out + residual`` and ``x = rms_norm(residual')``
-    as ``norm.fused_add_rms_norm``, then the routed + shared expert MoE of
-    ``x`` (NVFP4 rule). Returns ``(moe_out, residual')``; inputs are not
+    Computes `residual' = attn_out + residual` and `x = rms_norm(residual')`
+    as `norm.fused_add_rms_norm`, then the routed + shared expert MoE of
+    `x` (NVFP4 rule). Returns `(moe_out, residual')`; inputs are not
     modified. A Triton router kernel and two CuTe split-K expert kernels
-    (``moe_gemv``) chained with programmatic dependent launch. counter: buffer
-    from ``make_route_counter``.
+    (`moe_gemv`) chained with programmatic dependent launch. counter: buffer
+    from `make_route_counter`.
     """
     m, hidden = attn_out.shape
     assert 0 < m <= LL_MOE_MAX_TOKENS and attn_out.is_contiguous()
@@ -1086,7 +1086,7 @@ def ll_weights_from_layers(
     shared_down: nn.Module,
     experts: FlintMoEWeights,
 ) -> LLMoEWeights:
-    """``LLMoEWeights`` viewing the loaded layers' tensors: the shared-expert
+    """`LLMoEWeights` viewing the loaded layers' tensors: the shared-expert
     linears are vLLM linear layers holding the FlashInfer-prepared NVFP4
     tensors (ModelOpt-packed weight, 128x4-swizzled scales, fp32 global
     scale)."""

@@ -105,7 +105,7 @@ def _xcd_splits(
     """Splits for the XCD-aware grid with up to three requests per XCD, or None.
 
     A request's rows and splits all run on one XCD (32 CUs), so the cost model
-    of ``decode_splits``, which spreads the grid over every CU, mispredicts: at
+    of `decode_splits`, which spreads the grid over every CU, mispredicts: at
     5 requests it picks 6 splits for 15.7 us where 4 splits take 11.9 us.
     Measured on MI355X (top-k 16, 8 rows a request, 30K-400K contexts, 1-24
     requests; the kernel time does not depend on the context): 4 splits is
@@ -141,11 +141,11 @@ def minimax_m3_nvfp4_sparse_decode_fly(
     """Sparse decode attention over the NVFP4 K/V pages.
 
     Row i is query row i % decode_query_len of request i // decode_query_len
-    and attends to the tokens of its ``topk_idx`` blocks up to its position.
+    and attends to the tokens of its `topk_idx` blocks up to its position.
 
-    With ``out_q`` and ``out_scale`` the output is written as MXFP8 (E4M3 values
-    and row-major E8M0 scales per 32 dims, equal to ``mxfp8_e4m3_quantize`` of
-    the bf16 output) instead of bf16 into ``output``, which is then unused.
+    With `out_q` and `out_scale` the output is written as MXFP8 (E4M3 values
+    and row-major E8M0 scales per 32 dims, equal to `mxfp8_e4m3_quantize` of
+    the bf16 output) instead of bf16 into `output`, which is then unused.
     """
     rows, num_heads, head_dim = q.shape
     if rows == 0:

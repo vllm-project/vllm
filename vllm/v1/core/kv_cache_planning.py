@@ -297,10 +297,10 @@ def _pool_bytes_per_block_from_builder(
 
     Core places one block with the builder and reads the size of its single
     device backing. A placement with several device allocations declares the
-    value through ``KVCacheConfigBuilder._get_pool_bytes_per_block``. HiSparse
+    value through `KVCacheConfigBuilder._get_pool_bytes_per_block`. HiSparse
     keeps the pure computation, since probing its placement would check the host
-    pool against ``max_model_len`` before auto-fit shortens it.
-    ``num_gpu_blocks_override`` is suppressed so it cannot inflate the probe.
+    pool against `max_model_len` before auto-fit shortens it.
+    `num_gpu_blocks_override` is suppressed so it cannot inflate the probe.
     """
     if not kv_cache_groups:
         return 0
@@ -380,10 +380,10 @@ def unify_kv_cache_spec_page_size(
     and is independent of block size; and non-MLA attention layers whose page
     does not evenly divide the maximum (the padded page is read through a
     strided view). MLA is excluded because sparse MLA indexes the cache in
-    whole token rows (see ``flat_kv_row_view``), so its block stride can only
-    be padded by its own row-aligned ``alignment``, not to an arbitrary page
+    whole token rows (see `flat_kv_row_view`), so its block stride can only
+    be padded by its own row-aligned `alignment`, not to an arbitrary page
     size. Raise NotImplementedError if failed to unify the page size;
-    ``get_kv_cache_groups`` catches it to try the full-allocation fallback
+    `get_kv_cache_groups` catches it to try the full-allocation fallback
     (e.g. MLA next to an incompatible sliding-window draft).
 
     Args:
@@ -944,7 +944,7 @@ def _get_packed_kv_cache_groups(
     Greedily buckets layers into uniform-type specs. Buckets with equal layer
     counts per page size are treated as a repeating layer pattern (one layer
     per page size) and split into groups covering the same number of pattern
-    repeats (picked by ``_approximate_gcd`` to minimize padding), so all
+    repeats (picked by `_approximate_gcd` to minimize padding), so all
     groups pack into the same per-block layout. Mamba buckets are additionally
     split to fit the block the attention buckets already need.
     Returns None when the layout is not block-outermost or all layers already
@@ -1232,7 +1232,7 @@ def get_kv_cache_groups_from_builder(
     """Group the layers with the builder and check the result.
 
     Core checks every grouping, whether it comes from the default grouping, a
-    model's ``SupportsKVCacheGrouping`` or a platform builder.
+    model's `SupportsKVCacheGrouping` or a platform builder.
     """
     groups = builder.get_kv_cache_groups(vllm_config, kv_cache_spec)
     _check_exact_partition(groups, kv_cache_spec)
@@ -1286,7 +1286,7 @@ def _max_memory_usage_bytes_from_groups(
     be padded to 9 full + 9 sliding window for uniform group sizes.
 
     Each group independently claims blocks from the shared pool, so a request consumes
-    the sum of the per-group block counts, i.e. ``bytes_per_block * total_blocks``.
+    the sum of the per-group block counts, i.e. `bytes_per_block * total_blocks`.
     """
     kv_cache_groups = [group for group in kv_cache_groups if not group.host_resident]
     if not kv_cache_groups:
@@ -1741,14 +1741,14 @@ def get_global_kv_cache_groups(
 class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
     """Default grouping and placement, backed by the module-level functions here.
 
-    .. note::
-        This class is part of the experimental ``KVCacheConfigBuilder``
+    !!! note
+        This class is part of the experimental `KVCacheConfigBuilder`
         interface and is subject to change.
 
     Subclasses override only the hooks they need. The planning flow and its
-    invariants (``num_gpu_blocks_override``, null-block reservation, auto-fit,
+    invariants (`num_gpu_blocks_override`, null-block reservation, auto-fit,
     admission checks, cross-rank convergence) stay in the Core-owned
-    :func:`get_kv_cache_configs`.
+    `get_kv_cache_configs`.
     """
 
     def get_kv_cache_groups(
@@ -1756,9 +1756,9 @@ class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
         vllm_config: VllmConfig,
         kv_cache_spec: dict[str, KVCacheSpec],
     ) -> list[KVCacheGroupSpec]:
-        """See ``KVCacheConfigBuilder.get_kv_cache_groups``.
+        """See `KVCacheConfigBuilder.get_kv_cache_groups`.
 
-        A model implementing ``SupportsKVCacheGrouping`` owns the grouping
+        A model implementing `SupportsKVCacheGrouping` owns the grouping
         decision; otherwise the default grouping is used.
         """
         if not vllm_config.model_config.supports_kv_cache_grouping:
@@ -1781,7 +1781,7 @@ class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
         kv_cache_groups: list[KVCacheGroupSpec],
         num_blocks: int,
     ) -> KVCacheConfig:
-        """See ``KVCacheConfigBuilder.get_kv_cache_config_from_groups``."""
+        """See `KVCacheConfigBuilder.get_kv_cache_config_from_groups`."""
         if len(kv_cache_groups) == 0:
             # Attention free models do not have KV cache.
             # Return num_blocks=1 as BlockPool always needs a null_block.

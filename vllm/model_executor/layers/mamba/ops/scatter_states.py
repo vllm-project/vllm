@@ -75,10 +75,10 @@ def scatter_states(
     src: torch.Tensor,
     indices: torch.Tensor,
 ) -> DispatchSpec:
-    """Scatter ``src`` rows into ``state`` at ``indices`` (in place).
+    """Scatter `src` rows into `state` at `indices` (in place).
 
-    Equivalent to ``state[indices] = src`` but non-atomic and bandwidth-bound,
-    since mamba cache slots are unique per sequence. ``gather_initial_states``
+    Equivalent to `state[indices] = src` but non-atomic and bandwidth-bound,
+    since mamba cache slots are unique per sequence. `gather_initial_states`
     is the read-side counterpart.
     """
     assert state.ndim >= 2

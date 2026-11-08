@@ -81,7 +81,7 @@ def _inputs(rows=M):
 @pytest.fixture
 def run(monkeypatch):
     """Call the mono path for one layer under a forward context built from
-    ``mode`` and ``metadata``; returns (result, runner calls)."""
+    `mode` and `metadata`; returns (result, runner calls)."""
 
     def _run(
         mode=CUDAGraphMode.FULL,
@@ -397,7 +397,7 @@ def _config(monokernel=True, **parallel):
 
 def _deployment(monkeypatch, cdna=4, cus=256, tp=2, target=None):
     """A deployment the kernels take (the runner module stubbed: no FlyDSL).
-    ``target`` is the architecture FlyDSL compiles for, by default the GPU's."""
+    `target` is the architecture FlyDSL compiles for, by default the GPU's."""
     import vllm.platforms.rocm as rocm
 
     monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)

@@ -2147,7 +2147,7 @@ def test_replicated_lora_preserves_base_forward_for_subclasses(
 def test_dsv4_compressor_projections_apply_lora_with_fp32_output(
     default_vllm_config, dist_init
 ):
-    """V4's main and indexer compressor closures must call ``fused_wkv_wgate``,
+    """V4's main and indexer compressor closures must call `fused_wkv_wgate`,
     so its adapter reaches the FP32 kv_score."""
     from vllm.models.deepseek_v4.attention import DeepseekV4Attention
     from vllm.models.deepseek_v4.compressor import DeepseekV4CompressorKVScoreLinear
@@ -2215,8 +2215,8 @@ def test_dsv4_compressor_projections_apply_lora_with_fp32_output(
 def test_dsv4_grouped_o_projection_applies_each_tokens_adapter(
     default_vllm_config, dist_init
 ):
-    """Every DeepSeek-V4 CUDA o_proj must run ``wo_a.grouped_forward``, so the
-    adapter on ``wo_a`` is applied."""
+    """Every DeepSeek-V4 CUDA o_proj must run `wo_a.grouped_forward`, so the
+    adapter on `wo_a` is applied."""
     from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
     from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
         DeepseekV4FlashInferMLAAttention,

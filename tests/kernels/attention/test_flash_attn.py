@@ -232,7 +232,7 @@ def test_fa4_hd256_paged_call_shape(
     num_heads: tuple[int, int],
     sliding_window: int | None,
 ) -> None:
-    """Handles excess block-table columns with page-aligned ``max_seqlen_k``."""
+    """Handles excess block-table columns with page-aligned `max_seqlen_k`."""
     from vllm.v1.attention.backends.fa_utils import FA4_HD256_PAGE_SIZE
 
     if not is_fa_version_supported(4):

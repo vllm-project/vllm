@@ -8,8 +8,8 @@ q_c rows of the query, so the rest of the query stage leaves the critical path:
               (bit-identical to MlaQuery's: its scalar form below tiled_from rows,
               its tiled kernel's packed FP32 pairs from there)
   MlaQuery    Q_B, W_UK absorption, the query rows, the MLA KV insert and, under
-              DCP, the q mailbox publish, on a side stream (``store_qc=False``,
-              ``poll=False``)
+              DCP, the q mailbox publish, on a side stream (`store_qc=False`,
+              `poll=False`)
   QueryWait   DCP: the q mailbox poll (until every rank's heads landed) after the
               MlaQuery on the side stream, a few CTAs instead of MlaQuery's grid
 
@@ -98,9 +98,9 @@ WIDE_MODES = ("serial", "fork")
 
 
 def overlap_for(batch, policy=None, dcp=False, wide=False, split=False):
-    """The query overlap mode of ``batch`` rows: ``policy`` is a mode or a
-    "rows:mode,..." table (default QUERY_OVERLAP of the topology, ``dcp``;
-    ``wide``: the split query of TP1, WIDE_MODES only; ``split``: the split query
+    """The query overlap mode of `batch` rows: `policy` is a mode or a
+    "rows:mode,..." table (default QUERY_OVERLAP of the topology, `dcp`;
+    `wide`: the split query of TP1, WIDE_MODES only; `split`: the split query
     of fewer heads, under DCP its own table)."""
     topology = "tp1" if wide else "dcp" if dcp else "tp"
     if split and dcp and not wide:
@@ -120,8 +120,8 @@ def side_stream(device_index):
 
 
 class QueryNorm:
-    """The q_a RMSNorm of ``batch`` rows of the packed projection -> q_c [B, 1536]
-    BF16, exactly as MlaQuery (``heads``) computes it for the same batch."""
+    """The q_a RMSNorm of `batch` rows of the packed projection -> q_c [B, 1536]
+    BF16, exactly as MlaQuery (`heads`) computes it for the same batch."""
 
     def __init__(self, heads: int, batch: int):
         self.batch = batch
@@ -203,8 +203,8 @@ class QueryNorm:
 
 
 class QueryWait:
-    """DCP: poll the gathered q mailbox (``batch`` tokens of ``gathered`` = DCP x H
-    published heads in rows of ``q_heads``, ``q_bytes`` per element) until no 16 B
+    """DCP: poll the gathered q mailbox (`batch` tokens of `gathered` = DCP x H
+    published heads in rows of `q_heads`, `q_bytes` per element) until no 16 B
     chunk is the sentinel. It first waits for the MlaQuery before it, so the KV
     insert is complete too when the main stream joins."""
 

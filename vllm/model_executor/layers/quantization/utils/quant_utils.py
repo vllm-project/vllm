@@ -40,14 +40,14 @@ def _dtype_abbr(dtype: torch.dtype | ScalarType) -> str:
 def weight_amax(
     weight: torch.Tensor, *, dim: int | None = None, keepdim: bool = False
 ) -> torch.Tensor:
-    """``max(|weight|)``, without materializing a full-size ``abs()``."""
+    """`max(|weight|)`, without materializing a full-size `abs()`."""
     lo, hi = weight.aminmax(dim=dim, keepdim=keepdim)
     return torch.maximum(lo.abs(), hi.abs())
 
 
 def amax_for_tp_weight_quant(amax: torch.Tensor, is_sharded: bool) -> torch.Tensor:
-    """Reduce a weight ``amax`` over the TP group when the weight is sharded
-    along a dim the ``amax`` reduces over, so each shard derives the same scale
+    """Reduce a weight `amax` over the TP group when the weight is sharded
+    along a dim the `amax` reduces over, so each shard derives the same scale
     it would as part of the whole weight.
     """
     if is_sharded:
@@ -60,9 +60,9 @@ def amax_for_tp_weight_quant(amax: torch.Tensor, is_sharded: bool) -> torch.Tens
 
 
 def amax_for_moe_weight_quant(amax: torch.Tensor, moe_tp_size: int) -> torch.Tensor:
-    """Reduce a per-expert weight ``amax`` over the ranks that tensor-shard the
+    """Reduce a per-expert weight `amax` over the ranks that tensor-shard the
     MoE weights. That sharding is flattened over DP x PCP x TP, exactly the EP
-    group's span. Under EP ``moe_tp_size`` is 1 and each rank owns whole
+    group's span. Under EP `moe_tp_size` is 1 and each rank owns whole
     experts, so no reduction is needed.
     """
     if moe_tp_size > 1:
@@ -219,7 +219,7 @@ kNvfp4DynamicToken = QuantKey(
 
 
 def is_dynamic_per_token_outer_scale(key: QuantKey | None) -> bool:
-    """Whether ``key``'s second-level scale is computed per token at runtime."""
+    """Whether `key`'s second-level scale is computed per token at runtime."""
     return (
         key is not None
         and key.scale2 is not None

@@ -35,7 +35,7 @@ class RoutedExpertsRowRestorer(Protocol):
     ) -> torch.Tensor:
         """Restore local token-ordered logical IDs for all captured MoE layers.
 
-        Binding selects the first provider. Read current metadata from ``ctx``;
+        Binding selects the first provider. Read current metadata from `ctx`;
         do not depend on the provider's layer-specific state or modify input.
         Return a 2-D tensor with the input device, dtype and top-k width.
         Collectives must be rank-consistent and graph-replay safe.
@@ -60,15 +60,15 @@ def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
 class RoutedExpertsCapturer:
     """Worker-side capturer for routed experts, lives on GPU.
 
-    Layer-level hooks call :meth:`capture` inside the forward pass. Routing
+    Layer-level hooks call `capture` inside the forward pass. Routing
     rows owned by this DP rank are written into a preallocated device buffer.
 
-    The device buffer uses ``int32``. Stable snapshots use the narrowest dtype
+    The device buffer uses `int32`. Stable snapshots use the narrowest dtype
     that can represent every logical expert ID.
 
     Invariants:
         - One instance per worker; shape is fixed at init and covers the
-          worst-case step (``max_num_batched_tokens`` tokens).
+          worst-case step (`max_num_batched_tokens` tokens).
         - Every routed layer overwrites the current step's token rows.
     """
 

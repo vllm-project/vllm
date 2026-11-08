@@ -124,6 +124,7 @@ pre-commit run ruff-check --all-files
 The line length limit for Python code is 88 characters. If you are not sure, use pre-commit to check.
 
 Use [Google-style docstrings](https://google.github.io/styleguide/pyguide.html#38-comments-and-docstrings) (`Args:`/`Returns:`/`Raises:` sections), not reStructuredText/Sphinx fields (`:param:`, `:return:`, `:rtype:`).
+Docstrings render as Markdown: write code in single backticks, not double backticks or Sphinx roles like `:class:`, and wrap shapes and indexing like `[block][2][16]` in backticks so mkdocs does not read them as cross-references (the `check-docstring-style` hook enforces this).
 
 ### Coding style guidelines
 

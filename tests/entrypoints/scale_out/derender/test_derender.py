@@ -1319,7 +1319,7 @@ def _e2e_generate_response(
 async def test_e2e_plain_roundtrip(parser_client, parser_tokenizer):
     """Plain text without reasoning markers roundtrips correctly.
 
-    Markerless output has no ``</think>``, which deepseek_r1 classifies
+    Markerless output has no `</think>`, which deepseek_r1 classifies
     wholly as reasoning, so the text lands there rather than in content.
     What this pins is detokenization fidelity through the parser path.
     """
@@ -1350,7 +1350,7 @@ async def test_e2e_token_identity(parser_client, parser_tokenizer):
     """encode(derender(token_ids)) == token_ids (RL invariant).
 
     Markerless output comes back as reasoning (see
-    ``test_e2e_plain_roundtrip``), so re-encode that.
+    `test_e2e_plain_roundtrip`), so re-encode that.
     """
     messages = [{"role": "user", "content": "Hi"}]
     gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
@@ -1378,7 +1378,7 @@ async def test_e2e_non_ascii_roundtrip(parser_client, parser_tokenizer):
     """CJK + emoji roundtrip without U+FFFD.
 
     Markerless output comes back as reasoning (see
-    ``test_e2e_plain_roundtrip``).
+    `test_e2e_plain_roundtrip`).
     """
     messages = [{"role": "user", "content": "Reply in Chinese"}]
     gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
@@ -1644,7 +1644,7 @@ def _ensure_harmony_vocab():
 
     The Rust tiktoken-rs backend downloads from Azure Blob Storage, which
     may be unreachable in some environments.  When the cache is cold we
-    fetch the file ourselves and place it in ``/tmp/tiktoken-rs-cache/``
+    fetch the file ourselves and place it in `/tmp/tiktoken-rs-cache/`
     using the SHA-1(URL) filename that tiktoken-rs expects.
     """
     import hashlib
@@ -1956,7 +1956,7 @@ def test_derender_chat_finish_reason_matches_chat_completion(
     tool_choice, text, engine_finish_reason, expected_finish_reason
 ):
     """/derender applies the same finish_reason rule as the coupled chat
-    path: ``tool_calls`` only for a real call at a natural stop."""
+    path: `tool_calls` only for a real call at a natural stop."""
     choice = _derender_hermes_chat(text, tool_choice, engine_finish_reason)
 
     assert choice.finish_reason == expected_finish_reason
@@ -1973,7 +1973,7 @@ def test_derender_chat_tool_call_id_matches_chat_completion():
 
 def test_derender_chat_keeps_parser_tool_call_id():
     """Batch /derender keeps the parser's tool call ID (Kimi K2 style
-    ``functions.<name>:<idx>``), since chat templates reference it in
+    `functions.<name>:<idx>`), since chat templates reference it in
     multi-turn history."""
 
     class _KimiIdParser:
@@ -1998,8 +1998,8 @@ def test_derender_chat_keeps_parser_tool_call_id():
 
 @pytest.mark.parametrize("use_stub_parser", [False, True])
 def test_derender_chat_drops_tool_calls_without_tool_choice(use_stub_parser):
-    """/derender drops parsed tool calls for ``tool_choice=None`` and for a
-    parser that ignores ``tool_choice="none"`` (Harmony), like coupled chat."""
+    """/derender drops parsed tool calls for `tool_choice=None` and for a
+    parser that ignores `tool_choice="none"` (Harmony), like coupled chat."""
 
     class _IgnoresToolChoiceParser:
         tool_parser_cls = object

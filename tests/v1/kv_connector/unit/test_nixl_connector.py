@@ -4783,8 +4783,7 @@ def test_compatibility_hash_validation(
 ):
     """Test NIXL compatibility hash validation during handshake.
 
-    Parameters
-    ----------
+    Args:
         mismatch_type: description of what is being tested
         config_overrides: dict of config to override for the remote instance
         version_override: version dict e.g. {"vllm_version": "0.6.1"}
@@ -5005,14 +5004,14 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
     ):
         """MLA + remote TP > local TP: the broadcast notification sent to
         non-read prefill ranks must be keyed by the prefill-side request
-        id (``meta.remote.request_id``), not the local decode request id.
+        id (`meta.remote.request_id`), not the local decode request id.
 
-        Prefill ranks key ``_reqs_to_send`` by their own request id, so a
+        Prefill ranks key `_reqs_to_send` by their own request id, so a
         broadcast keyed by the decode id is rejected in
-        ``_get_new_notifs`` with "Potentially invalid KV blocks for
+        `_get_new_notifs` with "Potentially invalid KV blocks for
         unrecognized request" and the blocks only release via the abort
-        timeout. See ``_read_blocks_for_req`` in
-        ``vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py``.
+        timeout. See `_read_blocks_for_req` in
+        `vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py`.
         """
         decode_tp_size = 1
         prefill_tp_size = 4

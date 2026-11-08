@@ -68,12 +68,12 @@ def _aiter_topk_gating_supported(
     num_shared_experts: int,
     shared_expert_scoring_func: str,
 ) -> bool:
-    """Whether AITER's ``topk_gating`` can serve this softmax or sigmoid launch.
+    """Whether AITER's `topk_gating` can serve this softmax or sigmoid launch.
 
-    It needs contiguous gating rows and at most ``_AITER_TOPK_GATING_MAX_TOKENS``
+    It needs contiguous gating rows and at most `_AITER_TOPK_GATING_MAX_TOKENS`
     tokens. Fused shared experts are scored with sigmoid after the routed
-    top-k: 1, 2, 4 or 8 of them, with ``topk_weights`` and ``topk_indices``
-    sharing a row stride and ``topk_weights`` wide enough for the shared
+    top-k: 1, 2, 4 or 8 of them, with `topk_weights` and `topk_indices`
+    sharing a row stride and `topk_weights` wide enough for the shared
     columns. Shared expert ids stay as the caller prefilled them.
     """
     if (
@@ -102,9 +102,9 @@ def dispatch_topk_softmax_func(
 ) -> Callable[..., tuple[torch.Tensor, ...]]:
     """Pick the softmax top-k implementation for one launch.
 
-    On ROCm with AITER, ``topk_gating`` is chosen on gfx942 and gfx950 when the
+    On ROCm with AITER, `topk_gating` is chosen on gfx942 and gfx950 when the
     launch described by the tensors and shared-expert arguments is one it supports;
-    every other AITER launch uses the legacy ``topk_softmax``. The tensors are
+    every other AITER launch uses the legacy `topk_softmax`. The tensors are
     optional: without them the launch cannot be judged and the legacy launcher
     is used.
     """
@@ -136,9 +136,9 @@ def dispatch_topk_sigmoid_func(
 ) -> Callable[..., tuple[torch.Tensor, ...]]:
     """Pick the sigmoid top-k implementation for one launch.
 
-    On ROCm with AITER, ``topk_gating`` is chosen on gfx942 and gfx950 when it
+    On ROCm with AITER, `topk_gating` is chosen on gfx942 and gfx950 when it
     supports the launch described by the tensors; every other launch uses
-    ``vllm_topk_sigmoid``.
+    `vllm_topk_sigmoid`.
     """
     if use_rocm_aiter and (
         rocm_aiter_ops.is_topk_gating_enabled()

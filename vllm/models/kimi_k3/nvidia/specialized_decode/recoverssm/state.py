@@ -3,14 +3,14 @@
 """How the specialized decode installs its deferred RecoverSSM on the stock Kimi K3
 objects, without changing their classes:
 
-- the KDA layers (``install_layers``, before the specialized providers are built):
+- the KDA layers (`install_layers`, before the specialized providers are built):
   verify records indexed by record slot (with a scratch row) and a verify that
   flushes the pending replays and writes the records to each request's record slot;
-- the model runner state (``install_model_state``): the per-request pending replay
-  counts (``DeferredRecoverSSMState``), reset per new request and bound, with the
+- the model runner state (`install_model_state`): the per-request pending replay
+  counts (`DeferredRecoverSSMState`), reset per new request and bound, with the
   step's request slots, to the KDA metadata builders before their build;
-- the KDA metadata builders (``install_builder``, on first bind): the
-  ``fp32_deferred`` commit context, and each step's ``recoverssm_deferred``."""
+- the KDA metadata builders (`install_builder`, on first bind): the
+  `fp32_deferred` commit context, and each step's `recoverssm_deferred`."""
 
 from types import MethodType
 from typing import Any
@@ -36,9 +36,9 @@ from .kernels import kda_recoverssm_verify
 
 
 class DeferredRecoverSSMState(RecoverSSMState):
-    """``pending`` [max_num_reqs]: per request-state slot, the accepted tokens of its
+    """`pending` [max_num_reqs]: per request-state slot, the accepted tokens of its
     last verify not yet folded into its checkpoint, for the KDA metadata builders
-    that defer the commit to the next verify (those ``install_builder`` set up);
+    that defer the commit to the next verify (those `install_builder` set up);
     other builders never see it."""
 
     def __init__(self, max_num_reqs: int, device: torch.device) -> None:
@@ -70,9 +70,9 @@ class DeferredRecoverSSMState(RecoverSSMState):
 
 
 def install_model_state(state: Any) -> None:
-    """Install the deferred RecoverSSM on a ``KimiK3ModelState`` (no-op without
-    RecoverSSM): its ``recoverssm`` becomes a ``DeferredRecoverSSMState``, and its
-    ``add_request`` / ``prepare_attn`` reset a new request's pending count after the
+    """Install the deferred RecoverSSM on a `KimiK3ModelState` (no-op without
+    RecoverSSM): its `recoverssm` becomes a `DeferredRecoverSSMState`, and its
+    `add_request` / `prepare_attn` reset a new request's pending count after the
     base and bind the KDA builders before the metadata build."""
     if state.recoverssm is None:
         return
@@ -114,8 +114,8 @@ def install_model_state(state: Any) -> None:
 
 
 class _DeferredStepCommit:
-    """A step's commit context (the KDA metadata's ``recoverssm_context``): the
-    ``fp32_deferred`` context's commit with the step's deferred operands."""
+    """A step's commit context (the KDA metadata's `recoverssm_context`): the
+    `fp32_deferred` context's commit with the step's deferred operands."""
 
     def __init__(
         self, context: KDADeferredCommitContext, deferred: KDARecoverSSMDeferred
@@ -135,9 +135,9 @@ class _DeferredStepCommit:
 
 def install_builder(builder: KimiK3KDAMetadataBuilder, pending: torch.Tensor) -> None:
     """Set up a KDA metadata builder for the deferred RecoverSSM: the
-    ``fp32_deferred`` commit context for Triton RecoverSSM layers (CuTe ones keep
+    `fp32_deferred` commit context for Triton RecoverSSM layers (CuTe ones keep
     their own FP32-state commit), and a build that adds the step's
-    ``recoverssm_deferred`` (None: not deferred) to the metadata."""
+    `recoverssm_deferred` (None: not deferred) to the metadata."""
     builder.recoverssm_pending = pending
     builder.recoverssm_request_slots = None
     if getattr(builder, "recoverssm_record_rows", None) is not None:
@@ -219,7 +219,7 @@ def _spec_sequence_masks_cpu(
     builder: KimiK3KDAMetadataBuilder, m, num_decode_draft_tokens_cpu: torch.Tensor
 ) -> torch.Tensor:
     """The speculative rows of a RecoverSSM build with speculative rows (the
-    builder's ``spec_sequence_masks_cpu``)."""
+    builder's `spec_sequence_masks_cpu`)."""
     query_lens_cpu = m.query_start_loc_cpu.diff()
     masks = num_decode_draft_tokens_cpu >= 0
     masks |= (~m.is_prefilling) & (query_lens_cpu > 0)
@@ -281,8 +281,8 @@ def _build_deferred(
 
 def install_layers(layers) -> None:
     """Before the specialized providers read them: give every Triton RecoverSSM KDA
-    layer of ``layers`` (decoder layers) verify records indexed by record slot and
-    the deferred verify (``deferred_recoverssm_verify``). CuTe RecoverSSM layers
+    layer of `layers` (decoder layers) verify records indexed by record slot and
+    the deferred verify (`deferred_recoverssm_verify`). CuTe RecoverSSM layers
     keep their own FP32-state commit and are left as they are."""
     for decoder in layers:
         attn: Any = getattr(decoder, "self_attn", None)
@@ -314,7 +314,7 @@ def deferred_recoverssm_verify(
     query_start_loc: torch.Tensor,
     out: torch.Tensor | None,
 ) -> torch.Tensor:
-    """``KimiK3DeltaAttention._recoverssm_verify`` of a Triton RecoverSSM layer
+    """`KimiK3DeltaAttention._recoverssm_verify` of a Triton RecoverSSM layer
     under the deferred RecoverSSM: a deferred step's verify does not replay the
     last step's accepted tokens, so it folds them into the checkpoints first (every
     layer, once per step), and writes its records to the request slots. Other steps

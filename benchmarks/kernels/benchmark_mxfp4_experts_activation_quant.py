@@ -5,12 +5,12 @@
 """Benchmark MXFP4 MoE activation quant at GLM-5.3-shaped sizes.
 
 Sweeps expert count at a fixed hidden width (default 6144). Two timed regions
-(``--timed-region``):
+(`--timed-region`):
 
-* ``quant``: ``mxfp4_experts_quant`` / ``silu_and_mul_mxfp4_experts_quant`` only,
+* `quant`: `mxfp4_experts_quant` / `silu_and_mul_mxfp4_experts_quant` only,
   with synthetic routing offsets (kernel isolation).
-* ``metadata_and_quant``: ``get_cutlass_moe_mm_data`` → ``shuffle_rows`` → quant.
-* ``both``: run ``quant`` then ``metadata_and_quant``.
+* `metadata_and_quant`: `get_cutlass_moe_mm_data` → `shuffle_rows` → quant.
+* `both`: run `quant` then `metadata_and_quant`.
 
 Routing uses 32 rows (4 tokens, topk 8, two picks per expert 0..15). GEMMs are
 outside the timed region.

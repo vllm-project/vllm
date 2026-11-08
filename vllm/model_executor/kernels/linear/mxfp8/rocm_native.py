@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Native MXFP8 linear GEMM for AMD CDNA4 (gfx950) via Triton ``tl.dot_scaled``.
+"""Native MXFP8 linear GEMM for AMD CDNA4 (gfx950) via Triton `tl.dot_scaled`.
 
 Consumes the FP8 E4M3 weights + E8M0 block scales directly (no dequant-to-BF16);
 activations are MXFP8-quantized per token (inside the GEMM for small M), or
-arrive pre-quantized as a ``QuantizedActivation`` with row-major (not swizzled)
-E8M0 scales. Uses the CDNA4 hardware microscaling matrix cores. ``dot_scaled``
+arrive pre-quantized as a `QuantizedActivation` with row-major (not swizzled)
+E8M0 scales. Uses the CDNA4 hardware microscaling matrix cores. `dot_scaled`
 tiles K by 128; a weight whose K is not a multiple of that is dequantized to
-BF16 once at load and served by a plain linear instead, since ``can_implement``
+BF16 once at load and served by a plain linear instead, since `can_implement`
 does not filter on K.
 """
 
@@ -47,7 +47,7 @@ _TINY = float(torch.finfo(torch.float32).tiny)
 @triton.jit
 def _quant_mxfp8_tile(x, FP8_MAX: tl.constexpr, TINY: tl.constexpr):
     """MXFP8-quantize a [BLOCK_M, BLOCK_K] tile: bit-exact with
-    ``mxfp8_e4m3_quantize`` (see ``_mxfp8_quant_triton_kernel`` for why the
+    `mxfp8_e4m3_quantize` (see `_mxfp8_quant_triton_kernel` for why the
     scale is applied as a reciprocal)."""
     BM: tl.constexpr = x.shape[0]
     BK: tl.constexpr = x.shape[1]
@@ -156,7 +156,7 @@ def _launch(
     num_warps: int,
     num_stages: int,
 ) -> None:
-    """``out = x @ w.T``. ``x_scale`` None means ``x`` is the unquantized
+    """`out = x @ w.T`. `x_scale` None means `x` is the unquantized
     activation and is MXFP8-quantized inside the kernel."""
     M, K = x.shape
     N = w.shape[0]
@@ -443,7 +443,7 @@ def _as_block32_scale(weight_scale: torch.Tensor) -> torch.Tensor | None:
 
 
 class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
-    """Native CDNA4 (gfx950) MXFP8 linear via Triton ``tl.dot_scaled``."""
+    """Native CDNA4 (gfx950) MXFP8 linear via Triton `tl.dot_scaled`."""
 
     supports_pre_processed_weights = True
 
@@ -490,8 +490,8 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
 
     @staticmethod
     def supports_quantized_input(layer: torch.nn.Module) -> bool:
-        """Whether ``apply_weights`` reads a ``QuantizedActivation`` for
-        ``layer`` as is (fp8 weights), rather than dequantizing it back."""
+        """Whether `apply_weights` reads a `QuantizedActivation` for
+        `layer` as is (fp8 weights), rather than dequantizing it back."""
         return layer.weight.element_size() == 1 and (
             layer.weight_scale.shape[0] != layer.weight.shape[0]
             or layer.weight.shape[1] % _DOT_SCALED_K_ALIGN == 0

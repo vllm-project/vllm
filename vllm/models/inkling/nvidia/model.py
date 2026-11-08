@@ -72,7 +72,7 @@ def _sconv_add_norm(
     norm: InklingRMSNorm | None,
     positions: torch.Tensor,
 ) -> tuple[torch.Tensor | None, torch.Tensor]:
-    """``h = hidden + sconv(TP-sum(delta)); y = rmsnorm(h)``.
+    """`h = hidden + sconv(TP-sum(delta)); y = rmsnorm(h)`.
 
     The Lamport path performs reduce-scatter + shard sconv + all-gather +
     residual add + norm. The NCCL path handles unsupported configurations."""
@@ -479,7 +479,7 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
 
 
 class InklingForCausalLM(_TmlForCausalLMBase):
-    """Text-only entry point (``inkling_model`` checkpoints)."""
+    """Text-only entry point (`inkling_model` checkpoints)."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -497,7 +497,7 @@ class InklingForConditionalGeneration(_TmlForCausalLMBase, SupportsMultiModal):
     Builds the vision + audio towers on top of the shared text backbone. Inkling has
     NO cross-modal fusion (the vision tower emits one token per patch, the audio
     tower one token per frame), so generation reuses the inherited backbone
-    ``forward`` / ``compute_logits`` (the latter already applies muP) and this
+    `forward` / `compute_logits` (the latter already applies muP) and this
     class only adds multimodal embedding + merge.
     """
 

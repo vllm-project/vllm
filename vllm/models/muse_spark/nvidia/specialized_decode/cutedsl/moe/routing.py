@@ -6,9 +6,9 @@ selected sigmoid scores renormalized and scaled. Writes the global expert ids
 (int32 [b, 8]) and the routing weights (FP32 [b, 8]) that the routed MoE op
 takes.
 
-The result is bitwise equal to ``fused_muse_spark_routing``
+The result is bitwise equal to `fused_muse_spark_routing`
 (vllm/models/muse_spark/common/ops/fused_routing.py: on CUDA the
-``muse_spark_routing`` op, written to match its Triton ``_routing_kernel`` bit
+`muse_spark_routing` op, written to match its Triton `_routing_kernel` bit
 for bit) as Muse Spark calls it:
 sigmoid scores, no output multiplier (it is folded into the router weight after
 loading) and router_score_division_eps = 1e-15. With renormalize the weights
@@ -23,10 +23,10 @@ the exclusive prefix sum of the CTA counts in expert order, and its routes take
 the permuted rows from that CTA offset times tile, in token order. A route to
 another rank's expert and the padding rows of each expert's last CTA map to -1.
 The histogram and per-expert token counts are not written, nor is any element
-past what these fields take (``metadata_size`` leaves a guard element).
+past what these fields take (`metadata_size` leaves a guard element).
 
 Launch: one CTA of 256 threads, one warp per token row, with programmatic
-dependent launch: the bias (a weight) is read before ``griddepcontrol.wait``,
+dependent launch: the bias (a weight) is read before `griddepcontrol.wait`,
 the logits after it; the dependents launch at the grid's end. Without metadata
 the warps past the last token row exit at once.
 
@@ -37,8 +37,8 @@ holding it, matching the Triton argmax (the lowest expert among equal values);
 the winner pops its head.
 
 Arithmetic: every float operation is the PTX instruction Triton emits for the
-same expression of ``_routing_kernel`` (``primitives.sigmoid_f32``,
-``add_rn``, ``mul_rn``, ``div_full_f32``), as inline assembly, so the compiler
+same expression of `_routing_kernel` (`primitives.sigmoid_f32`,
+`add_rn`, `mul_rn`, `div_full_f32`), as inline assembly, so the compiler
 can neither contract nor reorder them.
 """
 
@@ -94,14 +94,14 @@ assert META_PERMUTED_TO_TOKEN % 4 == 0
 
 
 def metadata_size(tile_n: int) -> int:
-    """int32 elements of the metadata for GEMM tile ``tile_n``: the fields
+    """int32 elements of the metadata for GEMM tile `tile_n`: the fields
     above and the permuted-to-token map (MAX_CTAS CTAs of tile_n rows), plus a
     guard element."""
     return META_PERMUTED_TO_TOKEN + MAX_CTAS * tile_n + 1
 
 
 def _load_row(address: Int64) -> cute.Tensor:
-    """A lane's 8 consecutive FP32 at the 16-byte aligned ``address``: two
+    """A lane's 8 consecutive FP32 at the 16-byte aligned `address`: two
     16-byte loads, kept in program order around the PDL wait."""
     row = cute.make_rmem_tensor((EXPERTS_PER_LANE,), Float32)
     values = (
@@ -118,7 +118,7 @@ def _select(cond, if_value, else_value):
 
 
 def _sort_word(value: Float32, j: int) -> Uint64:
-    """A word that orders as ``value`` (non-NaN), then the lower index ``j``:
+    """A word that orders as `value` (non-NaN), then the lower index `j`:
     the order-preserving unsigned key of the value in bits 3..34, 7 - j in
     bits 0..2. -0.0 takes the key of +0.0, as the two compare equal; the key of
     any non-NaN value (-inf included) is above 0, the word of a popped slot.
@@ -131,7 +131,7 @@ def _sort_word(value: Float32, j: int) -> Uint64:
 
 
 def _compare_exchange(c: list, a: int, b: int) -> None:
-    """``c[a], c[b] = max, min``."""
+    """`c[a], c[b] = max, min`."""
     c[a], c[b] = cutlass.max(c[a], c[b]), cutlass.min(c[a], c[b])
 
 
@@ -144,7 +144,7 @@ _SORT8 = (
 
 
 class _RoutingKernel:
-    """The routing of up to 8 token rows; ``metadata`` and ``renormalize``
+    """The routing of up to 8 token rows; `metadata` and `renormalize`
     are compile-time."""
 
     def __init__(self, metadata: bool, renormalize: bool) -> None:
@@ -249,8 +249,8 @@ class _RoutingKernel:
         warp: Int32,
         lane: Int32,
     ) -> Int32:
-        """Warp ``warp``: the top-8 of logits row ``warp`` into its ids and
-        weights rows; lanes 0..7 return the global id of pick ``lane``."""
+        """Warp `warp`: the top-8 of logits row `warp` into its ids and
+        weights rows; lanes 0..7 return the global id of pick `lane`."""
         row = logits.iterator + (
             Int64(warp) * logits.stride[0] + lane * EXPERTS_PER_LANE
         )
@@ -394,9 +394,9 @@ class _RoutingKernel:
 
 
 def compile_routing(metadata: bool, renormalize: bool, options: str = ""):
-    """``cute.compile`` the routing kernel of one variant, with these extra
-    compile ``options``. Call the result with the tensors of ``route``
-    (``meta`` None without metadata), then scale, local offset, local count and
+    """`cute.compile` the routing kernel of one variant, with these extra
+    compile `options`. Call the result with the tensors of `route`
+    (`meta` None without metadata), then scale, local offset, local count and
     tile; it launches on the current stream."""
     assert_not_capturing("the routing short tail")
     rows = cute.sym_int32()
@@ -426,13 +426,13 @@ def compile_routing(metadata: bool, renormalize: bool, options: str = ""):
 
 @functools.cache
 def compiled_routing(metadata: bool, renormalize: bool):
-    """``compile_routing`` of one variant, once per process (before CUDA graph
+    """`compile_routing` of one variant, once per process (before CUDA graph
     capture)."""
     return compile_routing(metadata, renormalize)
 
 
 def prepare(renormalize: bool = True) -> None:
-    """Compile the variants ``route`` takes with and without metadata (before
+    """Compile the variants `route` takes with and without metadata (before
     CUDA graph capture)."""
     for metadata in (False, True):
         compiled_routing(metadata, renormalize)
@@ -450,20 +450,20 @@ def route(
     num_local_experts: int = 0,
     tile_n: int = 0,
 ) -> None:
-    """``ids`` [b, 8] (global expert ids) and ``weights`` [b, 8] of the top-8
-    of sigmoid(logits) + bias for FP32 ``logits`` [b, 256] (1 <= b <= 8, unit
-    column stride, 16-byte aligned rows) and ``bias`` (contiguous, 16-byte
+    """`ids` [b, 8] (global expert ids) and `weights` [b, 8] of the top-8
+    of sigmoid(logits) + bias for FP32 `logits` [b, 256] (1 <= b <= 8, unit
+    column stride, 16-byte aligned rows) and `bias` (contiguous, 16-byte
     aligned FP32 [256]), on the current stream of the logits' CUDA device (the
-    compiled call switches to it and back). With ``metadata`` (a contiguous,
-    16-byte aligned int32 vector of at least ``metadata_size(tile_n)``
+    compiled call switches to it and back). With `metadata` (a contiguous,
+    16-byte aligned int32 vector of at least `metadata_size(tile_n)`
     elements, aliasing neither ids nor weights), also the routing metadata of
-    the local experts ``[local_expert_offset, local_expert_offset +
-    num_local_experts)`` for GEMM tile ``tile_n`` (1 to 256), at the
-    ``META_*`` offsets.
+    the local experts `[local_expert_offset, local_expert_offset +
+    num_local_experts)` for GEMM tile `tile_n` (1 to 256), at the
+    `META_*` offsets.
 
     Raises ValueError on arguments outside that contract (some through the
     compiled call's own checks: dtypes, shapes, strides, alignment, devices).
-    Allocates nothing; graph-capturable once ``prepare`` compiled the variant.
+    Allocates nothing; graph-capturable once `prepare` compiled the variant.
     """
     num_tokens = logits.shape[0] if logits.dim() == 2 else 0
     if not 1 <= num_tokens <= MAX_TOKENS:

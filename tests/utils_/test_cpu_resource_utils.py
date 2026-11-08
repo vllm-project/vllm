@@ -28,7 +28,7 @@ def _clear_cgroup_cache():
 
 
 def _stub_files(monkeypatch, files: dict):
-    """Stub ``open()`` for a fixed set of paths; ``None`` -> OSError."""
+    """Stub `open()` for a fixed set of paths; `None` -> OSError."""
     real_open = open
 
     def fake_open(path, *args, **kwargs):

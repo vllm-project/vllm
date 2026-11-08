@@ -597,7 +597,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         For prefill, we use chunked prefill to align with the indexer's chunking.
 
-        ``replay_start`` ([num_reqs], SWA bounded replay): the position from
+        `replay_start` ([num_reqs], SWA bounded replay): the position from
         which each request holds window KV; the model state passes it for every
         batch of a replaying group, graph captures pass nothing.
         """
@@ -911,16 +911,16 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     def build_tile_scheduler(
         self, num_decode_tokens: int
     ) -> dict[str, FlashMLASchedMeta | None]:
-        """Allocate one empty ``FlashMLASchedMeta`` per present DeepseekV4 layer type.
+        """Allocate one empty `FlashMLASchedMeta` per present DeepseekV4 layer type.
 
-        Returned instances have ``tile_scheduler_metadata`` / ``num_splits``
-        set to ``None``; the FlashMLA C++ decode path will allocate them and
-        run the tile-scheduler planner on the first ``flash_mla_with_kvcache``
+        Returned instances have `tile_scheduler_metadata` / `num_splits`
+        set to `None`; the FlashMLA C++ decode path will allocate them and
+        run the tile-scheduler planner on the first `flash_mla_with_kvcache`
         call of each type. Subsequent same-type calls reuse the plan because
-        the tensors (and ``have_initialized``) are populated on the struct.
+        the tensors (and `have_initialized`) are populated on the struct.
 
-        Returns all-``None`` when there are no decode tokens this step, so
-        ``_forward_decode`` sees a clean sentinel.
+        Returns all-`None` when there are no decode tokens this step, so
+        `_forward_decode` sees a clean sentinel.
         """
         out: dict[str, FlashMLASchedMeta | None] = {
             _LAYER_TYPE_SWAONLY: None,

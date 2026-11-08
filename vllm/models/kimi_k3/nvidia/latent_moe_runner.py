@@ -56,7 +56,7 @@ class LatentMoERunner(MoERunner):
     """MoE runner for latent MoE with a replicated routed up-projection.
 
     The fused path (tp>1, un-reduced combine output, shared expert, no SP)
-    dispatches over ``LatentTailTier`` by token count; see that enum for what
+    dispatches over `LatentTailTier` by token count; see that enum for what
     each tier does and when it applies.
 
     Native path: the replicated up-proj produces the full hidden dim on every
@@ -147,7 +147,7 @@ class LatentMoERunner(MoERunner):
         hidden_states: torch.Tensor,
         max_token_num: int,
     ) -> torch.Tensor:
-        """Read-only zero ``residual_in`` for the fused AR+RMSNorm kernel.
+        """Read-only zero `residual_in` for the fused AR+RMSNorm kernel.
 
         flashinfer requires a residual buffer even when there is no residual to
         add.

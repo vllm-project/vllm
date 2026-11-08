@@ -342,12 +342,12 @@ def _predict_kernel(
 class OnlineAcceptanceEstimator:
     """Predicts per-position acceptance, and calibrates itself while serving.
 
-    Lifecycle per step, driven by ``DraftModelSpeculator``:
+    Lifecycle per step, driven by `DraftModelSpeculator`:
 
-    1. ``step`` folds the previous step's drafts, now graded by the target,
+    1. `step` folds the previous step's drafts, now graded by the target,
        into the IRLS accumulators, and periodically solves for new coefficients,
        independently but identically on every rank.
-    2. ``predict`` runs inside the captured draft graph, turning this step's
+    2. `predict` runs inside the captured draft graph, turning this step's
        draft logits into acceptance probabilities for adaptive verification.
 
     Trimming starts immediately: survival is a running product of sigmoids, so it
