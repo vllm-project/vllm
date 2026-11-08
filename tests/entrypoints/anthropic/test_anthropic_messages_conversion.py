@@ -1834,7 +1834,8 @@ class TestStopSequenceReason:
 class TestToolUseStopReason:
     """A response carrying a tool_use block reports ``stop_reason="tool_use"``
     even when the chat layer says ``finish_reason="stop"``, as it does for a
-    forced (named) tool. A call cut short by max_tokens or a stop string does not.
+    forced (named) tool. A call cut short by max_tokens, a stop string, a stop
+    token id or a natural EOS inside its arguments does not.
     """
 
     @pytest.mark.parametrize(
@@ -1875,6 +1876,14 @@ class TestToolUseStopReason:
             ('{"city": "Pa', "length", None, "max_tokens"),
             ('{"city": "Paris"}', "tool_calls", "</x>", "tool_use"),
             ('{"city": "Pa', "tool_calls", "</x>", "stop_sequence"),
+            # EOS or a stop token inside the arguments: the chat layer still
+            # finishes with tool_calls, but the call is not complete
+            ('{"city": "Pa', "tool_calls", None, "end_turn"),
+            ('{"city": "Pa', "stop", None, "end_turn"),
+            ('{"city": "Pa', "tool_calls", 128009, "end_turn"),
+            # no arguments streamed, as for a tool without parameters
+            ("", "tool_calls", None, "tool_use"),
+            ("  ", "tool_calls", None, "tool_use"),
         ],
     )
     async def test_streaming(self, args, finish_reason, stop_reason, expected):

@@ -133,6 +133,7 @@ def _to_anthropic_stop_reason(
     stop_reason: int | str | None,
     tool_used: bool,
     tool_complete: bool,
+    tool_cut: bool = False,
 ) -> tuple[
     Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None,
     str | None,
@@ -144,6 +145,8 @@ def _to_anthropic_stop_reason(
     ``tool_used`` records whether a ``tool_use`` block was produced.
     ``max_tokens`` always wins. A matched stop string wins unless the tool
     calls are complete (``tool_complete``): a call it cut short must not run.
+    The same holds for a natural EOS or a stop token id inside a call's
+    arguments (``tool_cut``): the turn ended, and the call did not.
     """
     if finish_reason == "length":
         return "max_tokens", None
@@ -155,6 +158,8 @@ def _to_anthropic_stop_reason(
     # an int stop-token-id or None (natural EOS) is not a stop sequence.
     if isinstance(stop_reason, str):
         return "stop_sequence", stop_reason
+    if tool_cut:
+        return "end_turn", None
     if finish_reason == "tool_calls" or tool_used:
         return "tool_use", None
     return "end_turn", None
@@ -1136,14 +1141,18 @@ class AnthropicServingMessages(OpenAIServingChat):
                 if len(origin_chunk.choices) == 0:
                     for event in stop_and_flush():
                         yield event
+                    tool_args = "".join(last_tool_args)
+                    tool_complete = tool_used and _is_json(tool_args)
+                    # Arguments were streamed but never became JSON. No
+                    # arguments at all is a call without parameters.
+                    tool_cut = tool_used and bool(tool_args.strip())
                     anthropic_stop_reason, anthropic_stop_sequence = (
                         _to_anthropic_stop_reason(
                             finish_reason or "stop",
                             stop_sequence,
                             tool_used=tool_used,
-                            tool_complete=(
-                                tool_used and _is_json("".join(last_tool_args))
-                            ),
+                            tool_complete=tool_complete,
+                            tool_cut=tool_cut and not tool_complete,
                         )
                     )
                     stop_delta = AnthropicDelta(
