@@ -141,6 +141,16 @@ def extract_intermediate_diff(curr: str, old: str) -> str:
         -> 'ple'
 
     """
+    if curr.startswith(old):
+        # ``old`` is a prefix of the new text - the normal streaming case where
+        # the previously streamed argument text is exactly the prefix of the
+        # new one. Everything past that prefix is newly generated content, so
+        # return it directly. The suffix/prefix rewrite below assumes the two
+        # strings differ near their ends and mis-handles prefixes whose suffix
+        # characters collide with JSON structural delimiters, such as a value
+        # that starts with a quote or a closing bracket
+        return curr[len(old) :]
+
     suffix = find_common_suffix(curr, old)
 
     old = old[::-1].replace(suffix[::-1], "", 1)[::-1]
