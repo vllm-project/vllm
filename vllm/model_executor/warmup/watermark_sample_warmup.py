@@ -79,7 +79,7 @@ def watermark_sample_warmup(worker: Worker) -> None:
     # deduplication setting and its fp64 flag are what the launches have to
     # match, and cannot drift from the runner. A rank that does not sample -- a
     # non-final pipeline stage, a pooling model -- holds no such sampler.
-    sampler = getattr(worker.model_runner, "sampler", None)
+    sampler = worker.model_runner.sampler
     if not isinstance(sampler, GPUWatermarkSampler):
         return
 

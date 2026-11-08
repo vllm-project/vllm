@@ -30,8 +30,8 @@ work are one launch.
 
 Shapes (a TP8 rank): 16 q heads, 2 kv heads (QPK = 8), head dim 64, 8 query tokens a request,
 NR requests (K3 S8: 1, S16: 2; HA S32: 4). K / V bf16 in the layer's vLLM LBHNC cache
-[block][2][16][K 64 | V 64] (block 16); the page table is the layer group's block_table
-(int32 [NR][stride]); seq_used = vLLM's seq_lens (int32 [NR], keys incl. the 8 new ones).
+`[block][2][16][K 64 | V 64]` (block 16); the page table is the layer group's block_table
+(int32 `[NR][stride]`); seq_used = vLLM's seq_lens (int32 [NR], keys incl. the 8 new ones).
 q [8 NR, 16, 64] bf16 (row stride 1024, without the QK scale); out attn_o [8 NR, 1024] bf16.
 SWA: vLLM's window (2047, 0), keys qpos - key < 2048, and only keys in the window are read
 (vLLM frees the blocks before it: their block-table entries are stale).
@@ -633,8 +633,8 @@ def vllm_scale_word(scale):
 
 def vllm_desc(q, kv_cache, block_table, seq_lens, out, part, nreq, scale):
     """The 10 descriptor words of one layer: q [8 nreq.., 16 x 64] bf16 rows,
-    kv_cache the layer's [block][2][16][128] bf16 view (block stride = kv_cache.stride(0)), block_table int32
-    [>= nreq][stride] of the layer's group, seq_lens int32 [>= nreq], out attn_o [rows, 1024] bf16, part the scratch
+    kv_cache the layer's `[block][2][16][128]` bf16 view (block stride = kv_cache.stride(0)), block_table int32
+    `[>= nreq][stride]` of the layer's group, seq_lens int32 [>= nreq], out attn_o [rows, 1024] bf16, part the scratch
     (int32, part_bytes()), nreq the requests of the step (graph padding included: seq_len 0 = no keys, zero rows)."""
     import torch
 
