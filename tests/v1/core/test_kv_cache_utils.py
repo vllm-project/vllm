@@ -911,6 +911,7 @@ def test_cache_salt_all_or_nothing_shares_nothing():
 
     assert tenant_a.block_hashes != tenant_b.block_hashes
 
+
 def test_generate_block_hash_extra_keys_cache_salt():
     request = make_request(
         request_id="0",

@@ -458,8 +458,10 @@ class CompletionRequest(OpenAIBaseModel):
         if not isinstance(data, dict):
             return data
         validate_cache_salt(data.get("cache_salt"))
-        if data.get("cache_salt_start_idx") is not None \
-                and data.get("cache_salt") is None:
+        if (
+            data.get("cache_salt_start_idx") is not None
+            and data.get("cache_salt") is None
+        ):
             raise VLLMValidationError(
                 "Parameter 'cache_salt_start_idx' requires 'cache_salt' to be set.",
                 parameter="cache_salt_start_idx",
