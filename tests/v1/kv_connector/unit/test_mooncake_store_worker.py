@@ -2044,6 +2044,27 @@ def test_stale_store_job_cannot_touch_a_reused_request_id():
     assert thread._get_retry_token_ids(live) == (32, list(range(32, 64)))
 
 
+def test_wait_for_save_retires_preempted_attempt_before_queueing():
+    # A request preempted outside schedule() is re-admitted in the step that
+    # reports the preemption, so that step's job belongs to the new attempt.
+    w = _make_bare_worker()
+    w.kv_send_thread = _make_store_sending_thread(MagicMock())
+    stale = _make_store_req("req-a", [b"a0", b"a1"])
+    stale.store_job_id = 1
+    w.kv_send_thread.add_request(stale)
+    live = _make_store_req("req-a", [b"a0", b"a1"])
+    live.store_job_id = 2
+    meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), {"req-a"})
+    meta.add_request(live)
+
+    with patch.object(torch.cuda, "Event"):
+        w.wait_for_save(meta)
+    w.get_finished(set(), meta)
+
+    assert w.kv_send_thread.is_live_store_job(live)
+    assert not w.kv_send_thread.is_live_store_job(stale)
+
+
 def test_store_recving_thread_reports_failed_block_ids():
     store = MagicMock()
     store.batch_get_into_multi_buffers.return_value = [256, -5, -7]

@@ -1707,3 +1707,62 @@ def test_lookahead_hashed_prefix_is_retried_without_new_blocks():
     (meta,) = second.kv_connector_metadata.requests
     assert meta.num_hash_lookahead_tokens == 1
     assert meta.token_ids[-1] == 32
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("saves_drained", [True, False])
+def test_reset_running_requests_resumes_in_reporting_step(saves_drained):
+    """reset_prefix_cache(reset_running_requests=True) preempts outside
+    schedule(), so the next step reports the preemption and re-admits the
+    requests; their new attempts must keep their state."""
+    config = _make_vllm_config()
+    config.scheduler_config.async_scheduling = False
+    set_mtp_config(config)
+    with patch.object(scheduler, "LookupKeyClient") as lookup:
+        lookup.return_value.lookup.return_value = MooncakeLookupResult(0)
+        engine_scheduler = create_scheduler(config, num_blocks=64)
+    init_none_hash(sha256)
+    requests = [
+        Request(
+            f"req-{i}",
+            list(range(100 * i, 100 * i + 32)),
+            SamplingParams(max_tokens=8, ignore_eos=True),
+            None,
+            block_hasher=get_request_block_hasher(16, sha256, 1),
+        )
+        for i in range(2)
+    ]
+    for request in requests:
+        engine_scheduler.add_request(request)
+    req_ids = {request.request_id for request in requests}
+
+    first = engine_scheduler.schedule()
+    jobs = first.kv_connector_metadata.requests
+    engine_scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=[request.request_id for request in requests],
+            sampled_token_ids=[[1], [2]],
+            kv_connector_output=KVConnectorOutput(
+                kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
+                    completed_saves={m.store_job_id: 1 for m in jobs}
+                )
+                if saves_drained
+                else None
+            ),
+        ),
+    )
+
+    try:
+        engine_scheduler.reset_prefix_cache(reset_running_requests=True)
+    except RuntimeError:
+        # In-flight saves hold block refs, so the reset fails, but only after
+        # the running requests are preempted.
+        assert not saves_drained
+    assert all(r.status == RequestStatus.PREEMPTED for r in requests)
+
+    resumed = engine_scheduler.schedule()
+    assert resumed.preempted_req_ids == req_ids
+    assert {r.req_id for r in resumed.scheduled_new_reqs} == req_ids
+    metas = resumed.kv_connector_metadata.requests
+    assert {m.req_id for m in metas if m.can_save} == req_ids
