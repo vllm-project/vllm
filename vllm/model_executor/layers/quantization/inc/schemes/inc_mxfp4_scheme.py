@@ -3,7 +3,9 @@
 
 from typing import TYPE_CHECKING
 
+from vllm import envs
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 from ..inc_linear import INCLinearMethod
 from .inc_scheme import INCScheme
@@ -49,6 +51,13 @@ class INCMxfp4Scheme(INCScheme):
         layer_config: "INCLayerConfig",
     ):
         del config, prefix, layer_config
+        backend = envs.VLLM_XPU_INC_MXFP4_BACKEND
+        if backend != "auto":
+            if not current_platform.is_xpu():
+                raise NotImplementedError("ARK MXFP4 MoE requires Intel CRI XPU")
+            from .inc_ark_mxfp4_moe import INCARKMxfp4MoEMethod
+
+            return INCARKMxfp4MoEMethod(layer.moe_config, backend)
         from .inc_mxfp4_moe import INCMxfp4MoEMethod
 
         return INCMxfp4MoEMethod(layer.moe_config)

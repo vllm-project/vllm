@@ -342,6 +342,11 @@ if TYPE_CHECKING:
     VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
+    VLLM_XPU_INC_MXFP4_BACKEND: Literal[
+        "auto", "ark_mxfp8", "ark_mxfp4", "ark_mxfp4_fwht"
+    ] = "auto"
+    VLLM_XPU_INC_MXFP8_PREPACK: bool = True
+    VLLM_XPU_INC_MXFP4_PREPACK: bool = True
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
@@ -2352,6 +2357,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Which one is fastest is device-dependent, so this is left as an opt-in.
     "VLLM_XPU_INC_WNA16_BACKEND": env_with_choices(
         "VLLM_XPU_INC_WNA16_BACKEND", "auto", ["auto", "ark", "w4a16", "w4a8"]
+    ),
+    # Explicit native CRI routed-expert activation format for MXFP4 weights.
+    "VLLM_XPU_INC_MXFP4_BACKEND": env_with_choices(
+        "VLLM_XPU_INC_MXFP4_BACKEND",
+        "auto",
+        ["auto", "ark_mxfp8", "ark_mxfp4", "ark_mxfp4_fwht"],
+    ),
+    # Keep one immutable expanded MXFP4 weight image per routed projection.
+    "VLLM_XPU_INC_MXFP8_PREPACK": lambda: bool(
+        int(os.getenv("VLLM_XPU_INC_MXFP8_PREPACK", "1"))
+    ),
+    "VLLM_XPU_INC_MXFP4_PREPACK": lambda: bool(
+        int(os.getenv("VLLM_XPU_INC_MXFP4_PREPACK", "1"))
     ),
     # Enable simple KV offload.
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
