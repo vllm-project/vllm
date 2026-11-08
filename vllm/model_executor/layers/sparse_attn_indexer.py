@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+import functools
 import math
 
 import torch
@@ -37,6 +38,7 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     get_fused_mqa_topk_workspaces,
     use_fused_mqa_topk,
 )
+from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import has_deep_select
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
     deep_select_topk,
@@ -329,6 +331,16 @@ def _upcast_logits_kernel(src_ptr, dst_ptr, row_ends_ptr, stride, BLOCK: tl.cons
         tl.store(dst_ptr + offs, vals.to(tl.float32), mask=mask)
 
 
+@functools.cache
+def _prefill_uses_deep_select(topk_backend: str, batch_invariant: bool) -> bool:
+    """Whether prefill chunks rank their BF16 logits with DeepSelect: always for
+    "deep_select", and for "auto" wherever DeepSelect runs (SM100/SM103) unless
+    batch-invariant mode is on. Cached: ``has_deep_select`` calls ``find_spec``."""
+    if topk_backend == "deep_select":
+        return True
+    return topk_backend == "auto" and not batch_invariant and has_deep_select()
+
+
 def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor:
     """Upcast BF16 MQA logits for the FP32 top-k kernels.
 
@@ -541,6 +553,9 @@ def sparse_attn_indexer(
         fp4_cache=use_fp4_cache,
         full_context=use_pcp or dcp_world_size == 1,
         candidate_selection=candidate_blocks is not None,
+    )
+    prefill_deep_select = _prefill_uses_deep_select(
+        topk_backend, envs.VLLM_BATCH_INVARIANT
     )
 
     # DeepSelect ranks BF16 decode logits directly; other top-k backends and
@@ -889,7 +904,7 @@ def sparse_attn_indexer(
                         # DeepSelect ranks the bf16 logits in place of their exact
                         # fp32 copy; fp32 logits keep the per-row top-k.
                         use_deep_select = (
-                            topk_backend == "deep_select"
+                            prefill_deep_select
                             and logits.dtype == torch.bfloat16
                             and dcp_world_size == 1
                             and is_deep_select_supported(logits, topk_tokens)
