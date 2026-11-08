@@ -224,9 +224,7 @@ else:
     @triton.jit
     def convert_rs_fp16x2(x: tl.tensor, rand: tl.tensor) -> tl.tensor:
         y = tl.inline_asm_elementwise(
-            asm="""{
-cvt.rs.f16x2.f32 $0, $2, $1, $3;
-}""",
+            asm="{\ncvt.rs.f16x2.f32 $0, $2, $1, $3;\n}",
             constraints="=r,r,r,r,r",
             args=(x, rand),
             dtype=tl.float16,
