@@ -669,7 +669,6 @@ class ModelCudaGraphManager(CudaGraphManager):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         pcp_manager: "PCPManager | None" = None,
-        has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
@@ -818,7 +817,6 @@ class ModelCudaGraphManager(CudaGraphManager):
                 if cg_mode == CUDAGraphMode.PIECEWISE:
                     batch_descriptor = BatchDescriptor(
                         num_tokens=num_tokens,
-                        has_lora=has_lora,
                         num_active_loras=desc.num_active_loras,
                     )
                 with set_forward_context(
@@ -1040,7 +1038,7 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
         saved_capture_triggers = compilation_counter.num_gpu_runner_capture_triggers
         all_wrappers: list[Any] = []
         original_pools: dict[int, Any] = {}
-        speculator = getattr(runner, "speculator", None)
+        speculator = runner.speculator
         spec_manager_names: list[str] = []
         try:
             if not runner.needs_cudagraph_capture():

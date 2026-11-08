@@ -15,15 +15,14 @@ from pydantic import Field, TypeAdapter, field_validator
 import vllm.envs as envs
 from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import (
+    CompileFactors,
     Range,
     config,
-    get_hash_factors,
-    hash_factors,
+    get_compile_factors,
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if TYPE_CHECKING:
@@ -285,12 +284,12 @@ class PassConfig:
             return {}
         return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(capability.to_int(), {})
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
         """
-        return hash_factors(get_hash_factors(self, set()))
+        return get_compile_factors(self, set())
 
     @field_validator(
         "fuse_norm_quant",
@@ -396,7 +395,7 @@ class PassConfig:
             )
 
 
-class DynamicShapesType(str, enum.Enum):
+class DynamicShapesType(enum.StrEnum):
     """Types of dynamic shapes handling in torch.compile().
     see  Dynamic shapes and vllm guard dropping in torch_compile.md
     for more details."""
@@ -448,12 +447,9 @@ class DynamicShapesConfig:
     `True` requires PyTorch 2.10+
     """
 
-    def compute_hash(self) -> str:
-        """Provide a hash for DynamicShapesConfig."""
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, set())
-        return hash_factors(factors)
+    def compile_factors(self) -> CompileFactors:
+        """Provide the factors used for hashing DynamicShapesConfig."""
+        return get_compile_factors(self, set())
 
 
 @config
@@ -900,7 +896,7 @@ class CompilationConfig:
     """custom ops that are enabled"""
     disabled_custom_ops: Counter[str] = field(default_factory=Counter, init=False)
     """custom ops that are disabled"""
-    traced_files: set[str] = field(default_factory=set, init=False)
+    traced_files: set[Path] = field(default_factory=set, init=False)
     """files that are traced for compilation"""
     compilation_time: float = field(default=0.0, init=False)
     """time taken for compilation"""
@@ -924,6 +920,7 @@ class CompilationConfig:
         "vllm::mamba_mixer2",
         "vllm::mamba_mixer",
         "vllm::short_conv",
+        "vllm::zaya_cca",
         # Qwen4Exp's AMD backend still uses these splitting ops.
         "vllm::qwen4_exp_ple_short_conv",
         "vllm::qwen4_exp_qsa_with_output",
@@ -941,17 +938,16 @@ class CompilationConfig:
         "vllm::step5_csa_attention",
     ]
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
-        """
-        # Opt-out: default-include declared fields; keep a tiny exclude set;
-        # normalize types; keep SHA-256. For nested opaque configs, include a
-        # stable identifier (e.g., pass_config.compute_hash()) instead of object id.
 
+        WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
+        """
         ignored_factors = {
             # Paths/dirs and runtime/metrics that don’t affect compiled graph
             "debug_dump_path",
@@ -963,17 +959,9 @@ class CompilationConfig:
             "enabled_custom_ops",
             "disabled_custom_ops",
             "static_forward_context",
-            "pass_config",  # handled separately below
-            "dynamic_shapes_config",  # handled separately below
         }
 
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, ignored_factors)
-
-        factors["pass_config"] = self.pass_config.compute_hash()
-        factors["dynamic_shapes_config"] = self.dynamic_shapes_config.compute_hash()
-        return hash_factors(factors)
+        return get_compile_factors(self, ignored_factors)
 
     def __repr__(self) -> str:
         exclude: dict[str, bool | dict[str, bool]] = {
@@ -1532,12 +1520,16 @@ class CompilationConfig:
         min_cg_support: "AttentionCGSupport",
         min_cg_attn_backend: str | None,
         uniform_decode_query_len: int = 1,
-        use_v2_model_runner: bool = False,
         kv_cache_config: "KVCacheConfig | None" = None,
         max_num_reqs: int | None = None,
         is_profiling: bool = False,
         piecewise_capture_available: bool = True,
     ) -> CUDAGraphMode:
+        """Resolve the CUDA Graphs mode the attention backends can support.
+
+        Downgrades the configured mode to the best supported one and stores it, or
+        raises a `ValueError` if the requested CUDA Graphs cannot be supported.
+        """
         from vllm.v1.attention.backend import AttentionCGSupport
 
         cudagraph_mode = self.cudagraph_mode
@@ -1652,18 +1644,6 @@ class CompilationConfig:
                 "and make sure compilation mode is VLLM_COMPILE"
             )
 
-        # MRV1 adjusts cudagraph sizes to be a multiple of uniform_decode_query_len
-        # to avoid: https://github.com/vllm-project/vllm/issues/28207 and temp-fix:
-        # https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
-        # MRV2 takes separate uniform decode and mixed capture sizes and doesn't
-        # need below: https://github.com/vllm-project/vllm/pull/45953
-        if (
-            not use_v2_model_runner
-            and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and uniform_decode_query_len > 1
-        ):
-            self.adjust_cudagraph_sizes_for_spec_decode(uniform_decode_query_len)
-
         # For Mamba models with FULL decode cudagraphs, each decode
         # sequence needs one Mamba cache block. The decode cudagraph
         # dispatcher already caps batch sizes at max_num_seqs, so we just
@@ -1690,36 +1670,6 @@ class CompilationConfig:
 
         self.cudagraph_mode = cudagraph_mode
         return cudagraph_mode
-
-    def adjust_cudagraph_sizes_for_spec_decode(self, uniform_decode_query_len: int):
-        multiple_of = uniform_decode_query_len
-        if not self.cudagraph_capture_sizes or multiple_of <= 1:
-            return
-
-        assert self.max_cudagraph_capture_size is not None
-        rounded_sizes = sorted(
-            set(
-                round_up(size, multiple_of)
-                for size in self.cudagraph_capture_sizes
-                if round_up(size, multiple_of) <= self.max_cudagraph_capture_size
-            )
-        )
-
-        if len(rounded_sizes) == 0 and multiple_of <= self.max_cudagraph_capture_size:
-            # if one valid but would be round_down use that
-            rounded_sizes = [multiple_of]
-
-        if len(rounded_sizes) == 0:
-            raise ValueError(
-                f"No valid cudagraph sizes after rounding to multiple of {multiple_of} "
-                f"(num_speculative_tokens + 1)"
-                f" please adjust num_speculative_tokens ({uniform_decode_query_len - 1}"
-                f") or max_cudagraph_capture_size ({self.max_cudagraph_capture_size})"
-                f" or cudagraph_capture_sizes ({self.cudagraph_capture_sizes})"
-            )
-
-        self.max_cudagraph_capture_size = rounded_sizes[-1]
-        self.cudagraph_capture_sizes = rounded_sizes
 
     def get_compile_ranges(self) -> list[Range]:
         """Get the compile ranges for the compilation config."""

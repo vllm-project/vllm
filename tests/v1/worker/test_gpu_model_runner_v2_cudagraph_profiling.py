@@ -64,6 +64,7 @@ def _make_profiling_runner(
     runner.cudagraph_manager = _FakeCudaGraphManager(
         needs_capture, num_full_descs, piecewise_only
     )
+    runner.speculator = None
     runner.vllm_config = SimpleNamespace()
     runner.model_state = SimpleNamespace(
         supports_mm_inputs=encoder_only,
@@ -383,7 +384,9 @@ def test_profile_cudagraph_memory_swaps_and_drops_speculator_managers(monkeypatc
 
 
 @create_new_process_for_each_test("spawn")
-@pytest.mark.skipif(not cgu.current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not cgu.current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
+)
 def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
     """Profiling graph memory must be freed before teardown completes."""
 

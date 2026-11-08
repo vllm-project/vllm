@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <string>
+#include <cooperative_groups.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -13,6 +14,8 @@
 #include "core/cuda_compat.h"
 
 namespace {
+
+namespace cg = cooperative_groups;
 
 template <typename StateT>
 __device__ __forceinline__ void cp_async_16b(StateT* smem_ptr,
@@ -89,7 +92,8 @@ constexpr int kWarps = kThreads / 32;
 constexpr int kChunkV = 32;
 constexpr int kNumChunks = kDimV / kChunkV;
 constexpr int kRowsPerWarp = kChunkV / kWarps;
-constexpr int kMaxMtpTokens = 8;
+constexpr int kMaxMtpTokens = 9;
+constexpr int kTokenPasses = (kMaxMtpTokens + kWarps - 1) / kWarps;
 constexpr int kDtBiasFloat32 = 0;
 constexpr int kDtBiasBFloat16 = 1;
 constexpr int kDtBiasFloat16 = 2;
@@ -157,12 +161,15 @@ __device__ __forceinline__ Sum2 warp_reduce_sum_pair(float x, float y) {
   return {x, y};
 }
 
+// SplitV > 1 splits the V rows of one (request, value head) over a cluster of
+// SplitV CTAs along blockIdx.z, so small batches fill more SMs. The gated
+// RMSNorm over V then needs the partial sums of the other CTAs (via DSMEM).
 // WriteReplay (RecoverSSM verify): the window starts from the checkpoint in
 // state_indices[request, 0], which is only read. Instead of a state per token,
 // each token's replay record is written into the checkpoint's replay slot; the
 // commit after sampling folds the accepted prefix into the checkpoint.
 template <typename StateT, int ValueHeadsPerKeyHead, bool SigmoidGate,
-          bool WriteReplay>
+          int SplitV, bool WriteReplay>
 __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
     const __nv_bfloat16* __restrict__ mixed_qkv,
     const __nv_bfloat16* __restrict__ a, const __nv_bfloat16* __restrict__ b,
@@ -174,8 +181,20 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
     int H, int HV, int state_indices_width, int64_t state_indices_row,
     int dt_bias_type, bool norm_weight_is_bf16, float scale, float norm_eps,
     GdnDecodeStrides strides, GdnReplayRecord replay) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 900
+  // Reduce binary size on architectures without cluster support.
+  if constexpr (SplitV > 1) {
+    __trap();
+    return;
+  }
+#endif
+  constexpr int kChunksPerCta = kNumChunks / SplitV;
+  constexpr int kSliceV = kDimV / SplitV;
   const int request = blockIdx.x;
   const int value_head = blockIdx.y;
+  const int split_rank = SplitV == 1 ? 0 : static_cast<int>(blockIdx.z);
+  const int first_chunk = split_rank * kChunksPerCta;
+  const int slice_begin = split_rank * kSliceV;
   const int tid = threadIdx.x;
   const int lane = tid & 31;
   const int warp = tid >> 5;
@@ -193,9 +212,9 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
           : 0;
   const int max_tokens = WriteReplay ? replay.positions : kMaxMtpTokens;
   if (source_slot <= 0 || num_tokens > max_tokens) {
-    for (int linear = tid; linear < num_tokens * kDimV; linear += kThreads) {
-      const int token = bos + linear / kDimV;
-      const int value = linear % kDimV;
+    for (int linear = tid; linear < num_tokens * kSliceV; linear += kThreads) {
+      const int token = bos + linear / kSliceV;
+      const int value = slice_begin + linear % kSliceV;
       const int64_t out_offset =
           (static_cast<int64_t>(token) * HV + value_head) * kDimV + value;
       out[out_offset] = __float2bfloat16(0.0f);
@@ -211,20 +230,26 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
   __shared__ __nv_bfloat16 shared_out[kMaxMtpTokens][kDimV];
   __shared__ float shared_decay[kMaxMtpTokens];
   __shared__ float shared_beta[kMaxMtpTokens];
+  __shared__ float shared_sum_square[kMaxMtpTokens];
 
   StateT* source_state =
       state + static_cast<int64_t>(source_slot) * strides.state_slot +
       value_head * kDimV * kDimK;
-  copy_state_chunk<StateT, kChunkV, kDimK, 2>(&shared_state[0][0][0],
-                                              source_state, 0, tid, kThreads);
+  copy_state_chunk<StateT, kChunkV, kDimK, 2>(
+      &shared_state[0][0][0], source_state, first_chunk, tid, kThreads);
   float* replay_record =
       WriteReplay
           ? replay.data + static_cast<int64_t>(source_slot) * replay.slot +
                 static_cast<int64_t>(value_head) * replay.head
           : nullptr;
+  // The key and decay are the same in every CTA of a split; one writes them.
+  const bool write_replay_key = WriteReplay && split_rank == 0;
 
-  if (warp < num_tokens) {
-    const int t = warp;
+  // One warp per token. kMaxMtpTokens exceeds kWarps, so warps stride.
+  // kTokenPasses bounds the trip count, so the compiler unrolls the passes.
+#pragma unroll
+  for (int pass = 0, t = warp; pass < kTokenPasses && t < num_tokens;
+       ++pass, t += kWarps) {
     const int token = bos + t;
     const int64_t mixed_base = static_cast<int64_t>(token) * strides.mixed_row;
     float q_values[4];
@@ -254,7 +279,9 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       shared_q[t][dim] = q_values[i] * q_scale;
       shared_k[t][dim] = k_values[i] * k_scale;
       if constexpr (WriteReplay) {
-        replay_record[t * replay.position + kDimV + dim] = shared_k[t][dim];
+        if (write_replay_key) {
+          replay_record[t * replay.position + kDimV + dim] = shared_k[t][dim];
+        }
       }
     }
     if (lane == 0) {
@@ -270,7 +297,9 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       if constexpr (WriteReplay) {
         // The decay as multiplied below, so the commit replays this exact
         // float.
-        replay_record[t * replay.position + kDimV + kDimK] = shared_decay[t];
+        if (write_replay_key) {
+          replay_record[t * replay.position + kDimV + kDimK] = shared_decay[t];
+        }
       }
     }
   }
@@ -284,10 +313,11 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
   }
 
 #pragma unroll
-  for (int chunk = 0; chunk < kNumChunks; ++chunk) {
+  for (int cta_chunk = 0; cta_chunk < kChunksPerCta; ++cta_chunk) {
+    const int chunk = first_chunk + cta_chunk;
     cp_async_wait_all();
     __syncthreads();
-    if (chunk + 1 < kNumChunks) {
+    if (cta_chunk + 1 < kChunksPerCta) {
       copy_state_chunk<StateT, kChunkV, kDimK, 2>(
           &shared_state[0][0][0], source_state, chunk + 1, tid, kThreads);
     }
@@ -373,23 +403,15 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
   }
   __syncthreads();
 
-  if (warp < num_tokens) {
-    const int t = warp;
-    float output_values[4];
-    float sum_square = 0.0f;
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-      const int value = lane + i * 32;
-      output_values[i] = __bfloat162float(shared_out[t][value]);
-      sum_square += output_values[i] * output_values[i];
-    }
-    sum_square = warp_reduce_sum(sum_square);
+  constexpr int kValuesPerLane = kSliceV / 32;
+  const auto write_token = [&](int t, float sum_square) {
     const float rstd =
         rsqrtf(sum_square / static_cast<float>(kDimV) + norm_eps);
     const int token = bos + t;
 #pragma unroll
-    for (int i = 0; i < 4; ++i) {
-      const int value = lane + i * 32;
+    for (int i = 0; i < kValuesPerLane; ++i) {
+      const int value = slice_begin + lane + i * 32;
+      const float output_value = __bfloat162float(shared_out[t][value]);
       const float gate_input = __bfloat162float(
           output_gate[static_cast<int64_t>(token) * strides.gate_row +
                       value_head * kDimV + value]);
@@ -402,10 +424,79 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
               : static_cast<const float*>(norm_weight)[value];
       const int64_t out_offset =
           (static_cast<int64_t>(token) * HV + value_head) * kDimV + value;
-      out[out_offset] =
-          __float2bfloat16(output_values[i] * rstd * weight * gate);
+      out[out_offset] = __float2bfloat16(output_value * rstd * weight * gate);
+    }
+  };
+
+#pragma unroll
+  for (int pass = 0, t = warp; pass < kTokenPasses && t < num_tokens;
+       ++pass, t += kWarps) {
+    float sum_square = 0.0f;
+#pragma unroll
+    for (int i = 0; i < kValuesPerLane; ++i) {
+      const float value =
+          __bfloat162float(shared_out[t][slice_begin + lane + i * 32]);
+      sum_square += value * value;
+    }
+    sum_square = warp_reduce_sum(sum_square);
+    if constexpr (SplitV == 1) {
+      write_token(t, sum_square);
+    } else if (lane == 0) {
+      shared_sum_square[t] = sum_square;
     }
   }
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  // Sum the partial sums of squares of all CTAs in the cluster via DSMEM.
+  if constexpr (SplitV > 1) {
+    cg::cluster_group cluster = cg::this_cluster();
+    cluster.sync();
+    for (int t = warp; t < num_tokens; t += kWarps) {
+      float sum_square = 0.0f;
+  #pragma unroll
+      for (int rank = 0; rank < SplitV; ++rank) {
+        sum_square += cluster.map_shared_rank(shared_sum_square, rank)[t];
+      }
+      write_token(t, sum_square);
+    }
+    cluster.sync();  // keep shared_sum_square alive for remote readers
+  }
+#endif
+}
+
+// Split V over a cluster while the split grid still fits in one wave (2 CTAs
+// per SM). On B300 this picks 4 up to 2 requests and 2 at 4 requests (value
+// heads HV=32).
+int choose_split_v(int num_blocks, int device) {
+  int major = 0, num_sms = 0;
+  cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
+  cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device);
+  if (major < 9) {
+    return 1;
+  }
+  for (const int split : {4, 2}) {
+    if (num_blocks * split <= 2 * num_sms) {
+      return split;
+    }
+  }
+  return 1;
+}
+
+template <typename StateT, int ValueHeadsPerKeyHead, bool SigmoidGate,
+          int SplitV, bool WriteReplay, typename... Args>
+cudaError_t launch_split(dim3 grid, cudaStream_t stream, Args... args) {
+  const auto kernel =
+      gdn_decode_post_conv_mtp_kernel<StateT, ValueHeadsPerKeyHead, SigmoidGate,
+                                      SplitV, WriteReplay>;
+  cudaLaunchAttribute attribute{};
+  attribute.id = cudaLaunchAttributeClusterDimension;
+  attribute.val.clusterDim = {1, 1, SplitV};
+  cudaLaunchConfig_t config{};
+  config.gridDim = grid;
+  config.blockDim = dim3(kThreads);
+  config.stream = stream;
+  config.attrs = SplitV > 1 ? &attribute : nullptr;
+  config.numAttrs = SplitV > 1 ? 1 : 0;
+  return cudaLaunchKernelEx(&config, kernel, args...);
 }
 
 template <typename StateT, int ValueHeadsPerKeyHead, bool SigmoidGate,
@@ -433,20 +524,27 @@ void launch_gdn_decode_post_conv_mtp(
   const cudaStream_t stream =
       get_current_cuda_stream(mixed_qkv.get_device_index());
   const int num_requests = static_cast<int>(state_indices.size(0));
-  const dim3 grid(num_requests, num_value_heads);
-  gdn_decode_post_conv_mtp_kernel<StateT, ValueHeadsPerKeyHead, SigmoidGate,
-                                  WriteReplay><<<grid, kThreads, 0, stream>>>(
-      static_cast<const __nv_bfloat16*>(mixed_qkv.data_ptr()), a, b,
-      static_cast<const float*>(a_log.data_ptr()), dt_bias.data_ptr(),
-      static_cast<const int*>(state_indices.data_ptr()),
-      static_cast<const int*>(cu_seqlens.data_ptr()), num_accepted_tokens,
-      static_cast<StateT*>(state.data_ptr()), output_gate,
-      norm_weight.data_ptr(), static_cast<__nv_bfloat16*>(out.data_ptr()),
-      num_key_heads, num_value_heads, static_cast<int>(state_indices.size(1)),
-      state_indices.stride(0), dt_bias_type,
-      norm_weight.scalar_type() == ScalarType::BFloat16,
-      static_cast<float>(scale), static_cast<float>(norm_eps), strides, replay);
-  const cudaError_t error = cudaGetLastError();
+  const int split_v = choose_split_v(num_requests * num_value_heads,
+                                     mixed_qkv.get_device_index());
+  const auto launch = [&]<int SplitV>() {
+    return launch_split<StateT, ValueHeadsPerKeyHead, SigmoidGate, SplitV,
+                        WriteReplay>(
+        dim3(num_requests, num_value_heads, SplitV), stream,
+        static_cast<const __nv_bfloat16*>(mixed_qkv.data_ptr()), a, b,
+        static_cast<const float*>(a_log.data_ptr()), dt_bias.data_ptr(),
+        static_cast<const int*>(state_indices.data_ptr()),
+        static_cast<const int*>(cu_seqlens.data_ptr()), num_accepted_tokens,
+        static_cast<StateT*>(state.data_ptr()), output_gate,
+        norm_weight.data_ptr(), static_cast<__nv_bfloat16*>(out.data_ptr()),
+        num_key_heads, num_value_heads, static_cast<int>(state_indices.size(1)),
+        state_indices.stride(0), dt_bias_type,
+        norm_weight.scalar_type() == ScalarType::BFloat16,
+        static_cast<float>(scale), static_cast<float>(norm_eps), strides,
+        replay);
+  };
+  const cudaError_t error = split_v == 4   ? launch.template operator()<4>()
+                            : split_v == 2 ? launch.template operator()<2>()
+                                           : launch.template operator()<1>();
   STD_TORCH_CHECK(error == cudaSuccess,
                   "GDN decode MTP post-conv kernel launch failed: ",
                   cudaGetErrorString(error));
@@ -530,7 +628,7 @@ void run_gdn_decode_post_conv_mtp(
   STD_TORCH_CHECK(state_indices.dim() == 2 && state_indices.size(0) > 0 &&
                       state_indices.size(1) > 0 &&
                       state_indices.size(1) <= kMaxMtpTokens,
-                  "state_indices must have shape [N, S] with 1 <= S <= 8");
+                  "state_indices must have shape [N, S] with 1 <= S <= 9");
   const int num_requests = static_cast<int>(state_indices.size(0));
   STD_TORCH_CHECK(
       cu_seqlens.dim() == 1 && cu_seqlens.numel() == num_requests + 1,
@@ -601,7 +699,7 @@ void run_gdn_decode_post_conv_mtp(
             replay->size(1) == num_value_heads && replay->size(2) >= 1 &&
             replay->size(2) <= kMaxMtpTokens &&
             replay->size(3) == kDimV + kDimK + 1 && replay->stride(3) == 1,
-        "replay must have shape [slots, HV, P <= 8, 257] with contiguous "
+        "replay must have shape [slots, HV, P <= 9, 257] with contiguous "
         "records");
     STD_TORCH_CHECK(state_indices.size(1) == 1,
                     "replay mode takes one checkpoint column per request");
