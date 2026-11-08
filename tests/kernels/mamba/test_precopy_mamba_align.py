@@ -14,23 +14,19 @@ with byte-identical semantics to the scalar V1 copy specs
   ``state[bt[dst_col]]``.
 
 The kernel must also no-op when ``src_col < 0`` (fresh request) or
-``src_col == dst_col`` (no boundary crossed). V2 callers pass an explicit
-``idx_mapping``; V1 align preprocessing launches in batch order with
-``idx_mapping=None``.
+``src_col == dst_col`` (no boundary crossed). Callers pass an explicit
+``idx_mapping``; ``idx_mapping=None`` launches in batch order.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from types import SimpleNamespace
 from typing import Any
 
-import numpy as np
 import torch
 
 from vllm.model_executor.layers.mamba import mamba_utils as layer_mamba_utils
 from vllm.platforms import current_platform
-from vllm.v1.worker import mamba_utils as worker_mamba_utils
 from vllm.v1.worker.mamba_utils import (
     _TEMPORAL_TILES,
     postprocess_mamba_fused_kernel,
@@ -43,7 +39,7 @@ try:
     import pytest
 
     _cuda_required = pytest.mark.skipif(
-        not current_platform.is_cuda(),
+        not current_platform.is_cuda_alike(),
         reason="precopy_mamba_align_fused_kernel needs CUDA/Triton",
     )
     _parametrize = pytest.mark.parametrize
@@ -316,182 +312,6 @@ def test_ds_conv_copy_spec_reproduces_multi_accept_assert(monkeypatch):
             cur_block_idx=0,
             num_accepted_tokens=3,
         )
-
-
-class _FakeCpuGpuBuffer:
-    def __init__(self, n):
-        self.np = np.zeros(n, dtype=np.int32)
-        self.gpu = object()
-        self.copy_sizes = []
-
-    def copy_to_gpu(self, n=None):
-        self.copy_sizes.append(n)
-        return self.gpu
-
-
-class _FakePrecopyContext:
-    def __init__(self, n):
-        self.is_initialized = True
-        self.mamba_group_ids = [0]
-        self.mamba_state_idx_buf = _FakeCpuGpuBuffer(n)
-        self.precopy_src_col_buf = _FakeCpuGpuBuffer(n)
-        self.precopy_token_bias_buf = _FakeCpuGpuBuffer(n)
-        self.calls = []
-
-    def initialize_from_forward_context(self, *args, **kwargs):
-        raise AssertionError("test context is pre-initialized")
-
-    def run_fused_precopy(
-        self,
-        *,
-        num_reqs,
-        state_idx_gpu,
-        src_col_gpu,
-        token_bias_gpu,
-        idx_mapping,
-    ):
-        self.calls.append(
-            {
-                "num_reqs": num_reqs,
-                "state_idx": self.mamba_state_idx_buf.np[:num_reqs].copy(),
-                "src_col": self.precopy_src_col_buf.np[:num_reqs].copy(),
-                "token_bias": self.precopy_token_bias_buf.np[:num_reqs].copy(),
-                "idx_mapping": idx_mapping,
-            }
-        )
-
-
-def _make_preprocess_case(token_bias):
-    req_ids = ["fresh", "same", "cross_a", "cross_b"]
-    scheduler_output = SimpleNamespace(
-        finished_req_ids=set(),
-        preempted_req_ids=set(),
-        scheduled_cached_reqs=SimpleNamespace(resumed_req_ids=set()),
-        num_scheduled_tokens={
-            "fresh": 1,
-            "same": 1,
-            "cross_a": 1,
-            "cross_b": 2,
-        },
-    )
-    input_batch = SimpleNamespace(
-        req_ids=req_ids,
-        num_accepted_tokens_cpu=np.array(
-            [token_bias + 1, token_bias + 1, token_bias + 1, 2],
-            dtype=np.int32,
-        ),
-    )
-    requests = {
-        "fresh": SimpleNamespace(req_id="fresh", num_computed_tokens=0),
-        "same": SimpleNamespace(req_id="same", num_computed_tokens=5),
-        "cross_a": SimpleNamespace(req_id="cross_a", num_computed_tokens=8),
-        "cross_b": SimpleNamespace(req_id="cross_b", num_computed_tokens=7),
-    }
-    mamba_state_idx = {"same": 1, "cross_a": 0, "cross_b": 1}
-    return scheduler_output, input_batch, requests, mamba_state_idx
-
-
-@_parametrize("token_bias", [1, 2])
-def test_preprocess_fused_align_matches_scalar_bookkeeping(monkeypatch, token_bias):
-    block_size = 4
-    mamba_spec = SimpleNamespace(block_size=block_size, num_speculative_blocks=1)
-    # Fakes stand in for real config/context objects. The fused path tests
-    # below only touch the attributes preprocess_mamba actually reads.
-    cache_config: Any = SimpleNamespace(enable_prefix_caching=True)
-    kv_cache_config: Any = SimpleNamespace()
-    scalar_copy_calls = []
-
-    def fake_collect(
-        copy_bufs,
-        kv_cache_config,
-        mamba_state_copy_funcs,
-        mamba_group_ids,
-        src_block_idx,
-        dest_block_idx,
-        accept_token_bias,
-        req_state,
-        forward_context,
-    ):
-        scalar_copy_calls.append(
-            (
-                req_state.req_id,
-                src_block_idx,
-                dest_block_idx,
-                accept_token_bias,
-            )
-        )
-
-    monkeypatch.setattr(worker_mamba_utils, "collect_mamba_copy_meta", fake_collect)
-    monkeypatch.setattr(
-        worker_mamba_utils, "do_mamba_copy_block", lambda copy_bufs: None
-    )
-
-    scalar_case = _make_preprocess_case(token_bias)
-    fused_case = _make_preprocess_case(token_bias)
-
-    scalar_copy_bufs: Any = SimpleNamespace(
-        mamba_group_ids=[0],
-        mamba_spec=mamba_spec,
-        offset=0,
-    )
-    worker_mamba_utils.preprocess_mamba(
-        scheduler_output=scalar_case[0],
-        kv_cache_config=kv_cache_config,
-        cache_config=cache_config,
-        mamba_state_idx=scalar_case[3],
-        input_batch=scalar_case[1],
-        requests=scalar_case[2],
-        forward_context={},
-        mamba_state_copy_funcs={},
-        copy_bufs=scalar_copy_bufs,
-    )
-
-    ctx: Any = _FakePrecopyContext(len(fused_case[1].req_ids))
-    fused_copy_bufs: Any = SimpleNamespace(
-        mamba_group_ids=[0],
-        mamba_spec=mamba_spec,
-        offset=0,
-    )
-    worker_mamba_utils.preprocess_mamba(
-        scheduler_output=fused_case[0],
-        kv_cache_config=kv_cache_config,
-        cache_config=cache_config,
-        mamba_state_idx=fused_case[3],
-        input_batch=fused_case[1],
-        requests=fused_case[2],
-        forward_context={},
-        mamba_state_copy_funcs={},
-        copy_bufs=fused_copy_bufs,
-        align_ctx=ctx,
-    )
-
-    assert fused_case[3] == scalar_case[3]
-    np.testing.assert_array_equal(
-        fused_case[1].num_accepted_tokens_cpu,
-        scalar_case[1].num_accepted_tokens_cpu,
-    )
-    assert scalar_copy_calls == [
-        ("cross_a", 0, 2, token_bias),
-        ("cross_b", 1, 2, 1),
-    ]
-    assert len(ctx.calls) == 1
-    call = ctx.calls[0]
-    assert call["num_reqs"] == len(fused_case[1].req_ids)
-    assert call["idx_mapping"] is None
-    np.testing.assert_array_equal(call["state_idx"], np.array([0, 1, 2, 2]))
-    np.testing.assert_array_equal(call["src_col"], np.array([-1, -1, 0, 1]))
-    np.testing.assert_array_equal(call["token_bias"], np.array([0, 0, token_bias, 1]))
-    fused_copy_calls = [
-        (req_id, int(src), int(dst), int(bias))
-        for req_id, src, dst, bias in zip(
-            fused_case[1].req_ids,
-            call["src_col"],
-            call["state_idx"],
-            call["token_bias"],
-        )
-        if int(src) != -1 and int(src) != int(dst)
-    ]
-    assert fused_copy_calls == scalar_copy_calls
 
 
 if __name__ == "__main__":

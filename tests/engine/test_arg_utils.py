@@ -43,16 +43,18 @@ def test_nixl_selector_allows_cli_defaults(monkeypatch):
         [
             sys.executable,
             "-c",
-            "import json\n"
-            "from vllm.engine.arg_utils import EngineArgs\n"
-            "from vllm.utils.argparse_utils import FlexibleArgumentParser\n"
-            "parser = EngineArgs.add_cli_args(FlexibleArgumentParser())\n"
-            "args = EngineArgs.from_cli_args(parser.parse_args([\n"
-            "    '--tensor-parallel-size', '2',\n"
-            "    '--decode-context-parallel-size', '2',\n"
-            "    '--dcp-comm-backend', 'a2a']))\n"
-            "print(json.dumps([args.tensor_parallel_size,\n"
-            "    args.decode_context_parallel_size, args.dcp_comm_backend]))\n",
+            (
+                "import json\n"
+                "from vllm.engine.arg_utils import EngineArgs\n"
+                "from vllm.utils.argparse_utils import FlexibleArgumentParser\n"
+                "parser = EngineArgs.add_cli_args(FlexibleArgumentParser())\n"
+                "args = EngineArgs.from_cli_args(parser.parse_args([\n"
+                "    '--tensor-parallel-size', '2',\n"
+                "    '--decode-context-parallel-size', '2',\n"
+                "    '--dcp-comm-backend', 'a2a']))\n"
+                "print(json.dumps([args.tensor_parallel_size,\n"
+                "    args.decode_context_parallel_size, args.dcp_comm_backend]))\n"
+            ),
         ],
         capture_output=True,
         text=True,
@@ -89,8 +91,10 @@ def test_watermark_config_cli():
             "--model",
             "dummy",
             "--watermark-config",
-            '{"algorithm":"dual_key_gumbel","key":42,"prf":"philox","alpha":0.25,'
-            '"allow_target_only_watermarking":true}',
+            (
+                '{"algorithm":"dual_key_gumbel","key":42,"prf":"philox","alpha":0.25,'
+                '"allow_target_only_watermarking":true}'
+            ),
         ]
     )
 
@@ -111,8 +115,10 @@ def test_watermark_config_cli():
             "--model",
             "dummy",
             "--watermark-config",
-            '{"key":42,"deduplicate_contexts":"none",'
-            '"deduplicate_contexts_max_history":32}',
+            (
+                '{"key":42,"deduplicate_contexts":"none",'
+                '"deduplicate_contexts_max_history":32}'
+            ),
         ]
     )
     config = EngineArgs.from_cli_args(args).create_watermark_config()
@@ -120,6 +126,13 @@ def test_watermark_config_cli():
     assert config is not None
     assert config.deduplicate_contexts == "none"
     assert config.deduplicate_contexts_max_history == 32
+
+    args = parser.parse_args(
+        ["--model", "dummy", "--watermark-config", '{"key":42,"enforce":true}']
+    )
+    config = EngineArgs.from_cli_args(args).create_watermark_config()
+    assert config is not None
+    assert config.enforce is True
 
 
 @pytest.mark.parametrize(
@@ -514,9 +527,11 @@ def test_compilation_config():
     # set to string form of a dict
     args = parser.parse_args(
         [
-            "--compilation-config="
-            '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
-            '"backend": "inductor"}',
+            (
+                "--compilation-config="
+                '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+                '"backend": "inductor"}'
+            ),
         ]
     )
     assert (
@@ -596,11 +611,13 @@ def test_attention_config():
     # set to string form of a dict with all fields
     args = parser.parse_args(
         [
-            "--attention-config="
-            '{"backend": "FLASHINFER", "flash_attn_version": 2, '
-            '"flash_attn_max_num_splits_for_cuda_graph": 8, '
-            '"use_trtllm_attention": false, '
-            '"disable_flashinfer_q_quantization": false}',
+            (
+                "--attention-config="
+                '{"backend": "FLASHINFER", "flash_attn_version": 2, '
+                '"flash_attn_max_num_splits_for_cuda_graph": 8, '
+                '"use_trtllm_attention": false, '
+                '"disable_flashinfer_q_quantization": false}'
+            ),
         ]
     )
     assert args is not None
@@ -657,15 +674,10 @@ def test_attention_config():
         engine_args.create_engine_config()
 
 
-def test_multi_node_world_size_includes_pcp(monkeypatch):
+def test_multi_node_world_size_includes_pcp():
     """PCP expands the process world size, so the --nnodes divisibility check
     must include it. Without this, TP=1/PCP=2 over 2 nodes computes a world
     size of 1 and the launch is rejected before the engine starts."""
-    import vllm.config.vllm
-
-    # PCP requires the V2 model runner, which is gated on Triton.
-    monkeypatch.setattr(vllm.config.vllm, "HAS_TRITON", True)
-
     engine_args = EngineArgs(
         model="facebook/opt-125m",
         tensor_parallel_size=1,

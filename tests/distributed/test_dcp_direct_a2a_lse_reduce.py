@@ -524,6 +524,7 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
     )
     workspace = torch.empty(96, 8)
 
+    assert manager.v_up_proj_combine is None
     local_query = torch.empty(2, 2, 8)
     assert manager.query_gather(local_query) == direct_query.gather.return_value
     direct_query.gather.assert_called_once_with(local_query)
@@ -611,31 +612,28 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch):
         cp_group=group,
         is_lse_base_on_e=True,
     )
+    assert isinstance(manager.v_up_proj_combine, functools.partial)
+    assert manager.v_up_proj_combine.func is dcp_manager.dcp_a2a_v_up_proj_lse_reduce
+    assert manager.v_up_proj_combine.keywords == {
+        "cp_group": group,
+        "is_lse_base_on_e": True,
+    }
 
 
-@pytest.mark.parametrize(
-    ("parallel_drafting", "use_v2_model_runner", "expected"),
-    [
-        # Model runner V1's parallel drafter widens requests to 1 + 2 * 3.
-        (True, False, 28),
-        (True, True, 16),
-        # A diffusion canvas of 3 without a speculative config.
-        (None, True, 16),
-    ],
-)
-def test_dcp_workspace_covers_decode_width(
-    parallel_drafting, use_v2_model_runner, expected
-):
+# False: a diffusion canvas of 3 without a speculative config.
+@pytest.mark.parametrize("with_spec_config", [True, False])
+def test_dcp_workspace_covers_decode_width(with_spec_config):
+    from vllm.config import SpeculativeConfig
+
     config = _manager_config()
     config.scheduler_config.max_num_batched_tokens = 128
     config.num_speculative_tokens = 3
-    config.use_v2_model_runner = use_v2_model_runner
-    if parallel_drafting is not None:
-        config.speculative_config = MagicMock(
-            num_speculative_tokens=3, parallel_drafting=parallel_drafting
+    if with_spec_config:
+        config.speculative_config = SpeculativeConfig(
+            method="ngram", num_speculative_tokens=3
         )
 
-    assert dcp.get_dcp_workspace_max_num_tokens(config) == expected
+    assert dcp.get_dcp_workspace_max_num_tokens(config) == 16
 
 
 def test_mla_dcp_manager_selects_pcp_combine(monkeypatch):
@@ -658,6 +656,7 @@ def test_mla_dcp_manager_selects_pcp_combine(monkeypatch):
     assert isinstance(manager.combine, functools.partial)
     assert manager.combine.func is dcp_manager.cp_lse_ag_out_ar
     assert manager.query_gather is None
+    assert manager.v_up_proj_combine is None
 
 
 def test_dcp_chunk_workspace_alignment_covers_interleave():

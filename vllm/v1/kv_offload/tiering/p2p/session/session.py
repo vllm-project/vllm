@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -45,6 +45,7 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
 )
 from vllm.v1.kv_offload.tiering.p2p.session.server import (
     ServerRole,
+    StoreDrainResult,
     StoreResult,
 )
 
@@ -82,6 +83,7 @@ class SessionPollResult(NamedTuple):
     loads: list[LoadResult]
     stores: list[StoreResult]
     new_fetch_ids: list[str]
+    terminal_fetch_ids: frozenset[str] = frozenset()
 
 
 class SessionCloseResult(NamedTuple):
@@ -91,13 +93,17 @@ class SessionCloseResult(NamedTuple):
     server stores) the manager must mark failed. `failed_req_ids` is every
     client-side kv_request_id whose lookup() must fail (in-flight loads plus
     unresolved probes); `failed_serves` is the server-side lookup state the
-    dead peer can no longer resolve.
+    dead peer can no longer resolve. `retained` maps each server transfer
+    that may still be writing to the store jobs it reads: they are not in
+    `failed_stores`, and stay pinned until the transport reports it stopped.
     """
 
     failed_jobs: list[int]  # client load job_ids
     failed_req_ids: list[str]  # client kv_request_ids (loads + probes)
     failed_stores: list[int]  # server store job_ids
     failed_serves: list[ReqContext]  # server-side lookup ctxs needing release
+    # transfer_id → store job_ids it still reads
+    retained: dict[int, frozenset[int]]
 
 
 class P2PSession:
@@ -143,7 +149,10 @@ class P2PSession:
 
         # First cause recorded by _mark_dead; see death_reason.
         self._death_reason: str | None = None
+        self._accept_buffered_terminals = True
         self._peer_fault_at: float | None = None
+        self._abort_ack_fault: str | None = None
+        self._registration_fault: str | None = None
 
         now = time.monotonic()
         self._connected_at: float | None = None
@@ -154,6 +163,7 @@ class P2PSession:
         # manager can bind kv_request_id → session and replay any
         # submit_store batches parked before the binding existed.
         self._new_fetch_ids: list[str] = []
+        self._terminal_fetch_ids: set[str] = set()
 
         # In-flight peer registration started by _on_connect. Registration
         # is O(num_blocks) and runs off this thread, so ConnectAckMsg is
@@ -211,8 +221,15 @@ class P2PSession:
 
     @property
     def data_plane_fault(self) -> str | None:
-        """The transport's peer fault, if one was reported (see server role)."""
-        return self._server.peer_fault
+        """The data-plane fault that ended this session, if any.
+
+        The transport's peer fault (see server role), an AbortAck that never
+        arrived, which leaves this side unable to tell whether the peer's
+        WRITE stopped, or a failed registration of the peer's NIXL agent.
+        """
+        if self._server.peer_fault is not None:
+            return self._server.peer_fault
+        return self._abort_ack_fault or self._registration_fault
 
     @property
     def last_activity_at(self) -> float:
@@ -263,6 +280,12 @@ class P2PSession:
         """New blocks stored locally — match against pending fetch demand."""
         self._server.add_stored_blocks(kv_request_id, keys, block_ids, job_id)
 
+    def drain_stores(
+        self, kv_request_ids: Iterable[str] | None = None
+    ) -> StoreDrainResult:
+        """Withdraw queued stores, optionally for fetches arriving during drain."""
+        return self._server.drain_stores(kv_request_ids)
+
     def finish_request(self, kv_request_id: str) -> None:
         """Called when the request is finishing locally.
 
@@ -273,6 +296,10 @@ class P2PSession:
         """
         self._client.finish(kv_request_id)
         self._server.finish(kv_request_id)
+
+    def abort_loads(self) -> None:
+        """Abort every inbound load, failing each now; see ``ClientRole``."""
+        self._client.abort_loads()
 
     def register_lookup(self, kv_request_id: str, key: bytes) -> bool | None:
         """Register or resolve one (kv_request_id, key) probe.
@@ -351,6 +378,7 @@ class P2PSession:
         stores = self._server.collect_results()
         self._server.drain_pending_aborts()
         self._escalate_peer_fault()
+        self._escalate_abort_ack_timeout()
 
         # Drain buffered replies and completed transfers before expiring a peer.
         expired_lookup = self._client.get_expired_lookup()
@@ -367,8 +395,13 @@ class P2PSession:
 
         new_fetch_ids = self._new_fetch_ids
         self._new_fetch_ids = []
+        terminal_fetch_ids = frozenset(self._terminal_fetch_ids)
+        self._terminal_fetch_ids.clear()
         return SessionPollResult(
-            loads=loads, stores=stores, new_fetch_ids=new_fetch_ids
+            loads=loads,
+            stores=stores,
+            new_fetch_ids=new_fetch_ids,
+            terminal_fetch_ids=terminal_fetch_ids,
         )
 
     def close(self) -> SessionCloseResult:
@@ -384,6 +417,8 @@ class P2PSession:
         failed_serves: synthetic lookup ctxs still owing
             ``parent.on_request_finished`` (the manager flushes these on
             its next ``serve_external_requests``).
+        retained: server transfers that may still be writing, with the
+            store jobs they read (held until they stop).
         """
         # Abandon any in-flight registration: nothing will ack this peer
         # now. The manager's remove_remote_peer bumps the transport's
@@ -394,7 +429,7 @@ class P2PSession:
             self._pending_registration = None
 
         client_result = self._client.close()
-        failed_stores, failed_serves = self._server.close()
+        failed_stores, failed_serves, retained = self._server.close()
 
         if self._conn is not None:
             with contextlib.suppress(Exception):
@@ -407,6 +442,7 @@ class P2PSession:
             failed_req_ids=client_result.failed_req_ids,
             failed_stores=failed_stores,
             failed_serves=failed_serves,
+            retained=retained,
         )
 
     # ------------------------------------------------------------------
@@ -477,12 +513,36 @@ class P2PSession:
                 self.peer_id,
                 fault,
             )
+        # A stalled transfer would never drain, and teardown retains
+        # whatever is still running, so waiting buys nothing.
         if (
             self._server.has_inflight_transfers
+            and not self._server.transfer_stalled
             and now - self._peer_fault_at < _PEER_FAULT_DRAIN_S
         ):
             return
         self._disconnect(f"data plane: {fault}")
+
+    def _escalate_abort_ack_timeout(self) -> None:
+        """Fault the peer once one of its AbortAcks times out.
+
+        The timed-out load already failed in this poll's results. Without
+        this, the session stays up and every later fetch to the same stuck
+        peer waits out the full load and abort-ack timeouts again.
+        """
+        expired = self._client.expired_abort_ack
+        if expired is None or self._abort_ack_fault is not None:
+            return
+        req_id, round_seq = expired
+        self._abort_ack_fault = "abort ack timed out"
+        logger.warning(
+            "P2PSession %s: abort_ack for kv_request_id=%s round=%s timed out; "
+            "disconnecting peer session",
+            self.peer_id,
+            req_id,
+            round_seq,
+        )
+        self._disconnect(self._abort_ack_fault)
 
     def _disconnect(self, reason: str) -> None:
         """Best-effort DisconnectMsg, then mark the connection dead."""
@@ -495,17 +555,24 @@ class P2PSession:
         """Mark the connection dead, recording the first cause."""
         if self._conn is None:
             return
+        if reason != "peer disconnected":
+            self._accept_buffered_terminals = False
         if self._death_reason is None:
             self._death_reason = reason
         self._conn.mark_dead()
 
     def _dispatch_message(self, msg: dict) -> None:
-        # Drop messages buffered before disconnect: a poll batch can
-        # contain msg-after-DisconnectMsg, and dispatching them would
-        # mutate state on a dead session.
-        if self._conn is not None and not self._conn.alive:
-            return
         msg_type = msg.get(TYPE_KEY) if isinstance(msg, dict) else None
+        # Buffered terminals can still settle loads after disconnect.
+        if (
+            self._conn is not None
+            and not self._conn.alive
+            and (
+                not self._accept_buffered_terminals
+                or msg_type not in (TransferDoneMsg.TYPE, AbortAckMsg.TYPE)
+            )
+        ):
+            return
         if msg_type == ConnectMsg.TYPE:
             self._on_connect(msg)
         elif msg_type == ConnectAckMsg.TYPE:
@@ -528,6 +595,10 @@ class P2PSession:
             # the demand recorded here and submit transfers immediately.
             self._server.on_fetch(kv_request_id, keys, block_indexes, round_seq)
             self._new_fetch_ids.append(kv_request_id)
+            if block_indexes:
+                self._terminal_fetch_ids.discard(kv_request_id)
+            else:
+                self._terminal_fetch_ids.add(kv_request_id)
         elif msg_type == AbortFetchMsg.TYPE:
             AbortFetchMsg.validate(msg)
             self._server.on_abort_fetch(
@@ -631,7 +702,8 @@ class P2PSession:
         Called from poll() after message dispatch. A successful
         registration releases ConnectAckMsg — the peer treats that as
         permission to send, so it must not go out earlier. A failed one
-        marks the connection dead so the manager reaps the session.
+        sends a best-effort disconnect and marks the local connection dead
+        for the manager to reap.
         """
         registration = self._pending_registration
         if registration is None or not registration.done():
@@ -645,7 +717,11 @@ class P2PSession:
                 self.peer_id,
                 exc,
             )
-            self._mark_dead(f"peer registration failed: {exc}")
+            # The peer may have registered us and be waiting for our ack. A
+            # session it keeps would ack our next ConnectMsg without sending
+            # its own, so we would look it up without ever registering it.
+            self._registration_fault = f"peer registration failed: {exc}"
+            self._disconnect(self._registration_fault)
             return
         if self._conn is not None and self._conn.alive:
             self._do_send(
@@ -702,6 +778,18 @@ class P2PSession:
 
     def _do_send(self, msg: dict) -> None:
         if self._conn is None:
+            return
+        if (
+            msg[TYPE_KEY] == FetchMsg.TYPE
+            and msg[FetchMsg.BLOCK_INDEXES]
+            and (not self._conn.alive or not self._client.mark_fetch_sent(msg))
+        ):
+            return
+        if (
+            msg[TYPE_KEY] == FetchMsg.TYPE
+            and not msg[FetchMsg.BLOCK_INDEXES]
+            and not self._client.can_send_terminal_fetch(msg[FetchMsg.KV_REQUEST_ID])
+        ):
             return
         try:
             self._conn.send(msg)

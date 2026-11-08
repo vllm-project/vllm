@@ -1125,10 +1125,6 @@ class SamplingParams(
             raise ValueError(
                 "trace_decode_token_ids is not supported with prompt_logprob_token_ids."
             )
-        if speculative_config is not None:
-            raise ValueError(
-                "trace_decode_token_ids is not supported with speculative decoding."
-            )
         if self.structured_outputs is not None:
             raise ValueError(
                 "trace_decode_token_ids is not supported with structured outputs."
@@ -1546,9 +1542,6 @@ class BeamSearchParams(
         if config.model_config.is_diffusion:
             # The diffusion sampler does not consume logprob_token_ids.
             raise ValueError("Beam allowlists with diffusion models are not supported")
-        if not config.use_v2_model_runner:
-            # V1 exact-ID logprobs overwrite other rows in a mixed batch.
-            raise ValueError("Beam allowlists require the V2 model runner")
         # Score the original distribution without applying a sampling mask.
         sampling_params.logprobs = None
         sampling_params.logprob_token_ids = ids
