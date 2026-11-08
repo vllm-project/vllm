@@ -16,6 +16,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
+from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 pytestmark = pytest.mark.cpu_test
@@ -78,6 +79,9 @@ def _create_vllm_config_for_dsd(
         )
     else:
         speculative_config.num_speculative_tokens_per_batch_size = None
+    speculative_config.num_speculative_tokens = max_spec_tokens
+    # The manager captures the decode shapes the speculator config declares.
+    speculative_config.speculator_config = SpeculatorConfig(speculative_config)
     vllm_config.speculative_config = speculative_config
 
     return vllm_config
