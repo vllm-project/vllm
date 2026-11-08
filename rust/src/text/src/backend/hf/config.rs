@@ -155,6 +155,10 @@ pub struct ModelConfig {
     n_routed_experts: Option<OneOrManyExpertCount>,
     num_local_experts: Option<OneOrManyExpertCount>,
     block_configs: Vec<BlockConfig>,
+    /// Checkpoint dtype; `torch_dtype` before transformers 4.56. Kept loose so
+    /// an unexpected value never fails model loading.
+    dtype: Option<serde_json::Value>,
+    torch_dtype: Option<serde_json::Value>,
     #[serde(alias = "llm_config", alias = "thinker_config")]
     text_config: Option<Box<ModelConfig>>,
 }
@@ -257,6 +261,14 @@ impl ModelConfig {
     /// may provide the value.
     pub fn model_type(&self) -> Option<&str> {
         self.model_type.as_deref().or_else(|| self.text_config.as_deref()?.model_type())
+    }
+
+    /// Return the checkpoint dtype name, such as `bfloat16`, following the
+    /// same text-config selection as `model_type`.
+    pub fn dtype(&self) -> Option<&str> {
+        (self.dtype.as_ref().or(self.torch_dtype.as_ref()))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| self.text_config.as_deref()?.dtype())
     }
 
     /// Return the effective model vocabulary size, following the same
@@ -416,6 +428,23 @@ mod tests {
 
         for input in [r#"{"top_k":-2}"#, r#"{"top_k":4294967296}"#] {
             assert!(serde_json::from_str::<GenerationConfig>(input).is_err());
+        }
+    }
+
+    #[test]
+    fn model_config_reads_checkpoint_dtype() {
+        for (config, expected) in [
+            (r#"{"dtype":"bfloat16"}"#, Some("bfloat16")),
+            (r#"{"torch_dtype":"float16"}"#, Some("float16")),
+            (
+                r#"{"text_config":{"torch_dtype":"float32"}}"#,
+                Some("float32"),
+            ),
+            (r#"{"torch_dtype":{"unexpected":true}}"#, None),
+            ("{}", None),
+        ] {
+            let config: ModelConfig = serde_json::from_str(config).unwrap();
+            assert_eq!(config.dtype(), expected);
         }
     }
 
