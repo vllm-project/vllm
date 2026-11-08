@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -1044,3 +1045,58 @@ def test_pop_blocks_for_free_trims_null_head():
     block_pool.free_blocks([null])
     assert null.ref_cnt == null_ref_cnt
     assert block_pool.get_num_free_blocks() == num_free_blocks
+
+
+def test_full_attention_cache_hit_honors_pool_lookup_override():
+    """Pools that override or lack ``cached_block_hash_to_block`` (connector
+    pools such as Mooncake's and UMBP's) take the ``get_cached_block`` path."""
+    spec = FullAttentionSpec(
+        block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    block_hashes = [BlockHash(str(i).encode()) for i in range(4)]
+
+    class HitSetPool(BlockPool):
+        def __init__(self):
+            super().__init__(num_gpu_blocks=8, enable_caching=True, hash_block_size=4)
+            self.calls = 0
+
+        def get_cached_block(self, block_hash, kv_cache_group_ids):
+            self.calls += 1
+            if block_hash in block_hashes[:2]:
+                block = self.blocks[1 + block_hashes.index(block_hash)]
+                return [block] * len(kv_cache_group_ids)
+            return None
+
+    pool = HitSetPool()
+    computed, hit_length = FullAttentionManager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=16,
+        kv_cache_group_ids=[0],
+        block_pool=pool,
+        kv_cache_spec=spec,
+        drop_eagle_block=False,
+        alignment_tokens=4,
+    )
+    assert pool.calls == 3
+    assert hit_length == 8
+    assert computed[0] == [pool.blocks[1], pool.blocks[2]]
+
+    present = KVCacheBlock(block_id=1)
+    duck_pool = SimpleNamespace(
+        hash_block_size=4,
+        null_block=KVCacheBlock(block_id=0),
+        get_cached_block=lambda h, gids: (
+            [present] * len(gids) if h == block_hashes[0] else None
+        ),
+    )
+    computed, hit_length = FullAttentionManager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=16,
+        kv_cache_group_ids=[0],
+        block_pool=duck_pool,
+        kv_cache_spec=spec,
+        drop_eagle_block=False,
+        alignment_tokens=4,
+    )
+    assert hit_length == 4
+    assert computed[0] == [present]

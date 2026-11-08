@@ -795,7 +795,12 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         # block implies every later block misses too (chained hashes).
         prefix_hashes = itertools.islice(full_block_hashes, max_length // block_size)
         computed_blocks: tuple[list[KVCacheBlock], ...]
-        if len(kv_cache_group_ids) == 1:
+        # Why: connector pools (Mooncake, UMBP) override or lack the hash map.
+        if (
+            len(kv_cache_group_ids) == 1
+            and getattr(type(block_pool), "get_cached_block", None)
+            is BlockPool.get_cached_block
+        ):
             computed_blocks = (
                 block_pool.cached_block_hash_to_block.get_prefix_blocks(
                     prefix_hashes, kv_cache_group_ids[0]
