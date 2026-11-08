@@ -487,8 +487,9 @@ def _convert(bt, topk, iptr, bsr: int, invalid: int = 0, bs: int = BS):
 def test_dsa_fold_matches_converter(splits, has_invalid, bs, nblk, bsr):
     """U7: the in-kernel fold (the indexer's top-k, the block table, the flat
     pitch) against ``dsa_attn`` on the converter's rows, bit for bit: a pitch
-    past the block size (64, and the hybrid engine's 2048), rows of every length, -1 and out-of-table positions
-    (the converter's row 0, or with ``has_invalid`` masked)."""
+    past the block size (64, and the hybrid engine's 2048), rows of every
+    length, -1 and out-of-table positions (the converter's row 0, or with
+    ``has_invalid`` masked)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.dsa_attn import (
         DsaAttnBuild,
     )
@@ -569,13 +570,14 @@ DSA_LENS = {3: [TOPK] * S, 5: [TOPK, 100, 2047, 1, 129, TOPK, 64, 65]}
 DSA_STALLED = 3  # U8's stalled rank
 
 
-def _dsa_k2(runner, P: int, dsa: int, fold: bool):
+def _dsa_k2(runner, P: int, dsa: int, fold: bool, opt: int | None = None):
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
 
     return k2.K2Build(
         tokens=S, nblocks=5, reset=True, m1b_qlen=S, m1b_ranks=1,
         m1b_off=runner.mla_post_off, m1b_splits=P, dsa=dsa, dsa_p=P,
-        dsa_fold=fold, uv_bf16=True, **runner.fault,
+        dsa_fold=fold, uv_bf16=True,
+        opt=k2.K2_OPT if opt is None else opt, **runner.fault,
     )  # fmt: skip
 
 
@@ -915,3 +917,100 @@ def test_dsa_fused_tp8_fresh_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
     token's DSA CTAs stalled (its partial LSEs late, in the 128 B lines other
     XCDs' combine tasks read before)."""
     multi_process_parallel(monkeypatch, 8, 1, _dsa_k2_fresh_worker)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _dsa_k2_opt_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+) -> None:
+    from tests.models.kimi_k3.amd_specialized_decode.test_numerics import (
+        _init_worker,
+        _k2_inputs,
+        _moe_args,
+        _moe_weights,
+    )
+
+    device = _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
+
+    from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_attn
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import HIDDEN
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import GROWS
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
+
+    runner = MonoRunner(device)
+    mw = _moe_weights(rank, device)
+    g = torch.Generator().manual_seed(700 + rank)
+    nblk, bsr, P = 80, 80, 16
+    qsl = torch.tensor([0, S], dtype=torch.int32, device=device)
+    # two input sets with different words (a sentinel region left un-re-armed
+    # hands the second launch the first one's words)
+    ins = []
+    for i in range(2):
+        rec, bt, topk, iptr = _paged(nblk, bsr, DSA_LENS[5], g)
+        ins.append(dict(
+            w=_k2_inputs(rank, device, S, seed=10 + i),
+            rec=rec, bt=bt, topk=topk, iptr=iptr,
+            idx=_convert(bt, topk, iptr, bsr),
+            q=_q(g),
+            gate=torch.sigmoid(torch.randn(S, GROWS, generator=g)).to(device, bf),
+            w_v=_w_uv(g).transpose(1, 2),
+        ))  # fmt: skip
+
+    def run(x, layer, dsa, fold, opt):
+        runner.step_begin()
+        key = _dsa_k2(runner, P, dsa, fold, opt)
+        dk = dsa_attn.DsaAttnBuild(tokens=S, splits=P, chunk=TOPK // P, fold=fold)
+        so, sl = dsa_attn.partial_shapes(dk)
+        po = torch.empty(so, dtype=bf, device=device)
+        pl = torch.empty(sl, dtype=torch.float32, device=device)
+        dsa_in = dict(q=x["q"], kv=x["rec"], iptr=x["iptr"], scale=_scale())
+        if fold:
+            dsa_in.update(topk=x["topk"], bt=x["bt"], bsr=bsr, bs=BS)
+        else:
+            dsa_in.update(idx=x["idx"])
+        if dsa == 1:
+            dsa_attn.dsa_attn_launch(dk, part_o=po, part_lse=pl, **dsa_in)
+        core = torch.empty(S, GROWS, dtype=bf, device=device)
+        prefix = x["w"]["prefix"].clone()
+        out = torch.empty(S, HIDDEN, dtype=bf, device=device)
+        m1b_in = dict(
+            o=po[0], lse=pl[0], seq_lens=qsl, qsl=qsl, w_v=x["w_v"],
+            w_v_scale=None, gate=x["gate"],
+        )  # fmt: skip
+        w = x["w"]
+        k2.k2_launch(
+            key, core=core, w_o=w["w_o"], prefix=prefix, blocks=w["blocks"],
+            ares_nw=w["ares_nw"], ares_qk=w["ares_qk"], in_nw=w["in_nw"],
+            out=out, layer=128 + layer, m1b_in=m1b_in,
+            dsa_in=dsa_in if dsa == 2 else None,
+            **_moe_args(mw), **runner.launch_args(), **runner.peer_args(),
+        )  # fmt: skip
+        torch.accelerator.synchronize()
+        return core, out, prefix
+
+    for dsa, fold in ((1, False), (2, False), (2, True)):
+        # both layer parities: the sentinel regions alternate by it
+        for layer in (3, 4):
+            want = [run(x, layer, dsa, fold, 0) for x in ins]
+            assert not torch.equal(want[0][1], want[1][1]), (dsa, fold, layer)
+            # back to back on the same regions: the second polls re-armed ones
+            for i, x in enumerate(ins):
+                got = run(x, layer, dsa, fold, k2.K2_OPT)
+                for a, b in zip(got, want[i]):
+                    assert torch.equal(a, b), (dsa, fold, layer, i)
+    assert not runner.health.any() and not runner.flags.any()
+
+
+@needs_gfx950
+@multi_gpu_test(num_gpus=8)
+def test_dsa_k2_tp8_opt_bits_are_bit_exact(monkeypatch: pytest.MonkeyPatch) -> None:
+    """K2's critical-path options (``layer.K2_OPT``) give ``opt=0``'s bits
+    with the DSA combine (``dsa`` 1) and the fused DSA stage (``dsa`` 2, with
+    and without the fold), on both layer parities, and again after their
+    regions were re-armed."""
+    multi_process_parallel(monkeypatch, 8, 1, _dsa_k2_opt_worker)
