@@ -877,7 +877,6 @@ class _BlockSlice:
 def _build_pending_block_slice(
     source: Sequence[int],
     destination: Sequence[int],
-    *,
     token_end: int,
     available: int,
     sent: int | None,
@@ -918,7 +917,6 @@ def _build_pending_block_slice(
 def _build_window_block_slice(
     source: Sequence[int],
     destination: Sequence[int],
-    *,
     token_end: int,
     block_size: int,
     null_block: int,
@@ -942,7 +940,6 @@ def _build_window_block_slice(
 def _build_state_block_slice(
     source: Sequence[int],
     destination: Sequence[int],
-    *,
     token_end: int,
     null_block: int,
 ) -> _BlockSlice:
@@ -3502,7 +3499,13 @@ class MooncakeConnectorWorker:
         pull_metas: dict[ReqId, PullReqMeta],
     ):
         if self._layerwise:
-            self._check_layerwise_coverage(response, pull_metas)
+            missing_layer_reqs = self._check_layerwise_coverage(response, pull_metas)
+            if missing_layer_reqs:
+                self._handle_failed_recv(
+                    pull_metas,
+                    missing_layer_reqs,
+                    "Producer stages omitted required cache layers",
+                )
         if response.err_reqs:
             self._handle_failed_recv(
                 pull_metas, response.err_reqs, response.err_msg or "unknown error"
@@ -4261,7 +4264,8 @@ class MooncakeConnectorWorker:
 
     def _check_layerwise_coverage(
         self, response: MooncakeXferResponse, pull_metas: dict[ReqId, PullReqMeta]
-    ) -> None:
+    ) -> list[ReqId]:
+        missing_layer_reqs: list[ReqId] = []
         for req_id in response.ok_reqs or ():
             pull = pull_metas.get(req_id)
             if pull is None:
@@ -4278,7 +4282,8 @@ class MooncakeConnectorWorker:
                 }
                 <= covered
             ):
-                raise RuntimeError("Producer stages omitted required cache layers")
+                missing_layer_reqs.append(req_id)
+        return missing_layer_reqs
 
     @property
     def pcp_rank(self) -> int:
