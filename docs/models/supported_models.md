@@ -55,9 +55,9 @@ For a model to be compatible with the Transformers modeling backend for vLLM it 
 
 - be a Transformers compatible custom model (see [Transformers - Customizing models](https://huggingface.co/docs/transformers/en/custom_models)):
     - The model directory must have the correct structure (e.g. `config.json` is present).
-    - `config.json` must contain `auto_map.AutoModel`.
+    - `config.json` must contain `auto_map.AutoModel`, pointing to the base model (e.g. `MyModel`, not `MyModelForCausalLM`).
 - be a Transformers modeling backend for vLLM compatible model (see [Writing custom models](#writing-custom-models)):
-    - Customisation should be done in the base model (e.g. in `MyModel`, not `MyModelForCausalLM`).
+    - Customisation should be done in the base model.
 
 If the compatible model is:
 
@@ -84,6 +84,10 @@ To make your model compatible with the Transformers modeling backend:
         - Inherit from `nn.ModuleList` (naive).
         - Or contain all 3D `nn.Parameters` (packed).
     3. `MyExperts.forward` must accept `hidden_states`, `top_k_index`, `top_k_weights`.
+4. If your model is multimodal:
+    1. The config must nest the text config (e.g. in `text_config`), otherwise vLLM uses the text-only class.
+    2. The base model (`MyModel`) must implement `get_<modality>_features` (e.g. `get_audio_features`), which accepts `return_dict=True` and returns the embeddings in `pooler_output`.
+    3. Your processor must define `<modality>_token` (e.g. `audio_token`), and its `__call__` must reach `ProcessorMixin.get_text_with_replacements` with one replacement per item, which usually means implementing `replace_<modality>_token`.
 
 !!! note
     `MyModel` no longer needs `_supports_attention_backend = True`, and `kwargs` no
@@ -199,7 +203,9 @@ Some model architectures are supported via vLLM plugins. These plugins extend vL
 | ------------ | ------ | ----------------- |
 | `BartForConditionalGeneration` | BART | [bart-plugin](https://github.com/vllm-project/bart-plugin) |
 | `Florence2ForConditionalGeneration` | Florence-2 | [bart-plugin](https://github.com/vllm-project/bart-plugin) |
+| `Nemotron3DiarizationForAudioFrameClassification` | NVIDIA Nemotron-3-Diarization | [vllm-nemotron-diarization-plugin](https://github.com/Alex-Wengg/vllm-nemotron-diarization-plugin) |
 | `Nemotron3_5AsrForRNNT` | NVIDIA Nemotron 3.5 ASR | [vllm-nemotron-asr-plugin](https://github.com/Sohaib-Ahmed21/vllm-nemotron-asr-plugin) |
+| `ParakeetForTDT` | NVIDIA Parakeet TDT | [vllm-parakeet-plugin](https://github.com/Alex-Wengg/vllm-parakeet-plugin) |
 
 For other model architectures not natively supported, in particular for Encoder-Decoder models, we recommend following a similar pattern by implementing support through the plugin system.
 
@@ -423,7 +429,7 @@ th {
 | `GraniteSWAForCausalLM` | Granite SWA | `ibm-granite/granite-swash-2b` | ✅︎ | ✅︎ |
 | `HrmTextForCausalLM` | HRM-Text | `sapientinc/HRM-Text-1B`, etc. | | |
 | `HYV3ForCausalLM` | HY3 | `tencent/Hy3-preview-Base`, `tencent/Hy3-preview`, `tencent/Hy3`, `tencent/Hy3-FP8` | ✅︎ | ✅︎ |
-| `HYV4ForCausalLM` | HY4 | `tencent/Hy4-preview`, `tencent/Hy4-preview-FP8` | ✅︎ | ✅︎ |
+| `HYV4ForCausalLM` | [HY4](hy4.md) | `tencent/Hy4-preview`, `tencent/Hy4-preview-FP8` | ✅︎ | ✅︎ |
 | `HyperCLOVAXForCausalLM` | HyperCLOVAX-SEED-Think-14B | `naver-hyperclovax/HyperCLOVAX-SEED-Think-14B` | ✅︎ | ✅︎ |
 | `InternLM2ForCausalLM` | InternLM2 | `internlm/internlm2-7b`, `internlm/internlm2-chat-7b`, etc. | ✅︎ | ✅︎ |
 | `InternLM3ForCausalLM` | InternLM3 | `internlm/internlm3-8b-instruct`, etc. | ✅︎ | ✅︎ |
@@ -434,6 +440,7 @@ th {
 | `KimiLinearForCausalLM` | Kimi-Linear-48B-A3B-Base, Kimi-Linear-48B-A3B-Instruct | `moonshotai/Kimi-Linear-48B-A3B-Base`, `moonshotai/Kimi-Linear-48B-A3B-Instruct` | | ✅︎ |
 | `Lfm2ForCausalLM` | LFM2 | `LiquidAI/LFM2-1.2B`, `LiquidAI/LFM2-700M`, `LiquidAI/LFM2-350M`, etc. | ✅︎ | ✅︎ |
 | `Lfm2MoeForCausalLM` | LFM2MoE | `LiquidAI/LFM2-8B-A1B-preview`, etc. | ✅︎ | ✅︎ |
+| `Lfm3ForCausalLM` | LFM3 | `LiquidAI/LFM3-1.7B`, `LiquidAI/LFM3-1.7B-Base`, etc. | ✅︎ | ✅︎ |
 | `LlamaForCausalLM` | Llama 3.1, Llama 3, Llama 2, LLaMA, Yi | `meta-llama/Meta-Llama-3.1-405B-Instruct`, `meta-llama/Meta-Llama-3.1-70B`, `meta-llama/Meta-Llama-3-70B-Instruct`, `meta-llama/Llama-2-70b-hf`, `01-ai/Yi-34B`, etc. | ✅︎ | ✅︎ |
 | `LongcatFlashForCausalLM` | LongCat-Flash | `meituan-longcat/LongCat-Flash-Chat`, `meituan-longcat/LongCat-Flash-Chat-FP8` | ✅︎ | ✅︎ |
 | `MambaForCausalLM` | Mamba | `state-spaces/mamba-130m-hf`, `state-spaces/mamba-790m-hf`, `state-spaces/mamba-2.8b-hf`, etc. | | ✅︎ |
@@ -451,7 +458,6 @@ th {
 | `NemotronForCausalLM` | Nemotron-3, Nemotron-4, Minitron | `nvidia/Minitron-8B-Base`, `mgoin/Nemotron-4-340B-Base-hf-FP8`, etc. | ✅︎ | ✅︎ |
 | `NemotronHForCausalLM` | Nemotron-H | `nvidia/Nemotron-H-8B-Base-8K`, `nvidia/Nemotron-H-47B-Base-8K`, `nvidia/Nemotron-H-56B-Base-8K`, etc. | ✅︎ | ✅︎ |
 | `OlmoHybridForCausalLM` | OLMo Hybrid | `allenai/Olmo-Hybrid-7B` | ✅︎ | ✅︎ |
-| `OlmoeForCausalLM` | OLMoE | `allenai/OLMoE-1B-7B-0924`, `allenai/OLMoE-1B-7B-0924-Instruct`, etc. | | ✅︎ |
 | `OPTForCausalLM` | OPT, OPT-IML | `facebook/opt-66b`, `facebook/opt-iml-max-30b`, etc. | ✅︎ | ✅︎ |
 | `OrionForCausalLM` | Orion | `OrionStarAI/Orion-14B-Base`, `OrionStarAI/Orion-14B-Chat`, etc. | | ✅︎ |
 | `PanguEmbeddedForCausalLM` | openPangu-Embedded-7B | `FreedomIntelligence/openPangu-Embedded-7B-V1.1` | ✅︎ | ✅︎ |
@@ -466,6 +472,7 @@ th {
 | `Qwen3ForCausalLM` | Qwen3 | `Qwen/Qwen3-8B`, etc. | ✅︎ | ✅︎ |
 | `Qwen3MoeForCausalLM` | Qwen3MoE | `Qwen/Qwen3-30B-A3B`, etc. | ✅︎ | ✅︎ |
 | `Qwen3NextForCausalLM` | Qwen3NextMoE | `Qwen/Qwen3-Next-80B-A3B-Instruct`, etc. | ✅︎ | ✅︎ |
+| `RicursiveForCausalLM` | Ripple | `ricursiveAI/Ripple-65B-Preview`, `ricursiveAI/Ripple-65B-Preview-NVFP4`, etc. | | ✅︎ |
 | `Rnj1ForCausalLM` | Rnj1 | `EssentialAI/rnj-1-instruct`, etc. | | |
 | `SarvamMoEForCausalLM` | Sarvam 2 | `sarvamai/sarvam2-30b-a3b`, etc. | ✅︎ | ✅︎ |
 | `SarvamMLAForCausalLM` | Sarvam 2 | `sarvamai/sarvam2-105b-a9b`, etc. | | ✅︎ |
@@ -477,6 +484,7 @@ th {
 | `TeleChat3ForCausalLM` | TeleChat3 | `Tele-AI/TeleChat3-36B-Thinking`, `Tele-AI/TeleChat3-Coder-36B-Thinking`, etc. | ✅︎ | ✅︎ |
 | `TeleFLMForCausalLM` | TeleFLM | `CofeAI/FLM-2-52B-Instruct-2407`, `CofeAI/Tele-FLM`, etc. | ✅︎ | ✅︎ |
 | `Zamba2ForCausalLM` | Zamba2 | `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc. | | |
+| `ZayaForCausalLM` | ZAYA1 | `Zyphra/ZAYA1-8B`, `Zyphra/ZAYA1-74B-preview`, etc. | | |
 
 Some models are supported only via the [Transformers modeling backend](#transformers). The purpose of the table below is to acknowledge models which we officially support in this way. The logs will say that the Transformers modeling backend is being used, and you will see no warning that this is fallback behaviour. This means that, if you have issues with any of the models listed below, please [make an issue](https://github.com/vllm-project/vllm/issues/new/choose) and we'll do our best to fix it!
 
@@ -497,6 +505,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | `OlmoForCausalLM` | OLMo | `allenai/OLMo-1B-hf`, `allenai/OLMo-7B-hf`, etc. | ✅︎ | ✅︎ |
 | `Olmo2ForCausalLM` | OLMo2 | `allenai/OLMo-2-0425-1B`, etc. | ✅︎ | ✅︎ |
 | `Olmo3ForCausalLM` | OLMo3 | `allenai/Olmo-3-7B-Instruct`, `allenai/Olmo-3-32B-Think`, etc. | ✅︎ | ✅︎ |
+| `OlmoeForCausalLM` | OLMoE | `allenai/OLMoE-1B-7B-0924`, `allenai/OLMoE-1B-7B-0924-Instruct`, etc. | ✅︎ | ✅︎ |
 | `PhiForCausalLM` | Phi | `microsoft/phi-1_5`, `microsoft/phi-2`, etc. | ✅︎ | ✅︎ |
 | `SeedOssForCausalLM` | SeedOss | `ByteDance-Seed/Seed-OSS-36B-Instruct`, etc. | ✅︎ | ✅︎ |
 | `SmolLM3ForCausalLM` | SmolLM3 | `HuggingFaceTB/SmolLM3-3B` | ✅︎ | ✅︎ |
@@ -542,7 +551,6 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ------ | ----------------- | -------------------- | ------------------------- |
 | `Alpamayo2Super` | Alpamayo 2 Super (reasoning model) | T + I<sup>E+</sup> | `nvidia/Alpamayo2-Super` | | ✅︎ |
-| `AriaForConditionalGeneration` | Aria | T + I<sup>+</sup> | `rhymes-ai/Aria` | | |
 | `AudioFlamingo3ForConditionalGeneration` | AudioFlamingo3 | T + A | `nvidia/audio-flamingo-3-hf`, `nvidia/music-flamingo-hf` | ✅︎ | ✅︎ |
 | `BagelForConditionalGeneration` | BAGEL | T + I<sup>+</sup> | `ByteDance-Seed/BAGEL-7B-MoT` | ✅︎ | ✅︎ |
 | `BailingMoeV3VLForConditionalGeneration` | Ling 3.0 Flash VL | T + I<sup>E+</sup> | `inclusionAI/Ling-3.0-flash-VL` | | ✅︎ |
@@ -584,9 +592,12 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `KimiAudioForConditionalGeneration` | Kimi-Audio | T + A<sup>+</sup> | `moonshotai/Kimi-Audio-7B-Instruct` | | ✅︎ |
 | `KimiK25ForConditionalGeneration` | Kimi-K2.5 | T + I<sup>+</sup> | `moonshotai/Kimi-K2.5` | | ✅︎ |
 | `KimiK3ForConditionalGeneration` | Kimi-K3 | T + I<sup>+</sup> | `moonshotai/Kimi-K3` | | ✅︎ |
+| `KimiK31ForConditionalGeneration` | Kimi-K3.1 | T + I<sup>+</sup> | `moonshotai/Kimi-K3.1` | | ✅︎ |
 | `KimiVLForConditionalGeneration` | Kimi-VL-A3B-Instruct, Kimi-VL-A3B-Thinking | T + I<sup>+</sup> | `moonshotai/Kimi-VL-A3B-Instruct`, `moonshotai/Kimi-VL-A3B-Thinking` | | ✅︎ |
 | `LightOnOCRForConditionalGeneration` | LightOnOCR-1B | T + I<sup>E+</sup> | `lightonai/LightOnOCR-1B`, etc | ✅︎ | ✅︎ |
 | `Lfm2VlForConditionalGeneration` | LFM2-VL | T + I<sup>+</sup> | `LiquidAI/LFM2-VL-450M`, `LiquidAI/LFM2-VL-3B`, `LiquidAI/LFM2-VL-8B-A1B`, etc. | ✅︎ | ✅︎ |
+| `Lfm3AudioForConditionalGeneration` | LFM3-Audio | T + A<sup>E+</sup> | `LiquidAI/LFM3-Audio-2B`, etc. | | ✅︎ |
+| `Lfm3VlForConditionalGeneration` | LFM3-VL | T + I<sup>E+</sup> + V<sup>E+</sup> | `LiquidAI/LFM3-VL-2B` | | ✅︎ |
 | `Llama4ForConditionalGeneration` | Llama 4 | T + I<sup>+</sup> | `meta-llama/Llama-4-Scout-17B-16E-Instruct`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, etc. | ✅︎ | ✅︎ |
 | `Llama_Nemotron_Nano_VL` | Llama Nemotron Nano VL | T + I<sup>E+</sup> | `nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1` | ✅︎ | ✅︎ |
 | `LlavaForConditionalGeneration` | LLaVA-1.5, Pixtral (HF Transformers) | T + I<sup>E+</sup> | `llava-hf/llava-1.5-7b-hf`, `mistral-community/pixtral-12b`, etc. | ✅︎ | ✅︎ |
@@ -610,6 +621,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `MuseSparkForConditionalGeneration` | Muse Spark Open | T + I<sup>+</sup> + V<sup>+</sup> + A<sup>+</sup> | `meta-models/Muse-Spark-Open-816B-A42B-NVFP4`, etc. | ✅︎ | ✅︎ |
 | `Nemotron3_5TranscribeForConditionalGeneration` | Nemotron-3.5-Transcribe | T + A | `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B`, `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-FP8`, `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-NVFP4` | | ✅︎ |
 | `NemotronH_Nano_Omni_Reasoning_V3`, `NemotronH_Nano_VL_V2` | Nemotron Nano 3 Omni, Nemotron Nano V2 VL | T + I<sup>E+</sup> + V<sup>+</sup> + A<sup>*</sup> | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16` | ✅︎ | |
+| `NemotronH_Omni_Reasoning_V3` | Nemotron 3.5 Super VL | T + I<sup>E+</sup> + V<sup>+</sup> | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`, `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4`, etc. | ✅︎ | |
 | `RadioMBartPrefixForCausalLM` | Nemotron Parse 3.5 | T + I | `nvidia/Nemotron-3.5-Parse` | | |
 | `NVLM_D_Model` | NVLM-D 1.0 | T + I<sup>+</sup> | `nvidia/NVLM-D-72B`, etc. | | ✅︎ |
 | `OpenCUAForConditionalGeneration` | OpenCUA-7B | T + I<sup>E+</sup> | `xlangai/OpenCUA-7B` | ✅︎ | ✅︎ |
@@ -645,11 +657,16 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `Step5ForConditionalGeneration` | Step-5-Preview | T + I<sup>+</sup> | `stepfun-ai/Step-5-Preview`, etc. | ✅︎ | ✅︎ |
 | `UltravoxModel` | Ultravox | T + A<sup>E+</sup> | `fixie-ai/ultravox-v0_5-llama-3_2-1b` | ✅︎ | ✅︎ |
 | `UnlimitedOCRForCausalLM` | Unlimited-OCR | T + I<sup>+</sup> | `baidu/Unlimited-OCR`, etc. | ✅︎ | ✅︎ |
+| `UnlimitedOCRForCausalLM` | Unlimited-OCR-2 | T + I<sup>+</sup> | `baidu/Unlimited-OCR-2` | | |
+
+Unlimited-OCR-2's optional page-count guard respects sampling constraints, preserving EOS
+when it is the only remaining permitted token.
 
 Some models are supported only via the [Transformers modeling backend](#transformers). The purpose of the table below is to acknowledge models which we officially support in this way. The logs will say that the Transformers modeling backend is being used, and you will see no warning that this is fallback behaviour. This means that, if you have issues with any of the models listed below, please [make an issue](https://github.com/vllm-project/vllm/issues/new/choose) and we'll do our best to fix it!
 
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ------ | ----------------- | --------------------------- | --------------------------------------- |
+| `AriaForConditionalGeneration` | Aria | T + I<sup>+</sup> | `rhymes-ai/Aria` | ✅︎ | ✅︎ |
 | `Emu3ForConditionalGeneration` | Emu3 | T + I<sup>+</sup> | `BAAI/Emu3-Chat-hf` | ✅︎ | ✅︎ |
 | `HunYuanVLForConditionalGeneration` | HunyuanOCR | T + I<sup>E+</sup> | `tencent/HunyuanOCR`, etc. | ✅︎ | ✅︎ |
 | `VibeVoiceAsrForConditionalGeneration` | VibeVoice-ASR | T + A<sup>+</sup> | `microsoft/VibeVoice-ASR-HF` | ✅︎ | ✅︎ |
@@ -722,10 +739,21 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     its [DFlash](../features/speculative_decoding/README.md) path.
 
 !!! note
-    Both Nemotron Nano architecture names map to the same vLLM implementation.
+    Both Nemotron Nano architecture names and `NemotronH_Omni_Reasoning_V3` map to
+    the same vLLM implementation.
     Audio inputs are only supported by the Omni variants; `NemotronH_Nano_VL_V2`
     checkpoints such as `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16` accept text,
-    image and video only.
+    image and video only, as do the Nemotron 3.5 Super VL checkpoints.
+    `NemotronH_Omni_Reasoning_V3` checkpoints load without `--trust-remote-code`
+    on `transformers>=5.18.0`; older versions still require the flag.
+
+!!! note
+    On ROCm, `Step5ForConditionalGeneration` requires CDNA3 or newer (MI300 series
+    or later) and runs its MoE layers on Triton. With
+    `VLLM_ROCM_USE_AITER=1`, also pass `--moe-backend triton`: AITER's MoE does not
+    apply Step-5's SwiGLU clamp. An FP8 KV cache (`--kv-cache-dtype fp8`) needs
+    `--block-size 32`. The checkpoint ships three MTP layers, enabled with
+    `--speculative-config '{"method":"mtp","num_speculative_tokens":3}'`.
 
 !!! note
     The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
@@ -737,6 +765,7 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `CanaryForConditionalGeneration` | Canary | `nvidia/canary-1b-v2` | | |
 | `CohereAsrForConditionalGeneration` | Cohere-Transcribe | `CohereLabs/cohere-transcribe-03-2026` | | |
 | `FireRedASR2ForConditionalGeneration` | FireRedASR2 | `allendou/FireRedASR2-LLM-vllm`, etc. | | |
 | `FunASRForConditionalGeneration` | FunASR | `FunAudioLLM/Fun-ASR-Nano-2512-vllm`, etc. | | |
@@ -744,6 +773,7 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | `GlmAsrForConditionalGeneration` | GLM-ASR | `zai-org/GLM-ASR-Nano-2512` | ✅︎ | ✅︎ |
 | `GraniteSpeechForConditionalGeneration` | Granite Speech | `ibm-granite/granite-4.0-1b-speech`, `ibm-granite/granite-speech-3.3-2b`, etc. | ✅︎ | ✅︎ |
 | `GraniteSpeechPlusForConditionalGeneration` | Granite Speech Plus | `ibm-granite/granite-speech-4.1-2b-plus` | ✅︎ | ✅︎ |
+| `MingV3ASRForConditionalGeneration` | Ming-3.0-ASR | `inclusionAI/Ming-3.0-asr-tiny` | | |
 | `MossTranscribeDiarizeForConditionalGeneration` | MOSS-Transcribe-Diarize | `OpenMOSS-Team/MOSS-Transcribe-Diarize` | | ✅︎ |
 | `Nemotron3_5TranscribeForConditionalGeneration` | Nemotron-3.5-Transcribe | `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B`, `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-FP8`, `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-NVFP4` | | ✅︎ |
 | `Qwen3ASRForConditionalGeneration` | Qwen3-ASR | `Qwen/Qwen3-ASR-1.7B`, etc. | ✅︎ | ✅︎ |
@@ -762,6 +792,13 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
     up to one hour, the model's training limit (`--limit-mm-per-prompt '{"audio": {"length": <samples>}}'`
     changes it), and `/v1/audio/transcriptions` splits longer audio into pieces of at most one hour, shorter
     when `--max-model-len` is below 65,536.
+
+    Audio tower: the FP8 and NVFP4 checkpoints quantize the linear layers of its ASR encoder to FP8 through
+    their `quantization_config`. FP8 encoder attention (`--mm-encoder-attn-dtype fp8`) is not supported and
+    raises an error when the model is built. The tower attends through vLLM's multimodal encoder attention
+    backend (FlashAttention on CUDA GPUs that support it; `--mm-encoder-attn-backend` selects another). In
+    bfloat16, its output can depend on that backend and on the other clips in the batch: small rounding
+    differences can flip the thresholded speaker features on some frames.
 
 !!! note
     `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.

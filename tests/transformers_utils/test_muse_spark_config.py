@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""MuseSpark1x text config normalization and the DSpark draft config."""
+"""Muse Spark DSpark draft config normalization."""
 
 import json
 from typing import Any
@@ -10,14 +10,19 @@ import pytest
 import torch
 from torch import nn
 
-from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
+from vllm.config import (
+    ModelConfig,
+    ParallelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.models.muse_spark.common.dspark import MuseSparkDSparkForCausalLM
 from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.configs.muse_spark import (
     GatedDeltaNetArgs,
     MetapArgs,
     MoEArgs,
-    MuseSpark1xTextConfig,
     MuseSparkDSparkConfig,
 )
 
@@ -35,12 +40,12 @@ TEXT: dict[str, Any] = {
 
 
 def test_text_config_eos_default():
-    assert MuseSpark1xTextConfig().eos_token_id == [200001, 200008]
-    assert MuseSpark1xTextConfig(eos_token_id=200001).eos_token_id == 200001
+    assert MuseSparkDSparkConfig().eos_token_id == [200001, 200008]
+    assert MuseSparkDSparkConfig(eos_token_id=200001).eos_token_id == 200001
 
 
 def test_nested_subconfig_dicts_promoted():
-    c = MuseSpark1xTextConfig(**TEXT)
+    c = MuseSparkDSparkConfig(**TEXT)
     assert isinstance(c.moe, MoEArgs) and c.moe.topk == 8
     assert isinstance(c.metap, MetapArgs) and c.metap.use_metap
     assert isinstance(c.gated_delta_net, GatedDeltaNetArgs)
@@ -50,7 +55,7 @@ def test_nested_subconfig_dicts_promoted():
 
 
 def test_derived_intermediate_sizes():
-    c = MuseSpark1xTextConfig(**TEXT)
+    c = MuseSparkDSparkConfig(**TEXT)
     assert c.intermediate_size_mlp == int(1.5 * 5120)
     assert c.intermediate_size_shared_experts == int(1.5 * 5120)
     assert c.intermediate_size_routed_experts == 1408
@@ -58,7 +63,7 @@ def test_derived_intermediate_sizes():
 
 def test_metap_rejects_unknown_mode():
     with pytest.raises(AssertionError):
-        MuseSpark1xTextConfig(metap={"use_metap": True, "metap_mode": "bogus"})
+        MuseSparkDSparkConfig(metap={"use_metap": True, "metap_mode": "bogus"})
 
 
 def _dspark_config() -> dict:
@@ -88,7 +93,7 @@ def test_dspark_config_loads(tmp_path, mode):
     assert config.draft_vocab_size == config.vocab_size
 
 
-def test_dspark_speculative_config_preserves_architecture(tmp_path):
+def _dspark_speculative_config(tmp_path, **draft) -> SpeculativeConfig:
     target_path, draft_path = tmp_path / "target", tmp_path / "draft"
     target_path.mkdir()
     draft_path.mkdir()
@@ -104,18 +109,49 @@ def test_dspark_speculative_config_preserves_architecture(tmp_path):
         "vocab_size": 128,
     }
     (target_path / "config.json").write_text(json.dumps(target))
-    (draft_path / "config.json").write_text(json.dumps(_dspark_config()))
-
-    config = SpeculativeConfig(
+    (draft_path / "config.json").write_text(json.dumps(_dspark_config() | draft))
+    return SpeculativeConfig(
         model=str(draft_path),
         method="dspark",
         num_speculative_tokens=7,
         target_model_config=ModelConfig(model=str(target_path), tokenizer_mode="skip"),
         target_parallel_config=ParallelConfig(),
     )
-    assert config.parallel_drafting
+
+
+def test_dspark_speculative_config_preserves_architecture(tmp_path):
+    config = _dspark_speculative_config(tmp_path)
+    assert config.speculator_config.parallel_drafting
     assert config.draft_model_config.architectures == ["MuseSparkDSparkModel"]
     assert isinstance(config.draft_model_config.hf_config, MuseSparkDSparkConfig)
+
+
+def test_dspark_draft_loads_weights(tmp_path, dist_init):
+    spec = _dspark_speculative_config(
+        tmp_path,
+        hidden_size=64,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=64,
+        vocab_size=128,
+        mask_token_id=127,
+        target_hidden_size=64,
+        enable_confidence_head=False,
+    )
+    vllm_config = VllmConfig(
+        model_config=spec.target_model_config, speculative_config=spec
+    )
+    with set_current_vllm_config(vllm_config):
+        model = MuseSparkDSparkForCausalLM(vllm_config=vllm_config)
+    checkpoint = {
+        "fc.weight": torch.zeros_like(model.model.fc.weight),
+        "lm_head.weight": torch.zeros_like(model.lm_head.weight),
+        "d2t": torch.zeros(128, dtype=torch.long),
+    }
+
+    loaded = model.load_weights(checkpoint.items())
+
+    assert loaded == {"model.fc.weight", "lm_head.weight", "draft_id_to_target_id"}
 
 
 def test_dspark_output_logit_transform():

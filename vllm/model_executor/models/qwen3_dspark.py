@@ -33,6 +33,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 from .utils import (
@@ -231,6 +232,10 @@ class Qwen3DSparkModel(DFlashQwen3Model):
 
 
 class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = DSparkSpeculatorConfig
+    model_cls = Qwen3DSparkModel
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         speculative_config = vllm_config.speculative_config
@@ -240,7 +245,7 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         if getattr(self.config, "draft_vocab_size", None) is None:
             self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
         target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
-        self.model = Qwen3DSparkModel(
+        self.model = self.model_cls(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
             start_layer_id=target_layer_num,
@@ -274,6 +279,10 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         # Draft-vocab logits without the d2t scatter: the speculator adds the
         # Markov bias in draft space, then remaps via map_draft_to_target.
         return self.logits_processor(self.lm_head, hidden_states)
+
+    def compute_draft_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """This TP rank's vocab shard of compute_draft_logits, not gathered."""
+        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
 
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
         # Map draft-vocab ids to target ids (identity for full-vocab drafts).
@@ -314,7 +323,6 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         includes_embed_tokens = False
         includes_lm_head = False
         includes_draft_id_mapping = False
-        includes_confidence_head = False
         for name, loaded_weight in weights:
             # t2d is training-only; the draft remaps via d2t at sampling time.
             if "t2d" in name:
@@ -328,8 +336,6 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
                 includes_embed_tokens = True
             if "lm_head" in name:
                 includes_lm_head = True
-            if "confidence_head" in name:
-                includes_confidence_head = True
             model_weights[name] = loaded_weight
             # Sets has_own_embed_tokens / has_own_lm_head so load_dspark_model
             # knows whether to keep these or alias the target's.
@@ -338,23 +344,6 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         # mask_embedding is an unused placeholder param; DSpark masks via the vocab row.
         # embed_tokens / lm_head are optional; when omitted they are shared from
         # the target by load_dspark_model, so skip the unloaded params here.
-        uses_expanded_input_vocab = self.config.vocab_size > self.target_vocab_size
-        uses_reduced_vocab = self.config.draft_vocab_size < self.target_vocab_size
-        if uses_expanded_input_vocab and not includes_embed_tokens:
-            raise ValueError(
-                "Qwen3 DSpark checkpoints whose input vocab_size is larger than "
-                "the target vocabulary must include embed_tokens weights."
-            )
-        if uses_reduced_vocab and not includes_lm_head:
-            raise ValueError(
-                "Reduced-vocabulary Qwen3 DSpark checkpoints must include "
-                "lm_head weights; the full target lm_head cannot be shared."
-            )
-        if uses_reduced_vocab and not includes_draft_id_mapping:
-            raise ValueError(
-                "Reduced-vocabulary Qwen3 DSpark checkpoints must include a "
-                "d2t mapping so sampled draft ids can be converted to target ids."
-            )
 
         orig_to_new_substr = {"mask_embedding": None}
         if not includes_embed_tokens:
@@ -363,10 +352,8 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             orig_to_new_substr["lm_head"] = None
         if not includes_draft_id_mapping:
             orig_to_new_substr["draft_id_to_target_id"] = None
-        if self.model.confidence_head is None or not includes_confidence_head:
-            self.model.confidence_head = None
+        if self.model.confidence_head is None:
             orig_to_new_substr["confidence_head"] = None
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
         loader = AutoWeightsLoader(self)
         loader.load_weights(model_weights.items(), mapper=mapper)
-        self.model._build_fused_kv_buffers()

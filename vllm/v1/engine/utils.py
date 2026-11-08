@@ -600,7 +600,7 @@ class CoreEngineActorManager:
             # Ray XPU known issue: dpctl initializes the GPU runtime early, so
             # setting device env vars in Ray actor's initialization method
             # will not affect device selection. See:
-            # https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/intel_gpu.py#L56 # noqa: E501
+            # https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/intel_gpu.py#L56
             if current_platform.is_xpu():
                 device_evar = current_platform.device_control_env_var
                 physical_gpu_ids = get_physical_gpu_ids_for_local_dp_rank(
@@ -1421,6 +1421,10 @@ def wait_for_engine_startup(
         and not parallel_config.data_parallel_external_lb
     )
 
+    # (engine index, parallel config hash) of the first READY engine, which
+    # the other engines' hashes are compared with.
+    reference_config_hash: tuple[int, str | None] | None = None
+
     # 1. Engine processes
     if isinstance(launch.engine_manager, CoreEngineProcManager):
         for sentinel in launch.engine_manager.sentinels():
@@ -1563,10 +1567,13 @@ def wait_for_engine_startup(
                 parallel_config.elastic_ep_max_dp_size = elastic_ep_max_dp_size
 
             # Validate config hash consistency across DP workers for MoE models.
+            # Compare possibly-updated engine config hashes with each other.
             if coordinated_dp:
                 worker_config_hash = msg.get("parallel_config_hash")
-                expected_hash = parallel_config.compute_hash()
-                if worker_config_hash != expected_hash:
+                if reference_config_hash is None:
+                    reference_config_hash = (eng_index, worker_config_hash)
+                elif worker_config_hash != reference_config_hash[1]:
+                    reference_index, reference_hash = reference_config_hash
                     raise RuntimeError(
                         f"Configuration mismatch detected for engine "
                         f"{eng_index}. All DP workers must have identical "
@@ -1574,7 +1581,8 @@ def wait_for_engine_startup(
                         f"communication (e.g., enable_eplb, "
                         f"eplb_config.log_balancedness). "
                         f"Worker hash: {worker_config_hash}, "
-                        f"Expected hash: {expected_hash}. "
+                        f"Expected hash: {reference_hash} (engine "
+                        f"{reference_index}). "
                         f"Please ensure all workers are started with the same "
                         f"command-line arguments."
                     )

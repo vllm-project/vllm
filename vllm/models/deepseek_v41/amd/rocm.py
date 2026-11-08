@@ -380,7 +380,7 @@ class DeepseekV41ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataB
         fast_build: bool = False,
         replay_start: torch.Tensor | None = None,
     ) -> DeepseekV41ROCMAiterSparseSWAMetadata:
-        # On gfx942 with --monokernel, a decode batch gets this
+        # On gfx942 and gfx950 with --monokernel, a decode batch gets this
         # metadata from one launch instead of 8 launches per SWA group
         # (swa_decode_meta.py). Other batches return None there and take
         # the build below.
@@ -685,16 +685,11 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if (
-            self.indexer is None
-            or self._prepare_and_attn_fn == self._prepare_and_attn_eager
-            or not current_platform.enable_multi_stream_overlap(
-                self.aux_stream_list, get_forward_context().attn_metadata
-            )
+        if self.indexer is None or not current_platform.enable_multi_stream_overlap(
+            self.aux_stream_list, get_forward_context().attn_metadata
         ):
             # Sequential fallback: no forks outside the capture region, where
-            # HIP event sync is unreliable; MRV1 keeps the input prep in its
-            # wide eager region (#51430).
+            # HIP event sync is unreliable.
             aux_streams = self.aux_stream_list
             self.aux_stream_list = None
             try:

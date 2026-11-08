@@ -8,8 +8,7 @@ without modifying core code:
     from vllm.triton_utils.dispatcher import register_kernels
 
     register_kernels({
-        "vllm.v1.sample.rejection_sampler.expand_kernel": my_expand_impl,
-        "vllm.v1.worker.mamba_utils.batch_memcpy_kernel": my_memcpy_impl,
+        "vllm.v1.worker.gpu.input_batch._prepare_pos_seq_lens_kernel": my_impl,
     })
 
 The same call covers Triton *device functions* (``@triton.jit`` helpers
@@ -198,8 +197,22 @@ def _rebind_impls(
             # kernel as an instance attribute; read the instance dict directly
             # so module-level __getattr__ hooks are never triggered, and so
             # this scan needs no dependency on the warmup machinery.
-            if hasattr(value, "__dict__"):
-                replacement = lookup(vars(value).get("kernel"))
+            #
+            # `hasattr(value, "__dict__")` is not a sufficient guard: proxy
+            # objects such as llvmlite's `binding.ffi.lib` synthesise every
+            # attribute through `__getattr__`, so `__dict__` resolves to a
+            # `_lib_fn_wrapper` and `.get()` would raise AttributeError. Only
+            # treat a real dict as an instance namespace.
+            try:
+                instance_dict = vars(value)
+            except TypeError:
+                # Slots-only objects have no instance dict.
+                instance_dict = None
+            replacement = (
+                lookup(instance_dict.get("kernel"))
+                if isinstance(instance_dict, dict)
+                else None
+            )
             if replacement is None:
                 continue
             value.kernel = replacement
@@ -213,9 +226,9 @@ def register_kernels(overrides: Mapping[str, Callable[..., Any]]) -> None:
     Args:
         overrides: Mapping from fully qualified kernel name to the
             platform implementation. Kernel names look like
-            "vllm.v1.sample.rejection_sampler.expand_kernel"; for kernels
+            "vllm.v1.worker.gpu.input_batch._prepare_pos_seq_lens_kernel"; for kernels
             owned by a JIT warmup class, include the attribute path, e.g.
-            "vllm.v1.worker.block_table.ComputeSlotMappingKernel.kernel".
+            "module.KernelClass.kernel".
 
             An implementation that is itself a Triton kernel (also the
             only kind that works for Triton *device functions*, which are

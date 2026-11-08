@@ -71,6 +71,7 @@ if TYPE_CHECKING:
         EncoderCudaGraphReplayBuffers,
         EncoderItemSpec,
     )
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 
 logger = init_logger(__name__)
 
@@ -356,7 +357,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
 
         Tower model components are automatically skipped when `--limit-mm-per-prompt`
         is set to zero for all of their modalities, and on pipeline stages after the
-        first under Model Runner V2, which runs encoders on the first stage only.
+        first, since encoders run on the first stage only.
 
         If `targets` is set, instead include descendants that are an instance
         of `targets`, even if they aren't direct children.
@@ -388,9 +389,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
                     targets=targets,
                 )
                 if all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
-                or (
-                    vllm_config.use_v2_model_runner and not get_pp_group().is_first_rank
-                )
+                or not get_pp_group().is_first_rank
                 else nullcontext()
             ):
                 yield
@@ -736,7 +735,7 @@ class SupportsLoRA(Protocol):
     packed_modules_mapping: dict[str, list[str]] = {}
     # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
     lora_skip_prefixes: ClassVar[list[str]] = []
-    lora_manager: "LoRAModelManager | None"
+    lora_manager: "LoRAModelManager | None" = None
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
@@ -1538,6 +1537,20 @@ def supports_transcription(
 
 
 @runtime_checkable
+class SpeculativeDraftModel(Protocol):
+    """The interface of a speculative decoding draft model which declares the
+    speculator it's for. This is read through the model registry, so that it's
+    available without importing the model.
+    """
+
+    speculator_config_class: ClassVar[type["SpeculatorConfig"]]
+    """The config class of the speculator that this is a draft model of.
+    Unless a speculative method is configured that the checkpoint can't
+    override, a draft checkpoint with this model's architecture uses this
+    speculator."""
+
+
+@runtime_checkable
 class SupportsEagleBase(Protocol):
     """Base interface for models that support EAGLE-based speculative decoding."""
 
@@ -1931,6 +1944,10 @@ class SupportsEncoderCudaGraph(Protocol):
         Override this for models that require additional processing on the raw
         encoder output prior to scattering, e.g. Step3-VL, which merges features
         according to dynamic patch counts before scattering.
+
+        With ``clone=True``, the tensors written to ``dest`` must not alias
+        ``outputs``: they are graph output buffers, shared across the token
+        budgets of a path, that the next replay overwrites.
         """
         from vllm.model_executor.models.utils import scatter_output_slices
 
@@ -1972,7 +1989,12 @@ class SupportsEncoderCudaGraph(Protocol):
         max_frames_per_batch: int,
         path: str = "default",
     ) -> "EncoderCudaGraphReplayBuffers":
-        """Compute buffer values from actual batch inputs for replay."""
+        """Compute buffer values from actual batch inputs for replay.
+
+        Must provide every capture buffer that smaller budgets share as a prefix
+        view: other budgets' captures overwrite its capture-time contents, so
+        the manager raises if replay omits it.
+        """
         ...
 
     def encoder_cudagraph_forward(

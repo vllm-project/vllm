@@ -332,6 +332,12 @@ Supported models:
 
     Recommended flags: `--tool-call-parser granite4`
 
+* `ibm-granite/granite-4.2-8b` and other Granite 4.2 models
+
+    Recommended flags: `--tool-call-parser granite_toolcall_parser`
+
+    Granite 4.2 emits tool calls in an XML format (`<tool_call><function=...><parameter=...>`). The chat template from Hugging Face can be used directly. Parallel function calls are supported.
+
 * `ibm-granite/granite-3.0-8b-instruct`
 
     Recommended flags: `--tool-call-parser granite --chat-template examples/tool_chat_template_granite.jinja`
@@ -593,7 +599,7 @@ Flags: `--tool-call-parser apertus`
 
 The Muse parser supports the ATEM tool-call format used by Muse Spark Open.
 Enable tool calling with `--enable-auto-tool-choice`,
-`--tool-call-parser muse`, and `--reasoning-parser muse`. `musespark1x` is an
+`--tool-call-parser muse`, and `--reasoning-parser muse`. `musespark` is an
 alias for both parsers. The `muse_glimmer` entry points share the Muse implementation while retaining
 their original channel semantics, including recipient-less tool-parser content.
 
@@ -603,10 +609,37 @@ ATEM tool-call extraction. `to=developer` messages are omitted. Framing
 special tokens are preserved for parsing and removed from surfaced content.
 
 The Rust frontend also provides a Muse unified parser under `muse` and
-`musespark1x`, and selects it automatically for Muse Spark model names.
+`musespark`, and selects it automatically for Muse Spark model names.
 Existing automatic parser selection for Muse Glimmer is unchanged.
 
 Parser availability alone does not enable Muse Spark model execution.
+
+### ZAYA1 Models (`zaya`)
+
+Supported models:
+
+* `Zyphra/ZAYA1-8B`
+* `Zyphra/ZAYA1-74B-preview`
+
+ZAYA1 uses the Qwen3-Coder XML format inside `<zyphra_tool_call>` tags. Pair it
+with `--reasoning-parser zaya`, which also treats a tool call as the end of
+reasoning.
+
+Flags: `--enable-auto-tool-choice --tool-call-parser zaya --reasoning-parser zaya`
+
+`zaya_xml` is an alias of `zaya`.
+
+### Ripple Models (`ripple`)
+
+Supported models:
+
+* `ricursiveAI/Ripple-65B-Preview`
+* `ricursiveAI/Ripple-65B-Preview-NVFP4`
+
+Ripple emits Hermes-style JSON tool calls inside `<tool_call>` tags after an
+optional `<think>` block. Pair it with `--reasoning-parser ripple`.
+
+Flags: `--enable-auto-tool-choice --tool-call-parser ripple --reasoning-parser ripple`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 
