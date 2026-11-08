@@ -150,23 +150,16 @@ def test_replayssm_flashinfer_decode_matches_baseline(vllm_runner, model_name):
 
 @pytest.mark.parametrize("model_name", FLASHINFER_MODELS)
 def test_replayssm_decode_backend_override_matches_triton_baseline(
-    vllm_runner, model_name, monkeypatch
+    vllm_runner, model_name
 ):
     """An overridden Replay deployment matches a separate Triton SSU baseline."""
-    try:
-        with monkeypatch.context() as patch:
-            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-            envs.disable_envs_cache()
-            _check_replayssm_parity(
-                vllm_runner,
-                model_name,
-                replay_decode_backend="flashinfer",
-                prompts=FLASHINFER_PROMPTS,
-                name_1="replayssm_decode_backend_override",
-                expected_v2=True,
-            )
-    finally:
-        envs.disable_envs_cache()
+    _check_replayssm_parity(
+        vllm_runner,
+        model_name,
+        replay_decode_backend="flashinfer",
+        prompts=FLASHINFER_PROMPTS,
+        name_1="replayssm_decode_backend_override",
+    )
 
 
 @pytest.mark.parametrize("model_name", FLASHINFER_MODELS)
