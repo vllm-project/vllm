@@ -73,20 +73,16 @@ class _SparseIndexerContext(NamedTuple):
 def _build_sparse_indexer_context(
     config: PreTrainedConfig, vllm_config: VllmConfig
 ) -> _SparseIndexerContext:
-    sparse_cfg = getattr(config, "sparse_attention_config", None)
-    if sparse_cfg is None:
-        return _SparseIndexerContext()
-
     # Reserved top-k indices buffer shared by all the sparse-attention indexer
     # layers below; the indexer writes its per-head decode/prefill block
     # selection into it, the attend reads it back.
     tp_size = get_tensor_model_parallel_world_size()
-    num_index_heads = max(1, sparse_cfg["sparse_num_index_heads"] // tp_size)
+    num_index_heads = max(1, config.index_n_heads // tp_size)
     max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     topk_indices_buffer = torch.empty(
         num_index_heads,
         max_tokens,
-        sparse_cfg["sparse_topk_blocks"],
+        config.index_topk_blocks,
         dtype=torch.int32,
     )
 
@@ -94,11 +90,10 @@ def _build_sparse_indexer_context(
     indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype("bf16")
 
     impl_cls = select_msa_indexer_impl_cls(
-        topk_blocks=sparse_cfg["sparse_topk_blocks"],
-        sparse_block_size=sparse_cfg["sparse_block_size"],
-        index_head_dim=sparse_cfg["sparse_index_dim"],
+        topk_blocks=config.index_topk_blocks,
+        sparse_block_size=config.index_block_size,
+        index_head_dim=config.index_head_dim,
         indexer_kv_dtype=indexer_kv_dtype,
-        score_type=sparse_cfg.get("sparse_score_type", "max"),
     )
     msa_indexer_impl_cls = None
     sparse_bt_buffer = None
@@ -112,8 +107,7 @@ def _build_sparse_indexer_context(
         msa_indexer_impl_cls = impl_cls
         sparse_bt_buffer = torch.empty(
             rows,
-            sparse_cfg["sparse_topk_blocks"]
-            * (sparse_cfg["sparse_block_size"] // ASM_PAGE_SIZE),
+            config.index_topk_blocks * (config.index_block_size // ASM_PAGE_SIZE),
             dtype=torch.int32,
         )
         sparse_ctx_buffer = torch.empty(rows, dtype=torch.int32)
@@ -272,9 +266,7 @@ class MiniMaxM3MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        self._tracks_own_embed = (
-            vllm_config.use_v2_model_runner and get_pp_group().world_size > 1
-        )
+        self._tracks_own_embed = get_pp_group().world_size > 1
         if self._tracks_own_embed:
             # Preserve embeddings from loaders that bypass load_weights.
             self.has_own_embed_tokens = vllm_config.load_config.load_format != "dummy"

@@ -524,9 +524,8 @@ class UBatchRunner:
                 # Note the siblings are not told to unwind: microbatches hand
                 # control to each other, so one that dies mid-forward leaves
                 # the others parked on a handoff that never comes and the step
-                # hangs. The V1 runner behaves the same way; fixing it means
-                # changing the shared handoff protocol in ubatching.py, which
-                # is deliberately out of scope here.
+                # hangs. Fixing it means changing the handoff protocol in
+                # ubatching.py.
                 errors[ubatch_context.id] = e
 
         # Threads own the forward context; keep it cleared and SMs reserved
@@ -592,7 +591,7 @@ def maybe_build_ubatch_runner(
     """Build the microbatch runner, or None when DBO is not in use.
 
     Microbatching needs the DP handshake to agree on it, so it is only
-    available with more than one DP rank (as in the V1 runner).
+    available with more than one DP rank.
     """
     parallel_config = vllm_config.parallel_config
     if not parallel_config.use_ubatching or parallel_config.data_parallel_size <= 1:
