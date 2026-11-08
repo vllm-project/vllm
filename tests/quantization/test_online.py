@@ -58,6 +58,7 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+from vllm.model_executor.layers.quantization.base_config import resolve_quant_method
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
     CompressedTensorsLinearMethod,
@@ -102,6 +103,9 @@ from vllm.model_executor.layers.quantization.online.mxfp8 import (
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
     _quantize_moe_weight_to_nvfp4,
+)
+from vllm.model_executor.layers.quantization.online.requantization import (
+    is_requantization_source,
 )
 from vllm.model_executor.layers.quantization.quark.quark import (
     QuarkConfig,
@@ -1254,6 +1258,67 @@ def test_online_requantized_moe_padding(
 
     # Preserve the logical down projection and zero both padding dimensions.
     torch.testing.assert_close(padded_w2, expected_w2, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("source_key", "params_dtype", "quantized"),
+    [
+        pytest.param(kNvfp4Static, torch.bfloat16, True, id="listed-format"),
+        pytest.param(kMxfp8Static, torch.bfloat16, False, id="other-format"),
+        pytest.param(None, torch.bfloat16, True, id="listed-unquantized-dtype"),
+        pytest.param(None, torch.float16, False, id="other-unquantized-dtype"),
+    ],
+)
+def test_requantize_from_selects_checkpoint_formats(
+    source_key, params_dtype: torch.dtype, quantized: bool, default_vllm_config
+) -> None:
+    """Only checkpoint layers in a listed format or dtype get the online target."""
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    base = (
+        UnquantizedLinearMethod()
+        if source_key is None
+        else Mock(requantization_source_key=Mock(return_value=source_key))
+    )
+    quant_config = Mock(packed_modules_mapping={})
+    quant_config.get_quant_method.return_value = base
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        quant_config_args(linear="fp8_per_tensor", requantize_from=["nvfp4", "bf16"])
+    )
+    layer = ColumnParallelLinear.__new__(ColumnParallelLinear)
+    layer.params_dtype = params_dtype
+
+    method = resolve_quant_method(quant_config, layer, "model.layers.0.mlp.down_proj")
+
+    if quantized:
+        assert isinstance(method, Fp8PerTensorOnlineLinearMethod)
+        expected_source = None if source_key is None else base
+        assert method.requantization_source is expected_source
+    else:
+        assert method is base
+
+
+def test_requantize_from_rebuilds_rejected_moe_outside_source_scope() -> None:
+    """A rejected MoE checkpoint method is rebuilt as the layer's own method, not
+    as a dequantization-only source (which skips its kernel selection)."""
+    built_in_source_scope = []
+    built = []
+
+    def get_quant_method(layer, prefix):
+        built_in_source_scope.append(is_requantization_source())
+        built.append(Mock(requantization_source_key=Mock(return_value=kNvfp4Static)))
+        return built[-1]
+
+    quant_config = Mock(packed_modules_mapping={})
+    quant_config.get_quant_method.side_effect = get_quant_method
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        quant_config_args(moe="fp8_per_tensor", requantize_from=["mxfp8"])
+    )
+    layer = RoutedExperts.__new__(RoutedExperts)
+
+    method = resolve_quant_method(quant_config, layer, "model.layers.0.mlp.experts")
+
+    assert built_in_source_scope == [True, False]
+    assert method is built[-1]
 
 
 @pytest.mark.skipif(

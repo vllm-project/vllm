@@ -924,6 +924,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         """FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales."""
         return True
 
+    def requantization_source_key(self, layer: torch.nn.Module) -> QuantKey | None:
+        return kNvfp4Static
+
     def dequantize_weight(
         self, layer: torch.nn.Module
     ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
@@ -2804,6 +2807,11 @@ class ModelOptLinearMethod(LinearMethodBase):
                 refill_derived(layer, name, src.detach().clone())
             layer._nvfp4_group_size_for_gather = self.ctx.group_size
         self.kernel.process_weights_after_loading(layer)
+
+    def requantization_source_key(self, layer: torch.nn.Module) -> QuantKey | None:
+        if self.wkey.key is kMxfp8Static:
+            return self.wkey.key
+        return None
 
     def dequantize_weight(self, layer: torch.nn.Module) -> torch.Tensor:
         """Reconstruct serialized weights for online requantization."""

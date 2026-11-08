@@ -2319,6 +2319,9 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         layer.register_parameter("w2_input_scale_2", w2_input_scale_2)
         set_weight_attrs(w2_input_scale_2, extra_weight_attrs)
 
+    def requantization_source_key(self, layer: torch.nn.Module) -> QuantKey | None:
+        return kNvfp4Static
+
     def dequantize_weight(
         self, layer: torch.nn.Module
     ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
     )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.model_executor.models.utils import WeightsMapper
 else:
     QuantizationMethods = str
@@ -105,6 +106,15 @@ class QuantizeMethodBase(ABC):
             "dequantize_weight, so re-quantization from this checkpoint is "
             "not supported. Please open an issue."
         )
+
+    def requantization_source_key(self, layer: nn.Module) -> "QuantKey | None":
+        """Checkpoint weight key that ``dequantize_weight`` supports for ``layer``.
+
+        Returns:
+            The weight key, or None if the layer cannot be re-quantized.
+
+        """
+        return None
 
 
 def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> bool:
@@ -367,6 +377,23 @@ def resolve_quant_method(
     checkpoint_is_quantized = base_quant_method is not None and not isinstance(
         base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
     )
+
+    requantize_from = online_config.args.requantize_from
+    if requantize_from is not None and online_target is not None:
+        source_key = (
+            base_quant_method.requantization_source_key(layer)
+            if base_quant_method is not None and checkpoint_is_quantized
+            # Unquantized layers are listed by dtype, e.g. "bfloat16".
+            else str(layer.params_dtype).removeprefix("torch.")
+        )
+        if source_key not in requantize_from:
+            # Only the listed checkpoint formats are re-quantized.
+            if isinstance(layer, RoutedExperts):
+                # Built above as a requantization source; rebuild it as the
+                # layer's own method.
+                with layer_target_spec_scope(target_spec):
+                    base_quant_method = quant_config.get_quant_method(layer, prefix)
+            return base_quant_method
 
     if checkpoint_is_quantized:
         if online_target is None:
