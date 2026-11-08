@@ -20,7 +20,7 @@ from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
-from vllm.renderers.online_derenderer import OnlineDerenderer
+from vllm.renderers.online_derenderer import OnlineDerenderer, resolve_prompt_tokens
 
 from ..token_in_token_out.mm_features import extract_mm_features
 from ..token_in_token_out.protocol import (
@@ -172,7 +172,7 @@ class ServingDerender(BaseServing):
             )
 
         try:
-            choices = await self.online_derenderer.derender_chat(
+            choices, prompt_logprobs = await self.online_derenderer.derender_chat(
                 request.generate_response,
                 request.chat_request,
                 request.prompt_token_ids,
@@ -180,10 +180,8 @@ class ServingDerender(BaseServing):
         except ValueError as exc:
             return self.create_error_response(str(exc))
 
-        prompt_tokens = (
-            request.prompt_tokens if request.prompt_tokens is not None else 0
-        )
         gen = request.generate_response
+        prompt_tokens = resolve_prompt_tokens(request.prompt_tokens, gen.usage)
         completion_tokens = sum(len(ch.token_ids) for ch in gen.choices if ch.token_ids)
         usage = UsageInfo(
             prompt_tokens=prompt_tokens,
@@ -205,7 +203,7 @@ class ServingDerender(BaseServing):
             created=int(time.time()),
             choices=choices,
             usage=usage,
-            prompt_logprobs=gen.prompt_logprobs,
+            prompt_logprobs=prompt_logprobs,
             prompt_token_ids=(
                 gen.prompt_token_ids
                 if request.chat_request is not None

@@ -24,7 +24,7 @@ pub mod names {
     pub const KIMI_K3: &str = "kimi_k3";
     pub const MUSE: &str = "muse";
     /// Alias of [`MUSE`]: the parser name of the original Muse Spark plugin.
-    pub const MUSE_SPARK_1X: &str = "musespark1x";
+    pub const MUSE_SPARK: &str = "musespark";
 
     /// Executes the checkpoint's Hugging Face `response_template`. Registered for
     /// name resolution only: it is built from the model's template, never by its
@@ -61,7 +61,7 @@ impl UnifiedParserFactory {
         factory.register_parser::<InklingUnifiedParser>(names::INKLING);
         factory.register_parser::<KimiK3UnifiedParser>(names::KIMI_K3);
         factory.register_parser::<MuseUnifiedParser>(names::MUSE);
-        factory.register_parser::<MuseUnifiedParser>(names::MUSE_SPARK_1X);
+        factory.register_parser::<MuseUnifiedParser>(names::MUSE_SPARK);
         // Opt-in only: no model patterns map to it.
         factory.register_parser::<HfUnifiedParser>(names::HF);
         factory.register_parser::<BeamUnifiedParser>(names::BEAM);
@@ -194,7 +194,7 @@ mod tests {
             factory.resolve_name_for_model("meta-models/Muse-Glimmer-30B"),
             None
         );
-        for name in [names::MUSE, names::MUSE_SPARK_1X] {
+        for name in [names::MUSE, names::MUSE_SPARK] {
             factory.create(name, &[], Arc::new(tokenizer.clone())).unwrap();
             let explicit = crate::ParserSelection::Explicit(name.to_owned());
             crate::parser::validate_parser_overrides(&explicit, &explicit).unwrap();

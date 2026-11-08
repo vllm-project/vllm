@@ -11,6 +11,7 @@ and consumer instances read/write KV to/from the store independently,
 enabling prefix caching via hash-based deduplication.
 """
 
+import os
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from contextlib import AbstractContextManager
@@ -38,6 +39,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
+from vllm.distributed.mooncake_store import MooncakeStoreConfig
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
@@ -128,8 +130,27 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
 
     @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        return True
+
+    @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
-        return False
+        config = MooncakeStoreConfig.load_from_config()
+        if (
+            config.protocol != "rdma"
+            or not (config.device_name or config.device_name_per_gpu)
+            or os.getenv("MC_MS_AUTO_DISC", "0") != "0"
+            or any(v in os.environ for v in ("MC_USE_TENT", "MC_USE_TEV1"))
+        ):
+            raise ValueError(
+                "MooncakeStoreConnector sleep requires protocol='rdma', "
+                "device_name or device_name_per_gpu set, MC_MS_AUTO_DISC=0 "
+                "or unset, and MC_USE_TENT/MC_USE_TEV1 unset. "
+                "Sleep with NVLink Fabric is not supported yet."
+            )
+        return True
 
     @staticmethod
     def _validate_kv_cache_config(
@@ -217,6 +238,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler-side methods
     # ============================================================
 
+    def on_new_request(self, request: Request) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.start_lookup_prefetch(request)
+
     def get_num_new_matched_tokens(
         self,
         request: Request,
@@ -269,8 +294,12 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         request: Request,
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.client.discard(request.request_id)
         # An in-flight store job holds its own reference on the blocks it reads,
         # so a finishing request never has to defer freeing them.
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.register_finished_lookahead_save(request, block_ids)
         return False, None
 
     def reset_cache(self) -> bool | None:
@@ -330,6 +359,14 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
+
+    def unregister_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.unregister_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.restore_kv_caches()
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         assert self.connector_worker is not None

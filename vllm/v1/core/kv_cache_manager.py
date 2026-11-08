@@ -137,6 +137,7 @@ class KVCacheManager:
         max_in_flight_tokens: int | None = None,
         enable_caching: bool = True,
         use_eagle: bool = False,
+        num_hash_lookahead_tokens: int = 0,
         num_prefill_lookahead: int = 0,
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
@@ -167,6 +168,7 @@ class KVCacheManager:
             max_model_len=self.max_model_len,
             max_in_flight_tokens=max_in_flight_tokens,
             use_eagle=self.use_eagle,
+            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
@@ -231,7 +233,29 @@ class KVCacheManager:
 
     def prefix_cache_lookup_enabled(self, request: Request) -> bool:
         """Whether a local prefix cache lookup may be run for this request."""
-        return self.enable_caching and not request.skip_reading_prefix_cache
+        return self.enable_caching and request.prefix_cache_hit_limit != 0
+
+    def get_num_cached_tokens(self, request: Request) -> int:
+        """How many of a request's tokens are already in the prefix cache.
+
+        Unlike `get_computed_blocks`, this only probes the cache: it takes no
+        references, allocates no blocks and emits no events, so it is safe to
+        call for a request that may not be scheduled.
+
+        Args:
+            request: The request to probe.
+
+        Returns:
+            The number of cached tokens, or 0 if lookup is disabled.
+
+        """
+        if not self.prefix_cache_lookup_enabled(request):
+            return 0
+        # Mirrors `get_computed_blocks`: the last token is always recomputed.
+        _, num_computed_tokens, _ = self.coordinator.find_longest_cache_hit(
+            request.block_hashes, request.num_tokens - 1
+        )
+        return num_computed_tokens
 
     def record_prefix_cache_stats(self, request: Request, num_hits: int) -> None:
         # Don't count a request that skipped the cache lookup.
@@ -253,7 +277,8 @@ class KVCacheManager:
         Args:
             request: The request to get the computed blocks.
             max_cache_hit_length: Upper bound on the hit length. Defaults to
-                ``request.num_tokens - 1``.
+                ``request.get_max_cache_hit_length()``; explicit bounds can only
+                reduce the request's cache hit limit.
 
         Returns:
             A tuple containing:
@@ -279,8 +304,7 @@ class KVCacheManager:
         # the single last token, because allocate_slots() requires
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
-        if max_cache_hit_length is None:
-            max_cache_hit_length = request.num_tokens - 1
+        max_cache_hit_length = request.get_max_cache_hit_length(max_cache_hit_length)
         computed_blocks, num_new_computed_tokens, num_uncached = (
             self.coordinator.find_longest_cache_hit(
                 request.block_hashes, max_cache_hit_length
@@ -341,8 +365,7 @@ class KVCacheManager:
         if not self.prefix_cache_lookup_enabled(request):
             return self.empty_kv_cache_blocks, 0, 0, False
 
-        if max_cache_hit_length is None:
-            max_cache_hit_length = request.num_tokens - 1
+        max_cache_hit_length = request.get_max_cache_hit_length(max_cache_hit_length)
         fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
             request.block_hashes, max_cache_hit_length
@@ -678,11 +701,6 @@ class KVCacheManager:
             self.prefix_cache_stats.reset = True
         return True
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
-        """Deprecated: cascade attention has been removed. Always returns 0
-        for each KV cache group. Kept for out-of-tree schedulers."""
-        return [0] * self.num_kv_cache_groups
-
     def take_events(self) -> list[KVCacheEvent]:
         """Take the KV cache events from the block pool.
 
@@ -754,12 +772,12 @@ class KVCacheManager:
                 # Cross-attention and encoder-only groups are not prefix cached.
                 continue
 
+            # Coverage grows along the block table: the last hashed block has the most.
             group_cached_tokens = 0
-            for block in blocks:
-                group_cached_tokens = max(
-                    group_cached_tokens,
-                    block.block_hash_num_tokens or 0,
-                )
+            for block in reversed(blocks):
+                if block.block_hash_num_tokens:
+                    group_cached_tokens = block.block_hash_num_tokens
+                    break
 
             cached_tokens = (
                 group_cached_tokens

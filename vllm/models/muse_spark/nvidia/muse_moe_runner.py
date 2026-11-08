@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MuseSpark1x MoE: routing, experts and the post-expert-norm finalize.
+"""Muse Spark MoE: routing, experts and the post-expert-norm finalize.
 
 Every expert backend stops after GEMM2 and hands its rows to the finalizer.
 """
@@ -58,10 +58,10 @@ from vllm.model_executor.layers.quantization.modelopt import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import refill_derived, replace_parameter
 from vllm.models.muse_spark.common.moe import (  # noqa: F401 re-exported
-    MuseSpark1xRouter,
     MuseSparkConsolidatedRoutedExperts,
+    MuseSparkRouter,
     needs_pre_norm_all_reduce,
 )
 from vllm.models.muse_spark.common.moe import (
@@ -110,7 +110,7 @@ def validate_deployment(moe_config: FusedMoEConfig, *, kernel_routes: bool) -> N
     routing_method = moe_config.routing_method
     if kernel_routes and routing_method != RoutingMethodType.MiniMax2:
         raise NotImplementedError(
-            "MuseSpark1x on the monolithic TRT-LLM kernel needs it to run the "
+            "Muse Spark on the monolithic TRT-LLM kernel needs it to run the "
             "router, which requires the routing to classify as MiniMax2 "
             "(sigmoid + expert bias + sum-renormalize, no expert groups, "
             f"route_scale == 1.0); this checkpoint classifies as "
@@ -118,20 +118,20 @@ def validate_deployment(moe_config: FusedMoEConfig, *, kernel_routes: bool) -> N
         )
     if moe_config.is_lora_enabled:
         raise NotImplementedError(
-            "MuseSpark1x post-expert norm does not support MoE LoRA: the LoRA "
+            "Muse Spark post-expert norm does not support MoE LoRA: the LoRA "
             "path applies the top-k weights alongside GEMM2."
         )
     if parallel_config.enable_eplb:
-        raise NotImplementedError("MuseSpark1x post-expert norm does not support EPLB.")
+        raise NotImplementedError("Muse Spark post-expert norm does not support EPLB.")
     if parallel_config.is_sequence_parallel and not parallel_config.use_all2all_kernels:
         # Without an all2all combine the pre-norm all-reduce would mix tokens.
         raise NotImplementedError(
-            "MuseSpark1x post-expert norm does not support sequence-parallel "
+            "Muse Spark post-expert norm does not support sequence-parallel "
             "MoE without an all2all combine."
         )
     if moe_config.skip_final_all_reduce:
         raise NotImplementedError(
-            "MuseSpark1x post-expert norm all-reduces TP partials before the "
+            "Muse Spark post-expert norm all-reduces TP partials before the "
             "norm, so it cannot hand back an un-reduced output for a fused "
             "downstream all-reduce."
         )
@@ -142,7 +142,7 @@ def _validate_route_major_deployment(moe_config: FusedMoEConfig) -> None:
     parallel_config = moe_config.moe_parallel_config
     if parallel_config.dp_size != 1 or parallel_config.pcp_size != 1:
         raise NotImplementedError(
-            "MuseSpark1x Triton/Marlin currently requires DP1 and PCP1."
+            "Muse Spark Triton/Marlin currently requires DP1 and PCP1."
         )
 
 
@@ -412,17 +412,30 @@ class MusePostExpertFinalize:
     ) -> torch.Tensor:
         """Norm weight in the activation dtype; the gain centre is added in fp32."""
         if self._fused_weight is None:
-            norm = self._norm
-            if norm.has_weight:
-                weight = norm.weight.detach()
-                assert weight.shape == (norm.hidden_size,), (
-                    f"post-expert norm weight is {tuple(weight.shape)}, expected "
-                    f"({norm.hidden_size},)"
-                )
-            else:
-                weight = torch.ones(norm.hidden_size)
-            self._fused_weight = weight.to(dtype=dtype, device=device).contiguous()
+            self._fused_weight = self._norm_weight(dtype, device)
         return self._fused_weight
+
+    def _norm_weight(self, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        norm = self._norm
+        if norm.has_weight:
+            weight = norm.weight.detach()
+            assert weight.shape == (norm.hidden_size,), (
+                f"post-expert norm weight is {tuple(weight.shape)}, expected "
+                f"({norm.hidden_size},)"
+            )
+        else:
+            weight = torch.ones(norm.hidden_size)
+        return weight.to(dtype=dtype, device=device).contiguous()
+
+    def process_weights_after_loading(self) -> None:
+        """Refill the activation-dtype norm weight (built on the first forward,
+        once the dtype is known) in place after a reload."""
+        if self._fused_weight is not None:
+            refill_derived(
+                self,
+                "_fused_weight",
+                self._norm_weight(self._fused_weight.dtype, self._fused_weight.device),
+            )
 
     def _finalize_chunk(
         self,
@@ -466,6 +479,8 @@ class _MuseSparkNvFp4Scales:
     gemm1_clamp_limit: torch.Tensor | None
     gemm1_alpha: torch.Tensor | None
     gemm1_beta: torch.Tensor | None
+    # g1_scale_c is registered below; there is no SwiGLU constant to keep
+    kept_constants: tuple[str, ...] = ()
 
     def _compute_g1_scale_c(self) -> torch.Tensor:
         quant_config = self.quant_config
@@ -483,10 +498,7 @@ class _MuseSparkNvFp4Scales:
             and self.gemm1_alpha is None
             and self.gemm1_beta is None
         ), "MuseSpark NVFP4 MoE does not support SwiGLU clamp/alpha/beta"
-        layer.register_parameter(
-            "g1_scale_c",
-            torch.nn.Parameter(self._compute_g1_scale_c(), requires_grad=False),
-        )
+        replace_parameter(layer, "g1_scale_c", self._compute_g1_scale_c())
         self.g1_scale_c = layer.g1_scale_c
 
 
@@ -643,15 +655,21 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
         # Collapsed to the global max and repeated per expert.
         a13 = a13_scale[0:1]
         a2 = a2_scale[0:1]
-        g1_alphas = (a13 * w13_weight_scale_2[:, 0]).contiguous()
-        g1_scale_c = (a13 * w13_weight_scale_2[:, 1] / a2).contiguous()
-        g2_alphas = (a2 * layer.w2_weight_scale_2.data).contiguous()
+        g1_alphas = refill_derived(
+            layer, "_g1_alphas", (a13 * w13_weight_scale_2[:, 0]).contiguous()
+        )
+        g1_scale_c = refill_derived(
+            layer, "_g1_scale_c", (a13 * w13_weight_scale_2[:, 1] / a2).contiguous()
+        )
+        g2_alphas = refill_derived(
+            layer, "_g2_alphas", (a2 * layer.w2_weight_scale_2.data).contiguous()
+        )
 
         base_config = nvfp4_moe_quant_config(
             g1_alphas=g1_alphas,
             g2_alphas=g2_alphas,
-            a1_gscale=1.0 / a13,
-            a2_gscale=1.0 / a2,
+            a1_gscale=refill_derived(layer, "_a1_gscale", 1.0 / a13),
+            a2_gscale=refill_derived(layer, "_a2_gscale", 1.0 / a2),
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             # The TRT-LLM kernel rejects swizzled activation scale factors.
@@ -667,6 +685,7 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
             backend=self.nvfp4_backend,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
         _attach_post_expert_finalize(self)
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
@@ -724,6 +743,7 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
             backend=NvFp4MoeBackend.MARLIN,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
 
     def get_fused_moe_quant_config(
         self, layer: "MuseSparkRoutedExperts"
@@ -789,7 +809,7 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
 
 
 class MuseMoERunner(MoERunner):
-    """MoE runner that splices MuseSpark1x's post-expert norm into the experts."""
+    """MoE runner that splices Muse Spark's post-expert norm into the experts."""
 
     def __init__(
         self,
@@ -813,6 +833,10 @@ class MuseMoERunner(MoERunner):
             routed_experts.quant_method,
         )
         quant_method.muse_post_expert_finalize = self.post_expert_finalize
+
+    def process_weights_after_loading(self) -> None:
+        super().process_weights_after_loading()
+        self.post_expert_finalize.process_weights_after_loading()
 
     @property
     def _prepared_nvfp4_experts(self) -> MuseSparkTrtLlmNvFp4Experts | None:
