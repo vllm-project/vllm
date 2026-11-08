@@ -83,6 +83,16 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             parallel_config.use_sequence_parallel_moe
             and parallel_config.pipeline_parallel_size == 1
         )
+        self.replicate_attn = envs.VLLM_DSA_REPLICATE_ATTN
+        if self.replicate_attn and (
+            parallel_config.use_sequence_parallel_moe
+            or parallel_config.decode_context_parallel_size > 1
+            or parallel_config.prefill_context_parallel_size > 1
+        ):
+            raise NotImplementedError(
+                "VLLM_DSA_REPLICATE_ATTN is not supported with sequence-parallel "
+                "MoE or decode/prefill context parallelism."
+            )
 
         self.self_attn = DeepseekV32Attention(
             vllm_config=vllm_config,
@@ -90,6 +100,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
             index_group_builder=index_group_builder,
+            replicate=self.replicate_attn,
         )
 
         if (
@@ -155,6 +166,11 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         if use_sequence_parallel:
             hidden_states = sp_reduce_scatter(hidden_states)
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual
+            )
+        elif self.replicate_attn:
+            # Replicated attention output is already complete on every rank.
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
             )

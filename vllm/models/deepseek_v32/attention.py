@@ -136,6 +136,7 @@ class DeepseekV32Attention(MLAAttention):
         topk_indices_buffer: torch.Tensor | None = None,
         attn_backend: "type | None" = None,
         index_group_builder: "SparseMLAIndexGroupBuilder | None" = None,
+        replicate: bool = False,
     ) -> None:
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
@@ -148,7 +149,8 @@ class DeepseekV32Attention(MLAAttention):
         kv_lora_rank = config.kv_lora_rank
         num_heads = config.num_attention_heads
 
-        tp_size = get_tensor_model_parallel_world_size()
+        # replicate: every rank holds all heads, o_proj output is complete.
+        tp_size = 1 if replicate else get_tensor_model_parallel_world_size()
         assert num_heads % tp_size == 0
         num_local_heads = num_heads // tp_size
         qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
@@ -180,6 +182,7 @@ class DeepseekV32Attention(MLAAttention):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj",
+            disable_tp=replicate,
         )
         indexer = None
         if not skip_topk or is_mtp_layer:
@@ -212,9 +215,24 @@ class DeepseekV32Attention(MLAAttention):
             index_group_builder=index_group_builder,
             attn_backend=attn_backend,
             # MTP draft steps reuse each token slot's top-k, which ShardQ's
-            # compact per-rank layout would break.
-            shardq_eligible=not is_mtp_layer,
+            # compact per-rank layout would break. ShardQ also splits heads
+            # across TP ranks, so replicated layers keep it off.
+            shardq_eligible=not is_mtp_layer and not replicate,
         )
+        if replicate and hasattr(self.impl, "masked_mha_available"):
+            from vllm.model_executor.layers.attention.sparse_mla_attention import (
+                _is_masked_mha_available,
+            )
+
+            # The impl infers total heads as local * TP; here local is total.
+            self.impl.masked_mha_available = _is_masked_mha_available(
+                num_heads,
+                kv_lora_rank,
+                qk_nope_head_dim,
+                qk_rope_head_dim,
+                v_head_dim,
+                self.kv_cache_dtype,
+            )
 
         self.num_local_heads = num_local_heads
         self.qk_head_dim = qk_head_dim
@@ -262,6 +280,7 @@ class DeepseekV32Attention(MLAAttention):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.q_b_proj",
+            disable_tp=replicate,
         )
         self.kv_a_layernorm = RMSNorm(kv_lora_rank, eps=config.rms_norm_eps)
 
@@ -272,6 +291,7 @@ class DeepseekV32Attention(MLAAttention):
             reduce_results=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            disable_tp=replicate,
         )
 
         self.rotary_emb = get_rope(
