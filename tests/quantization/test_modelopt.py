@@ -810,7 +810,6 @@ def test_modelopt_mixed_dspark_checkpoint(tmp_path, monkeypatch, vllm_runner):
     from vllm import SamplingParams
 
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     target, draft = tmp_path / "target", tmp_path / "draft"
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
@@ -1375,7 +1374,6 @@ def test_modelopt_fp8_pb_wo_hides_output_padding(monkeypatch):
     method.wkey = mo.SCHEME_FOR[kFp8Static128BlockSym]
     method.akey = mo.SCHEME_FOR[kFp8Dynamic128Sym]
     method.input_dtype = method.out_dtype = torch.bfloat16
-    method.marlin_input_dtype = None
 
     layer = torch.nn.Module()
     with (
