@@ -152,7 +152,7 @@ FUSED_MOE_FINALIZE_MAX_TOKENS = 128
 
 
 def fused_moe_finalize_max_tokens(tp_size: int) -> int:
-    """The cap at ``tp_size``. Each rank reduces ``tp_size`` rows per token, so
+    """The cap at `tp_size`. Each rank reduces `tp_size` rows per token, so
     above TP4 the cap shrinks to keep that at TP4's measured load."""
     return min(
         FUSED_MOE_FINALIZE_MAX_TOKENS, FUSED_MOE_FINALIZE_MAX_TOKENS * 4 // tp_size
