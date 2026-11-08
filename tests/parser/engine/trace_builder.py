@@ -46,8 +46,10 @@ from vllm.parser.engine.registered_adapters import (
     NemotronV3Parser,
     Plamo3Parser,
     Qwen3Parser,
+    RippleParser,
     SeedOssParser,
     Step3p5Parser,
+    ZayaParser,
 )
 
 # ── Data structures ──────────────────────────────────────────────────
@@ -464,6 +466,20 @@ def _build_step3p5(scenario: Scenario, validate: bool = True) -> Sample:
     )
 
 
+def _build_zaya(scenario: Scenario, validate: bool = True) -> Sample:
+    """ZAYA1: the Qwen3 grammar with ``<zyphra_tool_call>`` tags."""
+    sample = _build_qwen3(scenario, name="zaya", validate=False)
+    rename = {"<tool_call>": ZayaParser.TOOL_START, "</tool_call>": ZayaParser.TOOL_END}
+    sample = replace(
+        sample,
+        vocab={rename.get(text, text): tid for text, tid in sample.vocab.items()},
+        tokens=[(tid, rename.get(text, text)) for tid, text in sample.tokens],
+    )
+    if validate:
+        _validate_sample(sample, ZayaParser)
+    return sample
+
+
 # ── MiniMax M2 (XML invoke format, starts in REASONING) ──────────────
 
 _MINIMAX_M2_VOCAB: dict[str, int] = {
@@ -491,9 +507,11 @@ def _minimax_m2_tool_segments(tool_calls: list[ToolCallSpec]) -> list[tuple[str,
         for key, value in tc.arguments.items():
             segs.append(
                 (
-                    f'<parameter name="{key}">'
-                    f"{_minimax_m2_arg_value(value)}"
-                    "</parameter>",
+                    (
+                        f'<parameter name="{key}">'
+                        f"{_minimax_m2_arg_value(value)}"
+                        "</parameter>"
+                    ),
                     False,
                 )
             )
@@ -1244,6 +1262,42 @@ def _build_plamo3(scenario: Scenario, validate: bool = True) -> Sample:
     return sample
 
 
+# ── Ripple (optional plain-text <think>, JSON tool calls) ────────────
+
+
+def _ripple_segments(scenario: Scenario) -> list[tuple[str, bool]] | None:
+    if scenario.tool_calls is not None and not scenario.tool_calls:
+        return None
+    text = ""
+    if scenario.reasoning is not None:
+        text += f"<think>\n{scenario.reasoning}\n</think>\n"
+    text += scenario.content or ""
+    for tc in scenario.tool_calls or []:
+        body = json.dumps({"name": tc.name, "arguments": tc.arguments})
+        text += f"\n<tool_call>\n{body}\n</tool_call>"
+    return [(text, False)]
+
+
+def _build_ripple(scenario: Scenario, validate: bool = True) -> Sample | None:
+    segments = _ripple_segments(scenario)
+    if segments is None:
+        # Ripple's template never emits an empty tool block.
+        return None
+    sample = _make_sample(
+        sample_id=f"ripple-{scenario.id}",
+        description=scenario.description,
+        vocab={},
+        segments=segments,
+        expected_reasoning=scenario.reasoning or "",
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, RippleParser)
+    return sample
+
+
 # ── Granite (JSON-array tool bodies, no reasoning) ───────────────────────
 
 _GRANITE_VOCAB: dict[str, int] = {
@@ -1347,6 +1401,8 @@ _BUILDERS: dict[str, Any] = {
     "step3p5": _build_step3p5,
     "inkling": _build_inkling,
     "plamo3": _build_plamo3,
+    "ripple": _build_ripple,
+    "zaya": _build_zaya,
 }
 
 

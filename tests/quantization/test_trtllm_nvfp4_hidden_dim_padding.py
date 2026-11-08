@@ -2,10 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
+import pytest
 import torch
+import torch.nn.functional as F
 
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+from vllm.model_executor.layers.fused_moe.runner import moe_runner  # noqa: F401
+from vllm.model_executor.layers.fused_moe.runner.moe_runner_interface import (
+    MoERunnerInterface,
+)
 from vllm.model_executor.layers.quantization.utils import flashinfer_fp4_moe
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
@@ -14,6 +23,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     align_fp4_moe_hidden_dim_for_fi,
     align_fp4_moe_weights_for_fi,
 )
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import _USE_LAYERNAME, LayerName
 
 
 def test_shared_nvfp4_input_scales_have_writable_storage(monkeypatch):
@@ -158,3 +169,52 @@ def test_align_trtllm_fp4_moe_intermediate_pads_gate_and_up_separately():
     torch.testing.assert_close(out_w2_scale[:, :, : intermediate // 16], w2_scale)
     assert torch.count_nonzero(out_w2[:, :, intermediate // 2 :]) == 0
     assert torch.count_nonzero(out_w2_scale[:, :, intermediate // 16 :]) == 0
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_moe_forward_shared_gets_packed_shared_input_under_inductor():
+    """Inductor must not pass the shared experts a strided alias of the padded
+    routed input: their NVFP4 quant kernel assumes packed rows."""
+    hidden, padded_hidden, num_tokens = 2688, 2816, 64
+    name = "model.layers.0.mixer.experts"
+    shared_input_strides = []
+
+    def forward_impl(hidden_states, router_logits, shared_experts_input, input_ids):
+        shared_input_strides.append(shared_experts_input.stride())
+        return torch.zeros_like(shared_experts_input), torch.zeros_like(hidden_states)
+
+    layer = Mock(spec=MoERunnerInterface)
+    layer._forward_impl = forward_impl
+    layer_name = LayerName(name) if _USE_LAYERNAME else name
+
+    def moe_block(x, residual, norm_weight, gate_weight):
+        x = x + residual
+        x = x * torch.rsqrt(x.float().pow(2).mean(-1, keepdim=True) + 1e-5)
+        x = x.to(torch.bfloat16) * norm_weight
+        router_logits = torch.mm(x, gate_weight.t(), out_dtype=torch.float32)
+        padded = F.pad(x, (0, padded_hidden - hidden))
+        shared_out, fused_out = torch.ops.vllm.moe_forward_shared(
+            padded, router_logits, x, None, layer_name, 0
+        )
+        return shared_out + fused_out[..., :hidden]
+
+    x = torch.randn(num_tokens, hidden, device="cuda", dtype=torch.bfloat16)
+    residual = torch.randn_like(x)
+    norm_weight = torch.randn(hidden, device="cuda", dtype=torch.bfloat16)
+    gate_weight = torch.randn(128, hidden, device="cuda", dtype=torch.bfloat16)
+    torch._dynamo.mark_dynamic(x, 0)
+    torch._dynamo.mark_dynamic(residual, 0)
+
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config.static_forward_context = {name: layer}
+    with (
+        torch.inference_mode(),
+        torch._inductor.config.patch(force_disable_caches=True),
+        set_current_vllm_config(vllm_config),
+        set_forward_context(None, vllm_config),
+    ):
+        torch.compile(moe_block, backend="inductor", fullgraph=True)(
+            x, residual, norm_weight, gate_weight
+        )
+
+    assert shared_input_strides == [(hidden, 1)]

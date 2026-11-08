@@ -456,9 +456,11 @@ def test_whitespace_after_start_token(lfm2_tokenizer: TokenizerLike):
 def test_streaming_tool_call_with_large_steps(lfm2_tokenizer: TokenizerLike):
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
     model_output_deltas = [
-        f"{TOOL_CALL_START}[get_candidate_status(candidate_id='12345'), "
-        f"{PARAMETERLESS_FUNCTION_OUTPUT}, "
-        f"{EMPTY_LIST_FUNCTION_OUTPUT}]{TOOL_CALL_END}",
+        (
+            f"{TOOL_CALL_START}[get_candidate_status(candidate_id='12345'), "
+            f"{PARAMETERLESS_FUNCTION_OUTPUT}, "
+            f"{EMPTY_LIST_FUNCTION_OUTPUT}]{TOOL_CALL_END}"
+        ),
     ]
 
     reconstructor = run_tool_extraction_streaming(
@@ -634,15 +636,30 @@ def test_adjust_request_disables_skip_special_tokens(
             }
         ],
     )
-    assert request_with_tools.skip_special_tokens is True
+    assert (
+        request_with_tools.to_sampling_params(
+            1, default_sampling_params={}
+        ).skip_special_tokens
+        is True
+    )
     adjusted = tool_parser.adjust_request(request_with_tools)
     assert adjusted.skip_special_tokens is False
 
     # No tools → no override; default behaviour preserved.
     request_no_tools = ChatCompletionRequest(messages=[], model="test-model")
-    assert request_no_tools.skip_special_tokens is True
+    assert (
+        request_no_tools.to_sampling_params(
+            1, default_sampling_params={}
+        ).skip_special_tokens
+        is True
+    )
     adjusted_no_tools = tool_parser.adjust_request(request_no_tools)
-    assert adjusted_no_tools.skip_special_tokens is True
+    assert (
+        adjusted_no_tools.to_sampling_params(
+            1, default_sampling_params={}
+        ).skip_special_tokens
+        is True
+    )
 
 
 @pytest.mark.parametrize("streaming", [False])
