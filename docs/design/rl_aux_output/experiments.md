@@ -42,11 +42,12 @@ Engine events that do not occur on their own in a short test are triggered throu
 | X0 | Output sanity; KV capacity; where an R3 KV layer can attach | real numbers | pass |
 | X1 | Correctness per design | 0 missing, 0 wrong | all five designs pass |
 | X1b | Row determinism across schedules | bitwise identical | `auto` pass; `deep_gemm_mega_moe` failed, fixed |
-| X2 | Throughput with aux outputs on; engine-local store vs Mooncake at 8 replicas; each hop vs its ceiling | measured | as built about −41% at the top scenario; with partial capture and CUDA graph `FULL` −0.6% (R3) and −3.8% (all outputs) |
+| X2 | Throughput with aux outputs on; engine-local store vs Mooncake at 8 replicas; each hop vs its ceiling | measured | as built about −41% at the top scenario; with partial capture, CUDA graph `FULL` and capture off the output lock: one node at 512K −2.2% (all outputs), top scenario −2.1% to −6.1% across runs (all outputs) |
 | X4/X5 | Requested means delivered; freed once used | 0 missing, 0 leaks | pass down to a 16 MB pool |
-| X6 | Indexer compression | ratio, speed | 4.6–6.7× |
-| X7 | Hidden states fp8 vs bf16 | KL | fp8 chosen |
-| X9 | Trainer logprob recompute with R3 replay | aligned rows | pass |
+| X6 | Indexer encoding | ratio, order, bytes | 4.6–6.7× up to 128K; rows restored in engine order; deep slots out of blocks: 51.2 → 14.1 GB per run |
+| X7 | Hidden states: exact vs fp8 | logprob error, bytes, time | exact (`raw`) is the default: error max 7.8e-4 vs ~0.3 for fp8, no measurable time cost |
+| X9 | Trainer logprob recompute with R3 and indexer replay | aligned rows; gap vs a self-perturbation floor | delivered = exact; remaining gap is trainer-engine numerics |
+| E0 | KV offload to an NVMe tier | recompute, time, aux complete | −23% time and 9× less recompute with a 4 GB CPU tier; 0 missing |
 | Scale | 512K, 108 turns, shared pool | 0 missing, 0 wrong | pass |
 | Hardening | Preemption, GRPO, forks, delayed forks, in-flight weight updates, write failures, indexer gaps, writer memory, speculative decoding | 0 missing, 0 wrong vs the reference | pass (P-S) |
 
@@ -101,9 +102,13 @@ Output tokens/s on X1; differences are within run-to-run noise.
 
 ### Engine overhead relative to R3 off
 
-Every overhead is measured against R3 off, with a fixed workload, CUDA graph `FULL`, batch invariance on and no preemption.
+Every overhead is measured against R3 off, with a fixed workload, CUDA graph `FULL`, batch invariance on and no preemption. One run per arm unless stated. Arms compared on one node share that node: another node of the same type runs 4.3% slower, and one build repeated on one node differs by 2–4%, so single-node differences of a few points between single runs are not conclusions.
 
-**Cause.** On DeepSeek-V4.1 the layers past the last KV source (rest of 20, and 21–39) run in eager prefill steps only on each request's trailing rows. The build reads R3 as needing exact rows at every prompt position, so every new row of every request runs through those layers. Removing only the capture hook leaves the cost unchanged; removing that rule removes it. No process shows a Python hot spot; GPU utilization rises from 79% to 90%.
+There were two separate costs. R3 forced every new prompt row through the replay layers (GPU work). All outputs on top of R3 then cost several more points through host work on one TP rank (CPU work that stalled one GPU).
+
+#### R3: rows through the replay layers
+
+On DeepSeek-V4.1 the layers past the last KV source (rest of 20, and 21–39) run in eager prefill steps only on each request's trailing rows. The build reads R3 as needing exact rows at every prompt position, so every new row of every request runs through those layers. Removing only the capture hook leaves the cost unchanged; removing that rule removes it. No process shows a Python hot spot; GPU utilization rises from 79% to 90%.
 
 **Top scenario.** 5 TP4 replicas plus a pool node (700 GB, and 160 GB per replica node), 512K context, 16 turns, 51 sessions in flight per replica, a weight update every step, 4× GB300 per replica. Arms run in sequence on the same nodes; median replica generation time; each arm once.
 
@@ -115,11 +120,68 @@ Every overhead is measured against R3 off, with a fixed workload, CUDA graph `FU
 | partial capture, blocks only (§6.11 without cone patches) | `FULL` | −0.6% | −3.8% |
 | partial capture, blocks only | `FULL_AND_PIECEWISE` | −40.5% | −41.0% |
 
-At this scale nearly all prompt rows are new, so trimming rows already in the pool saves almost nothing. Both conditions are needed: partial capture, and CUDA graph `FULL` (with piecewise graphs the eager stages cost as much as the full rows). Generated tokens per arm differ by a few percent at this scale.
+At this scale nearly all prompt rows are new, so trimming rows already in the pool saves almost nothing. Both conditions are needed: partial capture, and CUDA graph `FULL` (with piecewise graphs the eager stages cost as much as the full rows). Generated tokens per arm differ by a few percent at this scale. With partial capture R3 costs little from here on: −0.1% in the response with cone patches (below).
 
-With cone patches, on the same GB300 nodes: R3 off 1,986.6 s, R3 in the response 1,989.1 s (−0.1%), R3 + indexer + hidden through Mooncake 2,028.7 s (−2.1%), nothing missing, readback 131–190 s per replica. The same scenario on 5 GB200 replicas (4 GPUs each) plus a pool node: R3 off 2,056.7 s, R3 in the response 2,052.6 s (no measurable cost), R3 + indexer + hidden through Mooncake 2,168.5 s (−5.2%; −4.0% as the median of per-node pairs, one node is a −17.5% outlier). Each replica writes 106.6 GB in 427,573 puts with no retry; the indexer is 91.1 GB of it (3,419 bytes per token), R3 13.2 GB, hidden 2.1 GB, cone patches 0.33 GB. On this cluster the checker's readback of one replica ran at about 25 MB/s and 6,831 keys still failed after three retries; they are reported missing, with 0 wrong rows, while the pool holds every object (no eviction). The same readback on GB300 takes 130–210 s with nothing missing. Reads of large objects that outlive the 1 s read lease are the suspect; this is the trainer-side path and is still open.
+#### All outputs: host work on the output rank
 
-**One node.** 512 closed-loop agents, 16 turns growing to 14.6K tokens, 256 output tokens per turn, same prompts and prefix hits in every arm. All arms on the same node, one run each:
+With R3 settled, the remaining cost is that of the indexer and hidden states. Its cause was not the bytes but where the host work ran.
+
+**Bytes are not the bottleneck.** On the one-node 14.6K workload (512 agents, below), dropping the deep indexer slots from blocks and compressing the cone patches cut the indexer from 51.2 to 14.1 GB per run (cone patches 0.99 GB). The all-outputs arm took 1,238.5 s, no faster than before.
+
+**What a profile shows.** All outputs against no indexer, same node, sampled at the turn plateau: GPU 0 runs at 82% against 93% (the other GPUs 91–93% in both). TP rank 0 is the output rank. It captures and assembles every request's rows while holding the connector lock, 17.6 s per 60 s with all outputs against 6.7 s without the indexer, and the engine's main thread waits on the same lock (begin step 3.0 s against 0.9 s, prepare output 2.0 s against 0.2 s). Rank 0's GPU idles while the others wait for it in collectives. The work under the lock was cone patch encoding (concatenation, masked copies, zstd), indexer block encoding and per-request capture of the indexer and hidden rows: many small per-request operations in every decode step. The writer thread was not involved: it was blocked 1.6 s in the run, and compressed indexer objects were already encoded on its thread pool.
+
+**Shrinking the work under the lock.** Each change keeps the stored bytes identical. Same node, one run each, against no indexer at 1,094.9 s:
+
+| Change, cumulative | All outputs | Over no indexer |
+|---|---|---|
+| cone patch encoding copies only the kept rows (29.3 → 17.4 ms per request) | 1,166.3 s | 71 s |
+| indexer block buffers zero-allocated; only shallow slots copied | 1,158.0 s | 63 s (within noise) |
+| hidden rows indexed per request; chunk bytes built on the writer thread | 1,148.3 s | 53 s |
+| hidden rows kept as references to the step's host arrays and stacked on the writer thread; short cone steps kept as views | 1,134.0 s | 39 s |
+
+On the first build, an arm without indexer cone patches splits the indexer's cost: 1,166.3 / 1,129.2 / 1,094.9 s (all / no indexer cones / no indexer) on this node and 1,237.3 / 1,166.9 / 1,114.6 s on a second node, so cone encoding is about half of it and block capture and encoding the rest, all on rank 0. After the last change GPU 0 runs at 88% (78% before it) and the output path holds the lock 12.3 s per 60 s (20.0 s before).
+
+**Longer contexts, same node per workload.** At 128K the indexer's share is larger than at 14.6K: 16 sessions × 6 turns gave R3 off 76.2 s, no indexer 77.3 s (−1.4%), all outputs 81.3 s (−6.3%); 48 sessions × 8 turns gave 215.9 s, 220.7 s (−2.2%), 228.4 s (−5.5%). The profile of the larger run shows GPU 0 at 90% against 96% without the indexer. Turning zstd off changed nothing (229.8 s against 228.4 s), and the cores were not contended (load 5.7 on 144 cores). What remained was the lock: capture 3.5 s and block publishing 4.3 s per 60 s.
+
+**Capture off the critical path.** Capture and per-request assembly moved to a dedicated thread, fed by one ordered queue from inside the lock, so the order of work is the order in which the output path handled requests and first-computation-wins is unchanged (protocol §6.9). The same build can run the work inline under the lock for comparison. 128K, 48 sessions × 8 turns, one run each:
+
+| Node | Threaded | Inline | No indexer |
+|---|---|---|---|
+| A | 223.5 s | 227.4 s | 222.9 s |
+| B | 222.9 s | 223.0 s | 218.7 s |
+
+All outputs now cost 0.3% and 1.9% over no indexer, against 3.3 points before. Threaded against inline is 1.7% on one node and equal on the other, so this pair alone does not establish the gain of the thread; the profiles below do. Exact hidden states (X7) on node B: 223.7 s.
+
+**512K, one node.** 8 sessions × 6 turns, all arms on the same node, one run each: R3 off 200.5 s, no indexer 201.6 s (−0.5%), all outputs 205.0 s (−2.2%). In the profile GPU 0 runs at 97% against 98% for the others, and the main thread's lock time is gone (process output 1.2 s, begin step 0.1 s per 60 s). Most of the extra time of all outputs is in turn 1, the large prefill (+1.4 s); later turns add 0.3–0.5 s each. The first attempt of this run failed in the checker, not the engine: decoding one 512K request's indexer on the GPU ran out of memory, and checkers now decode on the CPU above 100,000 rows.
+
+| Context | Workload | Capture | R3 off | No indexer | All outputs |
+|---|---|---|---|---|---|
+| 14.6K | 512 agents × 16 turns | under the lock, after the four changes | — | 1,094.9 s | 1,134.0 s |
+| 128K | 48 sessions × 8 turns | under the lock | 215.9 s | 220.7 s | 228.4 s |
+| 128K | 48 sessions × 8 turns | own thread, nodes A / B | — | 222.9 / 218.7 s | 223.5 / 222.9 s |
+| 512K | 8 sessions × 6 turns | own thread | 200.5 s | 201.6 s | 205.0 s |
+
+#### Top scenario: runs and their spread
+
+Same scenario as above (5 replicas, 512K, 51 sessions in flight per replica, a weight update every step). Each arm once per run, arms in sequence on the same nodes, 5 replicas per arm.
+
+| Run | R3 off | R3 in the response | All outputs without the indexer | All outputs |
+|---|---|---|---|---|
+| cone patches, GB300 | 1,986.6 s | 1,989.1 s (−0.1%) | — | 2,028.7 s (−2.1%) |
+| cone patches, GB200 | 2,056.7 s | 2,052.6 s (no cost) | — | 2,168.5 s (−5.2%; −4.0% median of per-node pairs) |
+| cone patches, GB300, earlier build | — | — | −0.4% | indexer 3.3 points more |
+| host work under the lock reduced, GB300 | 1,968.4 s | — | 2,013.3 s (−2.2%) | 2,096.4 s (−6.1%) |
+| capture on its own thread, GB300 | 1,999.8 s | — | −2.9% (median of per-replica pairs) | 2,084.9 s (−4.1%); −5.1% median of per-replica pairs |
+
+Times are the median replica. In the run with reduced host work one replica sat on an outlier node (−18% all outputs, −30% without the indexer); the other replicas' pairs were −3.6 to −6.2% for all outputs and −0.5 to −3.3% without the indexer, an indexer cost of about 3 points, as in the earlier build. In the capture-thread run the per-replica pairs were −5.8 / −5.4 / −4.5 / −3.8 / −5.1% for all outputs and −2.8 / −2.9 / −3.8 / −1.9 / −3.0% without the indexer, about 2.2 points for the indexer. Every run had 0 missing and 0 wrong rows.
+
+The arm without the indexer ran nearly the same code in the earlier build and in the capture-thread run, and cost −0.4% in one and −2.9% in the other. Run-to-run spread at this scale is therefore at least 2 points, and a single top run cannot resolve the effect of one change. The one-node gains (71 → 39 s over no indexer at 14.6K, the lock time gone at 512K) did not show at the top. The writer is not the cause there: in the capture-thread run puts took 0.71 ms at p99, the capture queue held at most one item, and the writer was blocked about 0 s, except on the slowest replica, which had one 4 s stall and 11.6 s blocked in all. All outputs write 53 GB per replica, against 15 GB without the indexer. Factors present only at the top, such as five replicas writing to one pool node over RDMA, are not yet tested. A repeated run with the latest build, alternating the arms twice each on the same nodes, is in progress.
+
+On the GB200 cluster the checker's readback of one replica ran at about 25 MB/s and 6,831 keys still failed after three retries; they are reported missing, with 0 wrong rows, while the pool holds every object (no eviction). The same readback on GB300 takes 130–210 s with nothing missing. Reads of large objects that outlive the 1 s read lease are the suspect; this is the trainer-side path and is still open. In that GB200 run each replica wrote 106.6 GB in 427,573 puts with no retry: indexer 91.1 GB (3,419 bytes per token, before deep slots were dropped from blocks), R3 13.2 GB, hidden 2.1 GB, cone patches 0.33 GB.
+
+#### One node, 14.6K context
+
+512 closed-loop agents, 16 turns growing to 14.6K tokens, 256 output tokens per turn, same prompts and prefix hits in every arm. All arms on the same node, one run each, before the host-work changes above:
 
 | Arm | Time | vs R3 off |
 |---|---|---|
@@ -129,11 +191,11 @@ With cone patches, on the same GB300 nodes: R3 off 1,986.6 s, R3 in the response
 | R3 + indexer + hidden through Mooncake | 1,146.3 s | −10.0% |
 | No trim (every row through layers 20–39) | 1,370.6 s | −24.7% |
 
-Arms must share a node: another node of the same type runs 4.3% slower, and one build repeated on one node differs by up to 4%, so differences under 4 points are not conclusions. The all-outputs arm costs about 7 points more than R3 alone; most of it is the indexer, which is 7× the bytes of R3. Cone patches for R3 are about 1.7 GB for 512 sessions (2.1M generated tokens).
+Cone patches for R3 are about 1.7 GB for 512 sessions (2.1M generated tokens). The 7 points between R3 and all outputs were mostly the host work above, not the indexer's 7× larger bytes.
 
-**Exactness.** Against a run without trimming, same prompts, no weight updates: every cell a sampled token depends on, plus all columns below layer 20, is bitwise identical for R3 and the indexer, in 512/512 plain sessions, 16/16 forks and 16/16 forks inside a parent's rows. 0 of 137.6M R3 cells and 0 of 36.0M indexer cells missing. With speculative decoding and a weight update every step, groups, forks, delayed forks, forced preemption and injected write failures stay at the same counts as without partial capture.
+#### Exactness
 
-**Trainer replay of the delivered bytes.** A BF16 trainer replays the delivered rows (no-replay cells run their own routing) and, separately, the exact rows of the untrimmed run. Over 8 forked samples (14,848 generated tokens), plain and interior forks, the two replays give bitwise identical logprobs, and a repeat is bitwise identical too. The trainer's own indexer top-k overlaps the delivered cells by 0.90 on average (0.67 against the previous row, which checks alignment); the trainer has no indexer replay path yet.
+Against a run without trimming, same prompts, no weight updates: every cell a sampled token depends on, plus all columns below layer 20, is bitwise identical for R3 and the indexer, in 512/512 plain sessions, 16/16 forks and 16/16 forks inside a parent's rows. 0 of 137.6M R3 cells and 0 of 36.0M indexer cells missing. Every build in the host-work and capture-thread series repeats these checks (512/512, 16/16) with 0 missing. The reader library, run against the writer's own overlay, differs in 0 of 286M replay cells and reports no needed cell missing, in plain runs and in the group, fork, delayed-fork, forced-preemption, write-failure and cut regressions. With speculative decoding and a weight update every step, groups, forks, delayed forks, forced preemption and injected write failures stay at the same counts as without partial capture.
 
 ### Engine-local store vs Mooncake, 8 replicas
 
@@ -167,10 +229,10 @@ At the top scenario (512K, 51 sessions in flight per replica, 8 replicas) each r
 
 - **One TP rank writes:** put calls equal successes; there are no redundant puts.
 - **Writer thread:** moving indexer encoding to a 4-thread pool and batching ready puts cut the writer's wait on encoding from 1,517 s to 310 s, R3 queueing from 1.5 s to 0.056 s, and scheduling pauses on writer backlog from 78–102 s to 0.
-- **Engine host time:** in the 512-agent workload above, committing outputs on the output thread averages 29 ms per step, and the full arm moves about 70 MB per step from GPU to host. Neither shows on the main loop's stacks.
+- **Engine host time:** in the 512-agent workload above, committing outputs on the output thread averages 29 ms per step, and the full arm moves about 70 MB per step from GPU to host. The copy is cheap; what cost throughput was the per-request capture work done while holding the connector lock on TP rank 0, which stalled that rank's GPU and the main thread (engine overhead, above). It now runs on its own thread.
 - **Trainer read:** 126–207 s to read back the 51 sessions (down from 857–914 s), with indexer decoding on the GPU where replay runs (protocol §7).
 
-## Indexer (X6) and hidden states (X7)
+## Indexer encoding (X6)
 
 A token's indexer row is 8 source layers × top-512 = 4,096 positions.
 
@@ -183,7 +245,17 @@ A token's indexer row is 8 source layers × top-512 = 4,096 positions.
 
 Compression depends on context length. At long contexts the selected positions spread over the whole compressed sequence, so zstd gains less, but it still halves the stored bytes at 512K. The encoder stores the packed bytes uncompressed when zstd does not reach 90% of them.
 
+**Sorted deltas in byte planes.** The current codec stores each cell's positions as deltas from the previous position and splits the deltas into byte planes before zstd. The positions of a cell are already ascending, so the deltas are small and their high planes compress well. The codec is named in the manifest and in each object's header (protocol §3).
+
+**Pads stay last.** The engine's top-k, and the trainer's top-k kernel that replay must match, emit a cell as ascending positions with the `-1` pads at the end; this held for every row of a captured data set. A decoder must restore exactly that order. One delta decoder put the pads first, so 9–12% of rows started with `-1`. Every check and review compared cells as sets and passed, and trainer indexer replay gained nothing until the decoders were fixed to rotate the pads back to the end (X9). Tests now compare decoded cells byte for byte in engine order.
+
+**Fewer bytes under partial capture.** Deep slots (layers 20 and up) of block objects are never read under partial capture, since deep cells come from cone patches, so blocks no longer store them, and cone patches are compressed. On the one-node 14.6K workload this cut the indexer from 51.2 to 14.1 GB per run, with 0.99 GB of cone patches. At the top scenario all outputs now write 53 GB per replica (15 GB without the indexer). None of this changed throughput; the cost was elsewhere (engine overhead).
+
 Selections are bitwise identical across runs under batch invariance. Through the delivery path (112 requests) the indexer matched an independent in-engine capture bitwise (551 B stored per token thanks to block sharing).
+
+## Hidden states (X7)
+
+The hidden state is the input of `lm_head`; the trainer multiplies it by the LM head to get full-vocabulary logits. Comparisons against vLLM's logits:
 
 | Hidden states | Result |
 |---|---|
@@ -191,11 +263,13 @@ Selections are bitwise identical across runs under batch invariance. Through the
 | bf16 | max abs diff 0.062 |
 | fp8 e4m3 + per-token scale | full-vocabulary KL mean 4.4e-4–8.7e-4, max 1.9e-3–2.8e-3; argmax agreement 98–100% |
 
-Through the delivery path every hidden row was the exact fp8 requantization; KL mean 7.7e-4, max 0.012.
+Through the delivery path every fp8 row was the exact requantization; KL mean 7.7e-4, max 0.012.
 
-## Trainer-side replay (X9)
+**Exact delivery is the default.** Codec `raw` stores the rows in the dtype that enters the LM head, float32 on this build: 16 KB per generated token, against 4.1 KB for fp8. Recomputing the sampled tokens' logprobs from the delivered rows gives an error of max 7.8e-4 and mean 3e-6, against a max of about 0.3 with fp8; the residual is the checker's own matmul, which is not bitwise equal to vLLM's (first row of the table). In every later regression the max stays at or below 6.7e-4 with 0 bad rows, including across forced preemption. Cost on the 128K one-node workload (same node, one run each): 223.7 s against 222.9 s with fp8, within noise, with 1.0 GB of hidden states in the run. fp8 stays available and produces the same bytes as before.
 
-R3 rows for 16 sessions were replayed in a BF16 trainer (TP1/EP16), forward only.
+## Trainer-side replay and training-inference mismatch (X9)
+
+**R3 replay, first test.** R3 rows for 16 sessions were replayed in a BF16 trainer (TP1/EP16), forward only.
 
 - Alignment: 2% of tokens differ in their expert set at layer 0 when aligned, ~100% when shifted by ±1 position or compared against the wrong layer.
 - The real routing gap grows with depth (16% at layer 1, 40–85% deep).
@@ -204,6 +278,29 @@ R3 rows for 16 sessions were replayed in a BF16 trainer (TP1/EP16), forward only
 |---|---|---|
 | Replay off | 0.175 | 8.15 |
 | Replay on | 0.082 | 3.09 |
+
+**Delivered rows are the exact rows.** Under partial capture a BF16 trainer replays the delivered rows (no-replay cells run their own routing) and, separately, the exact rows of an untrimmed run. Over 8 forked samples (14,848 generated tokens), plain and interior forks, the two replays give bitwise identical logprobs, and a repeat is bitwise identical too. Without indexer replay the trainer's own indexer top-k overlaps the delivered cells by 0.90 on average (0.67 against the previous row, which checks alignment).
+
+**Indexer replay.** The trainer replays delivered indexer cells too, and already emulates the engine's NVFP4 KV cache (quantize on insert, dequantize on gather, 528 B per token). On fork data decoded with pads first (X6), adding indexer replay gave nothing: mean |Δlogprob| 0.0294 with R3, 0.0303 with R3 + indexer. On new fork data decoded in engine order:
+
+| Replay | Mean abs logprob diff |
+|---|---|
+| none | 0.0489 and 0.0505 (one run each) |
+| R3 | 0.03413 |
+| R3 + indexer | 0.03285 (−3.8%) |
+
+Delivered equals exact here as well, and repeats are bitwise identical. The two data sets are different rollouts, so their numbers are not comparable with each other.
+
+**Self-perturbation floor.** To judge the remaining 0.033, the same delivered data was scored twice with one rounding change in the trainer: the LM head in fp32 and in bf16. KL is the k3 estimator per token.
+
+| | Mean abs diff | Median | p99 | KL mean | KL median |
+|---|---|---|---|---|---|
+| floor: trainer fp32 head vs bf16 head | 0.0066 | 8e-5 | 0.068 | 1.4e-4 | 1.7e-8 |
+| trainer vs rollout | 0.0329 | 4.2e-4 | 0.44 | 4.8e-3 | 9.2e-8 |
+
+**Median and mean tell different stories.** The median KL between trainer and rollout is 9.2e-8, the mean 4.8e-3. The 10% of tokens with |Δ| > 0.1 carry 75% of the mean, spread evenly over positions in the turn. A median alone hides that tail, so both are reported. Another system's published report gives a median KL of 2.2e-4 and a mean |Δ| of 0.0085, on a different model; numbers from different models, and medians against means, are not comparable.
+
+**What the remaining gap is.** Not sampling parameters: the rollout logprobs are raw, at temperature 1. Not cells the trainer computes itself: replay of the exact rows gives the same logprobs bitwise. Not delivery: delivered rows equal the exact rows. The gap between trainer and rollout, about 5× the floor in mean and median, is trainer-engine numerics outside the delivery (expert precision and similar), and belongs to the train-inference consistency work, not to this protocol.
 
 ## Scale
 
@@ -221,6 +318,29 @@ The third run exposed two store requirements, now in protocol §9:
 
 - Without pinning, an in-flight cap sized for short-context indexer bytes let 1.3 TB into a 700 GB pool, and Mooncake evicted 1.81M keys.
 - Taking down a finished replica's segment removed objects of the replicas still reading.
+
+## KV offload to an SSD tier (E0)
+
+A trajectory that waits for many weight versions loses its KV from the GPU, and its next turn recomputes the whole context unless a lower tier still holds it. E0 tests a tier on the node's local NVMe below the CPU tier: does the resumed context load instead of recomputing, and does aux delivery stay complete when KV comes from the tier?
+
+**Setup.** vLLM's offloading connector with a tiering spec: a CPU tier, and a filesystem tier on local NVMe. 128K context, all outputs with partial capture. Each pair of arms ran on one node, one run per arm.
+
+**Forcing a spill.** With the full GPU KV (10.3M tokens) the workload (48 sessions × 12 turns, 6.3M tokens) never left the GPU: 34.6M of 40.8M tokens were prefix hits on the GPU and the tiers served nothing (267.8 s CPU only, 269.7 s with the tier). Restricting the KV to about a quarter, with at most 8 running requests (48 × 6 turns), still kept every prior context on the GPU (294.4 s, 297.4 s; the tier wrote 26 GB and read nothing). The runs below use about 1/16 of the KV and at most 4 running requests, 48 sessions × 4 turns.
+
+| CPU tier | NVMe tier | Generation time | Old context recomputed |
+|---|---|---|---|
+| 20 GB | no | 304.0 s | 0.115M tokens |
+| 20 GB | yes | 313.0 s | 0.017M tokens |
+| 4 GB | no | 411.9 s | 5.69M tokens |
+| 4 GB | yes | 317.9 s (−23%) | 0.61M tokens |
+
+A 20 GB CPU tier already holds nearly all of it; the NVMe tier then removes the rest of the recompute and adds 9 s in this run. With a 4 GB CPU tier the NVMe tier is what saves the run: it wrote 47.8 GB and read 38.7 GB in 27 s, with 32,826 of 33,021 chunk lookups hitting (99.4%). The residual 0.61M tokens of recompute come with 18 promotion failures: a chunk read from NVMe goes through the CPU tier, and 4 GB had no room for it, so the engine recomputed. Aux delivery stayed complete in every arm: 0 missing rows, 0 uncovered cone cells, 0 preemptions, also with KV loaded from the tier.
+
+**Configuration.**
+
+- **Offload generated tokens too.** The next turn's prompt contains the previous turn's output; with prompt-only offload that part is always recomputed.
+- **There is no backpressure.** Under the default policy a store the tier cannot take is dropped, and its blocks are recomputed later. A full SSD degrades the same way, silently, so drops and tier fill need monitoring.
+- **Size the CPU tier for promotion,** not only as a cache: every NVMe hit passes through it.
 
 ## Correctness hardening
 
