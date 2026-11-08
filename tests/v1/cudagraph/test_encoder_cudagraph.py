@@ -188,6 +188,7 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     mgr.graph_pool = None
     mgr._shared_input_buffers = {}
     mgr._shared_output_buffers = {}
+    mgr._shared_input_keys = {}
     mgr._capture_axes = ()
     mgr.graph_hits = 0
     mgr.graph_misses = 0
@@ -649,6 +650,7 @@ def _make_manager_for_gpu(
     mgr.graph_pool = None
     mgr._shared_input_buffers = {}
     mgr._shared_output_buffers = {}
+    mgr._shared_input_keys = {}
     mgr._capture_axes = ()
     mgr.graph_hits = 0
     mgr.graph_misses = 0
@@ -1802,17 +1804,39 @@ class TestSharedCaptureBuffers:
                 torch.testing.assert_close(actual, eager)
         assert self.mgr.graph_hits == 4
 
+    def test_replay_without_shared_buffer_raises(self):
+        # Smaller budgets overwrote dummy_buf's capture-time contents, so a
+        # replay that leaves it out must fail loudly.
+        prepare = self.model.prepare_encoder_cudagraph_replay_buffers
+
+        def without_dummy_buf(*args, **kwargs):
+            replay = prepare(*args, **kwargs)
+            replay.values["dummy_buf"] = None
+            return replay
+
+        mm_kwargs = _make_mm_kwargs([[1, 4, 4]], self.device, self.dtype)
+        with (
+            patch.object(
+                self.model,
+                "prepare_encoder_cudagraph_replay_buffers",
+                side_effect=without_dummy_buf,
+            ),
+            pytest.raises(RuntimeError, match="'dummy_buf' is shared"),
+        ):
+            self.mgr.execute(mm_kwargs)
+
     def test_clear_releases_shared_buffers(self):
         self.mgr.clear()
         assert self.mgr._shared_input_buffers == {}
         assert self.mgr._shared_output_buffers == {}
+        assert self.mgr._shared_input_keys == {}
 
 
 class VarShapeMockViTModel(SimpleMockViTModel):
     """Adds capture buffers that exercise the sharing fallback.
 
-    `scalar` is 0-dim and must be shared wholesale; `odd_buf` changes
-    its trailing dimension per budget and must keep its own allocation.
+    `scalar` is 0-dim and holds its budget, and `odd_buf` changes its
+    trailing dimension per budget; both must keep their own allocation.
     """
 
     def prepare_encoder_cudagraph_capture_inputs(
@@ -1858,12 +1882,11 @@ class TestSharedBufferFallback:
         self.graph_pool = current_platform.graph_pool_handle()
         self.mgr.capture(graph_pool=self.graph_pool)
 
-    def test_scalar_buffers_are_shared(self):
+    def test_scalar_buffers_keep_own_value(self):
         metas = list(self.mgr.budget_graphs["default"].values())
-        storages = {
-            m.input_buffers["scalar"].untyped_storage().data_ptr() for m in metas
-        }
-        assert len(storages) == 1
+        assert [float(m.input_buffers["scalar"]) for m in metas] == [
+            float(m.token_budget) for m in metas
+        ]
 
     def test_incompatible_trailing_dim_keeps_own_allocation(self):
         metas = list(self.mgr.budget_graphs["default"].values())
@@ -1886,3 +1909,24 @@ class TestSharedBufferFallback:
         outputs = self.mgr.execute(mm_kwargs)
         for actual, eager in zip(outputs, expected):
             torch.testing.assert_close(actual, eager)
+
+
+def test_step3_vl_postprocess_clones_global_only_item():
+    """With clone=True, an image without local patches must not alias the
+    global graph output, which later replays overwrite."""
+    from vllm.model_executor.models.step3_vl import Step3VLForConditionalGeneration
+
+    model = SimpleNamespace(img_output_tokens=4, patch_output_tokens=1)
+    global_out = torch.randn(4, _HIDDEN)
+    dest: dict[int, torch.Tensor] = {}
+    Step3VLForConditionalGeneration.postprocess_encoder_output(
+        model,  # type: ignore[arg-type]
+        {"global": global_out},
+        indices=[0],
+        per_item_out_tokens=[],
+        dest=dest,
+        clone=True,
+        batch_mm_kwargs={"num_patches": [0]},
+    )
+    assert torch.equal(dest[0], global_out)
+    assert dest[0].data_ptr() != global_out.data_ptr()
