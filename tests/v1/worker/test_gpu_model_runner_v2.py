@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from functools import partial
@@ -604,46 +605,52 @@ def test_standalone_draft_kv_dtype_override(
     assert target.attention_config.backend == AttentionBackendEnum.FLASHINFER
 
 
-def test_state_only_cache_reaches_mrv2_initialization(monkeypatch):
-    """Real MRv2 initialization exposes typed per-slot views from core allocation."""
-    from tests.v1.core.utils import (
-        create_scheduler,
-        create_state_spec,
-        get_kv_cache_configs,
-    )
-    from vllm.config.compilation import CUDAGraphMode
+class _StateOnlyModelState:
+    """Generic model state for a state-only cache; its hooks are the defaults."""
+
+    num_new_sampled_tokens_per_step = 1
+    supports_mm_inputs = False
+    state_slots: object | None = None
+
+    def initialize_state_slots(self, bindings):
+        from vllm.v1.worker.gpu.model_states.interface import ModelState
+
+        ModelState.initialize_state_slots(self, bindings)
+
+    def post_warmup(self):
+        from vllm.v1.worker.gpu.model_states.interface import ModelState
+
+        ModelState.post_warmup(self)
+
+    def shutdown(self):
+        from vllm.v1.worker.gpu.model_states.interface import ModelState
+
+        ModelState.shutdown(self)
+
+    def get_additional_cg_support(self):
+        from vllm.v1.attention.backend import AttentionCGSupport
+
+        return AttentionCGSupport.ALWAYS, None
+
+    def initialize_kv_cache(self, cache_config, block_tables):
+        return None
+
+
+def _state_only_config(monkeypatch):
+    from tests.v1.core.utils import create_scheduler
     from vllm.platforms import current_platform
-    from vllm.v1.attention.backend import AttentionCGSupport
-    from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.worker.gpu import buffer_utils
-    from vllm.v1.worker.gpu.model_states.interface import ModelState
 
     monkeypatch.setattr(buffer_utils, "is_uva_available", lambda: False)
     monkeypatch.setattr(current_platform, "device_type", "cpu")
     config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
     config.cache_config.kv_cache_layout = "LBNHC"
-    state = create_state_spec()
-    plan = get_kv_cache_configs(config, [{"state": state}], [96])[0]
-    from vllm.model_executor.layers.state import PersistentStateLayerBase
-    from vllm.v1.worker.gpu.attn_utils import get_kv_cache_spec
+    return config
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-    with pytest.raises(ValueError, match="require Model Runner V2"):
-        PersistentStateLayerBase(state, prefix="state", vllm_config=config)
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    PersistentStateLayerBase(state, prefix="state", vllm_config=config)
-    assert get_kv_cache_spec(config)["state"] == state
 
-    class _ModelState:
-        num_new_sampled_tokens_per_step = 1
-        initialize_state_slots = ModelState.initialize_state_slots
-
-        def get_additional_cg_support(self):
-            return AttentionCGSupport.ALWAYS, None
-
-        def initialize_kv_cache(self, cache_config, block_tables):
-            assert len(cache_config.kv_cache_groups) == 1
-            assert block_tables.num_kv_cache_groups == 1
+def _state_only_runner(monkeypatch, config, model_state):
+    """A CPU runner whose ``initialize_kv_cache`` runs unmodified."""
+    from vllm.config.compilation import CUDAGraphMode
 
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.batch_sharder = None
@@ -669,16 +676,59 @@ def test_state_only_cache_reaches_mrv2_initialization(monkeypatch):
     runner.max_num_reqs = 2
     runner.max_num_tokens = 32
     runner.device = torch.device("cpu")
-    runner.model_state = _ModelState()
+    runner.model_state = model_state
     runner.model = torch.nn.Module()
     runner.decode_query_len = 1
     runner.lora_capture_cases = []
+    runner.lora_config = None
+    runner.aux_output_connector = None
     monkeypatch.setattr(
         config.compilation_config,
         "resolve_cudagraph_mode_and_sizes",
         lambda *a, **kw: CUDAGraphMode.NONE,
     )
     monkeypatch.setattr(model_runner_module, "ModelCudaGraphManager", Mock())
+    return runner
+
+
+def _state_plan(config):
+    """Three pages of the generic test state spec."""
+    from tests.v1.core.utils import create_state_spec, get_kv_cache_configs
+
+    return get_kv_cache_configs(config, [{"state": create_state_spec()}], [96])[0]
+
+
+def _initialized_state_runner(monkeypatch, model_state, **kwargs):
+    config = _state_only_config(monkeypatch)
+    runner = _state_only_runner(monkeypatch, config, model_state)
+    runner.initialize_kv_cache(_state_plan(config), **kwargs)
+    return runner
+
+
+def test_state_only_cache_reaches_mrv2_initialization(monkeypatch):
+    """Real MRv2 initialization exposes typed per-slot views from core allocation."""
+    from tests.v1.core.utils import create_state_spec
+    from vllm.model_executor.layers.state import PersistentStateLayerBase
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+    from vllm.v1.worker.gpu.attn_utils import get_kv_cache_spec
+
+    config = _state_only_config(monkeypatch)
+    state = create_state_spec()
+    plan = _state_plan(config)
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    with pytest.raises(ValueError, match="require Model Runner V2"):
+        PersistentStateLayerBase(state, prefix="state", vllm_config=config)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    PersistentStateLayerBase(state, prefix="state", vllm_config=config)
+    assert get_kv_cache_spec(config)["state"] == state
+
+    class _ModelState(_StateOnlyModelState):
+        def initialize_kv_cache(self, cache_config, block_tables):
+            assert len(cache_config.kv_cache_groups) == 1
+            assert block_tables.num_kv_cache_groups == 1
+
+    runner = _state_only_runner(monkeypatch, config, _ModelState())
     runner.initialize_kv_cache(plan, is_profiling=True)
     assert runner.block_tables.block_sizes == [1]
     assert runner.state_slots is not None
@@ -716,6 +766,505 @@ def test_state_only_cache_reaches_mrv2_initialization(monkeypatch):
     assert torch.all(views.view("c", c)["hidden"] == 1)
     with pytest.raises(ValueError, match="Stale"):
         allocator.complete(a, 10)
+
+
+def _state_bindings(num_pages=4):
+    from tests.v1.core.utils import create_state_spec
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+    from vllm.v1.worker.gpu.state_slots import StateSlotBindings
+
+    spec = create_state_spec()
+    raw = torch.zeros(num_pages * spec.page_size_bytes, dtype=torch.uint8)
+    return StateSlotBindings([KVCacheGroupSpec(["state"], spec)], {"state": raw}), raw
+
+
+@contextlib.contextmanager
+def _runner_log_records() -> Iterator[list[logging.LogRecord]]:
+    """Collect the runner module's log records; its logger does not propagate."""
+    records: list[logging.LogRecord] = []
+
+    class _Handler(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Handler()
+    model_runner_module.logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        model_runner_module.logger.removeHandler(handler)
+
+
+def _stub_device(monkeypatch, events=None):
+    record = events.append if events is not None else lambda _: None
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: record("sync"))
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+
+
+def test_profiling_then_serving_initialization_gets_fresh_bindings(monkeypatch):
+    """Profiling and serving initialization each get their own bindings, a
+    phase flag, and a startup window that admits only their own access."""
+    from vllm.v1.worker.gpu.cudagraph_utils import _teardown_profiling_state
+    from vllm.v1.worker.gpu.state_slots import StartupPoolAccess, StateSlotBindings
+
+    seen: list[
+        tuple[StateSlotBindings, StartupPoolAccess, tuple[bool, list[bool]]]
+    ] = []
+    addresses: list[int] = []
+
+    class _ModelState(_StateOnlyModelState):
+        def initialize_state_slots(self, bindings):
+            super().initialize_state_slots(bindings)
+            stale = []
+            for _, old_access, _ in seen:
+                try:
+                    old_access.component_pools  # noqa: B018
+                except ValueError:
+                    stale.append(True)
+                else:
+                    stale.append(False)
+            access = bindings.startup_pool_access("state")
+            hidden = access.component_pools["hidden"]
+            assert hidden.shape == (3, 4)
+            addresses.append(hidden.data_ptr())
+            seen.append((bindings, access, (bindings.is_profiling, stale)))
+
+    config = _state_only_config(monkeypatch)
+    runner = _state_only_runner(monkeypatch, config, _ModelState())
+    _stub_device(monkeypatch)
+    runner.initialize_kv_cache(_state_plan(config), is_profiling=True)
+    _teardown_profiling_state(runner)
+    assert runner.state_slots is None
+    runner.initialize_kv_cache(_state_plan(config))
+    (profiling, _, first), (serving, _, second) = seen
+    assert first == (True, []) and second == (False, [True])
+    assert profiling is not serving and runner.state_slots is serving
+    # The profiling bindings are still alive, so distinct addresses mean
+    # distinct allocations rather than allocator reuse.
+    profiling_address, serving_address = addresses
+    assert profiling_address != serving_address
+
+
+def test_shutdown_calls_model_state_hook_before_releasing_state(monkeypatch):
+    """After the device synchronizes, the model state releases its resources
+    while its bindings and KV cache still exist; a repeated shutdown does not
+    call it again."""
+    events = []
+
+    class _ModelState(_StateOnlyModelState):
+        def shutdown(self):
+            events.append(
+                (
+                    "hook",
+                    getattr(runner, "model_state", None) is self,
+                    runner.state_slots is bindings,
+                    self.state_slots is bindings,
+                    len(runner.kv_caches),
+                    "state" in runner.kv_caches_by_layer,
+                )
+            )
+
+    runner = _initialized_state_runner(monkeypatch, _ModelState())
+    bindings = runner.state_slots
+    assert bindings is not None
+    runner.kv_caches.append(torch.zeros(1))
+    _stub_device(monkeypatch, events)
+    runner.shutdown()
+    assert not hasattr(runner, "model_state")
+    assert runner.state_slots is None
+    assert runner.kv_caches == [] and runner.kv_caches_by_layer == {}
+    runner.shutdown()
+    assert events == ["sync", ("hook", True, True, True, 1, True), "sync"]
+
+
+def test_shutdown_hook_tolerates_incomplete_initialization(monkeypatch):
+    """Shutdown before the KV cache exists still reaches the model state."""
+    calls = []
+
+    class _ModelState(_StateOnlyModelState):
+        def shutdown(self):
+            assert self.state_slots is None
+            calls.append(runner.state_slots)
+
+    config = _state_only_config(monkeypatch)
+    runner = _state_only_runner(monkeypatch, config, _ModelState())
+    _stub_device(monkeypatch)
+    runner.shutdown()
+    assert calls == [None]
+    assert not hasattr(runner, "model_state")
+
+
+def test_shutdown_hook_failure_is_logged_and_cleanup_continues(monkeypatch):
+    error = RuntimeError("hook failed")
+
+    class _ModelState(_StateOnlyModelState):
+        def shutdown(self):
+            raise error
+
+    runner = _initialized_state_runner(monkeypatch, _ModelState())
+    runner.kv_caches.append(torch.zeros(1))
+    assert "state" in runner.kv_caches_by_layer
+    _stub_device(monkeypatch)
+    with _runner_log_records() as records:
+        runner.shutdown()
+    failures = [r for r in records if r.exc_info is not None]
+    assert len(failures) == 1
+    assert failures[0].levelno >= logging.ERROR
+    exc_info = failures[0].exc_info
+    assert exc_info is not None and exc_info[1] is error
+    assert exc_info[2] is not None
+    assert runner.kv_caches == [] and runner.kv_caches_by_layer == {}
+    assert runner.state_slots is None
+    assert not hasattr(runner, "model_state")
+    assert not hasattr(runner, "model")
+
+
+def test_shutdown_cleanup_failure_after_hook_still_propagates(monkeypatch):
+    """Only the model state's hook is contained; later cleanup failures are not."""
+    calls = []
+
+    class _ModelState(_StateOnlyModelState):
+        def shutdown(self):
+            calls.append("hook")
+
+    def fail(vllm_config):
+        raise RuntimeError("cleanup failed")
+
+    runner = _initialized_state_runner(monkeypatch, _ModelState())
+    _stub_device(monkeypatch)
+    monkeypatch.setattr(model_runner_module, "free_before_shutdown", fail)
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        runner.shutdown()
+    assert calls == ["hook"]
+
+
+def test_startup_pool_access_expires_after_initialize_state_slots(monkeypatch):
+    """Unowned resident pools are reachable only inside slot initialization.
+
+    The startup access covers every page, including unbound ones, and is
+    refused once ``initialize_state_slots`` has returned.
+    """
+    accesses = []
+
+    class _ModelState(_StateOnlyModelState):
+        def initialize_state_slots(self, bindings):
+            super().initialize_state_slots(bindings)
+            access = bindings.startup_pool_access("state")
+            hidden = access.component_pools["hidden"]
+            assert hidden.shape == (3, 4) and hidden.dtype == torch.float32
+            assert access.spec is bindings.views["state"].spec
+            accesses.append(access)
+
+    runner = _initialized_state_runner(monkeypatch, _ModelState(), is_profiling=True)
+    (access,) = accesses
+    with pytest.raises(ValueError):
+        access.component_pools  # noqa: B018
+    with pytest.raises(ValueError):
+        access.spec  # noqa: B018
+    with pytest.raises(ValueError):
+        runner.state_slots.startup_pool_access("state")
+
+
+def test_startup_pool_access_expires_when_initialize_state_slots_raises(
+    monkeypatch,
+):
+    accesses = []
+
+    class _ModelState(_StateOnlyModelState):
+        def initialize_state_slots(self, bindings):
+            super().initialize_state_slots(bindings)
+            accesses.append(bindings.startup_pool_access("state"))
+            raise RuntimeError("capture failed")
+
+    config = _state_only_config(monkeypatch)
+    runner = _state_only_runner(monkeypatch, config, _ModelState())
+    with pytest.raises(RuntimeError, match="capture failed"):
+        runner.initialize_kv_cache(_state_plan(config), is_profiling=True)
+    (access,) = accesses
+    with pytest.raises(ValueError):
+        access.component_pools  # noqa: B018
+    with pytest.raises(ValueError):
+        runner.state_slots.startup_pool_access("state")
+
+
+def test_startup_pool_access_windows_are_per_call_and_per_bindings():
+    """Each window admits only its own accesses on its own bindings."""
+    slots, _ = _state_bindings()
+    other, _ = _state_bindings()
+    with pytest.raises(ValueError):
+        slots.startup_pool_access("state")
+    with slots.startup_access_window():
+        first = slots.startup_pool_access("state")
+        assert first.component_pools["hidden"].shape == (4, 4)
+        with pytest.raises(RuntimeError), slots.startup_access_window():
+            pass
+        assert first.component_pools["hidden"].shape == (4, 4)
+        with pytest.raises(ValueError):
+            other.startup_pool_access("state")
+        with pytest.raises(ValueError):
+            slots.startup_pool_access("missing")
+    with (
+        pytest.raises(RuntimeError, match="raised"),
+        slots.startup_access_window(),
+    ):
+        second = slots.startup_pool_access("state")
+        raise RuntimeError("raised")
+    with slots.startup_access_window():
+        with pytest.raises(ValueError):
+            first.component_pools  # noqa: B018
+        with pytest.raises(ValueError):
+            second.spec  # noqa: B018
+        assert slots.startup_pool_access("state").component_pools.keys() == {
+            "hidden",
+            "count",
+        }
+    with pytest.raises(ValueError):
+        slots.startup_pool_access("state")
+
+
+def test_startup_access_preserves_ownership_and_bind_initialization():
+    """Startup access writes nothing and changes no ownership; the first bind
+    of a slot and every newer generation write the initial values, and
+    rebinding the same handle keeps the page."""
+    from vllm.v1.kv_cache_interface import StateSlotHandle
+
+    slots, raw = _state_bindings()
+    views = slots.views["state"]
+    page_bytes = views.spec.page_size_bytes
+    a = StateSlotHandle("epoch", 1, 1)
+    views.bind("a", a)
+    page = views.view("a", a)
+    page["hidden"].fill_(19)
+    page["count"].fill_(5)
+    before = raw.clone()
+    with slots.startup_access_window():
+        pools = slots.startup_pool_access("state").component_pools
+        assert torch.all(pools["hidden"][1] == 19)
+        assert torch.all(pools["hidden"][[0, 2, 3]] == 0)
+    assert torch.equal(raw, before)
+
+    views.bind("a", a)
+    page = views.view("a", a)
+    assert torch.all(page["hidden"] == 19) and torch.all(page["count"] == 5)
+
+    b = StateSlotHandle("epoch", 2, 1)
+    raw[2 * page_bytes : 3 * page_bytes].fill_(7)  # Whatever an unbound page held.
+    views.bind("b", b)
+    page = views.view("b", b)
+    assert torch.all(page["hidden"] == 1) and torch.all(page["count"] == 0)
+
+    newer = StateSlotHandle("epoch", 1, 2)
+    views.bind("c", newer)
+    page = views.view("c", newer)
+    assert torch.all(page["hidden"] == 1) and torch.all(page["count"] == 0)
+    with pytest.raises(ValueError, match="Stale"):
+        views.view("a", a)
+
+
+def _pool_layout_with_weak_refs():
+    """Take a layout, check it against both exposures, and return it with weak
+    references to everything it must not keep alive."""
+    import weakref
+
+    from vllm.v1.kv_cache_interface import StateSlotHandle
+
+    slots, raw = _state_bindings()
+    with slots.startup_access_window():
+        startup = dict(slots.startup_pool_access("state").component_pools)
+    step = SchedulerOutput.make_empty()
+    step.state_step_seq = 1
+    a = StateSlotHandle("epoch", 1, 1)
+    step.state_slot_handles = {"a": {"state": a}}
+    slots.begin_step(step, SimpleNamespace(wait_stream=lambda _: None))
+    slots.activate_requests()
+    rows = dict(slots.bind_rows("state", ("a",), (a,)).component_pools)
+
+    layout = slots.pool_layout("state")
+    assert layout.keys() == startup.keys() == rows.keys() == {"hidden", "count"}
+    for name, entry in layout.items():
+        for tensor in (startup[name], rows[name]):
+            assert (entry.data_ptr, entry.shape, entry.stride, entry.dtype) == (
+                tensor.data_ptr(),
+                tuple(tensor.shape),
+                tensor.stride(),
+                tensor.dtype,
+            )
+    again = slots.pool_layout("state")
+    assert again == layout and again is not layout
+    with pytest.raises(ValueError):
+        slots.pool_layout("missing")
+    refs = [weakref.ref(obj) for obj in (slots, raw, *startup.values(), *rows.values())]
+    return layout, refs
+
+
+def test_pool_layout_is_a_detached_snapshot_of_the_exposed_pools():
+    import gc
+
+    layout, refs = _pool_layout_with_weak_refs()
+    gc.collect()
+    assert all(ref() is None for ref in refs)
+    hidden = layout["hidden"]
+    assert hidden.shape == (4, 4) and hidden.dtype == torch.float32
+    assert isinstance(hidden.data_ptr, int) and isinstance(hidden.stride, tuple)
+    with pytest.raises(TypeError):
+        layout["hidden"] = layout["count"]  # type: ignore[index]
+    with pytest.raises(AttributeError):
+        hidden.data_ptr = 0  # type: ignore[misc]
+
+
+@pytest.fixture
+def warmup_worker(monkeypatch):
+    """A V2 worker over a CPU runner whose warmup stages record events."""
+    import vllm.compilation.compiler_interface as compiler_interface
+    import vllm.v1.worker.gpu_worker as gpu_worker
+    from vllm.config.compilation import CompilationMode, CUDAGraphMode
+
+    def make(
+        model_state,
+        events,
+        *,
+        with_state=True,
+        is_last_rank=True,
+        is_pooling_model=False,
+        enforce_eager=False,
+        compile=True,
+        jit_warmup=True,
+    ):
+        config = _state_only_config(monkeypatch)
+        runner = _state_only_runner(monkeypatch, config, model_state)
+        if with_state:
+            runner.initialize_kv_cache(_state_plan(config))
+        compilation = config.compilation_config
+        compilation.mode = (
+            CompilationMode.VLLM_COMPILE if compile else CompilationMode.NONE
+        )
+        compilation.backend = "inductor"
+        compilation.compile_sizes = [8]
+        compilation.cudagraph_mode = CUDAGraphMode.NONE
+        monkeypatch.setattr(compilation, "get_compile_ranges", lambda: [])
+        config.kernel_config.enable_jit_warmup = jit_warmup
+        config.model_config.enforce_eager = enforce_eager
+        runner.is_pooling_model = is_pooling_model
+
+        def dummy_run(num_tokens, **_):
+            events.append(f"dummy_run:{num_tokens}")
+            return None, None
+
+        def record(name):
+            return lambda *_, **__: events.append(name)
+
+        monkeypatch.setattr(runner, "_dummy_run", dummy_run)
+        monkeypatch.setattr(runner, "_dummy_sampler_run", record("sampler_run"))
+        monkeypatch.setattr(
+            runner, "capture_model", lambda: events.append("capture_model") or 0
+        )
+        monkeypatch.setattr(runner, "get_model", lambda: runner.model)
+        monkeypatch.setattr(gpu_worker, "has_compiled_submodule", lambda _: True)
+        monkeypatch.setattr(
+            gpu_worker,
+            "get_pp_group",
+            lambda: SimpleNamespace(is_last_rank=is_last_rank),
+        )
+        monkeypatch.setattr(gpu_worker, "kernel_warmup", record("kernel_warmup"))
+        monkeypatch.setattr(gpu_worker, "warmup_kernels", record("warmup_kernels"))
+        monkeypatch.setattr(gpu_worker, "set_random_seed", record("set_random_seed"))
+        monkeypatch.setattr(
+            compiler_interface,
+            "trigger_inductor_lazy_init",
+            record("inductor_lazy_init"),
+        )
+        monkeypatch.setattr(gpu_worker, "freeze_gc_heap", record("freeze_gc"))
+        monkeypatch.setattr(gpu_worker, "maybe_attach_gc_debug_callback", lambda: None)
+        monkeypatch.setattr(gpu_worker, "enable_gpu_sync_check", record("sync_check"))
+        worker = gpu_worker.Worker.__new__(gpu_worker.Worker)
+        worker.vllm_config = config
+        worker.model_config = config.model_config
+        worker.cache_config = config.cache_config
+        worker.compilation_config = compilation
+        worker.parallel_config = config.parallel_config
+        worker.scheduler_config = config.scheduler_config
+        worker.model_runner = runner
+        worker.use_v2_model_runner = True
+        worker.device = torch.device("cpu")
+        monkeypatch.setattr(
+            worker, "_get_cudagraph_capture_context", contextlib.nullcontext
+        )
+        monkeypatch.setattr(worker, "_maybe_activate_jit_monitor", record("jit_mon"))
+        return worker
+
+    return make
+
+
+_WARMUP_CASES = {
+    "last-rank": {},
+    "earlier-rank": {"is_last_rank": False},
+    "pooling": {"is_pooling_model": True},
+    "eager": {"enforce_eager": True},
+    "no-compile": {"compile": False},
+    "no-jit-warmup": {"jit_warmup": False},
+    "no-state": {"with_state": False},
+}
+
+
+@pytest.mark.parametrize("case", _WARMUP_CASES.values(), ids=_WARMUP_CASES.keys())
+def test_post_warmup_hook_runs_once_after_every_warmup(warmup_worker, case):
+    """The model state verifies once, after every enabled warmup stage and
+    before the worker starts JIT monitoring, freezes the GC heap and checks
+    syncs, whatever the rank, pooling, eager, compile or state setting."""
+    events = []
+
+    class _ModelState(_StateOnlyModelState):
+        def post_warmup(self):
+            events.append("post_warmup")
+
+    worker = warmup_worker(_ModelState(), events, **case)
+    worker._compile_or_warm_up_model()
+    compile = case.get("compile", True)
+    stages = ["kernel_warmup", "set_random_seed"]
+    if compile:
+        stages += ["dummy_run:8", "inductor_lazy_init"]
+    if case.get("jit_warmup", True):
+        stages.append("warmup_kernels")
+    if not case.get("enforce_eager", False):
+        stages.append("capture_model")
+    if case.get("is_last_rank", True) and not case.get("is_pooling_model", False):
+        stages += ["dummy_run:2", "sampler_run"]
+    assert events.count("post_warmup") == 1
+    hook = events.index("post_warmup")
+    assert sorted(events[:hook]) == sorted(stages)
+    assert events[hook + 1 :] == ["jit_mon", "freeze_gc", "sync_check"]
+
+
+def test_default_lifecycle_hooks_let_startup_and_shutdown_finish(
+    monkeypatch, warmup_worker
+):
+    """A model state that keeps the default hooks starts and shuts down."""
+    events: list[str] = []
+    worker = warmup_worker(_StateOnlyModelState(), events)
+    worker._compile_or_warm_up_model()
+    assert events[-3:] == ["jit_mon", "freeze_gc", "sync_check"]
+    runner = worker.model_runner
+    assert "state" in runner.kv_caches_by_layer
+    _stub_device(monkeypatch)
+    with _runner_log_records() as records:
+        runner.shutdown()
+    assert not [r for r in records if r.levelno >= logging.ERROR or r.exc_info]
+    assert not hasattr(runner, "model_state") and runner.state_slots is None
+    assert runner.kv_caches_by_layer == {}
+
+
+def test_post_warmup_hook_failure_fails_startup(warmup_worker):
+    events = []
+
+    class _ModelState(_StateOnlyModelState):
+        def post_warmup(self):
+            events.append("post_warmup")
+            raise RuntimeError("signature changed after warmup")
+
+    worker = warmup_worker(_ModelState(), events)
+    with pytest.raises(RuntimeError, match="signature changed"):
+        worker._compile_or_warm_up_model()
+    assert events[-1] == "post_warmup"
 
 
 def test_state_slot_rows_validate_step_handles_and_alias_resident_pools(monkeypatch):

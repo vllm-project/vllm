@@ -1296,6 +1296,11 @@ class Worker(WorkerBase):
 
             trigger_inductor_lazy_init(self.device)
 
+        if self.use_v2_model_runner:
+            # Every warmup stage has run; the model state can check its
+            # captures before the worker serves.
+            self._v2_model_runner().post_warmup()
+
         # All warmup is done — start monitoring for unexpected JIT
         # compilations that would cause latency spikes during inference.
         self._maybe_activate_jit_monitor()

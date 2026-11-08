@@ -876,8 +876,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and name not in {g.layer_names[0] for g in state_groups}
         ]
         if state_groups:
-            self.state_slots = StateSlotBindings(state_groups, kv_caches_dict)
-            self.model_state.initialize_state_slots(self.state_slots)
+            self.state_slots = StateSlotBindings(
+                state_groups, kv_caches_dict, is_profiling=is_profiling
+            )
+            # Startup pool access is valid only for the duration of this call.
+            with self.state_slots.startup_access_window():
+                self.model_state.initialize_state_slots(self.state_slots)
         self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
         self.replayssm_block_copy_tensors = get_replayssm_block_copy_tensors(
             self.compilation_config.static_forward_context
@@ -2517,10 +2521,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
+    def post_warmup(self) -> None:
+        """Let the model state check its captures after every warmup stage."""
+        self.model_state.post_warmup()
+
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
+        if hasattr(self, "model_state"):
+            # The model state releases what it owns while its state bindings
+            # and the KV cache still exist; the runner's cleanup continues
+            # even if it fails.
+            try:
+                self.model_state.shutdown()
+            except Exception:
+                logger.exception("Model state shutdown hook failed")
         if current_platform.is_rocm():
             # RCCL's ncclCommAbort waits for live graphs that captured the comm:
             # https://github.com/ROCm/rocm-systems/issues/13018

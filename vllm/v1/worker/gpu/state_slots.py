@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Bounded session views and the state-write completion contract."""
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from types import MappingProxyType
@@ -142,9 +143,51 @@ class StateSlotRows:
         return self.component_pools
 
 
+@dataclass(frozen=True)
+class StatePoolLayout:
+    """Plain-value layout of one resident component pool."""
+
+    data_ptr: int
+    shape: tuple[int, ...]
+    stride: tuple[int, ...]
+    dtype: torch.dtype
+
+
+@dataclass(frozen=True)
+class StartupPoolAccess:
+    """A state group's resident pools during ``initialize_state_slots``.
+
+    It grants no slot ownership and authorizes no stores to resident pages,
+    including the null page. It is valid only inside the window that issued
+    it; retained tensors are not revoked.
+    """
+
+    _bindings: "StateSlotBindings"
+    _window: object
+    layer: str
+
+    def _current_views(self) -> StateSlotViews:
+        if self._bindings._startup_window is not self._window:
+            raise ValueError("Stale startup pool access")
+        return self._bindings.views[self.layer]
+
+    @property
+    def spec(self) -> PersistentStateSpec:
+        return self._current_views().spec
+
+    @property
+    def component_pools(self) -> Mapping[str, torch.Tensor]:
+        """One tensor per descriptor, covering every page."""
+        return MappingProxyType(self._current_views()._views)
+
+
 class StateSlotBindings:
     def __init__(
-        self, groups: list[KVCacheGroupSpec], tensors: dict[str, torch.Tensor]
+        self,
+        groups: list[KVCacheGroupSpec],
+        tensors: dict[str, torch.Tensor],
+        *,
+        is_profiling: bool = False,
     ):
         self.views = {
             group.layer_names[0]: StateSlotViews(
@@ -158,6 +201,59 @@ class StateSlotBindings:
         self._main_stream: torch.cuda.Stream | None = None
         self._cleaning_up = False
         self._step_id: object | None = None
+        self._is_profiling = is_profiling
+        self._startup_window: object | None = None
+
+    @property
+    def is_profiling(self) -> bool:
+        """Whether these bindings cover the temporary pools of CUDA graph
+        memory profiling; the serving pools get new bindings afterwards."""
+        return self._is_profiling
+
+    @contextmanager
+    def startup_access_window(self) -> Iterator[None]:
+        """Admit startup pool access for one ``initialize_state_slots`` call.
+
+        Windows do not nest; each one invalidates the accesses of the last.
+        """
+        if self._startup_window is not None:
+            raise RuntimeError("A startup access window is already open")
+        self._startup_window = object()
+        try:
+            yield
+        finally:
+            self._startup_window = None
+
+    def startup_pool_access(self, layer: str) -> StartupPoolAccess:
+        """Expose every page of a state group's pools while the runner is
+        inside ``initialize_state_slots``."""
+        if self._startup_window is None:
+            raise ValueError(
+                "Startup pool access is valid only during initialize_state_slots"
+            )
+        if layer not in self.views:
+            raise ValueError("Unknown state group")
+        return StartupPoolAccess(self, self._startup_window, layer)
+
+    def pool_layout(self, layer: str) -> Mapping[str, StatePoolLayout]:
+        """Snapshot a state group's pool layout, keyed by descriptor name.
+
+        The snapshot holds plain values only, so a model can compare it with
+        what a capture recorded without keeping the pools alive.
+        """
+        if layer not in self.views:
+            raise ValueError("Unknown state group")
+        return MappingProxyType(
+            {
+                name: StatePoolLayout(
+                    tensor.data_ptr(),
+                    tuple(tensor.shape),
+                    tuple(tensor.stride()),
+                    tensor.dtype,
+                )
+                for name, tensor in self.views[layer]._views.items()
+            }
+        )
 
     def _validate_rows(
         self,

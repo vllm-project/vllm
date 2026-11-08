@@ -145,6 +145,21 @@ class ModelState(ABC):
         """Hook run after the KV cache tensors are allocated and bound."""
         return None
 
+    def post_warmup(self) -> None:
+        """Hook run once after every warmup stage, before the worker serves.
+
+        A model can check here that nothing its captured graphs read moved
+        during warmup. An exception fails engine startup.
+        """
+        return None
+
+    def shutdown(self) -> None:
+        """Hook run when the runner shuts down, before it releases the state
+        bindings and the KV cache. It must tolerate a model state whose
+        initialization did not complete. The runner logs an exception from it
+        and continues its cleanup."""
+        return None
+
     def capture_inner_cudagraphs(
         self,
         input_buffers: InputBuffers,

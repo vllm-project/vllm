@@ -56,7 +56,8 @@ A persistent-state model uses these Model Runner V2 hooks:
 
 - `ModelState.initialize_state_slots(bindings)` is called after the KV cache is
   allocated, with the `StateSlotBindings` that map a request's current handle
-  to its state views. Override it to register auxiliary state-writing streams.
+  to its state views. Override it to register auxiliary state-writing streams,
+  or to reach every resident page through startup pool access (below).
 - `ModelState.prepare_step(scheduler_output, *, dummy_run, is_profile)` is
   called at the start of each `execute_model`, so the model can tell profiling
   and dummy runs from scheduled steps.
@@ -67,6 +68,97 @@ A persistent-state model uses these Model Runner V2 hooks:
   at the start of `profile_run`, before KV cache memory is measured. Allocate
   long-lived execution buffers there, such as workspaces or captured graphs, so
   they are counted before the remaining memory is divided into state pages.
+- `ModelState.post_warmup()` is called once, after every warmup stage and
+  before the worker serves. Use it to check that nothing a captured graph reads
+  moved during warmup.
+- `ModelState.shutdown()` is called at the start of `GPUModelRunner.shutdown`,
+  before the runner releases the state bindings and the KV cache. Release
+  captured graphs and model-owned buffers there.
+
+`post_warmup` and `shutdown` do nothing by default. They apply to every model
+state, not only persistent-state ones, on the GPU worker's Model Runner V2
+path: the GPU worker calls `post_warmup` (workers that inherit its warmup, such
+as XPU, do too), and `GPUModelRunner.shutdown` calls `shutdown`. The CPU
+worker's own warmup does not call `post_warmup`.
+
+### Profiling and serving bindings
+
+`initialize_state_slots` can run more than once. When CUDA graph memory is
+profiled, the runner first allocates a minimal KV cache with temporary state
+pools, calls `initialize_state_slots` with bindings over them, and drops its
+own references to those pools after profiling. It then allocates the serving KV
+cache and calls `initialize_state_slots` again with new bindings.
+`StateSlotBindings.is_profiling` tells the two apart. A model must not serve
+anything it captured against profiling bindings: when it receives new bindings,
+it releases or replaces whatever it captured against the previous ones, and
+frees what it retained from the profiling pools.
+
+### Startup pool access
+
+`StateSlotBindings.bind_rows` authorizes the current step's handles; the
+`StateSlotRows` it returns expose the complete component pools, but a model
+may use them only for those rows. A model that captures CUDA graphs over its
+state pools, or checks a capture against an eager reference, needs to read the
+pools before any request exists. `StateSlotBindings` offers two accessors for
+that:
+
+- `startup_pool_access(layer)` returns the layer's spec and its component
+  pools: one tensor per descriptor, each covering every page, including the
+  null page and unbound slots. It is valid only while the runner is inside its
+  `initialize_state_slots` call.
+- `pool_layout(layer)` returns a new, immutable snapshot keyed by descriptor
+  name: each component pool's data address, shape, element strides and dtype,
+  as plain values. It holds no tensor and no reference to the bindings, and it
+  is available for the lifetime of the bindings, so `post_warmup` can compare
+  the serving pools' layout with what capture recorded.
+
+Startup access grants no ownership and authorizes no stores to resident pages,
+including the null page. Capture warm-ups, capture and validation replays may
+read unowned pages, and write only model-owned scratch; for example, they run
+on rows the model's own logic rejects, so no page is committed. After
+`initialize_state_slots` returns, replaying a graph over the pools requires
+the current step's authorization from `bind_rows`. As with `StateSlotRows`,
+this is a contract with a trusted model, not memory protection: tensors
+already returned are not revoked.
+
+### Startup and shutdown criteria
+
+- **M1.** `run_mixed_prefill_decode_warmup` returns `False` without calling
+  either worker callback when any KV cache group holds persistent state. Its
+  synthetic requests carry no scheduler-issued state handles and assume token
+  prefill and decode, while a persistent-state request's first step is
+  model-defined. Its other skip conditions (pooling model, fewer than two
+  requests, fewer than three tokens, too few KV blocks) are unchanged, and so
+  are the other warmup steps.
+- **M2.** On a successful startup through the GPU worker's warmup, the Model
+  Runner V2 model state receives `post_warmup` exactly once, whatever the rank,
+  pooling, `enforce_eager`, compilation or JIT-warmup setting, and whether or
+  not it holds persistent state. It runs after every enabled warmup stage (compile dummy runs,
+  kernel and JIT warmups, graph capture, the sampler warmup and Inductor's lazy
+  initialization), and before JIT monitoring, GC freezing and the GPU sync
+  check are enabled. An exception from it fails engine startup.
+- **M3.** Once the device has synchronized, `GPUModelRunner.shutdown` calls
+  `shutdown` on the model state, if one exists, before it clears the state
+  bindings or the KV cache. The hook must tolerate a model state whose
+  initialization did not complete. An exception from it is logged with its
+  traceback and the runner continues its cleanup; failures elsewhere in
+  cleanup behave as before. A second `GPUModelRunner.shutdown`, after the
+  model state is gone, does not call it again.
+- **M4.** Each `initialize_state_slots` call opens a separate startup-access
+  window on the bindings it receives, and the runner closes it when the call
+  returns or raises. Windows do not nest: opening one while another is open
+  raises `RuntimeError` and leaves the open window valid. `startup_pool_access`
+  called outside a window raises `ValueError`, and so does every use of an
+  access object whose window has closed, including while a later window is
+  open. An exception from
+  `initialize_state_slots` propagates and fails startup.
+- **M5.** Startup access changes no slot ownership and no handle. The first
+  bind of a slot, and every bind to a newer generation, writes the
+  descriptors' initial values to its page; binding the same handle again leaves
+  the page as it is.
+- **M6.** `pool_layout` reports the data address, shape, strides and dtype of
+  the tensors that `startup_pool_access` and `bind_rows` expose for the same
+  bindings, and the snapshot holds no tensor or bindings reference.
 
 ## Release fence
 
