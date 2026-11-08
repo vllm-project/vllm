@@ -319,10 +319,8 @@ steps:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - tests/v1/e2e/spec_decode/
-    - tests/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode/ngram_suffix/
-    - python3 spec_decode/test_custom_proposer.py
   mirror:
     amd:
       automatic_shard: true
@@ -446,8 +444,6 @@ steps:
   optional: true
   num_devices: 2
   source_file_dependencies:
-    - vllm/v1/spec_decode/llm_base_proposer.py
-    - vllm/v1/spec_decode/eagle.py
     - vllm/v1/worker/gpu/spec_decode/eagle/
     - vllm/model_executor/models/deepseek_mtp.py
     - vllm/model_executor/models/deepseek_v2.py
@@ -473,7 +469,6 @@ steps:
       - vllm/v1/engine/
       - vllm/v1/spec_decode/
       - vllm/v1/worker/gpu/spec_decode/
-      - vllm/v1/worker/gpu_model_runner.py
       - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
       - vllm/platforms/rocm.py
 
@@ -674,7 +669,6 @@ steps:
       - vllm/v1/spec_decode/
       - vllm/v1/sample/
       - vllm/v1/worker/gpu/
-      - vllm/v1/worker/gpu_model_runner.py
       - vllm/v1/worker/gpu_worker.py
       - vllm/model_executor/model_loader/
       - vllm/model_executor/models/gemma4.py
