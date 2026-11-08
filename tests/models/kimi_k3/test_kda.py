@@ -91,7 +91,7 @@ def test_kda_warmup_skips_missing_metadata(monkeypatch):
     object.__setattr__(layer, "prefix", "language_model.model.layers.0.self_attn")
     empty = torch.empty(0, device=DEVICE)
 
-    assert layer._forward(empty, empty, empty, empty, empty) is None
+    assert layer._forward(empty, empty, empty, empty, empty, empty) is None
 
 
 def test_resolve_kda_spec_decode_backend(monkeypatch: pytest.MonkeyPatch):
@@ -1351,6 +1351,7 @@ def test_flashinfer_fused_kda_spec_decode_integration(
         KimiK3DeltaAttention._forward(
             layer,
             mixed_qkv=x,
+            f_a=x.new_empty(num_rows, D),
             g1=raw_gate,
             g2=output_gate,
             beta=raw_beta,
