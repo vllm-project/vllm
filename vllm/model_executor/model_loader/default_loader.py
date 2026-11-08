@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import StackedColumnParallelLinear
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
+from vllm.model_executor.load_threads import limit_load_threads
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_eplb_local_expert_ids,
@@ -524,6 +525,7 @@ class DefaultModelLoader(BaseModelLoader):
             )
 
     @instrument(span_name="Load weights")
+    @limit_load_threads
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         if model_config.quantization == "torchao":
             quant_config = get_quant_config(model_config, self.load_config)
