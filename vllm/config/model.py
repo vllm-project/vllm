@@ -67,7 +67,7 @@ if TYPE_CHECKING:
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
-    from vllm.v1.sample.logits_processor import LogitsProcessor
+    from vllm.v1.worker.gpu.sample.logits_processor.interface import LogitsProcessor
 else:
     PreTrainedConfig = Any
 
@@ -230,9 +230,11 @@ class ModelConfig:
     hf_text_config: PreTrainedConfig = field(init=False)
     """The Hugging Face config of the text model (same as hf_config for text models)."""
     is_submodel_config: bool = field(default=False, init=False)
-    """Whether this is a submodule view derived by `VllmConfig.with_hf_config`
-    (e.g. a multimodal model's text stack). Its architecture list is empty, so
-    deployment-level validation must not run against it."""
+    """Whether this is a view derived from an already-validated `VllmConfig`: a
+    submodule view from `VllmConfig.with_hf_config` (e.g. a multimodal model's text
+    stack, whose architecture list may be empty) or a draft model's view that
+    reuses the target's configs. Deployment-level validation must not run against
+    it."""
     word_embeddings_untied_by_checkpoint: bool = field(default=False, init=False)
     """Whether `tie_word_embeddings` was overridden to `False` because the checkpoint
     contains an `lm_head` of its own. The two may still turn out to be identical, in
@@ -766,7 +768,10 @@ class ModelConfig:
                 self.tokenizer_mode = "alpamayo2_super"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
-            elif arch == "KimiK3ForConditionalGeneration":
+            elif arch in (
+                "KimiK3ForConditionalGeneration",
+                "KimiK31ForConditionalGeneration",
+            ):
                 self.tokenizer_mode = "kimi_k3"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
