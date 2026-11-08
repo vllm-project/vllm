@@ -4,31 +4,31 @@
 the gathered router logits and pooled activations to the scattered lines of
 the expert sum.
 
-``route_tokens`` (a wave a token): the token's 256 logits and its pooled row
+`route_tokens` (a wave a token): the token's 256 logits and its pooled row
 from the exchange lines; sigmoid scores, the top 8 of score + bias (ties to
-the lowest id), the route weights ``score * (route_scale / (sum + 1e-15))``;
+the lowest id), the route weights `score * (route_scale / (sum + 1e-15))`;
 the pre-expert norm of the pooled row, rounded to bf16 and quantized per
-token to FP8 (``MOE_IN_QUANT``). It zeroes the routes' activation maxima.
+token to FP8 (`MOE_IN_QUANT`). It zeroes the routes' activation maxima.
 
-``schedule`` (every CTA, from the route ids): each local expert's routes in
-assignment order, cut into blocks of at most ``cap`` routes. The up and down
+`schedule` (every CTA, from the route ids): each local expert's routes in
+assignment order, cut into blocks of at most `cap` routes. The up and down
 phases run units over the blocks; a block's routes are the MFMA's N
-dimension, so an expert with more than ``cap`` routes streams its weights
+dimension, so an expert with more than `cap` routes streams its weights
 once a block.
 
-``up_units``: unit = (block, piece ``p``): gate rows ``32 p ..`` and up rows
-``4096 + 32 p ..`` of the expert's w13 over the full K, so its epilogue holds
-both halves: ``bf16(bf16(silu(g)) * u)`` (``g``, ``u`` the bf16 GEMM outputs)
-to ``act[assignment]``, its absolute max into ``amax[assignment]`` (atomic).
+`up_units`: unit = (block, piece `p`): gate rows `32 p ..` and up rows
+`4096 + 32 p ..` of the expert's w13 over the full K, so its epilogue holds
+both halves: `bf16(bf16(silu(g)) * u)` (`g`, `u` the bf16 GEMM outputs)
+to `act[assignment]`, its absolute max into `amax[assignment]` (atomic).
 
-``down_units``: unit = (block, owner ``o``): rows ``64 o ..`` of w2 over the
+`down_units`: unit = (block, owner `o`): rows `64 o ..` of w2 over the
 full K, the activation quantized per route while it is staged
-(``MOE_MID_QUANT``). The epilogue stores ``y`` (bf16) and the owner's sum of
-``(y * (w + 1))^2`` in the route's slot ``o``.
+(`MOE_MID_QUANT`). The epilogue stores `y` (bf16) and the owner's sum of
+`(y * (w + 1))^2` in the route's slot `o`.
 
-``finalize_lines`` (a wave a line of the 4096-column sum): each local route's
-``rsqrt(sum of its 64 slots / 4096 + 1e-8) * weight``, the routes' scaled
-``y * (w + 1)`` summed in slot order, pushed to the line's owner (the scatter
+`finalize_lines` (a wave a line of the 4096-column sum): each local route's
+`rsqrt(sum of its 64 slots / 4096 + 1e-8) * weight`, the routes' scaled
+`y * (w + 1)` summed in slot order, pushed to the line's owner (the scatter
 of the expert all-reduce). Non-local routes contribute nothing.
 """
 
@@ -148,14 +148,14 @@ class MoEShape:
 
 class MoEBufs(TraceInvariant):
     """A rank's MoE buffers (byte addresses, wave-uniform Int64): the route
-    (``ids`` i32, ``wts`` f32 ``[rows, 8]``), the quantized expert input
-    (``hq`` FP8 ``[rows, 4096]``, ``hs`` f32 ``[rows]``), per assignment the
-    activation (``act`` bf16 ``[rows * 8, 4096]``) and its max (``amax``), the
-    expert output (``y`` bf16 ``[rows * 8, 4096]``) and its slots (``sq`` f32
-    ``[rows * 8, 64]``); the weights: ``w13`` FP8 ``[32, 8192, 4096]`` (gate
-    rows then up rows), ``w13s`` f32 ``[32, 8192]``, ``w2`` FP8 ``[32, 4096,
-    4096]``, ``w2s`` f32 ``[32, 4096]``, the router bias f32 ``[256]``, the
-    pre- and post-expert norm gains ``w + 1`` (f32 ``[4096]``)."""
+    (`ids` i32, `wts` f32 `[rows, 8]`), the quantized expert input
+    (`hq` FP8 `[rows, 4096]`, `hs` f32 `[rows]`), per assignment the
+    activation (`act` bf16 `[rows * 8, 4096]`) and its max (`amax`), the
+    expert output (`y` bf16 `[rows * 8, 4096]`) and its slots (`sq` f32
+    `[rows * 8, 64]`); the weights: `w13` FP8 `[32, 8192, 4096]` (gate
+    rows then up rows), `w13s` f32 `[32, 8192]`, `w2` FP8 `[32, 4096,
+    4096]`, `w2s` f32 `[32, 4096]`, the router bias f32 `[256]`, the
+    pre- and post-expert norm gains `w + 1` (f32 `[4096]`)."""
 
     def __init__(
         self,
@@ -234,11 +234,11 @@ def _wave_min(v):
 
 @traced
 def route_token(g, sh, b, logits, pooled, t):
-    """Token ``t``'s route and expert input (one wave); see the module doc.
-    ``logits``: the gather of the f32 logits as raw words (groups ``2 r``,
-    ``2 r + 1``: rank ``r``'s 32 experts' ``hi + mid`` and ``lo`` planes);
-    ``pooled``: the gather of the pooled row (64
-    groups, rank ``r`` owns ``8 r ..``)."""
+    """Token `t`'s route and expert input (one wave); see the module doc.
+    `logits`: the gather of the f32 logits as raw words (groups `2 r`,
+    `2 r + 1`: rank `r`'s 32 experts' `hi + mid` and `lo` planes);
+    `pooled`: the gather of the pooled row (64
+    groups, rank `r` owns `8 r ..`)."""
     lane = g.lane
     lpg = pooled.lpg
     gp = wait_lines(g, pooled, [(lane, lane * i32(lpg) + t // 8)])
@@ -326,7 +326,7 @@ def route_token(g, sh, b, logits, pooled, t):
 
 @traced
 def route_tokens(g, sh, b, logits, pooled):
-    """Every token's ``route_token``, a wave each over the grid."""
+    """Every token's `route_token`, a wave each over the grid."""
     waves = i32(BLOCKS * WAVES)
     for t in range(g.spread, i32(sh.rows), waves):
         route_token(g, sh, b, logits, pooled, t)
@@ -339,10 +339,10 @@ def route_tokens(g, sh, b, logits, pooled):
 
 @traced
 def schedule(g, sh, lp, b, rank):
-    """The rank's blocks into LDS page ``lp`` (``MoEShape`` offsets): per
+    """The rank's blocks into LDS page `lp` (`MoEShape` offsets): per
     local expert a token mask, its count, its first list slot and first
-    block; the list of its assignments in order; ``blocks[B] = expert | b <<
-    8``; ``nblocks``. Ends with a barrier."""
+    block; the list of its assignments in order; `blocks[B] = expert | b <<
+    8`; `nblocks`. Ends with a barrier."""
     mw = sh.mask_words
     for r in range_constexpr(-(-E_LOCAL * mw // THREADS)):
         i = g.tid + i32(r * THREADS)
@@ -404,7 +404,7 @@ def schedule(g, sh, lp, b, rank):
 
 
 class Block(TraceInvariant):
-    """Block ``B``'s expert, its first list slot and its route count
+    """Block `B`'s expert, its first list slot and its route count
     (wave-uniform)."""
 
     def __init__(self, sh, lp, B):
@@ -417,7 +417,7 @@ class Block(TraceInvariant):
         self.sh, self.lp = sh, lp
 
     def assignment(self, i):
-        """Route ``i`` of the block (the last one past ``n``)."""
+        """Route `i` of the block (the last one past `n`)."""
         return lds_ld(self.lp + self.sh.list + self.first + fx.min(i, self.n - 1))
 
 
@@ -431,9 +431,9 @@ def nblocks(sh, lp):
 
 
 def up_weights(g, sh, lp, b, u):
-    """Unit ``u``'s block, w13 and the wave's first row of each weight tile:
-    waves 0-1 the piece's gate rows, 2-3 its up rows, 16-row tiles ``wave % 2
-    + 2 mt``."""
+    """Unit `u`'s block, w13 and the wave's first row of each weight tile:
+    waves 0-1 the piece's gate rows, 2-3 its up rows, 16-row tiles `wave % 2
+    + 2 mt`."""
     blk = Block(sh, lp, u // UP_PIECES)
     w = fp8_weights(
         b.w13 + fx.Int64(blk.expert) * fx.Int64(2 * INTER * b.w13_ld),
@@ -452,7 +452,7 @@ def lane_rows(g, firsts):
 
 
 def ahead(g, units, u, weights):
-    """``Gemm.run``'s ``ahead`` for the CTA's unit after ``u``."""
+    """`Gemm.run`'s `ahead` for the CTA's unit after `u`."""
     nu = u + i32(BLOCKS)
     _, w, firsts = weights(fx.min(nu, units - 1))
     return w, lane_rows(g, firsts), nu < units
@@ -553,8 +553,8 @@ def up_unit(g, sh, lp, b, gemm, unit, units, pending):
 
 @traced
 def up_units(g, sh, lp, b, gemm):
-    """Every (block, piece) unit over the grid: CTA ``bid`` takes ``bid, bid
-    + BLOCKS, ..``."""
+    """Every (block, piece) unit over the grid: CTA `bid` takes `bid, bid
+    + BLOCKS, ..`."""
     acquire_device()  # hq: cached loads, shared in the XCD's L2
     units = nblocks(sh, lp) * i32(UP_PIECES)
     pending = first_weights(
@@ -570,8 +570,8 @@ def up_units(g, sh, lp, b, gemm):
 
 
 class QuantSource(TraceInvariant):
-    """The down GEMM's activations: a route's bf16 ``act`` row quantized to
-    FP8 with its scale while it is staged (``tiled.Source`` interface)."""
+    """The down GEMM's activations: a route's bf16 `act` row quantized to
+    FP8 with its scale while it is staged (`tiled.Source` interface)."""
 
     def __init__(self, b, blk, nbytes):
         self.b, self.blk, self.nbytes = b, blk, nbytes
@@ -600,8 +600,8 @@ class QuantSource(TraceInvariant):
 
 
 def down_weights(g, sh, lp, b, u):
-    """Unit ``u``'s block, w2 and the wave's first row of each weight tile of
-    the owner's ``OWNER`` rows."""
+    """Unit `u`'s block, w2 and the wave's first row of each weight tile of
+    the owner's `OWNER` rows."""
     blk = Block(sh, lp, u // DOWN_OWNERS)
     w = fp8_weights(
         b.w2 + fx.Int64(blk.expert) * fx.Int64(POOLED * b.w2_ld),
@@ -703,8 +703,8 @@ def expert_gemm(sh, lp, tid):
 
 @traced
 def finalize_line(g, sh, lp, b, sc, rank, group, line):
-    """Line ``line`` of column group ``group`` of the rank's expert sum,
-    pushed through the scatter ``sc``."""
+    """Line `line` of column group `group` of the rank's expert sum,
+    pushed through the scatter `sc`."""
     lane = g.lane
     token = line * 8 + lane // 8
     tk = fx.min(token, i32(sh.rows - 1))
@@ -765,7 +765,7 @@ def finalize_line(g, sh, lp, b, sc, rank, group, line):
 
 @traced
 def finalize_lines(g, sh, lp, b, sc, rank):
-    """Every line of the ``LINE_GROUPS`` column groups, a wave each over the grid."""
+    """Every line of the `LINE_GROUPS` column groups, a wave each over the grid."""
     lpg = sc.lpg
     waves = i32(BLOCKS * WAVES)
     for i in range(g.spread, i32(LINE_GROUPS * lpg), waves):

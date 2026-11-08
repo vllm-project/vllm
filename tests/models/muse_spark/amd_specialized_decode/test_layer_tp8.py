@@ -7,8 +7,8 @@ of the real shapes.
 Every rank builds its own weights (shared seeds for the replicated tensors),
 runs the kernel twice (fresh epochs: bitwise equal), and computes the stock
 layer on its GPU with all-gathers and rank-order sums. Also prints the launch
-time. Run: ``pytest -s test_layer_tp8.py`` or, from the repo root,
-``python -m tests.models.muse_spark.amd_specialized_decode.test_layer_tp8 1 8``.
+time. Run: `pytest -s test_layer_tp8.py` or, from the repo root,
+`python -m tests.models.muse_spark.amd_specialized_decode.test_layer_tp8 1 8`.
 """
 
 import itertools
@@ -44,10 +44,10 @@ def _gpus_ok() -> bool:
 
 
 def quant_rows(x, q, nudge=False):
-    """Per-row FP8 as the kernels (``layout.Quant``): f32 scale by divide or by
-    ``* (1 / max)``, the floor, codes ``x * (1 / scale)`` saturated. The
-    kernels' ``1 / scale`` (v_rcp_f32) is within an ulp of this one; with
-    bf16 inputs codes on FP8 rounding midpoints are common, so ``nudge`` (the
+    """Per-row FP8 as the kernels (`layout.Quant`): f32 scale by divide or by
+    `* (1 / max)`, the floor, codes `x * (1 / scale)` saturated. The
+    kernels' `1 / scale` (v_rcp_f32) is within an ulp of this one; with
+    bf16 inputs codes on FP8 rounding midpoints are common, so `nudge` (the
     factor an ulp down) gives the reference's own noise floor."""
     amax = x.abs().amax(-1, keepdim=True).float()
     if q.divide:
@@ -275,7 +275,7 @@ def reference(rank, t, full, attn, og, stream, nudge=False):
 
 def _width(rank, rows, seed, iters, t, full, wtab, bufs, launches, dev) -> dict:
     """One width's launches on this rank: the metrics against the reference.
-    ``launches`` counts every launch of the rank: they alternate barrier slots
+    `launches` counts every launch of the rank: they alternate barrier slots
     (a launch zeroes the next one's)."""
     from vllm.models.muse_spark.amd.specialized_decode.wide import layer as wide
     from vllm.models.muse_spark.amd.specialized_decode.wide.abi import FAILED

@@ -104,7 +104,7 @@ def deployment_refusals(lm: nn.Module, tp_rank: int, tp_size: int) -> list[str]:
 
 
 def _nk(w: torch.Tensor, n: int, k: int) -> str | None:
-    """Why ``w`` is not an ``[n, k]`` row-major FP8 matrix (or its transposed
+    """Why `w` is not an `[n, k]` row-major FP8 matrix (or its transposed
     view, as torch's scaled-mm methods keep it)."""
     if w.dtype != FP8:
         return f"{w.dtype}"

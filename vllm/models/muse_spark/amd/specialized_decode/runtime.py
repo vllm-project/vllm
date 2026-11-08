@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The host side of the gfx942 specialized decode: the weight tables, the
-buffers every width shares and the step (``refusals``: what it refuses).
+buffers every width shares and the step (`refusals`: what it refuses).
 
 A step runs layer 0 and layer 1's attention stock, then layers 1-60 as one
-launch each (``wide.layer``: layer ``i``'s o-path to layer ``i + 1``'s QKVG
+launch each (`wide.layer`: layer `i`'s o-path to layer `i + 1`'s QKVG
 output), with vLLM's QK-norm / RoPE / KV insert and attention op between the
 launches, then layer 61 stock from the kernels' residual stream. Every rank
 must take the same path (the launches wait on their peers), so the step
@@ -52,7 +52,7 @@ MAX_ROWS = 64
 
 
 def _gain(norm: nn.Module) -> torch.Tensor:
-    """``weight + gain_center`` in f32, as the fused norm kernels apply it."""
+    """`weight + gain_center` in f32, as the fused norm kernels apply it."""
     return (norm.weight.detach().float() + norm.fused_gain_center).contiguous()
 
 
@@ -61,8 +61,8 @@ def _rows(t: torch.Tensor, rank: int, n: int) -> torch.Tensor:
 
 
 def router_planes(w: torch.Tensor) -> torch.Tensor:
-    """The rank's fp32 router rows ``[32, 8192]`` as ``dense.ROUTER_ROWS``
-    bf16 rows: ``hi``, ``mid``, ``lo`` (``w = hi + mid + lo``), zeros."""
+    """The rank's fp32 router rows `[32, 8192]` as `dense.ROUTER_ROWS`
+    bf16 rows: `hi`, `mid`, `lo` (`w = hi + mid + lo`), zeros."""
     hi = w.to(torch.bfloat16)
     r = w - hi.float()
     mid = r.to(torch.bfloat16)
@@ -72,7 +72,7 @@ def router_planes(w: torch.Tensor) -> torch.Tensor:
 
 
 class LayerTable:
-    """Layer ``i``'s ``wide.layer.WEIGHTS`` addresses and the tensors they
+    """Layer `i`'s `wide.layer.WEIGHTS` addresses and the tensors they
     point into (views of vLLM's parameters, and the small f32 / plane copies
     this keeps alive)."""
 
@@ -148,12 +148,12 @@ class Buffers:
         ]
 
     def stream(self, rows: int) -> torch.Tensor:
-        """The kernels' f32 residual stream of a ``rows``-row step."""
+        """The kernels' f32 residual stream of a `rows`-row step."""
         flat = self.scratch["stream"][: rows * HIDDEN * 4].view(torch.float32)
         return flat.view(rows, HIDDEN)
 
     def slots(self, k: int) -> tuple[int, int, int]:
-        """(sync, sync_next, folds) of the step's ``k``-th launch: the launches
+        """(sync, sync_next, folds) of the step's `k`-th launch: the launches
         alternate barrier slots (60 a step: the pattern repeats a step)."""
         base = self.sync.data_ptr()
         return (
@@ -167,7 +167,7 @@ class Buffers:
 
 
 def built_widths(vllm_config) -> list[int]:
-    """The CUDA graph capture sizes up to ``MAX_ROWS`` (every decode width
+    """The CUDA graph capture sizes up to `MAX_ROWS` (every decode width
     vLLM pads to), or its powers of two when there are none."""
     sizes = vllm_config.compilation_config.cudagraph_capture_sizes or []
     widths = sorted({s for s in sizes if 1 <= s <= MAX_ROWS})
@@ -180,7 +180,7 @@ def built_widths(vllm_config) -> list[int]:
 
 
 def _attend(attn: nn.Module, qkv: torch.Tensor, positions: torch.Tensor):
-    """Stock QK-norm / RoPE / KV insert and attention of ``qkv``: (o, og)."""
+    """Stock QK-norm / RoPE / KV insert and attention of `qkv`: (o, og)."""
     q, k, v, og = attn._qk_norm_rope_kv_insert(qkv, positions)
     if attn.fused_qk_norm_rope_kv_insert:
         return attn.attn(q, None, None), og
@@ -189,7 +189,7 @@ def _attend(attn: nn.Module, qkv: torch.Tensor, positions: torch.Tensor):
 
 class SpecializedDecode:
     """Runs decoder layers 1-60 of eligible decode steps through the kernels
-    (the ``MuseSparkModel.mono`` interface)."""
+    (the `MuseSparkModel.mono` interface)."""
 
     def __init__(
         self,

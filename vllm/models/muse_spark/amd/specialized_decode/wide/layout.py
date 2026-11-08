@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The shapes the wide kernels are compiled for: Muse Spark at TP8 = EP8 on an
-MI300X (gfx942), one rank's share. ``SHAPES`` is what the runtime checks the
+MI300X (gfx942), one rank's share. `SHAPES` is what the runtime checks the
 checkpoint's text config against; every other constant follows from it."""
 
 from dataclasses import dataclass
@@ -49,8 +49,8 @@ GAIN_CENTER = 1.0  # zero-centered gammas: weight + 1
 
 @dataclass(frozen=True)
 class Quant:
-    """A per-token FP8 (e4m3fnuz) quant: ``scale = max(amax * (1/fp8_max) or
-    amax / fp8_max, min_scale)``, ``q = clamp(x * rcp(scale))``."""
+    """A per-token FP8 (e4m3fnuz) quant: `scale = max(amax * (1/fp8_max) or
+    amax / fp8_max, min_scale)`, `q = clamp(x * rcp(scale))`."""
 
     fp8_max: float
     min_scale: float

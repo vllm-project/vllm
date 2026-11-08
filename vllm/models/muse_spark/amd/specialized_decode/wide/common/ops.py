@@ -6,19 +6,19 @@
 buffer descriptors with explicit cache policies, LDS vectors, wave reductions,
 activations, bf16 and FP8 packing, the MFMAs and the clock.
 
-Kernels take raw ``Int64`` byte addresses. A buffer descriptor's offset is 32
+Kernels take raw `Int64` byte addresses. A buffer descriptor's offset is 32
 bits, so a tensor past 4 GiB (a layer's experts are 1.6 GB, so not yet) is
 addressed from a 64-bit base per slice. Offsets here count elements of the
 access's dtype.
 
-Cache policy (GFX940-family ``CPol``, the same bits on gfx942 and gfx950):
+Cache policy (GFX940-family `CPol`, the same bits on gfx942 and gfx950):
 data one CTA writes and another CTA reads in the same launch goes through
-``CM_DEV`` (sc1) on both sides, past the per-XCD L2s; peer data through
-``CM_SYS`` (sc0 | sc1). The dense weights stream with ``CM_NT``; the experts
-with plain loads (``moe.EXPERT_CM``).
+`CM_DEV` (sc1) on both sides, past the per-XCD L2s; peer data through
+`CM_SYS` (sc0 | sc1). The dense weights stream with `CM_NT`; the experts
+with plain loads (`moe.EXPERT_CM`).
 
-gfx942 has no permlane16/32 swaps (cross-row reductions use ``ds_bpermute``),
-no 16x16x32 bf16 MFMA (``mfma_bf16`` is the 16x16x16 one) and no scaled FP4
+gfx942 has no permlane16/32 swaps (cross-row reductions use `ds_bpermute`),
+no 16x16x32 bf16 MFMA (`mfma_bf16` is the 16x16x16 one) and no scaled FP4
 MFMA; its FP8 is e4m3fnuz.
 """
 
@@ -42,7 +42,7 @@ LOG2E = 1.4426950408889634
 
 
 def traced(fn):
-    """FlyDSL's AST rewriting on a helper, so its ``while`` / ``if`` over
+    """FlyDSL's AST rewriting on a helper, so its `while` / `if` over
     traced values lower to scf ops (kernels rewrite only their own body)."""
     return ASTRewriter.transform(fn)
 
@@ -53,15 +53,15 @@ def traced(fn):
 
 
 def rsrc(addr, nbytes=None):
-    """A buffer descriptor at byte address ``addr``, which must be wave-uniform:
+    """A buffer descriptor at byte address `addr`, which must be wave-uniform:
     a lane-varying base makes the compiler loop over the wave's distinct
     descriptors one at a time. Lane variation goes in the access's offset."""
     return bo.create_buffer_resource_from_addr(fx.Int64(addr), num_records_bytes=nbytes)
 
 
 def ld(addr, i, dtype=fx.Int32, n=1, cm=0, nbytes=None, mask=None):
-    """``n`` (1, 2, 4) elements of ``dtype`` at element ``i`` of address ``addr``.
-    With ``mask`` (and the descriptor bounded by ``nbytes``), a lane whose mask
+    """`n` (1, 2, 4) elements of `dtype` at element `i` of address `addr`.
+    With `mask` (and the descriptor bounded by `nbytes`), a lane whose mask
     is false reads zeros without a memory request."""
     v = bo.buffer_load(
         rsrc(addr, nbytes),
@@ -75,8 +75,8 @@ def ld(addr, i, dtype=fx.Int32, n=1, cm=0, nbytes=None, mask=None):
 
 
 def st(addr, i, value, cm=0, nbytes=None):
-    """``value`` (a Numeric or a Vector) at element ``i`` of address ``addr``; with
-    ``nbytes``, a store past the extent is dropped by the hardware."""
+    """`value` (a Numeric or a Vector) at element `i` of address `addr`; with
+    `nbytes`, a store past the extent is dropped by the hardware."""
     bo.buffer_store(
         fx.Vector(value).ir_value() if isinstance(value, fx.Vector) else value,
         rsrc(addr, nbytes),
@@ -86,25 +86,25 @@ def st(addr, i, value, cm=0, nbytes=None):
 
 
 def ld_i32x4(addr, i, cm=0, nbytes=None, mask=None):
-    """Four i32 words at word ``i``."""
+    """Four i32 words at word `i`."""
     return ld(addr, i, fx.Int32, 4, cm=cm, nbytes=nbytes, mask=mask)
 
 
 def gptr(addr):
-    """An i32 global pointer at byte address ``addr`` (for atomics)."""
+    """An i32 global pointer at byte address `addr` (for atomics)."""
     return fx.inttoptr(
         fx.PointerType.get(T.i32, fx.AddressSpace.Global, 4), fx.Int64(addr)
     )
 
 
 def atomic_add(addr, v):
-    """Agent-scope atomic add on the i32 at byte address ``addr``; the old value."""
+    """Agent-scope atomic add on the i32 at byte address `addr`; the old value."""
     return fx.Int32(fx.llvm.atomic_add(gptr(addr), fx.Int32(v), syncscope="agent"))
 
 
 def atomic_max_pos(addr, v):
-    """Agent-scope max of a non-negative f32 ``v`` into the f32 at byte address
-    ``addr`` (zeroed first): their bits order as signed ints."""
+    """Agent-scope max of a non-negative f32 `v` into the f32 at byte address
+    `addr` (zeroed first): their bits order as signed ints."""
     bits = fx.Float32(v).bitcast(fx.Int32)
     fx.llvm.atomic_max(gptr(addr), bits, syncscope="agent")
 
@@ -122,10 +122,10 @@ def drain_stores():
 
 
 def acquire_device():
-    """An agent-scope acquire (``buffer_inv sc1``): drops the XCD's L2 lines
+    """An agent-scope acquire (`buffer_inv sc1`): drops the XCD's L2 lines
     that other XCDs may have written since, so plain (cached) loads after a
     grid barrier read other CTAs' device-scope stores, and the CTAs of an XCD
-    share those lines in its L2 instead of each going to memory (``CM_DEV``)."""
+    share those lines in its L2 instead of each going to memory (`CM_DEV`)."""
     fx.memory_fence(syncscope="agent", ordering=fx.AtomicOrdering.Acquire)
 
 
@@ -140,7 +140,7 @@ def uniform(v):
 
 
 def ld_ptr64(table, i):
-    """Entry ``i`` of an i64 table in memory, wave-uniform."""
+    """Entry `i` of an i64 table in memory, wave-uniform."""
     w = ld(table, fx.Int32(i) * 2, fx.Int32, 2)
     lo, hi = uniform(w[0]), uniform(w[1])
     return (fx.Int64(hi) << fx.Int64(32)) | fx.Int64(fx.Uint32(lo))
@@ -152,8 +152,8 @@ def ld_ptr64(table, i):
 
 
 def lds_ld(ptr, n=1, dtype=fx.Int32):
-    """``n`` elements at LDS pointer ``ptr`` (an ``fx.Array`` iterator plus an
-    element offset): one ds_read of ``n`` x width bits."""
+    """`n` elements at LDS pointer `ptr` (an `fx.Array` iterator plus an
+    element offset): one ds_read of `n` x width bits."""
     if n == 1:
         return fx.ptr_load(ptr)
     return fx.Vector(fx.ptr_load(ptr, result_type=fx.Vector.make_type(n, dtype)))
@@ -169,7 +169,7 @@ def lds_st(ptr, value):
 
 
 def _xshfl(v, off):
-    """Lane ``lane ^ off``'s value: DPP for 1..8, ``ds_bpermute`` for 16, 32."""
+    """Lane `lane ^ off`'s value: DPP for 1..8, `ds_bpermute` for 16, 32."""
     if off >= 16:
         return v.shuffle_xor(off, 64)
     is_f = isinstance(v, fx.Float32)
@@ -192,7 +192,7 @@ def _add(a, b):
 
 
 def butterfly(v, offsets, op=_add):
-    """Butterfly reduction over the xor ``offsets`` in order: every lane of the
+    """Butterfly reduction over the xor `offsets` in order: every lane of the
     covered group receives the result."""
     for off in offsets:
         v = op(v, _xshfl(v, off))
@@ -293,8 +293,8 @@ def zeros(n, dtype=fx.Float32):
 
 
 def cvt_fp8x4(a, b, c, d):
-    """Four f32 to e4m3fnuz codes in one Int32 (``a`` the low byte), RNE with
-    saturation (``v_cvt_pk_fp8_f32``); the caller has scaled and clamped them
+    """Four f32 to e4m3fnuz codes in one Int32 (`a` the low byte), RNE with
+    saturation (`v_cvt_pk_fp8_f32`); the caller has scaled and clamped them
     to +-FP8_MAX."""
     lo = rocdl.cvt_pk_fp8_f32(
         T.i32,
@@ -311,8 +311,8 @@ def cvt_fp8x4(a, b, c, d):
 
 
 def quant_scale(amax, quant):
-    """The per-token scale of a row with absolute max ``amax`` under the
-    ``layout.Quant`` ``quant``."""
+    """The per-token scale of a row with absolute max `amax` under the
+    `layout.Quant` `quant`."""
     if quant.divide:
         scale = amax / fx.Float32(quant.fp8_max)
     else:
@@ -323,15 +323,15 @@ def quant_scale(amax, quant):
 
 
 def quant_factor(scale, quant):
-    """What ``fp8_quant8`` multiplies by: ``1 / scale`` (v_rcp_f32). For a
-    dividing quant a code differs from ``x / scale``'s only where the
+    """What `fp8_quant8` multiplies by: `1 / scale` (v_rcp_f32). For a
+    dividing quant a code differs from `x / scale`'s only where the
     quotient is within an f32 ulp of an FP8 rounding midpoint; a true
     division an element would cost the down GEMM's staging ~10x its loads."""
     return hw_rcp(scale)
 
 
 def fp8_quant8(values, factor, quant):
-    """Eight f32 times ``factor`` (``quant_factor``), clamped to +-fp8_max, as
+    """Eight f32 times `factor` (`quant_factor`), clamped to +-fp8_max, as
     two Int32 of e4m3fnuz codes."""
     lim = fx.Float32(quant.fp8_max)
     v = [fx.min(fx.max(x * factor, -lim), lim) for x in values]
@@ -344,8 +344,8 @@ def fp8_quant8(values, factor, quant):
 
 
 def mfma_bf16(a, b, acc):
-    """``acc + A @ B.T`` over 16 K: ``a``, ``b`` a lane's 4 bf16 as Int16
-    (16x16x16): lane ``l`` holds row ``l % 16``, K ``4 (l / 16) + [0, 4)``."""
+    """`acc + A @ B.T` over 16 K: `a`, `b` a lane's 4 bf16 as Int16
+    (16x16x16): lane `l` holds row `l % 16`, K `4 (l / 16) + [0, 4)`."""
     return fx.Vector(
         rocdl.mfma_f32_16x16x16bf16_1k(
             T.vec(4, T.f32),
@@ -362,10 +362,10 @@ def mfma_bf16(a, b, acc):
 
 
 def mfma_fp8(a, b, acc):
-    """``acc + A @ B.T`` over 32 K of e4m3fnuz: ``a``, ``b`` a lane's 8 codes as
-    Int64 (16x16x32): lane ``l`` holds row ``l % 16``, K ``8 (l / 16) + [0, 8)``.
-    The accumulator lane ``l`` holds rows ``4 (l / 16) + [0, 4)`` of column
-    ``l % 16``."""
+    """`acc + A @ B.T` over 32 K of e4m3fnuz: `a`, `b` a lane's 8 codes as
+    Int64 (16x16x32): lane `l` holds row `l % 16`, K `8 (l / 16) + [0, 8)`.
+    The accumulator lane `l` holds rows `4 (l / 16) + [0, 4)` of column
+    `l % 16`."""
     return fx.Vector(
         rocdl.mfma_f32_16x16x32_fp8_fp8(
             T.vec(4, T.f32),
@@ -382,7 +382,7 @@ def mfma_fp8(a, b, acc):
 
 
 def i64_of(lo, hi):
-    """Two Int32 words as one Int64 (``lo`` the low word)."""
+    """Two Int32 words as one Int64 (`lo` the low word)."""
     return (fx.Int64(fx.Uint32(hi)) << fx.Int64(32)) | fx.Int64(fx.Uint32(lo))
 
 
@@ -393,7 +393,7 @@ def sched_barrier():
 
 
 def unlikely(cond):
-    """``cond`` marked cold (llvm.expect)."""
+    """`cond` marked cold (llvm.expect)."""
     return fx.Boolean(
         llvm.call_intrinsic(
             ir.IntegerType.get_signless(1),

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """One Muse layer's decode step on one TP8 = EP8 rank of an MI300X, as one
-304-CTA kernel a step width: from the attention output of layer ``L`` to
-the QKVG output of layer ``L + 1``.
+304-CTA kernel a step width: from the attention output of layer `L` to
+the QKVG output of layer `L + 1`.
 
 The phases, with a grid barrier where a phase reads what other CTAs of the
 rank wrote, and exchange flags where it reads what other ranks pushed:
@@ -24,8 +24,8 @@ rank wrote, and exchange flags where it reads what other ranks pushed:
     quant (a CTA a token)                                     | barrier
 13. next layer's QKVG (split-K 8) to the QKVG buffer
 
-Weights come from a per-layer table (``WEIGHTS``), the rank's buffers from a
-per-width table (``SCRATCH``), both i64 byte addresses the runtime fills.
+Weights come from a per-layer table (`WEIGHTS`), the rank's buffers from a
+per-width table (`SCRATCH`), both i64 byte addresses the runtime fills.
 """
 
 import hashlib
@@ -92,7 +92,7 @@ def _source_key() -> str:
     """A hash of this package's sources. FlyDSL's compile-cache key hashes
     only helpers in the launcher's own directory, and of closure values only
     scalars and tuples: the kernel closes over this (and its phases as a
-    tuple), so an edit under ``stages/`` or ``common/`` or another phase
+    tuple), so an edit under `stages/` or `common/` or another phase
     subset compiles anew."""
     h = hashlib.sha256()
     for f in sorted(Path(__file__).parent.rglob("*.py")):
@@ -155,8 +155,8 @@ WIDE_SPLITS = (2, 16, 16, 8, 8)  # the pooler fold of 32 splits: ~50 us at 128 r
 
 
 class Plans:
-    """The split-K plans of width ``rows``: a last arriver sums ``splits *
-    rows`` partials a row, so wide steps cut K fewer ways."""
+    """The split-K plans of width `rows`: a last arriver sums `splits *
+    rows` partials a row, so wide steps cut K fewer ways."""
 
     def __init__(self, rows: int):
         o, router, pool, unpool, qkvg = NARROW_SPLITS if rows <= 16 else WIDE_SPLITS
@@ -193,7 +193,7 @@ POOL_OWNED = POOLED // COLS // TP  # 8
 
 
 def scratch_bytes(rows: int) -> dict[str, int]:
-    """Each ``SCRATCH`` buffer's bytes at width ``rows``."""
+    """Each `SCRATCH` buffer's bytes at width `rows`."""
     a = rows * TOPK
     p = Plans(rows)
     return {
@@ -250,11 +250,11 @@ def build(
     w13_ld: int = POOLED,
     w2_ld: int = INTER,
 ):
-    """The launcher of width ``rows``: ``launch(wtab, stab, peers, attn,
+    """The launcher of width `rows`: `launch(wtab, stab, peers, attn,
     qkv_in, qkv_out, epoch, layer, rank, sync, sync_next, folds, health,
-    stream)``. ``phases``: a subset of the module doc's phases to build (the
+    stream)`. `phases`: a subset of the module doc's phases to build (the
     others are left out: a measurement aid, not a working layer). The
-    checkpoint's ``route_scale`` and the expert matrices' row strides (bytes)
+    checkpoint's `route_scale` and the expert matrices' row strides (bytes)
     are compiled in."""
     lds = LdsPlan(rows)
     sh = lds.moe
@@ -559,6 +559,6 @@ def build(
 
 
 def compile_only(rows: int, phases=ALL_PHASES) -> None:
-    """Trace and compile width ``rows`` without a device (``COMPILE_ONLY=1``)."""
+    """Trace and compile width `rows` without a device (`COMPILE_ONLY=1`)."""
     launch, _ = build(rows, phases=phases)
     flyc.compile(launch, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, _STREAM)

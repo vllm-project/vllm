@@ -9,7 +9,7 @@ counter or flag seen, the target, CTA, clock.
 
 The output rank's flags: one int32 word a TP rank in the first PEER_HEAD bytes
 of rank 0's peer buffer. A rank whose wait gives up raises its word there and
-drains the store before it sets FAILED. ``runtime.guards.FailStop`` reads
+drains the store before it sets FAILED. `runtime.guards.FailStop` reads
 them after every step.
 """
 
@@ -26,5 +26,5 @@ SITE_FOLD = 3  # a split-K fold's arrival count
 
 
 def health_words(ctas: int) -> int:
-    """A rank's health words for a grid of ``ctas``: the header, a record a CTA."""
+    """A rank's health words for a grid of `ctas`: the header, a record a CTA."""
     return (ctas + 1) * RECORD_WORDS

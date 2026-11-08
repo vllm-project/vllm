@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Muse Spark PTPC FP8 specialized decode on MI300X / MI325X (gfx942, TP8 = EP8):
 persistent FlyDSL launches, one a decoder layer, for plain decode steps of
-1-16 rows (``--monokernel`` on gfx942). See README.md."""
+1-16 rows (`--monokernel` on gfx942). See README.md."""
 
 import importlib
 
@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 
 
 def attach(lm: nn.Module) -> None:
-    """Attach the kernels to ``lm.model`` after the weights are final.
+    """Attach the kernels to `lm.model` after the weights are final.
 
     Collective over the TP group: every rank calls it. A deployment that any
     rank cannot run raises on every rank, with every reason of this rank.
