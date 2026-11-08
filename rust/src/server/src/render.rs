@@ -18,6 +18,7 @@ use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_text::TextRequestProcessor;
 use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
+use crate::lora::check_lora_module;
 use crate::model_names::ServedModelNames;
 use crate::{
     HttpListenerMode, LoraModulePath, ReasoningEffort, TlsConfig,
@@ -151,12 +152,8 @@ fn validate_lora_modules(
     let mut seen = HashSet::new();
     for module in lora_modules {
         let name = &module.name;
-        if name.trim().is_empty() || module.path.trim().is_empty() {
-            bail!("--lora-modules entries need a non-empty name and path");
-        }
-        if served_model_names.names().contains(name) {
-            bail!("LoRA adapter name `{name}` is also a served model name");
-        }
+        check_lora_module(served_model_names.names(), module)
+            .with_context(|| format!("invalid --lora-modules entry `{name}`"))?;
         if !seen.insert(name) {
             bail!("LoRA adapter `{name}` is given more than once");
         }

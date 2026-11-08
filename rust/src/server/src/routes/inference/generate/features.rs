@@ -22,6 +22,9 @@ use crate::mm_wire;
 ///
 /// Each modality maps to parallel lists, one entry per item in placeholder
 /// order.
+///
+/// Python's `mm_metadata` is not modeled: render never emits it, and generate
+/// requires `kwargs_data`, which carries the same fields, so it is ignored.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MultiModalFeatures {
@@ -32,10 +35,6 @@ pub struct MultiModalFeatures {
     /// Base64-encoded MessagePack `MultiModalKwargsItem`s. Unset when render
     /// was asked for `mm_payload: "none"`.
     pub kwargs_data: Option<HashMap<MmModality, Vec<Option<String>>>>,
-    /// Metadata-only items Python's render adds for EC-transfer prefill. Never
-    /// emitted; ignored on input because generate requires `kwargs_data` for
-    /// every item, which already contains these fields.
-    pub mm_metadata: Option<HashMap<MmModality, Vec<Option<String>>>>,
 }
 
 /// Which multimodal payload render returns, mirroring Python's `MMPayload`.
@@ -86,7 +85,6 @@ impl MultiModalFeatures {
             mm_hashes,
             mm_placeholders,
             kwargs_data,
-            mm_metadata: None,
         })
     }
 
