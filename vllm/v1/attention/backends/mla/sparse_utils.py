@@ -27,7 +27,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, get_block_table_width
 
 def request_row_bounds(req_idx: np.ndarray) -> np.ndarray:
     """Bounds of the runs of adjacent rows that belong to one request: run
-    ``r`` is rows ``[bounds[r], bounds[r + 1])``.
+    `r` is rows `[bounds[r], bounds[r + 1])`.
 
     Under PCP a rank holds two adjacent chunk rows of a split prefill; the
     sparse backends give such a run one KV region.
@@ -47,8 +47,8 @@ def gathered_prefill_shards(
     request's slice of this rank's KV shard.
 
     PCP gives a rank two adjacent chunk rows of a split prefill; they share
-    one context, so the workspace holds it once. ``row_shard_rows`` is
-    ``CommonAttentionMetadata.dcp_local_seq_lens_cpu_upper_bound``: the
+    one context, so the workspace holds it once. `row_shard_rows` is
+    `CommonAttentionMetadata.dcp_local_seq_lens_cpu_upper_bound`: the
     largest DCP shard of the whole request on every row, identical on every
     PCP rank, so the all-gather is shaped the same everywhere.
 
@@ -63,7 +63,7 @@ def gathered_prefill_shards(
 
 
 def align_blocks_to_rows(spec: AttentionSpec, rows: int = 1) -> AttentionSpec:
-    """Sparse kernels read the cache as flat rows, viewed as ``rows``-row pages,
+    """Sparse kernels read the cache as flat rows, viewed as `rows`-row pages,
     so blocks must be whole pages apart."""
     return replace(spec, block_stride_alignment=rows * spec.state_content_size_bytes)
 
@@ -74,9 +74,9 @@ def flat_kv_row_view(
 ) -> tuple[torch.Tensor, int]:
     """Flat [row, head_dim] view of a paged cache and its physical rows per block.
 
-    Token offset is  ``block_idx * block_stride_rows + offset_in_block``.
+    Token offset is  `block_idx * block_stride_rows + offset_in_block`.
     When other layers' pages sit between consecutive blocks of this cache,
-    ``block_stride_rows`` exceeds ``block_size``; those in-between rows are never
+    `block_stride_rows` exceeds `block_size`; those in-between rows are never
     indexed (`triton_convert_req_index_to_global_index` ensures this).
     """
     num_blocks, _, head_dim = kv_cache.shape
@@ -674,11 +674,11 @@ def triton_filter_and_convert_dcp_index(
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Filter global per-request indices to this DCP rank's local slots.
 
-    With ``compact_valid_to_front`` (default), the conversion kernel scatters
-    this rank's owned slots to a contiguous prefix ``[0, valid_count)`` and
-    leaves the rest ``-1``. DCP filtering marks non-owned slots ``-1`` and so
+    With `compact_valid_to_front` (default), the conversion kernel scatters
+    this rank's owned slots to a contiguous prefix `[0, valid_count)` and
+    leaves the rest `-1`. DCP filtering marks non-owned slots `-1` and so
     creates interior gaps; the trtllm-gen sparse kernel reads the first
-    ``valid_count`` entries of each row, so they must be a contiguous prefix.
+    `valid_count` entries of each row, so they must be a contiguous prefix.
     Compaction is fused into the kernel (atomic slot allocator) rather than a
     separate sort/gather pass. Prefix order is unspecified (only the set matters).
     """

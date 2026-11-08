@@ -636,7 +636,7 @@ class NanoNemotronVLMultiModalProcessor(
 
         Videos whose bytes are missing or that contain no audio stream are
         silently skipped.  The returned *has_audio* mask is aligned with
-        the video list so callers know which ``<video>`` tokens need an
+        the video list so callers know which `<video>` tokens need an
         accompanying audio context.
 
         Returns:

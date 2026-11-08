@@ -681,11 +681,11 @@ class ROCMAiterMLASparseMetadataBuilder(
             self.pcp_dcp_shard_rows = _pcp_dcp_shard_rows(vllm_config)
 
     def _sparse_decode_max_split(self, max_seq_len: int) -> int:
-        """Cap ``max_split_per_batch`` for the aiter sparse-MLA decode reduce.
+        """Cap `max_split_per_batch` for the aiter sparse-MLA decode reduce.
 
-        The reduce only covers the selected tokens per row (``<= topk_tokens``),
-        so aiter's default (``-1`` => split across every CU) over-fragments it.
-        Mirror ``triton_mla.py``: aim for a minimum work per split, round to a
+        The reduce only covers the selected tokens per row (`<= topk_tokens`),
+        so aiter's default (`-1` => split across every CU) over-fragments it.
+        Mirror `triton_mla.py`: aim for a minimum work per split, round to a
         power of two, and cap by the CU count. Numerics are unchanged.
         """
         effective_len = min(max_seq_len, self.topk_tokens)
@@ -1445,7 +1445,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         counts: torch.Tensor,
         need_lse: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Attend each row's first ``counts`` slots of ``indices`` in ``kv_rows``."""
+        """Attend each row's first `counts` slots of `indices` in `kv_rows`."""
         kv_indices, kv_indptr = build_ragged_indices_from_dense(indices, counts)
         return self._forward_mla(
             layer,

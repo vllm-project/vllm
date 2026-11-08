@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The KV-balanced MLA core ("balanced") of the specialized decode: the device-planned
-split-KV FP8 MLA decode of ``nvidia/kv_balanced_mla`` in place of tokenspeed.
+split-KV FP8 MLA decode of `nvidia/kv_balanced_mla` in place of tokenspeed.
 
 tokenspeed splits every request's KV into the same number of chunks, fixed per batch
 shape, so the longest request of a mixed batch sets the layer time. The balanced core
@@ -9,13 +9,13 @@ plans each request's split count from this rank's KV lengths on the device (one 
 kernel per decode step, launched by the step's first MLA layer and reused by the
 others) and one wave of persistent clusters walks the planned work list. Under DCP it
 reads the local KV shard, masks causally in global positions and returns the log2 LSE
-that ``DcpValue`` merges, as tokenspeed does.
+that `DcpValue` merges, as tokenspeed does.
 
 Precision is tokenspeed_mla_decode's (the stock TOKENSPEED_MLA backend): FP32 split-KV
 partials and its P handling (row max kept while it grows by at most 2^8, P stored as
 E4M3 unscaled), so only the split points (a summation order) differ from stock.
 
-One ``BalancedMla`` per model: the kernels per query length q, their plan buffers and
+One `BalancedMla` per model: the kernels per query length q, their plan buffers and
 one split-KV scratch, all allocated while the providers are built (before the KV
 cache is sized)."""
 
@@ -36,7 +36,7 @@ MIN_SPLIT_TOKENS = 256
 
 
 def reducer_d_tiles(rows: int, device: torch.device) -> int:
-    """D512 bands per row of the split-KV reduction of ``rows`` query rows:
+    """D512 bands per row of the split-KV reduction of `rows` query rows:
     tokenspeed_mla_decode's choice, 2 when the rows fill at most half the SMs (TP8
     R1 at q = 5: 60 rows; -1 us at 8K-128K, GB300), else 1."""
     sms = torch.cuda.get_device_properties(device).multi_processor_count
@@ -44,14 +44,14 @@ def reducer_d_tiles(rows: int, device: torch.device) -> int:
 
 
 def supported(heads: int, q: int, device: torch.device) -> bool:
-    """Whether the balanced core runs ``heads`` x ``q`` query rows (M128 tiles)."""
+    """Whether the balanced core runs `heads` x `q` query rows (M128 tiles)."""
     from vllm.models.kimi_k3.nvidia.kv_balanced_mla.core import supports
 
     return supports(heads, q, device)
 
 
 class BalancedMla:
-    """The balanced cores of ``heads`` decode heads (under DCP: every rank's)."""
+    """The balanced cores of `heads` decode heads (under DCP: every rank's)."""
 
     def __init__(self, heads: int, device: torch.device, dcp: bool):
         self.heads, self.device, self.dcp = heads, device, dcp
@@ -61,11 +61,11 @@ class BalancedMla:
         self.workspace = torch.empty(0, dtype=torch.int8, device=device)
 
     def key(self, q: int, requests: int) -> tuple[int, int]:
-        """(q, capacity) of a step of ``requests``: the core that decodes it."""
+        """(q, capacity) of a step of `requests`: the core that decodes it."""
         return q, next(c for most, c in CAPACITY[self.dcp] if requests <= most)
 
     def require(self, q: int, requests: int):
-        """Prepare the core of ``q`` rows per request for ``requests``."""
+        """Prepare the core of `q` rows per request for `requests`."""
         from vllm.models.kimi_k3.nvidia.kv_balanced_mla.core import (
             TOKENSPEED_P_SCALE,
             KvBalancedMla,
@@ -100,16 +100,16 @@ class BalancedMla:
             )
 
     def plan(self, q: int, lengths: torch.Tensor):
-        """Plan this step's split counts from ``lengths`` (this rank's KV lengths, one
+        """Plan this step's split counts from `lengths` (this rank's KV lengths, one
         per request): once per step, before the decodes of its MLA layers."""
         key = self.key(q, lengths.numel())
         self.cores[key].plan(lengths, *self.plans[key])
 
     def decode(self, query, cache, block_table, lengths, scales, out, lse=None, **dcp):
-        """BF16 ``out`` [B, q, heads, 512] (and the log2 ``lse`` [B, q, heads]) of the
-        FP8 ``query`` [B, q, heads, 576] over the FP8 paged ``cache`` with the current
-        plan, PDL chained. Under DCP ``dcp`` holds ``cp`` (world, rank, interleave)
-        and ``totals``, the requests' global lengths for the causal mask."""
+        """BF16 `out` [B, q, heads, 512] (and the log2 `lse` [B, q, heads]) of the
+        FP8 `query` [B, q, heads, 576] over the FP8 paged `cache` with the current
+        plan, PDL chained. Under DCP `dcp` holds `cp` (world, rank, interleave)
+        and `totals`, the requests' global lengths for the causal mask."""
         q, (softmax, output_scale) = query.shape[1], scales
         key = self.key(q, query.shape[0])
         self.cores[key].decode(

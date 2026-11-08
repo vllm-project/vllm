@@ -125,7 +125,7 @@ def _deep_gemm_linear_data(
     module: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
     """Return (weight, weight_scale) for a layer whose kernel stamped itself as
-    ``deep_gemm_warmup_provider`` in ``process_weights_after_loading``, else None.
+    `deep_gemm_warmup_provider` in `process_weights_after_loading`, else None.
     """
     provider = getattr(module, "deep_gemm_warmup_provider", None)
     if not isinstance(provider, DeepGemmFp8BlockScaledMMKernel):
