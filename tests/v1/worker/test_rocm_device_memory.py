@@ -113,11 +113,13 @@ def test_code_objects_are_added_back(exact_count, code_objects):
         [
             sys.executable,
             "-c",
-            "import sys, torch\n"
-            "t = torch.empty(1 << 30, dtype=torch.uint8, device='cuda:0')\n"
-            "torch.accelerator.synchronize()\n"
-            "print('ready', flush=True)\n"
-            "sys.stdin.read()\n",
+            (
+                "import sys, torch\n"
+                "t = torch.empty(1 << 30, dtype=torch.uint8, device='cuda:0')\n"
+                "torch.accelerator.synchronize()\n"
+                "print('ready', flush=True)\n"
+                "sys.stdin.read()\n"
+            ),
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
