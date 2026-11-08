@@ -645,6 +645,10 @@ def _state_only_config(monkeypatch):
     monkeypatch.setattr(current_platform, "device_type", "cpu")
     config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
     config.cache_config.kv_cache_layout = "LBNHC"
+    # The executor turns the extensible KV cache off for persistent state; the
+    # config defaults it on for a CUDA host, whose device memory calls reject
+    # this CPU runner.
+    config.cache_config.enable_extensible_kv_cache = False
     return config
 
 
