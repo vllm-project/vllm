@@ -1006,8 +1006,14 @@ class MoRIIOConnectorScheduler:
                 return
 
         remote_notify_port = int(remote_notify_port)
+        dp_local = int(params.get("remote_dp_size_local") or 0)
+        hosts = params.get("remote_hosts") or []
+        pod_idx = pod_index(remote_dp_rank, dp_local)
+        if dp_local > 0 and pod_idx < len(hosts):
+            remote_host = hosts[pod_idx]
+        local_dp_rank = fold_local_rank(remote_dp_rank, dp_local)
         for tp_index in range(get_moriio_peer_tp_size(params, self.tp_size)):
-            target_port = remote_notify_port + get_port_offset(remote_dp_rank, tp_index)
+            target_port = remote_notify_port + get_port_offset(local_dp_rank, tp_index)
             self._send_transfer_release(transfer_id, remote_host, target_port)
 
     def update_state_after_alloc(
@@ -1617,6 +1623,11 @@ class MoRIIOConnectorScheduler:
             # to write into, and a plain request_id may not contain router-
             # embedded MoRIIO ZMQ addresses.
             if self.mode == MoRIIOMode.WRITE:
+                fill_remote_pod_from_config(
+                    params,
+                    self.kv_transfer_config.kv_connector_extra_config,
+                    self.is_producer,
+                )
                 self._release_write_prefill_blocks(request.request_id, params)
             else:
                 # Carry the actually-allocated blocks (incl. the per-request KDA

@@ -144,6 +144,7 @@ def _setup_kv_transfer_request(
 def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
     scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
     scheduler.is_producer = False
+    scheduler.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={})
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.tp_size = tp_size
     scheduler._has_mamba = False

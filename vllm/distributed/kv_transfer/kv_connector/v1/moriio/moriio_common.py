@@ -266,7 +266,10 @@ def fill_remote_pod_from_config(
         return
     params["remote_hosts"] = hosts
     params["remote_dp_size_local"] = dp_local
-    if not is_producer:
+    if not is_producer and (
+        "remote_dp_rank" in params
+        or min(int(params.get("remote_dp_size") or 1), dp_local) <= 1
+    ):
         params.setdefault("is_request_leader", True)
 
 
