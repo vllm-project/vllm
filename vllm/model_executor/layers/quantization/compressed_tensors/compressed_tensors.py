@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import re
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import regex as re
 import torch
 from compressed_tensors.config import CompressionFormat, SparsityCompressionConfig
 from compressed_tensors.quantization import (
@@ -107,9 +107,7 @@ def _render_literal(literal: str, escaped: bool) -> str:
     return re.escape(literal) if escaped else literal
 
 
-def _replace_literal(
-    pattern: str, literal: str, replacement: str | None
-) -> str | None:
+def _replace_literal(pattern: str, literal: str, replacement: str | None) -> str | None:
     """Replace the first copy of `literal` in a regex pattern.
 
     A replacement of None drops the whole pattern, matching WeightsMapper

@@ -50,7 +50,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
     should_ignore_layer,
 )
-from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -59,6 +58,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
@@ -763,13 +763,9 @@ def test_apply_vllm_mapper_rewrites_regex_literals_and_keeps_fusion():
 
     assert config.target_scheme_map["Linear"] is linear
     assert config.target_scheme_map[r"re:.*self_attn\..*"] is attn
-    assert (
-        config.target_scheme_map[r"re:^model\.layers\.\d+\.fc1\.gate\Z"] is gate
-    )
+    assert config.target_scheme_map[r"re:^model\.layers\.\d+\.fc1\.gate\Z"] is gate
     # Stacked fusion is not written into regex targets.
-    assert (
-        r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z" in config.target_scheme_map
-    )
+    assert r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z" in config.target_scheme_map
     assert config.kv_cache_scheme == {
         "type": "float",
         "num_bits": 8,
@@ -780,8 +776,7 @@ def test_apply_vllm_mapper_rewrites_regex_literals_and_keeps_fusion():
     assert r"re:^vision_tower\.multi_modal_projector\.linear_\d+\Z" in config.ignore
     assert r"re:^model\.layers\.\d+\.mlp\.gate\Z" in config.ignore
     assert (
-        r"re:^model\.layers\.\d+\.ffn\.gate\.e_score_correction_bias\Z"
-        in config.ignore
+        r"re:^model\.layers\.\d+\.ffn\.gate\.e_score_correction_bias\Z" in config.ignore
     )
     assert r"re:^mtp\.layers\.\d+\Z" not in config.ignore
     assert should_ignore_layer(
