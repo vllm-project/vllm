@@ -61,6 +61,7 @@ from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     validation_exception_handler,
 )
 from vllm.exceptions import VLLMValidationError
+from vllm.sampling_params import RepetitionDetectionParams
 
 _convert = AnthropicServingMessages.to_chat_completion_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
@@ -1900,6 +1901,26 @@ class TestToolUseStopReason:
 
         msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
         assert msg_deltas[0]["delta"]["stop_reason"] == expected
+
+
+class TestRepetitionDetection:
+    """Repetition detection reaches SamplingParams through the chat conversion."""
+
+    def test_repetition_detection_reaches_sampling_params(self):
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            repetition_detection={"max_pattern_size": 32, "min_count": 16},
+        )
+
+        converted = _convert(request)
+        sampling_params = converted.to_sampling_params(
+            max_tokens=converted.max_completion_tokens or 0,
+            default_sampling_params={},
+        )
+
+        assert sampling_params.repetition_detection == RepetitionDetectionParams(
+            max_pattern_size=32, min_count=16
+        )
 
 
 # ======================================================================

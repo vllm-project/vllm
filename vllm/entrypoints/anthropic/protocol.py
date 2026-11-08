@@ -13,6 +13,7 @@ from vllm.entrypoints.generate.base.protocol import (
     MMPayload,
     resolve_return_mm_kwargs_alias,
 )
+from vllm.sampling_params import RepetitionDetectionParams
 
 
 class AnthropicError(BaseModel):
@@ -351,6 +352,15 @@ class AnthropicMessagesRequest(BaseModel):
             "numeric values, used by custom extensions."
         ),
     )
+    repetition_detection: RepetitionDetectionParams | None = Field(
+        default=None,
+        description="Parameters for detecting repetitive N-gram patterns "
+        "in output tokens. If such repetition is detected, generation will "
+        "be ended early. LLMs can sometimes generate repetitive, unhelpful "
+        "token patterns, stopping only when they hit the maximum output length "
+        "(e.g. 'abcdabcdabcd...' or '\\emoji \\emoji \\emoji ...'). This feature "
+        "can detect such behavior and terminate early, saving time and tokens.",
+    )
     chat_template_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -412,7 +422,8 @@ class AnthropicDelta(BaseModel):
 
     # Message delta
     stop_reason: (
-        Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None
+        Literal["end_turn", "max_tokens", "stop_sequence", "tool_use", "repetition"]
+        | None
     ) = None
     stop_sequence: str | None = None
 
@@ -447,7 +458,8 @@ class AnthropicMessagesResponse(BaseModel):
     content: list[AnthropicContentBlock]
     model: str
     stop_reason: (
-        Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None
+        Literal["end_turn", "max_tokens", "stop_sequence", "tool_use", "repetition"]
+        | None
     ) = None
     stop_sequence: str | None = None
     usage: AnthropicUsage | None = None
