@@ -41,8 +41,9 @@ from .wide.layout import (
 logger = init_logger(__name__)
 
 HEALTH_POLL_INTERVAL = 64
-# widest step the kernels take (the CUDA graph sizes up to it)
-MAX_ROWS = 128
+# widest step the kernels take (the CUDA graph sizes up to it); they build and
+# pass their test up to MAX_TOKENS, but from 64 rows on tuned stock MoE is as fast
+MAX_ROWS = 64
 
 
 # --------------------------------------------------------------------------

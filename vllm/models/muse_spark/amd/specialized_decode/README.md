@@ -18,10 +18,10 @@ cover run vLLM's stock path.
   row-major FP8 `w13` / `w2` with per-channel scales (Triton MoE).
 - Steps (checked every forward; anything else runs stock): decode-only
   batches whose row count is a built width (the CUDA graph capture sizes up to
-  `MAX_ROWS` = 128), FULL CUDA graph or eager, no aux hidden states. On
-  MI325X the kernels decode faster than stock with the tuned Triton MoE config
-  up to 56 rows and 1-5% slower at 64-128 (faster than stock's default config
-  at every width).
+  `MAX_ROWS` = 64), FULL CUDA graph or eager, no aux hidden states. The
+  kernels build and pass their test up to 128 rows, but on MI325X stock with
+  the tuned Triton MoE config is as fast from 64 rows on, so wider steps run
+  stock.
 
 ## A launch (layer i, 1 <= i <= 60)
 
