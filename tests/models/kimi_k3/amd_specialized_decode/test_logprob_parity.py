@@ -247,7 +247,7 @@ def _engine(vllm_runner, mono: bool):
         enable_chunked_prefill=True,
         max_num_seqs=MAX_SEQS,
         gpu_memory_utilization=0.15,
-        # plan() rejects the views extend_kv_cache re-binds (#66357)
+        # plan() rejects the views extend_kv_cache re-binds (#66370)
         enable_extensible_kv_cache=False,
         enforce_eager=True,
         attention_config={"mla_prefill_backend": "ROCM_AITER_FA"},
