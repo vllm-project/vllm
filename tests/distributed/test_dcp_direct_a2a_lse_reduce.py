@@ -444,26 +444,47 @@ def test_nixl_config_rejects_unused_flag(monkeypatch, backend, dcp_size, pcp):
         )
 
 
-def test_nixl_rejects_models_that_do_not_use_mla(monkeypatch, tmp_path):
-    from transformers import OPTConfig
-
-    from vllm.config import DeviceConfig, ModelConfig, ParallelConfig, VllmConfig
+@pytest.mark.parametrize("dcp_size", [2, 8, 9, 16, 32])
+def test_nixl_config_accepts_multi_rank_groups(monkeypatch, dcp_size):
+    """NIXL's qualification sizes must not impose a configuration ceiling."""
+    from vllm.config import DeviceConfig, ParallelConfig, VllmConfig
 
     monkeypatch.setattr(dcp.envs, "VLLM_USE_NIXL_DCP_A2A", True)
     monkeypatch.setattr(dcp.envs, "VLLM_USE_DIRECT_DCP_A2A", False)
-    OPTConfig(architectures=["OPTForCausalLM"]).save_pretrained(tmp_path)
+    config = VllmConfig(
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=dcp_size,
+            decode_context_parallel_size=dcp_size,
+            dcp_comm_backend="a2a",
+            distributed_executor_backend="mp",
+        ),
+    )
+    assert config.parallel_config.decode_context_parallel_size == dcp_size
+    assert config.parallel_config.dcp_comm_backend == "a2a"
+
+
+@pytest.mark.parametrize("dcp_size", [2, 16])
+def test_nixl_rejects_models_that_do_not_use_mla(monkeypatch, tmp_path, dcp_size):
+    """LLM must reject non-MLA models, including above eight ranks, before loading."""
+    from transformers import OPTConfig
+
+    from vllm import LLM
+
+    monkeypatch.setattr(dcp.envs, "VLLM_USE_NIXL_DCP_A2A", True)
+    monkeypatch.setattr(dcp.envs, "VLLM_USE_DIRECT_DCP_A2A", False)
+    OPTConfig(
+        architectures=["OPTForCausalLM"], num_attention_heads=32, hidden_size=2048
+    ).save_pretrained(tmp_path)
     with pytest.raises(ValueError, match="MLA models only"):
-        VllmConfig(
-            device_config=DeviceConfig(device="cpu"),
-            model_config=ModelConfig(
-                model=str(tmp_path), skip_tokenizer_init=True, max_model_len=128
-            ),
-            parallel_config=ParallelConfig(
-                tensor_parallel_size=2,
-                decode_context_parallel_size=2,
-                dcp_comm_backend="a2a",
-                distributed_executor_backend="mp",
-            ),
+        LLM(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            max_model_len=128,
+            tensor_parallel_size=dcp_size,
+            decode_context_parallel_size=dcp_size,
+            dcp_comm_backend="a2a",
+            distributed_executor_backend="mp",
         )
 
 

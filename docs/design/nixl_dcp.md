@@ -1,6 +1,6 @@
 # Experimental NIXL GPU Device API DCP
 
-The opt-in prototype implements MLA DCP output/LSE exchange on two to eight
+The opt-in prototype implements MLA DCP output/LSE exchange on two or more
 GPUs using direct stores to mapped peers and NIXL device puts to unmapped peers.
 It targets both CUDA IPC mappings and cross-node mlx5 GPU-initiated RDMA, with
 three kernel launches per invocation. NIXL is disabled by default and requires
@@ -27,7 +27,7 @@ export CMAKE_ARGS="-DVLLM_BUILD_NIXL_DCP=ON -DNIXL_DCP_INCLUDE_DIR=/opt/nixl/inc
 uv pip install --python .venv/bin/python --no-build-isolation --no-deps -e .
 ```
 
-At runtime use `--dcp-comm-backend a2a`, a DCP size of 2..8, PCP size 1, an MLA
+At runtime use `--dcp-comm-backend a2a`, a DCP size greater than 1, PCP size 1, an MLA
 model, and FP16 or BF16 attention output. Set the flags explicitly for comparisons:
 
 | Path | `VLLM_USE_DIRECT_DCP_A2A` | `VLLM_USE_NIXL_DCP_A2A` |
@@ -133,6 +133,11 @@ and registrations, then waits for all peers to release their views before the
 owning tensors can be freed. Graphs must not be replayed after teardown.
 
 ## Validation and limits
+
+There is no NIXL-specific upper bound on DCP group size. The usual TP/DCP and
+attention-head divisibility constraints still apply, as do transport, queue and
+workspace capacity checks. Configuration acceptance does not qualify a topology:
+DCP16 has not yet been validated on GPUs.
 
 The mixed implementation passed H100 functional qualification on the pinned
 NIXL/UCX build with Torch 2.14.0+cu130 and NVIDIA driver 580.95.05:

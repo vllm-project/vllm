@@ -3458,13 +3458,13 @@ class VllmConfig:
         if envs.VLLM_USE_DIRECT_DCP_A2A is True:
             raise ValueError("NIXL and direct DCP A2A cannot both be enabled")
         if (
-            not 2 <= parallel.decode_context_parallel_size <= 8
+            parallel.decode_context_parallel_size <= 1
             or parallel.prefill_context_parallel_size != 1
             or parallel.dcp_comm_backend != "a2a"
         ):
             raise ValueError(
                 "VLLM_USE_NIXL_DCP_A2A requires --dcp-comm-backend a2a, "
-                "DCP size 2..8 and PCP size 1"
+                "DCP size greater than 1 and PCP size 1"
             )
         if self.model_config is not None and not self.model_config.use_mla:
             raise ValueError("VLLM_USE_NIXL_DCP_A2A currently supports MLA models only")
