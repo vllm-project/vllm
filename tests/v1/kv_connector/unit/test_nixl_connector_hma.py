@@ -374,6 +374,166 @@ def test_position_mapped_pull_builds_pair_descriptors(region_pull_worker):
     assert read["remote_block_descs_ids"].tolist() == [40, 41, 150, 151]
 
 
+def _recorded_copy_worker(region_pull_worker):
+    """Worker with two per-layer peers sharing one local pool region."""
+    worker = region_pull_worker
+    worker.num_regions = 3
+    worker.block_len_per_layer = [1024, 1024, 1024]
+    worker.dst_region_num_blocks = {"P": [16, 16], "D": [4, 4, 16]}
+    worker.dst_region_mem_types = {"P": ["VRAM", "VRAM"]}
+    worker.pp_size = 1
+    worker.pcp_size = 1
+    worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+        remote_tp_size=4,
+        remote_dcp_size=1,
+        remote_block_size=64,
+        remote_physical_blocks_per_logical=1,
+    )
+    return worker
+
+
+def _record_copy(worker, pairs, local_positions, required, remote_positions):
+    """Build the plan, then copy its pages between synthetic page buffers."""
+    worker._dst_pairs = {"P": pairs}
+    worker._read_blocks_mixed.reset_mock()
+    local_by_position = [
+        {position: block for position, block in group} for group in local_positions
+    ]
+    local_blocks = tuple(
+        tuple(local_by_position[g][position] for position in required[g])
+        for g in range(len(local_positions))
+    )
+    meta = ReqMeta(
+        local_block_ids=local_blocks,
+        local_physical_block_ids=local_blocks,
+        tp_size=1,
+        local_block_positions=tuple(tuple(group) for group in local_positions),
+        local_required_positions=tuple(tuple(group) for group in required),
+        remote=RemoteMeta(
+            block_ids=tuple(
+                tuple(block for _, block in group) for group in remote_positions
+            ),
+            engine_id="P",
+            request_id="p-req",
+            host="localhost",
+            port=1,
+            block_positions=tuple(tuple(group) for group in remote_positions),
+        ),
+    )
+    worker._read_blocks_for_req("request", meta)
+    read = worker._read_blocks_mixed.call_args.kwargs
+    local_ids = read["local_block_descs_ids"].tolist()
+    remote_ids = read["remote_block_descs_ids"].tolist()
+
+    page = 8
+    num_local = sum(worker.dst_region_num_blocks["D"])
+    num_remote = sum(worker.dst_region_num_blocks["P"])
+    local_buf = bytearray([0xEE] * (num_local * page))
+    remote_buf = bytes(
+        (desc_id + 1) for desc_id in range(num_remote) for _ in range(page)
+    )
+    for local_id, remote_id in zip(local_ids, remote_ids, strict=True):
+        local_buf[local_id * page : (local_id + 1) * page] = remote_buf[
+            remote_id * page : (remote_id + 1) * page
+        ]
+    return local_buf, remote_buf, local_ids, remote_ids
+
+
+def _assert_written_pages(local_buf, remote_buf, local_ids, remote_ids, num_local):
+    page = 8
+    for local_id, remote_id in zip(local_ids, remote_ids, strict=True):
+        assert (
+            local_buf[local_id * page : (local_id + 1) * page]
+            == remote_buf[remote_id * page : (remote_id + 1) * page]
+        )
+    written = set(local_ids)
+    for block in range(num_local):
+        if block in written:
+            continue
+        assert local_buf[block * page : (block + 1) * page] == bytes([0xEE]) * page
+
+
+@pytest.mark.cpu_test
+def test_recorded_copy_overlays_shared_region_by_group(region_pull_worker):
+    """Two groups over one shared region copy their own pages, not one alias."""
+    worker = _recorded_copy_worker(region_pull_worker)
+    pairs = SimpleNamespace(
+        remote=[0, 1],
+        local=[2, 2],
+        group=[0, 1],
+        remote_group=[0, 1],
+        remote_regions=[0, 1],
+        partner=[2, 2],
+        groups_match=False,
+        remote_ssm_regions=None,
+    )
+    local_buf, remote_buf, local_ids, remote_ids = _record_copy(
+        worker,
+        pairs,
+        local_positions=[((0, 0), (1, 1)), ((0, 4), (1, 5))],
+        required=[(0, 1), (0, 1)],
+        remote_positions=[((0, 0), (1, 1)), ((0, 2), (1, 3))],
+    )
+
+    assert local_ids == [8, 9, 12, 13]
+    assert remote_ids == [0, 1, 18, 19]
+    _assert_written_pages(local_buf, remote_buf, local_ids, remote_ids, 24)
+
+
+@pytest.mark.cpu_test
+def test_recorded_copy_follows_clipped_positions(region_pull_worker):
+    """A clipped tail copies the page each position names on the peer."""
+    worker = _recorded_copy_worker(region_pull_worker)
+    pairs = SimpleNamespace(
+        remote=[0],
+        local=[2],
+        group=[0],
+        remote_group=[0],
+        remote_regions=[0],
+        partner=[2],
+        groups_match=False,
+        remote_ssm_regions=None,
+    )
+    local_buf, remote_buf, local_ids, remote_ids = _record_copy(
+        worker,
+        pairs,
+        local_positions=[((5, 0), (6, 1)), ()],
+        required=[(5, 6), ()],
+        remote_positions=[((5, 10), (6, 11)), ()],
+    )
+
+    assert local_ids == [8, 9]
+    assert remote_ids == [10, 11]
+    _assert_written_pages(local_buf, remote_buf, local_ids, remote_ids, 24)
+
+
+@pytest.mark.cpu_test
+def test_recorded_copy_skips_prefix_hits(region_pull_worker):
+    """A locally cached page is neither read nor overwritten."""
+    worker = _recorded_copy_worker(region_pull_worker)
+    pairs = SimpleNamespace(
+        remote=[0],
+        local=[2],
+        group=[0],
+        remote_group=[0],
+        remote_regions=[0],
+        partner=[2],
+        groups_match=False,
+        remote_ssm_regions=None,
+    )
+    local_buf, remote_buf, local_ids, remote_ids = _record_copy(
+        worker,
+        pairs,
+        local_positions=[((0, 0), (1, 1)), ()],
+        required=[(1,), ()],
+        remote_positions=[((0, 0), (1, 1)), ()],
+    )
+
+    assert local_ids == [9]
+    assert remote_ids == [1]
+    _assert_written_pages(local_buf, remote_buf, local_ids, remote_ids, 24)
+
+
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("num_pages", [0, 3, 19])
 @pytest.mark.parametrize("region_groups", [(0, 1), (1, 0, 1)])
