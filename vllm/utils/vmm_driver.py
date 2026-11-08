@@ -7,18 +7,29 @@ management APIs, used by :class:`vllm.utils.extensible_tensor.ExtensibleTensor`.
 from __future__ import annotations
 
 import ctypes
+import glob
 import os
 from collections.abc import Iterable
+from contextlib import suppress
 from functools import cache
 from typing import Any
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 _SUCCESS = 0
+_ERROR_NOT_PERMITTED = 800
+_ERROR_NOT_SUPPORTED = 801
 _MEM_ALLOCATION_TYPE_PINNED = 1
 _MEM_LOCATION_TYPE_DEVICE = 1
 _MEM_ALLOC_GRANULARITY_MINIMUM = 0
 _MEM_ACCESS_FLAGS_PROT_READWRITE = 3
 _MEM_ALLOCATION_COMP_NONE = 0
 _DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED = 110
+_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED = 128
+_MEM_HANDLE_TYPE_FABRIC = 0x8
+_IMEX_CHANNELS = "/dev/nvidia-caps-imex-channels/channel*"
 
 DevicePtr = ctypes.c_ulonglong
 MemHandle = ctypes.c_ulonglong
@@ -53,6 +64,16 @@ class _MemAllocationProp(ctypes.Structure):
 
 class _MemAccessDesc(ctypes.Structure):
     _fields_ = [("location", _MemLocation), ("flags", ctypes.c_int)]
+
+
+def imex_channel_available() -> bool:
+    """Whether this process can open an IMEX channel, which FABRIC handles take.
+    The file alone does not tell: a container's device cgroup can still deny it."""
+    for path in glob.glob(_IMEX_CHANNELS):
+        with suppress(OSError):
+            os.close(os.open(path, os.O_RDONLY))
+            return True
+    return False
 
 
 def _find_loaded_library(
@@ -266,6 +287,14 @@ class CudaVmmDriver(VmmDriver):
         ]
         lib.cuDeviceGetAttribute.restype = ctypes.c_int
         self._rdma_capable: dict[int, bool] = {}
+        self._fabric_capable: dict[int, bool] = {}
+
+    def _device_attribute(self, attribute: int, device_index: int) -> bool:
+        flag = ctypes.c_int()
+        result = self._lib.cuDeviceGetAttribute(
+            ctypes.byref(flag), attribute, device_index
+        )
+        return result == _SUCCESS and bool(flag.value)
 
     def _make_alloc_prop(self, device_index: int) -> _MemAllocationProp:
         # Request GPUDirect RDMA support where available, as the sleep-mode
@@ -273,16 +302,44 @@ class CudaVmmDriver(VmmDriver):
         # memory with RDMA NICs (ibv_reg_mr fails with EFAULT).
         prop = super()._make_alloc_prop(device_index)
         if (capable := self._rdma_capable.get(device_index)) is None:
-            flag = ctypes.c_int()
-            result = self._lib.cuDeviceGetAttribute(
-                ctypes.byref(flag),
-                _DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
-                device_index,
+            capable = self._device_attribute(
+                _DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device_index
             )
-            capable = result == _SUCCESS and bool(flag.value)
             self._rdma_capable[device_index] = capable
         prop.allocFlags.gpuDirectRDMACapable = int(capable)
+        # UCX's cuda_ipc can only map driver-mapped memory through a FABRIC handle.
+        if (fabric := self._fabric_capable.get(device_index)) is None:
+            fabric = (
+                self._device_attribute(
+                    _DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device_index
+                )
+                and imex_channel_available()
+            )
+            self._fabric_capable[device_index] = fabric
+        if fabric:
+            prop.requestedHandleTypes = _MEM_HANDLE_TYPE_FABRIC
         return prop
+
+    def create(self, size: int, device_index: int) -> int:
+        prop = self._make_alloc_prop(device_index)
+        handle = MemHandle()
+        result = self._fns["create"](ctypes.byref(handle), size, ctypes.byref(prop), 0)
+        # Device support and an open channel do not guarantee a FABRIC allocation.
+        if prop.requestedHandleTypes and result in (
+            _ERROR_NOT_PERMITTED,
+            _ERROR_NOT_SUPPORTED,
+        ):
+            logger.warning(
+                "Device %d cannot allocate with a FABRIC handle (%s); allocating "
+                "without one. With the extensible KV cache, NIXL then loses NVLink "
+                "and falls back to RDMA or TCP.",
+                device_index,
+                self.error_string(result),
+            )
+            self._fabric_capable[device_index] = False
+            return super().create(size, device_index)
+        self._check(result)
+        return handle.value
 
     def error_string(self, code: int) -> str:
         msg = ctypes.c_char_p()
