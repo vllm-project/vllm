@@ -24,7 +24,7 @@
 # limitations under the License.
 """Inference-only Qwen3.5 Series, AMD ROCm implementation.
 
-Mirrors ``../nvidia/model.py`` (eager + breakable CUDA graphs) with the ROCm
+Mirrors `../nvidia/model.py` (eager + breakable CUDA graphs) with the ROCm
 counterparts of its fusions: Triton Gemma RMSNorm instead of FlashInfer's, the
 row-parallel all-reduce deferred into AITER's fused all-reduce + Gemma RMSNorm,
 and the fused QK-norm + RoPE + gate kernel. FlashInfer's FP8 / NVFP4 norm-quant
@@ -141,12 +141,12 @@ def _fused_gdn_gated_rms_norm(
 class Qwen3_5RMSNorm(nn.Module):
     """Gemma-style RMS normalization backed by Triton kernels.
 
-    When ``residual`` is given, the fused add + norm returns the updated
-    ``(x, residual)`` pair.
+    When `residual` is given, the fused add + norm returns the updated
+    `(x, residual)` pair.
 
-    ``reduce_inputs``: in ``forward_reduced``, an ``x`` that comes with a
+    `reduce_inputs`: in `forward_reduced`, an `x` that comes with a
     residual is the un-reduced TP partial of a row-parallel linear, and the
-    norm absorbs its all-reduce. An ``x`` without a residual (first decoder
+    norm absorbs its all-reduce. An `x` without a residual (first decoder
     layer, MTP layer) is always complete.
     """
 
@@ -171,9 +171,9 @@ class Qwen3_5RMSNorm(nn.Module):
     def forward_reduced(
         self, x: torch.Tensor, residual: torch.Tensor | None
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """``forward`` with the preceding TP all-reduce fused in when
-        ``reduce_inputs``. Returns the normed activation and the residual (x
-        when ``residual`` is None)."""
+        """`forward` with the preceding TP all-reduce fused in when
+        `reduce_inputs`. Returns the normed activation and the residual (x
+        when `residual` is None)."""
         if residual is None:
             return self(x), x
         if self.reduce_inputs:
@@ -816,7 +816,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for Qwen3.5.
 
-        With mrope enabled (default for Qwen3VL-class models), ``positions``
+        With mrope enabled (default for Qwen3VL-class models), `positions`
         has shape `(3, seq_len)`, otherwise `(seq_len,)`.
         """
         if intermediate_tensors is not None:

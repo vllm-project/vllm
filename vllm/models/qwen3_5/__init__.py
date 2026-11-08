@@ -5,7 +5,7 @@
 The NVIDIA and ROCm CDNA4+ (gfx950, gfx1250) variants use the eager +
 breakable CUDA-graph modelling code with explicit fused kernels. All other
 platforms keep the previous torch.compile implementation in
-``vllm/model_executor/models/`` so their behavior is unchanged.
+`vllm/model_executor/models/` so their behavior is unchanged.
 """
 
 from typing import TYPE_CHECKING

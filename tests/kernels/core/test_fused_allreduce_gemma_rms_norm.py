@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the manual AllReduce + GemmaRMSNorm fusion used by MiniMax M3.
 
-``fused_allreduce_gemma_rms_norm`` must match the unfused model path, i.e.
-``GemmaRMSNorm(all_reduce(partial), residual)``, both on the fused fast paths
+`fused_allreduce_gemma_rms_norm` must match the unfused model path, i.e.
+`GemmaRMSNorm(all_reduce(partial), residual)`, both on the fused fast paths
 (TP>1 with flashinfer + NVSwitch, or AITER's one-stage fused all-reduce on ROCm)
 and on the eager fallback (TP==1, or when no fused path applies).
 """
