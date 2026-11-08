@@ -35,6 +35,7 @@ async def test_structured_output(client: openai.AsyncOpenAI):
                 "strict": True,
             }
         },
+        temperature=0.0,
     )
     print(response)
 
@@ -62,6 +63,7 @@ async def test_structured_output_with_parse(client: openai.AsyncOpenAI):
         instructions="Extract the event information.",
         input="Alice and Bob are going to a science fair on Friday.",
         text_format=CalendarEvent,
+        temperature=0.0,
     )
     print(response)
 
