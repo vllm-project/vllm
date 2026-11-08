@@ -391,9 +391,12 @@ class CacheConfig:
     physical pages after warmup, so the cache is sized from the memory actually
     free after CUDA graph capture rather than from a profiling estimate. If
     unspecified, enabled on CUDA and ROCm unless kv_cache_memory_bytes is set,
-    or NIXL on device memory has no IMEX channel;
-    falls back to estimate-based sizing where the driver lacks VMM support.
-    Explicitly requesting it where unsupported is an error."""
+    or NIXL on device memory has no IMEX channel; falls back to estimate-based
+    sizing where the driver lacks VMM support. Explicitly requesting it where
+    unsupported is an error. On unpartitioned discrete ROCm GPUs, the sizing
+    adds back free memory that HIP hides by counting each allocation as at
+    least 2 MiB, so gpu_memory_utilization bounds exact device memory use
+    there."""
 
     kv_offloading_size: float | None = None
     """Size of the KV cache offloading buffer in GiB. When TP > 1, this is
