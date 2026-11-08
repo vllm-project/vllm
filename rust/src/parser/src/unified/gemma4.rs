@@ -10,7 +10,9 @@ use winnow::prelude::*;
 use winnow::stream::{Partial, Stream};
 use winnow::token::{literal, take_till, take_until};
 
-use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput, token_id};
+use super::{
+    Result, UnifiedParser, UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput, token_id,
+};
 use crate::reasoning::last_reasoning_boundary;
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
@@ -83,6 +85,140 @@ struct Gemma4ArgsScanState {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum ArgumentPhase {
+    #[default]
+    Key,
+    String {
+        key: String,
+        value_start: usize,
+    },
+    Separator,
+    BufferedTail,
+}
+
+/// Stream a prefix of string members; leave other values to the complete parser.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ArgumentStream {
+    cursor: usize,
+    // The cursor can pass a separator before another delta is emitted.
+    emitted_end: usize,
+    phase: ArgumentPhase,
+    started: bool,
+    streamed_values: Map<String, Value>,
+}
+
+impl ArgumentStream {
+    fn emit(
+        &mut self,
+        arguments: String,
+        name: &str,
+        tool_index: usize,
+        output: &mut UnifiedParserOutput,
+    ) {
+        output.push_call(ToolCallDelta {
+            tool_index,
+            name: (!self.started).then(|| name.to_owned()),
+            arguments,
+        });
+        self.started = true;
+        self.emitted_end = self.cursor;
+    }
+
+    fn parse(
+        &mut self,
+        text: &str,
+        name: &str,
+        tool_index: usize,
+        output: &mut UnifiedParserOutput,
+    ) {
+        loop {
+            match &self.phase {
+                ArgumentPhase::Key => {
+                    let rest = &text[self.cursor..];
+                    let Some(colon) = rest.find(':') else { return };
+                    let key = rest[..colon].trim();
+                    // A colon in text after the call, such as `Note:`, is not a key.
+                    if key.is_empty() || key.contains(TOOL_CALL_END) {
+                        self.phase = ArgumentPhase::BufferedTail;
+                        return;
+                    }
+                    let value = rest[colon + 1..].trim_start();
+                    if value.len() < STRING_DELIM.len() && STRING_DELIM.starts_with(value) {
+                        return;
+                    }
+                    let Some(value) = value.strip_prefix(STRING_DELIM) else {
+                        self.phase = ArgumentPhase::BufferedTail;
+                        return;
+                    };
+                    let key = key.to_owned();
+                    self.cursor = text.len() - value.len();
+                    let separator = if self.started { ',' } else { '{' };
+                    self.emit(
+                        format!("{separator}{}:\"", Value::String(key.clone())),
+                        name,
+                        tool_index,
+                        output,
+                    );
+                    self.phase = ArgumentPhase::String {
+                        key,
+                        value_start: self.cursor,
+                    };
+                }
+                ArgumentPhase::String { key, value_start } => {
+                    let rest = &text[self.cursor..];
+                    let delimiter = rest.find(STRING_DELIM);
+                    let fragment_len = delimiter
+                        .unwrap_or_else(|| rest.len() - partial_prefix_len(rest, STRING_DELIM));
+                    let end = self.cursor + fragment_len;
+                    let escaped = Value::String(rest[..fragment_len].to_owned()).to_string();
+                    let mut arguments = escaped[1..escaped.len() - 1].to_owned();
+                    self.cursor = end;
+                    if delimiter.is_some() {
+                        self.streamed_values.insert(
+                            key.clone(),
+                            Value::String(text[*value_start..end].to_owned()),
+                        );
+                        self.cursor += STRING_DELIM.len();
+                        self.phase = ArgumentPhase::Separator;
+                        arguments.push('"');
+                    }
+                    if !arguments.is_empty() {
+                        self.emit(arguments, name, tool_index, output);
+                    }
+                    if delimiter.is_none() {
+                        return;
+                    }
+                }
+                ArgumentPhase::Separator => {
+                    let rest = text[self.cursor..].trim_start();
+                    if rest.is_empty() {
+                        return;
+                    }
+                    if rest.starts_with(',') {
+                        self.cursor = text.len() - rest.len() + 1;
+                        self.phase = ArgumentPhase::Key;
+                    } else {
+                        self.phase = ArgumentPhase::BufferedTail;
+                    }
+                }
+                ArgumentPhase::BufferedTail => return,
+            }
+        }
+    }
+
+    fn finish(&self, mut args: Map<String, Value>) -> String {
+        // Append changed values: earlier members cannot be retracted.
+        args.retain(|key, value| self.streamed_values.get(key) != Some(value));
+        if args.is_empty() {
+            "}".to_owned()
+        } else {
+            let tail = Value::Object(args).to_string();
+            format!(",{}", &tail[1..])
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 enum Gemma4Mode {
     #[default]
     Text,
@@ -92,6 +228,7 @@ enum Gemma4Mode {
         name: String,
         body: Gemma4CallBody,
         args_scan: Gemma4ArgsScanState,
+        arguments: ArgumentStream,
     },
 }
 
@@ -109,7 +246,8 @@ enum Gemma4Mode {
 /// Some checkpoints write the body in parentheses (`call:func_name(...)`) or
 /// omit it (`call:func_name<tool_call|>`); both are accepted.
 ///
-/// Arguments are emitted only after a full Gemma4 tool call is parsed.
+/// Leading string arguments stream incrementally. Other values are buffered
+/// until the complete call can be parsed.
 pub struct Gemma4UnifiedParser {
     buffer: DecodedText,
     mode: Gemma4Mode,
@@ -153,16 +291,36 @@ impl Gemma4UnifiedParser {
                     name,
                     body,
                     args_scan: Gemma4ArgsScanState::default(),
+                    arguments: ArgumentStream::default(),
                 };
             }
             Gemma4Event::ToolCall { args } => {
                 let mode = std::mem::replace(&mut self.mode, Gemma4Mode::Text);
-                let Gemma4Mode::ToolCall { name, .. } = mode else {
+                let Gemma4Mode::ToolCall {
+                    name, arguments, ..
+                } = mode
+                else {
                     return Err(parsing_failed!(
                         "Gemma4 arguments without an active tool call"
                     ));
                 };
-                self.push_call(name, &args, output)?;
+                if arguments.started {
+                    let final_arguments = serde_json::to_string(&args).map_err(|error| {
+                        parsing_failed!("failed to serialize arguments: {}", error)
+                    })?;
+                    output.push_call(ToolCallDelta {
+                        tool_index: self.emitted_tool_count,
+                        name: None,
+                        arguments: arguments.finish(args),
+                    });
+                    output.events.push(UnifiedParserEvent::ToolCallEnd {
+                        tool_index: self.emitted_tool_count,
+                        arguments: final_arguments,
+                    });
+                    self.emitted_tool_count += 1;
+                } else {
+                    self.push_call(name, &args, output)?;
+                }
             }
             Gemma4Event::NameOnlyToolCall { name } => {
                 self.mode = Gemma4Mode::Text;
@@ -184,6 +342,10 @@ impl Gemma4UnifiedParser {
         output.push_call(ToolCallDelta {
             tool_index: self.emitted_tool_count,
             name: Some(name),
+            arguments: arguments.clone(),
+        });
+        output.events.push(UnifiedParserEvent::ToolCallEnd {
+            tool_index: self.emitted_tool_count,
             arguments,
         });
         self.emitted_tool_count += 1;
@@ -212,6 +374,9 @@ impl Gemma4UnifiedParser {
             Gemma4Mode::Header => {
                 format!("{TOOL_CALL_START}{buffer}")
             }
+            Gemma4Mode::ToolCall { arguments, .. } if arguments.started => {
+                buffer[arguments.emitted_end..].to_owned()
+            }
             Gemma4Mode::ToolCall { name, body, .. } => {
                 let opener = body.opener();
                 format!("{TOOL_CALL_START}{CALL_PREFIX}{name}{opener}{buffer}")
@@ -224,6 +389,10 @@ impl Gemma4UnifiedParser {
 }
 
 impl UnifiedParser for Gemma4UnifiedParser {
+    fn reports_tool_call_end(&self) -> bool {
+        true
+    }
+
     fn create(tools: &[Tool], tokenizer: DynTokenizer) -> Result<Box<dyn UnifiedParser>>
     where
         Self: Sized + 'static,
@@ -245,11 +414,19 @@ impl UnifiedParser for Gemma4UnifiedParser {
     fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
         self.buffer.append(delta);
 
-        while let Some((event, consumed_len)) = {
-            parse_buffered_event(&self.buffer.text, |input| {
+        loop {
+            if let Gemma4Mode::ToolCall {
+                name, arguments, ..
+            } = &mut self.mode
+            {
+                arguments.parse(&self.buffer.text, name, self.emitted_tool_count, output);
+            }
+            let Some((event, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
                 parse_next_gemma4_event(input, &mut self.mode)
             })?
-        } {
+            else {
+                break;
+            };
             let piece = self.buffer.drain_prefix(consumed_len);
             self.apply_event(event, piece, output)?;
         }
@@ -263,7 +440,19 @@ impl UnifiedParser for Gemma4UnifiedParser {
         match &self.mode {
             Gemma4Mode::Text => output.push_text(self.buffer.take().text),
             Gemma4Mode::Reasoning => output.push_reasoning(self.buffer.take()),
-            Gemma4Mode::Header | Gemma4Mode::ToolCall { .. } => {
+            Gemma4Mode::ToolCall { body, .. } => {
+                // A stop string can remove the outer marker after a complete body.
+                let args = self
+                    .buffer
+                    .text
+                    .trim_end()
+                    .strip_suffix(body.closer())
+                    .and_then(|args| parse_gemma4_args(args).ok())
+                    .ok_or(UnifiedParserError::IncompleteToolCall { parser: "Gemma4" })?;
+                let piece = self.buffer.take();
+                self.apply_event(Gemma4Event::ToolCall { args }, piece, &mut output)?;
+            }
+            Gemma4Mode::Header => {
                 return Err(UnifiedParserError::IncompleteToolCall { parser: "Gemma4" });
             }
         }
@@ -479,6 +668,9 @@ fn gemma4_pair(input: &mut &str) -> ModalResult<(String, Value)> {
 
 /// Parse a Gemma4 bare key.
 fn gemma4_key(input: &mut &str) -> ModalResult<String> {
+    if matches!(input.chars().next(), Some('}' | ']' | ')')) {
+        return Err(ErrMode::Backtrack(ContextError::new()));
+    }
     let key = take_till(1.., |char: char| char == ':').parse_next(input)?.trim();
     if key.is_empty() {
         return Err(ErrMode::Cut(ContextError::new()));
@@ -488,13 +680,18 @@ fn gemma4_key(input: &mut &str) -> ModalResult<String> {
 
 /// Parse a Gemma4 value.
 fn gemma4_value(input: &mut &str) -> ModalResult<Value> {
-    alt((
-        gemma4_string.map(|value: &str| Value::String(value.to_string())),
-        gemma4_object.map(Value::Object),
-        gemma4_array_value.map(Value::Array),
-        gemma4_bare_value,
-    ))
-    .parse_next(input)
+    // An incomplete string, object or array must not fall back to a bare value.
+    if input.starts_with(STRING_DELIM) || STRING_DELIM.starts_with(input.trim_end()) {
+        gemma4_string
+            .map(|value: &str| Value::String(value.to_string()))
+            .parse_next(input)
+    } else if input.starts_with('{') {
+        gemma4_object.map(Value::Object).parse_next(input)
+    } else if input.starts_with('[') {
+        gemma4_array_value.map(Value::Array).parse_next(input)
+    } else {
+        gemma4_bare_value(input)
+    }
 }
 
 /// Parse a Gemma4 string delimited by `<|"|>`.
@@ -619,7 +816,7 @@ mod tests {
         fn parse_complete(&mut self, text: &str) -> super::Result<UnifiedParserOutput> {
             let mut output = self.parse_chunk(text)?;
             output.append(self.finish()?);
-            Ok(output)
+            Ok(output.coalesce())
         }
     }
 
@@ -636,7 +833,9 @@ mod tests {
                 .iter()
                 .filter_map(|event| match event {
                     UnifiedParserEvent::Text(text) => Some(text.as_str()),
-                    UnifiedParserEvent::Reasoning(_) | UnifiedParserEvent::ToolCall(_) => None,
+                    UnifiedParserEvent::Reasoning(_)
+                    | UnifiedParserEvent::ToolCall(_)
+                    | UnifiedParserEvent::ToolCallEnd { .. } => None,
                 })
                 .collect()
         }
@@ -646,7 +845,9 @@ mod tests {
                 .iter()
                 .filter_map(|event| match event {
                     UnifiedParserEvent::Reasoning(text) => Some(text.text.as_str()),
-                    UnifiedParserEvent::Text(_) | UnifiedParserEvent::ToolCall(_) => None,
+                    UnifiedParserEvent::Text(_)
+                    | UnifiedParserEvent::ToolCall(_)
+                    | UnifiedParserEvent::ToolCallEnd { .. } => None,
                 })
                 .collect()
         }
@@ -655,14 +856,40 @@ mod tests {
             self.events
                 .iter()
                 .filter_map(|event| match event {
-                    UnifiedParserEvent::Text(_) | UnifiedParserEvent::Reasoning(_) => None,
+                    UnifiedParserEvent::Text(_)
+                    | UnifiedParserEvent::Reasoning(_)
+                    | UnifiedParserEvent::ToolCallEnd { .. } => None,
                     UnifiedParserEvent::ToolCall(call) => Some(call),
                 })
                 .collect()
         }
 
         fn coalesce(self) -> Self {
-            self
+            let mut output = Self::default();
+            for event in self.events {
+                if let UnifiedParserEvent::ToolCallEnd {
+                    tool_index,
+                    arguments,
+                } = event
+                {
+                    let Some(UnifiedParserEvent::ToolCall(previous)) = output.events.last_mut()
+                    else {
+                        panic!("tool end without a call");
+                    };
+                    assert_eq!(previous.tool_index, tool_index);
+                    previous.arguments = arguments;
+                    continue;
+                }
+                if let UnifiedParserEvent::ToolCall(call) = &event
+                    && let Some(UnifiedParserEvent::ToolCall(previous)) = output.events.last_mut()
+                    && previous.tool_index == call.tool_index
+                {
+                    previous.arguments.push_str(&call.arguments);
+                } else {
+                    output.events.push(event);
+                }
+            }
+            output
         }
     }
 
@@ -979,20 +1206,20 @@ mod tests {
     }
 
     #[test]
-    fn gemma4_streaming_waits_for_complete_tool_call() {
+    fn gemma4_streams_string_arguments_before_closing_markers() {
         let mut parser = test_parser();
         let mut output = UnifiedParserOutput::default();
 
-        for chunk in [
-            "<|tool_call>",
-            "call:get_weather{",
-            "location:<|\"|>Paris<|\"|>}",
-        ] {
+        for chunk in ["<|tool_call>", "call:get_weather{", "location:<|\"|>Par"] {
             output.append(parser.parse_chunk(chunk).unwrap());
-            assert!(output.calls().is_empty());
         }
 
-        output.append(parser.parse_chunk("<tool_call|>").unwrap());
+        assert_eq!(
+            output.clone().coalesce().calls()[0].arguments,
+            "{\"location\":\"Par"
+        );
+
+        output.append(parser.parse_chunk("is<|\"|>}<tool_call|>").unwrap());
         let output = output.coalesce();
 
         assert_eq!(first_call(&output).name.as_deref(), Some("get_weather"));
@@ -1000,6 +1227,84 @@ mod tests {
             serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
             json!({ "location": "Paris" })
         );
+    }
+
+    #[test]
+    fn gemma4_completes_repeated_keys_with_the_last_value() {
+        let mut parser = test_parser();
+        let mut output = parser.parse_chunk("<|tool_call>call:set{key:<|\"|>first<|\"|>").unwrap();
+        output.append(parser.parse_chunk(",key:<|\"|>last<|\"|>}<tool_call|>").unwrap());
+        let streamed: String = output.calls().iter().map(|call| call.arguments.as_str()).collect();
+        assert_eq!(streamed, r#"{"key":"first","key":"last"}"#);
+        assert!(matches!(
+            output.events.last(),
+            Some(UnifiedParserEvent::ToolCallEnd { tool_index: 0, arguments })
+                if arguments == r#"{"key":"last"}"#
+        ));
+    }
+
+    #[test]
+    fn gemma4_streamed_arguments_match_complete_parser_at_every_split() {
+        for args in [
+            "text:<|\"|>雪\n\t\"\\<tool_call|><|\"|>,empty:<|\"|><|\"|>",
+            "key:<|\"|>first<|\"|>,key:<|\"|>last<|\"|>",
+            "key:<|\"|>first<|\"|>,count:3,key:<|\"|>last<|\"|>",
+            "key:<|\"|>first<|\"|>,key:42,nested:{items:[true,None,<|\"|>x<|\"|>]}",
+            "count:3,text:<|\"|>buffered<|\"|>",
+        ] {
+            let expected = Value::Object(parse_gemma4_args(args).unwrap());
+            for (open, close) in [('{', '}'), ('(', ')')] {
+                let wire = format!("<|tool_call>call:set{open}{args}{close}<tool_call|>");
+                for split in (0..=wire.len()).filter(|&split| wire.is_char_boundary(split)) {
+                    let output = collect_stream(&[&wire[..split], &wire[split..]]);
+                    assert_eq!(
+                        serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
+                        expected,
+                        "split {split}: {wire}",
+                    );
+                }
+                let chunks: Vec<_> = wire
+                    .char_indices()
+                    .map(|(start, ch)| &wire[start..start + ch.len_utf8()])
+                    .collect();
+                let output = collect_stream(&chunks);
+                assert_eq!(
+                    serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gemma4_truncated_string_keeps_partial_arguments_without_fabricating_a_close() {
+        let mut parser = test_parser();
+        let output = parser
+            .parse_chunk("<|tool_call>call:set{text:<|\"|>partial<|")
+            .unwrap()
+            .coalesce();
+        assert_eq!(first_call(&output).arguments, "{\"text\":\"partial");
+        assert!(matches!(
+            parser.finish(),
+            Err(UnifiedParserError::IncompleteToolCall { .. })
+        ));
+        assert_eq!(parser.reset(), "<|");
+    }
+
+    #[test]
+    fn gemma4_streaming_keeps_adjacent_calls_separate_after_a_trailing_comma() {
+        let output = collect_stream(&[
+            "<|tool_call>call:set{text:<|\"|>one<|\"|>,}<tool_call|><|tool_call>call:set{text:<|\"|>two<|\"|>}<tool_call|>",
+        ]);
+        let calls = output.calls();
+        assert_eq!(calls.len(), 2);
+        for (index, expected) in ["one", "two"].into_iter().enumerate() {
+            assert_eq!(calls[index].tool_index, index);
+            assert_eq!(
+                serde_json::from_str::<Value>(&calls[index].arguments).unwrap(),
+                json!({"text": expected})
+            );
+        }
     }
 
     #[test]
@@ -1250,35 +1555,64 @@ mod tests {
     }
 
     #[test]
-    fn gemma4_finish_rejects_complete_args_without_end_marker() {
-        let mut parser = test_parser();
-        for chunk in ["<|tool_call>", "call:get_status{}"] {
-            parser.parse_chunk(chunk).unwrap();
+    fn gemma4_finish_accepts_complete_args_without_end_marker() {
+        for body in [
+            "{}",
+            "()",
+            "{text:<|\"|>done<|\"|>,meta:{items:[1,true]}}",
+            "(text:<|\"|>done<|\"|>,meta:{items:[1,true]})",
+        ] {
+            let wire = format!("<|tool_call>call:set{body}");
+            let expected = test_parser().parse_complete(&format!("{wire}<tool_call|>")).unwrap();
+            for split in 0..=wire.len() {
+                let output = collect_stream(&[&wire[..split], &wire[split..]]);
+                assert_eq!(output, expected, "split {split}: {wire}");
+            }
         }
-
-        let error = parser.finish().unwrap_err();
-
-        assert!(error.to_report_string().contains("incomplete Gemma4 tool call"));
     }
 
     #[test]
-    fn gemma4_reset_preserves_internally_buffered_arguments() {
+    fn gemma4_finish_rejects_incomplete_values_without_end_marker() {
+        for body in [
+            "{}Note: hi}",
+            "()Note: hi)",
+            "{text:<|\"|>partial}",
+            "{text:<|}",
+            "{meta:{count:1}",
+            "{items:[1,2}",
+            "(meta:{count:1)",
+            "{text:<|\"|>done<|\"|>,items:[1,2}",
+        ] {
+            let mut parser = test_parser();
+            parser.parse_chunk(&format!("<|tool_call>call:set{body}")).unwrap();
+            assert!(
+                matches!(
+                    parser.finish(),
+                    Err(UnifiedParserError::IncompleteToolCall { .. })
+                ),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn gemma4_reset_returns_only_uncommitted_arguments() {
         let mut parser = test_parser();
         for chunk in [
             "<|tool_call>",
             "call:write_file{",
             "content:<|\"|>hello ",
-            "world<|\"|>",
+            "world<|\"|>,count:4",
         ] {
             parser.parse_chunk(chunk).unwrap();
         }
 
         let raw = parser.reset();
 
-        assert_eq!(
-            raw,
-            "<|tool_call>call:write_file{content:<|\"|>hello world<|\"|>"
-        );
+        assert_eq!(raw, ",count:4");
+        let output = parser.parse_complete("<|tool_call>call:get_time{}<tool_call|>").unwrap();
+        assert_eq!(first_call(&output).tool_index, 0);
+        assert_eq!(first_call(&output).arguments, "{}");
     }
 
     #[test]

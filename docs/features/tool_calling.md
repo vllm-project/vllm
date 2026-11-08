@@ -504,6 +504,30 @@ Supported models:
 
 Flags: `--tool-call-parser glm47`
 
+### Gemma 4 Models (`gemma4`)
+
+Supported models:
+
+* `google/gemma-4-E2B-it`
+
+Flags: `--enable-auto-tool-choice --tool-call-parser gemma4`
+
+Both frontends can stream string arguments before the tool call ends. The Rust
+frontend (`VLLM_USE_RUST_FRONTEND=1`) streams consecutive leading strings delimited
+by `<|"|>`. At the first value without these delimiters, it buffers all remaining
+arguments until the call ends. Python can also stream later strings after a
+complete non-string member. Rust supports both braced and parenthesized calls.
+
+In non-stream Chat Completions responses, Rust returns only complete calls and
+uses the last value for each repeated key. A complete argument body is retained
+even if a stop string removes `<tool_call|>`. An aborted call does not change
+`finish_reason` from `stop` to `tool_calls` in either response mode. Python may
+also recover arguments from incomplete calls. In a stream, Rust cannot retract
+earlier fragments, so repeated keys may appear more than once. This differs from Python, which stops
+argument deltas when a repeated key changes an earlier value. Truncated calls
+can leave partial arguments in either frontend's stream. After a parse error,
+Rust returns only the text suffix that it has not yet emitted.
+
 ### FunctionGemma Models (`functiongemma`)
 
 Google's FunctionGemma is a lightweight (270M parameter) model specifically designed for function calling.
