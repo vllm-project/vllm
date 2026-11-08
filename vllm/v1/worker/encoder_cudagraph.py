@@ -244,7 +244,7 @@ class EncoderCudaGraphManager:
 
         Subdivided grid: quarter-octave steps up to 1024, half-octave steps
         above. Capture buffers are shared across budgets (see
-        ``_capture_budget_graph``), so extra graphs cost no buffer memory
+        `_capture_budget_graph`), so extra graphs cost no buffer memory
         and the finer table only cuts padding waste.
         """
         points = {min_budget, max_budget}

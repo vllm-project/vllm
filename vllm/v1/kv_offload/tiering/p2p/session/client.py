@@ -556,10 +556,10 @@ class ClientRole:
     def collect_results(self) -> list[LoadResult]:
         """Walk load timeouts and drain completed loads.
 
-        A load past its load timeout (``_P2P_LOAD_TIMEOUT_S`` or
-        ``_PD_LOAD_TIMEOUT_S``) gets an AbortFetchMsg and is reported failed
+        A load past its load timeout (`_P2P_LOAD_TIMEOUT_S` or
+        `_PD_LOAD_TIMEOUT_S`) gets an AbortFetchMsg and is reported failed
         at once, with its blocks' release deferred. One whose AbortAck then
-        misses ``_ABORT_ACK_TIMEOUT_S`` is recorded in ``expired_abort_ack``,
+        misses `_ABORT_ACK_TIMEOUT_S` is recorded in `expired_abort_ack`,
         so the session disconnects and close() releases it.
         Fetches never handed to the transport fail locally without an abort.
         """

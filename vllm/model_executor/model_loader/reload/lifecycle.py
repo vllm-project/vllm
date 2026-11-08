@@ -17,7 +17,7 @@ _weight_update_active = False
 
 
 def weight_update_active() -> bool:
-    """Whether a weight update is running, when one ``load_weights`` call may hold
+    """Whether a weight update is running, when one `load_weights` call may hold
     only part of the checkpoint. Process-wide, so a module nested in the model
     passed to `start_reload` sees it too."""
     return _weight_update_active

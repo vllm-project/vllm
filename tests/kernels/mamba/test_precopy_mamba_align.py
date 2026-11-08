@@ -7,15 +7,15 @@ with byte-identical semantics to the scalar V1 copy specs
 (`get_conv_copy_spec` / `get_temporal_copy_spec`):
 
 * conv state (SD layout, conv_width > 0): shift the sliding window by
-  ``token_bias`` tokens -- ``state[bt[src_col], token_bias:]`` ->
-  ``state[bt[dst_col], :conv_width - token_bias]``.
-* temporal state (conv_width == 0): ``token_bias`` selects the accepted
-  speculative column -- ``state[bt[src_col + token_bias]]`` ->
-  ``state[bt[dst_col]]``.
+  `token_bias` tokens -- `state[bt[src_col], token_bias:]` ->
+  `state[bt[dst_col], :conv_width - token_bias]`.
+* temporal state (conv_width == 0): `token_bias` selects the accepted
+  speculative column -- `state[bt[src_col + token_bias]]` ->
+  `state[bt[dst_col]]`.
 
-The kernel must also no-op when ``src_col < 0`` (fresh request) or
-``src_col == dst_col`` (no boundary crossed). Callers pass an explicit
-``idx_mapping``; ``idx_mapping=None`` launches in batch order.
+The kernel must also no-op when `src_col < 0` (fresh request) or
+`src_col == dst_col` (no boundary crossed). Callers pass an explicit
+`idx_mapping`; `idx_mapping=None` launches in batch order.
 """
 
 from __future__ import annotations

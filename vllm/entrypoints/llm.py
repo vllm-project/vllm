@@ -868,8 +868,8 @@ class LLM(
             mode: How to handle any existing requests, can be "abort", "wait",
                 or "keep".
             reset_connector: Also reset the KV connector's cache, such as
-                blocks offloaded to CPU. Set ``False`` only if the weights do
-                not change before ``wake_up``. Ignored at level 0.
+                blocks offloaded to CPU. Set `False` only if the weights do
+                not change before `wake_up`. Ignored at level 0.
 
         """
         self.llm_engine.sleep(level=level, mode=mode, reset_connector=reset_connector)
@@ -877,8 +877,8 @@ class LLM(
     def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         """Release the GPU physical memory backing the KV cache.
 
-        Requires a completed ``sleep(level=0)`` and resident executor memory.
-        Restore with ``wake_up(tags=["kv_cache"])``; kept requests are recomputed.
+        Requires a completed `sleep(level=0)` and resident executor memory.
+        Restore with `wake_up(tags=["kv_cache"])`; kept requests are recomputed.
 
         Args:
             reset_connector: Also reset the KV connector's cache; see

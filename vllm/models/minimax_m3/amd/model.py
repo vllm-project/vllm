@@ -222,19 +222,19 @@ def _is_moe_layer(config: PreTrainedConfig, layer_id: int) -> bool:
 
 
 def _build_rotary_emb(config: PreTrainedConfig, head_dim: int):
-    """Build the (partial NeoX) RoPE from ``config.rope_parameters``.
+    """Build the (partial NeoX) RoPE from `config.rope_parameters`.
 
-    Without scaling the cos/sin cache is sized to ``max_position_embeddings``
+    Without scaling the cos/sin cache is sized to `max_position_embeddings`
     (524288 native); a request whose positions exceed that reads the cache out of
     bounds and the worker hard-crashes (no Python traceback). When scaling is set
-    (e.g. YaRN ``factor: 2`` to reach 1M), it is threaded into ``get_rope`` so the
+    (e.g. YaRN `factor: 2` to reach 1M), it is threaded into `get_rope` so the
     proper scaled embedding is built and its cache covers
-    ``original_max_position_embeddings * factor`` positions. Default behavior
+    `original_max_position_embeddings * factor` positions. Default behavior
     (no scaling) is unchanged. Shared by the dense and sparse attention layers, and
     the index branch reuses the returned module.
 
     Note: for the VL checkpoint, set the scaling on the *text* config
-    (``--hf-overrides '{"text_config":{"rope_parameters":{...}}}'``) -- that is
+    (`--hf-overrides '{"text_config":{"rope_parameters":{...}}}'`) -- that is
     the config the decoder reads here; a top-level override does not reach it.
     """
     rope_parameters = dict(config.rope_parameters)

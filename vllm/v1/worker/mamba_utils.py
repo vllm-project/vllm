@@ -208,13 +208,13 @@ def _copy_mamba_state_block(
 ):
     """Copy one (layer, state-type) mamba state block between block columns.
 
-    Shared copy body of ``postprocess_mamba_fused_kernel`` and
-    ``precopy_mamba_align_fused_kernel``:
-    - conv state (conv_width > 0): shift the window by ``token_bias`` tokens,
-      ``state[bt[src_col], token_bias:] ->
-      state[bt[dst_col], :conv_width - token_bias]``
-    - temporal state: ``token_bias`` selects the accepted speculative column,
-      ``state[bt[src_col + token_bias]] -> state[bt[dst_col]]``
+    Shared copy body of `postprocess_mamba_fused_kernel` and
+    `precopy_mamba_align_fused_kernel`:
+    - conv state (conv_width > 0): shift the window by `token_bias` tokens,
+      `state[bt[src_col], token_bias:] ->
+      state[bt[dst_col], :conv_width - token_bias]`
+    - temporal state: `token_bias` selects the accepted speculative column,
+      `state[bt[src_col + token_bias]] -> state[bt[dst_col]]`
 
     The caller owns the decision logic (which columns, whether to copy); this
     device function only performs the byte copy for the given metadata slot.
@@ -590,8 +590,8 @@ def precopy_mamba_align_fused_kernel(
     Before the forward pass, copy each request's last SSM/conv state from its
     previous block column into the new window block column, so the kernels read
     the initial state from the write-side block as usual.
-    Same per-(layer, state) copy semantics as ``postprocess_mamba_fused_kernel``
-    (shared ``_copy_mamba_state_block`` body), but driven by the GPU-resident src
+    Same per-(layer, state) copy semantics as `postprocess_mamba_fused_kernel`
+    (shared `_copy_mamba_state_block` body), but driven by the GPU-resident src
     columns so it needs no CPU-GPU sync (async-scheduling safe).
 
     Grid: (num_reqs, num_states [, TEMPORAL_TILES]). The runner passes

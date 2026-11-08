@@ -323,9 +323,9 @@ def yield_req_data(
     """Yields:
     (req_id, block_id_groups, is_full_table)
 
-    ``is_full_table`` is True when ``block_id_groups`` is the request's whole
+    `is_full_table` is True when `block_id_groups` is the request's whole
     block table (new and resumed requests, which are both in
-    ``scheduled_new_reqs``) rather than this step's additions.
+    `scheduled_new_reqs`) rather than this step's additions.
     """
     # new requests
     for req_data in scheduler_output.scheduled_new_reqs:

@@ -1034,7 +1034,7 @@ class EngineCore:
         - `keep`: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
 
-        ``reset_connector`` decides whether clearing caches also resets the
+        `reset_connector` decides whether clearing caches also resets the
         KV connector's cache.
         """
         if mode not in get_args(PauseMode):
@@ -1104,7 +1104,7 @@ class EngineCore:
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
             reset_connector: Also reset the KV connector's cache; see
-                ``LLM.sleep``.
+                `LLM.sleep`.
 
         """
         if self._checkpoint_state != CheckpointState.RUNNING:
@@ -1174,7 +1174,7 @@ class EngineCore:
     def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         """Discard KV cache physical memory. Requires a completed pause
         and all executor memory to be resident. Kept requests are recomputed
-        after wake-up. ``reset_connector`` is as for ``sleep``.
+        after wake-up. `reset_connector` is as for `sleep`.
         """
         if not (
             self.is_scheduler_paused()

@@ -971,7 +971,7 @@ class TestFlashInferTopkToppRobustness:
     def test_flashinfer_handles_pathological_logits(self, pattern: str, path: str):
         """flashinfer_sample must return valid ids even on poisoned logits.
 
-        Direct call into ``flashinfer_sample`` — exactly the code path the
+        Direct call into `flashinfer_sample` — exactly the code path the
         sampler takes when FI is enabled.
         """
         from vllm.v1.sample.ops.topk_topp_sampler import flashinfer_sample

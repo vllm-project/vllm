@@ -1242,21 +1242,21 @@ def _mamba_align_block_table_kernel(
 
     Two annotations above are load-bearing and easy to drop by accident:
 
-    ``block_table_stride_0: tl.int64``
-        Without it ``req_idx * block_table_stride_0`` is computed in i32 --
-        ``program_id`` is i32 and Triton specializes a stride below 2^31 to
+    `block_table_stride_0: tl.int64`
+        Without it `req_idx * block_table_stride_0` is computed in i32 --
+        `program_id` is i32 and Triton specializes a stride below 2^31 to
         i32 -- so the product wraps once a row offset reaches 2^31 elements
         (a 4096 x 625000 table faults from row 3436 on MI355X).
-        ``torch.gather``, which this replaces, indexes in 64-bit and has no
+        `torch.gather`, which this replaces, indexes in 64-bit and has no
         such limit, so narrowing it would be a regression.
-        ``mamba_utils.py:43`` annotates its row stride the same way.
+        `mamba_utils.py:43` annotates its row stride the same way.
 
-    ``do_not_specialize_on_alignment`` on the three pointers
+    `do_not_specialize_on_alignment` on the three pointers
         Triton puts pointer alignment in the specialization key. A view of
-        ``seq_lens`` or ``block_table_tensor`` starting at a request index that
+        `seq_lens` or `block_table_tensor` starting at a request index that
         is not a multiple of 4 is differently aligned, so a fresh variant
         JIT-compiles mid-step -- 25-28 ms cold, ~1.5 ms warm, and an error under
-        ``jit_monitor_mode=error``. The torch expression this replaced never
+        `jit_monitor_mode=error`. The torch expression this replaced never
         compiled anything, so that recompile would be a regression introduced
         by this change.
     """
