@@ -19,7 +19,7 @@ from .base import (
 
 try:
     from torchcodec.decoders import VideoDecoder
-except (ImportError, RuntimeError):
+except (ImportError, OSError, RuntimeError):
     VideoDecoder = PlaceholderModule("torchcodec").placeholder_attr(  # type: ignore[assignment]
         "decoders.VideoDecoder"
     )
