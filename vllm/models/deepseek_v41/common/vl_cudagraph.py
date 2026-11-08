@@ -64,15 +64,6 @@ class DeepseekV4VLEncoderCudaGraphMixin:
 
     # -- helpers shared with the eager multimodal path --
 
-    def _encode_image(
-        self,
-        patches: torch.Tensor,
-        n_vit_h: int,
-        n_vit_w: int,
-    ) -> torch.Tensor:
-        # Aligner rows in reading order, one per IMAGE slot.
-        return self.aligner(self.vision(patches, n_vit_h, n_vit_w), n_vit_h, n_vit_w)
-
     def _build_image_span(
         self, image_embeds: torch.Tensor, types: torch.Tensor
     ) -> torch.Tensor:
@@ -326,19 +317,19 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         mm_kwargs: dict[str, Any],
         path: str = "default",
     ) -> torch.Tensor:
-        patches = mm_kwargs["patches"].to(self.aligner.w1.weight.dtype)
+        """Run all images as one unpadded varlen batch."""
         vit_grid = self._get_grid_list(mm_kwargs, "vit_grid")
-        outs: list[torch.Tensor] = []
-        offset = 0
-        for n_vit_h, n_vit_w in vit_grid:
-            n_vit = n_vit_h * n_vit_w
-            outs.append(
-                self._encode_image(patches[offset : offset + n_vit], n_vit_h, n_vit_w)
+        if not vit_grid:
+            return mm_kwargs["patches"].new_zeros(
+                (0, self.config.hidden_size), dtype=self.aligner.w1.weight.dtype
             )
-            offset += n_vit
-        if not outs:
-            return patches.new_zeros((0, self.config.hidden_size))
-        return torch.cat(outs, dim=0)
+        inputs = self.prepare_encoder_cudagraph_replay_buffers(
+            mm_kwargs,
+            max_batch_size=len(vit_grid),
+            max_frames_per_batch=0,
+            path=path,
+        )
+        return self.encoder_cudagraph_forward(inputs.values, path=path)
 
     def postprocess_encoder_output(
         self,

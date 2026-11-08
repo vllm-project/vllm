@@ -1593,11 +1593,10 @@ class Ernie4_5_VLMoeForConditionalGeneration(
     #
     # Only the vision transformer (self.vision_model) is captured into the
     # CUDA graph. The VariableResolutionResamplerModel (spatial merge +
-    # projection) runs eagerly in encoder_eager_forward / postprocess_
-    # encoder_output because its temporal path performs host-side (numpy)
-    # indexing that cannot be captured. Image only: video uses a temporal
-    # conv that changes the output token count, so it falls back to the
-    # eager multimodal path for now.
+    # projection) runs eagerly in postprocess_encoder_output because its
+    # temporal path performs host-side (numpy) indexing that cannot be
+    # captured. Image only: video uses a temporal conv that changes the output
+    # token count, so it falls back to the eager multimodal path for now.
 
     def get_encoder_cudagraph_config(self):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
@@ -1729,14 +1728,13 @@ class Ernie4_5_VLMoeForConditionalGeneration(
     def encoder_eager_forward(
         self, mm_kwargs: dict[str, Any], path: str = "default"
     ) -> torch.Tensor:
-        # Eager fallback: run the full pipeline (ViT + resampler). The result
-        # is scattered directly, so it must be the post-merge embeddings.
+        # ViT only, like the graph: postprocess_encoder_output runs the
+        # resampler on both outputs.
         pixel_values = mm_kwargs["pixel_values"].type(self.vision_model.dtype)
         grid_thw = async_tensor_h2d(
             mm_kwargs["image_grid_thw"], self.vision_model.device
         )
-        image_features = self.vision_model(pixel_values, grid_thw)
-        return self.resampler_model(image_features, grid_thw)
+        return self.vision_model(pixel_values, grid_thw)
 
     def postprocess_encoder_output(
         self,
