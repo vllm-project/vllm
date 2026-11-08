@@ -3051,11 +3051,15 @@ impl ChatRenderer for FakeRenderBackend {
     fn render(&self, request: &ChatRequest) -> vllm_chat::Result<RenderedPrompt> {
         let mut prompt = String::new();
         for message in &request.messages {
-            prompt.push_str(&format!(
-                "{}: {}\n",
-                message.role().as_str(),
-                message.text_content()?
-            ));
+            let mut text = message.text_content()?;
+            if let vllm_chat::ChatMessage::Assistant { content } = message {
+                for block in content {
+                    if let vllm_chat::AssistantContentBlock::ToolCall(call) = block {
+                        text.push_str(&format!(" {}({})", call.name, call.arguments));
+                    }
+                }
+            }
+            prompt.push_str(&format!("{}: {text}\n", message.role().as_str()));
         }
         if request.chat_options.add_generation_prompt() {
             prompt.push_str("assistant:");
@@ -3197,8 +3201,9 @@ async fn render_chat_echoes_structured_output_without_parsers() {
     assert_eq!(rendered.structured_output, Some(structured_output));
 }
 
-/// Assistant blocks render in the order given, and continuing a final message
-/// that is not an assistant's is the client's error.
+/// Assistant blocks render in the order given, a tool call without arguments
+/// renders them as an empty object, and continuing a final message that is not
+/// an assistant's is the client's error.
 #[tokio::test]
 async fn render_chat_maps_assistant_blocks_and_generation_prompt_mode() {
     use pb::assistant_content_block::Block;
@@ -3213,7 +3218,7 @@ async fn render_chat_maps_assistant_blocks_and_generation_prompt_mode() {
                     block(Block::ToolCall(pb::ChatToolCall {
                         id: "call_1".to_string(),
                         name: "get_weather".to_string(),
-                        arguments: "{}".to_string(),
+                        arguments: String::new(),
                     })),
                     block(Block::Text("two".to_string())),
                 ],
@@ -3237,7 +3242,7 @@ async fn render_chat_maps_assistant_blocks_and_generation_prompt_mode() {
     .await;
     assert_eq!(
         rendered.prompt_token_ids,
-        render_token_ids("user: Hi\nassistant: one two\n")
+        render_token_ids("user: Hi\nassistant: one two get_weather({})\n")
     );
 
     let status = service
@@ -3488,4 +3493,139 @@ async fn render_chat_can_omit_media_kwargs() {
     };
     assert_eq!(features.kwargs, None);
     assert!(features.mm_hash.is_some());
+}
+
+/// Input the server cannot map is rejected rather than dropped or defaulted.
+#[tokio::test]
+async fn render_chat_rejects_unset_parts_and_unknown_enum_values() {
+    use pb::chat_content_part::Part;
+
+    let unknown = 99;
+    let with_part = |part| pb::ChatRequest {
+        messages: vec![user_message(pb::chat_content::Content::Parts(
+            pb::ChatContentParts {
+                parts: vec![pb::ChatContentPart { part }],
+            },
+        ))],
+        ..weather_chat_request()
+    };
+    let cases = [
+        ("unset part", with_part(None)),
+        (
+            "image detail",
+            with_part(Some(Part::ImageUrl(pb::ChatImageUrl {
+                url: TINY_PNG_DATA_URI.to_string(),
+                detail: unknown,
+                ..Default::default()
+            }))),
+        ),
+        (
+            "generation prompt mode",
+            pb::ChatRequest {
+                generation_prompt_mode: unknown,
+                ..weather_chat_request()
+            },
+        ),
+        (
+            "tool choice mode",
+            pb::ChatRequest {
+                tool_choice: Some(pb::ChatToolChoice {
+                    choice: Some(pb::chat_tool_choice::Choice::Mode(unknown)),
+                }),
+                ..weather_chat_request()
+            },
+        ),
+        (
+            "truncation side",
+            pb::ChatRequest {
+                truncation: Some(pb::PromptTruncation {
+                    limit: Some(pb::prompt_truncation::Limit::MaxTokens(4)),
+                    side: unknown,
+                }),
+                ..weather_chat_request()
+            },
+        ),
+    ];
+    let service = render_service();
+
+    for (case, chat) in cases {
+        let status = service
+            .render_chat(tonic::Request::new(pb::RenderChatRequest {
+                chat: Some(chat),
+                ..Default::default()
+            }))
+            .await
+            .expect_err(case);
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{case}");
+    }
+}
+
+/// Media that cannot be decoded is the client's error, as in HTTP render.
+#[tokio::test]
+async fn render_chat_rejects_undecodable_media_as_invalid_argument() {
+    use pb::chat_content_part::Part;
+
+    let chat = pb::ChatRequest {
+        messages: vec![user_message(pb::chat_content::Content::Parts(
+            pb::ChatContentParts {
+                parts: vec![pb::ChatContentPart {
+                    part: Some(Part::ImageUrl(pb::ChatImageUrl {
+                        url: "data:image/png;base64,bm90IGFuIGltYWdl".to_string(),
+                        ..Default::default()
+                    })),
+                }],
+            },
+        ))],
+        ..Default::default()
+    };
+
+    let status = multimodal_render_service()
+        .render_chat(tonic::Request::new(pb::RenderChatRequest {
+            chat: Some(chat),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("undecodable image");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+}
+
+/// Shutdown ends open health watches, including one on the overall server
+/// status, so the render gRPC server's drain finishes.
+#[tokio::test]
+async fn render_grpc_server_shutdown_ends_health_watches() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
+    let addr = listener.local_addr().expect("local addr");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let server = tokio::spawn(crate::render::serve_render_grpc(
+        Arc::new(render_state()),
+        MaybeTlsListener::plain(Listener::Tcp(listener)),
+        shutdown.clone(),
+    ));
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .expect("grpc endpoint")
+        .connect()
+        .await
+        .expect("connect grpc channel");
+    // Held until the server stops: dropping the client could close the
+    // connection and end the watch on its own.
+    let mut client = HealthClient::new(channel);
+    let mut watch = client
+        .watch(HealthCheckRequest {
+            service: String::new(),
+        })
+        .await
+        .expect("watch overall health")
+        .into_inner();
+    let first = watch.message().await.expect("watch message").expect("status");
+    assert_eq!(first.status, HealthServingStatus::Serving as i32);
+
+    shutdown.cancel();
+
+    tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .expect("server drains")
+        .expect("server task")
+        .expect("server result");
+    drop(client);
 }

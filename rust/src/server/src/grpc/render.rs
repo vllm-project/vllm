@@ -195,28 +195,32 @@ async fn check_model(state: &impl RenderContext, model: &str) -> Result<(), Stat
 
 fn to_chat_request(chat: pb::ChatRequest) -> Result<ChatRequest, Status> {
     // `ChatRequest::validate` checks a continued final message is an assistant's.
-    let generation_prompt_mode = match chat.generation_prompt_mode() {
-        pb::GenerationPromptMode::Unspecified | pb::GenerationPromptMode::StartNewAssistant => {
-            GenerationPromptMode::StartNewAssistant
-        }
-        pb::GenerationPromptMode::ContinueFinalAssistant => {
-            GenerationPromptMode::ContinueFinalAssistant
-        }
-        pb::GenerationPromptMode::NoGenerationPrompt => GenerationPromptMode::NoGenerationPrompt,
-    };
+    let generation_prompt_mode =
+        match enum_from_proto(chat.generation_prompt_mode, "generation_prompt_mode")? {
+            pb::GenerationPromptMode::Unspecified | pb::GenerationPromptMode::StartNewAssistant => {
+                GenerationPromptMode::StartNewAssistant
+            }
+            pb::GenerationPromptMode::ContinueFinalAssistant => {
+                GenerationPromptMode::ContinueFinalAssistant
+            }
+            pb::GenerationPromptMode::NoGenerationPrompt => {
+                GenerationPromptMode::NoGenerationPrompt
+            }
+        };
     let messages: Vec<_> = chat.messages.into_iter().map(message_from_proto).try_collect()?;
-    let tool_choice = chat.tool_choice.and_then(|choice| choice.choice).and_then(|choice| {
+    let tool_choice = {
         use pb::chat_tool_choice::{Choice, Mode};
-        match choice {
-            Choice::Mode(mode) => match Mode::try_from(mode).unwrap_or_default() {
+        match chat.tool_choice.and_then(|choice| choice.choice) {
+            None => None,
+            Some(Choice::Mode(mode)) => match enum_from_proto(mode, "tool_choice.mode")? {
                 Mode::Unspecified => None,
                 Mode::Auto => Some(ChatToolChoice::Auto),
                 Mode::None => Some(ChatToolChoice::None),
                 Mode::Required => Some(ChatToolChoice::Required),
             },
-            Choice::FunctionName(name) => Some(ChatToolChoice::Function { name }),
+            Some(Choice::FunctionName(name)) => Some(ChatToolChoice::Function { name }),
         }
-    });
+    };
     let tool_context = ResolvedToolContext::new(
         &messages,
         tools_from_proto(chat.tools)?,
@@ -241,9 +245,10 @@ fn to_chat_request(chat: pb::ChatRequest) -> Result<ChatRequest, Status> {
             response_format: None,
             template_kwargs: chat
                 .chat_template_kwargs
-                .map(|kwargs| match convert::proto_struct_to_json(&kwargs) {
-                    serde_json::Value::Object(map) => map.into_iter().collect(),
-                    _ => unreachable!("a proto struct converts to a JSON object"),
+                .map(|kwargs| {
+                    (kwargs.fields.iter())
+                        .map(|(key, value)| (key.clone(), convert::proto_value_to_json(value)))
+                        .collect()
                 })
                 .unwrap_or_default(),
         },
@@ -266,7 +271,7 @@ fn to_chat_request(chat: pb::ChatRequest) -> Result<ChatRequest, Status> {
 fn truncation_from_proto(truncation: pb::PromptTruncation) -> Result<PromptTruncation, Status> {
     use pb::prompt_truncation::{Limit, Side};
 
-    let side = match truncation.side() {
+    let side = match enum_from_proto(truncation.side, "truncation.side")? {
         Side::Unspecified | Side::Left => TruncationSide::Left,
         Side::Right => TruncationSide::Right,
     };
@@ -337,45 +342,52 @@ fn assistant_block_from_proto(
 /// Omitted content renders as empty text.
 fn content_from_proto(content: Option<pb::ChatContent>) -> Result<ChatContent, Status> {
     use pb::chat_content::Content;
-    use pb::chat_content_part::Part;
 
     Ok(match content.and_then(|content| content.content) {
         None => ChatContent::Text(String::new()),
         Some(Content::Text(text)) => ChatContent::Text(text),
-        Some(Content::Parts(parts)) => ChatContent::Parts(
-            parts
-                .parts
-                .into_iter()
-                .filter_map(|part| part.part)
-                .map(|part| match part {
-                    Part::Text(text) => ChatContentPart::text(text),
-                    Part::ImageUrl(image) => ChatContentPart::ImageUrl {
-                        detail: match image.detail() {
-                            pb::ImageDetail::Unspecified => None,
-                            pb::ImageDetail::Auto => Some(ImageDetail::Auto),
-                            pb::ImageDetail::Low => Some(ImageDetail::Low),
-                            pb::ImageDetail::High => Some(ImageDetail::High),
-                        },
-                        image_url: image.url,
-                        uuid: image.uuid,
-                    },
-                    Part::VideoUrl(video) => ChatContentPart::VideoUrl {
-                        video_url: video.url,
-                        uuid: video.uuid,
-                    },
-                    Part::AudioUrl(audio) => ChatContentPart::AudioUrl {
-                        audio_url: audio.url,
-                        uuid: audio.uuid,
-                    },
-                    Part::InputAudio(audio) => ChatContentPart::InputAudio {
-                        data: audio.data,
-                        format: audio.format,
-                        uuid: audio.uuid,
-                    },
-                })
-                .collect(),
-        ),
+        Some(Content::Parts(parts)) => {
+            ChatContent::Parts(parts.parts.into_iter().map(part_from_proto).try_collect()?)
+        }
     })
+}
+
+fn part_from_proto(part: pb::ChatContentPart) -> Result<ChatContentPart, Status> {
+    use pb::chat_content_part::Part;
+
+    Ok(match part.part {
+        Some(Part::Text(text)) => ChatContentPart::text(text),
+        Some(Part::ImageUrl(image)) => ChatContentPart::ImageUrl {
+            detail: match enum_from_proto(image.detail, "image_url.detail")? {
+                pb::ImageDetail::Unspecified => None,
+                pb::ImageDetail::Auto => Some(ImageDetail::Auto),
+                pb::ImageDetail::Low => Some(ImageDetail::Low),
+                pb::ImageDetail::High => Some(ImageDetail::High),
+            },
+            image_url: image.url,
+            uuid: image.uuid,
+        },
+        Some(Part::VideoUrl(video)) => ChatContentPart::VideoUrl {
+            video_url: video.url,
+            uuid: video.uuid,
+        },
+        Some(Part::AudioUrl(audio)) => ChatContentPart::AudioUrl {
+            audio_url: audio.url,
+            uuid: audio.uuid,
+        },
+        Some(Part::InputAudio(audio)) => ChatContentPart::InputAudio {
+            data: audio.data,
+            format: audio.format,
+            uuid: audio.uuid,
+        },
+        None => return Err(Status::invalid_argument("chat content part is required")),
+    })
+}
+
+/// Read a proto enum field, rejecting values this server does not know.
+fn enum_from_proto<E: TryFrom<i32>>(value: i32, field: &str) -> Result<E, Status> {
+    E::try_from(value)
+        .map_err(|_| Status::invalid_argument(format!("unknown {field} value {value}")))
 }
 
 fn tools_from_proto(tools: Vec<pb::ChatTool>) -> Result<Vec<ChatTool>, Status> {
@@ -417,34 +429,5 @@ fn chat_error_to_status(error: vllm_chat::Error) -> Status {
         Status::unavailable(message)
     } else {
         Status::internal(message)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tool_call_without_arguments_renders_as_empty_object() {
-        let block = pb::AssistantContentBlock {
-            block: Some(pb::assistant_content_block::Block::ToolCall(
-                pb::ChatToolCall {
-                    id: "call_1".to_string(),
-                    name: "now".to_string(),
-                    arguments: String::new(),
-                },
-            )),
-        };
-        let AssistantContentBlock::ToolCall(call) = assistant_block_from_proto(block).unwrap()
-        else {
-            panic!("expected a tool call");
-        };
-        assert_eq!(call.arguments, "{}");
-    }
-
-    #[test]
-    fn media_errors_are_invalid_argument() {
-        let status = chat_error_to_status(vllm_chat::Error::Multimodal("fetch failed".into()));
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 }

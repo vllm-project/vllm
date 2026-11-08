@@ -9,6 +9,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use tonic::server::NamedService;
 use tonic::transport::Server as TonicServer;
+use tonic_health::ServingStatus;
 use tonic_health::server::health_reporter;
 use tracing::info;
 use vllm_chat::multimodal::MmLimitPerPrompt;
@@ -280,39 +281,49 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
         let Some((address, grpc_listener)) = grpc_listener else {
             return Ok(());
         };
-        let (mut health_reporter, health_service) = health_reporter();
-        health_reporter.set_serving::<grpc::RenderGrpcService<RenderState>>().await;
-        let render_service =
-            grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state.clone()))
-                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
-        // Publish NOT_SERVING before the listener stops, then remove the
-        // service so open health watches end and the drain can finish.
-        let stop = {
-            let server_shutdown = server_shutdown.clone();
-            async move {
-                server_shutdown.cancelled().await;
-                health_reporter.set_not_serving::<grpc::RenderGrpcService<RenderState>>().await;
-                health_reporter
-                    .clear_service_status(
-                        <grpc::RenderGrpcService<RenderState> as NamedService>::NAME,
-                    )
-                    .await;
-            }
-        };
         info!(%address, "starting engine-free Rust render gRPC server");
-        let result = TonicServer::builder()
-            .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
-            .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
-            .add_service(health_service)
-            .add_service(render_service)
-            .serve_with_incoming_shutdown(grpc_listener, stop)
-            .await
-            .context("render gRPC server failed");
+        let result = serve_render_grpc(state.clone(), grpc_listener, server_shutdown.clone()).await;
         server_shutdown.cancel();
         result
     };
     let (http_result, grpc_result) = tokio::join!(http_fut, grpc_fut);
     http_result.and(grpc_result)
+}
+
+/// Serve the gRPC Render service and its health service until `shutdown`.
+pub(crate) async fn serve_render_grpc(
+    state: Arc<RenderState>,
+    listener: MaybeTlsListener,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let (mut health_reporter, health_service) = health_reporter();
+    health_reporter.set_serving::<grpc::RenderGrpcService<RenderState>>().await;
+    let render_service = grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state))
+        .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+    // Publish NOT_SERVING before the listener stops, then remove the
+    // services, including the overall server status `""` that tonic
+    // registers, so open health watches end and the drain can finish.
+    let stop = async move {
+        let services = [
+            <grpc::RenderGrpcService<RenderState> as NamedService>::NAME,
+            "",
+        ];
+        shutdown.cancelled().await;
+        for service in services {
+            health_reporter.set_service_status(service, ServingStatus::NotServing).await;
+        }
+        for service in services {
+            health_reporter.clear_service_status(service).await;
+        }
+    };
+    TonicServer::builder()
+        .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
+        .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
+        .add_service(health_service)
+        .add_service(render_service)
+        .serve_with_incoming_shutdown(listener, stop)
+        .await
+        .context("render gRPC server failed")
 }
 
 #[cfg(test)]

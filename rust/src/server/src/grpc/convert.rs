@@ -512,7 +512,7 @@ pub(super) fn proto_struct_to_json(s: &prost_types::Struct) -> serde_json::Value
     )
 }
 
-fn proto_value_to_json(v: &prost_types::Value) -> serde_json::Value {
+pub(super) fn proto_value_to_json(v: &prost_types::Value) -> serde_json::Value {
     use prost_types::value::Kind;
     match v.kind.as_ref() {
         None | Some(Kind::NullValue(_)) => serde_json::Value::Null,
