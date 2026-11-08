@@ -83,6 +83,14 @@ GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.2}
 PREFILL_BLOCK_SIZE=${PREFILL_BLOCK_SIZE:-128}
 DECODE_BLOCK_SIZE=${DECODE_BLOCK_SIZE:-128}
 ENFORCE_EAGER=${ENFORCE_EAGER:-1}
+# Set to 1 to replace --enforce-eager on the decoder with FULL decode-only CUDA
+# graphs and no torch.compile: decode is CPU-bound in eager mode, while
+# compiling every model costs more startup than the eval saves. Backends that
+# cannot capture full graphs fall back to eager. Prefillers stay eager; they
+# only run prefills.
+DECODER_CUDAGRAPH=${DECODER_CUDAGRAPH:-0}
+# Covers test_accuracy.py's default 100 concurrent requests.
+DECODER_CUDAGRAPH_MAX_SIZE=${DECODER_CUDAGRAPH_MAX_SIZE:-128}
 # Comma-separated extra args for vllm serve (e.g. --max-model-len,2048)
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
 # Set to 1 to put every instance to sleep and wake it up before the eval.
@@ -267,7 +275,10 @@ run_tests_for_model() {
     --block-size ${DECODE_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --kv-transfer-config '$KV_CONFIG_D'"
-    if [[ "$ENFORCE_EAGER" == "1" ]]; then
+    if [[ "$ENFORCE_EAGER" == "1" && "$DECODER_CUDAGRAPH" == "1" ]]; then
+      BASE_CMD="${BASE_CMD} -cc.mode=NONE -cc.cudagraph_mode=FULL_DECODE_ONLY"
+      BASE_CMD="${BASE_CMD} -cc.max_cudagraph_capture_size=${DECODER_CUDAGRAPH_MAX_SIZE}"
+    elif [[ "$ENFORCE_EAGER" == "1" ]]; then
       BASE_CMD="${BASE_CMD} --enforce-eager"
     fi
     if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
