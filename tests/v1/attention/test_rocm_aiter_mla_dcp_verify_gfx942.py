@@ -92,7 +92,8 @@ def _vllm_config(heads_per_rank: int, qlen: int, fp8_kv: bool):
     # The reorder threshold reads only these two fields; without them a
     # multi-token row is classified as prefill and never reaches decode.
     config.speculative_config = SimpleNamespace(
-        num_speculative_tokens=qlen - 1, parallel_drafting=False
+        num_speculative_tokens=qlen - 1,
+        max_num_new_slots_for_drafting=0,
     )
     config.parallel_config.decode_context_parallel_size = DCP
     config.parallel_config.cp_kv_cache_interleave_size = 1

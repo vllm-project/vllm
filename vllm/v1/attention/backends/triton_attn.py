@@ -170,7 +170,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         ):
             num_speculative_tokens = speculative_config.num_speculative_tokens or 0
             query_len = 1 + num_speculative_tokens * (
-                2 if speculative_config.parallel_drafting else 1
+                2 if speculative_config.speculator_config.parallel_drafting else 1
             )
             max_query_len_3d = min(query_len, MAX_3D_QUERY_LEN)
         # Scratch is indexed by query token, including verification tokens.
@@ -780,7 +780,8 @@ class TritonAttentionImpl(AttentionImpl):
 
         # Use encoder-specific metadata for sequence information
         query_start_loc = attn_metadata.query_start_loc
-        seq_lens = attn_metadata.seq_lens
+        # No KV cache: K/V length is the query length, not seq_lens.
+        seq_lens = query_start_loc[1:] - query_start_loc[:-1]
         max_query_len = attn_metadata.max_query_len
 
         # Call flash attention directly on Q, K, V tensors
