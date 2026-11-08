@@ -944,6 +944,146 @@ def test_trtllm_fp8_block_moe_deferred_finalize(
         )
 
 
+@pytest.mark.parametrize("block_shape", [[128, 128], [1, 32]], ids=["block", "mxfp8"])
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Requires TRTLLM-Gen FP8 MoE (SM100)",
+)
+@torch.inference_mode()
+def test_trtllm_fp8_moe_padding_robust(block_shape: list[int], workspace_init):
+    """Padding rows (topk_ids == -1) must be skipped, never fed into results.
+
+    DeepEP v2 hands these experts a PaddedStandard buffer whose tail rows are
+    inactive. Construct that layout directly, poison the padding rows with
+    NaN, and check the valid outputs are finite, bit-identical to a
+    zero-padding run, and bit-identical to the unpadded kernel run.
+    """
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        per_token_group_quant_fp8,
+    )
+
+    e, topk, n, k, m, pad = 32, 4, 1024, 1024, 64, 64
+    set_random_seed(7)
+    with set_current_vllm_config(vllm_config):
+        if block_shape == [1, 32]:
+            w1, w2, w1_scale, w2_scale = _make_mxfp8_moe_weights(e, n, k)
+        else:
+            (_, w1, w1_scale, _), (_, w2, w2_scale, _) = make_test_weights(
+                e, n, k, quant_dtype=torch.float8_e4m3fn, block_shape=block_shape
+            )
+        w1, w2, w1_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            SimpleNamespace(
+                weight_block_size=block_shape,
+                moe_config=SimpleNamespace(
+                    is_act_and_mul=True, intermediate_size_per_partition=n
+                ),
+                activation=MoEActivation.SILU,
+            ),
+            w1,
+            w2,
+            w1_scale,
+            w2_scale,
+            w13_input_scale=None,
+            w2_input_scale=None,
+        )
+        quant_config = make_fp8_moe_quant_config(
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            w1_scale,
+            w2_scale,
+            a1_scale=None,
+            a2_scale=None,
+            block_shape=block_shape,
+        )
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=MoEActivation.SILU,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=torch.bfloat16,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=next_power_of_2(m + pad),
+        )
+        experts = TrtLlmFp8ExpertsModular(
+            moe_config=moe_config, quant_config=quant_config
+        )
+
+        def quantize_activations(
+            x: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            if block_shape == [1, 32]:
+                return mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=False)
+            return per_token_group_quant_fp8(x, 128, column_major_scales=False)
+
+        def run(
+            hidden_states: torch.Tensor,
+            hidden_states_scale: torch.Tensor,
+            topk_weights: torch.Tensor,
+            topk_ids: torch.Tensor,
+        ) -> torch.Tensor:
+            output = torch.empty(
+                (hidden_states.shape[0], k), device="cuda", dtype=torch.bfloat16
+            )
+            empty_ws = torch.empty((0,), device="cuda", dtype=torch.bfloat16)
+            experts.apply(
+                output=output,
+                hidden_states=hidden_states,
+                w1=w1,
+                w2=w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=e,
+                expert_map=None,
+                a1q_scale=hidden_states_scale,
+                a2_scale=None,
+                workspace13=empty_ws,
+                workspace2=empty_ws,
+                expert_tokens_meta=None,
+                apply_router_weight_on_input=False,
+            )
+            return output
+
+        a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
+        score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
+        scores = torch.softmax(score, dim=-1, dtype=torch.float32)
+        topk_weights, topk_ids = torch.topk(scores, topk)
+        topk_ids = topk_ids.to(torch.int32)
+
+        topk_ids_padded = torch.full(
+            (m + pad, topk), -1, device="cuda", dtype=torch.int32
+        )
+        topk_ids_padded[:m] = topk_ids
+        topk_weights_padded = torch.zeros(
+            (m + pad, topk), device="cuda", dtype=topk_weights.dtype
+        )
+        topk_weights_padded[:m] = topk_weights
+
+        a_clean = torch.zeros((m + pad, k), device="cuda", dtype=torch.bfloat16)
+        a_clean[:m] = a
+        a_poison = a_clean.clone()
+        a_poison[m:] = float("nan")
+
+        hs_clean, scale_clean = quantize_activations(a_clean)
+        hs_poison, scale_poison = quantize_activations(a_poison)
+        hs_unpadded, scale_unpadded = quantize_activations(a)
+
+        out_clean = run(hs_clean, scale_clean, topk_weights_padded, topk_ids_padded)
+        out_poison = run(hs_poison, scale_poison, topk_weights_padded, topk_ids_padded)
+        out_unpadded = run(hs_unpadded, scale_unpadded, topk_weights, topk_ids)
+
+        assert torch.isfinite(out_poison[:m]).all(), (
+            "padding garbage leaked into valid outputs"
+        )
+        torch.testing.assert_close(out_poison[:m], out_clean[:m], rtol=0, atol=0)
+        torch.testing.assert_close(out_clean[:m], out_unpadded, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("m", [1, 16])
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),

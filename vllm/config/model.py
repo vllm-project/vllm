@@ -24,7 +24,12 @@ from vllm.config.multimodal import (
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS, PoolerConfig
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
-from vllm.config.utils import config, getattr_iter
+from vllm.config.utils import (
+    CompileFactors,
+    config,
+    get_compile_factors,
+    getattr_iter,
+)
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
@@ -62,7 +67,7 @@ if TYPE_CHECKING:
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
-    from vllm.v1.sample.logits_processor import LogitsProcessor
+    from vllm.v1.worker.gpu.sample.logits_processor.interface import LogitsProcessor
 else:
     PreTrainedConfig = Any
 
@@ -89,6 +94,7 @@ ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal[
     "auto",
     "hf",
+    "glm5_next",
     "alpamayo2_super",
     "mistral",
     "deepseek_v32",
@@ -185,6 +191,10 @@ class ModelConfig:
     - "deepseek_v41" will use the DeepSeek V4.1 prompt encoder.
     - "kimi_k3" will always use the "hf" tokenizer but render chat prompts
       with Kimi K3's Python XTML encoding instead of a Jinja template.
+    - "glm5_next" uses the "hf" tokenizer and renderer on the Python frontend;
+      the Rust frontend renders GLM-5.3 and GLM-5.3-Flash prompts natively,
+      and selects this under "auto" for the `glm5_next` model type
+      (GLM-5.3-Flash).
     - "cohere" uses the standard HF tokenizer but renders the chat template
       via the `cohere_melody` library (cmd3 / cmd4 templates) instead of
       Jinja, and surfaces grounded-citation metadata on responses.
@@ -207,8 +217,10 @@ class ModelConfig:
     - "bfloat16" for a balance between precision and range.
     - "float" is shorthand for FP32 precision.
     - "float32" for FP32 precision."""
-    seed: int = 0
+    seed: int = Field(default=0, ge=0, le=2**32 - 1)
     """Random seed for reproducibility.
+
+    The seed must be in the range [0, 2**32 - 1].
 
     We must set the global seed because otherwise,
     different tensor parallel workers would sample different tokens,
@@ -218,9 +230,11 @@ class ModelConfig:
     hf_text_config: PreTrainedConfig = field(init=False)
     """The Hugging Face config of the text model (same as hf_config for text models)."""
     is_submodel_config: bool = field(default=False, init=False)
-    """Whether this is a submodule view derived by `VllmConfig.with_hf_config`
-    (e.g. a multimodal model's text stack). Its architecture list is empty, so
-    deployment-level validation must not run against it."""
+    """Whether this is a view derived from an already-validated `VllmConfig`: a
+    submodule view from `VllmConfig.with_hf_config` (e.g. a multimodal model's text
+    stack, whose architecture list may be empty) or a draft model's view that
+    reuses the target's configs. Deployment-level validation must not run against
+    it."""
     word_embeddings_untied_by_checkpoint: bool = field(default=False, init=False)
     """Whether `tie_word_embeddings` was overridden to `False` because the checkpoint
     contains an `lm_head` of its own. The two may still turn out to be identical, in
@@ -458,10 +472,9 @@ class ModelConfig:
     mm_device_do_normalize: InitVar[bool | None] = None
     mm_processor_device: InitVar[MMProcessorDevice | None] = None
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def compile_factors(self) -> CompileFactors:
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
 
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
@@ -507,13 +520,10 @@ class ModelConfig:
             "checkpoint_prepare_on_startup",
         }
 
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, ignored_factors)
+        factors = get_compile_factors(self, ignored_factors)
 
         # NOTE: For some models (e.g, Qwen3-VL), whether the MM code path is enabled
-        # affects the computation graph of the language model, therefore we add it
-        # here early.
+        # affects the computation graph of the language model.
         if self.multimodal_config:
             factors["language_model_only"] = self.multimodal_config.language_model_only
             # Sizes Qwen3.5's M-RoPE cache.
@@ -527,7 +537,7 @@ class ModelConfig:
                 for modality, opts in self.multimodal_config.limit_per_prompt.items()
             }
             factors["mm_enable_mm_embeds"] = self.multimodal_config.enable_mm_embeds
-        return hash_factors(factors)
+        return factors
 
     def _update_nested(
         self,
@@ -758,7 +768,10 @@ class ModelConfig:
                 self.tokenizer_mode = "alpamayo2_super"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
-            elif arch == "KimiK3ForConditionalGeneration":
+            elif arch in (
+                "KimiK3ForConditionalGeneration",
+                "KimiK31ForConditionalGeneration",
+            ):
                 self.tokenizer_mode = "kimi_k3"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
@@ -1719,9 +1732,13 @@ class ModelConfig:
 
         total_num_hidden_layers = self.get_total_num_hidden_layers()
 
-        # the layout order is: DP x PP x TP
+        # the layout order is: DP x PP x PCP x TP
         pp_rank = (
-            parallel_config.rank // parallel_config.tensor_parallel_size
+            parallel_config.rank
+            // (
+                parallel_config.tensor_parallel_size
+                * parallel_config.prefill_context_parallel_size
+            )
         ) % parallel_config.pipeline_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
         start, end = get_pp_indices(total_num_hidden_layers, pp_rank, pp_size)
@@ -2068,6 +2085,18 @@ class ModelConfig:
         return self._model_info.has_inner_state
 
     @property
+    def speculator_config_class(self) -> str | None:
+        """For a speculative decoding draft model, the config class of the
+        speculator it's for, if it declares one (see `SpeculativeDraftModel`)."""
+        return self._model_info.speculator_config_class
+
+    @property
+    def may_use_target_embed(self) -> bool:
+        """For a speculative decoding draft model, whether it may reuse the
+        target's input embedding under pipeline parallelism."""
+        return self._model_info.may_use_target_embed
+
+    @property
     def supports_replayssm(self) -> bool:
         return self._model_info.supports_replayssm
 
@@ -2142,10 +2171,18 @@ class ModelConfig:
 
     @property
     def embedding_size(self):
-        # Check for embedding_size set by model config (e.g., Voyage models)
+        # Check for embedding_size set by model config (e.g., Voyage models).
         override = getattr(self.hf_config, "embedding_size", None)
         if override is not None:
             return override
+
+        # Check for embedding_dim set by model config (e.g., embedding gemma-2).
+        emb_dim = getattr(self.hf_text_config, "embedding_dim", None)
+        if emb_dim is None:
+            emb_dim = getattr(self.hf_config, "embedding_dim", None)
+        if isinstance(emb_dim, int) and emb_dim > 0:
+            return emb_dim
+
         dense_modules = try_get_dense_modules(self.model, revision=self.revision)
         if dense_modules is not None:
             return dense_modules[-1]["out_features"]
