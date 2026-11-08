@@ -4,7 +4,7 @@
 
 This file owns the ROCm-specific fused-MoE custom-op path:
 - custom-op registration and fake-tensor support
-- enablement gating for ``VLLM_ROCM_USE_AITER_MOE`` and shared experts
+- enablement gating for `VLLM_ROCM_USE_AITER_MOE` and shared experts
 - BF16 accuracy for the fused MoE kernel on representative shapes
 - AITER MXFP4 MoE support per arch (incl. the MXFP4 experts check), and the
   gfx950-only W4A16 accuracy and determinism
@@ -12,10 +12,10 @@ This file owns the ROCm-specific fused-MoE custom-op path:
 - deterministic routing and representative gfx942 / gfx950 coverage
 
 Generic fused-MoE backend selection and non-ROCm kernel coverage live in the
-generic MoE test files under ``tests/kernels/moe``.
+generic MoE test files under `tests/kernels/moe`.
 
-Raw ROCm AITER helper-op coverage such as ``group_fp8_quant`` and
-``per_tensor_quant`` lives in ``tests/kernels/core/test_rocm_aiter_ops.py``.
+Raw ROCm AITER helper-op coverage such as `group_fp8_quant` and
+`per_tensor_quant` lives in `tests/kernels/core/test_rocm_aiter_ops.py`.
 This file only keeps the MoE-shaped integration angle for those helpers.
 """
 
@@ -1178,7 +1178,7 @@ def test_aiter_moe_group_fp8_quant_reconstructs_hidden_states(
     within the expected FP8 error budget.
 
     The raw op's shape and standalone roundtrip contracts are covered in
-    ``tests/kernels/core/test_rocm_aiter_ops.py``. This test keeps the
+    `tests/kernels/core/test_rocm_aiter_ops.py`. This test keeps the
     representative hidden-state sizes that the fused-MoE path actually cares
     about.
     """
@@ -1548,7 +1548,7 @@ def _make_alignment_moe_config(intermediate: int):
 def _make_aiter_method(moe_config):
     """Build the unquantized method with the backend pinned to AITER.
 
-    ``select_unquantized_moe_backend`` needs a real ROCm + AITER runtime, so
+    `select_unquantized_moe_backend` needs a real ROCm + AITER runtime, so
     stub it out and set the backend directly.
     """
     from unittest.mock import patch
@@ -1748,10 +1748,10 @@ def _aiter_accepts_intermediate(intermediate: int, num_tokens: int) -> bool:
 # respectively (AITER's get_block_size_M, on both 256- and 304-CU parts).
 @pytest.mark.parametrize("num_tokens", [1024, 2560, 5120])
 def test_aiter_moe_alignment_rule_holds_across_block_m(intermediate, num_tokens):
-    """The alignment rule must hold at every reachable ``block_m``.
+    """The alignment rule must hold at every reachable `block_m`.
 
-    Stage 1 checks ``NPerBlock`` and stage 2 ``KPerBlock``; both vary with
-    ``block_m``, so a size validated at one tile size says nothing about the
+    Stage 1 checks `NPerBlock` and stage 2 `KPerBlock`; both vary with
+    `block_m`, so a size validated at one tile size says nothing about the
     others.
     """
     from vllm.model_executor.layers.fused_moe.oracle.unquantized import (

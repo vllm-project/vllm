@@ -36,7 +36,7 @@ def _argmax_finish(PV, PI, OUT, SPLITS: tl.constexpr, BLOCK: tl.constexpr):
 
 
 def greedy_argmax(logits: torch.Tensor) -> torch.Tensor:
-    """Like ``logits.argmax(dim=-1)``, but treats NaNs as -inf on every path.
+    """Like `logits.argmax(dim=-1)`, but treats NaNs as -inf on every path.
     Ties resolve to the first index.
     """
     if (

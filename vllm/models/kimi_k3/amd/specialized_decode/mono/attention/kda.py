@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""K1 ``kda_pre``: one Kimi-K3 KDA layer from the AttnRes seam to the gated core
+"""K1 `kda_pre`: one Kimi-K3 KDA layer from the AttnRes seam to the gated core
 output, for a spec-verify step (R requests x L tokens, S = R L rows).
 
-One launch a layer, ``BLOCKS`` CTAs x ``THREADS`` threads, in three roles so that
+One launch a layer, `BLOCKS` CTAs x `THREADS` threads, in three roles so that
 no CTA that polls a mailbox has weight loads in flight (a poll's load retires
 behind every earlier load):
 
@@ -208,8 +208,8 @@ def step_tag(epoch, slot):
 
 
 def vals_all(s, ns, extra=0):
-    """Whether every (token, source)'s slice stays in LDS ``vals`` (else the
-    prefix only; ``stage_mix`` re-reads the blocks), ``extra`` bytes beside it."""
+    """Whether every (token, source)'s slice stays in LDS `vals` (else the
+    prefix only; `stage_mix` re-reads the blocks), `extra` bytes beside it."""
     return s * ns * COLS * 4 + extra <= VALS_BYTES
 
 
@@ -262,7 +262,7 @@ def sum_polled(vals):
 # ---------------------------------------------------------------- attn CTAs
 @traced
 def stage_slice(c, task):
-    """Columns 128 task ..: every token's sources into LDS ``vals`` (4 columns a
+    """Columns 128 task ..: every token's sources into LDS `vals` (4 columns a
     thread), the prefix (+ delta) rounded to bf16 and stored back, per-(token,
     source) partial sum of squares and qk dot -> PART."""
     s, ns, nb, tid, lane = c["S"], c["NS"], c["NB"], c["tid"], c["lane"]
@@ -382,9 +382,9 @@ def stage_gate(c, t):
 
 
 def mix_src(c, t, src, cc, c0):
-    """Token t's source ``src``, slice columns cc .. cc + 4: from ``vals``, or
-    (prefix only in LDS) a block re-read from ``blocks`` -- the same bf16 values
-    ``stage_slice`` read."""
+    """Token t's source `src`, slice columns cc .. cc + 4: from `vals`, or
+    (prefix only in LDS) a block re-read from `blocks` -- the same bf16 values
+    `stage_slice` read."""
     if const_expr(c["vals_all"]):
         return [
             fx.ptr_load(c["vals"] + ((t * c["NS"] + src) * COLS + cc + j))
@@ -467,9 +467,9 @@ def stage_mix(c, task):
 
 @traced
 def poll_rows_to_lds(c, region, k, n, xl, xrow, ldk, k0, t0):
-    """``gemv.rows_to_lds`` from tagged pairs: columns k0 .. k0 + k of rows
+    """`gemv.rows_to_lds` from tagged pairs: columns k0 .. k0 + k of rows
     t0 .. t0 + n of the [S, ldk] bf16 rows a producer put as (word, tag) pairs
-    into ``region``, polled (two pairs a spec, every thread's specs one batch)
+    into `region`, polled (two pairs a spec, every thread's specs one batch)
     -> LDS rows 0 .. n - 1."""
     tid = c["tid"]
     quads = n * k // 4  # 4 bf16 = 2 pairs a spec
@@ -494,7 +494,7 @@ def poll_rows_to_lds(c, region, k, n, xl, xrow, ldk, k0, t0):
 
 @traced
 def stage_gates(c, bid):
-    """The gates of tokens bid, bid + 56, .. (< S) on attn CTA ``bid``."""
+    """The gates of tokens bid, bid + 56, .. (< S) on attn CTA `bid`."""
     s = c["S"]
     for rr in range_constexpr((s + NA - 1) // NA):
         if bid + NA * rr < s:
@@ -503,9 +503,9 @@ def stage_gates(c, bid):
 
 # ---------------------------------------------------------------- gemv CTAs
 def gemv_loads(c, rg, chunks):
-    """This wave's weight operands of rows 16 rg .. for its K chunks ``chunks``
+    """This wave's weight operands of rows 16 rg .. for its K chunks `chunks`
     (indices into wave, wave + 8, ..): a lane 64 contiguous bytes of its row a
-    chunk (4 dwordx4). ``rg`` past the last group loads the last group."""
+    chunk (4 dwordx4). `rg` past the last group loads the last group."""
     lane, wave = c["lane"], c["wave"]
     r_w = rsrc(c["args"]["w_in"])
     row = fx.min(rg, GEMV_TASKS - 1) * ROWS + lane % ROWS
@@ -650,7 +650,7 @@ def kda_stage(c, req, h, ch):
 
 @traced
 def kda_conv(c, k, req, h, ch):
-    """Owned channels: the spec conv update of request ``req``'s L tokens -> new
+    """Owned channels: the spec conv update of request `req`'s L tokens -> new
     conv state; q / k out through QK, v to LDS."""
     L, sl, tid = c["L"], c["SL"], c["tid"]
     a = c["args"]
@@ -752,7 +752,7 @@ def kda_gates(c, k, req, h):
 @traced
 def kda_recur(c, k, req, h, ch):
     """State rows 16 ch .. of head h: the recurrence over the L tokens, a state
-    written a token, bf16 outputs to LDS ``ol`` and their partial norms (ONRM)."""
+    written a token, bf16 outputs to LDS `ol` and their partial norms (ONRM)."""
     L, tid, lane = c["L"], c["tid"], c["lane"]
     a = c["args"]
     v = tid // 32
@@ -1130,11 +1130,11 @@ def kda_pre(
     alarm,
     tl=None,
 ):
-    """Host launcher. ``conv_state`` [slots, dim, state_len] or a transposed view
-    of [slots, state_len, dim] (strides read); ``rstate`` [slots, 12, 128, 128]
-    fp32; ``st_idx`` [R, >= L] int32; ``scratch`` zeroed before the step's first
-    layer (tags are a layer's); ``epoch`` a device int32 bumped once a step and
-    ``layer`` this launch's slot below ``TAG_SLOTS``."""
+    """Host launcher. `conv_state` [slots, dim, state_len] or a transposed view
+    of [slots, state_len, dim] (strides read); `rstate` [slots, 12, 128, 128]
+    fp32; `st_idx` [R, >= L] int32; `scratch` zeroed before the step's first
+    layer (tags are a layer's); `epoch` a device int32 bumped once a step and
+    `layer` this launch's slot below `TAG_SLOTS`."""
     f = build(key)
     _run_compiled(
         f,

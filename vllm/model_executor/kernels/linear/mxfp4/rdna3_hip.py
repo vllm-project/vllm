@@ -5,7 +5,7 @@ path.
 
 Routes on the number of activation rows M:
   1 <= M <= MAX_W4A8_BATCH_SIZE (decode, speculative verify):
-      HIP W4A8 GEMV (``_rocm_C.mxfp4_w4a8_gemv_rdna3``). Activations are quantized
+      HIP W4A8 GEMV (`_rocm_C.mxfp4_w4a8_gemv_rdna3`). Activations are quantized
       to int8 per 32-element group and reduced with int8 dot instructions.
   otherwise (prefill, profiling):
       dequantize the weight and run a high-precision GEMM on the unquantized
@@ -15,7 +15,7 @@ Both paths read the checkpoint layout directly ([N, K/2] uint8 E2M1 codes,
 [N, K/32] uint8 E8M0 scales), so there is no weight repack.
 
 Selected when int8 activations are requested, e.g. with
-``--quantization-config.linear.activation int8_per_group_32``. For W4A4
+`--quantization-config.linear.activation int8_per_group_32`. For W4A4
 checkpoints this replaces the MXFP4 activation QDQ: decode uses int8
 activations and prefill uses the model dtype, which kept accuracy where mixing
 MXFP4-QDQ prefill with int8 decode did not.
