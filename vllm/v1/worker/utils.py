@@ -43,8 +43,8 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
+    get_block_table_width,
 )
-from vllm.v1.worker.block_table import get_block_table_width
 
 logger = init_logger(__name__)
 
@@ -363,13 +363,6 @@ class AttentionGroup:
             self._with_kernel_block_table(common_attn_metadata, ubatch_idx)
         )
 
-    def build_metadata_for_drafting(
-        self, common_attn_metadata: CommonAttentionMetadata, draft_index: int
-    ) -> Any:
-        return self.get_metadata_builder().build_for_drafting(
-            self._with_kernel_block_table(common_attn_metadata), draft_index
-        )
-
     def _with_kernel_block_table(
         self, common_attn_metadata: CommonAttentionMetadata, ubatch_idx: int = 0
     ) -> CommonAttentionMetadata:
@@ -639,8 +632,9 @@ def layer_kernel_block_size(
 
 
 def _allocate_kv_cache_buffer(raw_size: int, device: torch.device) -> torch.Tensor:
-    # wvSplitKrc's process-lifetime static workspaces (csrc/rocm/skinny_gemms.cu)
-    # are created lazily on the first qualifying GEMM. Force that now, before
+    # wvSplitKrc's process-lifetime static workspaces
+    # (csrc/rocm/skinny_gemms_wvsplitkrc.cu) are created lazily on the first
+    # qualifying GEMM. Force that now, before
     # the giant backing allocation below: if one landed in this segment's
     # rounding tail it would pin the whole segment at engine shutdown.
     if current_platform.is_rocm():
