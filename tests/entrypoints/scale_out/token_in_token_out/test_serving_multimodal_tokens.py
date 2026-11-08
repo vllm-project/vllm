@@ -229,22 +229,44 @@ async def test_content_parts_generates_tokens(client, test_image):
 
 
 @pytest.mark.asyncio
-async def test_features_with_content_parts(client, test_image):
-    """Earlier items as features plus a new raw item must match /render."""
+@pytest.mark.parametrize("cached", [False, True])
+async def test_features_with_content_parts(client, test_image, cached):
+    """Earlier items as features plus a new raw item must match /render.
+
+    With ``cached``, features carry only ``mm_hashes`` (as in the docs), so
+    the earlier item resolves from the cache filled by a previous request.
+    """
     old_url = encode_image_url(test_image, format="PNG")
     new_url = encode_image_url(Image.new("RGB", (224, 224)), format="PNG")
     render_data = await _render_image_prompt(client, old_url, new_url)
     expanded = render_data["token_ids"]
     features = render_data["features"]
-    new = features["mm_placeholders"]["image"][1]
+    old, new = features["mm_placeholders"]["image"]
+
+    if cached:
+        turn1 = await client.post(
+            GEN_ENDPOINT,
+            json={
+                "token_ids": _collapse_placeholders(
+                    expanded[: new["offset"]], {"image": [old]}
+                ),
+                "content_parts": [{"type": "image_url", "url": old_url, "uuid": "old"}],
+                "sampling_params": {"max_tokens": 1},
+            },
+        )
+        turn1.raise_for_status()
+        old_features = {
+            "mm_hashes": {"image": ["old"]},
+            "mm_placeholders": {"image": [old]},
+        }
+    else:
+        old_features = {k: {"image": v["image"][:1]} for k, v in features.items() if v}
 
     gen_resp = await client.post(
         GEN_ENDPOINT,
         json={
             "token_ids": _collapse_placeholders(expanded, {"image": [new]}),
-            "features": {
-                k: {"image": v["image"][:1]} for k, v in features.items() if v
-            },
+            "features": old_features,
             "content_parts": [{"type": "image_url", "url": new_url}],
             "sampling_params": {"max_tokens": 1},
             "return_token_ids": True,
@@ -253,45 +275,6 @@ async def test_features_with_content_parts(client, test_image):
     gen_resp.raise_for_status()
     assert gen_resp.json()["prompt_token_ids"] == expanded
     assert gen_resp.json()["mm_placeholders"] == features["mm_placeholders"]
-
-
-@pytest.mark.asyncio
-async def test_cached_features_with_content_parts(client, test_image):
-    """Features with only mm_hashes resolve from the cache, as in the docs."""
-    old_url = encode_image_url(test_image, format="PNG")
-    new_url = encode_image_url(Image.new("RGB", (224, 224)), format="PNG")
-    render_data = await _render_image_prompt(client, old_url, new_url)
-    expanded = render_data["token_ids"]
-    old, new = render_data["features"]["mm_placeholders"]["image"]
-
-    turn1 = await client.post(
-        GEN_ENDPOINT,
-        json={
-            "token_ids": _collapse_placeholders(
-                expanded[: new["offset"]], {"image": [old]}
-            ),
-            "content_parts": [{"type": "image_url", "url": old_url, "uuid": "old"}],
-            "sampling_params": {"max_tokens": 1},
-        },
-    )
-    turn1.raise_for_status()
-
-    gen_resp = await client.post(
-        GEN_ENDPOINT,
-        json={
-            "token_ids": _collapse_placeholders(expanded, {"image": [new]}),
-            "features": {
-                "mm_hashes": {"image": ["old"]},
-                "mm_placeholders": {"image": [old]},
-            },
-            "content_parts": [{"type": "image_url", "url": new_url}],
-            "sampling_params": {"max_tokens": 1},
-            "return_token_ids": True,
-        },
-    )
-    gen_resp.raise_for_status()
-    assert gen_resp.json()["prompt_token_ids"] == expanded
-    assert gen_resp.json()["mm_placeholders"]["image"] == [old, new]
 
 
 @pytest.mark.asyncio
