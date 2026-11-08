@@ -12,9 +12,11 @@ window from it: one read and one write of the state per step.
 
 One kernel runs a layer's verify step: the short convolution, the q / k
 normalization, the F_B gate projection and decays, the replay, the chunked verify
-and the gated RMSNorm (``cute_dsl/fused_ws.py``: persistent, warp specialized;
-``cute_dsl/fused.py``, one item per CTA or cluster, where that one cannot run or
-for small steps). Copied from the Kimi-K3 specialized decode.
+and the gated RMSNorm (``cute_dsl/fused_tc.py``: persistent, the dot products and
+the gate on the tensor cores; where it does not fit shared memory,
+``cute_dsl/fused_ws.py``, persistent and warp specialized, for large steps, else
+``cute_dsl/fused.py``, one item per CTA or cluster). ``fused_ws`` and ``fused`` are
+copied from the Kimi-K3 specialized decode.
 """
 
 from collections.abc import Callable
@@ -28,15 +30,16 @@ from cutlass.cute.runtime import make_fake_stream
 from vllm.models.common.ops.moe_tail_fusion.primitives import to_cute
 from vllm.triton_utils import tl, triton
 
-from .cute_dsl import fused_ws
+from .cute_dsl import fused_tc, fused_ws
 from .cute_dsl.fused import KdaFused
+from .cute_dsl.fused_tc import KdaFusedTC
 from .cute_dsl.fused_ws import KdaFusedWS
 from .cute_dsl.host import fake, layout, stream
 
 K = 128
-# (request, head) items from which KdaFusedWS takes the step (B200, 64 heads, q 6,
-# 4 replayed, ms per step KdaFused / KdaFusedWS: 512 items 1.43 / 1.53, 768 items
-# 2.19 / 1.98, 1024 items 2.92 / 2.28).
+# (request, head) items from which KdaFusedWS takes the step where KdaFusedTC does not
+# fit (B200, 64 heads, q 6, 4 replayed, ms per step KdaFused / KdaFusedWS: 512 items
+# 1.43 / 1.53, 768 items 2.19 / 1.98, 1024 items 2.92 / 2.28).
 WS_MIN_ITEMS = 768
 # CTAs per item of KdaFused by item count: clusters fill the GPU at small steps.
 FUSED_SPLIT = ((48, 8), (96, 4), (192, 2), (1 << 30, 1))
@@ -50,8 +53,9 @@ def decode_conv_weight(weight: torch.Tensor) -> torch.Tensor:
 
 
 def _kernel(heads, requests, tokens, conv_state, qkv):
-    """KdaFusedWS where its operands stream in (16-byte aligned rows, a conv
-    window of at least q + 2) and fit shared memory, else KdaFused."""
+    """KdaFusedTC where its operands stream in (16-byte aligned rows, a conv window
+    of at least q + 2) and fit shared memory, else KdaFusedWS from WS_MIN_ITEMS
+    items, else KdaFused."""
     items = heads * requests
     shape, stride = conv_state.shape, conv_state.stride()
     window = shape[-1]
@@ -60,14 +64,19 @@ def _kernel(heads, requests, tokens, conv_state, qkv):
     aligned = (stride[0] * size) % 16 == 0 and (qkv.stride(0) * 2) % 16 == 0
     if not dim_first:
         aligned = aligned and (stride[-1] * size) % 16 == 0
-    if items >= WS_MIN_ITEMS and aligned and window >= tokens + 2 and tokens >= 3:
+    streams = aligned and window >= tokens + 2 and tokens >= 3
+    sms = torch.cuda.get_device_properties(qkv.device).multi_processor_count
+    ctas = -(-items // max(2, -(-items // sms)))
+    cta_items = fused_tc.cta_items(heads, requests, ctas)
+    tc = fused_tc.shared_bytes(tokens, tokens, dim_first, window, size, cta_items)
+    if streams and 2 * tokens <= fused_tc.PROBES and tc <= fused_tc.SMEM_LIMIT:
+        return KdaFusedTC(heads, tokens, 0, False, dim_first, window, ctas)
+    if streams and items >= WS_MIN_ITEMS:
         smem = partial(fused_ws.shared_bytes, tokens, tokens, dim_first, window, size)
         stage_fb = smem(True) <= fused_ws.SMEM_LIMIT
         if stage_fb or smem() <= fused_ws.SMEM_LIMIT:
-            sms = torch.cuda.get_device_properties(qkv.device).multi_processor_count
-            per = max(2, -(-items // sms))
             return KdaFusedWS(
-                heads, tokens, 0, False, dim_first, window, -(-items // per), stage_fb
+                heads, tokens, 0, False, dim_first, window, ctas, stage_fb
             )
     split = next(s for limit, s in FUSED_SPLIT if items < limit)
     return KdaFused(heads, tokens, 0, False, split)

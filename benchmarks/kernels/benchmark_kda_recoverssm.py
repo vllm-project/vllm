@@ -14,8 +14,9 @@ write of the state that a deferred step needs.
 
 Each figure is a CUDA graph replay over all KDA layers, each with its own caches,
 so every layer reads a cold state as in decode. The conv state layout follows
-``VLLM_SSM_CONV_STATE_LAYOUT`` (default SD). Run the GLM-5.3-Flash shapes per rank
-with:
+``VLLM_SSM_CONV_STATE_LAYOUT`` (default SD). ``--kernel specialized`` runs the
+deferred step on the Kimi-K3 specialized decode's kernels instead. Run the
+GLM-5.3-Flash shapes per rank with:
 
     python benchmarks/kernels/benchmark_kda_recoverssm.py --model glm5next
 """
@@ -29,6 +30,8 @@ from types import SimpleNamespace
 import torch
 
 from vllm.model_executor.kernels.kda import deferred_recoverssm
+from vllm.model_executor.kernels.kda.cute_dsl.fused import KdaFused
+from vllm.model_executor.kernels.kda.cute_dsl.fused_ws import KdaFusedWS
 from vllm.model_executor.kernels.kda.deferred_recoverssm import (
     KdaDeferredVerify,
     decode_conv_weight,
@@ -71,9 +74,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--kernel",
-        choices=("auto", "ws", "fused"),
+        choices=("auto", "specialized"),
         default="auto",
-        help="Force the deferred kernel (KdaFusedWS or KdaFused).",
+        help="The deferred kernels: KdaDeferredVerify's choice, or the Kimi-K3 "
+        "specialized decode's.",
     )
     parser.add_argument("--warmup-replays", type=int, default=5)
     parser.add_argument("--samples", type=int, default=20)
@@ -236,6 +240,21 @@ def check(layer, verify, inputs, slots, starts, ones, accepted, window):
     assert out_error < 1e-2 * expected.float().abs().max(), out_error
 
 
+def specialized_kernel(heads, requests, tokens, conv_state, qkv):
+    """The Kimi-K3 specialized decode's kernels: KdaFusedWS without the F_B staging
+    from WS_MIN_ITEMS (request, head) items, else KdaFused."""
+    items = heads * requests
+    if items < deferred_recoverssm.WS_MIN_ITEMS:
+        split = next(s for limit, s in deferred_recoverssm.FUSED_SPLIT if items < limit)
+        return KdaFused(heads, tokens, 0, False, split)
+    sms = torch.cuda.get_device_properties(qkv.device).multi_processor_count
+    ctas = -(-items // max(2, -(-items // sms)))
+    dim_first = conv_state.stride(-1) == 1
+    return KdaFusedWS(
+        heads, tokens, 0, False, dim_first, conv_state.shape[-1], ctas, False
+    )
+
+
 def capture_graph(op: Callable[[], object]) -> torch.cuda.CUDAGraph:
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
@@ -353,8 +372,8 @@ def print_results(args, heads, num_layers, window, results) -> None:
 def main() -> None:
     args = parse_args()
     heads, num_layers, window = _MODELS[args.model]
-    if args.kernel != "auto":
-        deferred_recoverssm.WS_MIN_ITEMS = 0 if args.kernel == "ws" else 1 << 62
+    if args.kernel == "specialized":
+        deferred_recoverssm._kernel = specialized_kernel
     assert min(args.batch) > 0 and 1 <= args.accepted <= window
     results = []
     for batch in args.batch:
