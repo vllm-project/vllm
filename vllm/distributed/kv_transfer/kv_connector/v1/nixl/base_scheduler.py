@@ -137,7 +137,7 @@ class NixlBaseConnectorScheduler:
         # Heartbeat tracking: requests needing periodic lease-renewal heartbeats to
         # remote P-side, stored as ready-to-send HeartbeatInfo grouped by remote engine
         self._heartbeat_by_engine: dict[EngineId, HeartbeatInfo] = {}
-        # Reverse lookup: local req_id -> (engine_id, remote_req_id) for O(1) removal
+        # Reverse lookup: local req_id -> (engine_id, heartbeat_id) for O(1) removal
         self._heartbeat_req_engine: dict[ReqId, tuple[EngineId, ReqId]] = {}
         self._last_heartbeat_time: float = 0.0
         # Requests tracked since the last heartbeat round, sent right away.
@@ -239,17 +239,23 @@ class NixlBaseConnectorScheduler:
                 dcp_size=dcp_size,
                 pp_size=pp_size,
             )
+        heartbeat_request_id = (
+            request.request_id if self._TRANSFER_MODE == "push" else remote_request_id
+        )
         info = self._heartbeat_by_engine[remote_engine_id]
-        info.req_ids.add(remote_request_id)
+        info.req_ids.add(heartbeat_request_id)
         expiry = params.get("remote_blocks_expiry_time")
         extension = params.get("remote_lease_extension")
         if expiry is not None and extension:
-            info.leases[remote_request_id] = (expiry, extension)
+            info.leases[heartbeat_request_id] = (expiry, extension)
         self._heartbeat_req_engine[request.request_id] = (
             remote_engine_id,
-            remote_request_id,
+            heartbeat_request_id,
         )
-        self._new_heartbeat_reqs.add((remote_engine_id, remote_request_id))
+        self._new_heartbeat_reqs.add((remote_engine_id, heartbeat_request_id))
+
+    def take_unavailable_requests(self) -> set[str]:
+        return set()
 
     def _stop_heartbeat(self, req_id: ReqId) -> None:
         """Remove *req_id* from heartbeat tracking (if tracked)."""
