@@ -345,3 +345,88 @@ def test_dsa_m1b_bf16_uv(splits, part_fp32):
     print(f"P={splits} f32={part_fp32} rel_l2 {err:.2e} "
           f"frac>1ulp {(ulp > 2**-7).float().mean().item():.2e}")  # fmt: skip
     assert err < 4e-3 and _cos(core, ref) > COS_MIN, err
+
+
+# ---------------------------------------------------------------- U9
+
+
+@needs_gfx950
+@pytest.mark.parametrize("splits", [16, 32])
+@torch.inference_mode()
+def test_dsa_graph_replay(splits):
+    """U9 (one launch each): ``dsa_attn`` then M1b captured once in a CUDA
+    graph, replayed over new queries, indices and row lengths (empty slices
+    coming and going): every replay bit-equal to the eager launches on the
+    same inputs, and to itself (no host value baked in, deterministic)."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.dsa_attn import (
+        DsaAttnBuild,
+    )
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import GROWS
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla_back import (
+        MlaPostBuild,
+        mla_post,
+    )
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import HEALTH_WORDS
+
+    g = torch.Generator().manual_seed(90 + splits)
+    rec = _cache(4 * TOPK, g)
+    key = DsaAttnBuild(splits=splits, chunk=TOPK // splits)
+    post = MlaPostBuild(
+        tokens=S, qlen=S, ranks=1, splits=splits, src="stream", uv="bf16"
+    )
+    w_v = _w_uv(g).transpose(1, 2)
+    # the persistent buffers a graph reads (the builder's, the runner's)
+    q = _q(g)
+    gate = torch.empty(S, GROWS, dtype=bf, device="cuda")
+    idx = torch.zeros(S * TOPK, dtype=torch.int32, device="cuda")
+    iptr = torch.zeros(S + 1, dtype=torch.int32, device="cuda")
+    health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device="cuda")
+    flags = torch.zeros(1, dtype=torch.int32, device="cuda")
+    epoch = torch.ones(1, dtype=torch.int32, device="cuda")
+    seq_lens = torch.tensor([TOPK], dtype=torch.int32, device="cuda")
+    qsl = torch.tensor([0, S], dtype=torch.int32, device="cuda")
+
+    def step():
+        po, pl = _split(key, q, rec, iptr, idx, _scale())
+        core = torch.empty(S, GROWS, dtype=bf, device="cuda")
+        mla_post(
+            post, o=po[0], lse=pl[0], seq_lens=seq_lens, qsl=qsl, w_v=w_v,
+            w_v_scale=None, gate=gate, core=core, peers=None, rank=0, layer=7,
+            epoch=epoch, health=health, alarm=flags.data_ptr(),
+        )  # fmt: skip
+        return po, pl, core
+
+    def fill(lens):
+        ip, ix = _indices(lens, rec.shape[0], g)
+        idx.zero_()
+        idx[: ix.numel()].copy_(ix)
+        iptr.copy_(ip)
+        q.copy_(_q(g))
+        gate.copy_(torch.sigmoid(torch.randn(S, GROWS, generator=g)).to(bf))
+
+    fill([TOPK] * S)
+    step()  # compiled and warm before the capture
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        g_po, g_pl, g_core = step()
+    for lens in (
+        [TOPK] * S,
+        [1, 2, 3, 4, 5, 6, 7, 8],
+        [TOPK, 100, 2047, 1, 129, TOPK, 64, 65],
+    ):
+        fill(lens)
+        e_po, e_pl, e_core = step()
+        graph.replay()
+        torch.accelerator.synchronize()
+        assert torch.equal(g_pl, e_pl) and torch.equal(g_po, e_po), lens
+        assert torch.equal(g_core, e_core), lens
+        for _ in range(20):
+            graph.replay()
+        torch.accelerator.synchronize()
+        assert torch.equal(g_core, e_core), lens
+        ip, ix = iptr, idx
+        ref_o, _ = _reference(q, rec, ip, ix, _scale())
+        lat = _merge(e_po, e_pl)[0]
+        assert _cos(lat, ref_o) > COS_MIN, lens
+    assert not health.any() and not flags.any()

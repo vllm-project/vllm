@@ -884,6 +884,9 @@ def test_dsa_layers_use_dsa_m1_when_eligible(monkeypatch):
     decode.runner.num_spec = 63
     with pytest.raises(ValueError, match="one request a step"):
         decode._dsa_widths([4], (64,))
+    decode, _ = _dsa_decode(monkeypatch, "auto")
+    decode.runner.num_spec = 63
+    assert decode._dsa_widths([4], (64,)) == []
 
 
 def test_dsa_refusal_auto_falls_back_explicit_raises(monkeypatch):

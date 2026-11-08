@@ -240,11 +240,17 @@ class SpecializedDecode:
             )
             return []
         served = [w for w in widths if width_served(runner, w)]
-        if not served and mode != AUTO:
-            raise ValueError(
-                f"Kimi-K3 specialized decode: VLLM_KIMI_SD_DSA={mode} serves "
-                f"one request a step ({runner.num_spec + 1} rows), none of the "
-                f"widths {list(widths)}"
+        if not served:
+            why = (
+                f"VLLM_KIMI_SD_DSA={mode} serves one request a step "
+                f"({runner.num_spec + 1} rows), none of the widths {list(widths)}"
+            )
+            if mode != AUTO:
+                raise ValueError(f"Kimi-K3 specialized decode: {why}")
+            logger.info(
+                "Kimi-K3 specialized decode: the DSA layers run vLLM's attention "
+                "ops (%s)",
+                why,
             )
         return served
 
