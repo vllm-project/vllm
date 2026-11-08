@@ -31,9 +31,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.v1.outputs import SamplerOutput
-from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.sampler import Sampler
 
 from .model import HYV4DecoderLayer, _normalize_hyv4_config
 
@@ -539,7 +536,6 @@ class HYV4MTP(nn.Module):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.quant_config = self.model.quant_config
-        self.sampler = Sampler()
 
     def set_topk_indices_buffer(self, topk_indices_buffer: torch.Tensor) -> None:
         """Share the target sparse-index buffer with every draft consumer.
@@ -593,13 +589,6 @@ class HYV4MTP(nn.Module):
     ) -> torch.Tensor | None:
         self.model.spec_step_idx = spec_step_idx
         return self.model.compute_logits(hidden_states)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput | None:
-        return self.sampler(logits, sampling_metadata)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         if f"model.layers.{spec_layer}.embed_tokens" in name:
@@ -892,32 +881,4 @@ class HYV4MTP(nn.Module):
             loaded_params.add(name)
 
         logger.info_once("HYV4 MTP draft model loaded: %d params", len(loaded_params))
-        unassigned_all = sorted(set(params_dict) - loaded_params)
-        # KVCacheScaleParameter (``k_scale`` / ``v_scale`` / ``q_scale`` /
-        # ``prob_scale``) is created by ``BaseKVCacheMethod.create_weights`` for
-        # every Attention layer that runs on an fp8-family quant method, and
-        # its -1.0 sentinel is replaced by the runtime default (1.0) in
-        # ``process_weights_after_loading`` -- which runs *after* this method.
-        # HY V4 checkpoints intentionally omit these (``kv_cache_quant_algo:
-        # null``); silence them only when the parameter is actually the
-        # sentinel type so a genuine mismatch on a same-named tensor still
-        # reaches the warning.
-        from vllm.model_executor.layers.quantization.kv_cache import (
-            KVCacheScaleParameter,
-        )
-
-        unassigned = [
-            name
-            for name in unassigned_all
-            if not isinstance(params_dict.get(name), KVCacheScaleParameter)
-        ]
-        if unassigned:
-            # A draft parameter with no checkpoint source keeps its sentinel
-            # init value (FP8 scales start at finfo(float32).min), which
-            # silently destroys draft quality instead of failing the load.
-            logger.warning(
-                "HYV4 MTP draft model: %d parameters received no checkpoint value: %s",
-                len(unassigned),
-                ", ".join(unassigned),
-            )
         return loaded_params

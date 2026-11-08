@@ -19,6 +19,8 @@ DTYPES = [torch.float16, torch.bfloat16]
 SHAPES = [(128, 128, 64), (128, 128, 128), (256, 128, 64), (128, 256, 128)]
 PAD_SHAPES = [(150, 128, 64), (128, 128, 96)]
 SHAPES.extend(PAD_SHAPES)
+# M > 256 takes the large-M GEMM config.
+SHAPES.append((512, 128, 64))
 
 SEEDS = [42]
 CUDA_DEVICES = ["cuda:0"]
@@ -53,13 +55,17 @@ def get_ref_results(
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("has_bias", [False, True])
 @torch.inference_mode()
 def test_nvfp4_gemm(
     dtype: torch.dtype,
     shape: tuple[int, int, int],
     seed: int,
     device: str,
+    has_bias: bool,
 ) -> None:
+    if has_bias and not current_platform.is_device_capability_family(120):
+        pytest.skip("The bias epilogue is implemented for SM12x only.")
     set_random_seed(seed)
     m, n, packed_k = shape
     k = packed_k * 2
@@ -93,8 +99,11 @@ def test_nvfp4_gemm(
         block_size,
         device,
     )
+    bias = torch.randn(n, dtype=dtype, device=device) if has_bias else None
+    if bias is not None:
+        expected_out = expected_out + bias
     out = ops.cutlass_scaled_fp4_mm(
-        a_fp4, b_fp4, a_scale_interleaved, b_scale_interleaved, alpha, dtype
+        a_fp4, b_fp4, a_scale_interleaved, b_scale_interleaved, alpha, dtype, bias=bias
     )
 
     torch.testing.assert_close(out, expected_out.to(dtype=dtype), atol=1e-1, rtol=1e-1)

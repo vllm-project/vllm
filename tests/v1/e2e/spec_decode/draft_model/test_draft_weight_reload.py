@@ -41,7 +41,6 @@ def _update_draft_weights(worker) -> None:
 def test_draft_weight_update_keeps_draft_tensor_addresses(
     reload_mode: str, vllm_runner, monkeypatch
 ) -> None:
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_RELOAD_MODE", reload_mode)
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     with vllm_runner(
