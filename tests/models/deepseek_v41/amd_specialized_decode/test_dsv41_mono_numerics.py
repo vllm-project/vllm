@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Numerics of the DeepSeek-V4.1 mono decode kernels at TP2 and TP4 on CDNA4:
 every fused stage against a float64 reference in plain torch
-(``mono_reference``), on the stage's own input as the kernels left it in their
+(`mono_reference`), on the stage's own input as the kernels left it in their
 scratch and peer memory, so a failure names the stage. Random weights in the
 checkpoint's formats, which the reference reads as loaded and the kernels after
 vLLM's post-load processing.
@@ -18,15 +18,15 @@ vLLM's post-load processing.
 Exact where the arithmetic is (data movement, the rank-order sums, the
 quantization rules on the kernel's own input); the documented rounding chain
 otherwise, with KAPPA for the hardware transcendentals and the scaled MFMA's
-accumulation. The first test's ``vllm_ops`` cases also run the ops vLLM runs
+accumulation. The first test's `vllm_ops` cases also run the ops vLLM runs
 for the same step and compare against them, stage by stage, within the budgets
-``test_dsv41_mono_layers`` derives from both paths' formats.
+`test_dsv41_mono_layers` derives from both paths' formats.
 
-On gfx942 at TP4, ``test_mono_decode_942_replays`` runs the composed runner on
+On gfx942 at TP4, `test_mono_decode_942_replays` runs the composed runner on
 the copies of the weights that the model makes at load, at steps of 6, 8 and 42
 rows, checks the arch-independent stages exactly and replays the steps in one
 CUDA graph. The real model's numerics on gfx942 are checked by
-``test_dsv41_mono_layers.py``."""
+`test_dsv41_mono_layers.py`."""
 
 import shutil
 import subprocess
@@ -66,12 +66,12 @@ TOP5, TIE = (5, 20, 37, 115, 127), (70, 100)
 
 class Case(NamedTuple):
     """A decode step of R requests x T tokens on a layer of compress ratio
-    ``ratio``. ``entry``: the residual K1 takes, "fold" (the previous layer's
+    `ratio`. `entry`: the residual K1 takes, "fold" (the previous layer's
     output folded in), "settled" (after an Engram write) or "embedding" (the
-    first layer's). ``pad``: rows a FULL graph pads the step with (slot -1).
-    ``short``: SHORT_CONTEXTS among the long contexts. ``index``: an index
-    source, its top-k selected between K1 and K2. ``vllm``: also against the
-    ops vLLM runs for the step. ``hard``: a zeroed 32-column group in each norm
+    first layer's). `pad`: rows a FULL graph pads the step with (slot -1).
+    `short`: SHORT_CONTEXTS among the long contexts. `index`: an index
+    source, its top-k selected between K1 and K2. `vllm`: also against the
+    ops vLLM runs for the step. `hard`: a zeroed 32-column group in each norm
     weight and the FFN norm's x6 (the gate / up clamps, router logits past 20),
     and the router's TOP5 and TIE."""
 
@@ -187,7 +187,7 @@ def _mul(a_lo, a_hi, b_lo, b_hi):
 
 def _rot(lo, hi, cos, sin, inverse=False, rnd=R.bf16_rne):
     """GPT-J rotation of each (even, odd) pair of [..., D] value spans in f32
-    (products and the sum rounded), then ``rnd`` -> spans."""
+    (products and the sum rounded), then `rnd` -> spans."""
     sin = -sin if inverse else sin
     e, o = (lo[..., 0::2], hi[..., 0::2]), (lo[..., 1::2], hi[..., 1::2])
     ec, es, oc, os_ = (
@@ -316,7 +316,7 @@ def _rank_sum(parts):
 
 
 def _peer(runner, M: int, ep: int):
-    """Every rank's attention and FFN partials of launch pair ``ep`` (its K2 or
+    """Every rank's attention and FFN partials of launch pair `ep` (its K2 or
     FFN launch), as pushed to this rank's peer memory."""
     from vllm.models.deepseek_v41.amd.mono.layer import peer_half_bytes
 
@@ -356,7 +356,7 @@ def _flat(cache: torch.Tensor) -> torch.Tensor:
 
 
 def _record_bytes(cache: torch.Tensor, block: int, slots: torch.Tensor):
-    """The offsets in ``_flat(cache)`` of the records at ``slots``: their data
+    """The offsets in `_flat(cache)` of the records at `slots`: their data
     bytes [n, 576] and their scale bytes [n, 8]."""
     slots = slots.to(cache.device).long()
     b, o = slots // block, slots % block
@@ -378,9 +378,9 @@ def _rope(kv: torch.Tensor, positions: torch.Tensor, cos_sin: torch.Tensor):
 
 
 def _write_records(cache, block: int, slots, kv, fnuz: bool = False):
-    """fp8_ds_mla records of roped bf16 kv rows at ``slots``: the 448 nope dims
+    """fp8_ds_mla records of roped bf16 kv rows at `slots`: the 448 nope dims
     in e4m3 with a UE8M0 per 64, the rope dims in bf16, as vLLM's insert.
-    ``fnuz``: the e4m3 bytes in FNUZ with a maximum of 224, as vLLM's gfx942
+    `fnuz`: the e4m3 bytes in FNUZ with a maximum of 224, as vLLM's gfx942
     window cache holds them. In FNUZ the OCP -0 byte would be NaN."""
     fp8, fp8_max = torch.float8_e4m3fn, 448.0
     if fnuz:
@@ -424,11 +424,11 @@ def _decode_step(
 ):
     """R requests x T tokens past random contexts: the step's metadata as
     vLLM's builders lay it out, its window rows and (ratio > 0) the compressed
-    cache filled, a random top-512 a token. ``fnuz``: the window records in
+    cache filled, a random top-512 a token. `fnuz`: the window records in
     FNUZ, as on gfx942. The compressed records stay OCP, as vLLM's Triton
-    compressor writes them on gfx942 too. ``short``: SHORT_CONTEXTS among
-    them. ``pad``: rows after the step's, as a FULL graph pads it (slot -1, no
-    window). ``causal=False``: the DSpark draft block's rows, each the window
+    compressor writes them on gfx942 too. `short`: SHORT_CONTEXTS among
+    them. `pad`: rows after the step's, as a FULL graph pads it (slot -1, no
+    window). `causal=False`: the DSpark draft block's rows, each the window
     before the block and the whole block."""
     from vllm.v1.attention.backends.mla.compressor_utils import (
         get_dspark_swa_index_width,
@@ -525,9 +525,9 @@ def _decode_step(
 
 
 def _rows(s: dict, a: int, b: int) -> dict:
-    """The decode step ``s`` cut to its rows a .. b - 1, as a step of its own
+    """The decode step `s` cut to its rows a .. b - 1, as a step of its own
     on the same caches. The rows keep their request numbers, so the block
-    tables of ``s`` stay valid."""
+    tables of `s` stay valid."""
     cut = dict(s, M=b - a)
     for k in ("positions", "slot_mapping", "token_to_req", "swa_indices", "swa_lens"):
         cut[k] = s[k][a:b]
@@ -575,10 +575,10 @@ def _mxfp8(n: int, k: int, g, device):
 
 def _random_moe(moe, gd, gr, inter: int) -> None:
     """Random parameters in the loaded layout, before post-load processing: this
-    rank's shards (``gd``, a device generator) of the MXFP4 routed experts
-    (random nibbles, E8M0 scales; the intermediate past ``inter`` zero, as the
+    rank's shards (`gd`, a device generator) of the MXFP4 routed experts
+    (random nibbles, E8M0 scales; the intermediate past `inter` zero, as the
     loader pads it) and the MXFP8 shared expert (one E8M0 a 32 x 32 block); the
-    replicated router from ``gr``, seeded alike on every rank."""
+    replicated router from `gr`, seeded alike on every rank."""
     u8 = torch.uint8
     for lin in (moe.shared_experts.gate_up_proj, moe.shared_experts.down_proj):
         n = lin.weight.shape[0]
@@ -669,7 +669,7 @@ def _mono_index(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
 
 @contextmanager
 def _k1_taps(runner, taps: dict):
-    """Each K1 launch followed by a copy of its step's scratch into ``taps``:
+    """Each K1 launch followed by a copy of its step's scratch into `taps`:
     K2 reuses K1's X8 regions."""
     from vllm.models.deepseek_v41.amd.mono import runner as runner_module
 
@@ -697,9 +697,9 @@ def _k1_taps(runner, taps: dict):
 
 def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage=None):
     """The process's mono runner of the target's layers, or of the DSpark
-    draft's (``draft``), on random weights of one layer (``seed``), and
-    ``check(case)``: every stage of the case's step against a float64
-    reference on the stage's own input (``stage(name, check)`` runs a check
+    draft's (`draft`), on random weights of one layer (`seed`), and
+    `check(case)`: every stage of the case's step against a float64
+    reference on the stage's own input (`stage(name, check)` runs a check
     with its error constant), which returns the step's launches on fixed
     buffers for the replay stress."""
     from vllm._aiter_ops import rocm_aiter_ops
@@ -873,7 +873,7 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
         return q, c
 
     def gemv(tag, got, a, w, kappa_name, quant=None):
-        """``got`` (f32 or bf16, or ``quant``'s MXFP8 of the bf16) = a @ w^T,
+        """`got` (f32 or bf16, or `quant`'s MXFP8 of the bf16) = a @ w^T,
         a scaled-MFMA GEMV: within kappa of R.blockmax_cond."""
         ref, cond = a @ w.T, R.blockmax_cond(a, w)
 
@@ -908,8 +908,8 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
         stage("mix", check)
 
     def norm(tag, lin, w, got=None, quant=None):
-        """bf16 RMSNorm rows of the kernel's own input ``lin`` -> ``got``, or
-        their MXFP8 (vLLM's rule) ``quant``."""
+        """bf16 RMSNorm rows of the kernel's own input `lin` -> `got`, or
+        their MXFP8 (vLLM's rule) `quant`."""
 
         def check(kappa):
             lo, hi = _norm_span(lin, w, eps, kappa)
@@ -922,8 +922,8 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
 
     def ffn_io(tag, M, res, post, comb, pre, outs, hard=False, tuned=False):
         """The FFN seam and the MoE of the last launch, from the partials its
-        attention pushed to this rank. ``tuned``: the launch's build's
-        (``MonoBuild.tuned``), whose scratch it wrote."""
+        attention pushed to this rank. `tuned`: the launch's build's
+        (`MonoBuild.tuned`), whose scratch it wrote."""
         sc, lay = (
             runner.scratch(M, tuned),
             scratch_layout(M, tp, experts, topk_k, runner.ug_groups, tuned),
@@ -1513,7 +1513,7 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
 
 def _replay(steps: list, launches: dict) -> None:
     """The hand-off protocol under back-to-back launches: the steps alternating
-    in one graph, every replay bit for bit the first's. ``launches``: each
+    in one graph, every replay bit for bit the first's. `launches`: each
     runner's launches in a run of the steps; every one moves its runner's
     epoch, which the ranks agree on."""
     from vllm.distributed import tensor_model_parallel_all_gather

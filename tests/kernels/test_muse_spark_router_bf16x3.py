@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MuseSpark1x ROCm fp32-exact router GEMM over three BF16 weight planes."""
+"""Muse Spark ROCm fp32-exact router GEMM over three BF16 weight planes."""
 
 import pytest
 import torch

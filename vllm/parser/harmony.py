@@ -185,7 +185,7 @@ class HarmonyParser(DelegatingParser):
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         """Parse Harmony output from token IDs.
 
-        Tool calls are always extracted regardless of ``enable_auto_tools``.
+        Tool calls are always extracted regardless of `enable_auto_tools`.
         Callers must decide whether to surface them.
         """
         result = self.process_chunk(model_output_token_ids)

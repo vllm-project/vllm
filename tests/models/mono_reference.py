@@ -3,9 +3,9 @@
 """Slow references for the AMD monokernel I/O tests: plain torch in float64,
 written from the model definitions, never from a vLLM, AITER or Triton kernel.
 
-Rounding points a kernel documents are explicit calls here (``bf16_rne``,
-``to_e4m3_rne``, the E8M0 code rules), so a test reproduces them on purpose.
-``tests/kernels/models/amd/test_mono_primitives.py`` proves each rounding and
+Rounding points a kernel documents are explicit calls here (`bf16_rne`,
+`to_e4m3_rne`, the E8M0 code rules), so a test reproduces them on purpose.
+`tests/kernels/models/amd/test_mono_primitives.py` proves each rounding and
 code rule bit-exact against the device helpers the kernels use."""
 
 import torch
@@ -46,8 +46,8 @@ NOPE, ROPE, RECORD = 448, 64, 576
 
 
 def read_records(cache, block: int, slots, fnuz=False) -> torch.Tensor:
-    """fp8_ds_mla records at ``slots`` -> float64 [n, 512]. A page holds
-    ``block`` records of 576 bytes (448 E4M3, 64 bf16 rope), then ``block``
+    """fp8_ds_mla records at `slots` -> float64 [n, 512]. A page holds
+    `block` records of 576 bytes (448 E4M3, 64 bf16 rope), then `block`
     times 8 scale bytes (a UE8M0 per 64 nope dims)."""
     flat = torch.empty(0, dtype=torch.uint8, device=cache.device)
     flat.set_(cache.untyped_storage())
@@ -64,8 +64,8 @@ def read_records(cache, block: int, slots, fnuz=False) -> torch.Tensor:
 
 
 def pairs(region: torch.Tensor, n: int, tag: int | None = None) -> torch.Tensor:
-    """The first ``n`` (value, tag) int32 mailbox pairs of a byte region ->
-    the int32 values, after checking every tag is ``tag`` (the launch's)."""
+    """The first `n` (value, tag) int32 mailbox pairs of a byte region ->
+    the int32 values, after checking every tag is `tag` (the launch's)."""
     p = region[: n * 8].view(torch.int32).view(n, 2)
     if tag is not None:
         stale = (p[:, 1] != tag).nonzero()
@@ -74,15 +74,15 @@ def pairs(region: torch.Tensor, n: int, tag: int | None = None) -> torch.Tensor:
 
 
 def words(region: torch.Tensor, n: int, dtype: torch.dtype) -> torch.Tensor:
-    """The first ``n`` elements of ``dtype`` of a byte region (a copy)."""
+    """The first `n` elements of `dtype` of a byte region (a copy)."""
     return region[: n * dtype.itemsize].view(dtype).clone()
 
 
 # ---------------------------------------------------------------- rounding
 def round_float(x, mant: int, emin: int, fmax: float | None = None):
-    """``x`` rounded to nearest-even onto a binary format with ``mant``
-    mantissa bits and normal exponents >= ``emin`` (subnormals below),
-    saturating at ``fmax`` if given, else overflowing to inf at 2^(emax+1)."""
+    """`x` rounded to nearest-even onto a binary format with `mant`
+    mantissa bits and normal exponents >= `emin` (subnormals below),
+    saturating at `fmax` if given, else overflowing to inf at 2^(emax+1)."""
     x = x.double()
     if fmax is not None:
         x = x.clamp(-fmax, fmax)
@@ -103,7 +103,7 @@ def f32_rne(x):
 
 
 def to_e4m3_rne(x, fnuz=False, fmax=None):
-    """The E4M3 value of ``x`` clamped to +-fmax (448 OCP, 224 FNUZ), RNE."""
+    """The E4M3 value of `x` clamped to +-fmax (448 OCP, 224 FNUZ), RNE."""
     if fmax is None:
         fmax = 224.0 if fnuz else 448.0
     return round_float(x, 3, -7 if fnuz else -6, fmax)
@@ -132,7 +132,7 @@ def mx_code_ceil(amax, fmax=448.0, floor=0.0):
 
 
 def mx_code_vllm(amax, fmax=448.0):
-    """VLLM's ``mxfp8_e4m3_quantize``: ceil(log2(RN_f32(max(amax, FLT_MIN)
+    """VLLM's `mxfp8_e4m3_quantize`: ceil(log2(RN_f32(max(amax, FLT_MIN)
     / fmax))) + 127, clamped to [0, 254] (0 for an all-zero group)."""
     q = f32_rne(amax.double().clamp(min=FLT_MIN) / fmax)
     return (_ceil_log2(q) + 127).clamp(0, 254)
@@ -144,8 +144,8 @@ def e8m0_roundup6(amax):
 
 
 def mx_quantize(x, code_rule, block=32, fnuz=False):
-    """``x`` [..., K] per ``block`` -> (E4M3 values [..., K], codes
-    [..., K / block]) with ``code_rule(amax)``: x * 2^(127 - code), clamped, RNE."""
+    """`x` [..., K] per `block` -> (E4M3 values [..., K], codes
+    [..., K / block]) with `code_rule(amax)`: x * 2^(127 - code), clamped, RNE."""
     xb = x.double().unflatten(-1, (-1, block))
     codes = code_rule(xb.abs().amax(-1))
     q = to_e4m3_rne(xb * torch.exp2(127 - codes.double())[..., None], fnuz)
@@ -164,8 +164,8 @@ def gated_rmsnorm(x, gate, w, eps):
 
 
 def rope_gptj(x, cos, sin, inverse=False):
-    """GPT-J (interleaved pair) rotation of the last dim of ``x`` by
-    cos / sin [..., D / 2]; ``inverse`` rotates back."""
+    """GPT-J (interleaved pair) rotation of the last dim of `x` by
+    cos / sin [..., D / 2]; `inverse` rotates back."""
     x, cos, sin = x.double(), cos.double(), sin.double()
     sin = -sin if inverse else sin
     e, o = x[..., 0::2], x[..., 1::2]
@@ -174,7 +174,7 @@ def rope_gptj(x, cos, sin, inverse=False):
 
 def mhc_mixes(x, fn, scale, base, hc, rms_eps, pre_eps, sk_eps, post_mult, iters):
     """DeepSeek-V4 mHC coefficients of the flattened residual x [M, hc D]
-    -> (pre [M, hc], post [M, hc], comb [M, hc, hc]); ``fn`` [hc (2 + hc),
+    -> (pre [M, hc], post [M, hc], comb [M, hc, hc]); `fn` [hc (2 + hc),
     hc D] as the kernel reads it (e.g. bf16 hi + lo, summed in float64)."""
     x = x.double()
     mixes = (x @ fn.double().T) * torch.rsqrt(x.square().mean(-1, True) + rms_eps)
@@ -203,8 +203,8 @@ def mhc_collapse(residual, pre):
 
 def sparse_attention_sink(q, keys, scale, sink=None, valid=None, values=None):
     """Softmax attention of q [M, H, D] over each row's keys [M, N, D] (MLA:
-    the values are the keys unless given), ``valid`` [M, N] masking keys, a
-    per-head ``sink`` logit [H] in the denominator only -> [M, H, Dv]."""
+    the values are the keys unless given), `valid` [M, N] masking keys, a
+    per-head `sink` logit [H] in the denominator only -> [M, H, Dv]."""
     q, keys = q.double(), keys.double()
     values = keys if values is None else values.double()
     s = torch.einsum("mhd,mnd->mhn", q, keys) * scale
@@ -246,7 +246,7 @@ def router_scores(logits, kind: str):
 
 
 def route(logits, bias, k, kind, scale, ids=None):
-    """Top-k of score + bias (ties to the lower id; ``ids`` given: hash
+    """Top-k of score + bias (ties to the lower id; `ids` given: hash
     routing), weights the picked scores times scale / their sum.
     -> (ids [M, k], weights [M, k], margin [M]: k-th minus (k+1)-th value)."""
     s = router_scores(logits, kind)
@@ -276,7 +276,7 @@ def kda_step(S, q, k, v, g, beta, a_log, dt_bias, lower_bound, scale):
 
 def causal_conv1d(state, x, w, bias=None, act=True):
     """Depthwise causal conv over [state | x]: state [C, W - 1] (oldest
-    first), x [T, C], w [C, W] -> (y [T, C], SiLU if ``act``; the last W - 1
+    first), x [T, C], w [C, W] -> (y [T, C], SiLU if `act`; the last W - 1
     columns as the new state)."""
     seq = torch.cat([state.double(), x.double().T], 1)
     W = w.shape[1]
@@ -289,9 +289,9 @@ def causal_conv1d(state, x, w, bias=None, act=True):
 
 
 def attn_res(prefix, blocks, w_norm, w_qk, w_out, eps, out_eps):
-    """Kimi AttnRes of one row set: softmax over the sources (``blocks``
-    [M, B, D], then ``prefix`` [M, D]) of rmsnorm-scaled logits
-    v . (w_norm w_qk), the mix of the sources, then RMSNorm with ``w_out``."""
+    """Kimi AttnRes of one row set: softmax over the sources (`blocks`
+    [M, B, D], then `prefix` [M, D]) of rmsnorm-scaled logits
+    v . (w_norm w_qk), the mix of the sources, then RMSNorm with `w_out`."""
     src = torch.cat([blocks.double(), prefix.double()[:, None]], 1)
     rstd = torch.rsqrt(src.square().mean(-1) + eps)
     logits = (src @ (w_norm.double() * w_qk.double())) * rstd
@@ -304,20 +304,20 @@ _FMT = {torch.bfloat16: (7, -126), torch.float32: (23, -126)}
 
 
 def ulp(x, dtype=torch.bfloat16):
-    """The ``dtype`` (bf16 / f32) spacing at |x| (subnormal spacing below)."""
+    """The `dtype` (bf16 / f32) spacing at |x| (subnormal spacing below)."""
     mant, emin = _FMT[dtype]
     e = torch.floor(torch.log2(x.double().abs())).clamp(min=emin)
     return torch.exp2(e - mant)
 
 
 def ulps(got, ref, dtype=torch.bfloat16, floor=0.0):
-    """|got - ref| in ``dtype`` ulps of max(|ref|, floor)."""
+    """|got - ref| in `dtype` ulps of max(|ref|, floor)."""
     ref = ref.double()
     return (got.double() - ref).abs() / ulp(ref.abs().clamp(min=floor), dtype)
 
 
 def err_over_cond(got, ref, a, b):
-    """|got - ref| / (|a| @ |b|^T) for ``got`` a computed a @ b^T: the dot
+    """|got - ref| / (|a| @ |b|^T) for `got` a computed a @ b^T: the dot
     product's error relative to its conditioning scale."""
     return (got.double() - ref.double()).abs() / (a.double().abs() @ b.double().abs().T)
 
@@ -336,7 +336,7 @@ def blockmax_cond(a, b, block=32):
 
 
 def boundary(fn, x, d):
-    """Where ``fn`` (monotone) is not constant on [x - d, x + d] -> (mask,
+    """Where `fn` (monotone) is not constant on [x - d, x + d] -> (mask,
     fn(x - d), fn(x + d)): the elements a reference error of d may flip."""
     lo, hi = fn(x - d), fn(x + d)
     return lo != hi, lo, hi
@@ -344,7 +344,7 @@ def boundary(fn, x, d):
 
 def assert_quant_equal(got_q, got_codes, x, d, code_rule, block=32, fnuz=False):
     """MXFP8 output (E4M3 values [..., K] as float64, codes [..., K / block])
-    against the reference values ``x`` known to +-``d``: exact outside the
+    against the reference values `x` known to +-`d`: exact outside the
     boundary set, one of its two ends inside, and the set under 1 %."""
     xb = x.double().unflatten(-1, (-1, block))
     db = torch.as_tensor(d, dtype=F64, device=x.device).expand_as(x)
@@ -366,7 +366,7 @@ def assert_quant_equal(got_q, got_codes, x, d, code_rule, block=32, fnuz=False):
 
 def assert_topk(ids, ref_ids, margin, bound):
     """Picked ids as a set equal the reference's on every row whose k-th /
-    (k+1)-th margin exceeds ``bound`` -> rows checked."""
+    (k+1)-th margin exceeds `bound` -> rows checked."""
     clear = margin > bound
     got = ids.long()[clear].sort(-1).values
     assert torch.equal(got, ref_ids.long()[clear].sort(-1).values), "top-k ids"

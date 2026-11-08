@@ -1,35 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Teacher-forced logprob parity of Kimi-K3's specialized decode on and off
-(``mono_logprob_parity`` describes the method), on the 8-layer dummy Kimi-K3
+(`mono_logprob_parity` describes the method), on the 8-layer dummy Kimi-K3
 with random weights at TP8 / DCP8 and its DSpark draft (3 speculative tokens,
 every decode step a verify step): every decode step of 8 requests runs the
 kernels of layers 1-7 on every rank in the on arm. Both arms run eager, the
 same requests through the same tokens, 64 logprobs a position (the 163840
 vocabulary is too large for full distributions): KL over the tokens both arms
-return, 73% of the mass, at least ``MIN_OVERLAP`` of the two sets shared.
+return, 73% of the mass, at least `MIN_OVERLAP` of the two sets shared.
 Neither arm is bit-exact run to run (vLLM's own ops around the kernels are
 not), so there is no exact eager-vs-graphs check. Under heavy GPU co-tenancy
 the kernels' in-kernel waits can time out and fail-stop the engine: an
 environment failure, rerun.
 
-The weights (``RandomWeightLoader``): name-seeded (a TP shard's also by rank)
+The weights (`RandomWeightLoader`): name-seeded (a TP shard's also by rank)
 N(0, 1 / fan_in) matrices, MXFP4 experts with E8M0 codes 115-119, lm_head
 scaled for an entropy of 3.0 nats over the top 64 (mean top-1 margin 0.85).
 The routed experts quantize their activations to MXFP4, which turns a
 rounding-level difference of their input into a ~16% one of their output: at
 full scale this makes the random stack chaotic (off vs off decorrelates, KL up
-to 5). Their up projection is scaled to ``ROUTED_UP`` of that, at which the
+to 5). Their up projection is scaled to `ROUTED_UP` of that, at which the
 stack is not chaotic, so the routed experts' arithmetic is below this test's
 sensitivity: test_e2e_parity checks it stage by stage.
 
-Mutants of layer ``MUTANT_LAYER``'s weights while the kernels run (eager:
-weights are read at each launch), worst KL over ``KL`` against each of the 11
-off runs below: the MLP AttnRes query negated (``attn_res``, the test's)
+Mutants of layer `MUTANT_LAYER`'s weights while the kernels run (eager:
+weights are read at each launch), worst KL over `KL` against each of the 11
+off runs below: the MLP AttnRes query negated (`attn_res`, the test's)
 40-45x, support overlap min 0.14-0.17; the KDA conv taps reversed 26-31x; the
 MLA query norm negated (layer 3) 11-14x. Below 10x: rank 0's shared-expert
 down projection zeroed 4.8-5.9x (overlap min 0.68-0.71, under
-``MIN_OVERLAP``), A_log + 0.5 0.4-1.0x, and rank 0's routed experts (E8M0
+`MIN_OVERLAP`), A_log + 0.5 0.4-1.0x, and rank 0's routed experts (E8M0
 codes of w2 + 1, or w13 of expert pairs swapped) 0.1-0.5x.
 """
 
@@ -77,7 +77,7 @@ MUTANT_LAYER = 4
 
 @torch.no_grad()
 def _fill(name: str, t: torch.Tensor, fan_in: int) -> None:
-    """A random value for every weight, seeded by ``name``, in the ranges the
+    """A random value for every weight, seeded by `name`, in the ranges the
     checkpoint's formats hold."""
     if t.device.type == "meta":
         return
@@ -127,7 +127,7 @@ def _tp(module) -> tuple[bool, int]:
 
 @register_model_loader(LOAD_FORMAT)
 class RandomWeightLoader(DummyModelLoader):
-    """Dummy loading, then ``_fill`` before post-load processing. A shard's
+    """Dummy loading, then `_fill` before post-load processing. A shard's
     seed includes the rank (alike shards would tie the vocabulary's logits
     eight ways); replicated weights, the router's included, are alike on
     every rank."""
@@ -208,15 +208,15 @@ def _corrupt(mutant: str, layer, rank: int):
 
 
 class Probe:
-    """Worker extension (``worker_extension_cls``): it also brings this module,
+    """Worker extension (`worker_extension_cls`): it also brings this module,
     and so the loader, into the workers."""
 
     def epoch(self) -> int:
         return int(_decode(self).runner.epoch[0])
 
     def mutate(self, mutant: str | None, layer_idx: int = MUTANT_LAYER) -> None:
-        """Runs the kernels of layer ``layer_idx`` on its weights with
-        ``mutant`` (None: restores); vLLM's ops read them unchanged."""
+        """Runs the kernels of layer `layer_idx` on its weights with
+        `mutant` (None: restores); vLLM's ops read them unchanged."""
         for kernels in _decode(self).kernels.values():
             for kernel in kernels.values():
                 kernel.__dict__.pop("launch", None)
@@ -247,7 +247,7 @@ def _engine(vllm_runner, mono: bool):
         enable_chunked_prefill=True,
         max_num_seqs=MAX_SEQS,
         gpu_memory_utilization=0.15,
-        # plan() rejects the views extend_kv_cache re-binds (#66370)
+        # plan() rejects the views extend_kv_cache re-binds (#66357)
         enable_extensible_kv_cache=False,
         enforce_eager=True,
         attention_config={"mla_prefill_backend": "ROCM_AITER_FA"},

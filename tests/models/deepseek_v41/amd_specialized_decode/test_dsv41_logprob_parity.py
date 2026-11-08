@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Teacher-forced logprob parity of ``--monokernel`` on and off for the
-five-layer DeepSeek-V4.1-Flash of ``test_dsv41_mono_layers`` (its random
+"""Teacher-forced logprob parity of `--monokernel` on and off for the
+five-layer DeepSeek-V4.1-Flash of `test_dsv41_mono_layers` (its random
 weights and layer variants, every layer whole on the mono path) at TP4 on
 CDNA4, with a 4096-token vocabulary and full-vocabulary logprobs
-(``tests/models/mono_logprob_parity``): 8 requests of 1100-2000 prompt tokens
+(`tests/models/mono_logprob_parity`): 8 requests of 1100-2000 prompt tokens
 (both compress ratios past their 512 compressed entries, so the indexers'
 top-k selects), 32 forced decode positions each.
 
-Through ``D``'s weights the layers add ~0.5% (attention) and ~3% (FFN) to the
+Through `D`'s weights the layers add ~0.5% (attention) and ~3% (FFN) to the
 residual, so the logits barely depend on them: on/off agree to the BF16 logit
 grid even with the last layer's attention or routing broken on a rank. More
 gain in every layer makes the stack chaotic (FP8 activations amplify any
@@ -17,9 +17,9 @@ layer gets it, and the test probes that layer's mono path. Its router's top-k
 margins are small (median 0.019), so the difference of any two runs' MoE
 inputs, on or off, moves its routing at 13-26 of the 256 positions, and those
 positions take KL up to 0.32. Not ties within the router's own rounding (of
-the 24 in one off/on pair, none is within ``D._route_ties``), these are
+the 24 in one off/on pair, none is within `D._route_ties`), these are
 compared apart: the routing is recomputed in float64 from each arm's own MoE
-input (``Probe.routes``), a position where it differs is dropped, and at most
+input (`Probe.routes`), a position where it differs is dropped, and at most
 ROUTE_MOVES may be (a bug upstream of the router moves more; a bug in it
 moves none). The rest hold the bounds but for OUTLIERS positions, which also
 cover their top-1 flips at clear margins.
@@ -28,7 +28,7 @@ Calibrated on 11 runs (4 off, 4 on, 3 on in FULL graphs, each relaunched), 55
 pairs: at most 26 positions moved (ROUTE_MOVES twice that), at most 1 kept
 position over the bounds and 4 kept top-1 flips (OUTLIERS twice that); KL <=
 0.0050 and |dlogprob| <= 0.163 at the 9th worst kept position (the bounds 3x
-that). Bugs in the probe layer's mono path, on every rank (``MUTANTS``),
+that). Bugs in the probe layer's mono path, on every rank (`MUTANTS`),
 against the 4 off runs: the 9th worst kept KL over KL router_off_by_one
 118-124x, shared_scale_off_by_one 88-94x, w2_scale_off_by_one 32-34x;
 attention_dropped only 1.5-1.7x, but it moves 80-86 positions. Mono is not
@@ -64,7 +64,7 @@ KL, DLP = 0.015, 0.5
 
 @register_model_loader(LOAD_FORMAT)
 class ProbeLoader(D.RandomWeightLoader):
-    """``D.RandomWeightLoader``'s weights, PROBE_LAYER's scales shifted by
+    """`D.RandomWeightLoader`'s weights, PROBE_LAYER's scales shifted by
     PROBE_SHIFT, the vocabulary shards of the embedding and the head drawn per
     rank (alike, every token would have TP - 1 twins of equal logits) and the
     head scaled by HEAD_SCALE."""
@@ -116,7 +116,7 @@ MUTANTS = {
 
 class Probe(D.MonoProbe):
     def mutate(self, name: str) -> None:
-        """PROBE_LAYER's mono weights through ``MUTANTS[name]``, on every rank.
+        """PROBE_LAYER's mono weights through `MUTANTS[name]`, on every rank.
         Eager only: FULL graphs keep the pointers they captured."""
         layer = self._decoder_layers()[PROBE_LAYER]
         layer.mono._weights = MUTANTS[name](layer.mono.weights(layer))
@@ -176,8 +176,8 @@ def _run(
     graphs: bool = False,
     mutant: str | None = None,
 ) -> tuple[P.Forced, torch.Tensor]:
-    """The forced decode of ``_requests`` with mono on or off, eager or in
-    FULL graphs, and its ``Probe.routes`` (one step a decode position); on,
+    """The forced decode of `_requests` with mono on or off, eager or in
+    FULL graphs, and its `Probe.routes` (one step a decode position); on,
     every layer took the mono path at every decode step."""
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
@@ -233,7 +233,7 @@ def _run(
 
 @pytest.fixture(scope="module")
 def arm(vllm_runner):
-    """``_run`` once a module for each setting."""
+    """`_run` once a module for each setting."""
     runs: dict = {}
 
     def get(**kw) -> tuple[P.Forced, torch.Tensor]:
@@ -251,7 +251,7 @@ def arm(vllm_runner):
 
 
 def _compare(off, on) -> tuple[dict, int]:
-    """``P.compare`` of two ``_run``s without the positions where their
+    """`P.compare` of two `_run`s without the positions where their
     PROBE_LAYER routing differs, and how many those are."""
     (a, routes_a), (b, routes_b) = off, on
     m = P.compare(a, b)

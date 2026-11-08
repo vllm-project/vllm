@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Teacher-forced logprob parity of --monokernel on and off on test_model's
 mini MiniMax M3 (random weights, TP4, no checkpoint), its lm_head scaled for
-logits of about 4.3 nats (mean top-1 margin 0.83); ``mono_logprob_parity``
+logits of about 4.3 nats (mean top-1 margin 0.83); `mono_logprob_parity`
 describes the method. Both arms run eager, the same 16 requests in one batch.
 
 Mutants of mono's own view of the last sparse layer's weights on rank 0,
-measured as the 6th largest KL (past ``OUTLIERS``) over ``KL``: experts 0 and
-1's w2 swapped (``expert_swap``, the test's; 24 positions over the bounds)
+measured as the 6th largest KL (past `OUTLIERS`) over `KL`: experts 0 and
+1's w2 swapped (`expert_swap`, the test's; 24 positions over the bounds)
 19.6x; expert 5's w13 scales an E8M0 step up 50x; expert 7's router bias +1
 22.8x. One K block of every expert's w13 scales an E8M0 step up is 2.2x, the
 sensitivity limit."""
@@ -111,8 +111,8 @@ def _forced(vllm_runner, model_dir, mono, mutant=None):
 
 
 def _assert_engaged(llm, start):
-    """Since ``start``, alike on every rank: the prefill ran stock and each of
-    the ``STEPS - 1`` batched decode steps one mono launch a sparse layer, so
+    """Since `start`, alike on every rank: the prefill ran stock and each of
+    the `STEPS - 1` batched decode steps one mono launch a sparse layer, so
     a silent fallback cannot pass as parity."""
     moved = {
         tuple(a - b for a, b in zip(after, before))
@@ -139,7 +139,7 @@ def test_logprobs_match_native(vllm_runner, model_dir, native):
 
 def test_mutant_fails_parity(vllm_runner, model_dir, native):
     """The bounds are not vacuous: a corrupted copy of mono's expert weights
-    (``expert_swap``) fails them by over 10x."""
+    (`expert_swap`) fails them by over 10x."""
     m = P.compare(
         native, _forced(vllm_runner, model_dir, mono=True, mutant="expert_swap")
     )

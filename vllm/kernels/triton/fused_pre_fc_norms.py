@@ -52,7 +52,7 @@ def fused_pre_fc_norms(
 ) -> torch.Tensor:
     """Returns cat([norm_e(inputs_embeds), norm_h(hidden_states)]) -> [N, 2H].
 
-    Both norms are Gemma-style RMSNorm (scale by ``1 + weight``, fp32
+    Both norms are Gemma-style RMSNorm (scale by `1 + weight`, fp32
     accumulation, multiply in fp32 before the cast back to the input dtype).
     """
     n, h = inputs_embeds.shape

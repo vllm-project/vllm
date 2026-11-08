@@ -8,11 +8,11 @@ path runs; every rank then overwrites them in place at sensible scales,
 distinct per layer and per TP shard, the experts generated in the checkpoint's
 MXFP4 format and converted by that same path.
 
-- layer: each sparse ``MiniMaxM3DecoderLayer``'s FFN half (seam all-reduce and
+- layer: each sparse `MiniMaxM3DecoderLayer`'s FFN half (seam all-reduce and
   residual, post-attention norm, MoE) on native's captured decode-step inputs;
 - model: teacher-forced decode (trace replay), --monokernel eager: every fused
   launch of the engine's real steps against vLLM's own ops on that launch's
-  inputs, within the a-priori bounds of both paths' arithmetic (``_launch_check``);
+  inputs, within the a-priori bounds of both paths' arithmetic (`_launch_check`);
   under FULL graphs (with frequent epoch resets) the full-vocabulary logprobs
   equal eager's bit for bit;
 - fail-stop: a late rank fault under FULL graphs returns no token.
@@ -220,9 +220,9 @@ def _requests():
 
 
 def _fallback_requests():
-    """One batch of 4 requests more than ``FALLBACK_SEQS``, the last
-    ``FALLBACK_SHORT`` admitted done after 3 tokens: a decode step of all
-    ``FALLBACK_SEQS`` rows (also when the requests reach the engine over a few
+    """One batch of 4 requests more than `FALLBACK_SEQS`, the last
+    `FALLBACK_SHORT` admitted done after 3 tokens: a decode step of all
+    `FALLBACK_SEQS` rows (also when the requests reach the engine over a few
     steps), then the waiting requests' prefills next to decodes, then 16 rows
     and fewer."""
     set_random_seed(SEED + 2)
@@ -240,7 +240,7 @@ def _fallback_requests():
 
 def _decode(llm, capture=False, requests=None):
     """Full-vocabulary logprobs of every decode step (the first output token
-    comes from prefill, which runs stock), every token forced; ``capture``:
+    comes from prefill, which runs stock), every token forced; `capture`:
     also each sparse layer's inputs at the first decode step of each batch."""
     from vllm import SamplingParams
 
@@ -277,7 +277,7 @@ TORCH_NORM_ETA = (0.5 * (6144 + 1) + 6) * 2.0**-24
 
 def _scratch(runner, s):
     """A launch's X, router logits (its parts summed as its route stage does)
-    and route from its scratch; ``tags``: every pair carries the launch's."""
+    and route from its scratch; `tags`: every pair carries the launch's."""
     from tests.models import mono_reference as R
     from tests.models.minimax_m3.amd_specialized_decode import test_ops as O
     from vllm.models.minimax_m3.amd.specialized_decode.mono import ffn
@@ -376,7 +376,7 @@ def _launch_check(layer, part, residual, out, res_out, scratch):
 
 
 def _assert_launches(results, label):
-    """Every launch's checks (``_launch_check``) on every rank; the route
+    """Every launch's checks (`_launch_check`) on every rank; the route
     compared on at least half the rows, and the mean square and bias over
     all of rank 0's launches (the ranks' outputs are the same all-reduced
     sums, not independent samples) within the variance model."""
@@ -466,7 +466,7 @@ def _replay(worker):
 
 
 def _engine(vllm_runner, model_dir, mono, graphs=False, in_process=None, **extra):
-    """``in_process``: a MonkeyPatch to run the engine core in this process."""
+    """`in_process`: a MonkeyPatch to run the engine core in this process."""
     if in_process is not None:
         in_process.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     extra.setdefault("max_num_seqs", max(BATCHES))
@@ -552,7 +552,7 @@ def mono_eager(vllm_runner, model_dir):
 def test_sparse_layers_match_native(native):
     """Every rank, both sparse layers, decode widths 1, 4 and 16: the fused
     launch on native's captured inputs against vLLM's own ops
-    (``_launch_check``)."""
+    (`_launch_check`)."""
     assert not any(failed for _, failed in native)
     _assert_launches([results for results, _ in native], "replay")
 
@@ -595,8 +595,8 @@ def _engagement(worker):
 
 
 def _engaged(llm, start, forwards):
-    """Since ``start`` (``_count_launches``), alike on every rank: each forward
-    ``_record_forwards`` saw routed as ``decide_step`` decides, and every
+    """Since `start` (`_count_launches`), alike on every rank: each forward
+    `_record_forwards` saw routed as `decide_step` decides, and every
     sampled step but the stock ones (eager forwards or FULL graph replays)
     ran one launch a sparse layer on the device. Returns the fused steps and
     the stock forwards' rows, prefills and decodes."""
@@ -702,7 +702,7 @@ def _record_launches(worker):
 
 
 def _check_launches(worker):
-    """Every launch ``_record_launches`` saw, through ``_launch_check``."""
+    """Every launch `_record_launches` saw, through `_launch_check`."""
     from vllm.forward_context import set_forward_context
 
     for hook in worker._launch_hooks:
@@ -737,7 +737,7 @@ def _reset_state(worker):
 @pytest.mark.parametrize("graphs", [False, True], ids=["eager", "full_graphs"])
 def test_model_matches_native(vllm_runner, model_dir, mono_eager, graphs, monkeypatch):
     """Teacher-forced decode with --monokernel. Eager: every launch matches
-    vLLM's own ops (``_launch_check``). Under FULL graphs (async scheduling)
+    vLLM's own ops (`_launch_check`). Under FULL graphs (async scheduling)
     the logprobs equal eager's bit for bit, the epoch resets every 3 sampled
     steps on every rank at the same steps, and no wait times out."""
     ref = mono_eager
@@ -775,7 +775,7 @@ def test_fallback_steps_match_native(vllm_runner, model_dir):
     """--monokernel eager over steps it hands to stock: decode steps of over
     16 rows and mixed prefill / decode steps, between plain decode steps that
     run the fused launches; every launch, on the state the stock steps left,
-    matches vLLM's own ops (``_launch_check``)."""
+    matches vLLM's own ops (`_launch_check`)."""
     from vllm.models.minimax_m3.amd.specialized_decode.mono.ffn import MAX_TOKENS
 
     with _engine(
@@ -892,7 +892,7 @@ def test_eagle3_verify_steps_match_native(
 ):
     """EAGLE3 (random draft) with --monokernel: the verify steps of 1-4
     requests run the fused launches up to 16 rows (k=5: 18 and 24 rows run
-    stock). Eager: every launch matches vLLM's own ops (``_launch_check``) and
+    stock). Eager: every launch matches vLLM's own ops (`_launch_check`) and
     EAGLE3's auxiliary states after the fused layers are the launches' outputs
     plus residuals. Under FULL graphs a late rank fault during a verify step
     then returns no token."""

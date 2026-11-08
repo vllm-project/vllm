@@ -4,7 +4,7 @@
 MXFP4 weights from vLLM's real post-load path: every stage against a float64
 reference (TP1 and TP4), routing ties, padding, residency, graph replay,
 fail-stop sites, epoch reset, the gfx950 hand-off ISA, and the hand-off
-stresses (one-GPU cross-XCD; TP4 over XGMI). ``*_match_vllm_ops``: the stages
+stresses (one-GPU cross-XCD; TP4 over XGMI). `*_match_vllm_ops`: the stages
 against vLLM's and AITER's native ops (nightly)."""
 
 import glob
@@ -60,8 +60,8 @@ SHORT_WAIT = 10_000_000  # 100 ms of the 100 MHz clock
 
 
 def _weights(rank=0, seed=0):
-    """The checkpoint's MXFP4 experts (``raw``) and vLLM's post-load copies;
-    ``rank`` > 0 draws its own experts (a TP shard), the replicated tensors
+    """The checkpoint's MXFP4 experts (`raw`) and vLLM's post-load copies;
+    `rank` > 0 draws its own experts (a TP shard), the replicated tensors
     alike on every rank."""
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         Mxfp4MoeBackend,
@@ -151,7 +151,7 @@ def _native_route(logits, bias):
 
 
 def _native_router(x, router):
-    """The FP32 router GEMM ``GateLinear`` runs on gfx950 up to 32 rows."""
+    """The FP32 router GEMM `GateLinear` runs on gfx950 up to 32 rows."""
     from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (
         rocm_fp32_router_gemm,
     )
@@ -161,7 +161,7 @@ def _native_router(x, router):
 
 def _clear_choices(logits, bias, err):
     """Rows whose float64 4th and 5th biased scores differ by more than twice
-    ``err``, the most any path's scores may be off: both pick the same four."""
+    `err`, the most any path's scores may be off: both pick the same four."""
     top = (logits.double().sigmoid() + bias.double()).topk(ffn.TOPK + 1, dim=-1)
     return (top.values[:, ffn.TOPK - 1] - top.values[:, ffn.TOPK]) > 2 * err
 
@@ -312,7 +312,7 @@ U = 2.0**-24
 
 
 def _sigmoid_err(x):
-    """``ffn._sigmoid``'s relative error on an f32 ``x``, to first order:
+    """`ffn._sigmoid`'s relative error on an f32 `x`, to first order:
     LOG2E and the product (2 U times the condition number |x| (1 - s)),
     v_exp_f32's 1 ulp (2 U times 1 - s), the add (U), v_rcp_f32's 1 ulp (2 U)."""
     return (2 * x.abs() * (1 - torch.sigmoid(x)) + 5) * U
@@ -355,12 +355,12 @@ def _weight_err(logits):
 
 def _count_limit(mean):
     """Bernstein's bound on a sum of independent Bernoulli whose means sum to
-    at most ``mean``, exceeded with probability exp(-TAIL)."""
+    at most `mean`, exceeded with probability exp(-TAIL)."""
     return mean + TAIL / 3 + (TAIL**2 / 9 + 2 * TAIL * mean) ** 0.5
 
 
 def _norm_flips(got, want, eta=NORM_ETA):
-    """Two bf16 roundings of f32 norms each within ``eta`` (both paths) of the
+    """Two bf16 roundings of f32 norms each within `eta` (both paths) of the
     exact one land at most one step apart, and only where a rounding boundary
     falls between them: with a uniform position in its step, at most eta |x| /
     ulp(x) a chance. Returns the largest difference in steps, the flips and
@@ -372,7 +372,7 @@ def _norm_flips(got, want, eta=NORM_ETA):
 
 
 def _combine_budget(terms):
-    """The two paths' sums of the same bf16 expert terms ``terms`` [k, ..., H]
+    """The two paths' sums of the same bf16 expert terms `terms` [k, ..., H]
     (the native op's, one expert a call: f32 w v rounded once onto a zeroed
     output) -> per element, a bound on |mono - native| and the variance of the
     difference if every rounding is uniform within half an ulp. Both round each
@@ -395,10 +395,10 @@ def _combine_budget(terms):
 
 
 def _combine_stats(got, want, bound, var, scale):
-    """The largest difference over its bound and in ulps of ``scale``, and the
+    """The largest difference over its bound and in ulps of `scale`, and the
     sums for the mean-square check: squares, the variance model, and
     Bernstein's terms (each square is at most its bound squared); and the
-    signed sums for the bias checks, plain and along ``want``'s signs."""
+    signed sums for the bias checks, plain and along `want`'s signs."""
     signed = got.double() - want.double()
     diff = signed.abs()
     b2 = bound.square()
@@ -437,7 +437,7 @@ def _assert_combine(stats, label):
 
 
 def _mfma_err(x, w, waves):
-    """``x @ w.T``'s A16W4 error: a wave's chain of 16x16x32 MFMAs over its
+    """`x @ w.T`'s A16W4 error: a wave's chain of 16x16x32 MFMAs over its
     128-K steps (MFMA d: K 32 g + 8 d .. + 8 of lane groups g), each within
     33 U of its |C| + sum |a b| (test_mono_primitives), then the waves' sums in
     order (U |sum| each)."""
@@ -455,7 +455,7 @@ EXACT = ("sres", "res_out", "route_ids", "out", "pad")
 
 
 def _io_weights(w):
-    """``w`` with norm columns 0 .. 31 at ``1 + w = 0`` (exact zeros in X) and
+    """`w` with norm columns 0 .. 31 at `1 + w = 0` (exact zeros in X) and
     experts 0 and 1 tied (one router row and bias) and always picked."""
     w = SimpleNamespace(**vars(w))
     w.post_norm = w.post_norm.clone()
@@ -530,7 +530,7 @@ def _ratio(err, bound):
 
 
 def _f32_sum(terms):
-    """``terms`` [..., n] summed from 0 in order, each add rounded to f32."""
+    """`terms` [..., n] summed from 0 in order, each add rounded to f32."""
     acc = torch.zeros_like(terms[..., 0])
     for i in range(terms.shape[-1]):
         acc = R.f32_rne(acc + terms[..., i])
@@ -538,9 +538,9 @@ def _f32_sum(terms):
 
 
 def _stage_errors(w, r, parts, residual, valid, rank=0, experts=ffn.Experts.ALL):
-    """Every stage of launch ``r`` against float64 references of its own
-    captured input -> the checks: error over its a-priori bound (``RATIOS``,
-    <= 1 passes), exact (``EXACT``), the route weights' f32 ulps, coverage."""
+    """Every stage of launch `r` against float64 references of its own
+    captured input -> the checks: error over its a-priori bound (`RATIOS`,
+    <= 1 passes), exact (`EXACT`), the route weights' f32 ulps, coverage."""
     v, m = valid, {}
     nv = int(v.sum())
     dev = r.sres.device
@@ -883,7 +883,7 @@ def test_fail_stop_sites(weights, build, arm, final, want):
 
 
 def test_launches_up_to_the_epoch_limit(weights):
-    """From two launches short of ``EPOCH_LIMIT`` (both seam parities, the
+    """From two launches short of `EPOCH_LIMIT` (both seam parities, the
     16-bit tags at their top) a launch matches one from epoch 0 bit for bit;
     the launch at the limit refuses to run."""
     runner = _runner(weights, 2, wait_ticks=SHORT_WAIT)
@@ -903,8 +903,8 @@ def test_launches_up_to_the_epoch_limit(weights):
 
 
 def _reset_executor(runner, monkeypatch, agree):
-    """A TP1 FfnExecutor over ``runner`` that resets every 3 output steps, its
-    TP agreement ``agree``."""
+    """A TP1 FfnExecutor over `runner` that resets every 3 output steps, its
+    TP agreement `agree`."""
     from vllm.models.minimax_m3.amd.specialized_decode.runtime import executor as ex
 
     monkeypatch.setattr(ex, "tp_agree", agree)
@@ -1001,11 +1001,11 @@ def _disassemble(compiled):
 
 
 def test_isa_encodes_the_handoff_contract(weights):
-    """The linked TP4 S=1 kernel has the shapes ``mono/sync.py`` argues from:
+    """The linked TP4 S=1 kernel has the shapes `mono/sync.py` argues from:
     every system-scope access one aligned 64-bit pair or the 32-bit error
     word; no buffer op carries cache bits; every global access (only hand-offs
-    use them) carries ``sc1``, alone for agent scope, and every agent store /
-    load form ``mono/sync.py`` uses is lowered that way; the handshake's
+    use them) carries `sc1`, alone for agent scope, and every agent store /
+    load form `mono/sync.py` uses is lowered that way; the handshake's
     system release is a write-back then a drain, its acquire a drain then an
     invalidate, and (performance policy) no other L2 maintenance remains."""
     dev = torch.device("cuda")
@@ -1077,7 +1077,7 @@ def _launch_handoff_probe(
 
 
 def test_isa_orders_handoff_data_around_av_none_fences():
-    """The agent ``av none`` release / acquire on gfx950: a completion wait,
+    """The agent `av none` release / acquire on gfx950: a completion wait,
     not an L2 write-back / invalidate, between the data stores and the pair
     store, and between the pair load and the data loads (the data's addresses
     do not depend on the pair, so only the acquire orders them)."""
@@ -1116,7 +1116,7 @@ XCD_LAUNCHES = int(os.environ.get("MINIMAX_M3_XCD_STRESS_LAUNCHES", "200"))
 
 def test_handoffs_between_xcds():
     """The same-GPU hand-off protocol under the adversarial one-GPU stress
-    (``_xcd_stress.py``): every hand-off between CTAs on different XCDs
+    (`_xcd_stress.py`): every hand-off between CTAs on different XCDs
     delivers the producer's current payload, and no wait times out."""
     _writable_flydsl_cache()
     cus = current_platform.num_compute_units(torch.accelerator.current_device_index())
@@ -1234,7 +1234,7 @@ def test_peer_handoffs_under_rank_skew():
     """TP4 over XGMI: four ranks replay graphs of three widths, alternating two
     payload sets (half ending in the step-end fault handshake), with random
     per-rank device delays before every launch and the executor's collective
-    epoch reset every ``RESET_EVERY`` launches. Every launch reproduces its
+    epoch reset every `RESET_EVERY` launches. Every launch reproduces its
     first result bit for bit, the reduced output matches across ranks, and no
     wait times out."""
     from vllm.utils.network_utils import get_open_port

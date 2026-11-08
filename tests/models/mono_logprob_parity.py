@@ -11,11 +11,11 @@ verify steps (each draft accepted only if it is the trace's token), but their
 widths change the stock ops' rounding: compare arms with the same speculative
 config, never one against a run without it.
 
-A test builds two engines alike but for the mono switch, runs ``run_forced``
-on each, then ``assert_informative`` on ``compare(off, on)`` (random weights
+A test builds two engines alike but for the mono switch, runs `run_forced`
+on each, then `assert_informative` on `compare(off, on)` (random weights
 must give logits of a sane entropy and top-1 margin, else the metrics are
-vacuous) and ``assert_parity`` with bounds calibrated from off-vs-off runs and
-checked against bugs injected into the mono path (``worst``). High-gain random
+vacuous) and `assert_parity` with bounds calibrated from off-vs-off runs and
+checked against bugs injected into the mono path (`worst`). High-gain random
 stacks have heavy-tailed run-to-run noise, so a model may need an outlier
 allowance; it must be justified (measured or derived)."""
 
@@ -42,8 +42,8 @@ def forced_requests(
     seed: int = 0,
     prompt_len: tuple[int, int] = (16, 48),
 ) -> tuple[list[list[int]], list[list[int]]]:
-    """``n`` prompts of random lengths in ``prompt_len`` and ``n`` traces of
-    ``steps`` tokens, uniform ids in [0, vocab), alike every run."""
+    """`n` prompts of random lengths in `prompt_len` and `n` traces of
+    `steps` tokens, uniform ids in [0, vocab), alike every run."""
     g = torch.Generator().manual_seed(seed)
     lens = torch.randint(*prompt_len, (n,), generator=g).tolist()
     prompts = [torch.randint(vocab, (m,), generator=g).tolist() for m in lens]
@@ -55,7 +55,7 @@ def forced_requests(
 def _all_in_first_step(llm):
     """The engine core in its own process schedules requests as they arrive,
     so the first steps' composition (and the stock ops' rounding) would vary
-    run to run: hold its scheduler until ``generate`` has added them all."""
+    run to run: hold its scheduler until `generate` has added them all."""
     client = llm.llm_engine.engine_core
     if not hasattr(client, "call_utility"):  # in process: added before a step
         yield
@@ -85,9 +85,9 @@ def run_forced(
     traces: list[list[int]],
     k: int = -1,
 ) -> Forced:
-    """Decode every prompt through its trace with ``k`` logprobs a position
-    (-1: the full vocabulary; needs ``max_logprobs=-1``) on an engine built
-    with ``enable_trace_replay=True``."""
+    """Decode every prompt through its trace with `k` logprobs a position
+    (-1: the full vocabulary; needs `max_logprobs=-1`) on an engine built
+    with `enable_trace_replay=True`."""
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
 
@@ -130,12 +130,12 @@ def _dense(a: dict[int, float], b: dict[int, float]):
 
 
 def compare(off: Forced, on: Forced, clear_margin: float = 0.1) -> dict:
-    """Per position (``pos``): KL(off || on), |delta logprob| of the forced
+    """Per position (`pos`): KL(off || on), |delta logprob| of the forced
     token, the off arm's entropy and top-1 margin (nats), whether the two
     top-1 tokens agree, and the support overlap (the share of the larger
     returned token set both arms return: 1 over the full vocabulary, less
-    when a top-k set moves); ``clear``: the positions whose off margin exceeds
-    ``clear_margin``."""
+    when a top-k set moves); `clear`: the positions whose off margin exceeds
+    `clear_margin`."""
     assert off.tokens == on.tokens and off.index == on.index, "arms forced apart"
     kl, dlp, ent, margin, agree, overlap = [], [], [], [], [], []
     for tok, a, b in zip(off.tokens, off.logprobs, on.logprobs):
@@ -161,7 +161,7 @@ def compare(off: Forced, on: Forced, clear_margin: float = 0.1) -> dict:
 
 
 def worst(m: dict, key: str, outliers: int = 0) -> float:
-    """The ``outliers + 1``-th largest of a per-position metric ("kl",
+    """The `outliers + 1`-th largest of a per-position metric ("kl",
     "dlp"): a mutant's, over the bound, tells how far it fails."""
     v = m["pos"][key].sort(descending=True).values
     return v[min(outliers, len(v) - 1)].item()
@@ -194,8 +194,8 @@ def assert_informative(
     m: dict, entropy: tuple[float, float], min_margin: float = 0.1
 ) -> None:
     """The off arm's logits are neither near-uniform nor near-one-hot: their
-    mean entropy within ``entropy`` (nats), their mean top-1 margin at least
-    ``min_margin`` (a mean: BF16 logits tie their top two often)."""
+    mean entropy within `entropy` (nats), their mean top-1 margin at least
+    `min_margin` (a mean: BF16 logits tie their top two often)."""
     lo, hi = entropy
     pos = m["pos"]
     ent, margin = pos["entropy"].mean().item(), pos["margin"].mean().item()
@@ -205,9 +205,9 @@ def assert_informative(
 def assert_parity(
     m: dict, kl: float, dlp: float, outliers: int = 0, min_overlap: float = 0.0
 ) -> None:
-    """All positions but at most ``outliers`` (the model's justified
-    allowance, each isolated by the teacher forcing) within ``kl`` and
-    ``dlp`` and with a support overlap of at least ``min_overlap`` (top-k
+    """All positions but at most `outliers` (the model's justified
+    allowance, each isolated by the teacher forcing) within `kl` and
+    `dlp` and with a support overlap of at least `min_overlap` (top-k
     logprobs: KL over a shrunken intersection hides a moved top-k set), and
     as many top-1 flips at clear margins at most."""
     pos = m["pos"]

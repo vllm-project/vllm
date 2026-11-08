@@ -81,7 +81,7 @@ def _find(lib, name):
 
 
 def _fn(lib, name):
-    """Helper ``name`` of ``lib``; None where it is an earlier library's
+    """Helper `name` of `lib`; None where it is an earlier library's
     (imported, not a copy)."""
     fn = _find(lib, name)
     for other in _LIBS:
@@ -96,7 +96,7 @@ def _gfx942(lib):
 
 
 def _libs(*names, gfx950_only=False):
-    """The libraries defining every helper of ``names``."""
+    """The libraries defining every helper of `names`."""
     out = []
     for lib in _LIBS:
         skip = on_gfx942() and (gfx950_only or lib not in _ON_942)
@@ -118,7 +118,7 @@ def _rsrc(p):
 
 
 def _load_words(src, at, n):
-    """``n`` Int32 at word ``at`` of ``src``, in loads of up to 4 words."""
+    """`n` Int32 at word `at` of `src`, in loads of up to 4 words."""
     out: list = []
     while len(out) < n:
         w = min(4, n - len(out))
@@ -141,8 +141,8 @@ def _sources_digest():
 
 @cache
 def _map_kernel(key, fn, n_in, n_out):
-    """A kernel whose thread i calls ``fn`` on words i n_in .. of ``src``
-    (Int32) and stores the n_out Int32 it returns at i n_out .. of ``dst``.
+    """A kernel whose thread i calls `fn` on words i n_in .. of `src`
+    (Int32) and stores the n_out Int32 it returns at i n_out .. of `dst`.
     A wave is lanes 64 j .. 64 j + 63 of the rows."""
 
     @flyc.kernel(name=f"mono_prim_{key}", known_block_size=[256, 1, 1])
@@ -160,7 +160,7 @@ def _map_kernel(key, fn, n_in, n_out):
 
 
 def _run(key, fn, n_out, *cols):
-    """``fn`` over the rows of the int32 / float32 columns ``cols`` -> int32
+    """`fn` over the rows of the int32 / float32 columns `cols` -> int32
     [rows, n_out]."""
     src = torch.cat(
         [(c.view(I32) if c.dtype == F32 else c).view(len(c), -1) for c in cols], 1
@@ -215,13 +215,13 @@ def _edge_floats():
 
 
 def _neighbours(x):
-    """``x`` (float32) and its f32 neighbours."""
+    """`x` (float32) and its f32 neighbours."""
     inf = torch.full_like(x, math.inf)
     return torch.cat([torch.nextafter(x, -inf), x, torch.nextafter(x, inf)])
 
 
 def _assert_equal(got, ref, what, x):
-    """``got == ref`` row for row; a failure shows the first rows and their x."""
+    """`got == ref` row for row; a failure shows the first rows and their x."""
     bad = (got != ref).view(len(ref), -1).any(1).nonzero().flatten()[:3]
     assert bad.numel() == 0, (
         f"{what} differs at x={x[bad].tolist()}: "
@@ -379,7 +379,7 @@ def test_fp4_dequant(lib):
 
 
 def _fp4_domain(dtype):
-    """Every E2M1 value and midpoint, past 6 up to 100, with their ``dtype``
+    """Every E2M1 value and midpoint, past 6 up to 100, with their `dtype`
     neighbours and both signs, times scale codes 100 .. 140; zeros with a
     scale of 0 (an all-zero group's code 0)."""
     m = R.E2M1[:8].tolist() + [0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0, 7.0, 100.0]
@@ -433,7 +433,7 @@ _U = 2.0**-24
 
 class _Rounded:
     """A helper's formula in float64 with each f32 rounding v -> v (1 + d) + a,
-    |d| <= rel, |a| <= ab: ``bound(f)`` is the first-order error bound
+    |d| <= rel, |a| <= ab: `bound(f)` is the first-order error bound
     sum rel |df/dd| + ab |df/da| (second-order terms in d, a dropped)."""
 
     def __init__(self):
@@ -551,7 +551,7 @@ def _trans_cases():
 
 
 def trans_error(lib, name, seed, n=1 << 22):
-    """Max error of helper ``name`` of ``lib`` over n inputs of the seed over
+    """Max error of helper `name` of `lib` over n inputs of the seed over
     its bound: f32 ulps of a bare instruction; else the model's rounding bound
     plus the distance of its exact formula from the reference."""
     inputs, ref, model = _TRANS[name]
@@ -666,7 +666,7 @@ def _from_acc_lanes(d):
 
 def _mfma_error(got, a, b, c, k, block=None):
     """D = C + A B^T: the error over its a-priori bound, the fp32 accumulation's
-    (k + 1) 2^-24 (|C| + |A| |B|^T), plus, ``block`` given (an FP8 MFMA, which
+    (k + 1) 2^-24 (|C| + |A| |B|^T), plus, `block` given (an FP8 MFMA, which
     drops the products 2^-14 below the largest of their K block), block 2^-14
     R.blockmax_cond."""
     d = _from_acc_lanes(got.view(F32).double())
@@ -745,8 +745,8 @@ def _scaled_cases():
 
 
 def mfma_scaled_error(lib, fmts, sel, seed, p=256):
-    """The scaled MFMA of ``lib`` on random operands of the formats ``fmts``
-    whose scale words hold 4 codes, byte ``sel`` the lane's -> (error over
+    """The scaled MFMA of `lib` on random operands of the formats `fmts`
+    whose scale words hold 4 codes, byte `sel` the lane's -> (error over
     its bound, the operands' largest product range within a block)."""
     mfma = _fn(lib, "mfma_scaled")
     g = _gen(seed)
@@ -780,7 +780,7 @@ def mfma_scaled_error(lib, fmts, sel, seed, p=256):
 @pytest.mark.parametrize(("lib", "fmts", "sel"), _scaled_cases())
 def test_mfma_scaled(lib, fmts, sel):
     """The 16x16x128 scaled MFMA (f8f6f4) with E8M0 scale words whose byte
-    ``sel`` is the lane's (row or column, K block l / 16) code: against
+    `sel` is the lane's (row or column, K block l / 16) code: against
     the float64 product of the exactly dequantized operands."""
     err, span = mfma_scaled_error(lib, fmts, sel, seed=8)
     if fmts != (4, 4):
@@ -879,8 +879,8 @@ def test_fp4x8_fnuz(lib):
 @pytest.mark.parametrize("lib", _libs("scale_index"))
 def test_scale_index(lib):
     """scale_index(row, col, cols) on every scale of a 64 x 256 tile is where
-    AITER's shuffle_scale ``view(rows / 32, 2, 16, cols / 8, 2, 4)
-    .permute(0, 3, 5, 2, 4, 1)`` puts that scale (host integers)."""
+    AITER's shuffle_scale `view(rows / 32, 2, 16, cols / 8, 2, 4)
+    .permute(0, 3, 5, 2, 4, 1)` puts that scale (host integers)."""
     rows, cols = 64, 256
     count = torch.arange(rows * cols)
     shuffled = count.view(rows // 32, 2, 16, cols // 8, 2, 4)

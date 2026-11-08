@@ -147,12 +147,12 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
                 Pointer to output tensor of shape [ B, H, D ]
             vlse_ptr (triton.PointerType):
                 Pointer to output tensor of shape [ B, H ]
-            outputs_stride_B (int): Batch stride of ``outputs_ptr``
-            outputs_stride_H (int): Head stride of ``outputs_ptr``
-            outputs_stride_D (int): Head-dim stride of ``outputs_ptr``
-            lses_stride_N (int): Rank stride of ``lses_ptr``
-            lses_stride_B (int): Batch stride of ``lses_ptr``
-            lses_stride_H (int): Head stride of ``lses_ptr``
+            outputs_stride_B (int): Batch stride of `outputs_ptr`
+            outputs_stride_H (int): Head stride of `outputs_ptr`
+            outputs_stride_D (int): Head-dim stride of `outputs_ptr`
+            lses_stride_N (int): Rank stride of `lses_ptr`
+            lses_stride_B (int): Batch stride of `lses_ptr`
+            lses_stride_H (int): Head stride of `lses_ptr`
             lse_idx (int): Index of this rank's lse within the all-gathered tensor
             HEAD_DIM: Head dimension, as a constexpr
             N_ROUNDED: Rank count rounded to a power of two, as a constexpr
@@ -1032,9 +1032,9 @@ def dcp_a2a_v_up_proj_lse_reduce(
     """Combine partial MLA outputs with All-to-All and up-project them by W_UV.
 
     The LSE merge is a per-head weighted sum and W_UV is linear per head, so
-    up-projecting first matches ``dcp_a2a_lse_reduce`` followed by the
+    up-projecting first matches `dcp_a2a_lse_reduce` followed by the
     up-projection up to rounding, while the All-to-All carries V instead of L
-    values per head. Below ``_V_UP_PROJ_FIRST_MIN_TOKENS`` tokens it merges
+    values per head. Below `_V_UP_PROJ_FIRST_MIN_TOKENS` tokens it merges
     first and projects only this rank's heads instead.
 
     Args:

@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DeepSeek-V4.1 mono decode path through the real model: a five-layer
 DeepSeek-V4.1-Flash at TP2 and TP4 on CDNA4, and at TP4 on gfx942, served with
-``--monokernel`` on random weights. Every decode step of every layer also runs
+`--monokernel` on random weights. Every decode step of every layer also runs
 vLLM's path on the step's own inputs and caches, and the two must agree stage
 by stage (the attention output, the FFN seam, the MoE) within what each path's
 own rounding allows. Unlike
-``test_dsv41_mono_numerics.py``, which checks the kernels against float64
-references one stage at a time, this runs ``DeepseekV4DecoderLayer.forward``
+`test_dsv41_mono_numerics.py`, which checks the kernels against float64
+references one stage at a time, this runs `DeepseekV4DecoderLayer.forward`
 as the engine does -- the model's hooks, the per-step path choice, the weights
 taken off the layer, the metadata and the indexer's top-k -- so a change to the
 decoder layer that the kernels do not follow fails here.
@@ -72,7 +72,7 @@ DSPARK = {"method": "dspark", "num_speculative_tokens": DSPARK_TOKENS}
 
 
 def _truncate(config):
-    """``TRUNCATED`` as an override that the DSpark draft's config also takes
+    """`TRUNCATED` as an override that the DSpark draft's config also takes
     (a dict override reaches the target's only)."""
     for key, value in TRUNCATED.items():
         setattr(config, key, value)
@@ -167,7 +167,7 @@ class RandomWeightLoader(DummyModelLoader):
 
 
 class MonoProbe:
-    """Worker extension (``worker_extension_cls``): it also brings this module,
+    """Worker extension (`worker_extension_cls`): it also brings this module,
     and so the loader, into the workers."""
 
     def _decoder_layers(self) -> dict:
@@ -185,7 +185,7 @@ class MonoProbe:
 
     def capture_steps(self, compare: bool) -> None:
         """Count each decoder layer's decode-only steps (the steps the mono path
-        takes). With ``compare``, each such step of a mono layer then also runs
+        takes). With `compare`, each such step of a mono layer then also runs
         vLLM's path on the step's own inputs and caches, so every stage compares
         on equal inputs. Two results of the mono step are forced into vLLM's:
         an index source's top-k (a near-tie of index scores at the 512th entry
@@ -378,7 +378,7 @@ class MonoProbe:
 
         def copies(m) -> bool:
             """Whether the layer holds the gfx942 copies of its weights, which
-            the model makes when it loads them (``mono942``)."""
+            the model makes when it loads them (`mono942`)."""
             ffn = m.ffn
             held = [
                 ffn.experts.routed_experts,
@@ -422,11 +422,11 @@ def _decode(
     graphs: bool = False,
     compare: bool = False,
 ):
-    """Greedy decode of ``prompts`` on the mono path, with DSpark (``spec``),
-    in FULL CUDA graphs of 8 rows (``graphs``) or eager: (each prompt's output,
-    the workers' mono layers before and after the decode). With ``compare``,
-    every decode-only step's comparisons with vLLM's path (``capture_steps``)
-    are saved under ``path``."""
+    """Greedy decode of `prompts` on the mono path, with DSpark (`spec`),
+    in FULL CUDA graphs of 8 rows (`graphs`) or eager: (each prompt's output,
+    the workers' mono layers before and after the decode). With `compare`,
+    every decode-only step's comparisons with vLLM's path (`capture_steps`)
+    are saved under `path`."""
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
 
@@ -501,11 +501,11 @@ def _skip_unless(arch: str, tp: int) -> None:
 def _engaged(
     before: list, after: list, layers: dict, steps: int, replayed: bool = False
 ) -> None:
-    """Every rank ran ``layers`` ({layer: kind}) on the mono path, with the
+    """Every rank ran `layers` ({layer: kind}) on the mono path, with the
     weights taken off the layer and (gfx942) its copies made at load, at least
-    ``steps`` steps. Eager, each runner's epoch moved one launch for every
+    `steps` steps. Eager, each runner's epoch moved one launch for every
     decode-only step of every layer, as the capture hooks counted them, so no
-    step fell back to vLLM's path. ``replayed``: every decode-only step replayed
+    step fell back to vLLM's path. `replayed`: every decode-only step replayed
     one CUDA graph, which the hooks do not see: one launch a layer a step."""
     copies = _arch() == "gfx942"
     for b, a in zip(before, after):
@@ -593,7 +593,7 @@ def _mixes(res, seam, eps):
 
 
 def _fold_err(mid, inputs):
-    """How far the two paths' attention seam residuals ``mid`` may differ on
+    """How far the two paths' attention seam residuals `mid` may differ on
     equal inputs (x, residual, post, comb): each path's f32 sum of post x + sum
     comb r (5 rounded products, 4 adds) within 5u of the sum of its terms, so
     the two bf16 results an ulp and those 10u apart."""
@@ -622,7 +622,7 @@ def _seam(r: dict, c: dict) -> None:
     """The FFN seam of both paths: the residual and the MoE input each within
     their roundings (bf16, f32 sums) and the attention seam's mixes, one or two
     ulps, plus the difference of the attention outputs where vLLM's path took
-    its own (``attn_vllm``); the layer's mixes as ``_mixes_match``."""
+    its own (`attn_vllm`); the layer's mixes as `_mixes_match`."""
     f64 = lambda ts: [t.double() for t in ts]  # noqa: E731
     attn, mid, comb_a, pre_a, post_a = f64(
         (r["attn"][0], r["res_mid"], r["comb_a"], r["pre_a"], r["post_a"])
@@ -696,7 +696,7 @@ def _route_ties(x: torch.Tensor, c: dict) -> torch.Tensor:
 
 
 def _moe_parity(got, want, moe_in, c: dict, gfx942: bool = False) -> None:
-    """The MoE output of both paths on the same input ``moe_in``, a row within
+    """The MoE output of both paths on the same input `moe_in`, a row within
     MOE_ULPS (MOE_REL_942 on gfx942) unless its routing is a tie."""
     got, want = got.double(), want.double()
     if gfx942:
@@ -711,9 +711,9 @@ def _moe_parity(got, want, moe_in, c: dict, gfx942: bool = False) -> None:
 
 
 def _parity(path: str, tp: int, layers) -> None:
-    """Every compared step of every layer in ``layers``: the mono step against
+    """Every compared step of every layer in `layers`: the mono step against
     vLLM's path on the same inputs and caches, stage by stage (see
-    ``capture_steps``), within the budgets above. A row whose routing is a tie
+    `capture_steps`), within the budgets above. A row whose routing is a tie
     within the router's rounding may take another expert."""
     gfx942 = _arch() == "gfx942"
     for rank in range(tp):

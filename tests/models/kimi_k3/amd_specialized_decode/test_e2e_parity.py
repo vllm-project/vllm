@@ -102,7 +102,7 @@ def _scaled_weights(worker) -> bool:
 
 def _count_steps(worker, q: int) -> None:
     """Counts the scheduled steps that are pure verify steps (every request
-    scheduled with its ``q - 1`` draft tokens), and records the width of every
+    scheduled with its `q - 1` draft tokens), and records the width of every
     step plan() hands the kernels: under FULL graphs plan() runs only for steps
     that are not replayed."""
     decode, runner = _decode(worker), worker.model_runner
@@ -148,7 +148,7 @@ def _engine(vllm_runner, num_spec: int, max_num_seqs: int, **kwargs):
         max_num_seqs=max_num_seqs,
         gpu_memory_utilization=0.15,
         # extend_kv_cache re-binds the KV views without prepare_kv, which
-        # plan() rejects in eager steps (#66370)
+        # plan() rejects in eager steps (#66357)
         enable_extensible_kv_cache=False,
         attention_config={"mla_prefill_backend": "ROCM_AITER_FA"},
         speculative_config={
@@ -173,7 +173,7 @@ def _engine(vllm_runner, num_spec: int, max_num_seqs: int, **kwargs):
 )
 def test_verify_steps_replay_the_kernels(vllm_runner, num_spec, max_num_seqs, batches):
     """Only 8-row FULL graphs are captured: every pure verify step, including
-    a single request of 4 rows (``padded``, first batch), runs the kernels on
+    a single request of 4 rows (`padded`, first batch), runs the kernels on
     every rank, each step a replay."""
     with _engine(
         vllm_runner,
@@ -507,11 +507,11 @@ def _k1_check_engine(layer, runner, step, ins, rec) -> dict:
 
 
 def _check_layers(worker, launches: int) -> None:
-    """For the first ``launches`` kernel launches, each stage of the kernels
+    """For the first `launches` kernel launches, each stage of the kernels
     against the op vLLM's layer runs for it on the kernel's own input to that
     stage (test_numerics' *_matches_vllm_ops checks, with the engine's
     modules, weights and KDA states). Checked launches run the plain K2
-    (``opt=0``, bit-exact to ``K2_OPT``, test_numerics): K2_OPT's sentinel
+    (`opt=0`, bit-exact to `K2_OPT`, test_numerics): K2_OPT's sentinel
     all-reduces re-arm the words they read, leaving no taps."""
     import dataclasses
 

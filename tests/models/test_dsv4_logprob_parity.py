@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4-Pro ``--monokernel`` against vLLM's own path, end to end:
-teacher-forced logprobs (``mono_logprob_parity``) of the five-layer random
-DeepSeek-V4-Pro of ``test_dsv4_mono_layers`` at TP8 on CDNA4, every decode
+"""DeepSeek-V4-Pro `--monokernel` against vLLM's own path, end to end:
+teacher-forced logprobs (`mono_logprob_parity`) of the five-layer random
+DeepSeek-V4-Pro of `test_dsv4_mono_layers` at TP8 on CDNA4, every decode
 step of every layer on the mono path in the on arm, eager and in FULL graphs.
 Vocabulary 4096: full distributions, no tokenizer, no checkpoint. A quarter of
 the prompts run past the CSA layers' 1024-entry top-k (4096 tokens), so the
 indexer selects.
 
-The weights are ``test_dsv4_mono_layers``' (checkpoint ranges) but for:
-- lm_head: ``_fill`` seeds by name, so every rank's vocabulary shard is alike
+The weights are `test_dsv4_mono_layers`' (checkpoint ranges) but for:
+- lm_head: `_fill` seeds by name, so every rank's vocabulary shard is alike
   and the top two logits always tie. A distinct shard a rank, std 0.04: the off
   arm's entropy 3.9 nats, mean top-1 margin 0.8.
-- the bias-routed layers' (3, 4) bias, std 20: at ``_fill``'s 0.02 their
+- the bias-routed layers' (3, 4) bias, std 20: at `_fill`'s 0.02 their
   experts' near-ties flip under any change of rounding, off against off in
   reverse order too (KL over 1e-2 at 27 of 176 positions). At 20 the bias picks
   the experts by margins past rounding (none over 5e-3).
@@ -21,16 +21,16 @@ Scope: at checkpoint ranges the attention and the shared expert add about 1%
 to the residual stream, so the logprobs see mostly the routed experts and the
 router. Every wo_b E8M0 code one off (attention output x2) moves KL to 0.019
 only; the shared expert's down scales one off, to the null's. Those stages are
-held to derived bounds in ``test_dsv4_mono_layers``. With the attention's
+held to derived bounds in `test_dsv4_mono_layers`. With the attention's
 scales 4x, that wo_b bug reaches KL 1.4, but the two paths' own attention
 roundings then reach 0.05 (2.5x off against off) and the expert roll below
 is 7x that only.
 
-Injected bugs (``Probe.mutate``, mono's own view of layer 3 on every rank),
-their worst KL over ``KL``: the down projections one expert off
-(``expert_roll``) 74x, the busiest expert's down scales one off
-(``expert_scale``) 10.3x, the top two experts' gate rows swapped
-(``gate_swap``) 21x. ``expert_roll`` runs here."""
+Injected bugs (`Probe.mutate`, mono's own view of layer 3 on every rank),
+their worst KL over `KL`: the down projections one expert off
+(`expert_roll`) 74x, the busiest expert's down scales one off
+(`expert_scale`) 10.3x, the top two experts' gate rows swapped
+(`gate_swap`) 21x. `expert_roll` runs here."""
 
 import dataclasses
 import zlib

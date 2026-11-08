@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kernel I/O of the DeepSeek-V4-Pro mono decode layer at TP8 on CDNA4: each
 fused stage's output, read from the scratch, peer or runner buffer it hands off
-through, against a float64 reference (``mono_reference``) of the stage applied
+through, against a float64 reference (`mono_reference`) of the stage applied
 to the kernels' own captured input, so a failure names the stage. Nothing is
 compared with another kernel.
 
@@ -10,7 +10,7 @@ Weights are random in the checkpoint's formats; the references read them raw,
 before vLLM's shuffles. Every bound is a priori: the quantization rules and data
 movement exact, each rounding of the kernels' fp32 chains at 2^-24 (v_exp /
 v_rcp / v_rsq / v_log at 1 ulp, CDNA4 ISA 12.8), the scaled FP8 / FP4 MFMAs as
-``_gemv_err`` models them. Plain outputs are poisoned before the checked launch
+`_gemv_err` models them. Plain outputs are poisoned before the checked launch
 and must match an unpoisoned one bit for bit; every case then replays in one
 graph, bit for bit."""
 
@@ -66,7 +66,7 @@ TOP5, TIE, OUTLIERS = (5, 133, 261, 300, 377), (70, 100), (200, 201, 202, 203)
 
 
 def _apriori(name: str, ratio: torch.Tensor, ctx) -> None:
-    """``ratio``: each element's error over its a-priori bound."""
+    """`ratio`: each element's error over its a-priori bound."""
     worst = ratio.max().item() if ratio.numel() else 0.0
     assert worst <= 1.0, (ctx, name, worst)
 
@@ -77,10 +77,10 @@ def _half_ulp(x):
 
 def _gemv_err(a, b, waves=8):
     """The error bound of a scaled-MFMA GEMV a @ b^T (f64 operands, as
-    dequantized) whose K steps of 128 are split over ``waves`` chains, then
+    dequantized) whose K steps of 128 are split over `waves` chains, then
     summed: gfx950 drops a product 2^-14 below its 32-block's largest (32 2^-14
     blockmax a block), plus each MFMA's fp32 accumulation, (128 + 1) 2^-24 (|C|
-    + |A| |B|) as test_mono_primitives' ``_mfma_error`` bounds it, along a
+    + |A| |B|) as test_mono_primitives' `_mfma_error` bounds it, along a
     chain, and the chains' sum."""
     steps = -(-a.shape[-1] // (128 * waves))
     return 2.0**-9 * R.blockmax_cond(a, b) + (129 * steps + waves) * U * (
@@ -125,9 +125,9 @@ def _q8_equal(name, q8, codes, x, rule, ctx):
 
 
 def _q8_within(name, q8, codes, x, d, rule, ctx, sharp=True):
-    """MXFP8 of values x known to +-d (``R.assert_quant_equal`` where d may
+    """MXFP8 of values x known to +-d (`R.assert_quant_equal` where d may
     span more than one step): each code and value between the rule's at the
-    two ends, so exact wherever they agree (``sharp``: the rest under 1 %)."""
+    two ends, so exact wherever they agree (`sharp`: the rest under 1 %)."""
     xb, db = x.unflatten(-1, (-1, 32)), d.unflatten(-1, (-1, 32))
     amax, dmax = xb.abs().amax(-1), db.amax(-1)
     lo_c, hi_c = rule((amax - dmax).clamp(min=0)), rule(amax + dmax)
@@ -145,7 +145,7 @@ def _q8_within(name, q8, codes, x, d, rule, ctx, sharp=True):
 
 
 def _pad(s: dict, pad: int) -> dict:
-    """The step with ``pad`` rows past its tokens (slot -1: no keys)."""
+    """The step with `pad` rows past its tokens (slot -1: no keys)."""
     if not pad:
         return s
     out = dict(s, M=s["M"] + pad)
@@ -190,7 +190,7 @@ def _key_table(s: dict, ratio: int, glob: bool, width: int, keys: int):
 
 
 def _record_spans(cache, block, slots):
-    """Byte offsets of the records at ``slots`` in the cache's storage: each
+    """Byte offsets of the records at `slots` in the cache's storage: each
     576 data bytes and its 8 scale bytes."""
     slots = slots.long().cpu()
     page = cache.storage_offset() + slots // block * cache.stride(0)
@@ -266,7 +266,7 @@ def _moe(vc, kind: str, seed: int, rank: int, device):
 
 def _seam_ref(x, res, post, comb):
     """The fold of a seam's slice and its a-priori error: fp32 products
-    summed in order, then one bf16 rounding (``R.mhc_post``)."""
+    summed in order, then one bf16 rounding (`R.mhc_post`)."""
     terms = (post.double()[..., None] * x.double()[:, None]).abs()
     terms = terms + torch.einsum(
         "mij,mid->mjd", comb.double().abs(), res.double().abs()
@@ -286,7 +286,7 @@ def _fn_as_read(fn):
 
 
 def _gate_err(x, fn, scale, base, eps, hc_eps, iters):
-    """First-order bound on ``stage_gate``'s (pre, post, comb): sum |d out / d e|
+    """First-order bound on `stage_gate`'s (pre, post, comb): sum |d out / d e|
     |e| over its roundings e, along its op order -- 2^-24 an fp32 op or the
     IEEE division, 2^-23 a 1-ulp v_exp / v_rcp / v_rsq or an op with a rounded
     f32 constant; the mix projection 58 2^-24 sum |x fn| (4 MFMAs 16x16x4 at
@@ -376,7 +376,7 @@ def _check_norm(name, got, res, pre, w, eps, serial, ctx):
 
 def _gather_peer(region, rank, M, tag, two_hop, ctx):
     """Every rank's bf16 partial [tp, M, hidden] of a peer all-reduce region
-    (PART [src][token][pair], then SUM), gathered across the ranks; the
+    (`PART[src][token][pair]`, then SUM), gathered across the ranks; the
     region's tags checked; the reduced sum (rank order, fp32 -> bf16), whose
     two-hop copies at every rank must equal it."""
     from vllm.distributed import get_tp_group
@@ -723,7 +723,7 @@ def _check_q(got, s, qx8, qx8s, w, cos_sin, ctx):
 
 
 def _record_bytes(cache, block, slots):
-    """The raw records at ``slots``: (data [n, 576] u8, codes [n, 7])."""
+    """The raw records at `slots`: (data [n, 576] u8, codes [n, 7])."""
     flat = _storage(cache)
     slots = slots.long()
     page = cache.storage_offset() + slots // block * cache.stride(0)
@@ -882,10 +882,10 @@ def _swiglu(g, u, eg, eu):
 
 
 def _check_moe(region, moe, raw, xk, ffn, route_ids, kind, rank, tag, two_hop, ctx):
-    """The MoE's stages from its input row ``xk`` (the FFN seam's): its two
+    """The MoE's stages from its input row `xk` (the FFN seam's): its two
     MXFP8 quants, the router's logits, the route, the shared expert, each
     pick's MXFP8 intermediate, this rank's partial output -> the reduced
-    output (``_gather_peer``)."""
+    output (`_gather_peer`)."""
     from vllm.models.deepseek_v4.amd.mono.dims import EXPERTS, ROUTED_SCALE, TOPK
     from vllm.models.deepseek_v4.amd.mono.stages.moe import ROUTE_COPIES
 

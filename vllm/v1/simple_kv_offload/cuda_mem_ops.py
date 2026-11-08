@@ -61,10 +61,10 @@ _ROCM_DEFAULT_MAX_BATCH_DESCRIPTORS = 8192
 def _resolve_max_batch_descriptors() -> int:
     """Max copy descriptors to pass to one batch-memcpy call (0 = unlimited).
 
-    ROCm's ``hipMemcpyBatchAsync`` faults above 8192 descriptors per call, so
-    on ROCm we cap and chunk larger transfers. CUDA's ``cuMemcpyBatchAsync``
+    ROCm's `hipMemcpyBatchAsync` faults above 8192 descriptors per call, so
+    on ROCm we cap and chunk larger transfers. CUDA's `cuMemcpyBatchAsync`
     handles arbitrary counts and is left uncapped. Set
-    ``VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS`` (>0) to override on any platform.
+    `VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS` (>0) to override on any platform.
     """
     global _max_batch_descriptors
     if _max_batch_descriptors is None:
@@ -79,10 +79,10 @@ def _resolve_max_batch_descriptors() -> int:
 
 
 def _resolve_batch_memcpy() -> tuple[Any, int]:
-    """Resolve the batch-memcpy entry point and its ``numAttrs`` (one-time).
+    """Resolve the batch-memcpy entry point and its `numAttrs` (one-time).
 
-    CUDA uses ``cuMemcpyBatchAsync``; ROCm uses ``hipMemcpyBatchAsync``.
-    Raises ``RuntimeError`` if the symbol is unavailable (old CUDA driver,
+    CUDA uses `cuMemcpyBatchAsync`; ROCm uses `hipMemcpyBatchAsync`.
+    Raises `RuntimeError` if the symbol is unavailable (old CUDA driver,
     ROCm < 7.1, unusual install).
     """
     if current_platform.is_rocm():
@@ -117,11 +117,11 @@ def _resolve_batch_memcpy() -> tuple[Any, int]:
 
 
 def _load_hip_runtime() -> ctypes.CDLL:
-    """Load ``libamdhip64``, tolerating installs without the devel symlink.
+    """Load `libamdhip64`, tolerating installs without the devel symlink.
 
-    The unversioned ``libamdhip64.so`` only ships with the ROCm devel package;
+    The unversioned `libamdhip64.so` only ships with the ROCm devel package;
     runtime-only and wheel-packaged ROCm installs provide just the versioned
-    soname. ``dlopen`` returns the already-mapped library when asked for a
+    soname. `dlopen` returns the already-mapped library when asked for a
     soname the process has loaded — torch loads HIP at import — so the
     versioned names resolve even when they are not on the loader search path.
     """
@@ -135,7 +135,7 @@ def _load_hip_runtime() -> ctypes.CDLL:
 
 
 def _rocm_num_attrs(lib: ctypes.CDLL) -> int:
-    """``numAttrs`` for ``hipMemcpyBatchAsync`` on the running HIP runtime."""
+    """`numAttrs` for `hipMemcpyBatchAsync` on the running HIP runtime."""
     ver = ctypes.c_int(0)
     try:
         if lib.hipRuntimeGetVersion(ctypes.byref(ver)) != 0:
@@ -146,10 +146,10 @@ def _rocm_num_attrs(lib: ctypes.CDLL) -> int:
 
 
 def _num_attrs_for_hip_version(version: int) -> int:
-    """``numAttrs`` for ``hipMemcpyBatchAsync`` given a HIP runtime version int.
+    """`numAttrs` for `hipMemcpyBatchAsync` given a HIP runtime version int.
 
-    ROCm 7.2.1-7.2.3 reject ``numAttrs > 0`` (ROCm/clr @ rocm-7.2.1
-    hipamd/src/hip_memory.cpp:2819-2822); 7.13+ accept it. ``version`` 0
+    ROCm 7.2.1-7.2.3 reject `numAttrs > 0` (ROCm/clr @ rocm-7.2.1
+    hipamd/src/hip_memory.cpp:2819-2822); 7.13+ accept it. `version` 0
     (unknown) yields the conservative 0.
     """
     # HIP encodes version as major*10_000_000 + minor*100_000 + patch.

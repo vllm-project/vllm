@@ -11,8 +11,8 @@ logger = init_logger(f"vllm.{__name__}")
 
 
 class MonokernelCheckExtension:
-    """Proves an AMD monokernel served the eval: ``start_monokernel_count`` (a
-    startup check) takes its device launch counters, ``check_monokernel_ran``
+    """Proves an AMD monokernel served the eval: `start_monokernel_count` (a
+    startup check) takes its device launch counters, `check_monokernel_ran`
     (a final check) asserts that every one of them moved since."""
 
     model_runner: "GPUModelRunner"

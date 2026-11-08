@@ -42,7 +42,7 @@ def _recursively_merge_mm_processor_kwargs(
     defaults: Mapping[str, object],
     overrides: Mapping[str, object],
 ) -> dict[str, object]:
-    """Merge two mappings recursively, with ``overrides`` taking precedence.
+    """Merge two mappings recursively, with `overrides` taking precedence.
 
     Nested values are merged only when both values are mappings; otherwise the
     override replaces the existing value.

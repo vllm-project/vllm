@@ -1,28 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DeepSeek-V4-Pro mono decode path through the real model: a five-layer
-DeepSeek-V4-Pro at TP8 on CDNA4 with ``--monokernel``, random weights. At every
+DeepSeek-V4-Pro at TP8 on CDNA4 with `--monokernel`, random weights. At every
 decode-only step each decoder layer runs the mono path, then vLLM's own stages,
-each on the mono path's input of that stage (``MonoProbe._both``): unlike
-``test_dsv4_mono_numerics.py``, which builds the ops itself, this runs
-``DeepseekV4DecoderLayer.forward`` in the engine -- the model's hook, the
+each on the mono path's input of that stage (`MonoProbe._both`): unlike
+`test_dsv4_mono_numerics.py`, which builds the ops itself, this runs
+`DeepseekV4DecoderLayer.forward` in the engine -- the model's hook, the
 per-step path choice, the weights taken off the layer, the metadata, the
 compressor and the indexer's top-k -- so a change to the decoder layer that the
 kernels do not follow fails here. Fed the same inputs, the two outputs of a
 stage differ by its arithmetic only, so every bound is derived
-(``test_dsv4_mono_numerics``' parity bounds), not measured. Scope: eager steps
+(`test_dsv4_mono_numerics`' parity bounds), not measured. Scope: eager steps
 of one token a request; speculative decoding's multi-token rows and graph
 replays are not covered.
 
-The checkpoint's own first five layers (``compress_ratios`` 128, 128, 4, 128,
-4; ``num_hash_layers`` 3) hold every variant the kernels build, each taking the
+The checkpoint's own first five layers (`compress_ratios` 128, 128, 4, 128,
+4; `num_hash_layers` 3) hold every variant the kernels build, each taking the
 whole layer (K1 + K2):
 - 0: hash-routed HCA, the first layer (K1 takes the embedding, no fold)
 - 1: hash-routed HCA
 - 2: hash-routed CSA (vLLM's indexer between K1 and K2)
 - 3: bias-routed HCA
 - 4: bias-routed CSA
-A 32K ``max_model_len`` builds the HCA kernels 256 keys wide; the prompts
+A 32K `max_model_len` builds the HCA kernels 256 keys wide; the prompts
 (under 8.3K) keep vLLM's c128a decode table at its 128-wide floor, so the
 kernels read a table narrower than they are built for.
 """
@@ -126,7 +126,7 @@ class RandomWeightLoader(DummyModelLoader):
 
 
 class MonoProbe:
-    """Worker extension (``worker_extension_cls``): it also brings this module,
+    """Worker extension (`worker_extension_cls`): it also brings this module,
     and so the loader, into the workers."""
 
     def _decoder_layers(self) -> dict:
@@ -142,7 +142,7 @@ class MonoProbe:
 
     def capture_steps(self) -> None:
         """At every decode-only step each decoder layer runs the mono path,
-        then vLLM's stages on the mono path's own stage inputs (``_both``)."""
+        then vLLM's stages on the mono path's own stage inputs (`_both`)."""
         from vllm.forward_context import get_forward_context
 
         self._captured: list = []
@@ -331,8 +331,8 @@ class MonoProbe:
 
 
 def _decode(vllm_runner, monkeypatch, prompts, path: str) -> list:
-    """Greedy decode of ``prompts`` with the mono path on, both paths captured
-    at every decode-only step (``MonoProbe``) into ``path``; the workers' mono
+    """Greedy decode of `prompts` with the mono path on, both paths captured
+    at every decode-only step (`MonoProbe`) into `path`; the workers' mono
     layers."""
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
@@ -376,8 +376,8 @@ def _decode(vllm_runner, monkeypatch, prompts, path: str) -> list:
 
 def _check(records: list, params: dict) -> dict:
     """Every layer's stages, the kernels against vLLM on the same inputs ->
-    each check's worst over its bound (``within``: <= 1) or its derived
-    expectation (``units``: <= ``UNITS_OK``)."""
+    each check's worst over its bound (`within`: <= 1) or its derived
+    expectation (`units`: <= `UNITS_OK`)."""
     from .test_dsv4_mono_numerics import (
         ATTN_GRIDS,
         BF16_RN,
@@ -445,7 +445,7 @@ def _check(records: list, params: dict) -> dict:
 def _route_ties(p, x, route_m, route_v, same, layer) -> None:
     """Rows the two paths route differently: each a near-tie of score + bias
     (f64), within both paths' score errors: the kernels' logits
-    (``test_dsv4_mono_io``'s router bound, 242 u |x| |w|), vLLM's fp32 router
+    (`test_dsv4_mono_io`'s router bound, 242 u |x| |w|), vLLM's fp32 router
     GEMM in any order (7168 u |x| |w|), through sqrt(softplus)'s slope."""
     from .test_dsv4_mono_numerics import HIDDEN, U
 

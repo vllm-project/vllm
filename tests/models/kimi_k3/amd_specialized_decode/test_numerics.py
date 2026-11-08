@@ -3,14 +3,14 @@
 """Kimi-K3's MonoKernels on MI355X, random weights in the checkpoint's formats
 at TP8 shapes:
 
-- ``*_matches_slow_reference``: every fused stage of K1 (one GPU) and K2 (eight
+- `*_matches_slow_reference`: every fused stage of K1 (one GPU) and K2 (eight
   GPUs) read from its mailbox / scratch / peer tap and checked against a
-  float64 reference (``tests/models/mono_reference.py``) applied to the
+  float64 reference (`tests/models/mono_reference.py`) applied to the
   kernel's own input to that stage, with the kernel's rounding points
   reproduced. Every bound is a priori (error over its bound <= 1), derived
   from the stage's fp32 operations: U = 2^-24 a rounding, v_exp_f32 / v_rcp_f32
   / v_rsq_f32 1 ulp (2 U), the division IEEE, bf16 x bf16 products exact.
-- ``*_matches_vllm_ops`` (nightly): every K1 / K2 stage and the op vLLM runs
+- `*_matches_vllm_ops` (nightly): every K1 / K2 stage and the op vLLM runs
   for it, on the kernel's own input to that stage, must both round the stage's
   float64 value c +- r: r from both paths' fp32 roundings (Hoeffding) plus each
   bf16 / MXFP4 rounding the two may take apart, so they agree but within an
@@ -20,7 +20,7 @@ at TP8 shapes:
   W_UV -> the gate): one GPU, then TP8 + DCP8 with a graph of two MLA layers
   (M1a -> M1b -> K2) replayed.
 - The protocol: a CUDA graph of K2 replayed 300 times, bit-identical, K2's
-  critical-path options (``K2_OPT``) bit-exact against the plain K2, and a
+  critical-path options (`K2_OPT`) bit-exact against the plain K2, and a
   stalled rank (the fault hook): every rank's launch finishes and the output
   rank's flags fail the step.
 """
@@ -76,15 +76,15 @@ def _randn(g, *shape, scale=1.0, dtype=bf):
 
 
 def _tap(region: torch.Tensor, n: int, tag: int, dtype=torch.float32):
-    """The ``n`` 32-bit mailbox values of ``region`` (tags checked) as
-    ``dtype``: float32 / int32 words, or bf16 pairs (2 n values)."""
+    """The `n` 32-bit mailbox values of `region` (tags checked) as
+    `dtype`: float32 / int32 words, or bf16 pairs (2 n values)."""
     return R.pairs(region, n, tag).view(dtype)
 
 
 def _dot_err(got, a, b, add=None, out=bf, n=None):
     """|got - (a @ b^T + add)| over its a-priori bound: an fp32-accumulated dot
     of exact products (n, by default K, roundings: n 2^-24 sum |a||b|; an fp32
-    add of ``add``), then rounded to ``out``."""
+    add of `add`), then rounded to `out`."""
     a, b = a.double(), b.double()
     ref = a @ b.T
     d = (a.size(-1) if n is None else n) * U * (a.abs() @ b.abs().T)
@@ -95,7 +95,7 @@ def _dot_err(got, a, b, add=None, out=bf, n=None):
 
 
 def _err(got, ref, d, out=bf):
-    """|got - ref| over its bound: ``ref`` computed to +-d, rounded to ``out``."""
+    """|got - ref| over its bound: `ref` computed to +-d, rounded to `out`."""
     ref = ref.double()
     bound = 0.5 * R.ulp(ref.abs() + d, out) + d
     return ((got.double() - ref).abs() / bound).max().item()
@@ -130,7 +130,7 @@ def _tanh_err(x, rel_x=0.0, div=U):
 
 
 def _attn_res_err(prefix, blocks, w_norm, w_qk, w_out, eps, out_eps):
-    """``R.attn_res``'s fp32 error in stage_slice / gate / mix: exact bf16
+    """`R.attn_res`'s fp32 error in stage_slice / gate / mix: exact bf16
     products, the sources' sums of squares and qk dots 21 adds deep, rsq to
     14 U; log2 logits to +-dl; v_exp_f32 of logit - max (the shift cancels);
     the mix ns deep over its denominator (6 deep, IEEE division); its sum of
@@ -153,7 +153,7 @@ def _attn_res_err(prefix, blocks, w_norm, w_qk, w_out, eps, out_eps):
 
 
 def _kda_state_err(S, k, v, g, beta, a_log, dt_bias, lower_bound):
-    """``R.kda_step``'s state in fp32 (kda_gates / kda_recur) on exact inputs:
+    """`R.kda_step`'s state in fp32 (kda_gates / kda_recur) on exact inputs:
     k l2-normed to 7 U; exp(a_log), the gate's sigmoid and the decay's exp2;
     the decayed state; its dot with k 9 deep; the delta; the update."""
     S, k, v, a_log = S.double(), k.double(), v.double(), a_log.double()
@@ -235,7 +235,7 @@ LAM = math.sqrt(2 * math.log(2e12))
 
 
 def _sum_var(t2, t, depth):
-    """One fp32 sum of terms t through at most ``depth`` adds (t2 = sum t^2,
+    """One fp32 sum of terms t through at most `depth` adds (t2 = sum t^2,
     t = sum t): each add's rounding within +-U |partial|, the partials' sum of
     squares taken as depth (t2 + t^2), above its mean for terms of random sign
     (a chain of n: n / 2 t2 + n / 3 t^2; a tree: depth t2 + 2 t^2)."""
@@ -247,18 +247,18 @@ def _fn_var(y, k):
 
 
 def _r(var):
-    """The Hoeffding radius of a sum of roundings of variance ``var``."""
+    """The Hoeffding radius of a sum of roundings of variance `var`."""
     return LAM * (3 * var).sqrt()
 
 
 def _rounds(c, r, fmt=bf):
-    """[lo, hi]: what a value in c +- r rounds to in ``fmt`` (monotone)."""
+    """[lo, hi]: what a value in c +- r rounds to in `fmt` (monotone)."""
     fn = R.bf16_rne if fmt == bf else R.f32_rne
     return fn(c - r), fn(c + r)
 
 
 def _outside(got, c, r, fmt=bf) -> float:
-    """How far ``got`` lies outside [lo, hi] of c +- r, in ulps of c."""
+    """How far `got` lies outside [lo, hi] of c +- r, in ulps of c."""
     lo, hi = _rounds(c.double(), r, fmt)
     g = got.double()
     out = (lo - g).clamp(min=0) + (g - hi).clamp(min=0)
@@ -275,7 +275,7 @@ def _ulps(a, b, c) -> float:
 
 
 def _both(m, name, got, want, c, r, fmt=bf, r_v=None) -> None:
-    """Records how far the kernel's ``got`` (m[name]) and vLLM's ``want``
+    """Records how far the kernel's `got` (m[name]) and vLLM's `want`
     (m[name_v], against r_v if given) lie outside c +- r (ulps of c, 0
     inside), and their largest gap (m[name_ulps], _ulps)."""
     for key, val, rr in (
@@ -287,7 +287,7 @@ def _both(m, name, got, want, c, r, fmt=bf, r_v=None) -> None:
 
 
 def _split_var(x, w, parts: int):
-    """The extra variance of a bf16 x @ w^T whose K is split into ``parts``
+    """The extra variance of a bf16 x @ w^T whose K is split into `parts`
     partials each rounded to bf16 and summed in bf16 (AITER's FlyDSL hgemm,
     vLLM's linear on gfx950: slice-K waves meet in a bf16 LDS tile, split-K
     CTAs add with bf16 atomics): each rounding within half an ulp (<= 2^-8 of
@@ -337,7 +337,7 @@ def _attn_res_var(prefix, blocks, w_norm, w_qk, w_out, eps, out_eps):
 
 def _dot_var(x, w, depth=None):
     """The float64 x @ w^T and both paths' fp32 error variance over its exact
-    products, ``depth`` deep (default K: vLLM's GEMMs document no order)."""
+    products, `depth` deep (default K: vLLM's GEMMs document no order)."""
     x, w = x.double(), w.double()
     c = x @ w.T
     depth = x.size(-1) if depth is None else depth
@@ -356,9 +356,9 @@ def _l2n_var(c, v, scale=1.0):
 
 
 def _kda_step_var(S, comps, q, k, v, g, beta, a_log, dt_bias, lb, scale, vin):
-    """R.kda_step on S = (value, variance) and q, k, v to variances ``vin``:
+    """R.kda_step on S = (value, variance) and q, k, v to variances `vin`:
     both paths' fp32 error to first order. The delta rule's rank-1 errors
-    (xi_v kvec_k, one xi a value row) stay ``comps`` so that o, a dot over k,
+    (xi_v kvec_k, one xi a value row) stay `comps` so that o, a dot over k,
     keeps their correlation. -> (S', comps', (o, variance))."""
 
     def mv(a, b):
@@ -428,8 +428,8 @@ def _kda_inputs(
     seed: int = 0,
     pads: int = 0,
 ):
-    """``len(nacc)`` requests of ``q`` tokens, request r's last step having
-    accepted ``nacc[r]`` of them; the last ``pads`` requests pad a graph
+    """`len(nacc)` requests of `q` tokens, request r's last step having
+    accepted `nacc[r]` of them; the last `pads` requests pad a graph
     (NULL_BLOCK_ID 0 state, one accepted token)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         HD,
@@ -475,7 +475,7 @@ def _kda_inputs(
 
 
 def _strided_copy(t: torch.Tensor) -> torch.Tensor:
-    """A copy with ``t``'s strides: vLLM's padded state pages stay padded."""
+    """A copy with `t`'s strides: vLLM's padded state pages stay padded."""
     out = torch.empty_strided(t.size(), t.stride(), dtype=t.dtype, device=t.device)
     return out.copy_(t)
 
@@ -496,8 +496,8 @@ def _k1_key(w, nb: int, write_idx: int = -1):
 
 
 def _k1(w, nb: int, write_idx: int = -1, poison: bool = False):
-    """K1 on copies of ``w``'s prefix, blocks and states: them updated, the core
-    output and the scratch (its plain x rows NaN-filled first if ``poison``)."""
+    """K1 on copies of `w`'s prefix, blocks and states: them updated, the core
+    output and the scratch (its plain x rows NaN-filled first if `poison`)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         PROJ,
         kda_pre,
@@ -547,7 +547,7 @@ def _k1(w, nb: int, write_idx: int = -1, poison: bool = False):
 
 
 def _k1_taps(w, out, nb: int, write_idx: int, tag: int = 257) -> dict:
-    """K1's x rows, in_proj output and q, k (each [S, ...]) from ``out``'s
+    """K1's x rows, in_proj output and q, k (each [S, ...]) from `out`'s
     scratch."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         HD,
@@ -651,9 +651,9 @@ def _kda_vllm_stages(w, taps, nb: int, write_idx: int) -> dict:
 
 def _k1_path(w, taps, rounded: bool, g1=None) -> dict:
     """One path of K1's conv, recurrence and gated norm from the kernel's
-    proj (and, ``rounded``, its q, k), as intervals c +- r per stage: "qk" [S,
+    proj (and, `rounded`, its q, k), as intervals c +- r per stage: "qk" [S,
     2, NH, HD], "state" slot -> [NH, HD, HD], "core" row -> [NH, HD].
-    ``rounded``: the kernel's (and vLLM's Triton ops'): q, k, v, g1 and o in
+    `rounded`: the kernel's (and vLLM's Triton ops'): q, k, v, g1 and o in
     bf16; v, g1 and o never leave the kernel's LDS, so each the two paths may
     round apart is allowed its exact effect (a float64 rerun). Else AITER's
     fused decode: conv, q, k, v and o in fp32, g1 the given vLLM f_b output."""
@@ -845,7 +845,7 @@ def test_k1_matches_vllm_ops(
 
 
 def _k1_check(w, out, nb: int, write_idx: int, tag: int = 257) -> dict:
-    """Every K1 stage of one launch (inputs ``w``, results ``out``) against the
+    """Every K1 stage of one launch (inputs `w`, results `out`) against the
     float64 reference on the kernel's own input to it -> metric a stage."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         BETA_0,
@@ -973,7 +973,7 @@ def _k1_check(w, out, nb: int, write_idx: int, tag: int = 257) -> dict:
 
 
 def _k1_io(q, requests, nb, steps, write, dim_first, pad, seed=0) -> dict:
-    """``steps`` verify steps, each request accepting a random count a step, each
+    """`steps` verify steps, each request accepting a random count a step, each
     step from the states the kernel left: every stage of each against the slow
     reference, a rerun without the poisoned scratch bit-identical."""
     gen = torch.Generator().manual_seed(seed * 64 + q * 16 + requests)
@@ -1147,7 +1147,7 @@ def _fp8_f(t):
 def test_m1a_single_gpu_matches_vllm_ops(S: int, qbf16: bool) -> None:
     """M1a at DCP1 (ranks = 1: no gather, no peer memory) against attn_res ->
     qkv_a -> q / kv RMSNorm -> q_b -> aiter's fp4 W_UK -> the fp8 query (bf16
-    with ``qbf16``, M1c's), the fp8 cache rows and the gate."""
+    with `qbf16`, M1c's), the fp8 cache rows and the gate."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import (
         ENTRY,
         GROWS,
@@ -1230,7 +1230,7 @@ def test_m1a_single_gpu_matches_vllm_ops(S: int, qbf16: bool) -> None:
 
 
 def _a2a_combine(o, lse, seq_lens, qsl, q: int):
-    """``_dcp_a2a_pack_send`` + ``_dcp_a2a_unpack_combine`` for one rank's heads,
+    """`_dcp_a2a_pack_send` + `_dcp_a2a_unpack_combine` for one rank's heads,
     every rank's partials stacked: o [R, S, 12, 512], lse [R, S, 12], each
     sender's local KV lengths seq_lens [R, requests]."""
     S = o.size(1)
@@ -1282,7 +1282,7 @@ def _mla_back_inputs(S: int, q: int, R: int, rank: int = 0):
 
 
 def _uv_gate(lat, w):
-    """The gate times vLLM's ``_v_up_proj`` (aiter's fp4 W_UV)."""
+    """The gate times vLLM's `_v_up_proj` (aiter's fp4 W_UV)."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import NH
 
@@ -1301,7 +1301,7 @@ def _uv_gate(lat, w):
 
 
 def _mla_back_reference(w):
-    """DCP1: AITER's output is the latent (vLLM's ``_v_up_proj`` input)."""
+    """DCP1: AITER's output is the latent (vLLM's `_v_up_proj` input)."""
     return _uv_gate(w["o"], w)
 
 
@@ -1371,8 +1371,8 @@ def _mla_attn_reference(qb, kv8, idx, lens, q, scale):
     [(8, [8704]), (8, [3000, 0]), (4, [5000, 17, 9000, 64]), (8, [9]), (8, [40000])],
 )
 def test_m1c_m1b_splits_single_gpu(q: int, lens: list) -> None:
-    """M1c (``mla_attn``: bf16 query, fp8 KV, the splits' partials) against
-    fp32 attention, and M1b's ``splits`` combine -> W_UV -> the gate against
+    """M1c (`mla_attn`: bf16 query, fp8 KV, the splits' partials) against
+    fp32 attention, and M1b's `splits` combine -> W_UV -> the gate against
     the partials merged in torch."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import mla_attn as m
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import (
@@ -1491,7 +1491,7 @@ def _moe_raw(rank: int, device, seed: int = 0, w13_codes=(118, 123)) -> dict:
 
 
 def _moe_weights(rank: int, device, raw: dict | None = None) -> dict:
-    """``raw`` (``_moe_raw``'s, also kept as "raw") with the experts in aiter's
+    """`raw` (`_moe_raw`'s, also kept as "raw") with the experts in aiter's
     shuffled layout, the layout the kernel reads."""
     from aiter.utility.fp4_utils import e8m0_shuffle
 
@@ -1560,9 +1560,9 @@ def _k2_launch(
     m1c_in=None,
     opt: int | None = None,
 ):
-    """``m1b``: (``mla_post``'s inputs, qlen, ranks) to run M1b in K2's launch;
-    ``splits`` its M1c splits, ``m1c_in`` (``mla_attn.host_args``'s) to run M1c
-    in the launch too. ``opt``: ``K2Build.opt`` (None: the default)."""
+    """`m1b`: (`mla_post`'s inputs, qlen, ranks) to run M1b in K2's launch;
+    `splits` its M1c splits, `m1c_in` (`mla_attn.host_args`'s) to run M1c
+    in the launch too. `opt`: `K2Build.opt` (None: the default)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import compile_build
 
@@ -1648,8 +1648,8 @@ def _assert_replays_bit_identical(runner, w, mw) -> None:
 
 def _assert_mxfp4_equal(got, codes, v, d) -> float:
     """MXFP4 output (E2M1 values [..., K], E8M0 codes [..., K / 32]) of aiter's
-    inline quant (``e8m0_roundup6``, RNE) against the reference values ``v``
-    known to +-``d``: exact outside the boundary set, one of its two ends
+    inline quant (`e8m0_roundup6`, RNE) against the reference values `v`
+    known to +-`d`: exact outside the boundary set, one of its two ends
     inside, the set under 1 % -> its fraction."""
     vb, db = v.unflatten(-1, (-1, 32)), d.unflatten(-1, (-1, 32))
     clo, chi = (R.e8m0_roundup6((vb.abs() + e).amax(-1)) for e in (-db, db))
@@ -1668,7 +1668,7 @@ def _assert_mxfp4_equal(got, codes, v, d) -> float:
 
 
 def _peer(runner, s: int, name: str) -> torch.Tensor:
-    """This rank's peer region ``name`` of the current step's parity."""
+    """This rank's peer region `name` of the current step's parity."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
     from vllm.models.kimi_k3.amd.specialized_decode.mono.abi import PEER_HEAD
 
@@ -1678,7 +1678,7 @@ def _peer(runner, s: int, name: str) -> torch.Tensor:
 
 
 def _latq4(peer, s: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """The latent K2 publishes at ``few_rows``, LATQ4 only: (E2M1 values
+    """The latent K2 publishes at `few_rows`, LATQ4 only: (E2M1 values
     [s, LAT], E8M0 codes [s, LAT / 32])."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.stages.moe import LAT
 
@@ -1711,8 +1711,8 @@ def _bf16_span(c, d):
 
 
 def _k2_check(runner, key, w, mw, prefix, out, seed: int) -> dict:
-    """Every K2 stage of one launch (inputs ``w``, ``mw``; the prefix ``w``'s
-    updated to ``prefix``; the output ``out``) against the float64 reference on
+    """Every K2 stage of one launch (inputs `w`, `mw`; the prefix `w`'s
+    updated to `prefix`; the output `out`) against the float64 reference on
     the kernel's own input to it -> metric a stage."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
     from vllm.models.kimi_k3.amd.specialized_decode.mono.stages.moe import (
@@ -1870,8 +1870,8 @@ def _k2_check(runner, key, w, mw, prefix, out, seed: int) -> dict:
 
 
 def _k2_case(runner, w, mw, nb, reset, seed, poison=True):
-    """One K2 step of ``w``'s rows (scratch's plain rows NaN-filled first if
-    ``poison``) -> (metrics, prefix, out, MLP input rows)."""
+    """One K2 step of `w`'s rows (scratch's plain rows NaN-filled first if
+    `poison`) -> (metrics, prefix, out, MLP input rows)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
 
     s = w["core"].size(0)
@@ -1899,7 +1899,7 @@ W13_CODES = (118, 123)
 
 
 def _k2_io(runner, seed: int = 0) -> dict:
-    """K2 stage by stage over ``K2_CASES``, then (8 rows) every token on the same
+    """K2 stage by stage over `K2_CASES`, then (8 rows) every token on the same
     16 experts with exact routing ties (the 16th pick between two equal
     experts, two equal experts inside the top 16) and every token on 16 of its
     own (the largest union); a rerun without the poisoned scratch
@@ -1950,7 +1950,7 @@ def _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
 
 
 def _k2_taps(runner, key, tag: int) -> dict:
-    """K2's stage outputs of one launch (``tag``'s mailbox pairs, plain rows);
+    """K2's stage outputs of one launch (`tag`'s mailbox pairs, plain rows);
     collective at two-shot widths."""
     from vllm.distributed import tensor_model_parallel_all_gather
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
@@ -2053,7 +2053,7 @@ def _mx_alts(v, d) -> tuple:
 
 
 def _k2_vllm_check(runner, key, w, mw, prefix, out, ops, tag: int) -> dict:
-    """Every K2 stage of one launch and vLLM's op (``ops``) on the kernel's
+    """Every K2 stage of one launch and vLLM's op (`ops`) on the kernel's
     input to it against their shared interval, as _k1_vllm_check; both paths'
     top-16 picks among those the scores' intervals allow, the kernel's then
     feeding both (rows with a choice counted)."""
@@ -2479,14 +2479,14 @@ def _k2_opt_worker(
 @needs_gfx950
 @multi_gpu_test(num_gpus=8)
 def test_k2_tp8_opt_bits_are_bit_exact(monkeypatch: pytest.MonkeyPatch) -> None:
-    """K2's critical-path options (``layer.K2_OPT``, the default) give the
-    plain K2's (``opt=0``) bits at every width, block-write layer or not, on
+    """K2's critical-path options (`layer.K2_OPT`, the default) give the
+    plain K2's (`opt=0`) bits at every width, block-write layer or not, on
     both layer parities, and again after their regions were re-armed."""
     multi_process_parallel(monkeypatch, 8, 1, _k2_opt_worker)
 
 
 def _gather(t: torch.Tensor) -> torch.Tensor:
-    """Every rank's ``t`` stacked [ranks, ...]."""
+    """Every rank's `t` stacked [ranks, ...]."""
     out = [torch.empty_like(t) for _ in range(dist.get_world_size())]
     dist.all_gather(out, t.contiguous())
     return torch.stack(out)
