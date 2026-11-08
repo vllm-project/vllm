@@ -106,16 +106,16 @@ def _largest_kernel_block_within(
     kv_cache_spec: KVCacheSpec | None = None,
     divisor_of: int | None = None,
 ) -> int:
-    """Largest supported kernel block size whose page fits in ``page_budget``.
+    """Largest supported kernel block size whose page fits in `page_budget`.
 
     A padded spec (e.g. skip-quant layer) that pads its page up to a large shared page
-    wastes ``page_budget - block*per_token`` bytes per block. Picking the largest kernel
-    block whose natural page still fits under ``page_budget`` minimizes that waste.
-    ``MultipleOf`` declarations are expanded to the largest aligned block that fits.
+    wastes `page_budget - block*per_token` bytes per block. Picking the largest kernel
+    block whose natural page still fits under `page_budget` minimizes that waste.
+    `MultipleOf` declarations are expanded to the largest aligned block that fits.
     Falls back to the smallest supported block when nothing fits.
 
-    With ``divisor_of``, prefer the largest fitting block that divides it, so the
-    page can be scaled to ``divisor_of`` by an integer ratio instead of padded.
+    With `divisor_of`, prefer the largest fitting block that divides it, so the
+    page can be scaled to `divisor_of` by an integer ratio instead of padded.
     """
     from vllm.v1.attention.backend import MultipleOf
 

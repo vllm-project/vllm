@@ -23,7 +23,6 @@ from vllm.config.utils import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if TYPE_CHECKING:
@@ -614,19 +613,27 @@ class CompilationConfig:
 
     encoder_cudagraph_token_budgets: list[int] = field(default_factory=list)
     """Token budget levels for encoder CUDA graph capture.
-    Each budget defines a fixed token capacity. At runtime, images are greedy-packed
-    into the smallest fitting budget and the corresponding CUDA graph is replayed.
-    If empty (default), auto-inferred from model architecture as power-of-2
-    levels from the model's estimated min budget to max budget.
+    Each budget defines a fixed token capacity. At runtime, a batch replays the
+    smallest budget that holds it, or runs eagerly if none does.
+    If empty (default), generated over the model's budget range: quarter-octave
+    steps up to 1024 tokens, steps of 128 up to 2560, then 1/8-octave steps,
+    up to `encoder_cudagraph_max_token_budget`.
     User-provided values override auto-inference.
     Example: [2048, 4096, 8192, 13824]"""
+
+    encoder_cudagraph_max_token_budget: int | None = 5120
+    """Largest auto-generated encoder CUDA graph token budget; must be positive
+    or None. A batch with more tokens runs eagerly. The default balances graph
+    memory against replay coverage; performance depends on the model, batch
+    shape, and hardware. None captures up to the model's largest budget.
+    Ignored when encoder_cudagraph_token_budgets is set."""
 
     encoder_cudagraph_max_vision_items_per_batch: int = 0
     """Maximum number of images/videos per batch for encoder CUDA graph capture.
     Determines the fixed batch size used during graph capture.
     If 0 (default), auto-inferred as max_budget // min_budget from the
     model's budget range. User-provided positive value overrides
-    auto-inference."""
+    auto-inference. A batch with more items runs eagerly in one forward."""
 
     encoder_cudagraph_max_frames_per_batch: int | None = None
     """Maximum total video frames per batch for encoder CUDA graph capture.
@@ -1212,6 +1219,15 @@ class CompilationConfig:
                 "non-negative (None = auto-infer)"
             )
 
+        if (
+            self.encoder_cudagraph_max_token_budget is not None
+            and self.encoder_cudagraph_max_token_budget <= 0
+        ):
+            raise ValueError(
+                "encoder_cudagraph_max_token_budget must be positive "
+                f"(None = no limit), got {self.encoder_cudagraph_max_token_budget}"
+            )
+
         if self.encoder_cudagraph_token_budgets and any(
             b <= 0 for b in self.encoder_cudagraph_token_budgets
         ):
@@ -1521,12 +1537,16 @@ class CompilationConfig:
         min_cg_support: "AttentionCGSupport",
         min_cg_attn_backend: str | None,
         uniform_decode_query_len: int = 1,
-        use_v2_model_runner: bool = False,
         kv_cache_config: "KVCacheConfig | None" = None,
         max_num_reqs: int | None = None,
         is_profiling: bool = False,
         piecewise_capture_available: bool = True,
     ) -> CUDAGraphMode:
+        """Resolve the CUDA Graphs mode the attention backends can support.
+
+        Downgrades the configured mode to the best supported one and stores it, or
+        raises a `ValueError` if the requested CUDA Graphs cannot be supported.
+        """
         from vllm.v1.attention.backend import AttentionCGSupport
 
         cudagraph_mode = self.cudagraph_mode
@@ -1636,18 +1656,6 @@ class CompilationConfig:
                 "and make sure compilation mode is VLLM_COMPILE"
             )
 
-        # MRV1 adjusts cudagraph sizes to be a multiple of uniform_decode_query_len
-        # to avoid: https://github.com/vllm-project/vllm/issues/28207 and temp-fix:
-        # https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
-        # MRV2 takes separate uniform decode and mixed capture sizes and doesn't
-        # need below: https://github.com/vllm-project/vllm/pull/45953
-        if (
-            not use_v2_model_runner
-            and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and uniform_decode_query_len > 1
-        ):
-            self.adjust_cudagraph_sizes_for_spec_decode(uniform_decode_query_len)
-
         # For Mamba models with FULL decode cudagraphs, each decode
         # sequence needs one Mamba cache block. The decode cudagraph
         # dispatcher already caps batch sizes at max_num_seqs, so we just
@@ -1674,36 +1682,6 @@ class CompilationConfig:
 
         self.cudagraph_mode = cudagraph_mode
         return cudagraph_mode
-
-    def adjust_cudagraph_sizes_for_spec_decode(self, uniform_decode_query_len: int):
-        multiple_of = uniform_decode_query_len
-        if not self.cudagraph_capture_sizes or multiple_of <= 1:
-            return
-
-        assert self.max_cudagraph_capture_size is not None
-        rounded_sizes = sorted(
-            set(
-                round_up(size, multiple_of)
-                for size in self.cudagraph_capture_sizes
-                if round_up(size, multiple_of) <= self.max_cudagraph_capture_size
-            )
-        )
-
-        if len(rounded_sizes) == 0 and multiple_of <= self.max_cudagraph_capture_size:
-            # if one valid but would be round_down use that
-            rounded_sizes = [multiple_of]
-
-        if len(rounded_sizes) == 0:
-            raise ValueError(
-                f"No valid cudagraph sizes after rounding to multiple of {multiple_of} "
-                f"(num_speculative_tokens + 1)"
-                f" please adjust num_speculative_tokens ({uniform_decode_query_len - 1}"
-                f") or max_cudagraph_capture_size ({self.max_cudagraph_capture_size})"
-                f" or cudagraph_capture_sizes ({self.cudagraph_capture_sizes})"
-            )
-
-        self.max_cudagraph_capture_size = rounded_sizes[-1]
-        self.cudagraph_capture_sizes = rounded_sizes
 
     def get_compile_ranges(self) -> list[Range]:
         """Get the compile ranges for the compilation config."""

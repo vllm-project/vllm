@@ -80,7 +80,7 @@ def test_mimo_does_not_inherit_aux_hidden_state_pp_support():
 class _PPAuxLayer(torch.nn.Module):
     """Aliases and mutates residual in place like MiniMaxM3DecoderLayer.
 
-    With ``deferred``, the FFN output is this rank's half of a 2-way TP sum, and
+    With `deferred`, the FFN output is this rank's half of a 2-way TP sum, and
     the next input norm completes the all-reduce.
     """
 
@@ -178,7 +178,6 @@ def minimax_pp_stage(monkeypatch):
                 quant_config=None,
                 speculative_config=None,
                 kernel_config=SimpleNamespace(moe_backend="auto"),
-                use_v2_model_runner=True,
             )
         )
         model._set_aux_hidden_state_layers(taps)

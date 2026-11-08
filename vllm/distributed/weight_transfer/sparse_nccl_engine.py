@@ -85,7 +85,7 @@ class SparseNCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     dtype_names: list[str]
     shapes: list[list[int]]
     num_updates_list: list[int]
-    """Number of sparse entries to receive for each parameter in ``names``."""
+    """Number of sparse entries to receive for each parameter in `names`."""
 
     def __post_init__(self) -> None:
         num_params = len(self.names)
