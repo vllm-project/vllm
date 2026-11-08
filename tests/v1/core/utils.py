@@ -215,6 +215,10 @@ def create_scheduler(
         parallel_config=ParallelConfig(
             pipeline_parallel_size=pipeline_parallel_size,
             data_parallel_size=data_parallel_size,
+            # Scheduler tests only build configs and never launch workers. Pin the
+            # backend so the world-size vs local-GPU-count check doesn't fail on
+            # CUDA hosts with fewer GPUs than pipeline_parallel_size.
+            distributed_executor_backend="mp" if pipeline_parallel_size > 1 else None,
         ),
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
