@@ -826,6 +826,39 @@ def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
         assert server.vllm_config.parallel_config.rank == global_rank
 
 
+def test_daemon_keys_draft_as_the_only_pipeline_stage(monkeypatch):
+    """Under PP the engine builds a draft model as the only pipeline stage, so
+    the draft daemon must key it that way or no engine can map it."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.model_loader.weight_cache import daemon
+
+    pp_keys = []
+    monkeypatch.setattr(
+        daemon.WeightCacheKey,
+        "from_model_config",
+        lambda *args, **kwargs: pp_keys.append((kwargs["pp_size"], kwargs["pp_rank"])),
+    )
+    for is_draft in (False, True):
+        vllm_config = SimpleNamespace(
+            parallel_config=_parallel(
+                pipeline_parallel_size=2,
+                enable_eplb=False,
+                enable_expert_parallel=False,
+                expert_placement_strategy="linear",
+                rank=0,
+            ),
+            model_config=SimpleNamespace(is_moe=False),
+            speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace()),
+            cache_config=None,
+            kernel_config=None,
+        )
+        daemon.WeightCacheDaemon(
+            vllm_config, 1, 1, "tcp://127.0.0.1:0", is_draft=is_draft
+        )
+    assert pp_keys == [(2, 1), (1, 0)]
+
+
 def test_weight_cache_key_distinguishes_dp_ranks():
     from dataclasses import replace
 
