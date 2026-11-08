@@ -20,6 +20,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2DecoderLayer,
     DeepseekV2Model,
+    DeepseekV2MoE,
 )
 from vllm.model_executor.models.mistral_large_3 import MistralLarge3ForCausalLM
 
@@ -31,6 +32,7 @@ from .interfaces import (
 from .utils import (
     WeightsMapper,
     _merge_multimodal_embeddings,
+    get_fused_shared_expert_layers,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
@@ -60,6 +62,7 @@ class EagleMistralLarge3Model(DeepseekV2Model):
         quant_config = vllm_config.quant_config
         self.config = config
         self.vllm_config = vllm_config
+        self.hidden_size = config.hidden_size
 
         self.vocab_size = config.vocab_size
 
@@ -80,6 +83,11 @@ class EagleMistralLarge3Model(DeepseekV2Model):
                 )
                 for i in range(self.config.num_hidden_layers)
             ]
+        )
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
+            DeepseekV2MoE,
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
         self.start_layer = 0
         self.end_layer = self.config.num_hidden_layers
