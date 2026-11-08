@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MSA (SM100 family) block-sparse attention for MiniMax M3.
 
-``MiniMaxM3SparseMSAImpl`` serves BF16 and FP8 KV caches: prefill attends with
-``fmha_sm100`` (``build_k2q_csr`` + ``sparse_atten_func``), and decode uses the
-CUTLASS ``fmha_sm100`` path by default for regular decode and speculative
+`MiniMaxM3SparseMSAImpl` serves BF16 and FP8 KV caches: prefill attends with
+`fmha_sm100` (`build_k2q_csr` + `sparse_atten_func`), and decode uses the
+CUTLASS `fmha_sm100` path by default for regular decode and speculative
 verification, with Triton split-K as the fallback.
 
-``MiniMaxM3SparseMSANvfp4Impl`` serves NVFP4 KV caches, reading vLLM's packed
+`MiniMaxM3SparseMSANvfp4Impl` serves NVFP4 KV caches, reading vLLM's packed
 pages directly with only the E4M3 query: decode and prefill both run the CUTLASS
 Q8KV4 kernels.
 """
@@ -15,7 +15,6 @@ Q8KV4 kernels.
 import functools
 import os
 import weakref
-from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, ClassVar
 
@@ -24,7 +23,6 @@ import torch
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.attention import MiniMaxM3MSADecodeBackend
 from vllm.config.cache import CacheDType
-from vllm.device_allocator import get_mem_allocator_instance
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.models.minimax_m3.common.ops.sparse_attn import (
@@ -91,7 +89,7 @@ def _get_msa_cutlass_min_batch_size() -> int | None:
 def _dequantize_query(
     query_fp8: torch.Tensor, q_scale: float, dtype: torch.dtype
 ) -> torch.Tensor:
-    """``query_fp8 * q_scale`` in ``dtype`` (E4M3 is exact in BF16)."""
+    """`query_fp8 * q_scale` in `dtype` (E4M3 is exact in BF16)."""
     out = query_fp8.to(dtype)
     if q_scale != 1.0:
         out.mul_(q_scale)
@@ -118,7 +116,7 @@ class MiniMaxM3SparseMSANvfp4Backend(MiniMaxM3SparseMSABackend):
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
         """Store each head's K and V as two slots of packed data + block scales
-        (see ``nvfp4_kv_cache_views``)."""
+        (see `nvfp4_kv_cache_views`)."""
         if spec.state_content_bytes is not None or not spec.kv_quant_mode.is_nvfp4:
             return spec
         return replace(
@@ -173,28 +171,16 @@ def _shared_prefill_workspace(
     key = (device_index, topk_blocks, max_tokens, num_q_heads)
     if (workspace := _prefill_workspaces.get(key)) is not None:
         return workspace
-    # tag="runtime": the weights pool is discarded by level-2 sleep and only
-    # named model tensors are restored on wake; the runtime pool is offloaded
-    # and restored with contents intact.
-    model_config = get_current_vllm_config().model_config
-    alloc_context = (
-        get_mem_allocator_instance().use_memory_pool(tag="runtime")
-        if current_platform.is_cuda_alike()
-        and model_config is not None
-        and model_config.enable_cumem_allocator
-        else nullcontext()
+    workspace = PrefillWorkspace(
+        device_index, block_scale_shift=NVFP4_BLOCK_SCALE_SHIFT
     )
-    with alloc_context:
-        workspace = PrefillWorkspace(
-            device_index, block_scale_shift=NVFP4_BLOCK_SCALE_SHIFT
-        )
-        workspace.split_buffers(topk_blocks, max_tokens, num_q_heads)
+    workspace.split_buffers(topk_blocks, max_tokens, num_q_heads)
     _prefill_workspaces[key] = workspace
     return workspace
 
 
 class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
-    """Prepare MSA plans only for decode shapes supported by ``fmha_sm100``."""
+    """Prepare MSA plans only for decode shapes supported by `fmha_sm100`."""
 
     def __init__(
         self,
@@ -208,7 +194,7 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.num_q_heads = config.num_attention_heads // tp_size
         self.num_kv_heads = kv_cache_spec.num_kv_heads
-        self.topk_blocks = config.sparse_attention_config["sparse_topk_blocks"]
+        self.topk_blocks = config.index_topk_blocks
         # AttentionSpec stores every FP8 mode as uint8, so retain the configured
         # format to distinguish E4M3 (supported) from E5M2 before planning.
         self.kv_cache_dtype = vllm_config.cache_config.cache_dtype

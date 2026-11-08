@@ -793,12 +793,12 @@ def _make_nvfp4_kv_cache(
     v_scale: torch.Tensor,
     page_size: int = BLOCK_SIZE,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Write random K/V through the NVFP4 ``reshape_and_cache_flash`` writer,
+    """Write random K/V through the NVFP4 `reshape_and_cache_flash` writer,
     whose pages hold every head's data then every head's scales per side, and
     repack them into head slots.
 
-    Returns the packed HND cache ``[pages, 2 * Hkv, 128, 72]`` and its BF16
-    dequantization ``[pages, Hkv, 128, 2 * 128]`` for the Triton reference.
+    Returns the packed HND cache `[pages, 2 * Hkv, 128, 72]` and its BF16
+    dequantization `[pages, Hkv, 128, 2 * 128]` for the Triton reference.
     """
     num_slots = num_pages * page_size
     key = torch.randn(
@@ -882,7 +882,7 @@ def _assert_close_fp8_prefill(actual: torch.Tensor, expected: torch.Tensor) -> N
 def _record_query_dtypes(
     monkeypatch: pytest.MonkeyPatch, kernel_name: str
 ) -> list[torch.dtype]:
-    """Record the query dtype of every ``fmha_sm100.sparse.<kernel_name>`` call."""
+    """Record the query dtype of every `fmha_sm100.sparse.<kernel_name>` call."""
     from vllm.third_party.fmha_sm100 import sparse as msa_sparse
 
     kernel = getattr(msa_sparse, kernel_name)

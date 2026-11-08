@@ -3,15 +3,15 @@
 """MSA (SM100/Blackwell) indexer impl for MiniMax M3.
 
 Both sides write block scores into one unified token-major buffer
-``[total_q, H, max_k_tiles]``, then a single ``fmha_sm100.sparse_topk_select``
-selects the top-k blocks for the whole batch (decode ``[:nd]`` + prefill
-``[nd:]``) into the shared ``topk_indices_buffer``. It bounds each row by its
+`[total_q, H, max_k_tiles]`, then a single `fmha_sm100.sparse_topk_select`
+selects the top-k blocks for the whole batch (decode `[:nd]` + prefill
+`[nd:]`) into the shared `topk_indices_buffer`. It bounds each row by its
 causal page count and force-includes the init/local blocks, so the unwritten
-tail of the buffer is pre-filled with ``-inf``.
+tail of the buffer is pre-filled with `-inf`.
 
-Prefill scores with ``fmha_sm100``'s score-only (``OnlyScore``) path (much faster
+Prefill scores with `fmha_sm100`'s score-only (`OnlyScore`) path (much faster
 than Triton for the wide prefill score, benchmarked ~3-5x), writing its
-``max_score`` straight into the buffer's prefill region (stride-aware, no copy).
+`max_score` straight into the buffer's prefill region (stride-aware, no copy).
 
 Decode scores with CuteDSL when the flattened query tile is supported and fall
 back to Triton otherwise, writing into the decode region. Only the top-k is
@@ -19,11 +19,11 @@ shared with prefill.
 
 Sharded decode selects local candidates and merges them at each head owner.
 At TP2 with 256-token pages, a rank's shard of an NVFP4 index page is itself a
-stock 128-row NVFP4 page (global B128 page ``2 * column + rank``), so uniform
+stock 128-row NVFP4 page (global B128 page `2 * column + rank`), so uniform
 eight-query decode scores it with the stock MSA Q8KV4 decode indexer over all
 index heads; the CuTe DSL sharded scorer serves every other case.
 
-``fmha_sm100`` imports are function-local so this module is import-safe on
+`fmha_sm100` imports are function-local so this module is import-safe on
 AMD / non-SM100.
 """
 
@@ -156,9 +156,9 @@ class MiniMaxM3IndexerMSAPrefillMetadata:
 class MiniMaxM3IndexerMSAQ8KV4Decode:
     """The stock Q8KV4 decode indexer, planned over this rank's P256 shard pages.
 
-    Shard column ``c`` of a request is its 256-token page ``c``, which holds
-    global B128 page ``2 * c + rank``. ``lengths`` hands the indexer
-    ``owned * 128 + 8``: all eight query slots sit one page past the request's
+    Shard column `c` of a request is its 256-token page `c`, which holds
+    global B128 page `2 * c + rank`. `lengths` hands the indexer
+    `owned * 128 + 8`: all eight query slots sit one page past the request's
     last history column, so every owned history column is scored for every
     slot, uncausally. The candidate publish keeps the causal cut: it ranks only
     columns below a query's own page, and that page is forced, never ranked.
@@ -172,9 +172,9 @@ class MiniMaxM3IndexerMSAQ8KV4Decode:
 
 @dataclass
 class MiniMaxM3IndexerMSAMetadata(MiniMaxM3IndexerMetadata):
-    """Decode reuses the inherited base ``decode`` field (the Triton decode
-    metadata); ``prefill_msa`` carries the fmha score plan for the prefill side
-    (the base ``prefill`` field is unused on this path)."""
+    """Decode reuses the inherited base `decode` field (the Triton decode
+    metadata); `prefill_msa` carries the fmha score plan for the prefill side
+    (the base `prefill` field is unused on this path)."""
 
     prefill_msa: MiniMaxM3IndexerMSAPrefillMetadata | None = None
     # Per-forward view (``[:num_tokens]``) of the builder's persistent unified
@@ -324,9 +324,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 page_size=self.page_size,
                 total_index_heads=self.num_index_heads * self.index_k_tp,
                 max_decode_query_len=self.max_decode_query_len,
-                local_blocks=text_config.sparse_attention_config.get(
-                    "sparse_local_block", 0
-                ),
+                local_blocks=text_config.index_local_blocks,
             )
             self.q8kv4_decode = reason is None
             if self.q8kv4_decode:
@@ -349,7 +347,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
     ) -> MiniMaxM3IndexerMSAQ8KV4Decode | None:
         """Plan the stock Q8KV4 decode indexer over this rank's shard pages.
 
-        Runs in ``build()``, outside CUDA graph capture, every step: the
+        Runs in `build()`, outside CUDA graph capture, every step: the
         wrapper of a padded batch size keeps its page table, lengths, scheduler
         and score buffers, so a captured step replays the latest plan."""
         from vllm.models.minimax_m3.nvidia.ops.index_prefill import (
@@ -1164,11 +1162,7 @@ def get_comm(
         vllm_config.cache_config.block_size,
         vllm_config.scheduler_config.max_num_seqs,
         max_decode_query_len(vllm_config),
-        int(
-            vllm_config.model_config.hf_text_config.sparse_attention_config[
-                "sparse_index_dim"
-            ]
-        ),
+        int(vllm_config.model_config.hf_text_config.index_head_dim),
     )
     if (
         _COMM_OWNER is None

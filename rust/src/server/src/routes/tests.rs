@@ -1181,11 +1181,24 @@ async fn test_dev_mode_app_with_ready(
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-world-size".to_vec();
+    let answers_readiness = ready_response.enable_sleep_mode;
     let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
         handshake_address.clone(),
         engine_id,
         ready_response,
-        |_dealer, _push| boxed_test_future(async {}),
+        move |dealer, push| {
+            boxed_test_future(async move {
+                // With sleep mode, the client asks for readiness at connect.
+                if answers_readiness {
+                    let utility = recv_engine_message(dealer).await;
+                    let payload = decode_value(&utility[1]).expect("decode utility payload");
+                    let array = payload.as_array().expect("utility payload array");
+                    assert_eq!(array[2], Value::from("is_inference_ready"));
+                    let call_id = array[1].as_u64().expect("call id");
+                    send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
+                }
+            })
+        },
     ));
 
     let client = EngineCoreClient::connect(
@@ -3688,6 +3701,97 @@ async fn non_stream_chat_returns_json_response() {
     ] {
         assert!(!object.contains_key(key), "expected no `{key}`: {json}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn system_fingerprint_is_reported_on_the_last_message_like_python() {
+    let mut lines = Vec::new();
+    let cases = [
+        ("/v1/chat/completions", false),
+        ("/v1/completions", false),
+        // `echo` with `max_tokens=0` streams the prompt on its own branch.
+        ("/v1/completions", true),
+    ];
+    for (uri, prompt_only) in cases {
+        for (stream, include_usage) in [(false, false), (true, false), (true, true)] {
+            let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+                b"engine-openai-fingerprint",
+                default_stream_output_specs(),
+                Arc::new(FakeChatBackend::new()),
+            )
+            .await;
+            let mut app = build_router(Arc::new(
+                AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                    .with_system_fingerprint(Some("vllm-0.33.0-c84c7d4f".to_string())),
+            ));
+            let mut body = json!({"stream": stream});
+            if include_usage {
+                body["stream_options"] = json!({"include_usage": true});
+            }
+            if uri == "/v1/chat/completions" {
+                body["messages"] = json!([{"role": "user", "content": "hello"}]);
+            } else {
+                body["prompt"] = json!("hello");
+            }
+            if prompt_only {
+                body["echo"] = json!(true);
+                body["max_tokens"] = json!(0);
+            }
+            let response = app
+                .call(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .expect("build request"),
+                )
+                .await
+                .expect("call app");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+            engine_task.await.expect("mock engine task");
+
+            // One entry per message: whether it carries the fingerprint, and
+            // which kind of message it is.
+            let messages = if stream {
+                sse_json_payloads(std::str::from_utf8(&body).expect("utf8 body"))
+            } else {
+                vec![serde_json::from_slice(&body).expect("decode json")]
+            };
+            let summary = messages
+                .iter()
+                .map(|message| {
+                    let kind = if message["choices"].as_array().is_some_and(Vec::is_empty) {
+                        "usage"
+                    } else if message["choices"][0]["finish_reason"].is_string() {
+                        "finish"
+                    } else {
+                        "delta"
+                    };
+                    match message.get("system_fingerprint") {
+                        Some(fingerprint) => format!("{kind}={fingerprint}"),
+                        None => kind.to_string(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            lines.push(format!(
+                "{uri} prompt_only={prompt_only} stream={stream} include_usage={include_usage}: {summary}"
+            ));
+        }
+    }
+    expect_test::expect![[r#"
+        /v1/chat/completions prompt_only=false stream=false include_usage=false: finish="vllm-0.33.0-c84c7d4f"
+        /v1/chat/completions prompt_only=false stream=true include_usage=false: delta delta delta finish="vllm-0.33.0-c84c7d4f"
+        /v1/chat/completions prompt_only=false stream=true include_usage=true: delta delta delta finish usage="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=false stream=false include_usage=false: finish="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=false stream=true include_usage=false: delta delta delta finish="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=false stream=true include_usage=true: delta delta delta finish usage="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=true stream=false include_usage=false: finish="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=true stream=true include_usage=false: delta finish="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=true stream=true include_usage=true: delta finish usage="vllm-0.33.0-c84c7d4f""#]].assert_eq(&lines.join("\n"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7216,6 +7320,153 @@ async fn completions_echo_stream_decodes_token_id_prompt_chunk() {
     assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
 }
 
+/// With prompt truncation, a token-ID prompt echoes the text of the tokens
+/// the engine receives, like Python's renderer (vllm-project/vllm#61876).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_echo_reports_the_truncated_prompt() {
+    let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+        Arc::new(FakeChatBackend::new()),
+        |request| {
+            assert_eq!(
+                decode_prompt_token_ids(request).as_deref(),
+                Some(bytes_to_token_ids(b"world").as_slice())
+            );
+        },
+    )
+    .await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": bytes_to_token_ids(b"hello world"),
+                        "echo": true,
+                        "truncate_prompt_tokens": 5,
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["choices"][0]["text"], "worldhi");
+    assert_eq!(json["usage"]["prompt_tokens"], 5);
+}
+
+/// A truncated token-ID prompt streams the decoded tokens that remain; a
+/// text prompt echoes its text as sent, like Python.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_echo_stream_reports_the_truncated_prompt() {
+    let cases = [
+        (json!(bytes_to_token_ids(b"hello world")), "hello"),
+        (json!("hello world"), "hello world"),
+    ];
+    for (prompt, echoed) in cases {
+        let (app, engine_task) = test_app_with_engine_handle().await;
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "prompt": prompt,
+                            "echo": true,
+                            "truncate_prompt_tokens": 5,
+                            "truncation_side": "right",
+                            "stream": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+        let first_chunk: serde_json::Value =
+            serde_json::from_str(sse_data_payloads(&text)[0]).expect("first chunk json");
+        assert_eq!(first_chunk["choices"][0]["text"], echoed, "{text}");
+    }
+}
+
+/// Chat echoes the last assistant message, which prompt truncation does not
+/// change, so the two combine like in Python.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_echo_stream_with_prompt_truncation() {
+    let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+        Arc::new(FakeChatBackend::new()),
+        |request| {
+            assert_eq!(
+                decode_prompt_token_ids(request).as_ref().map(Vec::len),
+                Some(4)
+            );
+        },
+    )
+    .await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "messages": [
+                            {"role": "user", "content": "hello"},
+                            {"role": "assistant", "content": "Sure, "}
+                        ],
+                        "add_generation_prompt": false,
+                        "continue_final_message": true,
+                        "echo": true,
+                        "truncate_prompt_tokens": 4,
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let contents: Vec<_> = sse_data_payloads(&text)
+        .into_iter()
+        .filter_map(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+        .filter_map(|chunk| chunk["choices"][0]["delta"]["content"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(contents.concat(), "Sure, hi", "{text}");
+}
+
 /// Like Python, a streamed echo with `logprobs` reports the prompt tokens'
 /// logprobs with the echoed prompt, and the generated tokens' offsets continue
 /// after the reported prompt tokens rather than after the prompt text.
@@ -7814,31 +8065,52 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
     assert!(text.contains("\"logprobs\":{\"content\":"), "{text}");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn chat_rejects_empty_tools_array() {
-    let (mut app, engine_task) = test_app_with_engine_handle().await;
-    let cases = [json!({}), json!({"tool_choice": "none"})];
+/// Like OpenAI and Python, `tools: []` renders like an omitted field, whatever
+/// `tool_choice` says; a named choice still reports the missing function.
+#[tokio::test]
+async fn chat_render_treats_empty_tools_as_omitted() {
+    let mut app = test_render_app();
+    let base = json!({
+        "model": "render-model",
+        "messages": [{"role": "user", "content": "hello"}],
+    });
+    let (status, mut without_tools) =
+        post_json(&mut app, "/v1/chat/completions/render", base.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{without_tools}");
+    without_tools["request_id"].take();
+
+    let cases = [
+        json!({}),
+        json!({"tool_choice": "none"}),
+        json!({"tool_choice": "auto"}),
+        json!({"tool_choice": "required"}),
+    ];
     for extra in cases {
-        let mut body = json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "messages": [{"role": "user", "content": "hello"}],
-            "tools": [],
-        });
+        let mut body = base.clone();
+        body["tools"] = json!([]);
         body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-        let (status, error) = post_json(&mut app, "/v1/chat/completions", body.clone()).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {error}");
-        expect_test::expect![[r#"
-            {
-              "error": {
-                "message": "`tools` must not be an empty array. Either provide at least one tool or omit the field entirely.",
-                "type": "BadRequestError",
-                "param": "tools",
-                "code": 400
-              }
-            }"#]].assert_eq(&serde_json::to_string_pretty(&error).unwrap());
+        let (status, mut rendered) =
+            post_json(&mut app, "/v1/chat/completions/render", body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}: {rendered}");
+        rendered["request_id"].take();
+        assert_eq!(rendered, without_tools, "{body}");
     }
-    engine_task.abort_and_join().await;
+
+    let mut body = base;
+    body["tools"] = json!([]);
+    body["tool_choice"] = json!({"type": "function", "function": {"name": "f"}});
+    let (status, error) = post_json(&mut app, "/v1/chat/completions/render", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    expect_test::expect![[r#"
+        {
+          "error": {
+            "message": "tool_choice function `f` was not found in the available tools",
+            "type": "BadRequestError",
+            "param": null,
+            "code": 400
+          }
+        }"#]]
+    .assert_eq(&serde_json::to_string_pretty(&error).unwrap());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8207,7 +8479,11 @@ async fn sleep_route_uses_python_compatible_default_query_values() {
             assert_eq!(array[2], Value::from("sleep"));
             assert_eq!(
                 array[3],
-                Value::Array(vec![Value::from(1_u64), Value::from("abort")])
+                Value::Array(vec![
+                    Value::from(1_u64),
+                    Value::from("abort"),
+                    Value::from(true),
+                ])
             );
 
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
@@ -8315,6 +8591,64 @@ async fn sleep_route_rejects_invalid_query_before_engine_dispatch() {
     }
 }
 
+async fn assert_route_sends_utility_args(
+    uri: &'static str,
+    method: &'static str,
+    args: Vec<Value>,
+) {
+    let (app, engine_task) = test_admin_app_with_engine_script(move |dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from(method));
+            assert_eq!(array[3], Value::Array(args));
+
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn sleep_route_forwards_reset_connector_opt_out() {
+    assert_route_sends_utility_args(
+        "/sleep?reset_connector=false",
+        "sleep",
+        vec![Value::from(1_u64), Value::from("abort"), Value::from(false)],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn release_kv_cache_memory_route_forwards_reset_connector_opt_out() {
+    assert_route_sends_utility_args(
+        "/release_kv_cache_memory?reset_connector=false",
+        "release_kv_cache_memory",
+        vec![Value::from(false)],
+    )
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn release_kv_cache_memory_route_sends_expected_utility_call() {
@@ -8329,7 +8663,7 @@ async fn release_kv_cache_memory_route_sends_expected_utility_call() {
             let call_id = array[1].as_u64().expect("call id");
 
             assert_eq!(array[2], Value::from("release_kv_cache_memory"));
-            assert_eq!(array[3], Value::Array(Vec::new()));
+            assert_eq!(array[3], Value::Array(vec![Value::from(true)]));
 
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
         })
@@ -8776,8 +9110,8 @@ async fn pause_route_rejects_invalid_mode() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "BadRequestError");
-    assert_eq!(json["error"]["param"], "mode");
+    assert_eq!(json["error"]["type"], "Bad Request");
+    assert_eq!(json["error"]["param"], "query.mode");
     engine_task.abort_and_join().await;
 }
 
@@ -10178,6 +10512,54 @@ async fn world_size_route_accepts_python_spelled_bool_query_value() {
         serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
         json!({ "world_size": 6 })
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn dev_routes_reject_invalid_query_with_json_error() {
+    let ready = EngineCoreReadyResponse {
+        enable_sleep_mode: true,
+        ..default_ready_response()
+    };
+    let (app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
+    let cases = [
+        ("GET", "/get_world_size?include_dp=maybe"),
+        ("GET", "/server_info?config_format=yaml"),
+        ("POST", "/reset_prefix_cache?reset_external=maybe"),
+        ("POST", "/sleep?level=3"),
+        ("POST", "/pause?mode=abort&clear_cache=maybe"),
+        ("POST", "/checkpoint/prepare?mode=banana"),
+    ];
+    let mut bodies = Vec::new();
+    for (method, uri) in cases {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/json",
+            "{uri}"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("decode json error");
+        bodies.push(format!("{uri}: {body}"));
+    }
+    expect_test::expect![[r#"
+        /get_world_size?include_dp=maybe: {"error":{"message":"Failed to deserialize query string: include_dp: invalid boolean value `maybe`","type":"Bad Request","param":"query.include_dp","code":400}}
+        /server_info?config_format=yaml: {"error":{"message":"Failed to deserialize query string: config_format: unknown variant `yaml`, expected `text` or `json`","type":"Bad Request","param":"query.config_format","code":400}}
+        /reset_prefix_cache?reset_external=maybe: {"error":{"message":"Failed to deserialize query string: reset_external: invalid boolean value `maybe`","type":"Bad Request","param":"query.reset_external","code":400}}
+        /sleep?level=3: {"error":{"message":"Failed to deserialize query string: level: invalid sleep level `3`; expected one of: 0, 1, 2","type":"Bad Request","param":"query.level","code":400}}
+        /pause?mode=abort&clear_cache=maybe: {"error":{"message":"Failed to deserialize query string: clear_cache: invalid boolean value `maybe`","type":"Bad Request","param":"query.clear_cache","code":400}}
+        /checkpoint/prepare?mode=banana: {"error":{"message":"Failed to deserialize query string: mode: invalid pause mode `banana`; expected one of: abort, wait, keep","type":"Bad Request","param":"query.mode","code":400}}"#]].assert_eq(&bodies.join("\n"));
 }
 
 // ========================= Profiler route tests =========================

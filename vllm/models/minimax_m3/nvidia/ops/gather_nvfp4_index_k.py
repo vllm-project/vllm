@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Gather NVFP4 index-K pages into compact FP8 pages for the Q8KV8 prefill indexer.
 
-A packed NVFP4 page ``[128, 72]`` holds the E2M1 codes of all 128 tokens (64 B
+A packed NVFP4 page `[128, 72]` holds the E2M1 codes of all 128 tokens (64 B
 per token, low nibble first) followed by their E4M3 16-element block scales
-(``token * 8 + group``), with no global scale. A TP-sharded index cache keeps
+(`token * 8 + group`), with no global scale. A TP-sharded index cache keeps
 the same layout over its share of each page's rows. Each element dequantizes to
-``e4m3_rn_satfinite(e2m1 * scale)``, the value the Q8KV4 decode indexer scores,
+`e4m3_rn_satfinite(e2m1 * scale)`, the value the Q8KV4 decode indexer scores,
 so prefill and decode rank pages from identical keys.
 
 Where Triton can emit it, each four elements are one QMUL4
-(``mul.rn.satfinite.e4m3x4.e2m1x4.e4m3x4``), the instruction the decode kernel
+(`mul.rn.satfinite.e4m3x4.e2m1x4.e4m3x4`), the instruction the decode kernel
 dequantizes with; otherwise the product is formed exactly in fp32 and rounded
 once, which gives the same bytes.
 """
@@ -34,7 +34,7 @@ def _qmul4_supported(device_index: int) -> bool:
     """Whether Triton emits PTX that can use QMUL4 on this device.
 
     Triton takes the PTX ISA version from its Blackwell ptxas: the bundled one
-    unless ``TRITON_PTXAS_BLACKWELL_PATH`` points at a CUDA 13.4+ ptxas.
+    unless `TRITON_PTXAS_BLACKWELL_PATH` points at a CUDA 13.4+ ptxas.
     """
     capability = current_platform.get_device_capability(device_index)
     if capability is None or capability.to_int() not in (100, 103):
@@ -137,18 +137,18 @@ def minimax_m3_gather_nvfp4_index_k_fp8(
     """Dequantize each request's leading NVFP4 pages into contiguous FP8 pages.
 
     Args:
-        kv_cache: ``[num_blocks, rows, 72]`` uint8 packed NVFP4 pages: 128
+        kv_cache: `[num_blocks, rows, 72]` uint8 packed NVFP4 pages: 128
             rows, or block_size / TP rows (32, 64 or 128) of a TP-sharded
             index cache.
-        block_table: ``[num_reqs, max_blocks]`` int32 physical page ids.
-        num_pages: ``[num_reqs]`` int32 pages to gather per request (its first
-            ``num_pages[r]`` logical pages).
-        page_offsets: ``[num_reqs]`` int32 first output page of each request.
-        max_num_pages: Host upper bound of ``num_pages``.
-        out: ``[>= sum(num_pages), rows, 128]`` contiguous float8_e4m3fn.
+        block_table: `[num_reqs, max_blocks]` int32 physical page ids.
+        num_pages: `[num_reqs]` int32 pages to gather per request (its first
+            `num_pages[r]` logical pages).
+        page_offsets: `[num_reqs]` int32 first output page of each request.
+        max_num_pages: Host upper bound of `num_pages`.
+        out: `[>= sum(num_pages), rows, 128]` contiguous float8_e4m3fn.
 
     Returns:
-        ``out``.
+        `out`.
 
     """
     rows = kv_cache.shape[1]

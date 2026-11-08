@@ -546,11 +546,11 @@ class IndexDecodeScoreShardedNvfp4Kernel(IndexDecodeScoreShardedKernel):
     """FP8 Q against NVFP4 shard pages of M3.1's index cache.
 
     A shard page holds this rank's rows of an NVFP4 index page:
-    ``[ROWS x 64 B e2m1 codes][ROWS x 8 B e4m3 group scales]``, the low nibble
-    the even dim and one scale per 16 dims. With ``round_k`` each K value is
+    `[ROWS x 64 B e2m1 codes][ROWS x 8 B e4m3 group scales]`, the low nibble
+    the even dim and one scale per 16 dims. With `round_k` each K value is
     rounded once to e4m3, as the SM100/SM103 Q8KV4 decode indexer scores it;
     without it K keeps the exact e2m1 x scale product, as on SM107. K is fed
-    as FP16 to the same ``mma.sync`` as the FP8 kernel. ldmatrix gives each
+    as FP16 to the same `mma.sync` as the FP8 kernel. ldmatrix gives each
     lane eight consecutive codes per 16 B row slice, so every lane reads the
     matching eight Q bytes itself instead of ldmatrix-loading Q.
     """
@@ -1024,11 +1024,11 @@ class IndexDecodeScoreShardedNvfp4Kernel(IndexDecodeScoreShardedKernel):
 def nvfp4_shard_views(
     index_kv_shard: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Split ``[pages, ROWS, 72]`` uint8 shard pages into code and scale views.
+    """Split `[pages, ROWS, 72]` uint8 shard pages into code and scale views.
 
-    A page is ``ROWS x 64`` code bytes, then ``ROWS x 8`` scale bytes; the page
-    pitch may exceed ``ROWS * 72``. Returns ``[pages, ROWS, 64]`` codes and
-    ``[pages, ROWS // 2, 16]`` scales, two token rows per 16 B.
+    A page is `ROWS x 64` code bytes, then `ROWS x 8` scale bytes; the page
+    pitch may exceed `ROWS * 72`. Returns `[pages, ROWS, 64]` codes and
+    `[pages, ROWS // 2, 16]` scales, two token rows per 16 B.
     """
     pages, rows, width = index_kv_shard.shape
     data = IndexDecodeScoreShardedNvfp4Kernel.DATA_BYTES
@@ -1083,11 +1083,11 @@ def minimax_m3_index_decode_score_sharded_cutedsl(
 ) -> None:
     """Write B128 maxima for interleaved P128 or contiguous P256 shards.
 
-    ``index_kv_shard`` is FP8 ``[pages, ROWS, 128]`` or, for NVFP4 index
-    caches, uint8 ``[pages, ROWS, 72]`` pages (see ``nvfp4_shard_views``).
+    `index_kv_shard` is FP8 `[pages, ROWS, 128]` or, for NVFP4 index
+    caches, uint8 `[pages, ROWS, 72]` pages (see `nvfp4_shard_views`).
     History prefetch requires metadata fenced by a non-PDL cache writer.
     NVFP4 K is rounded to e4m3 where the stock decode indexer rounds it, unless
-    ``nvfp4_round_k`` says otherwise.
+    `nvfp4_round_k` says otherwise.
     """
     nvfp4 = index_kv_shard.dtype == torch.uint8
     if idx_q.dtype != torch.float8_e4m3fn or not (

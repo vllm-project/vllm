@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import Field, field_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -282,17 +282,14 @@ class AttentionConfig:
             return default
         return self.indexer_logits_dtype
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, set())
-        return hash_factors(factors)
+        return get_compile_factors(self, set())
 
     @field_validator("backend", mode="before")
     @classmethod

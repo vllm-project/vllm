@@ -32,7 +32,7 @@ PREFILL_SCORE_BYTES = 32 << 20
 
 
 def _nvfp4_rows_to_fp8(codes: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
-    """e4m3 ``[..., 128]`` rows: e2m1 * scale, clamped and rounded once."""
+    """e4m3 `[..., 128]` rows: e2m1 * scale, clamped and rounded once."""
     values = torch.tensor((0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0), device=codes.device)
     nibbles = torch.stack((codes & 15, codes >> 4), -1).flatten(-2).long()
     # Multiply rather than negate so that code 8 stays -0.
@@ -58,12 +58,7 @@ def _indexer_sharding(monkeypatch, tp_size, pp_size, rank, distributed_init_port
             max_model_len=4096,
             max_num_seqs=4,
             max_num_batched_tokens=1536,
-            hf_config_override={
-                "sparse_attention_config": {
-                    "sparse_num_index_heads": 4,
-                    "sparse_index_dim": 128,
-                }
-            },
+            hf_config_override={"index_n_heads": 4, "index_head_dim": 128},
         )
         config.speculative_config = SpeculativeConfig(
             method="ngram", num_speculative_tokens=7
@@ -474,13 +469,16 @@ def test_msa_indexer_tp_matches_replicated(monkeypatch, tp_size):
 def _check_sharding_policy(config, original_comm):
     from vllm.models.minimax_m3.nvidia import indexer_msa as msa
 
-    sparse_config = config.model_config.hf_text_config.sparse_attention_config
+    text_config = config.model_config.hf_text_config
     policy = create_vllm_config(
         tensor_parallel_size=original_comm.world,
         block_size=128,
         max_model_len=4096,
         max_num_seqs=32,
-        hf_config_override={"sparse_attention_config": sparse_config},
+        hf_config_override={
+            "index_n_heads": text_config.index_n_heads,
+            "index_head_dim": text_config.index_head_dim,
+        },
     )
     model = copy(policy.model_config)
     for mode, length, cap, active_cap, q, eager, graph_mode, expected in [
