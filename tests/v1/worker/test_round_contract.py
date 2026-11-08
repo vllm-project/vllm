@@ -476,6 +476,7 @@ def _mamba_state(max_num_reqs, align=False):
     )
     state._align_mode = align
     state.recoverssm = None
+    state.cache_config = SimpleNamespace(use_replayssm=False)
     state._mamba_ctx = None
     return state
 
@@ -485,7 +486,7 @@ def _mamba_state(max_num_reqs, align=False):
 def test_mamba_resumes_from_the_last_accepted_row(seed):
     """The GDN kernels read state row num_accepted_tokens - 1: the last accepted
     row. Rows filtered under PP (-1) are left alone; the aligned state mode
-    refuses tree paths."""
+    declines trees (admission lowers them to chains)."""
     gen = np.random.default_rng(200 + seed)
     num_reqs, max_rows, num_slots = int(gen.integers(1, 8)), int(gen.integers(2, 9)), 12
     counts = gen.integers(1, max_rows + 1, num_reqs)
@@ -502,10 +503,8 @@ def test_mamba_resumes_from_the_last_accepted_row(seed):
     for b in np.flatnonzero(idx >= 0):
         assert got[idx[b]] - 1 == path[b, max(path_len[b], 1) - 1]
     assert (np.delete(got, idx[idx >= 0]) == 99).all()
-    with pytest.raises(NotImplementedError, match="align"):
-        _mamba_state(4, align=True).postprocess_state(
-            _t([0]), _t([1]), accepted_row=_t([0])
-        )
+    aligned = _mamba_state(4, align=True)
+    assert "align" in aligned.tree_decline_reason()
 
 
 # Cache layout -> (shape, physical permutation or None): K and V packed in the

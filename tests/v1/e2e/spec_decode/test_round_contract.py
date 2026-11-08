@@ -148,7 +148,7 @@ def test_alternating_budget_on_hybrid():
     _check(HYBRID, got, "alternating_budget")
 
 
-# No in-tree backend sets serves_trees, so one dense backend stands for all.
+# No in-tree backend verifies trees, so one dense backend stands for all.
 @pytest.mark.parametrize("model, tp", [(DENSE, 1), (HYBRID, 1), (HYBRID, 2)])
 def test_tree_speculator_runs_chains(model, tp, capfd):
     """No in-tree attention backend verifies trees, and the hybrid's GDN layers

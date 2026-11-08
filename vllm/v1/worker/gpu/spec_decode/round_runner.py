@@ -18,7 +18,6 @@ from vllm.v1.worker.gpu.spec_decode.capabilities import (
     attn_layer_kind,
     attn_layout,
     layer_spec_limits,
-    mamba_state_mode,
     spec_layers,
 )
 from vllm.v1.worker.gpu.spec_decode.commit import accept_result_of, accepted_rows
@@ -96,9 +95,11 @@ class SpecRound:
         limits = layer_spec_limits(
             runner.attn_groups,
             runner.compilation_config.static_forward_context,
-            mamba_state_mode(runner.cache_config),
             kernels=self.registry(),
         )
+        why = runner.model_state.tree_decline_reason()
+        if why is not None:
+            limits.append(SpecLimit("chain", f"model state: {why}"))
         settings = {
             "a speculator without tree_accept": runner.speculator is not None
             and self.resources.max_branching > 1
@@ -129,19 +130,23 @@ class SpecRound:
         if resources.max_branching == 1:
             # Chains (perhaps lowered to): batches keep the chain layout.
             self.rows = None
+        layout = None
+        if resources.max_branching > 1:
+            layout = PlanLayout(self.max_num_tokens, self.max_rows, self.device)
         ctx = KernelContext(
             device=self.device,
             plan_kind=resources.plan_kind,
             max_num_reqs=self.max_num_reqs,
             max_rows=resources.max_rows,
             capture_rows=resources.capture_rows,
+            tree_parents=None if layout is None else layout.tree_parents,
         )
         self.registry().bind(ctx, layers)
-        # Built after binding: until then (the memory profile) dummy batches
+        # Laid out after binding: until then (the memory profile) dummy batches
         # verify chains, which the layers' own kernels run.
-        if resources.max_branching > 1:
-            self.layout = PlanLayout(self.max_num_tokens, self.max_rows, self.device)
-            input_buffers.tree_parents = self.layout.tree_parents
+        if layout is not None:
+            self.layout = layout
+            input_buffers.tree_parents = layout.tree_parents
 
     def plan_batch(
         self,
@@ -286,7 +291,6 @@ def spec_kernel_layers(runner: "GPUModelRunner") -> list[SpecLayerSpec]:
     from vllm.model_executor.layers.mamba.abstract import MambaBase
 
     forward_context = runner.compilation_config.static_forward_context
-    state_mode = mamba_state_mode(runner.cache_config)
     layers = []
     for group, name, spec, layer in spec_layers(runner.attn_groups, forward_context):
         if getattr(layer, "kv_sharing_target_layer_name", None):
@@ -300,11 +304,12 @@ def spec_kernel_layers(runner: "GPUModelRunner") -> list[SpecLayerSpec]:
             * (spec.block_size // runner.kernel_block_sizes[gid]),
         )
         if isinstance(layer, MambaBase):
-            variant = type(layer).spec_layer_variant
-            if variant is None:
+            if layer.tree_decline_reason() is not None:
                 continue
-            kind = SpecLayerKind("mamba", variant, state_mode)
-            layers.append(SpecLayerSpec(name, kind, layer, "mamba_state", **placement))
+            kind = SpecLayerKind("recurrent", type(layer).__name__)
+            layers.append(
+                SpecLayerSpec(name, kind, layer, "recurrent_state", **placement)
+            )
         elif isinstance(spec, AttentionSpec):
             layout = attn_layout(layer, spec)
             layers.append(

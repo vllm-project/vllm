@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 import torch
 
-import vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn as gdn_layer_module
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import CacheConfig, CompilationConfig, ParallelConfig
 from vllm.model_executor.layers.attention import Attention
@@ -20,9 +19,9 @@ from vllm.model_executor.layers.mamba.gdn.olmo_gdn_linear_attn import (
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
 )
+from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
@@ -36,6 +35,7 @@ from vllm.v1.worker.gpu.spec_decode.capabilities import (
     SpecCapabilities,
     SpecLayerKind,
     SpecLimit,
+    causal_full_attention,
     layer_spec_limits,
     resolve_spec_resources,
 )
@@ -51,9 +51,7 @@ from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound
 from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 from vllm.v1.worker.utils import AttentionGroup
 
-GDN_VERIFY: KernelKey = ("mamba:gdn@slots", "verify")
-SHORT_CONV_VERIFY: KernelKey = ("mamba:short_conv@slots", "verify")
-STATE_COMMIT: KernelKey = ("layout:mamba_state@slots", "commit")
+STATE_COMMIT: KernelKey = ("layout:recurrent_state", "commit")
 KV_COMMIT: KernelKey = ("layout:paged_token", "commit")
 
 
@@ -84,7 +82,11 @@ def _bare_layer(cls=Attention, **attrs):
 class _TreeBackend(FlashAttentionBackend):
     """A plugin backend that verifies trees."""
 
-    serves_trees = True
+    @classmethod
+    def tree_decline_reason(cls, layer, kv_cache_spec):
+        if not causal_full_attention(layer, kv_cache_spec):
+            return "not full attention"
+        return None
 
 
 def _model(*groups, backend=_TreeBackend):
@@ -114,9 +116,6 @@ class ToyKernel(SpecKernel):
         self.binds.append([layer.name for layer in layers])
         self.ctxs.append(ctx)
 
-    def verify(self, rows):
-        raise AssertionError("not called on CPU")
-
     def commit(self, step):
         self.steps.append(step)
 
@@ -127,11 +126,8 @@ def _kv_provided() -> KernelRegistry:
 
 
 def _provided() -> KernelRegistry:
-    """A plugin's KV compaction and recurrent tree verify: verify and state
-    commit kernels."""
-    return KernelRegistry(
-        {GDN_VERIFY: ToyKernel(), STATE_COMMIT: ToyKernel(), KV_COMMIT: ToyKernel()}
-    )
+    """A plugin's KV and recurrent-state commits."""
+    return KernelRegistry({STATE_COMMIT: ToyKernel(), KV_COMMIT: ToyKernel()})
 
 
 def _hybrid(layer_cls, backend=_TreeBackend):
@@ -144,8 +140,15 @@ _LLAMA = ((_FULL, "attn", 4, Attention),)
 _IN_TREE = "attn:full_attention, 4 layers: backend FLASH_ATTN verifies chains"
 
 
-def _gdn_reason(mode):
-    return f"mamba:gdn@{mode}, 3 layers: no mamba:gdn@{mode}/verify kernel"
+class TreeGDN(QwenGatedDeltaNetAttention):
+    """What a plugin swaps in with ``PluggableLayer.register_oot``."""
+
+    def tree_decline_reason(self):
+        return None
+
+
+def _chains(cls, why="verifies chains"):
+    return f"recurrent:{cls.__name__}, 3 layers: {why}"
 
 
 # case: (model, state mode, with plugin kernels, plan kind, reasons)
@@ -183,19 +186,24 @@ _MODEL_RULES: dict[str, tuple[Any, str, bool, str, list[str] | None]] = {
         "chain",
         ["attn:full_attention, 2 layers: not full attention"],
     ),
-    "qwen-gdn": (QwenGatedDeltaNetAttention, "slots", False, "chain", None),
-    "qwen-gdn-kernels": (QwenGatedDeltaNetAttention, "slots", True, "tree", []),
-    "qwen-gdn-kernels-in-tree-backend": (
-        lambda: _hybrid(QwenGatedDeltaNetAttention, FlashAttentionBackend),
+    "qwen-gdn": (QwenGatedDeltaNetAttention, "slots", True, "chain", None),
+    "tree-gdn": (TreeGDN, "slots", True, "tree", []),
+    "tree-gdn-no-state-commit": (
+        TreeGDN,
+        "slots",
+        False,
+        "chain",
+        ["recurrent:TreeGDN, 3 layers: no layout:recurrent_state/commit kernel"],
+    ),
+    "tree-gdn-in-tree-backend": (
+        lambda: _hybrid(TreeGDN, FlashAttentionBackend),
         "slots",
         True,
         "chain",
         [_IN_TREE.replace("4 layers", "1 layer")],
     ),
-    "qwen-gdn-replay": (QwenGatedDeltaNetAttention, "replay", True, "chain", None),
 }
-# A layer subclassing a tree-capable one (olmo) runs its own kernels: chains
-# only, with or without plugin kernels.
+# In-tree recurrent layers verify chains, with or without plugin kernels.
 for _name, _layer_cls in {
     "nemotron-h": MambaMixer2,
     "olmo-hybrid": OlmoHybridGatedDeltaNetAttention,
@@ -214,26 +222,28 @@ def test_plan_kind_rules(case):
     if isinstance(model, type):
         layer_cls = model
         model = lambda: _hybrid(layer_cls)  # noqa: E731
-        if reasons is None and layer_cls is QwenGatedDeltaNetAttention:
-            reasons = [_gdn_reason(state_mode)]
-        elif reasons is None:
-            reasons = [
-                f"{layer_cls.__name__}, 3 layers: declares no spec_layer_variant"
-            ]
+        if reasons is None:
+            reasons = [_chains(layer_cls)]
     attn_groups, layers = model()
     kernels = _provided() if provided else _kv_provided()
-    caps = SpecCapabilities.from_limits(
-        layer_spec_limits(attn_groups, layers, state_mode, kernels)
-    )
+    caps = SpecCapabilities.from_limits(layer_spec_limits(attn_groups, layers, kernels))
     assert caps.plan_kind == plan_kind
     assert [limit.reason for limit in caps.limits] == reasons
+
+
+def test_one_token_decode_refuses_drafts():
+    """A recurrent layer that decodes one token per request (Mamba1) refuses
+    speculative decoding at startup."""
+    attn_groups, layers = _hybrid(MambaMixer)
+    with pytest.raises(ValueError, match="cannot verify drafts"):
+        layer_spec_limits(attn_groups, layers, _provided())
 
 
 def test_no_kv_commit_verifies_chains():
     """Without a KV commit kernel, attention layers verify chains:
     vLLM keeps no compaction kernel, so a tree speculator lowers at startup."""
     attn_groups, layers = _model(*_LLAMA)
-    caps = SpecCapabilities.from_limits(layer_spec_limits(attn_groups, layers, "slots"))
+    caps = SpecCapabilities.from_limits(layer_spec_limits(attn_groups, layers))
     assert caps.plan_kind == "chain"
     assert [limit.reason for limit in caps.limits] == [
         "attn:full_attention, 4 layers: no layout:paged_token/commit kernel"
@@ -255,13 +265,14 @@ def _resolve(**settings):
     """Resolve the capabilities of a runner over a hybrid whose layers all
     verify trees, with ``settings`` on the runner."""
     runner = object.__new__(GPUModelRunner)
-    runner.attn_groups, layers = _hybrid(QwenGatedDeltaNetAttention)
+    runner.attn_groups, layers = _hybrid(TreeGDN)
     runner.compilation_config = CompilationConfig()
     runner.compilation_config.static_forward_context = layers
     runner.cache_config, runner.parallel_config = CacheConfig(), ParallelConfig()
     runner.use_pp, runner.pcp_manager, runner.dcp_size = False, None, 1
     runner.batch_sharder, runner.adaptive_verification = None, None
     runner.speculator = _Speculator({"plan", "tree_accept"})
+    runner.model_state = SimpleNamespace(tree_decline_reason=lambda: None)
     for setting, value in settings.items():
         setattr(runner, setting, value)
     spec_round = object.__new__(SpecRound)
@@ -280,7 +291,11 @@ def _resolve(**settings):
             ParallelConfig(enable_dbo=True),
             "micro-batching" + _LOWERED,
         ),
-        ("cache_config", CacheConfig(use_replayssm=True), _gdn_reason("replay")),
+        (
+            "model_state",
+            SimpleNamespace(tree_decline_reason=lambda: "no tree resume"),
+            "model state: no tree resume",
+        ),
         # vLLM has no tree walk: a speculator chooses its accepted paths.
         (
             "speculator",
@@ -290,8 +305,8 @@ def _resolve(**settings):
     ],
 )
 def test_runner_settings_lower_trees_to_chains(setting, value, reason):
-    """The runner's settings, and the Mamba state mode it reads from the cache
-    config, lower a model that verifies trees to chains."""
+    """The runner's settings and its model state lower a model that verifies
+    trees to chains."""
     caps = _resolve(**({} if setting is None else {setting: value}))
 
     assert caps.plan_kind == ("tree" if reason is None else "chain")
@@ -426,14 +441,12 @@ def test_pipeline_ranks_reduce_to_the_lowest_plan_kind():
 
 
 def _module():
-    module = torch.nn.Module()
-    module.spec_verify_kernel = None
-    return module
+    return torch.nn.Module()
 
 
-def _mamba_layer(name, variant="gdn", state_mode="slots"):
-    kind = SpecLayerKind("mamba", variant, state_mode)
-    return SpecLayerSpec(name, kind, _module(), "mamba_state")
+def _recurrent_layer(name):
+    kind = SpecLayerKind("recurrent", "TreeGDN")
+    return SpecLayerSpec(name, kind, _module(), "recurrent_state")
 
 
 _TABLE = torch.zeros(3, 4, dtype=torch.int32)
@@ -470,7 +483,11 @@ def _ctx(plan_kind="tree", shapes=SHAPES):
     "kernels, layer, plan_kind, why",
     [
         pytest.param(
-            {}, _mamba_layer("m"), "chain", "no mamba:gdn@slots/verify", id="gdn"
+            {},
+            _recurrent_layer("m"),
+            "chain",
+            "no layout:recurrent_state/commit",
+            id="recurrent",
         ),
         # No KV commit kernel: the layer verifies chains.
         pytest.param(
@@ -489,26 +506,18 @@ def _ctx(plan_kind="tree", shapes=SHAPES):
             id="nvfp4-kv",
         ),
         pytest.param(
-            {SHORT_CONV_VERIFY: ToyKernel(), STATE_COMMIT: ToyKernel()},
-            _mamba_layer("m", "short_conv"),
+            {STATE_COMMIT: ToyKernel()},
+            _recurrent_layer("m"),
             "tree",
             None,
             id="provided",
         ),
         pytest.param(
-            {GDN_VERIFY: ToyKernel(declines={"m.1"}), STATE_COMMIT: ToyKernel()},
-            _mamba_layer("m.1"),
+            {STATE_COMMIT: ToyKernel(declines={"m.1"})},
+            _recurrent_layer("m.1"),
             "chain",
             "ToyKernel declines the layer",
             id="declined",
-        ),
-        # Verify takes the layer, the state commit declines it: the layer chains.
-        pytest.param(
-            {GDN_VERIFY: ToyKernel(), STATE_COMMIT: ToyKernel(declines={"m"})},
-            _mamba_layer("m"),
-            "chain",
-            "ToyKernel declines the layer",
-            id="commit-declines",
         ),
     ],
 )
@@ -522,35 +531,29 @@ def test_registry_plan_kind(kernels, layer, plan_kind, why):
 
 
 def test_bind_and_commit():
-    """Bind binds each kernel once to its layers (a chain binds the verify
-    kernels only, no spec decode unbinds them, and a layer without one runs its
-    own); commit runs every bound commit kernel."""
-    verify, state, kv = ToyKernel(), ToyKernel(), ToyKernel()
-    registry = KernelRegistry({GDN_VERIFY: verify, STATE_COMMIT: state, KV_COMMIT: kv})
+    """Bind binds each commit kernel once to its layers, with the plan's
+    parents; a chain binds none; commit runs every bound kernel."""
+    state, kv = ToyKernel(), ToyKernel()
+    registry = KernelRegistry({STATE_COMMIT: state, KV_COMMIT: kv})
     layers = [
-        _mamba_layer("m.0"),
-        _mamba_layer("m.1"),
+        _recurrent_layer("m.0"),
+        _recurrent_layer("m.1"),
         _attn_layer("a.0"),
         _attn_layer("ring", layout=""),
     ]
     registry.bind(_ctx("chain"), layers)
-    assert verify.binds == [["m.0", "m.1"]] and not state.binds and not kv.binds
+    assert not state.binds and not kv.binds
 
-    verify.binds.clear()
-    registry.bind(_ctx("tree"), layers)
-    assert verify.binds == state.binds == [["m.0", "m.1"]]
+    parents = torch.full((8,), -1, dtype=torch.int32)
+    registry.bind(replace(_ctx("tree"), tree_parents=parents), layers)
+    assert state.binds == [["m.0", "m.1"]]
     assert kv.binds == [["a.0"]]
     assert [len(c.kv_layouts) for c in kv.ctxs] == [1]
-    assert not any(c.kv_layouts for c in state.ctxs + verify.ctxs)
-    assert all(layer.module.spec_verify_kernel is verify for layer in layers[:2])
+    assert not any(c.kv_layouts for c in state.ctxs)
+    assert all(c.tree_parents is parents for c in state.ctxs + kv.ctxs)
     step = CommitStep(result=None, num_reqs=2, rows=None, seq_lens=None)
     registry.commit(step)
     assert state.steps == [step] and kv.steps == [step]
-
-    stale = _mamba_layer("m.0")
-    stale.module.spec_verify_kernel = "stale"
-    KernelRegistry({STATE_COMMIT: ToyKernel()}).bind(_ctx(), [stale])
-    assert stale.module.spec_verify_kernel is None
 
 
 def _kv_layouts(*layers):
@@ -600,173 +603,13 @@ def test_paged_kv_layout_refuses_at_bind(layer, match):
 
 
 @pytest.mark.parametrize("plan_kind", ["chain", "tree"])
-def test_bind_one_kernel_for_verify_and_commit(plan_kind):
-    """A kernel given for both a recurrent layer's verify and its
-    state commit is bound once to each layer, and commits above a chain."""
+def test_bind_one_kernel_for_two_commits(plan_kind):
+    """A kernel given for both the KV and the recurrent-state commit is bound
+    once, to every layer, and commits above a chain."""
     kernel = ToyKernel()
-    registry = KernelRegistry({GDN_VERIFY: kernel, STATE_COMMIT: kernel})
-    layers = [_mamba_layer("m.0"), _mamba_layer("m.1")]
-    registry.bind(_ctx(plan_kind), layers)
-    assert kernel.binds == [["m.0", "m.1"]]
-    assert all(layer.module.spec_verify_kernel is kernel for layer in layers)
+    registry = KernelRegistry({STATE_COMMIT: kernel, KV_COMMIT: kernel})
+    registry.bind(_ctx(plan_kind), [_recurrent_layer("m.0"), _attn_layer("a.0")])
+    assert kernel.binds == ([["m.0", "a.0"]] if plan_kind == "tree" else [])
     step = CommitStep(result=None, num_reqs=2, rows=None, seq_lens=None)
     registry.commit(step)
     assert kernel.steps == ([step] if plan_kind == "tree" else [])
-
-
-NUM_TOKENS = 4
-
-
-class _RecordingKernel(SpecKernel):
-    """Writes ``fill`` to every spec row's output and records what it got."""
-
-    def __init__(self, fill: float):
-        self.fill = fill
-        self.calls: list = []
-
-    def supports(self, layer):
-        return True
-
-    def verify(self, layer, attn_metadata, mixed_qkv, a, b, out):
-        self.calls.append((layer, attn_metadata, mixed_qkv, out))
-        out.fill_(self.fill)
-
-
-class _Calls:
-    def __init__(self):
-        self.conv = 0
-        self.recurrent = 0
-        self.b: list[torch.Tensor] = []
-
-
-_HEADS = dict(num_k_heads=1, num_v_heads=2, head_k_dim=2, head_v_dim=3)
-
-
-def _layer(
-    monkeypatch, calls: _Calls, metadata: GDNAttentionMetadata
-) -> QwenGatedDeltaNetAttention:
-    """A tiny GDN layer whose spec kernels are fakes that count their calls.
-
-    Built with ``__new__``: the real constructor needs a TP group and weights,
-    and these tests only exercise how ``_forward_core`` routes the rows.
-    """
-
-    def fake_conv(mixed_qkv_spec, *args, **kwargs):
-        calls.conv += 1
-        return mixed_qkv_spec + 100
-
-    def fake_recurrent(**kwargs):
-        calls.recurrent += 1
-        calls.b.append(kwargs["b"])
-        return torch.full((1, kwargs["q"].shape[0], 2, 3), -1.0), None
-
-    monkeypatch.setattr(gdn_layer_module, "causal_conv1d_update", fake_conv)
-    monkeypatch.setattr(
-        gdn_layer_module, "fused_sigmoid_gating_delta_rule_update", fake_recurrent
-    )
-    monkeypatch.setattr(gdn_layer_module, "is_conv_state_dim_first", lambda: True)
-    monkeypatch.setattr(
-        gdn_layer_module,
-        "get_forward_context",
-        lambda: SimpleNamespace(attn_metadata={"layer": metadata}),
-    )
-    layer = QwenGatedDeltaNetAttention.__new__(QwenGatedDeltaNetAttention)
-    torch.nn.Module.__init__(layer)
-    layer.prefix = "layer"
-    layer.enable_packed_recurrent_decode = False
-    layer.activation = "silu"
-    layer.conv1d = torch.nn.Conv1d(5, 5, 4, groups=5, bias=False)
-    layer.kv_cache = (torch.zeros(2, 5, 3), torch.zeros(2, 2, 3, 3))
-    layer.A_log = torch.zeros(2)
-    layer.dt_bias = torch.ones(2)
-    layer.tp_size = 1
-    for name, value in _HEADS.items():
-        setattr(layer, name, value)
-    layer.rearrange_mixed_qkv = lambda x: (None, None, None) if x is None else (x, x, x)
-    layer.qkv_row_views = layer.rearrange_mixed_qkv
-    return layer
-
-
-def _spec_metadata(parents=None) -> GDNAttentionMetadata:
-    """One spec-decode request of NUM_TOKENS rows and nothing else."""
-    return GDNAttentionMetadata(
-        num_prefills=0,
-        num_prefill_tokens=0,
-        num_decodes=0,
-        num_decode_tokens=0,
-        num_spec_decodes=1,
-        num_spec_decode_tokens=NUM_TOKENS,
-        num_actual_tokens=NUM_TOKENS,
-        spec_query_start_loc=torch.tensor([0, NUM_TOKENS], dtype=torch.int32),
-        spec_state_indices_tensor=torch.zeros(1, 4, dtype=torch.int32),
-        spec_sequence_masks=torch.ones(1, dtype=torch.bool),
-        num_accepted_tokens=torch.ones(1, dtype=torch.int32),
-        spec_tree_parents=parents,
-    )
-
-
-def test_gdn_runs_the_bound_kernel(monkeypatch):
-    """The layer hands itself, its metadata and its spec rows, as the views they
-    are, to the bound kernel; plain decode rows next to them run the in-tree
-    kernels. The fused MTP decode kernel is off while a kernel is bound."""
-    kernel = _RecordingKernel(fill=7.0)
-    parents = torch.tensor([-1, 0, 0, 1], dtype=torch.int32)
-    metadata = _spec_metadata(parents)
-    metadata.num_decodes = metadata.num_decode_tokens = 1
-    metadata.num_actual_tokens = NUM_TOKENS + 1
-    metadata.spec_token_indx = torch.arange(1, NUM_TOKENS + 1)
-    metadata.non_spec_token_indx = torch.tensor([0])
-    metadata.non_spec_state_indices_tensor = torch.tensor([1], dtype=torch.int32)
-    metadata.non_spec_query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
-    calls = _Calls()
-    layer = _layer(monkeypatch, calls, metadata)
-    layer.spec_verify_kernel = kernel
-    # Two rows of padding past the batch.
-    out = torch.zeros(NUM_TOKENS + 3, 2, 3)
-    b, a = torch.zeros(NUM_TOKENS + 3, 4).chunk(2, dim=-1)
-    layer._forward_core(
-        mixed_qkv=torch.zeros(NUM_TOKENS + 3, 5), b=b, a=a, core_attn_out=out
-    )
-
-    ((got_layer, got_metadata, mixed_qkv, got_out),) = kernel.calls
-    assert got_layer is layer and got_metadata is metadata
-    assert mixed_qkv.shape[0] == NUM_TOKENS and got_out.shape[0] == NUM_TOKENS
-    assert (calls.conv, calls.recurrent) == (1, 1)  # the decode row
-    assert torch.all(out[0] == -1.0)
-    assert torch.all(out[1 : NUM_TOKENS + 1] == 7.0)
-    assert torch.all(out[NUM_TOKENS + 1 :] == 0)
-
-    state_dtype = next(iter(gdn_layer_module.FUSED_GDN_STATE_DTYPES))
-    layer.kv_cache = (torch.zeros(1), torch.zeros(1, dtype=state_dtype))
-    layer.gdn_decode_kernel = "cuda"
-    layer.num_v_heads = layer.num_k_heads = 2
-    monkeypatch.setattr(
-        torch.ops._C, "fused_gdn_decode_post_conv_mtp", object(), raising=False
-    )
-    assert layer._can_use_fused_gdn_mtp_decode(_spec_metadata()) is False
-    layer.spec_verify_kernel = None
-    assert layer._can_use_fused_gdn_mtp_decode(_spec_metadata()) is True
-
-
-def test_gdn_decode_keeps_b_and_a_strided(monkeypatch):
-    """Without spec rows the layer hands ``b`` and ``a`` to the kernels as the
-    strided views of ``ba`` they are, as on main."""
-    metadata = GDNAttentionMetadata(
-        num_prefills=0,
-        num_prefill_tokens=0,
-        num_decodes=2,
-        num_decode_tokens=2,
-        num_spec_decodes=0,
-        num_spec_decode_tokens=0,
-        num_actual_tokens=2,
-        non_spec_query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
-        non_spec_state_indices_tensor=torch.zeros(2, dtype=torch.int32),
-    )
-    calls = _Calls()
-    layer = _layer(monkeypatch, calls, metadata)
-    b, a = torch.zeros(2, 4).chunk(2, dim=-1)
-    layer._forward_core(
-        mixed_qkv=torch.zeros(2, 5), b=b, a=a, core_attn_out=torch.zeros(2, 2, 3)
-    )
-    assert [x.data_ptr() for x in calls.b] == [b.data_ptr()]
-    assert not calls.b[0].is_contiguous()

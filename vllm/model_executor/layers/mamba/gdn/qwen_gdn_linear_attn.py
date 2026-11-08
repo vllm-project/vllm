@@ -557,9 +557,6 @@ class ChunkGatedDeltaRule(CustomOp):
 
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
-    # A tree verifies only through a registry verify kernel bound to the layer.
-    spec_layer_variant = "gdn"
-
     def get_state_shape(
         self,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
@@ -1715,22 +1712,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
 
-        verify_kernel = self.spec_verify_kernel
-        spec_only = (
-            spec_sequence_masks is not None
-            and attn_metadata.num_prefills == 0
-            and attn_metadata.num_decodes == 0
-        )
-        if verify_kernel is not None and spec_only:
-            # Only spec-decode rows: the kernel reads the projections as they
-            # are and writes the layer's output buffer.
-            verify_kernel.verify(  # type: ignore[attr-defined]
-                self, attn_metadata, mixed_qkv, a, b, core_attn_out[:num_actual_tokens]
-            )
-            return
-
         if spec_sequence_masks is not None:
-            if spec_only:
+            if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
                 a_spec = a
                 b_spec = b
@@ -1748,33 +1731,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if spec_sequence_masks is not None:
             # spec_state_indices_tensor is always set when spec_sequence_masks is set
             assert spec_state_indices_tensor is not None
-            if verify_kernel is not None:
-                kernel_out_spec = mixed_qkv_spec.new_empty(
-                    mixed_qkv_spec.shape[0],
-                    self.num_v_heads // self.tp_size,
-                    self.head_v_dim,
-                )
-                verify_kernel.verify(  # type: ignore[attr-defined]
-                    self, attn_metadata, mixed_qkv_spec, a_spec, b_spec, kernel_out_spec
-                )
-                mixed_qkv_spec = None
-            else:
-                # The layer's own kernels verify chains only.
-                assert attn_metadata.spec_tree_parents is None
-                mixed_qkv_spec = causal_conv1d_update(
-                    mixed_qkv_spec,
-                    conv_state,
-                    conv_weights,
-                    self.conv1d.bias,
-                    self.activation,
-                    conv_state_indices=spec_state_indices_tensor[:, 0][  # type: ignore[index]
-                        : attn_metadata.num_spec_decodes  # type: ignore[attr-defined]
-                    ],
-                    num_accepted_tokens=num_accepted_tokens,
-                    query_start_loc=spec_query_start_loc,
-                    max_query_len=spec_state_indices_tensor.size(-1),
-                    validate_data=False,
-                )
+            mixed_qkv_spec = causal_conv1d_update(
+                mixed_qkv_spec,
+                conv_state,
+                conv_weights,
+                self.conv1d.bias,
+                self.activation,
+                conv_state_indices=spec_state_indices_tensor[:, 0][  # type: ignore[index]
+                    : attn_metadata.num_spec_decodes  # type: ignore[attr-defined]
+                ],
+                num_accepted_tokens=num_accepted_tokens,
+                query_start_loc=spec_query_start_loc,
+                max_query_len=spec_state_indices_tensor.size(-1),
+                validate_data=False,
+            )
 
         # 1.2: Process the remaining part
         conv_input_non_spec = mixed_qkv_non_spec
@@ -1873,10 +1843,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 2. Recurrent attention
 
         # 2.1: Process the multi-query part
-        if spec_sequence_masks is not None and verify_kernel is not None:
-            core_attn_out_spec = kernel_out_spec.unsqueeze(0)
-            last_recurrent_state = None
-        elif spec_sequence_masks is not None:
+        if spec_sequence_masks is not None:
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -2332,8 +2299,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> bool:
         state_indices = attn_metadata.spec_state_indices_tensor
         return (
-            self.spec_verify_kernel is None
-            and attn_metadata.spec_sequence_masks is not None
+            attn_metadata.spec_sequence_masks is not None
             and attn_metadata.num_decodes == 0
             and attn_metadata.num_spec_decodes > 0
             and self.kv_cache[1].dtype in FUSED_GDN_STATE_DTYPES

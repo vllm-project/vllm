@@ -72,10 +72,13 @@ class AttentionBackend(ABC):
     # Can forward() run with key/value omitted after a fused op wrote the cache?
     supports_kv_cache_update_bypass: bool = False
 
-    # Does forward() verify tree plans: attend each plan row to its context and
-    # its ancestors along CommonAttentionMetadata.tree_parents, not causally?
-    # Without it, a full attention layer verifies chains.
-    serves_trees: bool = False
+    @classmethod
+    def tree_decline_reason(cls, layer: Any, kv_cache_spec: Any) -> str | None:
+        """Why forward() cannot verify a tree plan on ``layer`` (None: it
+        attends each plan row to its context and its ancestors along
+        ``CommonAttentionMetadata.tree_parents``, for this layer's window,
+        soft cap and sinks). Without an override the layer verifies chains."""
+        return f"backend {cls.get_name()} verifies chains"
 
     @staticmethod
     def get_supported_kernel_block_sizes(
@@ -491,7 +494,8 @@ class CommonAttentionMetadata:
     index within its request, -1 for the request's first row, every other
     row's parent an earlier row (``i - 1`` in a chain). A row attends to the
     request's context, itself and its ancestors along these parents; a backend
-    that ``serves_trees`` derives its mask from them in its metadata builder.
+    that verifies trees (``tree_decline_reason``) derives its mask from them in
+    its metadata builder.
     ``positions`` holds each row's plan position. None means every request is a
     chain."""
 

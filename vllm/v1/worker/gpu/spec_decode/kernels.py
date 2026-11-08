@@ -20,14 +20,13 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.worker.gpu.spec_decode.round import AcceptResult
 
-Op = Literal["verify", "commit"]
+Op = Literal["commit"]
 KernelKey = tuple[str, Op]
-"""``(SpecLayerKind.key(), op)``, e.g. ``("mamba:gdn@slots", "verify")`` or
-``("layout:paged_token", "commit")``."""
+"""``(SpecLayerKind.key(), op)``, e.g. ``("layout:paged_token", "commit")``."""
 
 
 def key_name(key: KernelKey) -> str:
-    """``"mamba:gdn@slots/verify"``: a key as logs and docs spell it."""
+    """``"layout:paged_token/commit"``: a key as logs and docs spell it."""
     return f"{key[0]}/{key[1]}"
 
 
@@ -135,6 +134,11 @@ class KernelContext:
     """Rows per request of each decode CUDA graph."""
     kv_layouts: tuple[PagedKVLayout, ...] = ()
     """``layout:paged_token`` commit kernels only."""
+    tree_parents: torch.Tensor | None = None
+    """``[max_num_tokens]`` int32, static: during each forward, every batch
+    token's parent row within its request's query (-1 for the first; chains
+    and prefill tokens ``i - 1``), as ``CommonAttentionMetadata.tree_parents``.
+    None when the plan kind is chain. For layers that verify trees themselves."""
 
 
 @dataclass(frozen=True)
@@ -150,11 +154,9 @@ class CommitStep:
 
 
 class SpecKernel:
-    """A kernel for one key: implement :meth:`supports` and the key's op,
-    ``verify(layer, attn_metadata, mixed_qkv, a, b, out)`` for ``mamba:gdn@*``
-    keys or ``commit(step: CommitStep)`` for ``layout:*`` keys. A verify kernel
-    keeps the in-tree state layout and runs inside captured graphs: no host
-    syncs and no allocations sized by data.
+    """A kernel for one key: implement :meth:`supports` and
+    ``commit(step: CommitStep)``. It runs inside captured graphs: no host syncs
+    and no allocations sized by data.
     """
 
     def supports(self, layer: SpecLayerSpec) -> bool:
@@ -189,9 +191,8 @@ class KernelRegistry:
     def required_keys(layer: SpecLayerSpec) -> list[KernelKey]:
         """The kernels ``layer`` needs to verify trees."""
         kind = layer.kind
-        if kind.family == "mamba":
-            state = SpecLayerKind("layout", "mamba_state", kind.state_mode)
-            return [(kind.key(), "verify"), (state.key(), "commit")]
+        if kind.family == "recurrent":
+            return [(SpecLayerKind("layout", "recurrent_state").key(), "commit")]
         if layer.layout:
             return [(SpecLayerKind("layout", layer.layout).key(), "commit")]
         return []
@@ -215,25 +216,17 @@ class KernelRegistry:
         return "tree", ""
 
     def bind(self, ctx: KernelContext, layers: Sequence[SpecLayerSpec]) -> None:
-        """Bind each kernel once, to every layer it runs on; set each recurrent
-        layer's ``spec_verify_kernel``. A chain binds no commit kernel."""
-        commits = ctx.plan_kind != "chain"
-        # One kernel may serve several keys: bind it once to its unique layers
-        # and commit with it if any of its ops is a commit.
+        """Bind each kernel once, to every layer it runs on. A chain binds
+        none."""
+        # One kernel may serve several keys: bind it once to its unique layers.
         served: dict[int, tuple[SpecKernel, dict[KernelKey, list[SpecLayerSpec]]]] = {}
-        for layer in layers:
-            if layer.kind.family == "mamba":
-                layer.module.spec_verify_kernel = None
+        for layer in layers if ctx.plan_kind != "chain" else ():
             for key in self.required_keys(layer):
-                if key[1] == "commit" and not commits:
-                    continue
                 kernel = self.kernel_for(key, layer)
                 if kernel is None:
                     continue
                 _, by_key = served.setdefault(id(kernel), (kernel, {}))
                 by_key.setdefault(key, []).append(layer)
-                if key[1] == "verify":
-                    layer.module.spec_verify_kernel = kernel
         self._commits = []
         for kernel, by_key in served.values():
             unique = {layer.name: layer for keyed in by_key.values() for layer in keyed}
@@ -242,8 +235,7 @@ class KernelRegistry:
                 layouts = paged_kv_layouts(by_key[PAGED_KV_COMMIT])
                 kernel_ctx = replace(ctx, kv_layouts=layouts)
             kernel.bind(kernel_ctx, list(unique.values()))
-            if any(op == "commit" for _, op in by_key):
-                self._commits.append(kernel)
+            self._commits.append(kernel)
 
     def commit(self, step: CommitStep) -> None:
         """Run every bound commit kernel on ``step``."""

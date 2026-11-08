@@ -11,11 +11,8 @@ from tests.v1.attention.utils import (
     BatchSpec,
     MockMambaBuilder,
     create_common_attn_metadata,
-    create_vllm_config,
 )
-from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import MambaSpec
 
 
@@ -95,37 +92,3 @@ def test_mamba_captures_decode_graphs_up_to_one_plus_k(query_len):
     assert metadata.num_prefills == 0
     assert metadata.num_accepted_tokens is not None
     assert metadata.num_accepted_tokens[:num_reqs].tolist() == [query_len] * num_reqs
-
-
-def test_gdn_builder_hands_the_spec_rows_their_parents():
-    """``CommonAttentionMetadata.tree_parents`` reaches the GDN spec rows."""
-    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B", block_size=16)
-    vllm_config.speculative_config = SpeculativeConfig(
-        method="ngram", num_speculative_tokens=3
-    )
-    builder = GDNAttentionMetadataBuilder(
-        kv_cache_spec=MambaSpec(
-            block_size=16, shapes=((16, 64),), dtypes=(torch.float16,)
-        ),
-        layer_names=["layer.0"],
-        vllm_config=vllm_config,
-        device=torch.device("cpu"),
-    )
-
-    def build(tree_parents):
-        common = create_common_attn_metadata(
-            BatchSpec(seq_lens=[40, 50], query_lens=[4, 4]), 16, torch.device("cpu")
-        )
-        common.tree_parents = tree_parents
-        return builder.build(
-            common_prefix_len=0,
-            common_attn_metadata=common,
-            num_decode_draft_tokens_cpu=torch.tensor([3, 3], dtype=torch.int32),
-            num_accepted_tokens=torch.ones(2, dtype=torch.int32),
-        )
-
-    parents = torch.tensor([-1, 0, 0, 1, -1, 0, 1, 1], dtype=torch.int32)
-    assert build(None).spec_tree_parents is None
-    metadata = build(parents)
-    assert metadata.num_spec_decodes == 2
-    assert torch.equal(metadata.spec_tree_parents.cpu(), parents)

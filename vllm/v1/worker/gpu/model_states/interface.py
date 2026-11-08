@@ -145,6 +145,11 @@ class ModelState(ABC):
         on ``stream``: the model graphs' capture stream."""
         return None
 
+    def tree_decline_reason(self) -> str | None:
+        """Why this model state cannot resume requests from a tree's accepted
+        path (``postprocess_state(accepted_row=)``). None: it can."""
+        return None
+
     def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
         """Cudagraph support of attention groups this ModelState builds outside
         ``init_attn_backend`` (e.g. encoder-only layers).

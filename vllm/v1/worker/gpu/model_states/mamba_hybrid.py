@@ -348,6 +348,13 @@ class MambaHybridModelState(DefaultModelState):
             )
         return attn_metadata
 
+    def tree_decline_reason(self) -> str | None:
+        if self.recoverssm is not None or self._align_mode:
+            return "recoverssm and align prefix caching resume no tree path"
+        if self.cache_config.use_replayssm:
+            return "replayssm keeps no recurrent state per verify row"
+        return None
+
     def postprocess_state(
         self,
         idx_mapping: torch.Tensor,
@@ -362,11 +369,8 @@ class MambaHybridModelState(DefaultModelState):
         if accepted_row is not None:
             # A plan that is not a chain: resume from the state its last accepted
             # row wrote. The kernels read state row num_accepted_tokens - 1.
-            if self.recoverssm is not None or self._align_mode:
-                raise NotImplementedError(
-                    "verify plans that are not chains do not support recoverssm "
-                    "or mamba align prefix caching yet"
-                )
+            # (Admission lowers such plans to chains where tree_decline_reason
+            # says so.)
             if num_reqs:
                 _scatter_accepted_row_kernel[(num_reqs,)](
                     idx_mapping, accepted_row, self.num_accepted_tokens_gpu

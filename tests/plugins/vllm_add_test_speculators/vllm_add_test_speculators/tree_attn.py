@@ -14,6 +14,7 @@ from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionMetadata,
     TritonAttentionMetadataBuilder,
 )
+from vllm.v1.worker.gpu.spec_decode.capabilities import causal_full_attention
 
 from . import EAGER_UNIFORM_VERIFY, UNIFORM_VERIFY, VerifySteps
 from .reference import tree_window
@@ -71,7 +72,11 @@ class TreeAttentionImpl(TritonAttentionImpl):
 
 
 class TreeAttentionBackend(TritonAttentionBackend):
-    serves_trees = True
+    @classmethod
+    def tree_decline_reason(cls, layer, kv_cache_spec):
+        if not causal_full_attention(layer, kv_cache_spec):
+            return "not full attention"
+        return None
 
     @staticmethod
     def get_name() -> str:

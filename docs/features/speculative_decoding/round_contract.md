@@ -18,8 +18,8 @@ given and returns; the tree kernels themselves come from the speculator.
 | The candidate budget for the next round (`SpeculatorConfig.candidate_budget`) | Sampling the target's token at every verify row, and the rejection sampler for chains |
 | The accepted path through a tree (`BaseSpeculator.tree_accept`) | Checking that path against the plan |
 | Its own drafting (`BaseSpeculator.propose`) | KV cache and recurrent-state memory, sized at startup |
-| The tree kernels: KV compaction, recurrent verify and commit (`SpeculatorConfig.spec_kernels`) | A description of each KV cache group's layout for the KV commit |
-| A tree attention backend (`AttentionBackend.serves_trees`) | Each plan row's parent and position in the attention metadata |
+| The tree commits: KV compaction and recurrent state (`SpeculatorConfig.spec_kernels`) | A description of each KV cache group's layout for the KV commit |
+| Tree-verifying layers: an attention backend or a recurrent layer swapped in with `PluggableLayer.register_oot` | Each plan row's parent and position in the attention metadata |
 | | Scheduling, preemption and the order of the waiting queue |
 | | Deciding what each layer of the target can verify |
 
@@ -48,18 +48,30 @@ layers and reports a `SpecCapabilities`: a `plan_kind` and one
 `SpecLimit(plan_kind, reason)` per layer kind or setting that lowers it. The model
 verifies the lowest plan kind of any layer on any rank.
 
-- **Attention layers.** Full attention (no sliding window, chunk or R-SWA window)
-  verifies trees when its backend sets `AttentionBackend.serves_trees` and the
-  registry holds a `layout:paged_token/commit` kernel. Such a backend reads
+Each layer, its backend and the model state answer for themselves with a
+decline reason (None: trees); vLLM knows no model family.
+
+- **Attention layers** verify trees when
+  `AttentionBackend.tree_decline_reason(layer, kv_cache_spec)` returns None
+  (default: chains; `causal_full_attention` helps a backend decline windows)
+  and the registry holds the commit of the layer's layout, e.g.
+  `layout:paged_token/commit`. Such a backend reads
   `CommonAttentionMetadata.tree_parents` (each token's parent row within its
   request, -1 for its first) and the plan `positions`, and builds the mask it
   needs (a row sees its context, itself and its ancestors) in its own metadata
-  builder. No in-tree backend sets `serves_trees` and vLLM has no KV commit
+  builder. No in-tree backend verifies trees and vLLM has no KV commit
   kernel, so in tree every model verifies chains.
 - **The speculator** verifies chains unless it overrides `BaseSpeculator.tree_accept`.
-- **Recurrent layers** (`MambaBase` subclasses) verify chains unless the class
-  itself (not a parent) sets `spec_layer_variant`, for example `"gdn"`, and the
-  registry holds its kernels (see [Kernel registry](#kernel-registry)).
+- **Recurrent layers** (`MambaBase` subclasses) verify trees when
+  `MambaBase.tree_decline_reason()` returns None (no in-tree layer's does: a
+  plugin swaps in its own layer with `PluggableLayer.register_oot`) and the
+  registry holds a `layout:recurrent_state/commit` kernel. Row `i` of a request
+  stores its state at `spec_state_indices_tensor[b, i]` and continues from the
+  state of its parent row (`KernelContext.tree_parents`). A layer with
+  `verifies_drafts = False` (Mamba1) refuses speculative decoding at startup.
+- **The model state** verifies chains when `ModelState.tree_decline_reason()`
+  says it cannot resume from a tree path (recurrent align prefix caching,
+  recovery or replay).
 - **Runner settings** listed under [Limits](#limits) lower trees to chains.
 
 ### Downgrade to chain
@@ -197,10 +209,8 @@ written as `"<layer kind>/<op>"` in logs:
 
 | Op | Keys | What it does |
 | --- | --- | --- |
-| `verify` | `mamba:gdn@slots` | Runs the convolution and recurrence of a recurrent layer's verify rows, inside the captured graphs. Plugins only: without one, the layer runs its own chain kernels. |
-| `commit` | `layout:paged_token`, `layout:mamba_state@slots` | Moves what the accepted path wrote to where the next step reads it: the attention KV, or the recurrent state and conv window. |
+| `commit` | `layout:paged_token`, `layout:recurrent_state` | Moves what the accepted path wrote to where the next step reads it: the attention KV, or a recurrent layer's state. |
 
-`@slots` is the recurrent-state mode.
 
 The registry holds no kernel in tree. A speculator names, in
 `SpeculatorConfig.spec_kernels`, the qualified name of a factory that takes
@@ -215,12 +225,7 @@ A `SpecKernel` implements these methods:
 - `bind(ctx: KernelContext, layers: Sequence[SpecLayerSpec]) -> None` is called once
   per worker, before capture, with every layer the kernel runs on. Allocate memory
   here. Raise here on anything the kernel cannot run, not at the first step.
-- `verify(layer, attn_metadata, mixed_qkv, a, b, out) -> None`, for `mamba:gdn@*`
-  keys, gets the GDN layer (its weights and `kv_cache`), its `GDNAttentionMetadata`
-  and the spec rows' projections, writes every row's output to `out` and keeps the
-  in-tree state layout. Row `i` of request `b` stores its state at
-  `spec_state_indices_tensor[b, i]` and continues from row `spec_tree_parents[i]`.
-- `commit(step: CommitStep) -> None`, for `layout:*` keys, moves what the rows on
+- `commit(step: CommitStep) -> None` moves what the rows on
   `step.result.path` wrote to where the next step reads it. For request `b`
   with context `seq_lens[b] - rows[b]`, the KV of row `path[b, j]` moves to
   position `context + j`, for `1 <= j < path_len[b]`.
@@ -311,5 +316,5 @@ all three (`reference.py`, `tree_attn.py`).
 - Overlapping the drafter with the target forward is not part of the contract.
 - The KV and recurrent-state pools are sized for the declared resources, even when
   the model runs with less.
-- Replay and recovery recurrent-state modes keep no state slot per draft row, so
-  their layers verify chains.
+- Align prefix caching, replay and recovery keep no recurrent state per draft
+  row, so recurrent layers verify chains.

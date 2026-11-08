@@ -25,17 +25,13 @@ class SpecLayerKind:
     """What a layer is to speculative decoding, derived from the KV cache spec
     or the layer class (a plugin cannot invent one)."""
 
-    family: Literal["attn", "mamba", "layout"]
+    family: Literal["attn", "recurrent", "layout"]
     variant: str
-    """attn: the ``KVCacheSpecKind`` value; mamba: ``spec_layer_variant``;
-    layout: ``"paged_token"``, ``"paged_split_scale"`` or ``"mamba_state"``."""
-    state_mode: str = ""
-    """mamba and layout ``mamba_state`` only: how drafts keep recurrent state,
-    ``"slots"``, ``"replay"``, ``"recover"`` or ``"align"``."""
+    """attn: the ``KVCacheSpecKind`` value; recurrent: the layer class name;
+    layout: ``"paged_token"``, ``"paged_split_scale"`` or ``"recurrent_state"``."""
 
     def key(self) -> str:
-        suffix = f"@{self.state_mode}" if self.state_mode else ""
-        return f"{self.family}:{self.variant}{suffix}"
+        return f"{self.family}:{self.variant}"
 
 
 @dataclass(frozen=True)
@@ -88,22 +84,9 @@ def spec_layers(
                 yield group, name, spec, layer
 
 
-def mamba_state_mode(cache_config: Any) -> str:
-    """How recurrent layers keep the drafts' states. Align-mode prefix caching
-    keeps them only at block boundaries."""
-    if cache_config.mamba_cache_mode == "align":
-        return "align"
-    if cache_config.use_replayssm:
-        return "replay"
-    if cache_config.use_kda_recoverssm:
-        return "recover"
-    return "slots"
-
-
 def layer_spec_limits(
     attn_groups: Iterable[Iterable["AttentionGroup"]],
     layers: Mapping[str, Any],
-    mamba_state_mode: str,
     kernels: "KernelRegistry | None" = None,
 ) -> list[SpecLimit]:
     """The plan kind caps of the target's layers (:func:`spec_layers`), one per
@@ -119,25 +102,22 @@ def layer_spec_limits(
     num_layers: Counter[tuple[PlanKind, str, str]] = Counter()
     for group, name, spec, layer in spec_layers(attn_groups, layers):
         if isinstance(layer, MambaBase):
-            variant = type(layer).spec_layer_variant
-            if variant is None:
-                what = type(layer).__name__
-                num_layers[("chain", what, "declares no spec_layer_variant")] += 1
-                continue
-            # The state mode is part of the key: the slots kernels read a state
-            # slot per draft row, which replay and recovery do not keep.
-            kind = SpecLayerKind("mamba", variant, mamba_state_mode)
-            layout = "mamba_state"
+            if not layer.verifies_drafts:
+                raise ValueError(
+                    f"{name} ({type(layer).__name__}) decodes one token per "
+                    "request, so it cannot verify drafts: disable speculative "
+                    "decoding for this model."
+                )
+            kind = SpecLayerKind("recurrent", type(layer).__name__)
+            why = layer.tree_decline_reason()
+            layout = "recurrent_state"
         else:
             kind = attn_layer_kind(spec)
-            if kind.variant != "full_attention" or _has_window(layer, spec):
-                num_layers[("chain", kind.key(), "not full attention")] += 1
-                continue
-            if not group.backend.serves_trees:
-                why = f"backend {group.backend.get_name()} verifies chains"
-                num_layers[("chain", kind.key(), why)] += 1
-                continue
+            why = group.backend.tree_decline_reason(layer, spec)
             layout = attn_layout(layer, spec)
+        if why is not None:
+            num_layers[("chain", kind.key(), why)] += 1
+            continue
         plan_kind, why = kernels.plan_kind(
             SpecLayerSpec(name, kind, layer, layout=layout)
         )
@@ -149,9 +129,12 @@ def layer_spec_limits(
     ]
 
 
-def _has_window(layer: Any, spec: Any) -> bool:
-    """Whether a full attention layer attends to a window or chunk only."""
-    return any(
+def causal_full_attention(layer: Any, spec: Any) -> bool:
+    """Whether an attention layer attends to its whole context, causally (no
+    window or chunk): a helper for backends' ``tree_decline_reason``."""
+    from vllm.v1.kv_cache_interface import get_kv_cache_spec_kind
+
+    return get_kv_cache_spec_kind(spec).value == "full_attention" and not any(
         getattr(spec, name, None) or getattr(layer, name, None)
         for name in ("sliding_window", "attention_chunk_size", "rswa_window")
     )
