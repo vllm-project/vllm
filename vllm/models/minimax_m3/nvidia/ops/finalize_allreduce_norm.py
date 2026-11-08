@@ -221,9 +221,9 @@ class _LamportGemmaRMSNormMxfp8Kernel:
     hold, so two shuffles reduce its amax. The scales of the padding rows below
     the next multiple of 128 are zeroed, as FlashInfer's quantization does.
 
-    With ``reduced_input`` (two-shot, ``tp=1``), the mailbox holds each token's
-    finished sum, residual included, ``[generation][token]``, from
-    ``_OwnerReduceMulticastDeviceKernel``, which also advanced the generation.
+    With `reduced_input` (two-shot, `tp=1`), the mailbox holds each token's
+    finished sum, residual included, `[generation][token]`, from
+    `_OwnerReduceMulticastDeviceKernel`, which also advanced the generation.
     """
 
     def __init__(
@@ -574,7 +574,7 @@ class FinalizeAllReduceGemmaRMSNormMxfp8:
         device: torch.device,
         one_shot_max_tokens: int | None = None,
     ) -> None:
-        """``one_shot_max_tokens`` defaults to ``max_num_tokens`` (one-shot
+        """`one_shot_max_tokens` defaults to `max_num_tokens` (one-shot
         only); 0 makes every batch two-shot."""
         if max_num_tokens <= 0:
             raise ValueError("max_num_tokens must be positive")
@@ -611,9 +611,9 @@ class FinalizeAllReduceGemmaRMSNormMxfp8:
         self, max_num_tokens: int, device: torch.device, group: dist.ProcessGroup
     ) -> None:
         """Compile the two-shot kernels and allocate their mailboxes, laid out
-        as ``AllReduceMHC``'s BT ones: each owner's contributions
-        [generation][source rank][owned token] and every rank's sums
-        [generation][token]. Token t belongs to rank t % tp."""
+        as `AllReduceMHC`'s BT ones: each owner's contributions
+        `[generation][source rank][owned token]` and every rank's sums
+        `[generation][token]`. Token t belongs to rank t % tp."""
         hidden, tp = self.hidden_size, self.tp
         owner_capacity = math.ceil(max_num_tokens / tp)
         owner_shape = (LAMPORT_GENERATIONS, tp, owner_capacity, hidden)
