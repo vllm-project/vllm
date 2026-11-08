@@ -3258,15 +3258,17 @@ async def test_chat_kv_transfer_prompt_token_ids_rejection_notifies_kv_connector
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ids", [[10, 20, 30], [1.5]])
-async def test_chat_kv_transfer_prompt_token_ids_ignored_with_echo(ids):
-    """`echo` needs the rendered conversation, so the ids are not used."""
+@pytest.mark.parametrize("flag", ["echo", "return_prompt_text"])
+async def test_chat_kv_transfer_prompt_token_ids_ignored_with_echo(ids, flag):
+    """`echo` and `return_prompt_text` need the rendered conversation, so
+    the ids are not used."""
     serving_chat = _build_serving_chat(_build_mock_engine())
 
     request = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": "hi"}],
         kv_transfer_params={"prompt_token_ids": ids, "do_remote_prefill": True},
-        echo=True,
+        **{flag: True},
     )
     result = await serving_chat.render_chat_request(request)
     assert not isinstance(result, ErrorResponse)
