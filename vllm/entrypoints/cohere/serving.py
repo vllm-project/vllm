@@ -26,7 +26,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator
-from enum import Enum
+from enum import StrEnum
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
@@ -149,7 +149,7 @@ def _emit(event: BaseModel) -> str:
     return _sse(event.model_dump_json(exclude_none=True))
 
 
-class ContentBlockType(str, Enum):
+class ContentBlockType(StrEnum):
     """Wire-format / internal discriminator for chat content blocks.
 
     ``THINKING`` and ``TEXT`` are the documented Cohere v2 content-block

@@ -19,7 +19,7 @@ from prometheus_client.parser import text_string_to_metric_families
 from tests.utils import RemoteOpenAIServer
 from vllm.utils.network_utils import get_open_port
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 # GPU initialization might take take longer
 _SERVER_STARTUP_TIMEOUT = 120
