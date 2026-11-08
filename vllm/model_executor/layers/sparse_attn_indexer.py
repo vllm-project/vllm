@@ -40,6 +40,7 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
 )
 from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import has_deep_select
 from vllm.model_executor.layers.indexer_topk import (
+    _HAS_DEEP_SELECT_C,
     RADIX_TOPK_WORKSPACE_SIZE,
     deep_select_topk,
     get_indexer_topk,
@@ -334,11 +335,17 @@ def _upcast_logits_kernel(src_ptr, dst_ptr, row_ends_ptr, stride, BLOCK: tl.cons
 @functools.cache
 def _prefill_uses_deep_select(topk_backend: str, batch_invariant: bool) -> bool:
     """Whether prefill chunks rank their BF16 logits with DeepSelect: always for
-    "deep_select", and for "auto" wherever DeepSelect runs (SM100/SM103) unless
-    batch-invariant mode is on. Cached: ``has_deep_select`` calls ``find_spec``."""
+    "deep_select", and for "auto" wherever DeepSelect runs (SM100/SM103) and its
+    extension loaded, unless batch-invariant mode is on. Cached:
+    ``has_deep_select`` calls ``find_spec``."""
     if topk_backend == "deep_select":
         return True
-    return topk_backend == "auto" and not batch_invariant and has_deep_select()
+    return (
+        topk_backend == "auto"
+        and not batch_invariant
+        and _HAS_DEEP_SELECT_C
+        and has_deep_select()
+    )
 
 
 def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor:

@@ -709,14 +709,16 @@ def test_candidate_blocks_to_sparse_indices_matches_reference(
 
 
 def test_prefill_top_k_backend():
-    """'auto' ranks prefill logits with DeepSelect wherever it runs (SM100/SM103),
-    except in batch-invariant mode; an explicit backend keeps its choice."""
+    """'auto' ranks prefill logits with DeepSelect wherever it runs (SM100/SM103)
+    and its extension loaded, except in batch-invariant mode; an explicit backend
+    keeps its choice."""
     from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
         has_deep_select,
     )
+    from vllm.model_executor.layers.indexer_topk import _HAS_DEEP_SELECT_C
 
     choose = sparse_indexer._prefill_uses_deep_select
-    assert choose("auto", False) is has_deep_select()
+    assert choose("auto", False) is (_HAS_DEEP_SELECT_C and has_deep_select())
     assert choose("auto", True) is False
     assert choose("deep_select", True) is True
     assert choose("persistent", False) is False
