@@ -15,7 +15,7 @@ a request seeing context + 1 + j keys (spec verify), and requests with 0, 1, 2,
 hold more than N of the row's global top-K), including local lengths in (N, K).
 
 Launch: one process per GPU on one node (2 or 4 ranks), or 8 ranks across two
-GB300 nodes with ``srun -n8`` and ``KIMI_K3_SD_DCP_INIT`` (a shared rendezvous
+GB300 nodes with `srun -n8` and `KIMI_K3_SD_DCP_INIT` (a shared rendezvous
 file), one pytest per rank.
 """
 
@@ -341,7 +341,7 @@ def _spawned(rank, world, init_method):
 
 @pytest.mark.skipif(DCP_INIT is None, reason="needs a multi-node launch")
 def test_dcp_fp4_indexer_merge_exact_launched():
-    """One rank of an ``srun -n<world>`` launch (DCP8: 2 nodes x 4 GPUs)."""
+    """One rank of an `srun -n<world>` launch (DCP8: 2 nodes x 4 GPUs)."""
     rank, world = int(os.environ["SLURM_PROCID"]), int(os.environ["SLURM_NTASKS"])
     local = int(os.environ["SLURM_LOCALID"])
     run_worker(rank, world, local, f"file://{DCP_INIT}")

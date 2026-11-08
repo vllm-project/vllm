@@ -10,12 +10,12 @@
 
 """FlyDSL sparse MLA forward on the fp8_ds_mla cache (gfx950).
 
-Covers the slice of ``rocm_aiter_ops.triton_sparse_mla_fwd`` that
+Covers the slice of `rocm_aiter_ops.triton_sparse_mla_fwd` that
 DeepSeek-V3.2 / Kimi-K3 prefill takes: bf16 q, a 656 B fp8_ds_mla record
 cache, kv_lora_rank 512, rope 64, at most 16 heads, bf16 dots, no sink, no
-second segment, no split-K. ``flydsl_sparse_mla_fp8ds_supported`` says whether
-a call is in that slice; ``rocm_aiter_ops`` routes it here when
-``VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA=1``.
+second segment, no split-K. `flydsl_sparse_mla_fp8ds_supported` says whether
+a call is in that slice; `rocm_aiter_ops` routes it here when
+`VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA=1`.
 """
 
 import functools
@@ -107,9 +107,9 @@ def flydsl_sparse_mla_fp8ds_supported(
     inv_rope_cos_sin_cache: torch.Tensor | None = None,
     out_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> bool:
-    """Can ``flydsl_sparse_mla_fp8ds_fwd`` serve this ``sparse_mla_fwd`` call?
+    """Can `flydsl_sparse_mla_fp8ds_fwd` serve this `sparse_mla_fwd` call?
 
-    Takes ``sparse_mla_fwd``'s arguments. Reads host metadata only (no device
+    Takes `sparse_mla_fwd`'s arguments. Reads host metadata only (no device
     reads, no sync), so it is safe under CUDA-graph capture. has_invalid and
     return_lse are accepted with either value.
 
@@ -207,14 +207,14 @@ def flydsl_sparse_mla_fp8ds_fwd(
     out: torch.Tensor | None = None,
     return_lse: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Sparse MLA over an fp8_ds_mla cache, ``sparse_mla_fwd`` semantics.
+    """Sparse MLA over an fp8_ds_mla cache, `sparse_mla_fwd` semantics.
 
     Args:
         q: [T, H, 576] bf16, H <= 16.
         kv_buffer: fp8_ds_mla records (512 e4m3 | 4 f32 per-128 scales |
-            64 bf16 rope), see ``flydsl_sparse_mla_fp8ds_supported``.
+            64 bf16 rope), see `flydsl_sparse_mla_fp8ds_supported`.
         kv_indptr: [T + 1] CSR offsets into kv_indices. Row q attends
-            ``kv_indices[kv_indptr[q] : kv_indptr[q + 1]]``; any length >= 0,
+            `kv_indices[kv_indptr[q] : kv_indptr[q + 1]]`; any length >= 0,
             no alignment needed. int64 is accepted and copied to int32.
         kv_indices: flat GLOBAL slot ids.
         softmax_scale: the layer's softmax scale.
@@ -231,7 +231,7 @@ def flydsl_sparse_mla_fp8ds_fwd(
     returns NaN out for such a row).
 
     The first call for a new (H, has_invalid, return_lse) JIT-compiles the
-    kernel: call ``flydsl_sparse_mla_fp8ds_warmup`` before CUDA-graph capture.
+    kernel: call `flydsl_sparse_mla_fp8ds_warmup` before CUDA-graph capture.
     The launch itself does no host sync.
 
     Returns:

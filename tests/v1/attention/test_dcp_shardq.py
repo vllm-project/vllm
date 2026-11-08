@@ -90,7 +90,7 @@ def _sections(layout):
 
 
 def _row_bytes(page_base: torch.Tensor, rows: torch.Tensor, offset: int, row: int):
-    """Flat byte offsets [len(rows), row] of rows in pages at ``page_base``."""
+    """Flat byte offsets [len(rows), row] of rows in pages at `page_base`."""
     base = page_base.long() + offset + rows.long() * row
     return base[:, None] + torch.arange(row, device=rows.device)
 
@@ -102,7 +102,7 @@ def _flat(cache: torch.Tensor) -> torch.Tensor:
 
 
 class Replicated:
-    """Every token of every request, in dense pages from ``_page_start``."""
+    """Every token of every request, in dense pages from `_page_start`."""
 
     def __init__(self, lens, layout, fill_random: bool = True):
         self.lens, self.layout = lens, layout
@@ -119,8 +119,8 @@ class Replicated:
         self.index = cache(_index_entry(layout))
 
     def token_bytes(self, req: int, tokens: torch.Tensor, section):
-        """``section``'s cache and the flat byte offsets of request ``req``'s
-        rows of ``tokens`` in it."""
+        """`section`'s cache and the flat byte offsets of request `req`'s
+        rows of `tokens` in it."""
         name, offset, row = section
         cache = getattr(self, name)
         pages = int(_page_start(self.lens)[req]) + tokens // PAGE
@@ -130,7 +130,7 @@ class Replicated:
 def _shard(
     rep: Replicated, world: int, rank: int, seed: int, mla_block: int = MLA_BLOCK
 ):
-    """``rank``'s DCP-local caches of ``rep``: the MLA cache in ``mla_block``-
+    """`rank`'s DCP-local caches of `rep`: the MLA cache in `mla_block`-
     token blocks and the indexer cache in pages, both padded apart (other
     layers' pages sit between them in a packed cache) and randomly permuted,
     with their block tables."""
@@ -191,8 +191,8 @@ def _metadata(lens):
 
 
 def _split(lens, world, num_decodes=0):
-    """ShardQ's token split over ``world`` ranks of the requests after the
-    first ``num_decodes``."""
+    """ShardQ's token split over `world` ranks of the requests after the
+    first `num_decodes`."""
     from vllm.v1.attention.ops.shardq import ShardQSplit, zigzag_split
 
     new = np.array([n for _, n in lens])
@@ -239,7 +239,7 @@ def _workspace(plan, layout):
 
 
 def _push_all(rep: Replicated, world: int, num_dst: int = 2):
-    """Push every simulated rank's rows into ``num_dst`` local workspaces;
+    """Push every simulated rank's rows into `num_dst` local workspaces;
     returns them and the plans."""
     layout = rep.layout
     plans = [_build_context(rep.lens, layout, world, r) for r in range(world)]
@@ -261,8 +261,8 @@ def _check_workspace(
     ws_mla, ws_index, rep: Replicated, new_mla_rows: bool, fill, num_decodes=0
 ):
     """The workspace holds every section of each prefill request's tokens (the
-    requests from ``num_decodes`` on, in pages of their own; the MLA rows of
-    its new tokens only with ``new_mla_rows``); with ``fill``, every other
+    requests from `num_decodes` on, in pages of their own; the MLA rows of
+    its new tokens only with `new_mla_rows`); with `fill`, every other
     byte still holds it."""
     workspaces = {"mla": ws_mla, "index": ws_index}
     expected = {
@@ -392,7 +392,7 @@ def test_indexer_chunks_read_the_workspace_like_a_replicated_cache(
 
 def test_workspace_holds_a_max_model_len_request():
     """DCP ShardQ has no capacity knob: the workspace fits one request of
-    ``max_model_len`` tokens, plus a page of rounding per request."""
+    `max_model_len` tokens, plus a page of rounding per request."""
     from vllm.v1.attention.ops.dcp_shardq import context as dcp
 
     config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=131072))
@@ -491,7 +491,7 @@ def test_planner_follows_the_split_decode_rows(num_spec):
 
 
 def _flashinfer_impl(cache_dtype: str, kernel: str, dcp_world_size: int):
-    """A FlashInfer sparse MLA impl at K3.1's MLA sizes on ``kernel``."""
+    """A FlashInfer sparse MLA impl at K3.1's MLA sizes on `kernel`."""
     from vllm.v1.attention.backends.mla import flashinfer_mla_sparse as fims
 
     impl = object.__new__(fims.FlashInferMLASparseImpl)
@@ -523,7 +523,7 @@ def _fp8_query(num_tokens: int, num_heads: int) -> torch.Tensor:
 
 
 def _real_rows(rep: Replicated, cache_dtype: str):
-    """Write real MLA and indexer rows of every token into ``rep``; returns
+    """Write real MLA and indexer rows of every token into `rep`; returns
     the new tokens' latents (to write them as forward_impl does)."""
     from vllm import _custom_ops as ops
     from vllm.models.kimi_k3.nvidia.ops.dsa_indexer import (
@@ -561,8 +561,8 @@ def _real_rows(rep: Replicated, cache_dtype: str):
 
 
 def _separable_decode_keys(rep: Replicated, num_decodes: int) -> torch.Tensor:
-    """Rewrite the indexer keys of the first ``num_decodes`` (one-token)
-    requests of ``rep`` so that their top-k is unique: TOPK random positions
+    """Rewrite the indexer keys of the first `num_decodes` (one-token)
+    requests of `rep` so that their top-k is unique: TOPK random positions
     get the key +v and the others -v, so a query along v scores TOPK keys
     positive and the rest zero (after the ReLU), with no tie at the cut-off.
     Returns the sorted top-k positions, [num_decodes, TOPK]."""
@@ -925,7 +925,7 @@ LAYER_STEPS = {
 
 
 def _leading(lens, max_query_len: int) -> int:
-    """Requests before the step's first one of more than ``max_query_len``
+    """Requests before the step's first one of more than `max_query_len`
     tokens."""
     return next((i for i, (_, n) in enumerate(lens) if n > max_query_len), len(lens))
 
@@ -980,7 +980,7 @@ def _dsa_layer(config, topk_buffer, layer_index=0):
 
 def _common_metadata(lens, block_table, dcp=None):
     """The step's metadata, with the DCP-local sequence lengths that the runner
-    adds on rank ``dcp[1]`` of a DCP group of ``dcp[0]``."""
+    adds on rank `dcp[1]` of a DCP group of `dcp[0]`."""
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
@@ -1020,7 +1020,7 @@ def _layer_forward(layer, q, kv_c, k_pe, kv_cache, metadata, q_dcp_replicated=No
 
 
 def _min_topk_recall(topk: torch.Tensor, ref: torch.Tensor) -> float:
-    """The smallest share of a row's ``ref`` keys that ``topk`` selects."""
+    """The smallest share of a row's `ref` keys that `topk` selects."""
     keys = torch.sort(topk, dim=1).values.contiguous()
     at = torch.searchsorted(keys, ref.contiguous()).clamp(max=keys.shape[1] - 1)
     found = ((keys.gather(1, at) == ref) & (ref >= 0)).sum(1).float()

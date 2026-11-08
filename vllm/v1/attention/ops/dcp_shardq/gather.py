@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Push a DCP rank's context rows into every rank's gathered workspace.
 
-Under DCP (interleave 1) rank ``r`` of ``W`` stores global token ``t`` iff
-``t % W == r``, at local position ``t // W`` of its paged caches: a DSA layer's
+Under DCP (interleave 1) rank `r` of `W` stores global token `t` iff
+`t % W == r`, at local position `t // W` of its paged caches: a DSA layer's
 MLA cache (one row per token) and its indexer cache (64-token pages of fp8
 keys, then their scales). This kernel copies the rank's rows, byte for byte, to
 their global positions in every rank's workspace (peer addresses, e.g.
 symmetric memory), which holds each request's tokens in order in dense pages of
 the same two formats. The work comes from the step's device metadata: CTA
-row ``r`` of the grid serves request ``r``, and each CTA moves eight rows of one
+row `r` of the grid serves request `r`, and each CTA moves eight rows of one
 of its local pages (CTAs past the request's rows exit).
 """
 
@@ -384,15 +384,15 @@ class DcpContextPushKernel(VllmCuTeDSLJitKernel["DcpContextPushKernel.CompileKey
         rank: int,
         index_row_bytes: int,
     ) -> CuTeDSLLaunchSpec[CompileKey]:
-        """Push this rank's rows of the first ``seq_lens`` tokens of each
-        request (MLA rows of its context only; ``query_start_loc`` bounds its
-        new tokens) to the workspace pages from ``dst_block_table[:, 0]`` on.
+        """Push this rank's rows of the first `seq_lens` tokens of each
+        request (MLA rows of its context only; `query_start_loc` bounds its
+        new tokens) to the workspace pages from `dst_block_table[:, 0]` on.
 
-        ``mla_cache`` is a [blocks, block_size, row] byte view of the MLA cache
-        (blocks of whole pages, dense rows) and ``index_cache`` one of the
-        indexer cache in pages; ``max_local_pages`` bounds any request's local
-        pages. ``dst_addrs`` holds every rank's workspace, MLA pages first,
-        indexer pages ``dst_index_offset`` bytes in."""
+        `mla_cache` is a [blocks, block_size, row] byte view of the MLA cache
+        (blocks of whole pages, dense rows) and `index_cache` one of the
+        indexer cache in pages; `max_local_pages` bounds any request's local
+        pages. `dst_addrs` holds every rank's workspace, MLA pages first,
+        indexer pages `dst_index_offset` bytes in."""
         assert mla_cache.shape[1] % PAGE_TOKENS == 0 and index_cache.shape[1] == (
             PAGE_TOKENS
         )

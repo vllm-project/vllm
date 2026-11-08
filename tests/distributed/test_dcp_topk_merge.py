@@ -3,9 +3,9 @@
 """Exact one-round DCP decode top-k merge over a real DCP group.
 
 One process per GPU (DCP = TP = world size), the production construction
-gate (``init_dcp_topk_merge``: rank agreement, symmetric rescue workspace)
+gate (`init_dcp_topk_merge`: rank agreement, symmetric rescue workspace)
 and the real all-gather. Every rank builds the same global bf16 logits and
-keeps its interleave-1 shard (columns ``rank::W``); the reference is the
+keeps its interleave-1 shard (columns `rank::W`); the reference is the
 top-K of the union of all ranks' logits. Each world size spawns one group
 and runs every case inside it.
 """
@@ -49,8 +49,8 @@ pytestmark = pytest.mark.skipif(
 def _make_case(
     lengths: list[int], seed: int, levels: int = 0
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Global bf16 logits ``[rows, max_len]`` (identical on every rank) and
-    per-row global ends. ``levels`` > 0 quantizes the scores (tie-heavy)."""
+    """Global bf16 logits `[rows, max_len]` (identical on every rank) and
+    per-row global ends. `levels` > 0 quantizes the scores (tie-heavy)."""
     gen = torch.Generator(device="cuda").manual_seed(seed)
     logits = torch.randn((len(lengths), max(lengths)), generator=gen, device="cuda")
     if levels:

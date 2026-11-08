@@ -267,9 +267,9 @@ class NixlBaseConnectorScheduler:
         speculative scratch slots and everything before the running state
         (null placeholders and the previous step's superseded state) go.
 
-        Use this at every block-id exchange point. Pass ``clip_ssm=False``
+        Use this at every block-id exchange point. Pass `clip_ssm=False`
         for per-step partial lists (host-buffer save), where the SSM strip
-        does not apply. Pass the computed ``num_tokens`` to drop speculative
+        does not apply. Pass the computed `num_tokens` to drop speculative
         lookahead blocks first, so a window ends at the last computed token
         on both sides.
         """
@@ -411,7 +411,7 @@ class NixlBaseConnectorScheduler:
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. The number of prompt tokens to load from the prefiller.
-        Stops short of the trailing ``_prefill_backoff()`` tokens that the decoder
+        Stops short of the trailing `_prefill_backoff()` tokens that the decoder
         will recompute locally."""
         backoff = self._prefill_backoff()
         if backoff and num_prompt_tokens > backoff:
@@ -419,12 +419,12 @@ class NixlBaseConnectorScheduler:
         return num_prompt_tokens
 
     def _truncate_request_for_prefill(self, request: "Request") -> None:
-        """P-side only: drop the trailing ``_prefill_backoff()`` prompt tokens
+        """P-side only: drop the trailing `_prefill_backoff()` prompt tokens
         so the prefiller stops short of what the decoder recomputes locally.
         For Mamba that is the single token needed to yield h(N-1); for
         multi-module MTP it is the drafter's whole lookahead window.
 
-        Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
+        Guarded by `_p_side_truncated` to avoid repeated truncation if the
         request is preempted and rescheduled."""
         backoff = self._prefill_backoff()
         params = request.kv_transfer_params

@@ -355,7 +355,7 @@ def build_pcp_global_chunk_plan(
 ) -> PCPGlobalChunkPlan:
     """Plan the PCP packing for one chunk from its requests' KV shard rows.
 
-    The global layout is padded to ``shard rows x W`` per request. Positions
+    The global layout is padded to `shard rows x W` per request. Positions
     past a request's true extent lie beyond every token's causal bound, so
     the kernel never reads them.
     """
@@ -1390,7 +1390,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         """Chunk by request rather than by row, so a split prefill's two rows
         charge their shared context once, then widen each chunk back to rows.
 
-        ``row_shard_rows`` holds the whole request's largest DCP shard on
+        `row_shard_rows` holds the whole request's largest DCP shard on
         every row, so the plan is identical on every PCP rank.
         """
         row_bounds = request_row_bounds(row_req_idx)
@@ -1443,7 +1443,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         When a single request-level chunk still exceeds the logits budget,
         sub-chunks on the query dimension (M) to bound peak memory.
 
-        With ``fused_mqa_topk_eligible`` (chunks for the fused MQA+top-k kernel,
+        With `fused_mqa_topk_eligible` (chunks for the fused MQA+top-k kernel,
         which needs no logits buffer) chunks whose gathered keys fit
         FUSED_MQA_TOPK_MAX_KEYS are bounded by FUSED_MQA_TOPK_MAX_ROWS rows
         instead of the logits budget. Requests are never packed past that key

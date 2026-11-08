@@ -162,9 +162,9 @@ def _pack_local_keys(
 ):
     """Copy this rank's index keys out of the cache into one row per token.
 
-    A cache page holds ``PAGE`` value rows of ``HEAD_DIM`` bytes followed by
-    ``PAGE`` four-byte scales, the layout
-    ``cp_gather_indexer_k_quant_cache_triton`` reads. Values and scale travel
+    A cache page holds `PAGE` value rows of `HEAD_DIM` bytes followed by
+    `PAGE` four-byte scales, the layout
+    `cp_gather_indexer_k_quant_cache_triton` reads. Values and scale travel
     together so the all-gather below moves one buffer instead of two.
     """
     req = tl.program_id(0)
@@ -243,8 +243,8 @@ def gather_global_indexer_keys(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Every rank's index keys for one prefill chunk, in global token order.
 
-    Returns ``(keys, scales)`` of shape ``[chunk.total_seq_lens, head_dim]``
-    and ``[chunk.total_seq_lens]``: the whole context of every request in the
+    Returns `(keys, scales)` of shape `[chunk.total_seq_lens, head_dim]`
+    and `[chunk.total_seq_lens]`: the whole context of every request in the
     chunk, so a row scored against them needs no candidate merge afterwards.
     """
     from vllm.distributed import get_dcp_group

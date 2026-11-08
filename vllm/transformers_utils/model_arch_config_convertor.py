@@ -344,10 +344,10 @@ class ModelArchConfigConvertorBase:
     def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
         """Whether to use bidirectional attention for mm positions.
 
-        ``supports_multimodal`` is False when the deployment is configuration-
+        `supports_multimodal` is False when the deployment is configuration-
         disabled for multimodal inputs (text-only serving). In that case
         mm_prefix is unnecessary and must stay off so attention backends
-        without ``supports_mm_prefix()`` remain eligible.
+        without `supports_mm_prefix()` remain eligible.
         """
         if not supports_multimodal:
             return False

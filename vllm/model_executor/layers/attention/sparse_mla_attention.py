@@ -187,8 +187,8 @@ def build_shardq_metadata(
     device: torch.device,
     dcp_shardq: "DcpShardQPlanner | None" = None,
 ) -> ShardQMetadata | None:
-    """This step's ShardQ, with ``metadata`` narrowed to this rank's tokens,
-    or None. Under DCP (``dcp_shardq``), those tokens attend the step's
+    """This step's ShardQ, with `metadata` narrowed to this rank's tokens,
+    or None. Under DCP (`dcp_shardq`), those tokens attend the step's
     gathered context."""
     split = build_shardq_split(common_attn_metadata, vllm_config)
     gathered_context = None

@@ -7,10 +7,10 @@ buffer. Under DCP the
 op merges the ranks' local top-k into global token ids.
 
 Under DCP on the FlashInfer core, when the layer's indexer has the one-round DCP
-top-k merge (``dcp_local_topk``, Inferact/mum#63), ``merge_rows`` replaces the op
+top-k merge (`dcp_local_topk`, Inferact/mum#63), `merge_rows` replaces the op
 and the local-slot filter: it scores the rows (DeepGEMM paged MQA logits, bf16)
 and merges them straight into this rank's compacted physical KV rows and counts.
-With the fused DCP indexer (``fused``, indexer.py) the scoring is its scorer (the
+With the fused DCP indexer (`fused`, indexer.py) the scoring is its scorer (the
 same logits layout) and, packed, its select also takes the local top-N (the
 merge's B' rows), so the merge only all-gathers and selects."""
 
@@ -24,7 +24,7 @@ from .index import DIM, fp4_query_views, is_fp4_cache
 
 
 class IndexerStage:
-    """``indexer``: the layer's KimiK3DSAIndexer; ``rows``: the most decode rows
+    """`indexer`: the layer's KimiK3DSAIndexer; `rows`: the most decode rows
     of a step (sizes the DCP merge's outputs; 0: no direct DCP merge)."""
 
     def __init__(self, indexer, rows=0):
@@ -51,7 +51,7 @@ class IndexerStage:
         self.fp4 = indexer.use_fp4_cache
 
     def query(self, q_fp8, rows):
-        """The stock op's (query, its scales or None) of the first ``rows`` rows:
+        """The stock op's (query, its scales or None) of the first `rows` rows:
         FP8 [rows, 32, 128] (scales folded into the head weights), or MXFP4 E2M1
         [rows, 32, 64] and UE8M0 x4 [rows, 32] (contiguous copies of the views in
         the query rows, index.py)."""
@@ -95,9 +95,9 @@ class IndexerStage:
     # --- DCP top-k merge (#63) ---------------------------------------------------
     def merge_rows(self, q_fp8, head_w, metadata, stride_rows, batch, q=1):
         """DCP: this rank's flat KV rows of the merged global top-k of the first
-        ``batch`` rows (``q`` per request; compacted to a prefix, at most N per
-        row) and their counts, as ``dcp_stage.local_slots`` of the op's global
-        ids; ``metadata``: the MLA layer's. None when the step does not fit the
+        `batch` rows (`q` per request; compacted to a prefix, at most N per
+        row) and their counts, as `dcp_stage.local_slots` of the op's global
+        ids; `metadata`: the MLA layer's. None when the step does not fit the
         merge (the caller then runs the op and the filter). One all-gather over
         the DCP group, so every rank takes the same branch. The logits must hold
         no NaN: DeepSelect then returns out-of-range ids, on which the merge's

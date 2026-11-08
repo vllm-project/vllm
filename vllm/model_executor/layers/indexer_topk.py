@@ -407,8 +407,8 @@ class SparseIndexerTopk(torch.nn.Module):
         topk_indices: torch.Tensor,
         topk_tokens: int,
     ) -> None:
-        """Prefill top-k: row ``r`` selects over
-        ``logits[r, row_starts[r]:row_ends[r]]`` (row_starts None means 0) and
+        """Prefill top-k: row `r` selects over
+        `logits[r, row_starts[r]:row_ends[r]]` (row_starts None means 0) and
         writes indices relative to the row start (int32, -1 fill for rows
         shorter than topk_tokens)."""
         num_rows = logits.shape[0]

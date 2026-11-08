@@ -59,7 +59,7 @@ def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
     """Run a regex compilation callable with a timeout.
 
     Prevents ReDoS attacks where adversarial regex patterns (e.g. nested
-    quantifiers like ``(a+)+b``) cause exponential DFA state-space explosion,
+    quantifiers like `(a+)+b`) cause exponential DFA state-space explosion,
     hanging the inference worker indefinitely.
 
     Args:

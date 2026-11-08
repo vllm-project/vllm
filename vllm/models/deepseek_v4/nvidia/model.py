@@ -724,9 +724,9 @@ class DeepseekV4DecoderLayer(nn.Module):
         mega_gate_metadata: MegaGateRoutingMetadata | None = None,
         reuse_residual: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """With ``reuse_residual``, the caller hands ``residual`` over and the
+        """With `reuse_residual`, the caller hands `residual` over and the
         unfused mHC post/pre writes the next residual into its storage. A first
-        layer that starts from ``residual = x`` never overwrites ``x``."""
+        layer that starts from `residual = x` never overwrites `x`."""
         fused_post_pre = (
             mhc_fused_post_pre_tilelang_reuse_residual
             if reuse_residual

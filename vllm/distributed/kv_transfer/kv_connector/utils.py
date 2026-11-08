@@ -324,9 +324,9 @@ def yield_req_data(
     """Yields:
     (req_id, block_id_groups, is_full_table)
 
-    ``is_full_table`` is True when ``block_id_groups`` is the request's whole
+    `is_full_table` is True when `block_id_groups` is the request's whole
     block table (new and resumed requests, which are both in
-    ``scheduled_new_reqs``) rather than this step's additions.
+    `scheduled_new_reqs`) rather than this step's additions.
     """
     # new requests
     for req_data in scheduler_output.scheduled_new_reqs:
@@ -383,13 +383,13 @@ def get_current_attn_backends_and_specs(
     kv_cache_config: KVCacheConfig,
     fallback: list[type[AttentionBackend]],
 ) -> tuple[list[type[AttentionBackend]], list[AttentionSpec | None]]:
-    """Distinct (backend, spec) pairs of the transfer layers, else ``fallback``.
+    """Distinct (backend, spec) pairs of the transfer layers, else `fallback`.
 
     Attention caches in a block-outermost layout are skipped: blocks there are
-    never split group-wide (``prepare_kernel_block_sizes``), and a cache that
+    never split group-wide (`prepare_kernel_block_sizes`), and a cache that
     needs smaller kernel blocks views them inside each block, so its kernel
     pages never split transferred blocks. Compressed caches are skipped too
-    (``check_compressed_kernel_split`` guards them); caches whose backend writes
+    (`check_compressed_kernel_split` guards them); caches whose backend writes
     them from their block table must be packed.
     """
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
@@ -454,7 +454,7 @@ def get_current_attn_backend(
 class EngineTransferInfo:
     """Common per-remote-engine transfer state, computed at handshake.
 
-    Stored per ``(engine_id, pp_rank)`` inside ``TransferTopology._engines``.
+    Stored per `(engine_id, pp_rank)` inside `TransferTopology._engines`.
     """
 
     remote_tp_size: int
@@ -542,8 +542,8 @@ class TransferTopology:
     def dcp_rank(self) -> int:
         """This rank's DCP coverage rank.
 
-        with ``dcp_size in (1, tp_size)`` enforced at the connector boundary, a
-        rank's DCP identity is always exactly ``tp_rank % dcp_size``.
+        with `dcp_size in (1, tp_size)` enforced at the connector boundary, a
+        rank's DCP identity is always exactly `tp_rank % dcp_size`.
         """
         return self.tp_rank % self.dcp_size
 
@@ -555,7 +555,7 @@ class TransferTopology:
         """Calculate the tensor parallel ratio between local and remote TP.
 
         Positive when local_tp >= remote_tp (local workers read from the
-        same remote worker in groups of size ``tp_ratio``).  Negative when
+        same remote worker in groups of size `tp_ratio`).  Negative when
         remote_tp > local_tp (ratio is flipped).
         """
         if self.tp_size >= remote_tp_size:
@@ -601,10 +601,10 @@ class TransferTopology:
         return self.is_mla or self.tp_size > self.total_num_kv_heads
 
     def dcp_source_ranks(self, remote_tp_size: int, remote_dcp_size: int) -> list[int]:
-        """Remote ranks whose DCP slice overlaps mine (MLA, ``remote_dcp_size > 1``).
+        """Remote ranks whose DCP slice overlaps mine (MLA, `remote_dcp_size > 1`).
 
-        Shared by ``handshake_target_ranks`` (who to query metadata from) and
-        ``compute_tp_mapping`` (who to actually read from) — for MLA the two
+        Shared by `handshake_target_ranks` (who to query metadata from) and
+        `compute_tp_mapping` (who to actually read from) — for MLA the two
         questions have the identical answer, since DCP sharding is the only
         thing keeping a remote rank from being interchangeable with any other.
         """
@@ -629,12 +629,12 @@ class TransferTopology:
         its KV cache) sizes — does not require the remote engine to be
         registered yet.
 
-        DCP support is scoped to ``dcp_size in (1, tp_size)`` on each side
+        DCP support is scoped to `dcp_size in (1, tp_size)` on each side
         and DCP sizes that divide one another: neither side ever has a
         partially-duplicated, partially-sharded KV cache. When the
-        remote is not sharded (``remote_dcp_size == 1``) this reduces
+        remote is not sharded (`remote_dcp_size == 1`) this reduces
         exactly to the DTP>=PTP case, since a sharded local side
-        already has ``tp_size == dcp_size``.
+        already has `tp_size == dcp_size`.
         """
         if remote_dcp_size > 1:
             return self.dcp_source_ranks(remote_tp_size, remote_dcp_size)
@@ -649,9 +649,9 @@ class TransferTopology:
         """How many local ranks (in aggregate) read from a given remote rank.
 
         Used by the producer side to know how many reader notifications to
-        wait for before freeing a request's blocks. Reuses ``tp_ratio``
+        wait for before freeing a request's blocks. Reuses `tp_ratio`
         whenever the remote isn't sharded — a sharded local side already
-        has ``tp_size == dcp_size``, so the existing TP-ratio formula is
+        has `tp_size == dcp_size`, so the existing TP-ratio formula is
         already correct there unmodified.
         """
         if remote_dcp_size > 1:
@@ -697,9 +697,9 @@ class TransferTopology:
 
 
 class CircuitBreaker:
-    """Opens for ``cooldown_s`` after ``failure_threshold`` consecutive
+    """Opens for `cooldown_s` after `failure_threshold` consecutive
     failures; callers skip requests while it is open. After the cooldown,
-    ``allow()`` admits a single probe and holds others for ``probe_window_s``:
+    `allow()` admits a single probe and holds others for `probe_window_s`:
     a failed probe reopens the breaker, a success closes it, and a probe that
     never reports back lets the next request probe once the window passes."""
 

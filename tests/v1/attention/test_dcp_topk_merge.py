@@ -4,7 +4,7 @@
 layout, sizing and gating, the construction gate, the host-side call checks
 and the packed-mode contract helper. The merge itself (select, rescue, CUDA
 graphs, late peers) runs over a real DCP group in
-``tests/distributed/test_dcp_topk_merge.py``.
+`tests/distributed/test_dcp_topk_merge.py`.
 """
 
 import pytest
@@ -34,7 +34,7 @@ TOPK = 2048
 
 
 class _FakeDCPGroup:
-    """``all_gather(dim=0)`` of ``world_size`` copies of the input."""
+    """`all_gather(dim=0)` of `world_size` copies of the input."""
 
     def __init__(self, world_size: int) -> None:
         self.world_size = world_size
@@ -240,7 +240,7 @@ def test_pack_layout_bit_exact():
 
 @pytest.mark.parametrize("with_row_ends", [False, True])
 def test_pack_drops_invalid_ids_and_nan(with_row_ends):
-    """Ids outside ``[0, min(row_end, S, 2**17))`` and NaN scores pack as
+    """Ids outside `[0, min(row_end, S, 2**17))` and NaN scores pack as
     empty slots; +-inf scores pack as ordinary candidates."""
     from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
         dcp_topk_pack_indices,
@@ -546,7 +546,7 @@ def test_exact_call_checks(monkeypatch):
 
 
 def test_packed_contract_validator():
-    """``assert_packed_merge_contract`` accepts the stock producer (DeepSelect
+    """`assert_packed_merge_contract` accepts the stock producer (DeepSelect
     + pack, including short and empty rows) and catches a dropped word, a
     non-top word and a word whose score is not its logit."""
     from vllm.v1.attention.ops.dcp_topk_merge.kernels import (

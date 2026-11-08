@@ -296,7 +296,7 @@ def _try_load_aot_compiled_fn(
     """Try to load an AOT-compiled function from disk.
 
     Returns the loaded callable on success, or None on failure.
-    Re-raises on failure when ``VLLM_FORCE_AOT_LOAD`` is set.
+    Re-raises on failure when `VLLM_FORCE_AOT_LOAD` is set.
     """
     try:
         with monitor_torch_compile(

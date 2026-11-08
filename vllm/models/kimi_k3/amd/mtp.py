@@ -357,9 +357,9 @@ class KimiK3MTP(nn.Module):
         """Rewrite a checkpoint weight name to this module's parameter path.
 
         Top-level MTP submodules (enorm/hnorm/eh_proj/shared_head) stay under
-        ``model.layers.{spec_layer}.*``; the shared ``embed_tokens`` is hoisted
-        to ``model.*``; everything else is a transformer-block weight and gets
-        ``.mtp_block`` inserted.
+        `model.layers.{spec_layer}.*`; the shared `embed_tokens` is hoisted
+        to `model.*`; everything else is a transformer-block weight and gets
+        `.mtp_block` inserted.
         """
         spec_layer_weight_names = [
             "embed_tokens",

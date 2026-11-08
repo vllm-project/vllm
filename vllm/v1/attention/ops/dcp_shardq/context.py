@@ -21,11 +21,11 @@ every rank computes for all tokens, into its own workspace.
 
 A step runs this way when ShardQ splits its tokens (build_shardq_split) and
 its prefill rows fit the workspace. Its leading
-decode rows (rows of at most ``1 + num_speculative_tokens`` tokens, which the
+decode rows (rows of at most `1 + num_speculative_tokens` tokens, which the
 indexer scores on its decode path) keep the DCP path within the step; its
 other rows are sharded, including the short prefill pieces that the sparse
 MLA backend classifies as decodes. The workspace holds the prefill rows'
-requests only. ``DcpShardQPlanner`` decides, and counts the prefill steps and
+requests only. `DcpShardQPlanner` decides, and counts the prefill steps and
 tokens of each path.
 
 Scope: any sparse MLA layer with a DSA-style fp8 indexer cache, under DCP
@@ -84,10 +84,10 @@ class ContextLayout:
     def from_layer(cls, spec: KVCacheSpec, indexer: object) -> "ContextLayout | None":
         """The layout of a DSA layer that DCP ShardQ steps can gather, or None.
 
-        The MLA cache must keep one-byte elements (per-tensor ``fp8``,
-        ``nvfp4_ds_mla``) in kernel blocks of whole 64-token pages (a packed
+        The MLA cache must keep one-byte elements (per-tensor `fp8`,
+        `nvfp4_ds_mla`) in kernel blocks of whole 64-token pages (a packed
         cache may use e.g. 1024-token blocks), and the indexer fp8 keys
-        with one 4-byte scale per ``quant_block_size`` values (or MXFP4 keys:
+        with one 4-byte scale per `quant_block_size` values (or MXFP4 keys:
         64 B of values and 4 B of scales per token).
         """
         k_cache = getattr(indexer, "k_cache", None)
@@ -122,32 +122,32 @@ class ContextLayout:
 
 
 def workspace_max_tokens(vllm_config: "VllmConfig") -> int:
-    """Tokens of context the workspace holds: ``max_model_len``, so any one
-    request fits. It costs about ``mla_row_bytes + index_row_bytes`` (plus
+    """Tokens of context the workspace holds: `max_model_len`, so any one
+    request fits. It costs about `mla_row_bytes + index_row_bytes` (plus
     the index scales) per token on each rank, ~0.7 GB per 1M tokens with a
-    per-tensor ``fp8`` cache and ~0.5 GB with ``nvfp4_ds_mla``. Call it
+    per-tensor `fp8` cache and ~0.5 GB with `nvfp4_ds_mla`. Call it
     through this module so tests can patch it."""
     return vllm_config.model_config.max_model_len
 
 
 def capacity_pages(max_tokens: int, max_reqs: int) -> int:
-    """Workspace pages for ``max_tokens`` tokens, each request rounded up."""
+    """Workspace pages for `max_tokens` tokens, each request rounded up."""
     return -(-max_tokens // PAGE_TOKENS) + max_reqs
 
 
 def scheduler_context_pages(vllm_config: "VllmConfig") -> int | None:
     """The workspace pages the scheduler keeps each step's prefill rows
-    within (the sum over them of ``ceil(seq_len / 64)``), or None when DCP
+    within (the sum over them of `ceil(seq_len / 64)`), or None when DCP
     ShardQ steps cannot run under this configuration.
 
     With the cap, no step finds the workspace full, so the DCP path only runs
     a step's leading decode rows and steps of fewer than
-    ``sparse_mla_shard_q_min_tokens`` prefill tokens, and the memory profile
-    reserves those (``dcp_fallback_max_tokens``) instead of a whole
-    ``max_num_batched_tokens`` step. These are the configuration-level and
+    `sparse_mla_shard_q_min_tokens` prefill tokens, and the memory profile
+    reserves those (`dcp_fallback_max_tokens`) instead of a whole
+    `max_num_batched_tokens` step. These are the configuration-level and
     platform conditions of SparseMLAShardQ's DCP ShardQ; when its layer-level
     ones fail the cap merely keeps a step's prefill context within
-    ``max_model_len``.
+    `max_model_len`.
     """
     parallel_config = vllm_config.parallel_config
     kv_transfer_config = vllm_config.kv_transfer_config
@@ -174,7 +174,7 @@ def scheduler_context_pages(vllm_config: "VllmConfig") -> int | None:
 def dcp_fallback_max_tokens(vllm_config: "VllmConfig", decode_query_len: int) -> int:
     """Most tokens of a step that keeps the DCP path under DCP ShardQ, given
     the scheduler's context cap: its leading decode rows plus fewer than
-    ``sparse_mla_shard_q_min_tokens`` prefill tokens, or a padded step of at
+    `sparse_mla_shard_q_min_tokens` prefill tokens, or a padded step of at
     most the DCP workspace's tokens."""
     from vllm.v1.attention.ops.dcp import get_dcp_workspace_max_num_tokens
 
@@ -204,7 +204,7 @@ _retired: list[_Workspace] = []
 
 
 def _workspace(layout: ContextLayout, pages: int, device) -> _Workspace:
-    """The symmetric-memory workspace, grown to ``pages`` pages if needed.
+    """The symmetric-memory workspace, grown to `pages` pages if needed.
     Sizes come from the configuration, so every rank rendezvouses together."""
     global _workspace_buffer
     nbytes = pages * (layout.mla_page_bytes + layout.index_page_bytes)
@@ -241,8 +241,8 @@ _WARMED_UP_DCP_FALLBACK: set[tuple[Any, ...]] = set()
 
 
 def warm_up_dcp_fallback(dcp_manager: "MLADCPManager", num_tokens: int) -> None:
-    """Run ``dcp_manager``'s query gather and output combine of a step of
-    ``num_tokens`` tokens, and the combine's Triton kernels for every batch
+    """Run `dcp_manager`'s query gather and output combine of a step of
+    `num_tokens` tokens, and the combine's Triton kernels for every batch
     size, on dummy inputs (once per process and shape).
 
     A DCP ShardQ instance takes most prefill steps off the DCP path, so the
@@ -329,7 +329,7 @@ def warm_up_dcp_fallback(dcp_manager: "MLADCPManager", num_tokens: int) -> None:
 class DcpShardQContext:
     """One step's gathered-context plan (see the module docstring).
 
-    The workspace holds ``pages`` MLA pages, then as many indexer pages.
+    The workspace holds `pages` MLA pages, then as many indexer pages.
     """
 
     layout: ContextLayout
@@ -363,7 +363,7 @@ class DcpShardQContext:
     block_size = PAGE_TOKENS
 
     def _view(self, dtype: torch.dtype, offset: int, row_bytes: int, device):
-        """The workspace pages at ``offset`` as a [pages, 64, row] cache."""
+        """The workspace pages at `offset` as a [pages, 64, row] cache."""
         storage = _workspace(self.layout, self.pages, device).storage
         return torch.as_strided(
             storage.view(dtype),
@@ -373,12 +373,12 @@ class DcpShardQContext:
         )
 
     def mla_view(self, mla_cache: torch.Tensor) -> torch.Tensor:
-        """The workspace's MLA pages, typed as ``mla_cache``."""
+        """The workspace's MLA pages, typed as `mla_cache`."""
         layout = self.layout
         return self._view(mla_cache.dtype, 0, layout.mla_row_bytes, mla_cache.device)
 
     def index_view(self, index_cache: torch.Tensor) -> torch.Tensor:
-        """The workspace's indexer pages, typed as ``index_cache``."""
+        """The workspace's indexer pages, typed as `index_cache`."""
         layout = self.layout
         return self._view(
             index_cache.dtype,
@@ -397,7 +397,7 @@ class DcpShardQContext:
     ) -> None:
         """Copy this rank's rows of the prefill requests of one layer's
         DCP-local paged caches (with the step's kernel block tables) into the
-        workspaces at ``dst_addrs``."""
+        workspaces at `dst_addrs`."""
         if self.max_local_pages:
             # gather imports cutlass, so import it only on the SM100 path.
             from vllm.v1.attention.ops.dcp_shardq.gather import (
@@ -428,7 +428,7 @@ class DcpShardQContext:
         index_block_table: torch.Tensor,
     ) -> torch.Tensor:
         """Push this rank's rows of one layer into every rank's workspace (see
-        ``push``) and return the workspace as the indexer's cache view, once
+        `push`) and return the workspace as the indexer's cache view, once
         every rank's rows have landed in it."""
         index_view = self.index_view(index_cache)
         buffer = _workspace(self.layout, self.pages, index_cache.device)
@@ -452,9 +452,9 @@ def build_dcp_shardq_context(
     rank: int,
     device: torch.device,
 ) -> DcpShardQContext | None:
-    """The context plan of ``split``'s step on DCP rank ``rank`` of ``world``,
-    or None when its prefill rows (the requests after ``split``'s decode
-    tokens) do not fit the ``max_pages`` workspace pages.
+    """The context plan of `split`'s step on DCP rank `rank` of `world`,
+    or None when its prefill rows (the requests after `split`'s decode
+    tokens) do not fit the `max_pages` workspace pages.
 
     Every rank derives the same plan; the push kernel finds each rank's rows
     from the step's device sequence lengths.
@@ -595,7 +595,7 @@ def register_warmup(layout: ContextLayout, world: int, num_topk_tokens: int) -> 
     """Register the JIT kernels that only DCP ShardQ steps launch with the
     active warmup registry: the context push and the top-k remap onto the
     workspace. (The prefill chunk metadata kernel warms its non-DCP form when
-    ``sparse_mla_shard_q`` is set under DCP; ShardQ's exchange kernel warms
+    `sparse_mla_shard_q` is set under DCP; ShardQ's exchange kernel warms
     with every ShardQ layer.)"""
     # gather imports cutlass, so import it only on the SM100 path.
     from vllm.v1.attention.ops.dcp_shardq.gather import DCP_CONTEXT_PUSH_KERNEL
@@ -705,10 +705,10 @@ class DcpShardQPlanner:
         self, common_attn_metadata: CommonAttentionMetadata, split: ShardQSplit | None
     ) -> DcpShardQContext | None:
         """The context plan of a step that runs as a DCP ShardQ step with the
-        token split ``split`` (vllm.v1.attention.ops.shardq.build_shardq_split),
+        token split `split` (vllm.v1.attention.ops.shardq.build_shardq_split),
         or None for the DCP path. A step without prefill rows is not counted.
 
-        The split's decode tokens (requests of at most ``max_decode_query_len``
+        The split's decode tokens (requests of at most `max_decode_query_len`
         tokens, which the indexer scores on its decode path) keep the DCP path;
         the plan covers the rest.
         """

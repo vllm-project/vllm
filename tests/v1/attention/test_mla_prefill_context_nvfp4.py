@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Chunked-context MLA prefill with an nvfp4_ds_mla KV cache.
 
-``MLACommonBaseImpl._compute_prefill_context`` gathers each chunk's context KV
+`MLACommonBaseImpl._compute_prefill_context` gathers each chunk's context KV
 into a BF16 workspace. For nvfp4_ds_mla it must use the NVFP4 upconvert gather
 (the generic one rejects the dtype) and pass the chunk starts through, so a
 continuation chunk reads from its start rather than from the request's first
 token.
 
 The reference runs the same method on a BF16 cache that holds the dequantized
-values, through the generic gather, which applies ``seq_starts`` itself. Every
+values, through the generic gather, which applies `seq_starts` itself. Every
 chunk must then see bit-identical Q, K and V.
 
 Under decode context parallelism,
-``MLACommonBaseImpl._context_parallel_compute_prefill_context`` gathers each
+`MLACommonBaseImpl._context_parallel_compute_prefill_context` gathers each
 rank's padded local rows from the request's local start the same way.
 """
 
@@ -72,7 +72,7 @@ class _RecordingPrefillBackend:
 
 
 class _KVBProj(torch.nn.Module):
-    """Stand-in for ``kv_b_proj`` with a BF16 weight (returns (out, bias))."""
+    """Stand-in for `kv_b_proj` with a BF16 weight (returns (out, bias))."""
 
     def __init__(self, device: torch.device) -> None:
         super().__init__()
@@ -255,7 +255,7 @@ def _packed_nvfp4_cache(
     dequantized rows by slot.
 
     Other layers' pages sit between this layer's blocks, so the block stride is
-    larger than ``block_size`` rows. Those bytes are 0xFF, an e4m3 NaN in the
+    larger than `block_size` rows. Those bytes are 0xFF, an e4m3 NaN in the
     RoPE and the scale factors, so a gather that strays into them fails.
     """
     block_stride_rows = 3 * block_size + 64
@@ -298,8 +298,8 @@ def _context_rows(
     starts: list[int],
     lengths: list[int],
 ) -> torch.Tensor:
-    """Reference rows for ``lengths[i]`` tokens from ``starts[i]`` of each
-    request in ``request_slice``."""
+    """Reference rows for `lengths[i]` tokens from `starts[i]` of each
+    request in `request_slice`."""
     slots = []
     for req, start, length in zip(
         range(request_slice.start, request_slice.stop), starts, lengths, strict=True

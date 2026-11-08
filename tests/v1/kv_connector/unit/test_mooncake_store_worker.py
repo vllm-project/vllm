@@ -1699,7 +1699,7 @@ def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
 
 
 def test_shared_prefix_junction_handoff_writes_only_its_mamba_key():
-    """A junction hand-off (``--enable-mamba-shared-prefix-checkpoint``) below
+    """A junction hand-off (`--enable-mamba-shared-prefix-checkpoint`) below
     the prompt checkpoint stores its Mamba state under the junction hash and
     no attention tail."""
     store = MagicMock()
@@ -3587,7 +3587,7 @@ def test_worker_put_striding_covers_every_rank_get_namespace(
     When num_kv_head < tp_size, ranks holding the same KV heads stripe
     their PUTs across one shared key namespace. That dedup is only valid
     when those ranks really share a namespace: with DCP > 1 each rank GETs
-    every key from its own ``@dcpN`` namespace, so striding must be
+    every key from its own `@dcpN` namespace, so striding must be
     disabled.
     """
     tp_size = 4
@@ -4055,7 +4055,7 @@ def test_store_sending_thread_skips_when_token_len_below_lcm():
 
 
 def test_store_sending_thread_only_stores_swa_blocks_in_window():
-    """For SWA groups, only blocks within ``sliding_window`` of an
+    """For SWA groups, only blocks within `sliding_window` of an
     lcm-aligned boundary are stored — a block outside every such window
     can never participate in any future hit (mirrors recv-side masking).
 
@@ -6275,9 +6275,9 @@ def test_store_worker_close_swallows_store_errors():
 
 
 def test_blob_block_hashes_wire_roundtrip():
-    """The lookup wire format sends a ``hash_len`` frame plus the raw hashes
+    """The lookup wire format sends a `hash_len` frame plus the raw hashes
     concatenated back-to-back; the server rebuilds them through a zero-copy
-    ``BlobBlockHashes`` view over the frame buffer."""
+    `BlobBlockHashes` view over the frame buffer."""
     hashes = [BlockHash(bytes([i]) * 16) for i in range(5)]
     hash_len = len(hashes[0])
 

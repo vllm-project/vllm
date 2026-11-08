@@ -61,7 +61,7 @@ def test_dcp_csr_preserves_valid_slots_and_empty_rows(rows, topk):
 
 
 def _poison_empty(monkeypatch, value):
-    """Fill every ``torch.empty`` result, so an unwritten entry is visible."""
+    """Fill every `torch.empty` result, so an unwritten entry is visible."""
     real_empty = torch.empty
 
     def empty(*args, **kwargs):
@@ -75,9 +75,9 @@ def test_dcp_csr_with_counts_packs_row_prefixes(monkeypatch, rows, topk):
     """The counts arm is the DCP decode path: every pure-decode step uses it.
 
     With counts the valid entries are a row prefix rather than the entries
-    above the ``-1`` sentinel, and ``indptr`` is left uninitialised for the
+    above the `-1` sentinel, and `indptr` is left uninitialised for the
     kernel to fill. Poisoning the allocation fails this test if
-    ``_pack_valid_rows`` ever stops writing all ``rows + 1`` entries.
+    `_pack_valid_rows` ever stops writing all `rows + 1` entries.
     """
     generator = torch.Generator(device="cuda").manual_seed(13)
     # Positive garbage past the prefix: a sentinel-based pack would keep it.
@@ -148,8 +148,8 @@ def _reference_merge(scores, local_indices, token_block_table, rank, page, strid
     """Selection of _select_owned_slots, written out row by row.
 
     Args:
-        scores: Rank-major scores of shape ``[rows, world * k]``.
-        local_indices: Every rank's local KV positions, ``[world, rows, k]``.
+        scores: Rank-major scores of shape `[rows, world * k]`.
+        local_indices: Every rank's local KV positions, `[world, rows, k]`.
             A negative entry is a padded slot the row does not own.
         token_block_table: Per-row block table.
         rank: The rank whose selection is wanted.
@@ -157,7 +157,7 @@ def _reference_merge(scores, local_indices, token_block_table, rank, page, strid
         stride: Cache rows per KV block.
 
     Returns:
-        The CSR row pointer and the packed physical KV rows of ``rank``.
+        The CSR row pointer and the packed physical KV rows of `rank`.
 
     """
     world, rows, k = local_indices.shape
@@ -202,9 +202,9 @@ def _reference_merge(scores, local_indices, token_block_table, rank, page, strid
 def _merge_inputs(rows, k, world_size, num_pages, page, live_per_row, seed):
     """Build one merge case: tied scores, with each plane padding its tail.
 
-    ``live_per_row`` gives each row's total live entries across the ranks; a
-    row with fewer than ``k`` of them is a short row, whose k-th score is then
-    ``-inf`` and whose padding ties with it.
+    `live_per_row` gives each row's total live entries across the ranks; a
+    row with fewer than `k` of them is a short row, whose k-th score is then
+    `-inf` and whose padding ties with it.
     """
     generator = torch.Generator(device="cuda").manual_seed(seed)
     # A tiny score range makes ties at the k-th score the common case.
@@ -273,9 +273,9 @@ def test_merge_dcp_scores_matches_rank_major_tie_break(rows, k, world_size):
     how much room is left. An off-by-one there drops or duplicates KV slots
     without crashing, which only shows up as accuracy loss.
 
-    Half the rows are short, so their k-th score is ``-inf`` and their padding
+    Half the rows are short, so their k-th score is `-inf` and their padding
     ties with it. Padding must never be taken: it would read the block table
-    at index ``-1`` and emit a KV row of another request.
+    at index `-1` and emit a KV row of another request.
     """
     sparse_mod._score_widths.clear()
     page = 4
@@ -291,9 +291,9 @@ def test_merge_dcp_scores_matches_rank_major_tie_break(rows, k, world_size):
 
 
 def test_merge_dcp_scores_grows_the_cached_row_widths():
-    """The cached ``ends`` vector is reused, so a wider batch must grow it.
+    """The cached `ends` vector is reused, so a wider batch must grow it.
 
-    A too-short ``ends`` would leave the extra rows reading whatever the
+    A too-short `ends` would leave the extra rows reading whatever the
     neighbouring memory holds.
     """
     sparse_mod._score_widths.clear()
@@ -491,7 +491,7 @@ def test_forward_mqa_remaps_once_per_metadata(monkeypatch):
     """Skip layers sharing a metadata share its remap; the first one pays.
 
     All layers read one top-k buffer, so the reuse has to key off the metadata
-    that owns ``paged_kv_indices``, not off the buffer being distinct.
+    that owns `paged_kv_indices`, not off the buffer being distinct.
     """
     _patch_init_deps(monkeypatch)
     buffer = _new_buffer()
@@ -515,8 +515,8 @@ def test_forward_mqa_remaps_once_per_metadata(monkeypatch):
 def test_forward_mqa_remaps_for_each_metadata(monkeypatch):
     """Skip layers on a second metadata must remap its own paged_kv_indices.
 
-    Regression: gating on ``indexer is not None`` skipped every layer in the
-    non-indexer metadata group, leaving its ``paged_kv_indices`` unwritten.
+    Regression: gating on `indexer is not None` skipped every layer in the
+    non-indexer metadata group, leaving its `paged_kv_indices` unwritten.
     """
     _patch_init_deps(monkeypatch)
     buffer = _new_buffer()
@@ -541,7 +541,7 @@ def test_forward_mqa_remaps_for_each_metadata(monkeypatch):
 def test_forward_mqa_remaps_after_a_later_indexer_write(monkeypatch):
     """A skip metadata must be refreshed once per indexer write, not once ever.
 
-    Regression for cross-layer index sharing (``index_topk_freq``). With
+    Regression for cross-layer index sharing (`index_topk_freq`). With
     freq=4 on a 78-layer model the 57 skip layers share one metadata while the
     21 indexer layers share another, so the skip metadata has to pick up every
     new selection. Recording only the buffer left layers 4 onwards attending

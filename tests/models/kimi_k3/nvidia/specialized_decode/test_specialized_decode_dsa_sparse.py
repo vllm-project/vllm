@@ -41,7 +41,7 @@ def _inputs(counts, rows_total=40_000, seed=0):
 
 
 def _reference(query, kv, rows, valid, quantize_p):
-    """FP32 attention of the first HEADS heads; ``quantize_p``: the kernel's
+    """FP32 attention of the first HEADS heads; `quantize_p`: the kernel's
     schedule (each of SPLIT CTAs takes a contiguous 1 / SPLIT of the keys in
     chunks of CHUNK, E4M3 P at 448 of its running max, FP32 sums; the CTAs'
     partials merge in FP32)."""
@@ -212,7 +212,7 @@ def test_sparse_error_within_flashinfer(counts):
 
 
 def test_sparse_push_into_value_mailbox():
-    """``push``: the merged rows and base-2 LSEs land in DcpValue's "bf16" mailbox
+    """`push`: the merged rows and base-2 LSEs land in DcpValue's "bf16" mailbox
     slot [parity, rank, row, head % H] of owner head // H (as DcpValue's own push
     of the unpushed rows: no negative zeros; a row with nothing to merge sends
     only EMPTY_LSE), and the q mailbox rows read are re-armed."""

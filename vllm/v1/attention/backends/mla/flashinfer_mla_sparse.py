@@ -406,11 +406,11 @@ def compute_trtllm_sparse_mla_workspace_bytes(
     Under DCP the query is all-gathered across the DCP group in the head dim
     and the kernel is asked for LSE, so trtllm-gen carves the softmax-stats
     slab described above from the workspace before its (batch-independent)
-    counter and scratch regions. ``base_workspace_bytes`` must stay available
+    counter and scratch regions. `base_workspace_bytes` must stay available
     for those regions, so the slab is added on top of it (see #50781).
 
     Without DCP no LSE is requested, no slab is carved, and the base size is
-    returned unchanged. A launch covers at most ``_TRTLLM_GEN_MAX_REQUESTS``
+    returned unchanged. A launch covers at most `_TRTLLM_GEN_MAX_REQUESTS`
     tokens, and launches run in order on one stream, so larger batches reuse
     the same slab.
     """
@@ -564,12 +564,12 @@ class _PrimsTSPlans:
     A plan fixes FlashInfer's schedule (chosen from its row capacity) and
     compiles that schedule's kernel on first use, which takes seconds. So every
     row capacity of a geometry is planned at once, at startup (from the profile
-    run's ``reserve_workspace``), and a call runs on the smallest capacity that
+    run's `reserve_workspace`), and a call runs on the smallest capacity that
     holds its rows: no planning or compilation happens while serving, and the
-    plan count stays fixed. Each plan is a packed-query plan of ``capacity``
+    plan count stays fixed. Each plan is a packed-query plan of `capacity`
     one-token requests, so its schedule is the one FlashInfer picks for
-    ``capacity`` decode rows; a call with fewer rows passes the matching
-    offsets (``qo_indptr`` = [0, 1, ..., rows, ..., rows]).
+    `capacity` decode rows; a call with fewer rows passes the matching
+    offsets (`qo_indptr` = [0, 1, ..., rows, ..., rows]).
 
     The sparse MLA layers run one at a time on one stream, so every plan shares
     one workspace. A geometry that needs more workspace replaces it; plans keep
@@ -645,7 +645,7 @@ def _kv_counter_bytes(num_rows: int, num_heads: int, device: torch.device) -> in
 
 def _reserve_kv_counters(device: torch.device, num_rows: int, num_heads: int) -> None:
     """Allocates the zeroed trtllm-gen multi-CTA KV counters for launches of up
-    to ``num_rows`` x ``num_heads``, before CUDA graph capture. The kernel
+    to `num_rows` x `num_heads`, before CUDA graph capture. The kernel
     resets them after each launch, so all layers share them, as they share the
     workspace. Without them FlashInfer zero-allocates counters on every call."""
     global _fi_sparse_kv_counters
@@ -655,7 +655,7 @@ def _reserve_kv_counters(device: torch.device, num_rows: int, num_heads: int) ->
 
 
 def _kv_counters(num_rows: int, num_heads: int) -> dict[str, torch.Tensor]:
-    """``multi_ctas_kv_counter_buffer`` for one launch when the reserved
+    """`multi_ctas_kv_counter_buffer` for one launch when the reserved
     counters cover it; otherwise FlashInfer allocates its own."""
     counters = _fi_sparse_kv_counters
     if counters is None:
@@ -686,7 +686,7 @@ def _pad_query_heads_kernel(
 
 
 def _pad_query_heads(query: torch.Tensor, heads: int) -> torch.Tensor:
-    """``query`` [T, H, D] in a new contiguous [T, ``heads``, D] buffer whose
+    """`query` [T, H, D] in a new contiguous [T, `heads`, D] buffer whose
     extra heads are zero (the head count a decode kernel runs), in one kernel."""
     num_tokens, num_heads, dim = query.shape
     padded = query.new_empty((num_tokens, heads, dim))
@@ -744,9 +744,9 @@ def _finish_dcp_partials_kernel(
 def _finish_dcp_partials(
     out: torch.Tensor, lse: torch.Tensor, counts: torch.Tensor
 ) -> None:
-    """In place, for trtllm-gen's DCP partials ``out`` [T, H, D] and ``lse``
+    """In place, for trtllm-gen's DCP partials `out` [T, H, D] and `lse`
     [T, H] (views of its head-padded buffers): rows without top-k entries
-    (``counts`` 0; the DCP index conversion compacts a row's valid entries to
+    (`counts` 0; the DCP index conversion compacts a row's valid entries to
     its front and counts them, so these are the rows whose entries are all -1)
     get output 0 and LSE -inf, the empty-shard identity of the DCP combine. One
     small kernel that writes only the empty rows."""
@@ -937,9 +937,9 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         layer: AttentionLayer,
         block_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Sparse MLA of every row of ``q`` [T, H, 576] (E4M3, quantized by the
-        layer with ``q_scale``) over its ``valid_counts`` leading physical rows
-        of ``topk_indices`` (-1 entries are masked)."""
+        """Sparse MLA of every row of `q` [T, H, 576] (E4M3, quantized by the
+        layer with `q_scale`) over its `valid_counts` leading physical rows
+        of `topk_indices` (-1 entries are masked)."""
         assert q.dtype == torch.float8_e4m3fn, q.dtype
         num_tokens, heads, _ = q.shape
         # Storage rows; the backend aligns block strides to whole rows.

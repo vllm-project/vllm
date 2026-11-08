@@ -2,20 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CuTe DSL direct DCP A2A LSE reduce (the DCP decode output combine) on SM100.
 
-Drop-in for ``torch.ops._C.direct_dcp_a2a_lse_reduce``, which
-``DirectDCPA2AWorkspace`` selects on SM100 for the shapes accepted by
-``direct_dcp_a2a_cutedsl_supported``. It uses the same symmetric buffers and
-the same epoch protocol (``epoch + 1`` selects the parity slot; source ``r``
-publishes ``signal[parity][r] = epoch + 1`` with a system-scope release), and
+Drop-in for `torch.ops._C.direct_dcp_a2a_lse_reduce`, which
+`DirectDCPA2AWorkspace` selects on SM100 for the shapes accepted by
+`direct_dcp_a2a_cutedsl_supported`. It uses the same symmetric buffers and
+the same epoch protocol (`epoch + 1` selects the parity slot; source `r`
+publishes `signal[parity][r] = epoch + 1` with a system-scope release), and
 its output is bit-identical, in two launches instead of four:
 
-``push``: one CTA per (token, destination rank). It copies the token's head
-    slice for that destination (``heads_per_rank x head_dim``) and its LSE into
+`push`: one CTA per (token, destination rank). It copies the token's head
+    slice for that destination (`heads_per_rank x head_dim`) and its LSE into
     the destination's receive slot, all 16-byte loads in flight before the
-    remote stores. Empty-shard rows send an LSE of ``-inf``; their payload is
+    remote stores. Empty-shard rows send an LSE of `-inf`; their payload is
     never read by the combine. The last CTA of each destination (a local ticket)
     publishes the signal after a system-scope fence.
-``combine``: one warp per (token, local head). It waits for all sources,
+`combine`: one warp per (token, local head). It waits for all sources,
     forms the base-2 LSE weights in source order exactly as the CUDA op does,
     loads all non-zero-weight partials at once and accumulates in FP32. The last
     CTA advances the epoch, which replaces the separate epoch launch.
@@ -229,7 +229,7 @@ def _trap(*, loc=None, ip=None) -> None:
 
 @dsl_user_op
 def _pack_x2(lo: Float32, hi: Float32, fp16: bool, *, loc=None, ip=None) -> Uint32:
-    """Round two FP32 values to nearest-even bf16 or fp16, ``lo`` in bits 0-15."""
+    """Round two FP32 values to nearest-even bf16 or fp16, `lo` in bits 0-15."""
     return Uint32(
         _asm(
             T.i32(),
@@ -244,7 +244,7 @@ def _pack_x2(lo: Float32, hi: Float32, fp16: bool, *, loc=None, ip=None) -> Uint
 
 @dsl_user_op
 def _unpack_x2(word: Uint32, fp16: bool, *, loc=None, ip=None) -> list[Float32]:
-    """Widen the two bf16 or fp16 halves of ``word`` (low first) to FP32."""
+    """Widen the two bf16 or fp16 halves of `word` (low first) to FP32."""
     if not fp16:
         return [
             recast_val(word << Uint32(16), Float32, loc=loc, ip=ip),
@@ -844,9 +844,9 @@ def direct_dcp_a2a_lse_reduce_cutedsl(
     *,
     counters: torch.Tensor,
 ) -> None:
-    """``torch.ops._C.direct_dcp_a2a_lse_reduce`` with the same arguments.
+    """`torch.ops._C.direct_dcp_a2a_lse_reduce` with the same arguments.
 
-    ``counters`` is a zero-initialized int32 ``[world_size + 1]`` tensor (push
+    `counters` is a zero-initialized int32 `[world_size + 1]` tensor (push
     tickets per destination, then the combine's CTA count) that the kernels
     leave at zero. The checks mirror the CUDA op's (metadata only, no sync): a
     shape mismatch would otherwise write out of bounds into peer memory.

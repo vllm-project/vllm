@@ -6,8 +6,8 @@ GLM5Next is rope-free MLA: qk_nope_head_dim=256, qk_rope_head_dim=0,
 v_head_dim=256, kv_lora_rank=512 -> head_size 512. These tests pin the
 selection contract only (no GPU required):
 
-* ``get_supported_head_sizes`` advertises 512 so the backend is a candidate;
-* ``supports_combination`` admits 512 only for rope-free models on SM90, with
+* `get_supported_head_sizes` advertises 512 so the backend is a candidate;
+* `supports_combination` admits 512 only for rope-free models on SM90, with
   a bf16 cache or an fp8_ds_mla cache (zero RoPE slot), and rejects
   everything else;
 * adding 512 must NOT reorder the SM100 priority list for bf16, which is why

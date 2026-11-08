@@ -180,7 +180,7 @@ def _stage_keys(
 
 
 def prefill_workspace_bytes(max_keys, max_reqs, world, interleave):
-    """Peak prefill scratch of one chunk holding at most ``max_keys`` keys.
+    """Peak prefill scratch of one chunk holding at most `max_keys` keys.
 
     The indexer builder caps each chunk's keys at its prefill buffer size and
     _prepare_chunk keeps each logits tile under 1 GiB. Staging holds the local

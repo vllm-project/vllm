@@ -184,8 +184,8 @@ def test_dcp_consumer_count_matches_readers(
 def _make_mock_worker_for_splits(group_spec_types):
     """Build a mock NixlConnectorWorker with _group_spec_types for split tests.
 
-    No per-region replicate flags are configured (``block_len_per_layer`` empty
-    and ``num_regions == 0``), so ``_build_local_splits_from_plan`` treats every
+    No per-region replicate flags are configured (`block_len_per_layer` empty
+    and `num_regions == 0`), so `_build_local_splits_from_plan` treats every
     FA descriptor as SPLIT, matching the legacy behavior these tests assert.
     """
     worker = object.__new__(NixlConnectorWorker)

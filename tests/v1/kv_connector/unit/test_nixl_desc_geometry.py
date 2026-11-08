@@ -356,8 +356,8 @@ def _register_overlaid_mla_worker(
 ):
     """Register two MLA layers overlaid on one allocation.
 
-    ``tail_bytes`` leaves spare bytes past the last block, the way an allocation
-    rounded up to a page boundary does. Clearing ``page_covers_view`` narrows
+    `tail_bytes` leaves spare bytes past the last block, the way an allocation
+    rounded up to a page boundary does. Clearing `page_covers_view` narrows
     each layer's view below its page, leaving the block interior non-contiguous.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
@@ -565,9 +565,9 @@ def _make_mla_hybrid_worker(
     mamba=True,
 ):
     """Build a real worker (pull by default) with a hybrid MLA + 2xKDA HMA
-    layout, or a pure MLA one without ``mamba``.
+    layout, or a pure MLA one without `mamba`.
 
-    ``kda_only_tensor`` adds a third layer to the first KDA group in a tensor
+    `kda_only_tensor` adds a third layer to the first KDA group in a tensor
     no other group uses, as when a model has more SSM than MLA layers."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         base_worker as bw,
@@ -1093,9 +1093,9 @@ def _run_hetero_case(
 ):
     """Full pull-path run for one geometry; returns pairing records.
 
-    ``remote_kernel`` defaults to the local kernel block size; a smaller
-    value additionally exercises block_size_ratio > 1. Without ``mamba`` the
-    model is pure MLA, whose local prefix hit of ``cached`` blocks is not
+    `remote_kernel` defaults to the local kernel block size; a smaller
+    value additionally exercises block_size_ratio > 1. Without `mamba` the
+    model is pure MLA, whose local prefix hit of `cached` blocks is not
     pulled.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -1500,8 +1500,8 @@ def test_dcp_pull_with_block_size_ratio_writes_stay_within_request_blocks():
 def _make_csa_linear_ple_worker(
     scratch_aliases: str = "compressed", ple_page_size: int = 256
 ):
-    """``scratch_aliases`` selects which pages the compressor ring overlays;
-    ``ple_page_size`` widens the PLE page beyond the page it shares a region
+    """`scratch_aliases` selects which pages the compressor ring overlays;
+    `ple_page_size` widens the PLE page beyond the page it shares a region
     with (block-outer layout: both start at byte 0 of the block)."""
     from unittest.mock import MagicMock
 
