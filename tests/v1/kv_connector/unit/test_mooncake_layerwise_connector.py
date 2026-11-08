@@ -4,6 +4,7 @@
 import contextlib
 import ctypes
 import queue
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import msgspec
@@ -198,7 +199,7 @@ async def test_layerwise_batch_copies_each_request_and_layer(source_blocks):
             for name in names
         )
         result = worker._send_batch("decode:9000", tasks, torch.Event())
-        assert not result.errors
+        assert len(result.progress) == len(tasks)
         for source, destination in zip(sources, destinations):
             assert torch.equal(destination[5:7], source[list(source_blocks)])
             assert torch.equal(destination[7:9], source[3:5])
@@ -209,8 +210,9 @@ async def test_layerwise_batch_copies_each_request_and_layer(source_blocks):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("prefix_delta", [-1, 0, 1])
 @pytest.mark.parametrize("ready_before_start", [False, True])
+@pytest.mark.parametrize("delayed_send", [False, True])
 async def test_layerwise_prefix_copy_waits_for_complete_blocks_and_destination(
-    prefix_delta, ready_before_start
+    prefix_delta, ready_before_start, delayed_send
 ):
     with _layerwise_copy_worker() as worker:
         name = worker.registered_layer_names[0]
@@ -244,8 +246,15 @@ async def test_layerwise_prefix_copy_waits_for_complete_blocks_and_destination(
         assert not torch.any(destination[4])
         socket.send_multipart.assert_not_awaited()
         source[2].fill_(11)
-        worker.save_kv_layer(name)
-        worker.wait_for_save()
+        # An active prefill has no separate D-ready WRITE deadline.
+        delay = mooncake_connector.envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT + 61
+        with patch.object(
+            mooncake_connector.time,
+            "monotonic",
+            return_value=time.monotonic() + (delay if delayed_send else 0),
+        ):
+            worker.save_kv_layer(name)
+            worker.wait_for_save()
         assert torch.equal(destination[3:5], source[1:3])
 
 
