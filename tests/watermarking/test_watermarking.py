@@ -810,7 +810,7 @@ def _unaligned_max_history_inputs() -> tuple[torch.Tensor, ...]:
     """One row whose only repeated context ends at position 680.
 
     680 is not a multiple of the kernel's 512-position block, so the scan window
-    selected by ``max_history`` starts in the middle of a block.
+    selected by `max_history` starts in the middle of a block.
     """
     history = list(range(1_000, 2_200))
     history[676:680] = [1, 2, 3, 4]

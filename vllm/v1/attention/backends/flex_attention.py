@@ -571,7 +571,7 @@ class FlexAttentionMetadata:
         """Creates the Reference Sliding Window Attention (R-SWA) mask_mod.
 
         R-SWA keeps the whole prefix (image + prompt tokens, i.e. logical index
-        ``< prefix_len``) globally visible while generated tokens additionally
+        `< prefix_len`) globally visible while generated tokens additionally
         attend a fixed sliding window of recent tokens. This term is combined
         with the base causal mask via logical AND, so it only ever *removes*
         far-away generated tokens that fall outside the window and outside the

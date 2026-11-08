@@ -233,6 +233,7 @@ class ServingRender(BaseServing):
             tool_choice=request.tool_choice,
             parallel_tool_calls=request.parallel_tool_calls,
             include_reasoning=request.include_reasoning,
+            return_tokens_as_token_ids=request.return_tokens_as_token_ids,
             # Like the derenderer, Harmony output is parsed without template
             # kwargs.
             chat_template_kwargs=(

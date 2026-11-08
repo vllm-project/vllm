@@ -127,9 +127,8 @@ class HpcRopeNorm(CustomOp, HpcModule):
         self.q_size = num_heads * head_dim
         self.kv_size = num_kv_heads * head_dim
 
-        # Register as a non-persistent buffer so it participates in sleep
-        # level-2 save/restore (CuMemAllocator) but is excluded from the
-        # checkpoint state_dict.
+        # Register as a non-persistent buffer so it survives level-2 sleep on
+        # every platform but is excluded from the checkpoint state_dict.
         self.register_buffer("cos_sin_cache", cos_sin_cache.float(), persistent=False)
 
         self.fallback_qnorm = fallback_qnorm
@@ -245,12 +244,12 @@ class HpcRopeNorm(CustomOp, HpcModule):
     def _kv_write_scratch(self, cache: torch.Tensor) -> torch.Tensor:
         """Throwaway dense K/V pages for the stride-aware fallback path.
 
-        ``hpc.rope_norm_store_kv[_fp8]`` always writes the paged cache itself
+        `hpc.rope_norm_store_kv[_fp8]` always writes the paged cache itself
         (rotated K/V *and* zero padding for the tail of every request's last
         block), addressing it densely. When the real pages are not dense those
         writes would land on unrelated blocks, so they are redirected here by
         pairing this scratch cache with an all-zero block table; the real data
-        is taken out through ``out_k``/``out_v`` instead.
+        is taken out through `out_k`/`out_v` instead.
 
         Returns a (2, 1, block_size, num_kv_heads, head_dim) tensor: index 0 is
         the key scratch page, index 1 the value scratch page.
@@ -280,14 +279,14 @@ class HpcRopeNorm(CustomOp, HpcModule):
         """Zero the unused tail slots of each request's last block.
 
         The HPC attention kernels read whole blocks, so the slots past
-        ``seq_len`` must be zero. The fused op normally does this itself; on the
+        `seq_len` must be zero. The fused op normally does this itself; on the
         fallback path its (densely addressed) padding writes are discarded, so
         the padding is reapplied here through the real, strided cache views.
 
         Shapes are static and no value is inspected on the host, so this stays
         CUDA-graph capturable. It is also self-contained: each request's last
         block is read, masked and written back, so slots that must be preserved
-        (and requests padded in for graph capture, whose ``seq_len`` is 0) keep
+        (and requests padded in for graph capture, whose `seq_len` is 0) keep
         their previous contents instead of being redirected somewhere.
         """
         block_size = key_cache.shape[1]
@@ -326,15 +325,15 @@ class HpcRopeNorm(CustomOp, HpcModule):
     ) -> None:
         """Write dense per-token K (or V) into a paged cache view.
 
-        Used on the stride-aware fallback path (see ``_forward_impl``).
-        ``cache`` is a (num_blocks, block_size, num_kv_heads, head_dim) view
-        with arbitrary block/token/head strides; ``src`` is the dense
+        Used on the stride-aware fallback path (see `_forward_impl`).
+        `cache` is a (num_blocks, block_size, num_kv_heads, head_dim) view
+        with arbitrary block/token/head strides; `src` is the dense
         (num_tokens, num_kv_heads, head_dim) buffer produced by the fused HPC
-        kernel. FP8 payloads are moved as raw bytes because ``index_copy_``
+        kernel. FP8 payloads are moved as raw bytes because `index_copy_`
         has no FP8 kernel.
 
-        Padded tokens carry ``PAD_SLOT_ID`` (-1); clamping sends them to the
-        reserved null block instead of tripping ``index_copy_``'s bounds check.
+        Padded tokens carry `PAD_SLOT_ID` (-1); clamping sends them to the
+        reserved null block instead of tripping `index_copy_`'s bounds check.
         This keeps the op CUDA-graph safe (static shape, no host sync), unlike
         masking the padded rows out.
         """

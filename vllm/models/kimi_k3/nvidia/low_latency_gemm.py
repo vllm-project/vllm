@@ -2,20 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi-K3 decode GEMM selection for unquantized BF16 on SM90/SM100/SM103/SM107.
 
-Dispatch is purely by local ``(N, K)`` shape and token count ``M`` — the module
-name plays no role. Each measured shape maps to a :class:`ProjectionSpec`
+Dispatch is purely by local `(N, K)` shape and token count `M` — the module
+name plays no role. Each measured shape maps to a `ProjectionSpec`
 holding the winning backend per token count. The static part of the decision is
-resolved once per module at install time into a small ``{M: call}`` plan, so the
+resolved once per module at install time into a small `{M: call}` plan, so the
 per-forward path is a single dict lookup.
 
 The supported capabilities carry separate measured tables:
-:data:`KIMI_K3_PROJECTIONS` was tuned on B300 (SM103),
-:data:`KIMI_K3_PROJECTIONS_SM100` on B200 (SM100), and
-:data:`KIMI_K3_PROJECTIONS_SM90` on H200 (SM90). The per-(shape, M) winners
+`KIMI_K3_PROJECTIONS` was tuned on B300 (SM103),
+`KIMI_K3_PROJECTIONS_SM100` on B200 (SM100), and
+`KIMI_K3_PROJECTIONS_SM90` on H200 (SM90). The per-(shape, M) winners
 genuinely differ between the parts, so the tables must not be merged. SM107
 (Rubin) reuses the SM103 table: the plan was validated end-to-end on SM107
-hardware, but the per-M crossovers have not been re-measured there and may
-deserve their own table once retuned.
+hardware, but apart from 3584x7168 the per-M crossovers have not been
+re-measured there and may deserve their own table once retuned.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 import vllm.envs as envs
@@ -68,8 +69,8 @@ _KDA_TP_SIZE = 8
 def _kda_qkvg_flashinfer_backend() -> Literal["cute-dsl"] | None:
     """Return the tested FlashInfer backend for the low-M QKVG branch.
 
-    FlashInfer's ``cute-dsl`` BF16 GEMM supports SM100 and SM103, but rejects
-    SM90 during backend validation. Other capabilities use ``torch.mm`` for
+    FlashInfer's `cute-dsl` BF16 GEMM supports SM100 and SM103, but rejects
+    SM90 during backend validation. Other capabilities use `torch.mm` for
     QKVG while retaining the concurrent F_A/beta and F_B branch.
     """
     if current_platform.is_device_capability(
@@ -140,11 +141,15 @@ KIMI_K3_PROJECTIONS: dict[tuple[int, int], ProjectionSpec] = {
     (2112, 7168): ProjectionSpec(2112, 7168, _M1_TO_16, name="fused_qkv_a_proj"),
     (2304, 1536): ProjectionSpec(2304, 1536, _M1_TO_16, name="q_b_proj"),
     (4608, 1536): ProjectionSpec(4608, 1536, _M1_TO_16, name="q_b_proj"),
+    # 3584x7168 (latent-MoE routed_expert_down_proj): CuTe at M1 only. M2..8 go
+    # to the linear backend, where FlashInfer cute-dsl beats dsv3_fused_a_gemm
+    # (cold L2): ~11.3 vs ~15.0-15.6 us at M=2..8 on B300, 7.1 vs 10.4 us at M=8
+    # on SM107. cuBLAS loses to dsv3 at M>=4 on B300 (it wins on SM107), so the
+    # B300 gain needs --linear-backend flashinfer_cutedsl.
     (3584, 7168): ProjectionSpec(
         3584,
         7168,
-        frozenset(range(2, 9)),
-        ((1, _cute(1, 224, 2, 4)),),
+        cute_configs=((1, _cute(1, 224, 2, 4)),),
         name="routed_expert_down_proj",
     ),
     (6288, 7168): ProjectionSpec(
@@ -326,6 +331,27 @@ KIMI_K3_PROJECTIONS: dict[tuple[int, int], ProjectionSpec] = {
         ),
         name="lm_head",
     ),
+    # Kimi K3.1 DSA packed projections: [q_a | kv_a | wk | weights_proj] at any
+    # TP, and [q_b | wq_index] at TP1 / TP8. Packed cuBLAS already beats the
+    # separate GEMMs at M1..16; CuTe wins >=5% over it only where listed.
+    (2272, 7168): ProjectionSpec(
+        2272,
+        7168,
+        cute_configs=(
+            (1, _cute(1, 224, 4, 2)),
+            (2, _cute(2, 224, 4, 2)),
+            (3, _cute(3, 128, 2, 2)),
+            (4, _cute(4, 224, 4, 1)),
+            (5, _cute(5, 128, 2, 1)),
+        ),
+        name="dsa_qkv_a_wkv_proj",
+    ),
+    (22528, 1536): ProjectionSpec(
+        22528, 1536, cute_configs=((1, _cute(1, 32, 8, 2)),), name="dsa_q_b_wq_proj"
+    ),
+    (6400, 1536): ProjectionSpec(
+        6400, 1536, cute_configs=((1, _cute(1, 64, 4, 2)),), name="dsa_q_b_wq_proj"
+    ),
     # 7168x2112 (TP16 dense down_proj) has no entry on purpose: K=2112 divides
     # none of the fused-A tile_k values, and the CuTe kernel is left with
     # vector_width=2, which measured slower than cuBLAS.
@@ -477,8 +503,8 @@ KIMI_K3_PROJECTIONS_SM100: dict[tuple[int, int], ProjectionSpec] = {
         ),
         name="lm_head",
     ),
-    # Latent-MoE replicated projections. dsv3 measured M2..8 wins on B300 for
-    # 3584x7168 but loses to cuBLAS there on B200; only CuTe wins land here.
+    # Latent-MoE replicated projections. dsv3 loses to cuBLAS on B200 for
+    # 3584x7168 (and is no longer used for it on B300); only CuTe wins land here.
     (3584, 7168): ProjectionSpec(
         3584,
         7168,
@@ -639,7 +665,7 @@ def select_kimi_k3_backend(
     *,
     has_residual: bool = False,
 ) -> Backend | None:
-    """Backend for a local ``(N, K)`` at ``num_tokens``, or None to fall back."""
+    """Backend for a local `(N, K)` at `num_tokens`, or None to fall back."""
     spec = KIMI_K3_PROJECTIONS.get((n, k))
     return _backend_for(spec, num_tokens, has_residual) if spec is not None else None
 
@@ -742,10 +768,10 @@ def run_kda_projection_overlap(
     """Run the TP8 KDA decode projection branches concurrently.
 
     Args:
-        hidden_states: Packed BF16 input with shape ``[M, 7168]``.
+        hidden_states: Packed BF16 input with shape `[M, 7168]`.
         packed_weight: Existing Q/K/V/G/F_A/beta/pad weight with shape
-            ``[6288, 7168]``.
-        f_b_weight: F_B weight with shape ``[1536, 128]``.
+            `[6288, 7168]`.
+        f_b_weight: F_B weight with shape `[1536, 128]`.
         aux_stream: Stream for the F_A/beta then F_B branch.
         events: Start and completion events for the stream fork and join.
 
@@ -889,7 +915,7 @@ def try_low_latency_gemm(
     """Run the shape-selected low-latency kernel, or None to fall back.
 
     Resolves the plan from the shape table on each call; production installs a
-    precomputed plan (see :func:`enable_kimi_k3_low_latency_gemm`) and does not
+    precomputed plan (see `enable_kimi_k3_low_latency_gemm`) and does not
     use this path.
     """
     if envs.VLLM_BATCH_INVARIANT or not _runtime_ok(x, weight):
@@ -905,6 +931,22 @@ def try_low_latency_gemm(
     if not _residual_ok(x, weight, residual):
         return None
     return _run_residual_plan(_build_residual_plan(spec), x, weight, residual)
+
+
+def low_latency_linear(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    out = try_low_latency_gemm(x, weight)
+    return out if out is not None else F.linear(x, weight)
+
+
+def request_low_latency_warmup(weight: torch.Tensor) -> None:
+    """Warm up the measured CuTe configs for a weight that no linear module owns
+    (`enable_kimi_k3_low_latency_gemm` only covers modules)."""
+    table = _low_latency_table()
+    spec = table.get(tuple(weight.shape)) if table is not None else None
+    if spec is not None and shape_dynamic_skinny_gemm.is_available():
+        shape_dynamic_skinny_gemm.request_warmup_configs(
+            weight.dtype, (config for _, config in spec.cute_configs)
+        )
 
 
 class _KimiK3LowLatencyApply:
@@ -1004,9 +1046,10 @@ def enable_kimi_k3_low_latency_gemm(
     """Install shape-selected low-latency GEMMs and register CuTe warmups.
 
     Modules are matched purely by type, an exactly-unquantized method, and a
-    local ``(N, K)`` present in the current device's measured table
-    (:data:`KIMI_K3_PROJECTIONS` on SM103, :data:`KIMI_K3_PROJECTIONS_SM100`
-    on SM100, :data:`KIMI_K3_PROJECTIONS_SM90` on SM90).
+    local `(N, K)` present in the current device's measured table
+    (`KIMI_K3_PROJECTIONS` on SM103 and SM107,
+    `KIMI_K3_PROJECTIONS_SM100` on SM100, `KIMI_K3_PROJECTIONS_SM90`
+    on SM90).
     """
     if dtype != torch.bfloat16:
         return
