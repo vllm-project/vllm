@@ -211,8 +211,6 @@ steps:
   working_dir: "/vllm-workspace/tests"
   device: l4
   num_devices: 2
-  # No AMD mirror: the MI300/MI355 mirrors above are optional: false and
-  # already cover these paths on PRs.
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - tests/v1/kv_connector/nixl_integration/
@@ -220,6 +218,21 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_core_test.sh
+  mirror:
+    amd:
+      label: ":amd: (MI355) NixlConnector PD accuracy core"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 90
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+      - tests/v1/kv_connector/nixl_integration/
+      - tests/v1/kv_connector/nixl_push_integration/
+      - vllm/platforms/rocm.py
+      commands:
+      - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_core_test.sh
 
 - label: ":nvidia: (L4) NixlConnector PD edge case"
   key: nixlconnector-pd-edge-cases-2-gpus
