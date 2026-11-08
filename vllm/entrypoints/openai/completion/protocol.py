@@ -245,6 +245,18 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    cache_salt_start_idx: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Token index from which `cache_salt` applies (divergence-point "
+            "salting). Blocks covering tokens before this index hash without "
+            "the salt and stay shareable across tenants; blocks at/after it "
+            "are tenant-private. Must be aligned to the engine block size to "
+            "be effective. Ignored when `cache_salt` is not set."
+        ),
+    )
+
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
@@ -446,6 +458,12 @@ class CompletionRequest(OpenAIBaseModel):
         if not isinstance(data, dict):
             return data
         validate_cache_salt(data.get("cache_salt"))
+        if data.get("cache_salt_start_idx") is not None \
+                and data.get("cache_salt") is None:
+            raise VLLMValidationError(
+                "Parameter 'cache_salt_start_idx' requires 'cache_salt' to be set.",
+                parameter="cache_salt_start_idx",
+            )
         return data
 
     @model_validator(mode="before")

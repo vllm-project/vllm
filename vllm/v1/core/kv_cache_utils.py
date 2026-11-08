@@ -652,11 +652,26 @@ def generate_block_hash_extra_keys(
         request, start_token_idx, end_token_idx, start_mm_idx
     )
     lora_extra_keys = _gen_lora_extra_hash_keys(request)
-    cache_salt_keys: list[tuple[str, str]] = (
-        [("cache_salt", request.cache_salt)]
-        if (start_token_idx == 0 and request.cache_salt)
-        else []
-    )
+    # Divergence-point salting: when the request specifies
+    # cache_salt_start_idx, the salt applies to every block at/after that
+    # token index; blocks before it hash without the salt and stay shareable
+    # across tenants (preserving cross-tenant prefix-cache savings), while
+    # the salted chain keeps everything from the divergence block onward
+    # tenant-private. Without cache_salt_start_idx, behavior is unchanged:
+    # only block 0 is salted, so the whole chain is tenant-private
+    # (all-or-nothing isolation). The start index must be block-aligned by
+    # the caller; otherwise the block straddling the divergence leaks the
+    # first private tokens (see tests and arXiv:2608.09225).
+    if request.cache_salt:
+        if request.cache_salt_start_idx is not None:
+            salted = start_token_idx >= request.cache_salt_start_idx
+        else:
+            salted = start_token_idx == 0
+        cache_salt_keys: list[tuple[str, str]] = (
+            [("cache_salt", request.cache_salt)] if salted else []
+        )
+    else:
+        cache_salt_keys = []
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx
     )

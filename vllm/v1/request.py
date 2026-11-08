@@ -74,6 +74,7 @@ class Request:
         mm_features: list[MultiModalFeatureSpec] | None = None,
         lora_request: "LoRARequest | None" = None,
         cache_salt: str | None = None,
+        cache_salt_start_idx: int | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
@@ -190,6 +191,7 @@ class Request:
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
+        self.cache_salt_start_idx: int | None = cache_salt_start_idx
 
         # Multi-modal related
         self.mm_features = mm_features or []
@@ -272,6 +274,7 @@ class Request:
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
             cache_salt=request.cache_salt,
+            cache_salt_start_idx=request.cache_salt_start_idx,
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,

@@ -182,7 +182,7 @@ class EngineCoreRequest(
     lora_request: LoRARequest | None
     cache_salt: str | None
     data_parallel_rank: int | None
-    prompt_embeds: torch.Tensor | None = None
+    cache_salt_start_idx: int | None = None
 
     # Per-position mask for mixed-mode inputs (e.g chat completion with
     # prompt_embeds content parts). `True` means the position is a real

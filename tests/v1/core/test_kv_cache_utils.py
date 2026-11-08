@@ -264,6 +264,7 @@ def make_request(
     mm_positions: list[PlaceholderRange] | None = None,
     mm_hashes: list[str] | None = None,
     cache_salt: str | None = None,
+    cache_salt_start_idx: int | None = None,
     prompt_embeds: torch.Tensor | None = None,
     num_hash_lookahead_tokens: int = 0,
 ):
@@ -290,6 +291,7 @@ def make_request(
         pooling_params=None,
         lora_request=None,
         cache_salt=cache_salt,
+        cache_salt_start_idx=cache_salt_start_idx,
         block_hasher=get_request_block_hasher(
             block_size, hash_fn, num_hash_lookahead_tokens
         ),
@@ -813,6 +815,101 @@ def test_generate_block_hash_extra_keys_no_mm_inputs():
     assert extra_keys is None
     assert next_mm_idx == 0
 
+
+def test_generate_block_hash_extra_keys_cache_salt_start_idx():
+    """Divergence-point salting: the salt key appears only for blocks at/after
+    cache_salt_start_idx; earlier blocks hash without it (shareable across
+    tenants). Without cache_salt_start_idx, behavior is unchanged (salt only
+    on block 0)."""
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=[_ for _ in range(30)],
+        cache_salt="tenant-a",
+        cache_salt_start_idx=9,
+    )
+
+    # Block before the divergence point: unsalted.
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
+    assert extra_keys is None
+    # Block containing the divergence token: salted.
+    extra_keys, _ = generate_block_hash_extra_keys(request, 9, 12, 0)
+    assert extra_keys == (("cache_salt", "tenant-a"),)
+    # Later blocks stay salted.
+    extra_keys, _ = generate_block_hash_extra_keys(request, 24, 27, 0)
+    assert extra_keys == (("cache_salt", "tenant-a"),)
+
+
+def test_generate_block_hash_extra_keys_cache_salt_default_unchanged():
+    """Default upstream behavior: salt applies only to block 0."""
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=[_ for _ in range(30)],
+        cache_salt="tenant-a",
+    )
+
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
+    assert extra_keys == (("cache_salt", "tenant-a"),)
+    extra_keys, _ = generate_block_hash_extra_keys(request, 3, 6, 0)
+    assert extra_keys is None
+
+
+def test_cache_salt_start_idx_shares_prefix_blocks():
+    """Two tenants with different salts but the same cache_salt_start_idx
+    produce identical block hashes before the divergence point and different
+    hashes at/after it. This is the core security/cost tradeoff: pre-
+    divergence blocks stay shared (cache savings), private blocks are
+    isolated (no cross-tenant timing oracle)."""
+    block_size = 3
+    tokens = [_ for _ in range(30)]  # 10 blocks
+    divergence_block = 3  # salt from block 3 (token 9) onward
+
+    tenant_a = make_request(
+        request_id="a",
+        prompt_token_ids=list(tokens),
+        block_size=block_size,
+        cache_salt="tenant-a",
+        cache_salt_start_idx=divergence_block * block_size,
+    )
+    tenant_b = make_request(
+        request_id="b",
+        prompt_token_ids=list(tokens),
+        block_size=block_size,
+        cache_salt="tenant-b",
+        cache_salt_start_idx=divergence_block * block_size,
+    )
+
+    a_hashes = tenant_a.block_hashes
+    b_hashes = tenant_b.block_hashes
+    assert len(a_hashes) == len(b_hashes) == 10
+
+    # Shared region: identical hashes.
+    for i in range(divergence_block):
+        assert a_hashes[i] == b_hashes[i], f"block {i} should be shared"
+    # Private region: different hashes.
+    for i in range(divergence_block, 10):
+        assert a_hashes[i] != b_hashes[i], f"block {i} should be tenant-private"
+
+
+def test_cache_salt_all_or_nothing_shares_nothing():
+    """Baseline: without cache_salt_start_idx, different salts share nothing,
+    not even block 0 (the all-or-nothing cost the divergence mode avoids)."""
+    block_size = 3
+    tokens = [_ for _ in range(12)]
+
+    tenant_a = make_request(
+        request_id="a",
+        prompt_token_ids=list(tokens),
+        block_size=block_size,
+        cache_salt="tenant-a",
+    )
+    tenant_b = make_request(
+        request_id="b",
+        prompt_token_ids=list(tokens),
+        block_size=block_size,
+        cache_salt="tenant-b",
+    )
+
+    assert tenant_a.block_hashes != tenant_b.block_hashes
 
 def test_generate_block_hash_extra_keys_cache_salt():
     request = make_request(
