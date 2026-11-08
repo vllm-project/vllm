@@ -84,8 +84,7 @@ steps:
     entrypoints/rl
     --ignore=entrypoints/rl/weight_transfer
     --ignore=entrypoints/rl/return_routed_experts/test_openai_api.py
-    --ignore=entrypoints/rl/weight_transfer_metrics
-    --deselect="tests/entrypoints/rl/state_transitions/test_pause_resume.py::TestPauseResume::test_clear_cache_preserves_output_and_controls_prefix_cache[MRV1]" &&
+    --ignore=entrypoints/rl/weight_transfer_metrics &&
     PYTHONPATH=/workspace/vllm pytest -v -s entrypoints/serve/dev/rpc'
 
 - label: ":intel: (BMG) Entrypoints Integration (API Server Scale Out)"
@@ -112,8 +111,8 @@ steps:
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
     cd tests &&
     pytest -v -s entrypoints/scale_out
-    --deselect="entrypoints/scale_out/derender/test_derender_parity.py::test_inline_derender_parity[n2]"
-    --deselect="entrypoints/scale_out/derender/test_derender_parity.py::test_inline_derender_stream_parity[n2]"'
+    --deselect="tests/entrypoints/scale_out/derender/test_derender_parity.py::test_inline_derender_parity[n2]"
+    --deselect="tests/entrypoints/scale_out/derender/test_derender_parity.py::test_inline_derender_stream_parity[n2]"'
 
 - label: ":intel: (BMG) Entrypoints Integration (API Server Generate)"
   key: entrypoints-integration-api-server-generate-intel
