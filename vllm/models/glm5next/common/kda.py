@@ -43,7 +43,11 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
 from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
-from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    LoaderFunction,
+    default_weight_loader,
+    sharded_weight_loader,
+)
 from vllm.model_executor.utils import (
     maybe_disable_graph_partition,
     refill_derived,
@@ -195,7 +199,12 @@ def _resolve_kda_prefill_backend(
 
 
 def _fused_qkv_conv1d(
-    conv_size: int, projection_size: int, tp_size: int, tp_rank: int, prefix: str
+    conv_size: int,
+    projection_size: int,
+    tp_size: int,
+    tp_rank: int,
+    prefix: str,
+    disable_tp: bool = False,
 ) -> ColumnParallelLinear:
     """The q|k|v short convs as one `[3 * C_local, 1, K]` parameter.
 
@@ -210,6 +219,7 @@ def _fused_qkv_conv1d(
         bias=False,
         params_dtype=torch.float32,
         prefix=prefix,
+        disable_tp=disable_tp,
     )
     conv1d.weight.data = conv1d.weight.data.unsqueeze(1)
     delattr(conv1d.weight, "weight_loader")
@@ -386,8 +396,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         config: Glm5NextTextConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
+        replicate: bool = False,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
+
+        # replicate: every rank holds all heads and the full recurrent state.
+        self.replicate = replicate
+        if replicate:
+            self.tp_size, self.tp_rank = 1, 0
 
         self.head_dim = config.linear_head_dim
         self.num_heads = config.linear_num_heads
@@ -425,6 +441,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj_qkvbfg_a",
+            disable_tp=replicate,
         )
 
         self.f_b_proj = ColumnParallelLinear(
@@ -433,12 +450,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.f_b_proj",
+            disable_tp=replicate,
         )
         self.dt_bias = nn.Parameter(
             torch.empty(divide(projection_size, self.tp_size), dtype=torch.float32)
         )
 
-        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
+        def shard_loader(axis: int) -> LoaderFunction:
+            return default_weight_loader if replicate else sharded_weight_loader(axis)
+
+        set_weight_attrs(self.dt_bias, {"weight_loader": shard_loader(0)})
 
         self.conv1d = _fused_qkv_conv1d(
             self.conv_size,
@@ -446,12 +467,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.tp_size,
             self.tp_rank,
             prefix=f"{prefix}.conv1d",
+            disable_tp=replicate,
         )
 
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
         )
-        set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(2)})
+        set_weight_attrs(self.A_log, {"weight_loader": shard_loader(2)})
 
         self.g_b_proj = ColumnParallelLinear(
             self.head_dim,
@@ -459,6 +481,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.g_b_proj",
+            disable_tp=replicate,
         )
         self.o_norm = FusedRMSNormGated(
             self.head_dim,
@@ -471,6 +494,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.o_proj",
+            disable_tp=replicate,
         )
 
         compilation_config = get_current_vllm_config().compilation_config
@@ -482,7 +506,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         def _a_log_weight_loader(param, loaded_weight):
             if loaded_weight.dim() == 1:
                 loaded_weight = loaded_weight.view([1, 1, -1, 1])
-            return sharded_weight_loader(2)(param, loaded_weight)
+            return shard_loader(2)(param, loaded_weight)
 
         self.A_log.weight_loader = _a_log_weight_loader
 
