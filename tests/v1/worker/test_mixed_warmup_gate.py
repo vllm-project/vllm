@@ -33,6 +33,84 @@ def test_mixed_warmup_skipped_for_single_seq(max_num_reqs):
     )
 
 
+def _token_runner(
+    *, is_pooling_model=False, num_blocks=128, token_group=True, extra_specs=()
+):
+    token_groups = [
+        SimpleNamespace(
+            kv_cache_spec=SimpleNamespace(
+                block_size=16,
+                dcp_sharded=False,
+                max_num_blocks_per_req=lambda vllm_config, max_len: cdiv(max_len, 16),
+            )
+        )
+    ]
+    return SimpleNamespace(
+        is_pooling_model=is_pooling_model,
+        max_num_reqs=2,
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[
+                *(token_groups if token_group else []),
+                *(SimpleNamespace(kv_cache_spec=spec) for spec in extra_specs),
+            ],
+            num_blocks=num_blocks,
+        ),
+        vllm_config=SimpleNamespace(
+            num_lookahead_tokens=0,
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        ),
+        max_model_len=128,
+        model_config=SimpleNamespace(get_vocab_size=lambda: 64),
+        num_speculative_steps=0,
+        model_state=SimpleNamespace(max_encoder_len=0),
+        kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
+    )
+
+
+@pytest.mark.parametrize("with_token_group", [False, True])
+def test_mixed_warmup_skipped_for_persistent_state_groups(with_token_group):
+    """Synthetic token requests carry no state handles, so a runner with any
+    persistent-state group skips the warmup before any worker call."""
+    from tests.v1.core.utils import create_state_spec
+
+    runner = _token_runner(
+        token_group=with_token_group, extra_specs=(create_state_spec(),)
+    )
+    assert (
+        run_mixed_prefill_decode_warmup(
+            runner,
+            worker_execute_model=_fail,
+            worker_sample_tokens=_fail,
+            num_tokens=32,
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("runner_kwargs", "num_tokens"),
+    [({"is_pooling_model": True}, 32), ({}, 2), ({"num_blocks": 3}, 32)],
+    ids=["pooling", "short", "block-starved"],
+)
+def test_mixed_warmup_skipped_for_pooling_short_and_block_starved_runs(
+    runner_kwargs, num_tokens
+):
+    """Token-cache models keep the pooling, length and block-budget gates.
+
+    The 3-token decode and 31-token prefill need three blocks of 16, and block
+    0 is the null block, so three blocks leave too few.
+    """
+    assert (
+        run_mixed_prefill_decode_warmup(
+            _token_runner(**runner_kwargs),
+            worker_execute_model=_fail,
+            worker_sample_tokens=_fail,
+            num_tokens=num_tokens,
+        )
+        is False
+    )
+
+
 def test_mixed_warmup_disables_watermarking():
     outputs: list[SchedulerOutput] = []
     runner = SimpleNamespace(
