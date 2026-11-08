@@ -423,17 +423,19 @@ class LLMEngine:
         """
         self.engine_core.reset_encoder_cache()
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+    def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ):
         if level >= 1:
             self.renderer.clear_mm_cache()
-        self.engine_core.sleep(level, mode)
+        self.engine_core.sleep(level, mode, reset_connector)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
-    def release_kv_cache_memory(self) -> None:
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         self.renderer.clear_mm_cache()
-        self.engine_core.release_kv_cache_memory()
+        self.engine_core.release_kv_cache_memory(reset_connector)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, 0)

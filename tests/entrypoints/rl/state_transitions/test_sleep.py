@@ -49,7 +49,7 @@ def test_sleep_route_response_and_engine_arguments(sleep_route_app, level):
         response = client.post("/sleep", params={"level": level})
     assert response.status_code == 200
     assert response.json() == {"status": "sleeping", "level": level}
-    app.state.engine_client.sleep.assert_awaited_once_with(level, "abort")
+    app.state.engine_client.sleep.assert_awaited_once_with(level, "abort", True)
 
 
 @pytest.mark.cpu_test
@@ -73,6 +73,16 @@ def test_sleep_route_rejects_invalid_query_before_dispatch(
     app.state.engine_client.sleep.assert_not_awaited()
     assert list(metrics.duration.collect()[0].samples) == []
     assert list(metrics.in_flight.collect()[0].samples) == []
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("route", ["sleep", "release_kv_cache_memory"])
+def test_kv_cache_routes_forward_reset_connector(sleep_route_app, route):
+    app, _ = sleep_route_app
+    with TestClient(app) as client:
+        response = client.post(f"/{route}", params={"reset_connector": "false"})
+    assert response.status_code == 200
+    assert getattr(app.state.engine_client, route).await_args.args[-1] is False
 
 
 @pytest.mark.cpu_test
@@ -109,7 +119,7 @@ def test_release_kv_cache_memory_route(sleep_route_app, fails):
     assert response.status_code == (500 if fails else 200)
     if not fails:
         assert response.json() == {"status": "kv_cache_released"}
-    release.assert_awaited_once_with()
+    release.assert_awaited_once_with(True)
     assert metrics.in_flight.labels("release_kv_cache_memory")._value.get() == 0
     assert _duration_count(metrics, "release_kv_cache_memory") == 1
 

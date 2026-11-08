@@ -156,6 +156,17 @@ llm.release_kv_cache_memory()
 llm.wake_up(tags=["kv_cache"])  # Reallocate KV cache and resume scheduling.
 ```
 
+#### Keep the KV connector cache
+
+Discarding the KV cache, by a sleep at level 1 or 2 or by `release_kv_cache_memory()`, also resets a configured KV connector's cache, such as blocks offloaded to CPU or kept in an external store. Pass `reset_connector=False` to keep it, so that requests after the wake-up load those blocks instead of recomputing them:
+
+```python
+llm.sleep(level=1, reset_connector=False)
+llm.wake_up()
+```
+
+Block hashes do not cover the weights. If the weights may change before the wake-up, keep the default, or give requests a `cache_salt` per weight version so that blocks computed with older weights are never matched.
+
 #### Offloading CUDA graph memory
 
 By default, CUDA graph memory stays on the GPU while asleep. With
@@ -252,8 +263,8 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 
 #### HTTP endpoints
 
-- `POST /sleep?level=1` — Put the model to sleep (`level=1`).
-- `POST /release_kv_cache_memory` — Discard KV cache memory after a completed pause, while all executor memory is resident.
+- `POST /sleep?level=1` — Put the model to sleep (`level=1`). `reset_connector=false` keeps the KV connector's cache.
+- `POST /release_kv_cache_memory` — Discard KV cache memory after a completed pause, while all executor memory is resident. `reset_connector=false` keeps the KV connector's cache.
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
 - `POST /collective_rpc` — Perform a collective remote procedure call (RPC).
 - `GET /is_sleeping` — Check if the model is sleeping.

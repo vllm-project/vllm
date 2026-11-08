@@ -1038,16 +1038,24 @@ impl EngineCoreClient {
     }
 
     /// Put the engine to sleep.
-    pub async fn sleep(&self, level: SleepLevel, mode: PauseMode) -> Result<()> {
+    pub async fn sleep(
+        &self,
+        level: SleepLevel,
+        mode: PauseMode,
+        reset_connector: bool,
+    ) -> Result<()> {
         let recheck = self.inner.readiness().withdraw_until_recheck();
-        self.inner.call_utility::<(), _>("sleep", (level, mode), Some(recheck)).await?;
+        self.inner
+            .call_utility::<(), _>("sleep", (level, mode, reset_connector), Some(recheck))
+            .await?;
         self.inner.record_sleep_state(EngineSleepState::Asleep(level));
         Ok(())
     }
 
     /// Release KV cache memory while keeping model weights resident.
-    pub async fn release_kv_cache_memory(&self) -> Result<()> {
-        self.call_utility::<(), _>("release_kv_cache_memory", ()).await?;
+    pub async fn release_kv_cache_memory(&self, reset_connector: bool) -> Result<()> {
+        self.call_utility::<(), _>("release_kv_cache_memory", (reset_connector,))
+            .await?;
         self.inner.record_sleep_state(EngineSleepState::KvCacheReleased);
         Ok(())
     }
