@@ -273,9 +273,6 @@ apache-tvm-ffi==0.1.11 \
     #   -c requirements/rocm.txt
     #   tilelang
     #   xgrammar
-arctic-inference==0.1.1 \
-    --hash=sha256:36857e2fbe3ead34821a04be98dfab95086050c1e38199c8fdfe308234fdcf63
-    # via -r requirements/test/rocm.in
 argcomplete==3.6.3 \
     --hash=sha256:62e8ed4fd6a45864acc8235409461b72c9a28ee785a2011cc5eb78318786c89c \
     --hash=sha256:f5007b3a600ccac5d25bbce33089211dfd49eab4a7718da3f10e3082525a92ce
