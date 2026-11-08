@@ -83,11 +83,7 @@ GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.2}
 PREFILL_BLOCK_SIZE=${PREFILL_BLOCK_SIZE:-128}
 DECODE_BLOCK_SIZE=${DECODE_BLOCK_SIZE:-128}
 ENFORCE_EAGER=${ENFORCE_EAGER:-1}
-# Set to 1 to replace --enforce-eager on the decoder with FULL decode-only CUDA
-# graphs and no torch.compile: decode is CPU-bound in eager mode, while
-# compiling every model costs more startup than the eval saves. A remotely
-# prefilled request recomputes only its last prompt token, so decoder batches
-# are uniform decode. Prefillers stay eager; they only run prefills.
+# Set to 1 to give the decoder decode-only CUDA graphs without torch.compile.
 DECODER_CUDAGRAPH=${DECODER_CUDAGRAPH:-0}
 # Comma-separated extra args for vllm serve (e.g. --max-model-len,2048)
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
