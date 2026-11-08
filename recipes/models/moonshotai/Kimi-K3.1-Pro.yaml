@@ -92,6 +92,9 @@ features:
     # 1, 2, 4 or 8 with max-num-seqs x (1 + draft tokens) <= 16, and an FP32
     # KDA recurrent state; without DCP only 3 or 7 draft tokens at
     # max-num-seqs 1 or 2. See the concurrency-1 preset.
+    # The B300 AgentX TEP presets also run it at TP8 + DCP8 with routed experts
+    # EP8 on MegaMoE; the toggle is limited to the strategies below, so those
+    # presets set --additional-config in their own args.
     strategies:
       - single_node_tp
       - multi_node_tp
@@ -454,6 +457,411 @@ presets:
 
       Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
 
+  # B300: the single-node vLLM AgentX lane kimik3.1-fp4-b300-vllm-agentic-dspark
+  # of SemiAnalysisAI/InferenceX#4871, one preset per configuration family of
+  # the lane and one point per benchmark concurrency. Every point serves the
+  # K3.1 DSpark draft at revision 6a2ef20a with block rejection, TP8 + DCP8
+  # attention, FP8 KV with an MXFP4 indexer cache, host KV offload and the
+  # low-latency decode backend.
+  b300_agentx:
+    label: "AgentX TP8 + DCP8"
+    hardware: b300
+    strategy: single_node_tp
+    workload: "Agentic (InferenceX AgentX)"
+    description: "Concurrency 1 to 16 on one B300 node: TP8 with DCP8, the low-latency decode backend on FULL decode CUDA graphs, the K3.1 DSpark draft with 4 tokens on TOKENSPEED_MLA, and host KV offload."
+    source: { label: "InferenceX #4871", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4871", key: "kimik3.1-fp4-b300-vllm-agentic-dspark", revision: "eb118b9b661d8ca111f8dc29f19496e2a30ccb18" }
+    image: "vllm/vllm-openai:kimi-k31-mc@sha256:f81998764e8594d71b40788c5285ae112acf9230129d5d0d238b5df83da5acf6"
+    select:
+      frontend: python
+      # Named in full: the builder keeps any feature a preset doesn't name.
+      features: { tool_calling: true, reasoning: true, spec_decoding: true, text_only: true, low_latency_decode: true, nvfp4_kv_cache: false }
+      dcp: 8
+      kv_offload: simple
+    args:
+      - "--decode-context-parallel-size"
+      - "8"
+      - "--dcp-comm-backend"
+      - "a2a"
+      - "--cp-kv-cache-interleave-size"
+      - "1"
+      - "--enable-prefix-caching"
+      - "--kv-cache-dtype"
+      - "fp8"
+      # The K3.1 precision policy keeps the KDA recurrent state in FP32.
+      - "--mamba-ssm-cache-dtype"
+      - "float32"
+      # KDA verification replays the accepted prefix instead of keeping one
+      # recurrent state per draft token.
+      - "--use-replayssm"
+      - "--no-enable-flashinfer-autotune"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--stream-interval"
+      - "10"
+      - "--disable-uvicorn-access-log"
+      # tokenspeed_mla_min_split_kv sets the minimum number of KV splits of the
+      # draft's TOKENSPEED_MLA decode attention.
+      - "--attention-config"
+      - '{"indexer_kv_dtype":"mxfp4","tokenspeed_mla_min_split_kv":32}'
+    env:
+      # Loading ~1.56 TB of weights plus the specialized decode's JIT.
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+      # Keep pooled client connections open across idle gaps between agent turns.
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "900"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_USE_DIRECT_DCP_A2A: "1"
+      VLLM_USE_DIRECT_DCP_Q_GATHER: "1"
+      VLLM_USE_DIRECT_DCP_KV_GATHER: "1"
+      VLLM_ALLREDUCE_USE_FLASHINFER: "1"
+      VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: "0"
+      VLLM_USE_NCCL_SYMM_MEM: "0"
+      VLLM_ENABLE_GEMM_RS: "0"
+      TOKENSPEED_MLA_FP16_PARTIALS: "0"
+    # --kv-transfer-config: the Simple option's connector with the lane's host
+    # DRAM split per rank.
+    json_args:
+      "--speculative-config": { revision: "6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94", attention_backend: TOKENSPEED_MLA, num_speculative_tokens: 4, rejection_sample_method: block }
+      "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 281125000000 } }
+      "--compilation-config": { cudagraph_mode: FULL_DECODE_ONLY }
+    # Decode capture sizes are 5 rows (1 + 4 draft tokens) per request.
+    points:
+      c1:
+        label: "1"
+        concurrency: 1
+        args: ["--max-num-seqs", "2"]
+        json_args:
+          "--compilation-config":
+            cudagraph_capture_sizes: [5, 10]
+      c4:
+        label: "4"
+        concurrency: 4
+        args: ["--max-num-seqs", "8"]
+        json_args:
+          "--compilation-config":
+            cudagraph_capture_sizes: [5, 10, 15, 20, 25, 30, 35, 40]
+      c6:
+        label: "6"
+        concurrency: 6
+        args: ["--max-num-seqs", "6"]
+        json_args:
+          "--compilation-config":
+            cudagraph_capture_sizes: [5, 10, 15, 20, 25, 30]
+      c8:
+        label: "8"
+        concurrency: 8
+        args: ["--max-num-seqs", "16"]
+        json_args:
+          "--compilation-config":
+            cudagraph_capture_sizes: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
+      c12:
+        label: "12"
+        concurrency: 12
+        args: ["--max-num-seqs", "16"]
+        json_args:
+          "--compilation-config":
+            cudagraph_capture_sizes: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
+      c16:
+        label: "16"
+        concurrency: 16
+        args: ["--max-num-seqs", "32"]
+        json_args:
+          "--compilation-config":
+            cudagraph_capture_sizes: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100,
+              105, 110, 115, 120, 125, 130, 135, 140, 145, 150, 155, 160]
+    runbook: |
+      The single-node B300 TP8 + DCP8 AgentX configuration at concurrency 1 to 16. It follows the `agentic.yaml` points of InferenceX's B300 vLLM AgentX lane (SemiAnalysisAI/InferenceX#4871) and has been measured only on the image digest the preset pins. It serves text with tool-call and reasoning parsers.
+
+      **Serving config.**
+      - **TP8 with DCP8.** DCP8 shards the MLA latent and indexer-key caches across the TP group, with the A2A DCP backend, `--cp-kv-cache-interleave-size 1` and the direct DCP all-to-all and gather paths (`VLLM_USE_DIRECT_DCP_*`). The MLA KV cache is FP8 and the indexer key cache MXFP4 (`indexer_kv_dtype`).
+      - **Low-latency decode** (the Low-latency decode feature, on in this preset) runs every pure decode step on the fused CuTe DSL path, on the V2 model runner, in FULL_DECODE_ONLY CUDA graphs. Each point captures 5, 10, 15, … rows (1 + 4 draft tokens per request) up to its largest planned decode batch; a decode step above the largest captured size runs eager.
+      - **Spec decoding** (on in this preset) uses the K3.1 DSpark draft [`Inferact/Kimi-K3.1-Pro-DSpark-preview`](https://huggingface.co/Inferact/Kimi-K3.1-Pro-DSpark-preview) at revision `6a2ef20a`, with 4 tokens, TOKENSPEED_MLA attention for the draft layers, probabilistic drafting and block rejection. `tokenspeed_mla_min_split_kv: 32` in `--attention-config` sets the minimum number of KV splits of that decode attention (larger values can take more workspace memory), and `TOKENSPEED_MLA_FP16_PARTIALS=0` turns off its FP16 partials.
+      - **`--use-replayssm`.** With speculative decoding it turns on the KDA layers' RecoverSSM path: verification replays the accepted prefix instead of keeping one recurrent state per draft token. The KDA recurrent state is FP32 (`--mamba-ssm-cache-dtype float32`), as the K3.1 precision policy requires.
+      - **Collectives.** FlashInfer all-reduce stays on (`VLLM_ALLREDUCE_USE_FLASHINFER=1`); NCCL symmetric memory, the fused GEMM + reduce-scatter and the sharded sequence-parallel shared expert stay off (`VLLM_USE_NCCL_SYMM_MEM=0`, `VLLM_ENABLE_GEMM_RS=0`, `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT=0`).
+      - **Points.** `--max-num-seqs` is twice the concurrency, except 6 at concurrency 6 and 16 at concurrency 12. The capture sizes cover 5 rows per admitted request, except at concurrency 8 and 12, which capture up to 60 rows (12 requests). Size both to your own concurrency.
+      - The **Simple** KV-offload option gets 281,125,000,000 bytes of host DRAM per rank. Size `cpu_bytes_to_use_per_rank` to your host.
+      - `--no-enable-flashinfer-autotune`, `--max-num-batched-tokens 16384`, `--gpu-memory-utilization 0.9`, `--stream-interval 10` and `--disable-uvicorn-access-log` as in the lane. `VLLM_ENGINE_READY_TIMEOUT_S=7200` leaves time for the weight load and the specialized decode's JIT; `VLLM_HTTP_TIMEOUT_KEEP_ALIVE=900` keeps pooled client connections open between agent turns.
+
+      **Benchmark-only settings left out.** The lane also sets `PYTHONHASHSEED=42`, so that identical prefixes hash to the same block keys from run to run, and `PYTHONUNBUFFERED=1` for its logs; neither changes serving. Its `--served-model-name` equals the model ID.
+
+      ### Throughput measurement only (synthetic acceptance)
+
+      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for 4 draft tokens, 3.19. Only `--speculative-config` changes:
+
+      ```bash
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","revision":"6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94","attention_backend":"TOKENSPEED_MLA","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.19}'
+      ```
+
+      Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
+
+  b300_agentx_c24:
+    label: "AgentX TP8 + DCP8, concurrency 24"
+    hardware: b300
+    strategy: single_node_tp
+    workload: "Agentic (InferenceX AgentX)"
+    description: "Concurrency 24 on one B300 node: TP8 with DCP8, CUDA graphs for decode and for prefill and mixed steps up to 4096 tokens, prefill admitted every 8 engine steps, the low-latency decode backend, the K3.1 DSpark draft with 3 tokens, and host KV offload."
+    source: { label: "InferenceX #4871", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4871", key: "kimik3.1-fp4-b300-vllm-agentic-dspark", revision: "eb118b9b661d8ca111f8dc29f19496e2a30ccb18" }
+    image: "vllm/vllm-openai:kimi-k31-mc@sha256:f81998764e8594d71b40788c5285ae112acf9230129d5d0d238b5df83da5acf6"
+    select:
+      frontend: python
+      features: { tool_calling: true, reasoning: true, spec_decoding: true, text_only: true, low_latency_decode: true, nvfp4_kv_cache: false }
+      dcp: 8
+      kv_offload: simple
+    args:
+      - "--decode-context-parallel-size"
+      - "8"
+      - "--dcp-comm-backend"
+      - "a2a"
+      - "--enable-prefix-caching"
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--mamba-ssm-cache-dtype"
+      - "float32"
+      - "--use-replayssm"
+      # Admit prefill once every 8 engine steps; the specialized decode serves
+      # the pure decode steps in between.
+      - "--prefill-schedule-interval"
+      - "8"
+      - "--max-num-seqs"
+      - "96"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.95"
+      - "--stream-interval"
+      - "10"
+      - "--disable-uvicorn-access-log"
+      - "--attention-config"
+      - '{"indexer_kv_dtype":"mxfp4"}'
+    env:
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "900"
+      VLLM_USE_DIRECT_DCP_A2A: "1"
+      VLLM_USE_DIRECT_DCP_Q_GATHER: "1"
+      VLLM_USE_DIRECT_DCP_KV_GATHER: "1"
+    # Decode sizes, then prefill and mixed steps up to 4096 tokens.
+    json_args:
+      "--speculative-config": { revision: "6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94", num_speculative_tokens: 3, rejection_sample_method: block }
+      "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 281125000000 } }
+      "--compilation-config":
+        max_cudagraph_capture_size: 4096
+        cudagraph_capture_sizes: [1, 2, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80,
+          84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152,
+          156, 160, 164, 168, 172, 176, 180, 184, 188, 192, 196, 200, 204, 208, 212, 216, 220,
+          224, 228, 232, 236, 240, 244, 248, 252, 256, 260, 264, 268, 272, 276, 280, 284, 288,
+          292, 296, 300, 304, 308, 312, 316, 320, 324, 328, 332, 336, 340, 344, 348, 352, 356,
+          360, 364, 368, 372, 376, 380, 384, 512, 640, 768, 1024, 1280, 1536, 1792, 2048, 2560,
+          3072, 3584, 4096]
+    runbook: |
+      The concurrency-24 point of InferenceX's B300 vLLM AgentX lane (SemiAnalysisAI/InferenceX#4871, `agentic-mixed-graphs.yaml`), measured only on the image digest the preset pins. It keeps the TP8 + DCP8 layout, the low-latency decode backend, FP8 KV with the MXFP4 indexer cache, `--use-replayssm`, the FP32 KDA recurrent state and the Simple KV offload of [AgentX TP8 + DCP8](#preset-b300_agentx), and changes the following:
+      - **CUDA graphs also cover prefill and mixed steps up to 4096 tokens.** The default CUDA graph mode with `max_cudagraph_capture_size` 4096 captures 1, 2, then 4 to 384 in steps of 4 for decode, then 512 to 4096. InferenceX passes these as `--cudagraph-capture-sizes` and `--max-cudagraph-capture-size`, which set the same compilation-config fields.
+      - **`--prefill-schedule-interval 8`.** Prefill is admitted once every 8 engine steps, so the specialized decode serves the pure decode steps in between. A long prompt takes up to 8 times as many engine steps to finish prefilling.
+      - **Spec decoding** drafts 3 tokens on the draft's default attention backend, with probabilistic drafting and block rejection.
+      - `--max-num-seqs 96` and `--gpu-memory-utilization 0.95`. This point leaves FlashInfer autotuning on and `--cp-kv-cache-interleave-size` at its default, and its env sets only the direct DCP paths, `VLLM_ENGINE_READY_TIMEOUT_S=7200` and `VLLM_HTTP_TIMEOUT_KEEP_ALIVE=900`; everything else stays at the image defaults.
+
+      As in the other B300 presets, the lane's `PYTHONHASHSEED=42` and `PYTHONUNBUFFERED=1` are benchmark-only and left out.
+
+      ### Throughput measurement only (synthetic acceptance)
+
+      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for 3 draft tokens, 2.88. Only `--speculative-config` changes:
+
+      ```bash
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":3,"method":"dspark","draft_sample_method":"probabilistic","revision":"6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94","rejection_sample_method":"synthetic","synthetic_acceptance_length":2.88}'
+      ```
+
+      Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
+
+  b300_agentx_ep_c40:
+    label: "AgentX TP8 + DCP8 + EP8, concurrency 40"
+    hardware: b300
+    strategy: single_node_tep
+    workload: "Agentic (InferenceX AgentX)"
+    description: "Concurrency 40 on one B300 node: TP8 + DCP8 attention with routed experts EP8 on MegaMoE, CUDA graphs for decode and for prefill and mixed steps up to 4096 tokens, prefill admitted every 8 engine steps, the low-latency decode backend, the K3.1 DSpark draft with 4 tokens, and host KV offload."
+    source: { label: "InferenceX #4871", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4871", key: "kimik3.1-fp4-b300-vllm-agentic-dspark", revision: "eb118b9b661d8ca111f8dc29f19496e2a30ccb18" }
+    image: "vllm/vllm-openai:kimi-k31-mc@sha256:f81998764e8594d71b40788c5285ae112acf9230129d5d0d238b5df83da5acf6"
+    select:
+      frontend: python
+      # The Low-latency decode toggle isn't offered with expert parallelism,
+      # so --additional-config is set in args.
+      features: { tool_calling: true, reasoning: true, spec_decoding: true, text_only: true, nvfp4_kv_cache: false }
+      dcp: 8
+      kv_offload: simple
+    # The strategy adds --enable-expert-parallel, --moe-backend
+    # deep_gemm_mega_moe and --all2all-backend flashinfer_nvlink_one_sided.
+    args:
+      - "--decode-context-parallel-size"
+      - "8"
+      - "--dcp-comm-backend"
+      - "a2a"
+      - "--enable-prefix-caching"
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--mamba-ssm-cache-dtype"
+      - "float32"
+      - "--use-replayssm"
+      - "--additional-config"
+      - '{"decode_backend":"latency_specialized"}'
+      - "--prefill-schedule-interval"
+      - "8"
+      - "--max-num-seqs"
+      - "96"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.95"
+      - "--stream-interval"
+      - "10"
+      - "--disable-uvicorn-access-log"
+      - "--attention-config"
+      - '{"indexer_kv_dtype":"mxfp4"}'
+    env:
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "900"
+      VLLM_USE_DIRECT_DCP_A2A: "1"
+      VLLM_USE_DIRECT_DCP_Q_GATHER: "1"
+      VLLM_USE_DIRECT_DCP_KV_GATHER: "1"
+    # Decode sizes (5 rows per request), then prefill and mixed steps up to
+    # 4096 tokens.
+    json_args:
+      "--speculative-config": { revision: "6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94", num_speculative_tokens: 4, rejection_sample_method: block }
+      "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 281125000000 } }
+      "--compilation-config":
+        max_cudagraph_capture_size: 4096
+        cudagraph_capture_sizes: [1, 2, 4, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95,
+          100, 105, 110, 115, 120, 125, 130, 135, 140, 145, 150, 155, 160, 165, 170, 175, 180,
+          185, 190, 195, 200, 205, 210, 215, 220, 225, 230, 235, 240, 768, 1024, 1280, 1536,
+          1792, 2048, 2560, 3072, 3584, 4096]
+    runbook: |
+      The concurrency-40 point of InferenceX's B300 vLLM AgentX lane (SemiAnalysisAI/InferenceX#4871, `agentic-mixed-graphs.yaml`), measured only on the image digest the preset pins. It is [AgentX TP8 + DCP8, concurrency 24](#preset-b300_agentx_c24) with these changes:
+      - **Routed experts EP8 on MegaMoE.** Attention stays TP8 + DCP8; the Tensor + Expert Parallel strategy adds `--enable-expert-parallel`, `--moe-backend deep_gemm_mega_moe` and the one-sided NVLink all-to-all (`--all2all-backend flashinfer_nvlink_one_sided`).
+      - **Low-latency decode with expert parallelism.** The specialized decode also runs this hybrid layout (TP8 attention, routed experts EP over every rank), which needs MegaMoE. The Low-latency decode toggle is offered only without expert parallelism, so the preset sets `--additional-config '{"decode_backend":"latency_specialized"}'` itself.
+      - **Spec decoding** drafts 4 tokens, and the decode capture sizes follow them: 1, 2, 4, then 5 to 240 in steps of 5, then 768 to 4096.
+
+      ### Throughput measurement only (synthetic acceptance)
+
+      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for 4 draft tokens, 3.19. Only `--speculative-config` changes:
+
+      ```bash
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","revision":"6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.19}'
+      ```
+
+      Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
+
+  b300_agentx_ep:
+    label: "AgentX TP8 + DCP8 + EP8"
+    hardware: b300
+    strategy: single_node_tep
+    workload: "Agentic (InferenceX AgentX)"
+    description: "Concurrency 48 to 72 on one B300 node: TP8 + DCP8 attention with routed experts EP8 on MegaMoE, the low-latency decode backend at every decode batch on FULL decode CUDA graphs, prefill admitted every 8 engine steps, the K3.1 DSpark draft with 4 tokens on TOKENSPEED_MLA, and host KV offload."
+    source: { label: "InferenceX #4871", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4871", key: "kimik3.1-fp4-b300-vllm-agentic-dspark", revision: "eb118b9b661d8ca111f8dc29f19496e2a30ccb18" }
+    image: "vllm/vllm-openai:kimi-k31-mc@sha256:f81998764e8594d71b40788c5285ae112acf9230129d5d0d238b5df83da5acf6"
+    select:
+      frontend: python
+      # The Low-latency decode toggle isn't offered with expert parallelism,
+      # so --additional-config is set in args.
+      features: { tool_calling: true, reasoning: true, spec_decoding: true, text_only: true, nvfp4_kv_cache: false }
+      dcp: 8
+      kv_offload: simple
+    args:
+      - "--decode-context-parallel-size"
+      - "8"
+      - "--dcp-comm-backend"
+      - "a2a"
+      - "--cp-kv-cache-interleave-size"
+      - "1"
+      - "--enable-prefix-caching"
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--mamba-ssm-cache-dtype"
+      - "float32"
+      - "--use-replayssm"
+      - "--no-enable-flashinfer-autotune"
+      - "--additional-config"
+      - '{"decode_backend":"latency_specialized"}'
+      - "--prefill-schedule-interval"
+      - "8"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--stream-interval"
+      - "10"
+      - "--disable-uvicorn-access-log"
+      - "--attention-config"
+      - '{"indexer_kv_dtype":"mxfp4","tokenspeed_mla_min_split_kv":16}'
+    # The lane keeps the default all-to-all backend with MegaMoE.
+    remove_args: ["--all2all-backend"]
+    env:
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "900"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_USE_DIRECT_DCP_A2A: "1"
+      VLLM_USE_DIRECT_DCP_Q_GATHER: "1"
+      VLLM_USE_DIRECT_DCP_KV_GATHER: "1"
+      VLLM_ALLREDUCE_USE_FLASHINFER: "1"
+      # Sequence-parallel MoE replicates the shared expert on every rank.
+      VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: "0"
+      VLLM_USE_NCCL_SYMM_MEM: "0"
+      # Expert parallelism under the specialized decode needs it off.
+      VLLM_ENABLE_GEMM_RS: "0"
+      TOKENSPEED_MLA_FP16_PARTIALS: "0"
+    json_args:
+      "--speculative-config": { revision: "6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94", attention_backend: TOKENSPEED_MLA, num_speculative_tokens: 4, rejection_sample_method: block }
+      "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 374875000000 } }
+      "--compilation-config": { cudagraph_mode: FULL_DECODE_ONLY }
+    # --max-num-seqs equals the concurrency; decode capture sizes are 5 rows
+    # (1 + 4 draft tokens) per request.
+    points:
+      c48:
+        label: "48"
+        concurrency: 48
+        args: ["--max-num-seqs", "48", "--gpu-memory-utilization", "0.97"]
+        json_args:
+          "--compilation-config":
+            cudagraph_capture_sizes: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100,
+              105, 110, 115, 120, 125, 130, 135, 140, 145, 150, 155, 160, 165, 170, 175, 180,
+              185, 190, 195, 200, 205, 210, 215, 220, 225, 230, 235, 240]
+      c64:
+        label: "64"
+        concurrency: 64
+        args: ["--max-num-seqs", "64", "--gpu-memory-utilization", "0.98"]
+        json_args:
+          "--compilation-config":
+            cudagraph_capture_sizes: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100,
+              105, 110, 115, 120, 125, 130, 135, 140, 145, 150, 155, 160, 165, 170, 175, 180,
+              185, 190, 195, 200, 205, 210, 215, 220, 225, 230, 235, 240, 245, 250, 255, 260,
+              265, 270, 275, 280, 285, 290, 295, 300, 305, 310, 315, 320]
+      c72:
+        label: "72"
+        concurrency: 72
+        args: ["--max-num-seqs", "72", "--gpu-memory-utilization", "0.98"]
+        json_args:
+          "--compilation-config":
+            cudagraph_capture_sizes: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100,
+              105, 110, 115, 120, 125, 130, 135, 140, 145, 150, 155, 160, 165, 170, 175, 180,
+              185, 190, 195, 200, 205, 210, 215, 220, 225, 230, 235, 240, 245, 250, 255, 260,
+              265, 270, 275, 280, 285, 290, 295, 300, 305, 310, 315, 320, 325, 330, 335, 340,
+              345, 350, 355, 360]
+    runbook: |
+      The concurrency 48 to 72 points of InferenceX's B300 vLLM AgentX lane (SemiAnalysisAI/InferenceX#4871, `agentic-ep.yaml`), measured only on the image digest the preset pins. It is [AgentX TP8 + DCP8](#preset-b300_agentx) with routed experts on expert parallelism, and changes the following:
+      - **Routed experts EP8 on MegaMoE.** Attention stays TP8 + DCP8; the Tensor + Expert Parallel strategy adds `--enable-expert-parallel` and `--moe-backend deep_gemm_mega_moe`. The lane keeps the default all-to-all backend, so the preset drops the strategy's `--all2all-backend`.
+      - **Low-latency decode at every decode batch.** The specialized decode also runs this hybrid layout (TP8 attention, routed experts EP over every rank) on MegaMoE, with `VLLM_ENABLE_GEMM_RS=0`. The Low-latency decode toggle is offered only without expert parallelism, so the preset sets `--additional-config '{"decode_backend":"latency_specialized"}'` itself.
+      - **`--prefill-schedule-interval 8`.** Prefill is admitted once every 8 engine steps, so the specialized decode serves the pure decode steps in between.
+      - **Points.** `--max-num-seqs` equals the concurrency, and FULL_DECODE_ONLY graphs capture 5 rows (1 + 4 draft tokens) per request up to it. `--gpu-memory-utilization` is 0.98, or 0.97 at concurrency 48.
+      - `tokenspeed_mla_min_split_kv` (the minimum number of KV splits of the draft's TOKENSPEED_MLA decode attention) is 16. With `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT=0`, sequence-parallel MoE replicates the shared expert on every rank, which costs weight memory on each GPU.
+      - The **Simple** KV-offload option gets 374,875,000,000 bytes of host DRAM per rank. Size `cpu_bytes_to_use_per_rank` to your host.
+
+      As in the other B300 presets, the lane's `PYTHONHASHSEED=42` and `PYTHONUNBUFFERED=1` are benchmark-only and left out.
+
+      ### Throughput measurement only (synthetic acceptance)
+
+      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for 4 draft tokens, 3.19. Only `--speculative-config` changes:
+
+      ```bash
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","revision":"6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94","attention_backend":"TOKENSPEED_MLA","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.19}'
+      ```
+
+      Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
+
   # The exact configuration vllm-project/vllm-torchtpu#2775 validated on a
   # 2x2x4 TPU v7x slice (TP32 / EP32, 4 hosts, 16 chips, 32 devices).
   v7x_validated:
@@ -626,6 +1034,14 @@ guide: |
   VR200 (preview) takes the same TP8 layout on two trays, in the `vllm/vllm-openai:kimi-k31-cu134`
   image (CUDA 13.4). It uses the Blackwell flags and hasn't been tuned or verified on Rubin.
 
+  On one B300 node, four AgentX presets follow InferenceX's B300 vLLM AgentX lane
+  (SemiAnalysisAI/InferenceX#4871), all with TP8 + DCP8 attention, the K3.1 DSpark draft, the
+  low-latency decode backend and host KV offload:
+  [AgentX TP8 + DCP8](#preset-b300_agentx) at concurrency 1 to 16,
+  [concurrency 24](#preset-b300_agentx_c24) with CUDA graphs for prefill and mixed steps, and,
+  with routed experts EP8 on MegaMoE, [concurrency 40](#preset-b300_agentx_ep_c40) and
+  [AgentX TP8 + DCP8 + EP8](#preset-b300_agentx_ep) at concurrency 48 to 72.
+
   On MI355X, one node takes the same TP8 layout with the AMD profile's AITER environment, in the
   day-0 `vllm/vllm-openai-rocm:kimi-k31` image. Two single-node AgentX configurations have run
   on MI355X, both InferenceX points: [AgentX TP8, concurrency 48](#preset-mi355x_agentx), with
@@ -664,7 +1080,10 @@ guide: |
   small batches; prefill and mixed steps still run the default path. On 8x B300 at TP8 it cuts
   the decode step by 1.6–1.7x at batch 1 and 1.2–1.3x at batch 32–64. Under DCP8 it brings decode
   to within 6% of TP8. It requires the V2 model runner and FULL decode CUDA graphs (the
-  defaults), TP8 or TP8 + DCP8, and no expert parallelism in this recipe.
+  defaults), and TP8 or TP8 + DCP8. The feature toggle is offered only without expert
+  parallelism; the B300 AgentX presets with routed experts EP8 on MegaMoE
+  ([concurrency 40](#preset-b300_agentx_ep_c40) and [48 to 72](#preset-b300_agentx_ep)) set
+  the same `decode_backend` in their own args.
 
   On MI355X the same switch selects fused FlyDSL decode kernels. They cover only pure decode
   steps of up to 16 rows, so among other checks they also need speculative decoding,
