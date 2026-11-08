@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton Mamba2 ReplaySSM kernels for speculative decoding.
 
-These follow the ring contract of FlashInfer's ``checkpointing_ssu`` and
-``replayssm_materialize``, so the ReplaySSM trackers in
-``vllm.v1.worker.replayssm_utils`` drive both backends.
+These follow the ring contract of FlashInfer's `checkpointing_ssu` and
+`replayssm_materialize`, so the ReplaySSM trackers in
+`vllm.v1.worker.replayssm_utils` drive both backends.
 """
 
 import torch
@@ -260,10 +260,10 @@ def selective_state_update_replayssm_spec(
 ) -> torch.Tensor:
     """Verify a packed batch of speculative windows against ReplaySSM rings.
 
-    Each sequence first replays the ``prev_num_accepted_tokens[slot]`` ring
-    entries starting at ``ring_start[slot]`` onto its checkpoint ``state``,
-    stores that state as the new checkpoint when ``prev + seqlen`` exceeds
-    ``max_window = ring_len - max_seqlen``, then scans its own tokens and
+    Each sequence first replays the `prev_num_accepted_tokens[slot]` ring
+    entries starting at `ring_start[slot]` onto its checkpoint `state`,
+    stores that state as the new checkpoint when `prev + seqlen` exceeds
+    `max_window = ring_len - max_seqlen`, then scans its own tokens and
     appends them to the ring after the replayed entries.
 
     Args:
@@ -284,11 +284,11 @@ def selective_state_update_replayssm_spec(
         state_batch_indices: (batch,) cache slot per sequence.
         D: Optional (nheads, dim) skip connection.
         dt_bias: Optional (nheads, dim) with stride(-1) == 0.
-        dt_softplus: Apply softplus to ``dt + dt_bias``.
+        dt_softplus: Apply softplus to `dt + dt_bias`.
         pad_slot_id: Slot index of padded sequences, which are skipped.
 
     Returns:
-        ``out``.
+        `out`.
 
     """
     _, nheads, dim, dstate = state.shape
@@ -489,12 +489,12 @@ def replayssm_materialize(
     ring_buffer_len: int,
     pad_slot_id: int = NULL_BLOCK_ID,
 ) -> None:
-    """Write ``src`` advanced by a ring prefix into ``dst`` for every layer.
+    """Write `src` advanced by a ring prefix into `dst` for every layer.
 
-    Triton counterpart of FlashInfer's ``replayssm_materialize``: the tables
-    hold one base pointer and slot stride per layer, ``src_slots``/
-    ``dst_slots`` are ``(layers, max_num_reqs)`` and the first ``num_reqs``
-    entries of ``active_request_indices`` select requests (``-1`` skips).
+    Triton counterpart of FlashInfer's `replayssm_materialize`: the tables
+    hold one base pointer and slot stride per layer, `src_slots`/
+    `dst_slots` are `(layers, max_num_reqs)` and the first `num_reqs`
+    entries of `active_request_indices` select requests (`-1` skips).
     Per-slot state and ring layouts must be contiguous.
     """
     num_layers, max_num_reqs = src_slots.shape

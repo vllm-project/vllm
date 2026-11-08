@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Speculative decoding with the Triton Mamba2 ReplaySSM kernels.
 
-The kernels follow FlashInfer's ``checkpointing_ssu`` ring contract and are
-driven here by the tracker transition of ``_postprocess_replayssm_kernel``.
+The kernels follow FlashInfer's `checkpointing_ssu` ring contract and are
+driven here by the tracker transition of `_postprocess_replayssm_kernel`.
 Over many verify steps with random acceptance, every verified output and every
 materialized prefix state must match a plain recurrence over the accepted
 tokens.
@@ -25,7 +25,7 @@ NHEADS, HEADDIM, NGROUPS, DSTATE = 8, 64, 2, 128
 
 
 def _step_ref(S, x, dt, A, B, C, D):
-    """One token of the exact recurrence on fp32 ``S`` (nheads, dim, dstate)."""
+    """One token of the exact recurrence on fp32 `S` (nheads, dim, dstate)."""
     ratio = S.shape[0] // B.shape[0]
     B = B.float().repeat_interleave(ratio, 0)
     C = C.float().repeat_interleave(ratio, 0)
