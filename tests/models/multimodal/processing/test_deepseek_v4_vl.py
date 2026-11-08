@@ -305,10 +305,12 @@ def test_mm_device_do_normalize(model_id: str, placeholder: str):
 
     normalized_inputs = processor(prompt, mm_items=mm_items)
     normalized = normalized_inputs["mm_kwargs"].get_data()["patches"]
+    assert isinstance(normalized, torch.Tensor)
 
     mm_config.mm_device_do_normalize = True
     raw_inputs = processor(prompt, mm_items=mm_items)
     raw = raw_inputs["mm_kwargs"].get_data()["patches"]
+    assert isinstance(raw, torch.Tensor)
     assert raw.dtype == torch.uint8
 
     vision_config = copy.deepcopy(ctx.model_config.hf_config)
