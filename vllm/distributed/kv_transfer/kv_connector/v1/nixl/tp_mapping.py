@@ -34,6 +34,48 @@ class ReadSpec:
     remote_regions: list[int] | None = None
 
 
+@dataclass(frozen=True)
+class TransferEntry:
+    """One local-region-to-remote-region mapping of a request plan.
+
+    ``local_blocks`` and ``remote_blocks`` are aligned page by page: the page
+    at position ``k`` of one list belongs to the page at the same logical
+    position of the other. The two cache groups are recorded separately
+    because the peer need not order them like we do.
+    """
+
+    local_region: int
+    remote_region: int
+    local_group: int
+    remote_group: int
+    local_blocks: tuple[int, ...]
+    remote_blocks: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class RequestTransferPlan:
+    """The page mappings one request's pull covers, in read order."""
+
+    entries: tuple[TransferEntry, ...]
+
+    def read_specs(self, ranks: tuple[int, ...]) -> list[ReadSpec]:
+        local_regions = [entry.local_region for entry in self.entries]
+        remote_regions = [entry.remote_region for entry in self.entries]
+        local_blocks = [list(entry.local_blocks) for entry in self.entries]
+        remote_blocks = [list(entry.remote_blocks) for entry in self.entries]
+        return [
+            ReadSpec(
+                rank,
+                local_blocks,
+                remote_blocks,
+                block_ids_by_pair=True,
+                local_regions=local_regions,
+                remote_regions=remote_regions,
+            )
+            for rank in ranks
+        ]
+
+
 def _is_attention_spec(spec_type: type[KVCacheSpec]) -> bool:
     return issubclass(spec_type, AttentionSpec)
 

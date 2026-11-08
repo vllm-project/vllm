@@ -17,6 +17,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
+    RequestTransferPlan,
+    TransferEntry,
     _is_attention_spec,
 )
 from vllm.logger import init_logger
@@ -561,7 +563,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         required = [sorted(set(group)) for group in meta.local_required_positions]
         remote_groups = pairs.remote_group or pairs.group
         sources: dict[tuple[int, int, int], tuple[int, int]] = {}
-        pair_infos: list[tuple[int, int, list[int], list[int]]] = []
+        entries: list[TransferEntry] = []
         for local_region, remote_region, local_group, remote_group in zip(
             pairs.local, pairs.remote, pairs.group, remote_groups, strict=True
         ):
@@ -607,23 +609,22 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 local_blocks.append(local_block)
                 remote_blocks.append(remote_block)
             if local_blocks:
-                pair_infos.append(
-                    (local_region, remote_region, local_blocks, remote_blocks)
+                entries.append(
+                    TransferEntry(
+                        local_region,
+                        remote_region,
+                        local_group,
+                        remote_group,
+                        tuple(local_blocks),
+                        tuple(remote_blocks),
+                    )
                 )
 
-        if not pair_infos:
+        if not entries:
             return [ReadSpec(rank, [], []) for rank in plan.all_source_ranks]
-        return [
-            ReadSpec(
-                rank,
-                [info[2] for info in pair_infos],
-                [info[3] for info in pair_infos],
-                block_ids_by_pair=True,
-                local_regions=[info[0] for info in pair_infos],
-                remote_regions=[info[1] for info in pair_infos],
-            )
-            for rank in plan.all_source_ranks
-        ]
+        return RequestTransferPlan(tuple(entries)).read_specs(
+            tuple(plan.all_source_ranks)
+        )
 
     def _read_blocks(
         self,
