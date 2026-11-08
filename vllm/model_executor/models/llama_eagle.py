@@ -154,9 +154,7 @@ class EagleLlamaForCausalLM(_EagleLlamaForCausalLMBase):
         if getattr(self.config, "draft_vocab_size", None) is None:
             base_vocab_size = getattr(self.config, "vocab_size", None)
             self.config.draft_vocab_size = base_vocab_size
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
         self.model = LlamaModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
