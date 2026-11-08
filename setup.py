@@ -908,6 +908,7 @@ class precompiled_wheel_utils:
         "CMakeLists.txt",
         "pyproject.toml",
         "vllm/_custom_ops.py",
+        "vllm/_cpu_ops.py",
     )
     # Changes here are usually harmless for an older wheel.
     WHEEL_WARNING_PATHS = ("rust", "setup.py")
@@ -1715,7 +1716,7 @@ setup(
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch
-        "zen": ["zentorch==2.14.0.1"],
+        "zen": ["zentorch==2.14.0.2"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.3.3"],

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from transformers import PreTrainedConfig
 
 from tests.v1.kv_connector.umbp_test_utils import (
     MemoryRuntime,
@@ -219,6 +220,28 @@ def test_namespace_distinguishes_draft_models():
     assert namespace(draft("drafter-a")) == namespace(draft("drafter-a"))
     assert namespace(draft("drafter-a")) != namespace(draft("drafter-b"))
     assert namespace(draft("drafter-a")) != namespace(draft("drafter-a", "v2"))
+
+
+def test_namespace_distinguishes_effective_model_configs():
+    """Overridden RoPE, quantization or dtype must not reuse the defaults' KV."""
+    config = _kv_cache_config()
+
+    def namespace(rope_theta=1e6, quantization=None, dtype=torch.float16, **hf):
+        vllm_config = _vllm_config({"mode": "standalone"})
+        vllm_config.model_config.hf_config = PreTrainedConfig(
+            rope_parameters={"rope_theta": rope_theta, "rope_type": "default"},
+            **hf,
+        )
+        vllm_config.model_config.quantization = quantization
+        vllm_config.model_config.dtype = dtype
+        return UMBPNamespace.from_vllm_config(vllm_config, config).value
+
+    default = namespace()
+    assert namespace() == default
+    assert namespace(name_or_path="/mnt/another-copy") == default
+    assert namespace(rope_theta=1e4) != default
+    assert namespace(quantization="fp8") != default
+    assert namespace(dtype=torch.bfloat16) != default
 
 
 def test_layout_planner_sizes_uniform_type_layers_independently():
@@ -1013,16 +1036,17 @@ def test_scheduler_resumed_request_replaces_stale_block_table():
         SimpleNamespace(get_block_ids=lambda group_ids: ([1, 2],)),
         0,
     )
+    # Preemption frees the blocks; re-admission passes the whole new table.
+    scheduler.update_state_after_alloc(
+        request,
+        SimpleNamespace(get_block_ids=lambda group_ids: ([7, 8],)),
+        0,
+    )
+    scheduled = SimpleNamespace(
+        req_id="resumed", num_computed_tokens=0, block_ids=([7, 8],)
+    )
     metadata = scheduler.build_connector_meta(
-        make_scheduler_output(
-            cached_reqs=SimpleNamespace(
-                req_ids=["resumed"],
-                new_block_ids=[([7, 8],)],
-                num_computed_tokens=[31],
-                resumed_req_ids={"resumed"},
-            ),
-            scheduled_tokens={"resumed": 1},
-        )
+        make_scheduler_output(new_reqs=[scheduled], scheduled_tokens={"resumed": 32})
     )
 
     tracker = scheduler._request_trackers["resumed"]
@@ -1054,7 +1078,6 @@ def test_scheduler_stores_from_cores_current_block_table():
                 req_ids=["r"],
                 new_block_ids=[None],
                 num_computed_tokens=[0],
-                resumed_req_ids=set(),
             ),
             scheduled_tokens={"r": 32},
             block_state=SimpleNamespace(
@@ -1115,7 +1138,6 @@ def test_scheduler_readmission_after_failed_load_uses_new_blocks():
                 req_ids=["readmitted"],
                 new_block_ids=[None],
                 num_computed_tokens=[0],
-                resumed_req_ids=set(),
             ),
             scheduled_tokens={"readmitted": 32},
         )

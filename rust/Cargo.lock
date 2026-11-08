@@ -5838,7 +5838,7 @@ dependencies = [
 
 [[package]]
 name = "vllm-proto"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "prost",
  "prost-types",
@@ -5877,6 +5877,7 @@ dependencies = [
  "rmpv",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "serde_with",
  "serial_test",
  "sha2",

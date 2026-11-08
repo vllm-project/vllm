@@ -152,6 +152,9 @@ def _skip_cuda_specific_sparse_mla_tests_on_rocm(request):
         "test_sparse_backend_prefill_correctness",
         "test_rocm_fused_v32_dense_prefill_matches_mqa",
         "test_rocm_long_bf16_prefill_avoids_nonpersistent_aiter",
+        "test_split_indexer_prefill_chunks",
+        "test_split_indexer_prefill_chunks_single_request_overflow",
+        "test_sparse_mla_common_impl_resolves_buffer_lazily",
     }
     if (
         current_platform.is_rocm()
@@ -253,6 +256,7 @@ def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
         block_table=torch.zeros((1, 1), dtype=torch.int32),
         block_size=32,
         num_decode_tokens=1,
+        topk_start=0,
     )
     recorded_scale = None
 
@@ -4278,10 +4282,10 @@ def test_hisparse_keeps_speculative_rows_as_decodes():
     builder.vllm_config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=object()),
         speculative_config=SimpleNamespace(
-            num_speculative_tokens=3, parallel_drafting=False
+            num_speculative_tokens=3,
+            max_num_new_slots_for_drafting=0,
         ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        use_v2_model_runner=True,
     )
 
     builder._init_reorder_batch_threshold(256, supports_spec_as_decode=True)
@@ -4334,6 +4338,7 @@ def test_flashattn_shared_indices_match_independent_conversion(
             2, dtype=torch.int32, device=device
         ).repeat_interleave(query_len),
         num_decode_tokens=num_decode_tokens,
+        topk_start=0,
     )
     q_nope = torch.randn(num_tokens, 8, 512, dtype=torch.bfloat16, device=device)
     q_rope = torch.randn(num_tokens, 8, 64, dtype=torch.bfloat16, device=device)
@@ -4470,6 +4475,7 @@ def test_sparse_mqa_plain_lane_wiring(monkeypatch):
         block_table=torch.zeros((num_tokens, 1), dtype=torch.int32),
         req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32),
         cp_kv_cache_interleave_size=2,
+        topk_start=0,
     )
     index_filter = MagicMock(return_value=(None, None))
     monkeypatch.setattr(sparse_mla, "triton_filter_and_convert_dcp_index", index_filter)
@@ -4517,7 +4523,7 @@ def test_sparse_mqa_hisparse_lanes(
     staged = torch.zeros(3, block_size, head_dim, dtype=torch.bfloat16)
     q = torch.arange(num_tokens, dtype=torch.float32).view(num_tokens, 1, 1)
     metadata = SimpleNamespace(
-        num_decode_tokens=num_decode_tokens, block_size=block_size
+        num_decode_tokens=num_decode_tokens, block_size=block_size, topk_start=0
     )
 
     def converted(rows, fill):
@@ -4669,7 +4675,7 @@ def test_hisparse_flashmla_reorders_full_speculative_window_as_decode():
         attention_config=SimpleNamespace(hisparse_config=object()),
         speculative_config=SimpleNamespace(
             num_speculative_tokens=3,
-            parallel_drafting=False,
+            max_num_new_slots_for_drafting=0,
         ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
@@ -4766,6 +4772,7 @@ def _fa4_inputs(counts, *, num_heads=16, topk=128, num_blocks=4, device=DEVICE_T
             block_size=block_size,
             num_decode_tokens=num_tokens,
             cp_kv_cache_interleave_size=1,
+            topk_start=0,
         ),
     )
 
@@ -5082,6 +5089,7 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
         fp8_use_mixed_batch=use_mixed_batch,
         num_actual_tokens=num_batch_tokens,
         num_decode_tokens=num_decode_tokens,
+        topk_start=0,
         req_id_per_token=torch.empty(
             num_batch_tokens, dtype=torch.int32, device=DEVICE_TYPE
         ),
