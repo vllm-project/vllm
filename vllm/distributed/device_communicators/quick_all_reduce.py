@@ -365,10 +365,10 @@ class QuickAllReduce:
     def _prepare_flydsl_rmsnorm(self) -> None:
         """Build the fused-RMSNorm engines for the model's hidden size.
 
-        Wide-tile hidden sizes (6144) build their engines with a collective;
-        doing it at init keeps it out of profiling and CUDA graph capture.
+        Building them is a collective that allocates IPC buffers; doing it at
+        init keeps it out of memory profiling and CUDA graph capture.
         """
-        prepare = getattr(self._flydsl_int4, "prepare_rmsnorm", None)
+        prepare = getattr(self._flydsl_int4, "compile_rmsnorm", None)
         vllm_config = get_current_vllm_config_or_none()
         model_config = getattr(vllm_config, "model_config", None)
         if prepare is None or model_config is None:
