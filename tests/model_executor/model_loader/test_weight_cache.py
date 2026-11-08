@@ -536,6 +536,31 @@ def test_ipc_fallback_restores_memory_budget(vllm_runner, enable_pickle):
     assert outputs[1] == outputs[0]
 
 
+def test_ipc_cache_rejects_daemon_without_vision_tower(vllm_runner):
+    """A daemon started with `--language-model-only` exports no vision tower,
+    so an engine serving images must load from disk instead."""
+    case = replace(
+        QWEN_CASE,
+        prompts=[
+            (
+                "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+                "What is in this image?<|im_end|>\n<|im_start|>assistant\n"
+            )
+        ],
+        images=[ImageAsset("stop_sign").pil_image],
+        llm_kwargs={**QWEN_CASE.llm_kwargs, "max_model_len": 4096},
+    )
+    baseline_outputs = generate(vllm_runner, case, None, fallback=True)
+    with WeightCacheDaemon(
+        case.model, tp_size=1, extra_args=["--language-model-only"]
+    ) as daemon:
+        daemon.wait_until_ready()
+        outputs = generate(vllm_runner, case, daemon.socket_dir, fallback=True)
+
+    assert outputs == baseline_outputs
+    assert "mismatch on fields: ['language_model_only']" in daemon.logs
+
+
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
 def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path):
@@ -974,6 +999,7 @@ def test_weight_cache_key_distinguishes_nvfp4_activation_override(
         quantization_config=None,
         revision=None,
         hf_text_config=SimpleNamespace(),
+        multimodal_config=None,
         hf_config=SimpleNamespace(
             architectures=["NemotronHForCausalLM"],
             quantization_config=hf_quant_config,
@@ -1354,6 +1380,7 @@ def test_ipc_cache_key_tracks_kv_quantization(
         revision=None,
         hf_config=SimpleNamespace(architectures=["Qwen2ForCausalLM"]),
         hf_text_config=SimpleNamespace(),
+        multimodal_config=None,
         is_moe=False,
     )
     config = SimpleNamespace(
@@ -1439,6 +1466,7 @@ def test_ipc_cache_key_tracks_kernel_backends(
         revision=None,
         hf_config=SimpleNamespace(architectures=["Qwen3MoeForCausalLM"]),
         hf_text_config=SimpleNamespace(),
+        multimodal_config=None,
         is_moe=True,
     )
     config = SimpleNamespace(
@@ -1477,6 +1505,57 @@ def test_ipc_cache_key_tracks_kernel_backends(
     assert len(requested_keys) == 2
     for key in requested_keys:
         assert server.cache_key.mismatched_fields(key) == mismatched_fields
+
+
+@pytest.mark.parametrize(
+    "daemon_mm_kwargs,engine_mm_kwargs,mismatched_fields",
+    [
+        (
+            {"limit_mm_per_prompt": {"image": 1}},
+            {"limit_mm_per_prompt": {"image": 4}},
+            [],
+        ),
+        (
+            {"limit_mm_per_prompt": {"image": 0, "video": 0}},
+            {"limit_mm_per_prompt": {"video": 0, "image": 0}},
+            [],
+        ),
+        (
+            {"limit_mm_per_prompt": {"image": 0, "video": 0}},
+            {"limit_mm_per_prompt": {"image": 0}},
+            ["mm_zero_limit_modalities"],
+        ),
+        ({}, {"language_model_only": True}, ["language_model_only"]),
+        ({}, {"mm_encoder_only": True}, ["mm_encoder_only"]),
+    ],
+)
+def test_ipc_cache_key_tracks_skipped_mm_components(
+    tmp_path, daemon_mm_kwargs, engine_mm_kwargs, mismatched_fields
+):
+    """Zero limits and the language- or encoder-only modes decide which model
+    components the daemon builds and exports; nonzero limits do not."""
+    from transformers import Qwen3VLConfig
+
+    from vllm.config import CacheConfig, ModelConfig
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+
+    config = Qwen3VLConfig()
+    config.architectures = ["Qwen3VLForConditionalGeneration"]
+    config.save_pretrained(tmp_path)
+
+    def key(**mm_kwargs) -> WeightCacheKey:
+        model_config = ModelConfig(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            max_model_len=128,
+            **mm_kwargs,
+        )
+        return WeightCacheKey.from_model_config(
+            model_config, tp_size=1, tp_rank=0, cache_config=CacheConfig()
+        )
+
+    daemon_key = key(**daemon_mm_kwargs)
+    assert daemon_key.mismatched_fields(key(**engine_mm_kwargs)) == mismatched_fields
 
 
 def _warmup_cache_request(config_hash: str = "a" * 64, **overrides) -> dict:

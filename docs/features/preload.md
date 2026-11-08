@@ -173,8 +173,9 @@ deployment.
    identical weights in different directories still match), model
    architecture, TP/DP size/rank, dtype, quantization method and config, text
    RoPE parameters, model revision, KV cache dtype and quantization skip layers,
-   and vLLM version. On any mismatch the engine falls back to disk loading
-   (unless `fallback` is disabled).
+   the multimodal options that skip model components, and vLLM version. On any
+   mismatch the engine falls back to disk loading (unless `fallback` is
+   disabled).
 4. The engine also verifies the daemon's GPU UUID matches its own device, so a
    stale socket cannot serve weights for the wrong GPU.
 
@@ -320,7 +321,10 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   scales without modifying the daemon's shared tensors.
 - **Consistency**: the daemon and engine must run the same vLLM version and
   agree on model, dtype, quantization, and TP/DP layout, otherwise the
-  fingerprint mismatch triggers the disk fallback.
+  fingerprint mismatch triggers the disk fallback. For multimodal models, also
+  pass the same `--language-model-only`, `--mm-encoder-only`, and zero
+  `--limit-mm-per-prompt` entries to both: they decide which components (such
+  as the vision tower) are built. Nonzero limits may differ.
 - **Localhost only**: the daemon serves over a Unix domain socket; both the
   daemon and the engines must run on the same node as the same user.
 
