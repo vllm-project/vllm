@@ -193,9 +193,10 @@ def stage_xq(c, unit, w, live):
 
 @traced
 def stage_kt(c, t):
-    """Token t's keys for K2: `KT[t][k] = slot | 1 << 31` for its top-k compressed rows
-    (k < ntopk), the window slot for k in [ntopk, kv_len), -1 for an invalid or absent
-    key; KLEN[t] = kv_len (0 for a pad row), KLEN[S + t] = ntopk."""
+    """Token t's keys for K2: `KT[t][k] = slot | 1 << 31` for its top-k compressed
+    rows (k < ntopk), the window slot for k in [ntopk, kv_len), -1 for an
+    invalid or absent key; KLEN[t] = kv_len (0 for a pad row), KLEN[S + t] =
+    ntopk."""
     tid = c["tid"]
     a, ratio = c["args"], c["ratio"]
     # device scope where this launch reads the table (K2's)
@@ -490,7 +491,8 @@ def wqb_rope(c, task0, pos_t, n):
 
 
 def wqb_pos(c, t0, n):
-    """This thread's token position for `stage_wqb`'s epilogue of tile t0 .. t0 + n."""
+    """This thread's token position for `stage_wqb`'s epilogue of tile
+    t0 .. t0 + n."""
     per = ROWS * n // 2
     tl = fx.min((c["tid"] % per) // (ROWS // 2), n - 1)
     return ld_i32(c["args"]["pos"], 2 * (t0 + tl))

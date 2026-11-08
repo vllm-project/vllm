@@ -180,9 +180,10 @@ def _poll(
     offsets: cutlass.Constexpr[tuple],
     timeout_ns: cutlass.Constexpr[int],
 ):
-    """Lamport-poll the 16-byte fragments at base + offsets[i] * stride (elements) into
-    a [len(offsets), 4] u32 register tensor. All loads issue before any check and only
-    dirty fragments re-poll; traps after `timeout_ns` without data."""
+    """Lamport-poll the 16-byte fragments at base + offsets[i] * stride
+    (elements) into a [len(offsets), 4] u32 register tensor. All loads issue
+    before any check and only dirty fragments re-poll; traps after
+    `timeout_ns` without data."""
     count = len(offsets)
     values = cute.make_rmem_tensor(cute.make_layout((count, 4)), Uint32)
     pending = Uint32(0)
@@ -233,10 +234,11 @@ def poll_owned_fragment(
     release_dependents: cutlass.Constexpr[bool],
     timeout_ns: cutlass.Constexpr[int] = SPIN_TIMEOUT_NS,
 ) -> None:
-    """Column all-gather read: wait for this token's 8 global columns `fragment` from
-    the one rank that owns them, store the BF16x8 fragment into `packed` and re-arm the
-    slot; one thread per launch advances the stage. Releases PDL dependents after the
-    poll when `release_dependents` (a kernel that triggers earlier passes False)."""
+    """Column all-gather read: wait for this token's 8 global columns
+    `fragment` from the one rank that owns them, store the BF16x8 fragment
+    into `packed` and re-arm the slot; one thread per launch advances the
+    stage. Releases PDL dependents after the poll when `release_dependents`
+    (a kernel that triggers earlier passes False)."""
     local_fragments = hidden_local // VEC_BF16
     active_stage = load_volatile_u32(stage_state.iterator + ACTIVE_STAGE)
     source_rank = fragment // local_fragments

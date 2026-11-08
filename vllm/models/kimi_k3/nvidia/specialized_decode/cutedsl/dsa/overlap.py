@@ -7,8 +7,9 @@ q_c rows of the query, so the rest of the query stage leaves the critical path:
   QueryNorm   q_a RMSNorm -> the q_c rows, on the main stream ahead of wq_b
               (bit-identical to MlaQuery's: its scalar form below tiled_from rows,
               its tiled kernel's packed FP32 pairs from there)
-  MlaQuery Q_B, W_UK absorption, the query rows, the MLA KV insert and, under DCP, the q
-              mailbox publish, on a side stream (`store_qc=False`, `poll=False`)
+  MlaQuery    Q_B, W_UK absorption, the query rows, the MLA KV insert and, under
+              DCP, the q mailbox publish, on a side stream (`store_qc=False`,
+              `poll=False`)
   QueryWait   DCP: the q mailbox poll (until every rank's heads landed) after the
               MlaQuery on the side stream, a few CTAs instead of MlaQuery's grid
 

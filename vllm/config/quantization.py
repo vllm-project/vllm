@@ -107,9 +107,10 @@ def quant_key_name(quant_key: QuantKey | None) -> str | None:
 class QuantSpec:
     """Quantization spec for one layer kind (linear or MoE).
 
-    An omitted activation key lets the quantization implementation choose its default.
-    An explicitly configured `activation: null` requests no activation quantization;
-    methods that do not support that request raise an error.
+    An omitted activation key lets the quantization implementation choose its
+    default. An explicitly configured `activation: null` requests no
+    activation quantization; methods that do not support that request raise an
+    error.
     """
 
     weight: QuantKeyField = _UNSET

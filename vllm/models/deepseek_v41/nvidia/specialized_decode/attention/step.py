@@ -18,11 +18,12 @@ low-batch kernels where they apply:
   `wk` run on `ll_bf16` kernels (`aux_projections`), the key store reads
   `wk`'s FP32 output, and `wo_b` publishes its output into the mailbox of
   the fused all-reduce that reduces it next (`boundary.publishing_gemm`).
-- Dense indexers row-shard their decode rows (`indexer.decode_rows`) and plan them
-  (top-k reset, slice schedule) while the current stream waits for the index key; the
-  candidate source starts the candidate consumers' expansion on a side stream right
-  after its indexer, and index sources first join the side-stream sparse-index builds,
-  which read the top-k indices they overwrite.
+- Dense indexers row-shard their decode rows (`indexer.decode_rows`) and
+  plan them (top-k reset, slice schedule) while the current stream waits for
+  the index key; the candidate source starts the candidate consumers'
+  expansion on a side stream right after its indexer, and index sources first
+  join the side-stream sparse-index builds, which read the top-k indices they
+  overwrite.
 - The sparse MLA reuses the step's sparse-index tables and runs on persistent
   KV counters (`sparse_mla`).
 """
@@ -219,10 +220,11 @@ class AttentionStep:
     def _split_qkv_and_norm(
         self, qr_kv: torch.Tensor
     ) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor | None, torch.Tensor]:
-        """`attn._split_qkv_and_norm`, with the fused norm triggering its PDL dependents
-        early up to `WIDE_LOW_LATENCY_MAX_ROWS` rows: there this step's `wq_b` runs on
-        the low-latency GEMM (above 8 rows, where its shape has a wide tactic), which
-        loads its weights before its own wait, overlapping them with the norm."""
+        """`attn._split_qkv_and_norm`, with the fused norm triggering its
+        PDL dependents early up to `WIDE_LOW_LATENCY_MAX_ROWS` rows: there
+        this step's `wq_b` runs on the low-latency GEMM (above 8 rows, where
+        its shape has a wide tactic), which loads its weights before its own
+        wait, overlapping them with the norm."""
         attn = self.attn
         if attn.q_lora_rank % 32 or not attn._can_fuse_query_quant:
             return attn._split_qkv_and_norm(qr_kv)
@@ -257,12 +259,13 @@ class AttentionStep:
         """`_prepare_and_attn` up to the indexer, with the indexer inputs on
         side streams.
 
-        From the moment `qr` is ready, aux stream 2 runs the indexer query (`wq_b`, then
-        RoPE/quantize once the weights GEMM is done) and aux stream 0, after its
-        `kv_score` GEMM, the compressor and the index key; the current stream runs the
-        main query and KV insertion, a dense indexer's plan (`plan_decode_rows`), then
-        the compressed-cache insertion once the latent is ready. Returns the query, the
-        indexer query, its scale and weights, and the dense indexer's plan.
+        From the moment `qr` is ready, aux stream 2 runs the indexer query
+        (`wq_b`, then RoPE/quantize once the weights GEMM is done) and aux
+        stream 0, after its `kv_score` GEMM, the compressor and the index
+        key; the current stream runs the main query and KV insertion, a dense
+        indexer's plan (`plan_decode_rows`), then the compressed-cache
+        insertion once the latent is ready. Returns the query, the indexer
+        query, its scale and weights, and the dense indexer's plan.
         """
         attn = self.attn
         indexer, compressor = attn.indexer, attn.compressor
@@ -366,8 +369,9 @@ class AttentionStep:
         plan: DecodeRowsPlan | None,
         step: "DecodeStep",
     ) -> None:
-        """The layer's indexer: the top-k indices (and in the candidate source, the
-        candidate blocks) of the step; a dense indexer finishes its `plan`."""
+        """The layer's indexer: the top-k indices (and in the candidate
+        source, the candidate blocks) of the step; a dense indexer finishes
+        its `plan`."""
         q_quant = (index_q, index_q_scale) if index_q_scale is not None else index_q
         op = indexer.indexer_op
         if isinstance(op, SparseAttnIndexer):

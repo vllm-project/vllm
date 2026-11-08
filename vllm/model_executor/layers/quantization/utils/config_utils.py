@@ -96,8 +96,9 @@ def get_checkpoint_quant_keys(
     prefix: str,
     layer_type: "type[torch.nn.Module]",
 ) -> tuple["QuantKey | None", "QuantKey | None"]:
-    """Return the (weight, activation) keys a layer is stored with in the checkpoint.
-    `None` denotes an unquantized weight, or an unknown/unquantized activation.
+    """Return the (weight, activation) keys a layer is stored with in the
+    checkpoint. `None` denotes an unquantized weight, or an unknown/unquantized
+    activation.
 
     Raises:
         NotImplementedError: If the checkpoint format can not be determined.

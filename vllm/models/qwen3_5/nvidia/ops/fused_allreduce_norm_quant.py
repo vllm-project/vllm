@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TP all-reduce + residual add + Gemma RMSNorm + consumer input quant.
 
-Calls FlashInfer's `kARResidualRMSNormOut{FP8,FP4}Quant` patterns directly (no
-torch.compile custom op). The kernel writes the bf16 normed activation (GDN's
-`in_proj_ba` reads it) next to the static FP8 / NVFP4 codes; its outputs are bitwise
-identical to FlashInfer AR+norm followed by `scaled_fp8_quant` / `scaled_fp4_quant`.
+Calls FlashInfer's `kARResidualRMSNormOut{FP8,FP4}Quant` patterns directly
+(no torch.compile custom op). The kernel writes the bf16 normed activation
+(GDN's `in_proj_ba` reads it) next to the static FP8 / NVFP4 codes; its
+outputs are bitwise identical to FlashInfer AR+norm followed by
+`scaled_fp8_quant` / `scaled_fp4_quant`.
 
 Returns None when the fused kernel does not apply (FlashInfer or a supported
 workspace unavailable, or a batch above the workspace budget); the caller
@@ -41,7 +42,8 @@ _workspace_unsupported = False
 
 
 def _get_workspace(hidden_states: torch.Tensor, tp_size: int):
-    """The FlashInfer quant workspace if it can take `hidden_states`, else None."""
+    """The FlashInfer quant workspace if it can take `hidden_states`, else
+    None."""
     global _workspace_unsupported
     if not fi_ar.fi_ar_available or _workspace_unsupported:
         return None

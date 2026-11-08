@@ -1359,10 +1359,12 @@ class SupportsTranscription(Protocol):
 
     supports_explicit_language_detection: ClassVar[bool] = False
     """
-    Transcription models that require an explicit language detection step (e.g. Whisper
-    needs a separate forward pass to predict the language token) should set this to
-    `True` and implement `get_language_detection_prompt` and
-    `parse_language_detection_output` and `get_language_token_ids`.
+    Transcription models that require an explicit language detection step
+    (e.g. Whisper needs a separate forward pass to predict the language
+    token) should set this to `True` and implement
+    `get_language_detection_prompt` and
+    `parse_language_detection_output` and
+    `get_language_token_ids`.
     """
 
     no_space_languages: ClassVar[set[str]] = {"ja", "zh"}
@@ -1852,9 +1854,10 @@ class SupportsEncoderCudaGraph(Protocol):
     """Interface for models whose vision encoder supports CUDA graph
     capture/replay.
 
-    Models implement these methods to provide the `EncoderCudaGraphManager` with all
-    model-specific logic (input handling, metadata computation, forward pass) without
-    the manager needing to know model internals.
+    Models implement these methods to provide the
+    `EncoderCudaGraphManager` with all model-specific logic
+    (input handling, metadata computation, forward pass) without the
+    manager needing to know model internals.
     """
 
     supports_encoder_cudagraph: ClassVar[Literal[True]] = True

@@ -365,7 +365,8 @@ def wqb_rope(c, task0, pos_t, n):
 
 
 def wqb_pos(c, t0, n):
-    """This thread's token position for `stage_wqb`'s epilogue of tile t0 .. t0 + n."""
+    """This thread's token position for `stage_wqb`'s epilogue of tile
+    t0 .. t0 + n."""
     per = ROWS * n // 2
     tl = fx.min((c["tid"] % per) // (ROWS // 2), n - 1)
     return ld_i32(c["args"]["pos"], 2 * (t0 + tl))

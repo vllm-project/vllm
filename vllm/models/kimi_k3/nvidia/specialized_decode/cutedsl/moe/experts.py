@@ -207,9 +207,10 @@ PLAN_BYTES = PLAN_XSF + 64 * 448
 
 @cute.jit
 def plan_chunk(plan, token, chunk, words, xsf: cutlass.Constexpr = PLAN_XSF):
-    """Write 8-element `chunk` (four BF16x2 `words`) of `token` as MXFP8 into the plan
-    (scale words at `xsf`); lanes 4k..4k+3 hold one 32-element block, 16 lanes one scale
-    word. Bit-identical to `mx_block` (an exact max, the same scaling and packing)."""
+    """Write 8-element `chunk` (four BF16x2 `words`) of `token` as MXFP8 into
+    the plan (scale words at `xsf`); lanes 4k..4k+3 hold one 32-element block, 16
+    lanes one scale word. Bit-identical to `mx_block` (an exact max, the same
+    scaling and packing)."""
     lane, values = (thread()[2], cute.make_rmem_tensor(8, Float32))
     for i in cutlass.range_constexpr(4):
         pair = unpack_bf16(words[i])

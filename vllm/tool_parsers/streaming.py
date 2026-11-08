@@ -84,8 +84,9 @@ class _RequiredToolCallSpan:
     args_end: int | None = None
 
     def ready_at(self, length: int) -> bool:
-        """Whether the first `length` characters of the text already made this call
-        streamable: its name was complete and its parameters value had started."""
+        """Whether the first `length` characters of the text already made
+        this call streamable: its name was complete and its parameters value
+        had started."""
         return (
             self.name is not None
             and self.name_end is not None

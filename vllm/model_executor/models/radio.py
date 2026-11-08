@@ -12,12 +12,14 @@
 
 The module tree mirrors the Transformers `RadioModel` (`embeddings` and an
 `encoder.layer` stack of `norm1`/`attention`/`layer_scale1`/`norm2`/
-`mlp`/`layer_scale2` blocks). The vLLM-specific deviations are the fused `attention.qkv`
-(a `QKVParallelLinear` for TP/quantization, vs the split `query`/`key`/`value` in HF)
-and running input normalization in the processor instead of an `input_conditioner`
-module; the attention backend and MLP reuse vLLM's `MMEncoderAttention` and `InternMLP`.
-`load_weights` maps both native Transformers and legacy remote-code checkpoint keys onto
-this tree via `hf_to_vllm_mapper`.
+`mlp`/`layer_scale2` blocks). The vLLM-specific deviations are the fused
+`attention.qkv` (a `QKVParallelLinear`
+for TP/quantization, vs the split `query`/`key`/`value` in HF) and running
+input normalization in the processor instead of an `input_conditioner` module;
+the attention backend and MLP reuse vLLM's `MMEncoderAttention` and
+`InternMLP`. `load_weights` maps
+both native Transformers and legacy remote-code checkpoint keys onto this tree
+via `hf_to_vllm_mapper`.
 """
 
 import math
@@ -708,8 +710,9 @@ class RadioModel(nn.Module):
         return self._extract_final(encoder_outputs, imgs_sizes=imgs_sizes)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load RADIO checkpoint weights, remapping legacy remote-code and native
-        Transformers keys onto this module tree via `hf_to_vllm_mapper`."""
+        """Load RADIO checkpoint weights, remapping legacy remote-code and
+        native Transformers keys onto this module tree via
+        `hf_to_vllm_mapper`."""
         if isinstance(weights, dict):
             weights = weights.items()
         # Keep only tensors belonging to the RADIO tower (legacy ``radio_model.*``

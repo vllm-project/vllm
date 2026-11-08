@@ -136,8 +136,9 @@ def dispatch_topk_sigmoid_func(
 ) -> Callable[..., tuple[torch.Tensor, ...]]:
     """Pick the sigmoid top-k implementation for one launch.
 
-    On ROCm with AITER, `topk_gating` is chosen on gfx942 and gfx950 when it supports
-    the launch described by the tensors; every other launch uses `vllm_topk_sigmoid`.
+    On ROCm with AITER, `topk_gating` is chosen on gfx942 and gfx950 when it
+    supports the launch described by the tensors; every other launch uses
+    `vllm_topk_sigmoid`.
     """
     if use_rocm_aiter and (
         rocm_aiter_ops.is_topk_gating_enabled()

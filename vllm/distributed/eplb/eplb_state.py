@@ -272,9 +272,10 @@ class EplbState:
         """
         self.should_record_tensor: torch.Tensor | None = None
         """
-        Shared scalar bool tensor for all layers. Every `EplbLayerState` holds a
-        reference to the **same** object so a single `.fill_()` updates all layers at
-        once. Allocated on the first call to `_propagate_shared_tensors`.
+        Shared scalar bool tensor for all layers.  Every
+        `EplbLayerState` holds a reference to the **same** object so
+        a single `.fill_()` updates all layers at once.  Allocated on the
+        first call to `_propagate_shared_tensors`.
         """
         self._should_record_value: bool | None = None
         """Last value written to `should_record_tensor`."""
@@ -549,7 +550,8 @@ class EplbState:
         num_unpadded_tokens: int,
         ubatch_slices: list | None = None,
     ) -> None:
-        """Fill the per-[u]batch `num_unpadded_tokens` tensors before a forward pass.
+        """Fill the per-[u]batch `num_unpadded_tokens` tensors before a
+        forward pass.
 
         Args:
             model_config: Identifies which `EplbModelState` to update.
@@ -1239,9 +1241,10 @@ class EplbLayerState:
     metrics during this forward pass.  All layers reference the **same**
     tensor object, which is owned and updated by `EplbState`.
 
-    Set to `False` for the first `step_interval - window_size` steps of each
-    rearrangement period: those steps would be overwritten in the sliding window before
-    the next rearrangement, so recording them wastes GPU work.
+    Set to `False` for the first `step_interval - window_size` steps of
+    each rearrangement period: those steps would be overwritten in the
+    sliding window before the next rearrangement, so recording them wastes
+    GPU work.
     """
     num_unpadded_tokens_tensors: list[torch.Tensor] | None = None
     """

@@ -509,8 +509,9 @@ def run_method(
 
 
 class PydanticMsgspecMixin:
-    """Make a `msgspec.Struct` compatible with Pydantic for both **validation**
-    (JSON/dict -> Struct) and **serialization** (Struct -> JSON-safe dict).
+    """Make a `msgspec.Struct` compatible with Pydantic for both
+    **validation** (JSON/dict -> Struct) and **serialization**
+    (Struct -> JSON-safe dict).
 
     Subclasses may set `__pydantic_msgspec_exclude__` (a `set[str]`) to list
     non-underscore field names that should also be stripped from serialized output.

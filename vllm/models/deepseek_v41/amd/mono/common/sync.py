@@ -58,7 +58,8 @@ def sreg(base, offset, region):
 
 
 def preg(base, offset, region):
-    """Peer-symmetric region `region` at byte `offset` of a rank's buffer `base`."""
+    """Peer-symmetric region `region` at byte `offset` of a rank's buffer
+    `base`."""
     return Addr(region, Space.PEER, base + fx.Int64(offset))
 
 

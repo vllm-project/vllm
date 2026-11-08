@@ -290,7 +290,8 @@ def get_allreduce_workspace(
         world_size: TP size.
         comm_size: Explicit slot size in bytes. If `None`, computed automatically
             from `max_tokens` and `world_size` (fused Q+K path).
-        max_tokens: Maximum number of tokens per batch (used when `comm_size is None`).
+        max_tokens: Maximum number of tokens per batch (used when
+            `comm_size is None`).
         process_group: `torch.distributed` process group.
 
     """

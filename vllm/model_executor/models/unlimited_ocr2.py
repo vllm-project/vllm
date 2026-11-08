@@ -199,7 +199,8 @@ class PageCountGuardLogitsProcessor(LogitsProcessor):
       `<PAGE>` markers forces EOS;
     * each page is capped at `max_page_tokens` generated tokens -- hitting
       the cap forces `<PAGE>` (next page) or EOS (last page);
-    * prompts without a `<PAGE>` marker (single-page requests) pass through.
+    * prompts without a `<PAGE>` marker (single-page requests) pass
+      through.
 
     Forced transitions yield to existing token masks from other sampling
     constraints when their target token is unavailable. EOS is retained if

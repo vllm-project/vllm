@@ -248,8 +248,9 @@ class MooncakeStoreCoordinator:
         block_hashes: Sequence[BlockHash],
         token_len: int,
     ) -> tuple[list[bool], ...]:
-        """Per-group load masks: `mask[g][i]` is True iff group `g`'s spec would
-        populate physical block `i` at length `token_len` (e.g. SWA / Mamba tail-only).
+        """Per-group load masks: `mask[g][i]` is True iff group `g`'s
+        spec would populate physical block `i` at length `token_len`
+        (e.g. SWA / Mamba tail-only).
         """
         # Lookup has already applied Eagle's last-block drop.
         masks, _ = self.find_longest_cache_hit(

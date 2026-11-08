@@ -53,9 +53,10 @@ def _steps(c, nsteps, split, tiled):
 
 
 def _step_load(c, r_w, r_ws, k, row0, st, pred=None):
-    """Global step `st`'s weight operand of rows row0 .. +16: two 16 B chunks a lane (K
-    bytes 16 j .. and 64 + 16 j .. of the step, row row0 + lane % 16) and the E8M0 byte
-    of its K block. `pred` false: masked (out of range: no memory traffic, zeros)."""
+    """Global step `st`'s weight operand of rows row0 .. +16: two 16 B chunks a
+    lane (K bytes 16 j .. and 64 + 16 j .. of the step, row row0 + lane % 16)
+    and the E8M0 byte of its K block. `pred` false: masked (out of range: no
+    memory traffic, zeros)."""
     lane = c["lane"]
     j = lane // 16
     row = row0 + lane % 16

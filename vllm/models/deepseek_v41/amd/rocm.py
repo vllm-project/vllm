@@ -451,9 +451,10 @@ class DeepseekV41ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataB
 
 
 class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
-    """The indexer on aiter's paged MXFP4 cache: its K store and Q quant write in the
-    order aiter's MQA-logits kernel reads, and its layers score with it. `_produce_k`
-    and `forward_q` mirror `DeepseekV4Indexer`'s except for those two calls."""
+    """The indexer on aiter's paged MXFP4 cache: its K store and Q quant write
+    in the order aiter's MQA-logits kernel reads, and its layers score with it.
+    `_produce_k` and `forward_q` mirror `DeepseekV4Indexer`'s except for
+    those two calls."""
 
     mqa_cls = RocmSparseMQAIndexer
     attn_cls = RocmSparseAttnIndexer

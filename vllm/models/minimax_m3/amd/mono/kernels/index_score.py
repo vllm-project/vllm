@@ -205,10 +205,11 @@ def emit_index_scores(
         return col, _pick(seq, col)
 
     def load_raw(page, tiles):
-        """Key tiles `tiles` (16 keys each) of a block, in flight: lane g4 = lane / 16
-        reads its key's bytes 32 g4 .. 32 g4 + 32 with two 16 B loads (half the load
-        instructions of eight-byte operand reads, scattered over the rows: 1M context,
-        S = 16, scores 125 -> 100 us); `split_tiles` makes them MFMA operands."""
+        """Key tiles `tiles` (16 keys each) of a block, in flight: lane g4 =
+        lane / 16 reads its key's bytes 32 g4 .. 32 g4 + 32 with two 16 B loads
+        (half the load instructions of eight-byte operand reads, scattered over
+        the rows: 1M context, S = 16, scores 125 -> 100 us); `split_tiles`
+        makes them MFMA operands."""
         words = []
         for i in tiles:
             row = (page * INDEX_BLOCK_BYTES + (16 * i + l16) * HEAD_DIM + 32 * g4) // 4

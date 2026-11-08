@@ -30,12 +30,13 @@ Between the router GEMM and the first routed-expert GEMM, the stock path runs
 three kernels; `RoutedExpertFront` replaces them with one launch:
 
 1. the DSv4 top-k (vLLM's Triton `_dsv4_topk_kernel`, `dsv4_topk.py`):
-   per row, `score = sqrt(softplus(logit))` (softplus(x) = x above 20, else log(1 +
-   exp(x))), `biased = score + bias` (`bias_vl` for image sentinel tokens), the six
-   largest biased scores (lowest expert id on exact ties, NaN ranked as -1e30), and
-   `weights` = the unbiased scores times scale / sum (sum replaced by 1 unless
-   positive); a CUDA graph padding row (`VLLM_MOE_SKIP_PADDING`'s mask) gets ids -1 and
-   weights 0, so no expert computes it;
+   per row, `score = sqrt(softplus(logit))` (softplus(x) = x above 20, else
+   log(1 + exp(x))), `biased = score + bias` (`bias_vl` for image sentinel
+   tokens), the six largest biased scores (lowest expert id on exact ties, NaN
+   ranked as -1e30), and `weights` = the unbiased scores times scale / sum
+   (sum replaced by 1 unless positive); a CUDA graph padding row
+   (`VLLM_MOE_SKIP_PADDING`'s mask) gets ids -1 and weights 0, so no expert
+   computes it;
 2. the routed input's MXFP8 quantization (FlashInfer's linear-layout
    `mxfp8_quantize`): per 32-value block, a UE8M0 scale rounded up from
    amax / 448 and E4M3 values rounded to nearest with saturation;
@@ -54,17 +55,19 @@ Work split (1024 threads a CTA). The kernel is built for calls of up to 8,
 16, 32, 64, 128 or 192 rows (`max_rows`); the first `S = 8` CTAs select
 and form one thread block cluster, the rest quantize:
 
-* Selecting CTA `s` takes rows `s`, `s + S`, `s + 2 S`, ... (at most `max_rows / S`
-  rows: 1, 2, 4 or 8 up to 64 rows, 16 at 128, 24 at 192). Four warps per row (two at 16
-  rows a CTA, one at 24) each take the top-6 of their share of the experts (3, 6 or 12
-  per lane); one warp per row merges the candidates and normalizes. The top-k is bound
-  by instruction issue, so its time grows with the rows a CTA holds; the rows are
-  therefore spread over all eight CTAs, even at 8 rows or fewer. The selection is a
-  lexicographic (value, lowest id) maximum, so splitting it does not change the result.
-  The merging warps store the selected ids to CTA 0's shared memory (through distributed
-  shared memory) and release them with the cluster barrier, then CTA 0 builds the
-  routing record from them. The ids and weights go to global memory only after that
-  release, which would otherwise wait for those stores to reach L2.
+* Selecting CTA `s` takes rows `s`, `s + S`, `s + 2 S`, ... (at most
+  `max_rows / S` rows: 1, 2, 4 or 8 up to 64 rows, 16 at 128, 24 at 192).
+  Four warps per row (two at 16 rows a CTA, one at 24) each take the top-6 of
+  their share of the experts (3, 6 or 12 per lane); one warp per row merges
+  the candidates and normalizes. The top-k is bound by instruction issue,
+  so its time grows with the rows a CTA holds; the rows are therefore spread
+  over all eight CTAs, even at 8 rows or fewer. The
+  selection is a lexicographic (value, lowest id) maximum, so splitting it
+  does not change the result. The merging warps store the selected ids to
+  CTA 0's shared memory (through distributed shared memory) and release
+  them with the cluster barrier, then CTA 0 builds the routing record from
+  them. The ids and weights go to global memory only after that release,
+  which would otherwise wait for those stores to reach L2.
 * Quantizing CTA `S + c`: rows `3c .. 3c + 2` of the BF16 input, two
   threads per 32-value block. The grid is rounded up to whole clusters.
 
@@ -228,11 +231,13 @@ def lane_best(key: cute.Tensor):
 
 @cute.jit
 def part_top_k(logit: cute.Tensor, bias: cute.Tensor, base: Int32, lane: Int32):
-    """One warp's top-6 of its share of the experts (expert = base + lane + 32 j, `j`
-    below the size of `logit`), in selection order: each round takes the warp's largest
-    key with one `redux.sync` max, then the lowest expert id holding it with one min
-    (Triton's `tl.max`, then the lowest index equal to it); only the winning lane
-    rescans. Lane `s < 6` gets slot `s`: its key, id and unbiased score."""
+    """One warp's top-6 of its share of the experts (expert = base + lane +
+    32 j, `j` below the size of `logit`), in
+    selection order: each round takes the warp's largest key with one
+    `redux.sync` max, then the lowest expert id holding it with one min
+    (Triton's `tl.max`, then the lowest index equal to it); only the winning
+    lane rescans. Lane `s < 6` gets slot `s`: its key, id and unbiased
+    score."""
     per_lane = cute.size(logit)
     score = cute.make_rmem_tensor((per_lane,), Float32)
     key = cute.make_rmem_tensor((per_lane,), Uint32)
@@ -541,11 +546,12 @@ class RoutedExpertFront:
         stream: cuda.CUstream,
     ):
         """`logits`: FP32 [rows, 384]; `bias`, `bias_vl`: FP32 [384];
-        `input_ids`: [rows] int32, or int64 if `ids_are_64bit`, as Int32 words
-        (`bias_vl` and `input_ids` are read only with image routing; pass any pointers
-        otherwise); `is_padding`: bool [rows], read only if `has_padding`; `x`: BF16
-        [rows, 5120] as Uint32 words; outputs: `topk_ids` int32 / `topk_weights` FP32
-        [rows, 6], `x_quant` [rows, 5120] E4M3 bytes, `x_scale` [rows, 160] UE8M0,
+        `input_ids`: [rows] int32, or int64 if `ids_are_64bit`, as Int32
+        words (`bias_vl` and `input_ids` are read only with image routing;
+        pass any pointers otherwise); `is_padding`: bool [rows], read only
+        if `has_padding`; `x`: BF16 [rows, 5120] as Uint32
+        words; outputs: `topk_ids` int32 / `topk_weights` FP32 [rows, 6],
+        `x_quant` [rows, 5120] E4M3 bytes, `x_scale` [rows, 160] UE8M0,
         `permuted` [rows, 6] and the routing record. rows in [1, max_rows]."""
         slots = cute.make_layout(rows * TOP_K)
         selecting = self.selecting

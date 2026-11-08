@@ -621,9 +621,10 @@ def _filter_by_activation(
     backends: list[Mxfp4MoeBackend],
     requested_activation_key: QuantKey | None,
 ) -> list[Mxfp4MoeBackend]:
-    """Pick variants matching `requested_activation_key`, followed by BF16 variants as a
-    higher-precision fallback; without one, prefer BF16 if the list has any, else keep
-    the list as-is so explicit non-BF16 picks (e.g. the `_afp8` aliases) still land."""
+    """Pick variants matching `requested_activation_key`, followed by BF16
+    variants as a higher-precision fallback; without one, prefer BF16 if the
+    list has any, else keep the list as-is so explicit non-BF16 picks (e.g.
+    the `_afp8` aliases) still land."""
     bf16 = [b for b in backends if _backend_activation_key(b) is None]
     if requested_activation_key is not None:
         matching = [

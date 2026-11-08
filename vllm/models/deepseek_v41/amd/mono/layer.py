@@ -179,7 +179,8 @@ def scratch_layout(
     outlive a step width, are in the epoch buffer. The MoE regions follow the
     runner's routing and FP4 groups of an ug task: with one group a task (the
     DSpark draft's runner) the ug flags take twice the room of two groups.
-    `tuned`: a tuned build's layout (`MonoBuild.tuned`), in a scratch of its own."""
+    `tuned`: a tuned build's layout (`MonoBuild.tuned`), in a scratch of its
+    own."""
     d = Dims(tp)
     out: dict = {}
     off = 0

@@ -190,13 +190,14 @@ class CacheConfig:
     kv_cache_layout: str | None = field(default=None, init=False)
     """Resolved physical KV cache layout name (a `KVCacheLayout` member).
 
-    `None` means the layout has not been resolved yet. The engine core resolves it once
-    (`resolve_kv_cache_layout`) before memory profiling, and every worker process adopts
-    the resolved name — via the `set_kv_cache_layout` RPC, or
-    `KVCacheConfig.kv_cache_layout` for workers spawned after resolution — before the KV
-    cache is allocated. Once set the value is final and read with
-    `get_resolved_kv_cache_layout`, which raises on `None`. Tests and standalone tools
-    may pre-set a value, which resolution then honors as-is."""
+    `None` means the layout has not been resolved yet. The engine core
+    resolves it once (`resolve_kv_cache_layout`) before memory profiling, and
+    every worker process adopts the resolved name — via the
+    `set_kv_cache_layout` RPC, or `KVCacheConfig.kv_cache_layout` for
+    workers spawned after resolution — before the KV cache is allocated. Once
+    set the value is final and read with `get_resolved_kv_cache_layout`,
+    which raises on `None`. Tests and standalone tools may pre-set a value,
+    which resolution then honors as-is."""
     prefix_match_unit: int | None = Field(default=None, gt=0)
     """The finest token boundary (in tokens) a prefix-cache hit can land on.
 
@@ -285,9 +286,10 @@ class CacheConfig:
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
     skip_page_size_padded: int | None = None
-    """Optional override for the page size of layers skipped from KV cache quantization
-    (`--kv-cache-dtype-skip-layers`); set during block-size alignment so unquantized
-    skip layers pad up to the quantized primary's page."""
+    """Optional override for the page size of layers skipped from KV cache
+    quantization (`--kv-cache-dtype-skip-layers`); set during block-size
+    alignment so unquantized skip layers pad up to the quantized primary's
+    page."""
     mamba_block_size: int | None = Field(default=None, gt=0)
     """Size of a contiguous cache block in number of tokens for mamba cache.
     Can be set only when prefix caching is enabled."""

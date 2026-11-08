@@ -23,9 +23,10 @@ multicast memory (`MailboxSlot`), then runs the dual norm over the full row::
         stream * rsqrt(mean(stream**2) + next_eps) * (next_weight + next_gain_center)
     )
 
-with layer `l - 1`'s post_ffn_norm and residual gates and layer `l`'s pre_qkv_proj_norm
-(model.norm at the final boundary, after the last layer). The stream (FP32 [b, H]) is
-updated in place; `aux` receives it when layer `l` is an aux layer of the drafter.
+with layer `l - 1`'s post_ffn_norm and residual gates and layer `l`'s
+pre_qkv_proj_norm (model.norm at the final boundary, after the last layer).
+The stream (FP32 [b, H]) is updated in place; `aux` receives it when layer
+`l` is an aux layer of the drafter.
 
 Two kernels per call, as the stock fused path: the publisher (or the unpooler's
 zero-copy epilogue, which writes the same bytes) multicasts this rank's block
@@ -34,12 +35,13 @@ mailbox and sets `ACTIVE_STAGE`; the consumer reads each 8-column fragment
 from the one rank that owns it, re-arms it, rotates `NEXT_STAGE` and runs
 the dual norm. Each boundary has its own mailbox and stage words.
 
-The consumer releases its PDL dependents right after `griddepcontrol.wait`, before the
-poll, so the next kernel (the QKV front loading its weights) starts while the gather
-waits on the other ranks. A dependent still waits for this whole grid in its own
-`griddepcontrol.wait`. Like the stock consumer it loads the stream and the parameters
-before its wait: no kernel between the stream's last writer and this one may trigger its
-dependents before its own wait.
+The consumer releases its PDL dependents right after `griddepcontrol.wait`,
+before the poll, so the next kernel (the QKV front loading its weights) starts
+while the gather waits on the other ranks. A dependent still waits for this
+whole grid in its own `griddepcontrol.wait`. Like the stock consumer it
+loads the stream and the parameters before its wait: no kernel between the
+stream's last writer and this one may trigger its dependents before its own
+wait.
 
 Numerics: the row reduction decides the last bits. Where the stock forward
 runs the fused all-gather (the previous MoE defers its column gather and the
@@ -123,9 +125,10 @@ class MailboxSlot(NamedTuple):
 
 
 class BoundaryMailbox:
-    """The mailbox of one boundary: a `LamportMailbox` of `[b, H / tp]` column blocks
-    and its publisher, built collectively (every rank, the same order) before CUDA graph
-    capture. Raises on every rank without NVLink multicast."""
+    """The mailbox of one boundary: a `LamportMailbox` of `[b, H / tp]`
+    column blocks and its publisher, built collectively (every rank, the same
+    order) before CUDA graph capture. Raises on every rank without NVLink
+    multicast."""
 
     def __init__(
         self,
@@ -596,9 +599,10 @@ class BoundaryOperands(NamedTuple):
 
 
 def boundary_operands(post_norm, connection, next_norm) -> BoundaryOperands:
-    """Constants and weights of the stock boundary `post_norm` (the previous layer's
-    post_ffn_norm) -> `connection` (its add_ffn) -> `next_norm` (this layer's
-    pre_qkv_proj_norm, or model.norm), under the stock fused path's preconditions."""
+    """Constants and weights of the stock boundary `post_norm` (the previous
+    layer's post_ffn_norm) -> `connection` (its add_ffn) -> `next_norm`
+    (this layer's pre_qkv_proj_norm, or model.norm), under the stock fused
+    path's preconditions."""
     if (
         getattr(post_norm, "variance_size_override", None) is not None
         or getattr(next_norm, "variance_size_override", None) is not None
@@ -617,10 +621,11 @@ def boundary_operands(post_norm, connection, next_norm) -> BoundaryOperands:
 
 
 def stock_gathers(previous_layer: nn.Module, aux: bool, rows: int) -> bool:
-    """Whether the stock forward runs this boundary as the fused all-gather (serial
-    reduction) at `rows` tokens: the previous layer defers its unpooler's column gather
-    and this layer is not an aux layer (the stock forward gathers the columns before an
-    aux state and then runs the standalone dual norm, tree reduction)."""
+    """Whether the stock forward runs this boundary as the fused all-gather
+    (serial reduction) at `rows` tokens: the previous layer defers its
+    unpooler's column gather and this layer is not an aux layer (the stock
+    forward gathers the columns before an aux state and then runs the
+    standalone dual norm, tree reduction)."""
     sp_active = is_sequence_parallel_active(
         previous_layer.is_sequence_parallel, rows, previous_layer.sp_min_tokens
     )
@@ -629,8 +634,9 @@ def stock_gathers(previous_layer: nn.Module, aux: bool, rows: int) -> bool:
 
 class GatherBoundary:
     """The input boundary (a `BoundaryProvider`) of decoder layer
-    `layer_idx >= 1`: gathers the previous layer's unpooler blocks from this boundary's
-    mailbox and runs the dual norm into the layer's pre_qkv_proj_norm."""
+    `layer_idx >= 1`: gathers the previous layer's unpooler blocks from this
+    boundary's mailbox and runs the dual norm into the layer's
+    pre_qkv_proj_norm."""
 
     def __init__(
         self, index: int, mailbox: BoundaryMailbox, kernel: AllGatherDualNorm

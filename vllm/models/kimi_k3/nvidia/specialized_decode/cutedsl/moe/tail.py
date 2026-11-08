@@ -381,7 +381,8 @@ class MoeTail:
 
     @cute.jit
     def rearm(self, io, capacity, parity, batch, block, tid, reduced=None):
-        """Re-arms `parity`'s first `batch` tokens (and WaveMoeTail's reduced rows)."""
+        """Re-arms `parity`'s first `batch` tokens (and WaveMoeTail's reduced
+        rows)."""
         latent, shared, g, w, s, _ = io
         if parity >= 0:
             nl, nr = self.tp * batch * 448, self.tp * batch * (self.shard // 8)

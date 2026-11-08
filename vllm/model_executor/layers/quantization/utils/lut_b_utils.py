@@ -140,9 +140,10 @@ def quantize_lut_b(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Quantize a `[N, K]` or stacked `[E, N, K]` weight to LUT-B.
 
-    Returns `(packed, codebooks, scales)` with shapes `[E, N/8, K/64, 192]` (uint8),
-    `[E, N/8, K/64, 8]` (float8_e4m3fn) and `[E, N/8, K/64]` (uint8 UE8M0). The expert
-    dim is dropped for 2D inputs.
+    Returns `(packed, codebooks, scales)` with shapes
+    `[E, N/8, K/64, 192]` (uint8), `[E, N/8, K/64, 8]` (float8_e4m3fn)
+    and `[E, N/8, K/64]` (uint8 UE8M0). The expert dim is dropped for 2D
+    inputs.
     """
     squeeze = weight.ndim == 2
     if squeeze:

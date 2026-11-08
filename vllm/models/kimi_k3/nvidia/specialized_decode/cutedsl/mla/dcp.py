@@ -419,10 +419,11 @@ class DcpValue:
 
     @cute.jit
     def push_values(self, args, gh, tid):
-        """`preprojected`: push gathered head `gh`'s value rows (the W_UV argument,
-        [DCP * H, B, 128] BF16) and every row's LSE to the head's owner, a row with
-        nothing to merge only its LSE (as `project`). Thread tid takes 16 B chunk tid %
-        16 of rows tid // 16, + 32, ..: four rows' loads in flight per thread."""
+        """`preprojected`: push gathered head `gh`'s value rows (the W_UV
+        argument, [DCP * H, B, 128] BF16) and every row's LSE to the head's owner,
+        a row with nothing to merge only its LSE (as `project`). Thread tid
+        takes 16 B chunk tid % 16 of rows tid // 16, + 32, ..: four rows' loads in
+        flight per thread."""
         rows_lse, lens, box, _, peers, lpeers = args[1:7]
         values, parity, rank = args[8], args[12], args[13]
         H, D, B = self.heads, self.size, self.batch

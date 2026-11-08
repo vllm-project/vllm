@@ -9,14 +9,15 @@ DeepSeek-V4.1 backbone then copies the embedding into its `hc_mult`
 hyper-connection streams ([n, H] -> [n, hc, H]) at the first layer. At a
 few rows both are fixed costs on the critical path of every step.
 
-`ReplicatedEmbedding` keeps a full copy of the table on every rank: the ranks broadcast
-their shards into it once, when the decode executor is built (1.32 GB a GPU for
-DeepSeek-V4.1-Flash), which is before the KV cache is sized, so the memory profile
-counts it. A captured decode step then looks its tokens up in one launch of
-`StreamEmbedding` that writes the embedding (for the target's first layer, whose pre-mix
-reads it) and its streams, and needs no collective. A token outside the vocabulary gets
-zeros, as the sharded lookup's sum gives it, so the result equals the all-reduced
-embedding (up to the sign of a zero, which the sum makes positive).
+`ReplicatedEmbedding` keeps a full copy of the table on every rank: the
+ranks broadcast their shards into it once, when the decode executor is built
+(1.32 GB a GPU for DeepSeek-V4.1-Flash), which is before the KV cache is
+sized, so the memory profile counts it. A captured decode step then looks its
+tokens up in one launch of `StreamEmbedding` that writes the embedding (for
+the target's first layer, whose pre-mix reads it) and its streams, and needs
+no collective. A token outside the vocabulary gets zeros, as the sharded
+lookup's sum gives it, so the result equals the all-reduced embedding (up to
+the sign of a zero, which the sum makes positive).
 
 The copy serves the table as it was when the executor was built. Loading
 weights again rewrites the shards in place but not the copy, so a deployment
@@ -177,9 +178,10 @@ class ReplicatedEmbedding:
 
     @classmethod
     def create(cls, embed: nn.Module, hc_mult: int) -> "ReplicatedEmbedding | None":
-        """The copy of `embed`'s table, or None when `embed` is not the plain sharded
-        BF16 lookup this replaces. The decision reads only the configuration, which
-        every TP rank shares; building the copy is collective."""
+        """The copy of `embed`'s table, or None when `embed` is not the
+        plain sharded BF16 lookup this replaces. The decision reads only the
+        configuration, which every TP rank shares; building the copy is
+        collective."""
         if not isinstance(embed, VocabParallelEmbedding):
             return None
         weight = embed.weight
@@ -236,7 +238,8 @@ class ReplicatedEmbedding:
         )
 
     def __call__(self, ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """The embedding `[n, H]` and its streams `[n, hc, H]` of the tokens `ids`."""
+        """The embedding `[n, H]` and its streams `[n, hc, H]` of the
+        tokens `ids`."""
         rows, hidden = ids.shape[0], self.table.shape[1]
         streams = self.table.new_empty(rows, self.hc_mult, hidden)
         embedding = self.table.new_empty(rows, hidden)

@@ -175,7 +175,8 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
 
     names: list[str] = field(default_factory=list)
     """The trainer's complete, flat param name list. The bake drives
-    `model.load_weights` over all of them once and keys the plan by source name."""
+    `model.load_weights` over all of them once and keys the plan by source
+    name."""
 
     dtype_names: list[str] = field(default_factory=list)
     """Dtype name (e.g. 'bfloat16') for each entry of `names`."""
@@ -199,11 +200,12 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     """Per-name index into `owner_sets`, parallel to `names`: which producers
     hold each name. Empty means every producer holds every name.
 
-    This one table expresses every layout the trainer can have — pipeline stages (the
-    names of these groups have this owner set), expert parallelism (this expert name has
-    this one-rank owner set), and combinations of the two — so the engine cuts each
-    group's baked copies into one chunk per distinct class present and routes each chunk
-    to that class's owner. Derived by the trainer from `ParamMeta.owners`."""
+    This one table expresses every layout the trainer can have — pipeline stages
+    (the names of these groups have this owner set), expert parallelism (this
+    expert name has this one-rank owner set), and combinations of the two — so
+    the engine cuts each group's baked copies into one chunk per distinct class
+    present and routes each chunk to that class's owner. Derived by the trainer
+    from `ParamMeta.owners`."""
 
     num_consumers: int = 0
     """Total consumer count across the fleet, for M:N routing. Authoritative when
@@ -212,11 +214,12 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     worker's distinct index comes from `_global_worker_index`."""
 
     num_rdt_buffers: int = 2
-    """Depth of the consumer receive-buffer ring. Must match the producer's —
-    `_run_chunk_pipeline`'s slot-safety argument rests on it. 2 = double buffer: chunk
-    i+1's serve overlaps chunk i's RDMA, and scatter(i-1) overlaps RDMA(i) in the other
-    slot. Keep depth x chunk_bytes under the fabric's address-translation reach (~2-3
-    GB/flow on the reference 8xB200 RoCE cluster, where K=3 measurably hurt)."""
+    """Depth of the consumer receive-buffer ring. Must match the
+    producer's — `_run_chunk_pipeline`'s slot-safety argument rests on it. 2 =
+    double buffer: chunk i+1's serve overlaps chunk i's RDMA, and scatter(i-1)
+    overlaps RDMA(i) in the other slot. Keep depth x chunk_bytes under the
+    fabric's address-translation reach (~2-3 GB/flow on the reference 8xB200 RoCE
+    cluster, where K=3 measurably hurt)."""
 
     buffer_presize_gb: float = 0.0
     """Pre-size each packed receive-buffer slot to this many GiB
@@ -228,19 +231,21 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     replica_rank: int = 0
     """This inference engine's ordinal in the fleet (0..`num_replicas`-1).
 
-    Multi-engine deployments run several INDEPENDENT inference engines, each with its
-    own self-contained parallel config, so every engine's `_global_worker_index`
-    restarts at 0 and would collide across engines. The driver gives each engine a
-    distinct `replica_rank` (with identical `num_replicas`) so the engine offsets its
-    consumers into a globally distinct range for the M:N block assignment.Default 0/1
-    (single engine) needs no override."""
+    Multi-engine deployments run several INDEPENDENT inference engines, each with
+    its own self-contained parallel config, so every engine's
+    `_global_worker_index` restarts at 0 and would collide across engines. The
+    driver gives each engine a distinct `replica_rank` (with identical
+    `num_replicas`) so the engine offsets its consumers into a globally distinct
+    range for the M:N block assignment.Default 0/1 (single
+    engine) needs no override."""
 
     num_replicas: int = 1
     """Number of independent inference engines in the fleet. Default 1 => the
-    per-replica offset is 0 and consumer identity is exactly `_global_worker_index`
-    (preserves single-engine and single-DP-deployment behavior). When > 1,
-    `workers_per_replica = num_consumers // num_replicas` and this engine's consumers
-    occupy `replica_rank * workers_per_replica + _global_worker_index()`. Assumes a
+    per-replica offset is 0 and consumer identity is exactly
+    `_global_worker_index` (preserves single-engine and single-DP-deployment
+    behavior). When > 1, `workers_per_replica = num_consumers // num_replicas`
+    and this engine's consumers occupy
+    `replica_rank * workers_per_replica + _global_worker_index()`. Assumes a
     uniform fleet (every replica has the same worker count). Set alongside
     `replica_rank`, by the driver."""
 
@@ -713,10 +718,11 @@ class ShardedRDTWeightTransferEngine(
         ]
 
     def _issue_pull(self, chunk: "_Chunk", slot: int) -> "_PendingPull":
-        """Reserve `slot`, lay the targets out in its buffer, dispatch the produce RPC
-        and point the transfer at the buffer — WITHOUT the blocking `ray.get` (that is
-        `_complete_pull`). The chunked pipeline issues chunk i+1 before completing chunk
-        i, so the producer serves the next chunk while the in-flight RDMA streams.
+        """Reserve `slot`, lay the targets out in its buffer, dispatch the
+        produce RPC and point the transfer at the buffer — WITHOUT the blocking
+        `ray.get` (that is `_complete_pull`). The chunked pipeline issues
+        chunk i+1 before completing chunk i, so the producer serves the next
+        chunk while the in-flight RDMA streams.
 
         Slot-reuse guard, both stages required: a generation wait (the CUDA event binds
         only to its LAST record, so synchronizing before the background thread recorded

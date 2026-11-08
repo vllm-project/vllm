@@ -237,7 +237,8 @@ def _lut(bits: int, device_str: str) -> torch.Tensor:
 
 
 def _quantize_lut(x: torch.Tensor, bits: int):
-    """Nearest Lloyd-Max code on the block RMS; the scale keeps `x . x_hat = |x|^2`.
+    """Nearest Lloyd-Max code on the block RMS; the scale keeps
+    `x . x_hat = |x|^2`.
 
     Returns (codes uint8 in [0, 2**bits), scale) with
     x ≈ LUT[codes] * scale / LUT_ONE.

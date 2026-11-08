@@ -327,16 +327,18 @@ def lines_at(t, tp, col):
 
 
 def dma_lane(lane):
-    """(token, 16 B cc) tail DMA lane `lane` carries (it lands at position lane)."""
+    """(token, 16 B cc) tail DMA lane `lane` carries (it lands at position
+    lane)."""
     cc = lane // 16
     return 4 * (lane % 4) + ((lane // 4) % 4 + 4 - cc) % 4, cc
 
 
 def vtr_lane(lane, wave, i, lines=True):
-    """This lane's byte in a block's (line wave // 2) of the 8 B it gives a V^T
-    transpose read of latent tile i (`tr_read`; tiles 2 n .. at + 2 n TILEW): lane k of
-    a 16 its half k % 2 of the 16 B 4 (wave % 2) + i of token 4 g + k // 2 % 4 of tile k
-    // 8 -> lane m: latent 64 wave + 16 i + m, tokens 4 g .. of tiles 2 n, 2 n + 1."""
+    """This lane's byte in a block's (line wave // 2) of the 8 B it gives a
+    V^T transpose read of latent tile i (`tr_read`; tiles 2 n .. at + 2 n
+    TILEW): lane k of a 16 its half k % 2 of the 16 B 4 (wave % 2) + i of
+    token 4 g + k // 2 % 4 of tile k // 8 -> lane m: latent 64 wave + 16 i +
+    m, tokens 4 g .. of tiles 2 n, 2 n + 1."""
     g, k = lane // 16, lane % 16
     t = 4 * g + (k // 2) % 4
     if not lines:
@@ -457,7 +459,8 @@ def idx_dma(c, b, t0=None, n=1):
 
 
 def idx_lds(c, b):
-    """This lane's DMA tokens' page indices of block b (`idx_dma`'s; as `idx_load`)."""
+    """This lane's DMA tokens' page indices of block b (`idx_dma`'s; as
+    `idx_load`)."""
     xb = c["xi"] + ((b % 2) * WAVES + c["wave"]) * TILE
     if const_expr(not c["lines"]):
         return (fx.ptr_load(xb + c["dt"]),)

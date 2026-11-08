@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi K3.1 DSA (DeepSeek Sparse Attention) for the kimi_k3 stack.
 
-The DSA indexer uses the native upstream facilities (`DeepseekV32IndexerCache` +
-`torch.ops.vllm.sparse_attn_indexer`); the sparse MLA layers go through
-`MultiHeadLatentAttentionWrapper` with `MLAModules(is_sparse=True)`. Checkpoints name
-indexer weights `self_attn.indexer.{wq_b,wk,weights_proj,k_norm}`; the module tree keeps
-`self_attn.dsa_indexer.*`; load_weights renames into it and stacks `wk` and
-`weights_proj` into the merged `wkv_index`.
+The DSA indexer uses the native upstream facilities
+(`DeepseekV32IndexerCache` + `torch.ops.vllm.sparse_attn_indexer`); the
+sparse MLA layers go through `MultiHeadLatentAttentionWrapper` with
+`MLAModules(is_sparse=True)`. Checkpoints name indexer weights
+`self_attn.indexer.{wq_b,wk,weights_proj,k_norm}`; the module tree keeps
+`self_attn.dsa_indexer.*`; load_weights renames into it and stacks `wk`
+and `weights_proj` into the merged `wkv_index`.
 """
 
 import math
@@ -686,8 +687,9 @@ class KimiK3DSAAttention(nn.Module):
 
     def pack_projections(self) -> None:
         """Enable the fused forward (as DeepseekV32Attention): pack
-        `[q_a | kv_a | wk | weights_proj]` and `[q_b | wq_index]` into one weight each,
-        the linears becoming views. Other configurations keep the wrapper forward."""
+        `[q_a | kv_a | wk | weights_proj]` and `[q_b | wq_index]` into one
+        weight each, the linears becoming views. Other configurations keep the
+        wrapper forward."""
         if self._packed is not None:
             # A rerun after a reload: the loader refilled the views in place.
             return

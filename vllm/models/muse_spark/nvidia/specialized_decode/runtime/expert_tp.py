@@ -26,12 +26,13 @@ This needs `I' % 64 == 0` and `H % 128 == 0`. The per-expert scalars
 (g1_alphas, g1_scale_c, g2_alphas) do not depend on the slice: their global
 input scales are one value for all experts, the same on every rank.
 
-`reshard_nvfp4` builds a rank's TP experts with one NCCL all-to-all per tensor kind over
-the TP group (source `s` sends slice `d` of its experts to rank `d`; the receive buffer
-is the final tensor, experts in global order) and three all-gathers of the scalars. It
-runs once per layer at build, before capture, and keeps the stock tensors: the stock
-layer still serves every step the executor does not take. `probe_rel_l2` compares one
-layer's TP route rows, summed across ranks, with its EP rows.
+`reshard_nvfp4` builds a rank's TP experts with one NCCL all-to-all per
+tensor kind over the TP group (source `s` sends slice `d` of its experts to
+rank `d`; the receive buffer is the final tensor, experts in global order) and
+three all-gathers of the scalars. It runs once per layer at build, before
+capture, and keeps the stock tensors: the stock layer still serves every step
+the executor does not take. `probe_rel_l2` compares one layer's TP route rows,
+summed across ranks, with its EP rows.
 
 Every check runs on every rank and is agreed across the group before any rank
 raises, so a refusal never leaves the other ranks waiting in a collective.

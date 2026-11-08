@@ -100,7 +100,8 @@ def step_block(num_rows: int) -> int:
 
 class VocabParallelMarkovHead(DSparkMarkovHead):
     """`DSparkMarkovHead` with `markov_w2` sharded like the draft lm_head:
-    each rank computes its vocab range of the transition bias (`local_bias`)."""
+    each rank computes its vocab range of the transition bias
+    (`local_bias`)."""
 
     def __init__(
         self,
@@ -464,14 +465,16 @@ class MarkovSampler:
     def _step_variants(
         self, max_rows: int, width: int, draft_logits: torch.Tensor
     ) -> set[tuple[int, bool, bool]]:
-        """The `(block, PDL, vector)` of every step a call over 1 to `max_rows` rows
-        launches (`MarkovKernels.step` picks `vector` from its operands).
+        """The `(block, PDL, vector)` of every step a call over 1 to
+        `max_rows` rows launches (`MarkovKernels.step` picks `vector`
+        from its operands).
 
         The base logits and the bias of a call are fresh outputs of the
-        heads (`_heads`): their row strides are the heads' own (a padded lm_head or
-        Markov w2 leaves its padded rows' stride under the `[..., :vocab]` view the
-        logits processor returns), read here from one call of each on zeros, and they
-        start as aligned as these probes do (allocator blocks)."""
+        heads (`_heads`): their row strides are the heads' own (a padded
+        lm_head or Markov w2 leaves its padded rows' stride under the
+        `[..., :vocab]` view the logits processor returns), read here from
+        one call of each on zeros, and they start as aligned as these
+        probes do (allocator blocks)."""
         kernels, n_spec, w1 = self._kernels, self.num_steps, self.params.w1
         base_head, bias_head = self._heads()
         with torch.no_grad():

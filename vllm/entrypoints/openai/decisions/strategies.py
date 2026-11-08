@@ -996,8 +996,9 @@ class JointSchemaStrategy(ReadStrategy):
         return engine_input
 
     def _options(self, q: Question) -> list[tuple[int, str, Any]]:
-        """Each option's index in `q.options`, id and description, in the model's order:
-        choices sorted by name, noul true then false, score levels by index."""
+        """Each option's index in `q.options`, id and description, in the
+        model's order: choices sorted by name, noul true then false, score
+        levels by index."""
         if q.type.name == "noul":
             return [
                 (

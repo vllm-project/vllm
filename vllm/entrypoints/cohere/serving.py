@@ -13,8 +13,9 @@ The actual prompt rendering is handled by vLLM's renderer pipeline (`vllm.render
   `cohere_melody` library (`render_cmd3` / `render_cmd4`) and surface citations through
   the Cohere-scoped `CohereChatMessage` / `CohereDeltaMessage` subclasses
   (see `vllm.entrypoints.cohere.cohere_chat_message`).
-- For any other model the default Jinja-based `HfRenderer` is used, and the endpoint
-  behaves as a plain v2-shaped wrapper around chat completions.
+- For any other model the default Jinja-based `HfRenderer` is used,
+  and the endpoint behaves as a plain v2-shaped wrapper around chat
+  completions.
 """
 
 from __future__ import annotations
@@ -221,11 +222,12 @@ class CohereServingChatV2(OpenAIServingChat):
     templating happens in the renderer (`vllm.renderers.cohere.CohereRenderer`)
     when the engine is started with `--tokenizer-mode cohere`.
 
-    Citations flow through `CohereChatMessage` / `CohereDeltaMessage` subclasses (see
-    `vllm.entrypoints.cohere.cohere_chat_message`) so the OpenAI-shared `ChatMessage` /
-    `DeltaMessage` keep their declared schemas unchanged. Non-streaming responses pick
-    up the subclass by overriding `_create_chat_message`; streaming deltas are emitted
-    directly by the Cohere reasoning parser.
+    Citations flow through `CohereChatMessage` / `CohereDeltaMessage`
+    subclasses (see `vllm.entrypoints.cohere.cohere_chat_message`) so
+    the OpenAI-shared `ChatMessage` / `DeltaMessage` keep
+    their declared schemas unchanged. Non-streaming responses pick up
+    the subclass by overriding `_create_chat_message`; streaming
+    deltas are emitted directly by the Cohere reasoning parser.
     """
 
     def __init__(
@@ -346,14 +348,15 @@ class CohereServingChatV2(OpenAIServingChat):
     ) -> dict[str, Any]:
         """Keep this handler's internal entries out of the engine hop.
 
-        Overrides `OpenAIServingChat._engine_chat_template_kwargs`. The reserved keys in
-        `_API_SERVER_ONLY_TEMPLATE_KWARGS` exist only to hand request-side state to the
-        API-server-side parser and renderer; the engine-core-side reasoning parser (used
-        for structured-output reasoning-end gating) never reads them. They also can't
-        survive the trip: `POSITION_TO_SOURCE_KEY` holds `CitationSource` models, and
-        msgpack -- which encodes `reasoning_parser_kwargs` on the way to the engine
-        core -- has no native encoding for Pydantic models, so forwarding them fails the
-        request with a `TypeError`.
+        Overrides `OpenAIServingChat._engine_chat_template_kwargs`. The reserved
+        keys in `_API_SERVER_ONLY_TEMPLATE_KWARGS` exist only to hand request-side
+        state to the API-server-side parser and renderer; the engine-core-side reasoning
+        parser (used for structured-output reasoning-end gating) never reads them. They
+        also can't survive the trip: `POSITION_TO_SOURCE_KEY` holds
+        `CitationSource` models, and msgpack -- which encodes
+        `reasoning_parser_kwargs` on the way to the engine core -- has no native
+        encoding for Pydantic models, so forwarding them fails the request with a
+        `TypeError`.
         """
         return {
             k: v
@@ -938,7 +941,8 @@ class CohereServingChatV2(OpenAIServingChat):
         over the `doc_{idx}` fallback that `_walk_citable_positions` also emits
         for the same slot.
 
-        Thin wrapper over `_walk_citable_positions`; the numbering rule lives there.
+        Thin wrapper over `_walk_citable_positions`; the
+        numbering rule lives there.
         """
         doc_positions: dict[str, tuple[int, int]] = {}
         for pos in cls._walk_citable_positions(messages, documents):
@@ -1117,10 +1121,11 @@ class CohereServingChatV2(OpenAIServingChat):
     ) -> ChatMessage:
         """Copy grounding citations off the unified parser onto the message.
 
-        `vllm.parser.cohere_command.CohereCommandParser` caches the citations produced
-        by its most recent unary `parse` call on `last_unary_citations`. We surface them
-        here on `CohereChatMessage` so downstream response conversion can pick them up
-        without the base `OpenAIServingChat` having to know about citations.
+        `vllm.parser.cohere_command.CohereCommandParser` caches the citations
+        produced by its most recent unary `parse` call on `last_unary_citations`. We
+        surface them here on `CohereChatMessage` so downstream response
+        conversion can pick them up without the base `OpenAIServingChat` having
+        to know about citations.
         """
         # ``_create_chat_message`` above guarantees the concrete type at
         # runtime. ``cast`` narrows the declared ``ChatMessage`` for
@@ -1235,7 +1240,8 @@ class CohereServingChatV2(OpenAIServingChat):
         for id-less sources), and `document` / `tool_output` payload -- matching the
         cohere api's `Source` shape.
 
-        Thin wrapper over `_walk_citable_positions`; the numbering rule lives there.
+        Thin wrapper over `_walk_citable_positions`; the
+        numbering rule lives there.
         """
         return {
             (pos.bucket, pos.result_idx): pos.source
@@ -1333,11 +1339,13 @@ class CohereServingChatV2(OpenAIServingChat):
         principle even though internal underscore-prefixed keys are filtered before
         crossing the engine-core boundary).
 
-        Only emits an entry for a tool message whose content is a non-empty list of
-        blocks; a bare-string tool message renders fine through the default text-block
-        path in `vllm.renderers.cohere._content_blocks`, so no forwarded blocks are
-        needed there. Returns an empty dict when there is nothing to forward, so the
-        caller can use truthiness to decide whether to stash the key at all.
+        Only emits an entry for a tool message whose content is a
+        non-empty list of blocks; a bare-string tool message renders
+        fine through the default text-block path in
+        `vllm.renderers.cohere._content_blocks`, so no forwarded
+        blocks are needed there. Returns an empty dict when there is
+        nothing to forward, so the caller can use truthiness to decide
+        whether to stash the key at all.
         """
         blocks_by_index: dict[int, list[dict[str, Any]]] = {}
         for i, msg in enumerate(request.messages):

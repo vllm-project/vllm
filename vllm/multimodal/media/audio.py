@@ -96,7 +96,8 @@ def load_audio_pyav(
     model-specific rate is left to the downstream `AudioResampler`.
 
     Args:
-        path: A `BytesIO` buffer, a filesystem `Path`, or a string path.
+        path: A `BytesIO` buffer, a filesystem
+            `Path`, or a string path.
         sr: Target sample rate, or None to keep the native rate.
         mono: Whether to average the channels down to mono.
         max_decode_bytes: If set, abort decoding once this many bytes have
@@ -269,7 +270,8 @@ def load_audio_torchcodec(
     backend never falls back to PyAV or libsndfile.
 
     Args:
-        path: A `BytesIO` buffer, a filesystem `Path`, or a string path.
+        path: A `BytesIO` buffer, a filesystem
+            `Path`, or a string path.
         sr: Output sample rate; `None` keeps the native rate. Must be an
             integer when set.
         mono: Average channels down to a single channel.
@@ -280,8 +282,9 @@ def load_audio_torchcodec(
             bytes.
 
     Returns:
-        `(waveform, sample_rate)` where *waveform* is a float32 NumPy array (1-D when
-        `mono=True`) and *sample_rate* is the output sample rate in Hz.
+        `(waveform, sample_rate)` where *waveform* is a float32 NumPy
+        array (1-D when `mono=True`) and *sample_rate* is the output
+        sample rate in Hz.
 
     """
     if AudioDecoder is None:

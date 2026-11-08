@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tracing a model's weight loaders on zero-storage checkpoint tensors.
 
-A `TraceTensor` stands in for one checkpoint tensor while `load_weights` runs. View ops
-(`VIEW_OPS`) return a child that knows, as a meta view over the checkpoint tensor, where
-each of its elements sits in that tensor. What a trace cannot settle by itself (`copy_`
-from it, ops outside `VIEW_OPS`, value reads) it hands to the bake's `_PlanSink`
-(`bake.py`), which decides what each means for the plan; nothing moves data.
+A `TraceTensor` stands in for one checkpoint tensor while `load_weights`
+runs. View ops (`VIEW_OPS`) return a child that knows, as a meta view over
+the checkpoint tensor, where each of its elements sits in that tensor.
+What a trace cannot settle by itself (`copy_` from it, ops outside
+`VIEW_OPS`, value reads) it hands to the bake's `_PlanSink` (`bake.py`),
+which decides what each means for the plan; nothing moves data.
 """
 
 from collections.abc import Callable
@@ -60,9 +61,10 @@ class TraceTensor(torch.Tensor):
     tensor.
 
     `_geom` is a meta view over a contiguous meta tensor of the checkpoint
-    shape: its offset and strides say which checkpoint element each element of this
-    tensor is. It is `None` (and `_lost` says why) once this tensor is no longer a view
-    of the checkpoint tensor. `_sink` is the bake that owns the trace.
+    shape: its offset and strides say which checkpoint element each element of
+    this tensor is. It is `None` (and `_lost` says why) once this tensor
+    is no longer a view of the checkpoint tensor. `_sink` is the bake that
+    owns the trace.
     """
 
     # Declared at class scope so mypy can infer attribute types on instances
@@ -121,8 +123,9 @@ class TraceTensor(torch.Tensor):
             return func(*args, **kwargs)
 
     def _is_noop_to(self, args: tuple, kwargs: dict) -> bool:
-        """`.to()` that keeps the dtype, such as `.to(param.device)`: a device move
-        keeps every byte, and a trace has no device to move from."""
+        """`.to()` that keeps the dtype, such as `.to(param.device)`: a
+        device move keeps every byte, and a trace has no device to move
+        from."""
         kwargs = {k: v for k, v in kwargs.items() if k != "copy"}
         try:
             _, dtype, _, _ = torch._C._nn._parse_to(*args, **kwargs)

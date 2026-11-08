@@ -222,8 +222,9 @@ class PreparedMla:
         self.dcp_args[batch] = (mailbox, box.mc(p), ids[1]), (rows, boxes, peers), ids
 
     def plan(self, lengths, batch, q=1):
-        """The balanced core's plan of this step (`lengths`: this rank's), made by the
-        step's first MLA layer before its query kernel; nothing for the other cores."""
+        """The balanced core's plan of this step (`lengths`: this rank's), made by
+        the step's first MLA layer before its query kernel; nothing for the other
+        cores."""
         if self.cores[batch, q] == "balanced":
             self.balanced.plan(q, lengths[: batch // q])
 

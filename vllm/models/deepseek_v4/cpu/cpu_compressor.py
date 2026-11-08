@@ -26,12 +26,13 @@ from vllm.models.deepseek_v4.cpu.cpu_utils import map_local_to_global_slots_cpu
 
 
 class DeepseekV4CPUCompressor(DeepseekCompressor):
-    """CPU compressor: same state/weights as the shared base, but `forward`'s
-    cache-write and compress->RMSNorm->RoPE->quant->store steps always dispatch straight
-    to the ported CPU kernels above instead of through the shared method's
-    platform-dispatch chain. This class only ever runs on CPU, and `use_fp4_cache` is
-    always `False` here (the indexer's MXFP4 cache requires a Blackwell GPU), so the
-    shared method's MXFP4/two-stage/cutedsl/triton branches never apply.
+    """CPU compressor: same state/weights as the shared base, but
+    `forward`'s cache-write and compress->RMSNorm->RoPE->quant->store
+    steps always dispatch straight to the ported CPU kernels above instead
+    of through the shared method's platform-dispatch chain. This class
+    only ever runs on CPU, and `use_fp4_cache` is always `False` here
+    (the indexer's MXFP4 cache requires a Blackwell GPU), so the shared
+    method's MXFP4/two-stage/cutedsl/triton branches never apply.
     """
 
     _norm_weight_fp32: torch.Tensor

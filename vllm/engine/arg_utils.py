@@ -639,9 +639,10 @@ class EngineArgs:
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
     quantization: QuantizationMethods | str | None = ModelConfig.quantization
     quantization_config: "dict[str, Any] | QuantizationConfigArgs | None" = None
-    """User-facing quantization configuration. Carries per-layer-kind QuantSpecs
-    (linear, moe) and ignore patterns; see `QuantizationConfigArgs`. Auto-populated from
-    the matching online shorthand when `quantization` is one of the values in
+    """User-facing quantization configuration. Carries per-layer-kind
+    QuantSpecs (linear, moe) and ignore patterns; see
+    `QuantizationConfigArgs`. Auto-populated from the matching online
+    shorthand when `quantization` is one of the values in
     `ONLINE_QUANT_SHORTHAND_NAMES`."""
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
     enforce_eager: bool = ModelConfig.enforce_eager

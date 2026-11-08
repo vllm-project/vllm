@@ -104,14 +104,15 @@ def _xcd_splits(
 ) -> int | None:
     """Splits for the XCD-aware grid with up to three requests per XCD, or None.
 
-    A request's rows and splits all run on one XCD (32 CUs), so the cost model of
-    `decode_splits`, which spreads the grid over every CU, mispredicts: at 5 requests it
-    picks 6 splits for 15.7 us where 4 splits take 11.9 us. Measured on MI355X (top-k
-    16, 8 rows a request, 30K-400K contexts, 1-24 requests; the kernel time does not
-    depend on the context): 4 splits is best up to 8 requests (11.4-12.4 us, one request
-    per XCD) and for 17-24 requests (21 us), 2 splits for 9-16 requests (15.3-16 us).
-    Wider grids use the cost model. A request's KV heads also share its XCD, so with 2
-    or 4 KV heads per rank (TP2, TP1) the table over-splits and the cost model is kept.
+    A request's rows and splits all run on one XCD (32 CUs), so the cost model
+    of `decode_splits`, which spreads the grid over every CU, mispredicts: at
+    5 requests it picks 6 splits for 15.7 us where 4 splits take 11.9 us.
+    Measured on MI355X (top-k 16, 8 rows a request, 30K-400K contexts, 1-24
+    requests; the kernel time does not depend on the context): 4 splits is
+    best up to 8 requests (11.4-12.4 us, one request per XCD) and for 17-24
+    requests (21 us), 2 splits for 9-16 requests (15.3-16 us). Wider grids use
+    the cost model. A request's KV heads also share its XCD, so with 2 or 4 KV
+    heads per rank (TP2, TP1) the table over-splits and the cost model is kept.
     """
     if xcds <= 0 or topk != 16 or decode_query_len != 8 or num_kv_heads != 1:
         return None  # tuned for DSpark 7, one KV head per rank

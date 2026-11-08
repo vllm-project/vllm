@@ -3,13 +3,15 @@
 """Load plan: which part of each checkpoint tensor this rank needs, and where
 in live memory those bytes go.
 
-`plan_loads` traces the model's `load_weights` once (`bake.py`) on the real tensors,
-between `start_reload` and `finish_reload` so that it sees the layout direct mode
-actually restored (the NCCL engine does it at its first target update), and reduces each
-traced `copy_` to a box of the checkpoint tensor and a strided region of the target's
-storage (`geometry.py`). A name is direct only if every byte it writes is a copy of one
-incoming byte; anything else is a fallback, which the engine sends in full through
-`load_weights`. The plan holds for every later update of the same model.
+`plan_loads` traces the model's `load_weights` once (`bake.py`) on
+the real tensors, between `start_reload` and `finish_reload` so that it
+sees the layout direct mode actually restored (the NCCL engine does it at its
+first target update), and reduces each traced `copy_` to a box of the
+checkpoint tensor and a strided region of the target's storage
+(`geometry.py`). A name is
+direct only if every byte it writes is a copy of one incoming byte; anything
+else is a fallback, which the engine sends in full through `load_weights`.
+The plan holds for every later update of the same model.
 
 `load_planned` loads full checkpoint tensors through `get_dest`; the NCCL
 engine uses it. `get_boxes` (with `get_dest`) is for engines that send or
@@ -75,10 +77,11 @@ class LoadPlan:
         return self.entries[name].boxes
 
     def get_dest(self, name: str) -> list[tuple[Box, torch.Tensor]] | None:
-        """(part of a box, live tensor) pairs: copying each part, reshaped to its
-        tensor's shape, into that tensor is exactly what the loader would have written.
-        `None`: fallback, send the full tensor through `load_weights`. Write only
-        between `start_reload` and `finish_reload`; never read.
+        """(part of a box, live tensor) pairs: copying each part, reshaped to
+        its tensor's shape, into that tensor is exactly what the loader would
+        have written. `None`: fallback, send the full tensor through
+        `load_weights`. Write only between `start_reload` and
+        `finish_reload`; never read.
 
         `load_planned` copies full tensors through it; an engine that sends
         only `get_boxes` copies its slices the same way."""
@@ -91,13 +94,14 @@ def plan_loads(model: torch.nn.Module, metadata: "Iterable[ParamMeta]") -> LoadP
     """Trace `model.load_weights` over the declared checkpoint tensors once
     and return where each lands on this rank.
 
-    Call between `start_reload` and `finish_reload`: the plan traces the real tensors in
-    the layout `begin_direct_reload` applied. Incoming tensors are data-free traces, so
-    nothing is loaded. Loaders' constant writes land, as on the `load_weights` path; so
-    do writes into non-checkpoint GPU tensors fed by a read of a checkpoint tensor (a
-    mirror), which are not restored: that name falls back and the update rewrites them.
-    Module, parameter and buffer state a loader sets stays, as it would after
-    `load_weights`.
+    Call between `start_reload` and `finish_reload`: the plan traces
+    the real tensors in the layout `begin_direct_reload` applied. Incoming
+    tensors are data-free traces, so nothing is loaded. Loaders' constant
+    writes land, as on the `load_weights` path; so do writes into
+    non-checkpoint GPU tensors fed by a read of a checkpoint tensor (a
+    mirror), which are not restored: that name falls back and the update
+    rewrites them. Module, parameter and buffer state a loader sets stays,
+    as it would after `load_weights`.
 
     Raises:
         ValueError: a name is declared twice.
@@ -147,9 +151,10 @@ def load_planned(
     plan: LoadPlan,
     weights: Iterable[tuple[str, torch.Tensor]],
 ) -> None:
-    """Load full checkpoint tensors as `plan` says: copy each direct name's boxes into
-    its destinations, skip names this rank needs nothing of, and pass fallbacks to
-    `model.load_weights`. Call between `start_reload` and `finish_reload`."""
+    """Load full checkpoint tensors as `plan` says: copy each direct name's
+    boxes into its destinations, skip names this rank needs nothing of, and
+    pass fallbacks to `model.load_weights`. Call between `start_reload`
+    and `finish_reload`."""
     fallbacks = []
     for name, full in weights:
         dest = plan.get_dest(name)
@@ -163,9 +168,10 @@ def load_planned(
 
 
 def check_plannable(model: torch.nn.Module) -> None:
-    """Refuse a configuration no load plan supports: a reload mode other than direct,
-    and EPLB. Reads only configuration, so an engine can call it before `start_reload`
-    changes the model. Direct reload's own refusals run in `begin_direct_reload`.
+    """Refuse a configuration no load plan supports: a reload mode other than
+    direct, and EPLB. Reads only configuration, so an engine can call it
+    before `start_reload` changes the model. Direct reload's own refusals
+    run in `begin_direct_reload`.
 
     Raises:
         RuntimeError: the configuration cannot be planned.

@@ -167,7 +167,8 @@ def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
 def _tool_definitions_to_schema_list(
     tools: str | list[Any],
 ) -> list[CohereNormalizedTool]:
-    """Build the list of `CohereNormalizedTool` dicts expected by `collect_tool_schema`.
+    """Build the list of `CohereNormalizedTool` dicts expected by
+    `collect_tool_schema`.
 
     Accepts:
     - JSON string

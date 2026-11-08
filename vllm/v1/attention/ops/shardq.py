@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ShardQ: Ulysses-style sequence sharding of sparse-MLA prefill under TP.
 
-TP shards Q by heads, so every rank runs the indexer for all tokens and the sparse-MLA
-kernel pads its few local heads. ShardQ gives each TP rank a slice of the query tokens
-instead: the indexer scores only the rank's tokens, an all-to-all moves Q from [T, H /
-tp, D] to [T_rank, H, D], attention runs with all heads over the replicated KV cache,
-and a second all-to-all restores [T, H / tp, D_v]. Tokens split zigzag: each request
-cuts into `2 * tp` chunks and rank `r` owns chunks `r` and `2 * tp - 1 - r`, which
-balances the causal work.
+TP shards Q by heads, so every rank runs the indexer for all tokens and the
+sparse-MLA kernel pads its few local heads. ShardQ gives each TP rank a slice of
+the query tokens instead: the indexer scores only the rank's tokens, an
+all-to-all moves Q from [T, H / tp, D] to [T_rank, H, D], attention runs with
+all heads over the replicated KV cache, and a second all-to-all restores
+[T, H / tp, D_v]. Tokens split zigzag: each request cuts into `2 * tp`
+chunks and rank `r` owns chunks `r` and `2 * tp - 1 - r`, which balances
+the causal work.
 
 Both exchanges push tokens straight into peers' symmetric-memory buffers with
 one Triton kernel, or fall back to NCCL when the TP group has no symmetric

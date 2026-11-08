@@ -33,7 +33,8 @@ WeightTransferUpdatePayload = dict[str, Any] | list[dict[str, Any]]
 
 
 def _stack_key(name: str) -> tuple[str, int] | None:
-    """`(prefix, index)` of the OUTERMOST integer segment, or None if there is none.
+    """`(prefix, index)` of the OUTERMOST integer segment, or None if there is
+    none.
 
     Outermost is what keeps a MoE layer whole:
     `model.layers.3.mlp.experts.7.w1` keys on the layer, not the expert.

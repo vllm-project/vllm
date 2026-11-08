@@ -1309,12 +1309,13 @@ def verify_num_kv_splits(
 ) -> int:
     """Static upper bound on KV splits (safe to bake into a cudagraph).
 
-    The kernel splits each request's own length into max(cdiv(L, splits), MIN_SPLIT_LEN)
-    chunks, so this only caps the split count. The config's `occupancy` is the number of
-    resident stage-1 programs per CU. If one split of every request fits in a single
-    dispatch round, use as many splits as fit in that round; otherwise pick n <=
-    max_splits minimising rounds(n) / n (the idle tail of the last round), preferring
-    fewer splits within 5% of the best.
+    The kernel splits each request's own length into
+    max(cdiv(L, splits), MIN_SPLIT_LEN) chunks, so this only caps the split
+    count. The config's `occupancy` is the number of resident stage-1
+    programs per CU. If one split of every request fits in a single dispatch
+    round, use as many splits as fit in that round; otherwise pick
+    n <= max_splits minimising rounds(n) / n (the idle tail of the last round),
+    preferring fewer splits within 5% of the best.
     """
     cfg = select_verify_config(batch, qlen, num_heads)
     programs_per_split = max(1, batch) * verify_row_blocks(

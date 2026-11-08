@@ -205,8 +205,9 @@ def hc_up_gate_mix(
 ) -> torch.Tensor:
     """`hc_gate_mix(xn, F.linear(lowrank, w_up), 4)` in one SM100 kernel.
 
-    The gate stays on chip in fp32 (the chain rounds it to bf16) and the sigmoid uses
-    `tanh.approx`; results are within one bf16 ULP of an fp32 reference.
+    The gate stays on chip in fp32 (the chain rounds it to bf16) and the
+    sigmoid uses `tanh.approx`; results are within one bf16 ULP of an fp32
+    reference.
     Only hc_count 4, hidden size 2560 and rank 320 are supported.
     """
     out = xn.new_empty(xn.shape[0], xn.shape[1] // 4)

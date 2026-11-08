@@ -191,10 +191,11 @@ def pack_front(moe):
 class EpMoeLayer:
     """One DEP MoE layer's specialized schedule over the stock module's weights.
 
-    `weights`: gate [896, 7168] BF16 + e_score_correction_bias FP32, front (pack_front),
-    shared down [7168, 6144], latent norm [3584], up [7168, 3584]; `act` the stock
-    SiTU-and-mul; `routed(latent, topk_weights, topk_ids) -> BF16 latent` the EP
-    experts. Batches above FRONT_MAX tokens (or unprepared) run the stock order."""
+    `weights`: gate [896, 7168] BF16 + e_score_correction_bias FP32, front
+    (pack_front), shared down [7168, 6144], latent norm [3584], up [7168, 3584]; `act`
+    the stock SiTU-and-mul; `routed(latent, topk_weights, topk_ids) -> BF16 latent`
+    the EP experts. Batches above FRONT_MAX tokens (or unprepared) run the stock
+    order."""
 
     def __init__(self, weights, act, routed, batches, *, side_stream=None):
         from ...gemm.projection import PreparedProjection

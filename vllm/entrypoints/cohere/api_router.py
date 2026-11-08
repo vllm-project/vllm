@@ -165,8 +165,9 @@ if _SDK_AVAILABLE:
 
         The Cohere counterpart to `POST /v1/chat/completions/render`. The v2 body goes
         through the same conversion `/cohere/v2/chat` uses and is then handed to the
-        shared `ServingRender`, so the returned `GenerateRequest` carries the prompt
-        tokens and sampling params the chat endpoint would have sent to the engine.
+        shared `ServingRender`, so the returned `GenerateRequest` carries the
+        prompt tokens and sampling params the chat endpoint would have sent to the
+        engine.
         """
         handler = _serving(raw_request)
         render_handler = _serving_render(raw_request)
@@ -206,10 +207,11 @@ if _SDK_AVAILABLE:
     class CohereErrorEnvelopeMiddleware(BaseHTTPMiddleware):
         """Rewrite vLLM error bodies into the Cohere `{message, id}` shape.
 
-        The endpoint handler above already returns `CohereError` for errors it owns, but
-        globally-registered exception handlers (e.g. `validation_exception_handler` for
-        pydantic body errors, `http_exception_handler`, engine error handlers) fire
-        *before* the handler runs and produce vLLM's internal `ErrorResponse` shape
+        The endpoint handler above already returns `CohereError` for errors it
+        owns, but globally-registered exception handlers (e.g.
+        `validation_exception_handler` for pydantic body errors,
+        `http_exception_handler`, engine error handlers) fire *before* the handler
+        runs and produce vLLM's internal `ErrorResponse` shape
         (`{"error": {"message": ...}}`). That shape doesn't match the `CohereError`
         schema advertised on the route's OpenAPI `responses`, so clients (and
         schema-conformance tests like `test_openai_schema.py`) would see a mismatch on

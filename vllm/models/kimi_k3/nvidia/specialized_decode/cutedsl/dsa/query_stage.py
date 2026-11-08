@@ -46,12 +46,13 @@ def index_policies(batches):
 
 
 def q_b_policies(batches, heads=96):
-    """Split-K tactics of the split query's Q_B projection (`q_b_wide_policies` from
-    WIDE_HEADS heads; below, the TP8 shard: N = 12 * 192 = 2304, 64-row weight tiles
-    split K four ways up to 32 rows, then two ways). GB300, 12 heads, L2 flushed, us
-    (SOL 0.94): 5 rows 5.3 (64,8,4,4; 6.8 with 128-row tiles), 40 rows 7.3 (64,64,2,4;
-    9.1 split four ways), 80 rows 7.6 (64,64,2,4; 9.5 with one 128-row batch tile), 320
-    rows 11.2 (64,160,2,3; 13.6 with 128-row tiles, 16.8 with 128-row batch tiles)."""
+    """Split-K tactics of the split query's Q_B projection (`q_b_wide_policies`
+    from WIDE_HEADS heads; below, the TP8 shard: N = 12 * 192 = 2304, 64-row weight
+    tiles split K four ways up to 32 rows, then two ways). GB300, 12 heads, L2
+    flushed, us (SOL 0.94): 5 rows 5.3 (64,8,4,4; 6.8 with 128-row tiles), 40 rows
+    7.3 (64,64,2,4; 9.1 split four ways), 80 rows 7.6 (64,64,2,4; 9.5 with one
+    128-row batch tile), 320 rows 11.2 (64,160,2,3; 13.6 with 128-row tiles, 16.8
+    with 128-row batch tiles)."""
     if heads >= 64:
         return q_b_wide_policies(batches)
     tactics = {8: (64, 8, 4, 4), 16: (64, 16, 4, 4), 32: (64, 32, 4, 4)}
@@ -259,10 +260,11 @@ def compile_front(
     device,
     normalized=False,
 ):
-    """The fused index front of one batch of rows (`wq`, `index_kv`: the layouts of the
-    wq_b weight and the indexer cache): from the packed rows (q_a RMSNorm, wq_b,
-    DsaIndex), or (`normalized`: IndexFrontMma only) from the q_c rows. Shared by every
-    DSA layer of those layouts: the weight, cache and outputs are launch arguments."""
+    """The fused index front of one batch of rows (`wq`, `index_kv`: the
+    layouts of the wq_b weight and the indexer cache): from the packed rows (q_a
+    RMSNorm, wq_b, DsaIndex), or (`normalized`: IndexFrontMma only) from the q_c
+    rows. Shared by every DSA layer of those layouts: the weight, cache and outputs
+    are launch arguments."""
     kind, mx = front_kernel(batch), mqa_logits_use_mx_scales()
     args = batch, heads, pitch, wq, index_kv, device, normalized
     return _compile_front(*args, kind, mx)

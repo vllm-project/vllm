@@ -191,9 +191,10 @@ class MoonVisionPatchEmbed(nn.Module):
         """Args:
             x (L, Channels): input tensor
             grid_hw (N, 2): grid height and width
-            pos_embeds: precomputed positional embeddings of shape `(L, Cout)`. When
-                provided, `grid_hw` is unused and the CUDA-graph-incompatible
-                interpolation in `self.pos_emb` is skipped.
+            pos_embeds: precomputed positional embeddings of shape
+                `(L, Cout)`. When provided, `grid_hw` is unused and the
+                CUDA-graph-incompatible interpolation in `self.pos_emb` is
+                skipped.
 
         Returns:
             (L, Cout) tensor

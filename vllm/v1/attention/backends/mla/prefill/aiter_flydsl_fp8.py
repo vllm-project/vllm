@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """AITER FlyDSL FP8 backend for MLA prefill (ROCm gfx950).
 
-Runs AITER's FlyDSL FP8 flash attention on dynamically per-tensor quantized Q/K/V. Q is
-quantized once per forward and reused by every context chunk; each chunk quantizes only
-its own K/V. Whether the kernel serves the model's head dims is decided by AITER's
-`flydsl_flash_attn_fp8_supported` at selection time. Inputs the kernel cannot take
-(empty, or at least 2**31 elements) use the parent's BF16 AITER flash attention.
+Runs AITER's FlyDSL FP8 flash attention on dynamically per-tensor quantized
+Q/K/V. Q is quantized once per forward and reused by every context chunk; each
+chunk quantizes only its own K/V. Whether the kernel serves the model's head
+dims is decided by AITER's `flydsl_flash_attn_fp8_supported` at selection
+time. Inputs the kernel cannot take (empty, or at least 2**31 elements) use the
+parent's BF16 AITER flash attention.
 """
 
 from typing import TYPE_CHECKING, ClassVar

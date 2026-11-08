@@ -4,8 +4,9 @@
 `[b, 4096]` BF16 rows as one CuTe kernel, bit for bit the stock norm
 (`fused_rmsnorm_fwd` with the layer's weight after the norm).
 
-It is the row norm of `common/row_norm.py` at 4096 columns, one CTA of 256 threads per
-row; the weight loads before the PDL wait and the dependents launch at the grid's end.
+It is the row norm of `common/row_norm.py` at 4096 columns, one CTA of 256
+threads per row; the weight loads before the PDL wait and the dependents
+launch at the grid's end.
 """
 
 import cutlass.cute as cute

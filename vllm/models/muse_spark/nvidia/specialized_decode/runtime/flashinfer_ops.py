@@ -4,12 +4,14 @@
 package names the library:
 
 - the routed experts: the TRT-LLM-gen MoE op the stock layer runs, with the stock
-  layer's own weights and arguments, stopping after GEMM2 (`do_finalize=False`) so that
-  the tail kernel finalizes. NVFP4 layers take routing prepared by the caller; the BF16
-  layers route inside the op from the router logits, as the stock layer does.
-- on NVFP4 layers, the op's own runner at the op's tactic, run from routing metadata the
-  routing kernel wrote (`MuseRouting`) instead of the op's routing kernel, so the output
-  is the op's bit for bit; a tactic without a prepared body takes the public op.
+  layer's own weights and arguments, stopping after GEMM2 (`do_finalize=False`)
+  so that the tail kernel finalizes. NVFP4 layers take routing prepared by the
+  caller; the BF16 layers route inside the op from the router logits, as the
+  stock layer does.
+- on NVFP4 layers, the op's own runner at the op's tactic, run from routing
+  metadata the routing kernel wrote (`MuseRouting`) instead
+  of the op's routing kernel, so the output is the op's bit for bit; a tactic
+  without a prepared body takes the public op.
 - the TP16 all-reduce, through vLLM's own wrapper (the TP communicator's MNNVL
   all-reduce). TP4 and TP8 fuse their all-reduce into the attention boundary,
   summing in the order of the backend vLLM's FlashInfer all-reduce resolved to;
@@ -227,10 +229,11 @@ def stock_shards(args: dict[str, Any], experts) -> expert_tp.StockNvfp4:
 
 
 def tp_arguments(args: dict[str, Any], tp: expert_tp.TpExperts) -> dict[str, Any]:
-    """`args` (`nvfp4_arguments`) on the layer's TP experts: their weights, block scales
-    and per-expert scalars, every expert local, the intermediate slice, and
-    `tune_max_num_tokens` at ROUTING_MAX_TOKENS, the most tokens the executor runs them
-    at. The rest (routing, activation, global expert count) is the stock layer's."""
+    """`args` (`nvfp4_arguments`) on the layer's TP experts: their weights,
+    block scales and per-expert scalars, every expert local, the intermediate
+    slice, and `tune_max_num_tokens` at ROUTING_MAX_TOKENS, the most tokens
+    the executor runs them at. The rest (routing, activation, global expert
+    count) is the stock layer's."""
     return {
         **args,
         "gemm1_weights": tp.w13,
@@ -303,10 +306,11 @@ def gemm2_rows(num_tokens: int, tile: int, hidden_out: int) -> int:
 
 
 class Nvfp4Call:
-    """One NVFP4 layer's routed experts op as the op runs them: its runner, inputs,
-    tuning config and runner kwargs, built as `trtllm_fp4_block_scale_moe_op` builds
-    them for the arguments `nvfp4_arguments` binds, so the autotuner picks the op's
-    tactic and the runner launches the op's GEMMs."""
+    """One NVFP4 layer's routed experts op as the op runs them: its runner,
+    inputs, tuning config and runner kwargs, built as
+    `trtllm_fp4_block_scale_moe_op` builds them for the arguments
+    `nvfp4_arguments` binds, so the autotuner picks the op's tactic and the
+    runner launches the op's GEMMs."""
 
     def __init__(self, args: dict[str, Any]) -> None:
         self.args = args
@@ -317,8 +321,9 @@ class Nvfp4Call:
         self.fixed: dict[int, tuple[torch.Tensor, Any]] = {}
 
     def bind(self, device: torch.device, max_tokens: int) -> None:
-        """Builds the runner and, for 1 to `max_tokens` tokens, the output placeholder
-        and tuning config, so that `prepare` only assembles a call's inputs."""
+        """Builds the runner and, for 1 to `max_tokens` tokens, the
+        output placeholder and tuning config, so that `prepare` only
+        assembles a call's inputs."""
         for b in range(1, max_tokens + 1):
             self.prepare(
                 ExpertsInput(
@@ -760,10 +765,11 @@ class FlashInferOps:
     def probe_inputs(
         self, device: torch.device, global_scale: torch.Tensor
     ) -> tuple[ExpertsInput, RoutedTopk]:
-        """The build probe's input at the decode batch, the same on every rank (seeded):
-        unit-RMS rows quantized with `global_scale` (the layer's NVFP4 input global
-        scale), so they stay in the range the layer's scales were calibrated for, and
-        routes spread over all experts, so every EP rank serves some."""
+        """The build probe's input at the decode batch, the same on every rank
+        (seeded): unit-RMS rows quantized with `global_scale` (the layer's
+        NVFP4 input global scale), so they stay in the range the layer's scales
+        were calibrated for, and routes spread over all experts, so every EP
+        rank serves some."""
         from vllm import _custom_ops as ops
 
         b = BATCHES[0]
@@ -819,11 +825,12 @@ class FlashInferOps:
         return EXPERT_TP_TACTICS.get(ArtifactPath.TRTLLM_GEN_BMM, ())
 
     def pin_tp_tactic(self, tp) -> None:
-        """The TP experts' tactic: the first of expert_tp_tactics() that the op takes
-        for 1 to ROUTING_MAX_TOKENS tokens and that has a prepared body, on every rank
-        of the TP group, else the op's untuned default. Collective over `tp`'s CPU group
-        (every rank runs the same FlashInfer build, so the same list); nothing is timed,
-        so the same weights and FlashInfer build take the same tactic at every start."""
+        """The TP experts' tactic: the first of expert_tp_tactics() that the op
+        takes for 1 to ROUTING_MAX_TOKENS tokens and that has a prepared body,
+        on every rank of the TP group, else the op's untuned default.
+        Collective over `tp`'s CPU group (every rank runs the same FlashInfer
+        build, so the same list); nothing is timed, so the same weights and
+        FlashInfer build take the same tactic at every start."""
         self.tp_preferred = self.expert_tp_tactics()
         self.tp_tactic = None
         if not self.tp_preferred:
@@ -1031,8 +1038,9 @@ class FlashInferOps:
         )
 
     def is_bf16(self, layer: int) -> bool:
-        """Whether the layer's experts are BF16 (they take normed BF16 rows and the
-        router logits) rather than NVFP4 (`ExpertsInput` and `RoutedTopk`)."""
+        """Whether the layer's experts are BF16 (they take normed BF16 rows and
+        the router logits) rather than NVFP4 (`ExpertsInput` and
+        `RoutedTopk`)."""
         return layer in self.bf16
 
     def routed_experts(

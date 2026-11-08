@@ -7,33 +7,38 @@ checks that decide where each one runs.
 `attn2` (`cutedsl/attention/attn2.py`)
     Paged decode attention of the 8-token verify step (one request, 1 + 7 draft
     tokens) fused with the attention output's weightless RMS norm and sigmoid
-    gate: the o_proj input of a decoder layer. Contract: head_dim 64, 8 query heads per
-    KV head, bf16 [pages, num_kv_heads, 16, 128] cache (K | V per slot), 8 query rows
-    per request, any context length L >= 8, and the layer's sliding window if it has
-    one. One launch covers the KV heads of the rank. With max_model_len past 2048 (or a
-    window) a split kernel spreads a request's pages over `attn2_splits` z slices,
-    merged through a workspace. The launch shape depends on max_model_len only, not on
-    the step, so it is graph-capturable once `prepare_attn2` has compiled it.
+    gate: the o_proj input of a decoder layer. Contract: head_dim 64, 8 query
+    heads per KV head, bf16 [pages, num_kv_heads, 16, 128] cache (K | V per
+    slot), 8 query rows per request, any context length L >= 8, and the
+    layer's sliding window if it has one. One launch covers the KV heads of
+    the rank. With max_model_len past 2048 (or a window) a split kernel
+    spreads a request's pages over `attn2_splits` z slices, merged through a
+    workspace. The launch shape depends on max_model_len only, not on the
+    step, so it is graph-capturable once `prepare_attn2` has compiled it.
 
     attn2 has no fallback of its own: the executor's plan() leaves every step
     it does not cover (prefill, other query lengths) to the stock forward.
 
-`MuseRouting` (`cutedsl/moe/routing.py`) Muse Spark routing for decode batches of at
-    most 8 tokens. It writes, bit for bit, the expert ids and weights
-    `fused_musespark1x_routing` writes for Muse Spark's router: sigmoid scores, the
-    correction bias for the selection only, top-8 of 256 experts, weights
-    `score * route_scale / (sum + 1e-15)`. The router's output multiplier must already
-    be folded into its weight, as `fold_router_output_multiplier` does after loading.
-    Optionally the same launch writes the TRT-LLM-gen routing metadata of this rank's
-    experts for one GEMM tile (`RoutingMetadata`): the CTA map, the permutation and the
-    padded size the routed experts' GEMMs read, as the routed MoE op's own routing
-    kernel would write them for these ids.
+`MuseRouting` (`cutedsl/moe/routing.py`)
+    Muse Spark routing for decode batches of at most 8 tokens. It writes, bit
+    for bit, the expert ids and weights `fused_musespark1x_routing` writes
+    for Muse Spark's router: sigmoid scores, the correction bias for the
+    selection only, top-8 of 256 experts, weights
+    `score * route_scale / (sum + 1e-15)`. The router's output multiplier
+    must already be folded into its weight, as `fold_router_output_multiplier`
+    does after loading. Optionally the same launch writes the TRT-LLM-gen
+    routing metadata of this rank's experts for one GEMM tile
+    (`RoutingMetadata`): the CTA map, the permutation and the padded size the
+    routed experts' GEMMs read, as the routed MoE op's own routing kernel
+    would write them for these ids.
 
-`qkv_front` (`cutedsl/attention/qkv_front.py`) For 1 to 16 tokens on the SM100 family
-    the QKV front CuTe kernel replaces the QKV + o-gate projection GEMM and
+`qkv_front` (`cutedsl/attention/qkv_front.py`)
+    For 1 to 16 tokens on the SM100 family the QKV front CuTe kernel replaces
+    the QKV + o-gate projection GEMM and
     `fused_muse_spark_qknorm_rope_kv_insert`. A served call is checked once
-    (`supports_call`) and then launched (`launch_qkv_front`). Called eagerly (Muse Spark
-    runs uncompiled), so the `data_ptr()` checks are not traced.
+    (`supports_call`) and then launched (`launch_qkv_front`). Called
+    eagerly (Muse Spark runs uncompiled), so the `data_ptr()` checks are not
+    traced.
 """
 
 from typing import NamedTuple
@@ -189,7 +194,8 @@ def split_qkv(
 
 
 def unsupported_router(router: MuseSpark1xRouter) -> str | None:
-    """Why the kernel cannot reproduce `router`'s routing, or None if it can."""
+    """Why the kernel cannot reproduce `router`'s routing, or None if it
+    can."""
     if router.router_score_normalization != "sigmoid":
         return f"{router.router_score_normalization} router scores"
     if router.top_k != TOP_K or router.global_num_experts != NUM_EXPERTS:
@@ -270,10 +276,11 @@ class MuseRouting:
         weights: torch.Tensor,
         metadata: RoutingMetadata | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Route fp32 router logits [b, 256] (1 <= b <= 8, 16-byte aligned rows) into
-        `ids` (int32 [b, 8], global expert ids) and `weights` (fp32 [b, 8]), and with
-        `metadata` the routing metadata of its local experts; returns (ids, weights).
-        Raises ValueError on arguments outside `routing.route`'s contract."""
+        """Route fp32 router logits [b, 256] (1 <= b <= 8, 16-byte aligned
+        rows) into `ids` (int32 [b, 8], global expert ids) and `weights`
+        (fp32 [b, 8]), and with `metadata` the routing metadata of its local
+        experts; returns (ids, weights). Raises ValueError on arguments outside
+        `routing.route`'s contract."""
         if metadata is None:
             routing.route(logits, self.bias, ids, weights, self.route_scale)
         else:

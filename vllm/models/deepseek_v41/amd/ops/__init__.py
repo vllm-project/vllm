@@ -3,13 +3,15 @@
 """gfx942 (MI300X, MI325X) decode helpers for DeepSeek-V4.1. swa_decode_meta
 and fused_markov also run on gfx950 (MI355X).
 
-`topk` holds the sparse indexer's top-512 hooks, built from `topk512_gfx942.cu`, and
-`cand_logits` the indexer logits of the DSpark candidate positions. `sparse_indexer` is
-the indexer layer that runs them on decode steps. `topk_pack` and `swa_decode_meta`
-build the decode attention metadata, `fused_markov` is DSpark's Markov sampling in one
-launch, and `draft_lm_head` keeps the DSpark draft's 5-row logits GEMM off wvSplitK. All
-of them run only when `enabled()` is true, except `swa_decode_meta` and `fused_markov`,
-which run when `monokernel_cdna3_or_4()` is true.
+`topk` holds the sparse indexer's top-512 hooks, built from
+`topk512_gfx942.cu`, and `cand_logits` the indexer logits of the DSpark
+candidate positions. `sparse_indexer` is the indexer layer that runs them on
+decode steps. `topk_pack` and `swa_decode_meta` build the decode
+attention metadata, `fused_markov` is DSpark's Markov sampling in one
+launch, and `draft_lm_head` keeps the DSpark draft's 5-row logits GEMM off
+wvSplitK. All of them run only when `enabled()` is true, except
+`swa_decode_meta` and `fused_markov`, which run when
+`monokernel_cdna3_or_4()` is true.
 """
 
 import functools

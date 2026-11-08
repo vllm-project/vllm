@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The specialized decode's deferred RecoverSSM commit (backend `fp32_deferred`):
-the FP32-state commit of the Triton RecoverSSM (same association; FP32 checkpoints),
-whose commit after sampling turns each request's accepted count into the pending replay
-of its record slot (its request-state index); the next verify replays it (the
-specialized KDA core in the same pass, the stock verify after `flush`)."""
+the FP32-state commit of the Triton RecoverSSM (same association; FP32
+checkpoints), whose commit after sampling turns each request's accepted count into
+the pending replay of its record slot (its request-state index); the next verify
+replays it (the specialized KDA core in the same pass, the stock verify after
+`flush`)."""
 
 from dataclasses import dataclass, field
 
@@ -35,11 +36,12 @@ def allocate_records(
 ) -> KDARecoverSSMRecords:
     """The verify records of a deferred RecoverSSM layer, indexed by record slot.
 
-    Each tensor is a view that starts one row into its allocation: row -1 is a scratch
-    row. A row that owns no record slot has record index -1; the verify kernels write
-    its records there. Such rows can carry live state slots: a DCP FULL CUDA-graph
-    capture gives its dummy requests KV context (`set_dcp_capture_context`: block ids 0,
-    1, ...) while their record rows are -1. Nothing reads row -1."""
+    Each tensor is a view that starts one row into its allocation: row -1 is a
+    scratch row. A row that owns no record slot has record index -1; the verify
+    kernels write its records there. Such rows can carry live state slots: a DCP
+    FULL CUDA-graph capture gives its dummy requests KV context
+    (`set_dcp_capture_context`: block ids 0, 1, ...) while their record rows are
+    -1. Nothing reads row -1."""
     shape = (1 + max_num_reqs, num_heads, spec_query_len)
     return KDARecoverSSMRecords(
         torch.empty((*shape, head_dim), dtype=torch.float32, device=device)[1:],

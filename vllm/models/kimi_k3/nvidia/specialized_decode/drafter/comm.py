@@ -12,16 +12,17 @@ projection and the vocab-parallel lm_head logits: 16-20 us each plus a
 Here they are one kernel each over symmetric Lamport buffers (`common.mailbox`:
 a 16 B fragment is published once none of its 32-bit words is the sentinel):
 
-- `ArNorm` (one 8-CTA cluster per row, 112 threads x 8 columns each): the rank's partial
-  row is multicast into slot [rank] of every rank's [TP, cap, 7168] mailbox (one
-  `multimem.st` reaches every GPU), the TP slots are polled, summed in FP32 in rank
-  order 0 .. TP-1 and rounded once to BF16 (flashinfer's deterministic one-shot order),
-  the residual is added (one BF16 rounding) and the RMSNorm of the new residual follows
-  (FP32 sum of squares, vllm_c's `rsqrt(sum / 7168 + eps)`, `x * rstd * w` rounded
-  once). The reader re-arms its slots. Layer parity: the call sites alternate between
-  two mailboxes, so a rank can never write a mailbox its peer has not read yet (two uses
-  of one mailbox are separated by a use of the other, which needs this rank's push, made
-  after its re-arm).
+- `ArNorm` (one 8-CTA cluster per row, 112 threads x 8 columns each): the rank's
+  partial row is
+  multicast into slot [rank] of every rank's [TP, cap, 7168] mailbox (one
+  `multimem.st` reaches every GPU), the TP slots are polled, summed in FP32 in
+  rank order 0 .. TP-1 and rounded once to BF16 (flashinfer's deterministic
+  one-shot order), the residual is added (one BF16 rounding) and the RMSNorm of the
+  new residual follows (FP32 sum of squares, vllm_c's `rsqrt(sum / 7168 + eps)`,
+  `x * rstd * w` rounded once). The reader re-arms its slots. Layer parity: the
+  call sites alternate between two mailboxes, so a rank can never write a mailbox
+  its peer has not read yet (two uses of one mailbox are separated by a use of the
+  other, which needs this rank's push, made after its re-arm).
 - `Gather`: every rank's [M, S] shard multicast into the [cap, TP * S] row of every
   rank (rank r's at columns r S ..), polled; `copy`: copied to a dense output and
   re-armed, else left in place for a reader that re-arms it (the DCP query mailbox,
@@ -203,11 +204,12 @@ class ArNorm:
 
 class Gather:
     """Every rank's [M, S] 32-bit-word shard -> the [cap, TP * S] mailbox rows
-    (arguments: shard, out, mailbox, its multicast address, rank, stream). Grid (CTAs
-    per row, M): each CTA multicasts its share of the row's shard fragments, then polls
-    its share of the gathered row (all pushes precede every poll and the grid is at most
-    a few CTAs per SM, so each CTA a poll waits on is resident or done). `copy`: the row
-    is copied to `out` and re-armed (`out` is unused otherwise)."""
+    (arguments: shard, out, mailbox, its multicast address, rank, stream). Grid
+    (CTAs per row, M): each CTA multicasts its share of the row's shard fragments,
+    then polls its share of the gathered row (all pushes precede every poll and the
+    grid is at most a few CTAs per SM, so each CTA a poll waits on is resident or
+    done). `copy`: the row is copied to `out` and re-armed (`out` is unused
+    otherwise)."""
 
     def __init__(self, tp, words, sentinel, copy, clean):
         assert words % 4 == 0, words

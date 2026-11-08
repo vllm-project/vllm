@@ -180,28 +180,33 @@ class BaseFrontendArgs:
     --enable-log-outputs is set.
     """
     cohere_is_reasoning_model: bool = True
-    """Cohere `/cohere/v2/chat` only. Whether the served model is a reasoning
-    Command-family model. When True (default), the assistant's chain-of-thought is
-    surfaced as a `thinking` content block (or `content-*` events on the stream). When
-    False, reasoning is surfaced as Cohere's `tool_plan` field (or `tool-plan-delta`
-    events) whenever the model emits tool calls, matching older non- reasoning Command
-    models. Has no effect on the non-Cohere endpoints."""
+    """Cohere `/cohere/v2/chat` only. Whether the served model is a
+    reasoning Command-family model. When True (default), the assistant's
+    chain-of-thought is surfaced as a `thinking` content block (or
+    `content-*` events on the stream). When False, reasoning is
+    surfaced as Cohere's `tool_plan` field (or `tool-plan-delta`
+    events) whenever the model emits tool calls, matching older non-
+    reasoning Command models. Has no effect on the non-Cohere
+    endpoints."""
     cohere_format: str = "cmd4"
-    """Cohere `--tokenizer-mode cohere` only. Which Cohere prompt format to render:
-    `cmd4` (current Command A+ models; default) or `cmd3` (earlier Cmd-A and Cmd-A
-    reasoning models). Selecting the wrong format silently produces a prompt the model
-    wasn't trained on, which most commonly manifests as the model emitting text but no
+    """Cohere `--tokenizer-mode cohere` only. Which Cohere prompt
+    format to render: `cmd4` (current Command A+ models; default) or
+    `cmd3` (earlier Cmd-A and Cmd-A reasoning models). Selecting the
+    wrong format silently produces a prompt the model wasn't trained
+    on, which most commonly manifests as the model emitting text but no
     citations / tool calls / thinking blocks. Equivalent to passing
-    `--default-chat-template-kwargs '{"cohere_format": "..."}'` -- any explicit
-    request-level `chat_template_kwargs.cohere_format` takes priority."""
+    `--default-chat-template-kwargs '{"cohere_format": "..."}'` -- any
+    explicit request-level `chat_template_kwargs.cohere_format` takes
+    priority."""
     anthropic_disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto"
     """The `reasoning_effort` used for Anthropic Messages, token counting,
     and render requests with `thinking: {"type": "disabled"}` or
     `thinking: {"type": "between_tools"}`.
-    `none` turns thinking off for models that support it; `low` suits models that always
-    think (e.g. GLM-5.3) or reject `none` (e.g. gpt-oss). `auto` (default) uses `low`
-    when the renderer rejects `none` or renders it the same as a thinking effort, and
-    `none` otherwise."""
+    `none` turns thinking off for models that support it; `low` suits
+    models that always think
+    (e.g. GLM-5.3) or reject `none` (e.g. gpt-oss). `auto` (default) uses
+    `low` when the renderer rejects `none` or renders it the same as a
+    thinking effort, and `none` otherwise."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False
@@ -219,8 +224,9 @@ class BaseFrontendArgs:
     fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
     """Controls the `system_fingerprint` field on responses.
 
-    - `full` (default): `vllm-<version>[-<parallelism>]-<hash8>`. Encodes server
-      version, non-trivial parallelism degrees (tp/pp/dp/ep), and an 8-char config hash.
+    - `full` (default): `vllm-<version>[-<parallelism>]-<hash8>`. Encodes
+      server version, non-trivial parallelism degrees (tp/pp/dp/ep), and an
+      8-char config hash.
     - `hash`: `vllm-<version>-<hash8>`. Parallelism stripped.
     - `custom`: emits the literal string from `--fingerprint-value`.
     - `none`: the field is omitted (serialized as `null`).

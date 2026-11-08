@@ -20,14 +20,16 @@ and head `h`, the BF16 attention output over the token's active columns `c`
     p_c = exp(s_c - m)
     out[t, h] = bmm2_scale * sum_c p_c kv[c] / (sum_c p_c + exp(sink_h - m))
 
-where `kv[c]` is row `indices[t, c]` of the sliding-window pool for the first 128
-columns and of the compressed pool for the others, `m` is the maximum of the scores and
-the sink, and the sink term is omitted without sinks. A token with no active column gets
-zeros. This is what `trtllm_batch_decode_sparse_mla_dsv4` computes for these shapes.
+where `kv[c]` is row `indices[t, c]` of the sliding-window pool for the
+first 128 columns and of the compressed pool for the others, `m` is the
+maximum of the scores and the sink, and the sink term is omitted without sinks.
+A token with no active column gets zeros. This is what
+`trtllm_batch_decode_sparse_mla_dsv4` computes for these shapes.
 
-How. One CTA of 128 threads takes one token and one 128-column chunk of its sparse set
-(chunk 0 = the sliding-window columns); the `n = ceil(width / 128)` chunks of a token
-form a thread block cluster, so a 640-wide layer runs 5 CTAs a token in parallel::
+How. One CTA of 128 threads takes one token and one 128-column chunk of its
+sparse set (chunk 0 = the sliding-window columns); the `n = ceil(width / 128)`
+chunks of a token form a thread block cluster, so a 640-wide layer runs 5 CTAs
+a token in parallel::
 
     gather the chunk's KV rows and the query (cp.async, one group per 128-byte K
     block) into 128B-swizzled tiles
@@ -368,9 +370,10 @@ class SparseMlaDecodeCute:
         tokens: Int32,
         stream: cuda.CUstream,
     ):
-        """Launch on `stream`: one cluster of `n` CTAs a token. Pointers are addresses;
-        strides are in elements (bytes for the FP8 query and pools, BF16 elements for
-        `out`); `scale_log2` is `bmm1_scale * log2(e)`."""
+        """Launch on `stream`: one cluster of `n` CTAs a token. Pointers
+        are addresses; strides are in elements (bytes for the FP8 query and
+        pools, BF16 elements for `out`); `scale_log2` is
+        `bmm1_scale * log2(e)`."""
         self.kernel(
             q_ptr,
             q_stride,
@@ -939,7 +942,8 @@ def sparse_mla_decode(
         swa_kv_cache: FP8 pool of 512-byte rows `stride(-2)` apart; the first
             128 columns of `sparse_indices` are its row offsets.
         compressed_kv_cache: The pool of the other columns, likewise.
-        sparse_indices: [tokens, width] int32 row offsets, -1 for none (`width` <= 640).
+        sparse_indices: [tokens, width] int32 row offsets, -1 for none
+            (`width` <= 640).
         sparse_topk_lens: [tokens] int32 active columns of each token.
         out: [tokens, 16, 512] BF16 attention output.
         bmm1_scale: Score scale (the softmax scale times the FP8 scales).

@@ -3145,9 +3145,10 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     ) -> None:
         """Dispatch prefill to the FP8 ASM kernel when available.
 
-        Falls back to the parent (`flash_attn_varlen_func`) when FP8 MLA prefill is
-        disabled, the selected prefill backend supersedes it, PS metadata is missing, or
-        chunked context requires two-pass merge.
+        Falls back to the parent (`flash_attn_varlen_func`) when FP8
+        MLA prefill is disabled, the selected prefill backend supersedes
+        it, PS metadata is missing, or chunked context requires two-pass
+        merge.
 
         The annotation uses the base `MLACommonMetadata` to honour LSP
         with `MLACommonImpl.forward_mha`; the AITER builder always

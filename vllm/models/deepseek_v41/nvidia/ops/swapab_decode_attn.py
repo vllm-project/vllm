@@ -1211,12 +1211,13 @@ class SwapABDecodeKernel(VllmCuTeDSLJitKernel["SwapABDecodeKernel.CompileKey"]):
         """Decode attention of `heads` live heads, in place into `out_*`.
 
         The arguments are those of the mega kernel's decode call: `q` is
-        `[s_q, padded_heads, 512]` bf16 in its chunk-interleaved layout, not yet RoPEd;
-        the caches are `[num_blocks, page, record]` uint8 views of V4.1 records (a
-        token's data, then its scales) whose pages may be further apart than
-        `page * record` bytes; the slot lists are `[s_q, width]` int32 slot ids
-        (`block * page + offset`, `-1` invalid) with `[s_q]` int32 lengths; `positions`
-        is int64. Only the live heads' groups of `out_data` / `out_scale` are written.
+        `[s_q, padded_heads, 512]` bf16 in its chunk-interleaved layout, not
+        yet RoPEd; the caches are `[num_blocks, page, record]` uint8 views
+        of V4.1 records (a token's data, then its scales) whose pages may be
+        further apart than `page * record` bytes; the slot lists are
+        `[s_q, width]` int32 slot ids (`block * page + offset`, `-1`
+        invalid) with `[s_q]` int32 lengths; `positions` is int64. Only
+        the live heads' groups of `out_data` / `out_scale` are written.
         """
         assert q.shape[1] >= heads
         compile_key = self.dispatch(

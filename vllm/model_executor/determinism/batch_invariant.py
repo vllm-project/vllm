@@ -1099,7 +1099,8 @@ def rms_norm_batch_invariant(
         residual: Optional residual tensor fused into the normalization path
 
     Returns:
-        RMS normalized tensor, or `(output, residual_out)` when `residual` is provided
+        RMS normalized tensor, or `(output, residual_out)` when `residual`
+        is provided
 
     """
     if residual is not None:

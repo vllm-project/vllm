@@ -400,8 +400,9 @@ def row_sum4(sym, Y, t, tid, tag, dl, health, rank, site):
 
 @traced
 def norm_row(v, res, w, add, red, tid, lane, wave):
-    """Gemma RMSNorm of a row: s = v (+ the residual in LDS `res`) becomes the residual;
-    returns bf16(s rstd (1 + w)), 16 values a thread. `red`: 8 LDS floats."""
+    """Gemma RMSNorm of a row: s = v (+ the residual in LDS `res`) becomes the
+    residual; returns bf16(s rstd (1 + w)), 16 values a thread. `red`: 8 LDS
+    floats."""
     act = tid < 384
     ri = fx.min(tid, 383) * 8
     s = []

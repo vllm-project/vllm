@@ -604,11 +604,12 @@ class KimiMoE(nn.Module):
         on the default stream and overlaps the down projection.
 
         Returns:
-            `(routed_hidden_states, router_output, topk_ids)`. `routed_hidden_states` is
-            the down-projected latent (or the original `hidden_states` when latent MoE
-            is disabled). For MegaMoE `router_output` holds the grouped top-k weights
-            and `topk_ids` the selected experts; otherwise `router_output` holds the raw
-            gate logits and `topk_ids` is `None`.
+            `(routed_hidden_states, router_output, topk_ids)`.
+            `routed_hidden_states` is the down-projected latent (or the
+            original `hidden_states` when latent MoE is disabled). For MegaMoE
+            `router_output` holds the grouped top-k weights and `topk_ids`
+            the selected experts; otherwise `router_output` holds the raw gate
+            logits and `topk_ids` is `None`.
 
         """
 

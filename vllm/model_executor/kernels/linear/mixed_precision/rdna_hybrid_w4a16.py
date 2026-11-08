@@ -130,8 +130,9 @@ MIN_DENSE_M = 256
 
 @triton.jit
 def _int4_pair_to_fp16x2(x):
-    """Unpack two packed int4 nibbles into a uint32 holding two fp16 lanes, each equal
-    to 1024 + nibble, with one `v_and_or_b32` (`(x & 0x000F000F) | 0x64006400`).
+    """Unpack two packed int4 nibbles into a uint32 holding two fp16 lanes,
+    each equal to 1024 + nibble, with one `v_and_or_b32`
+    (`(x & 0x000F000F) | 0x64006400`).
 
     OR-ing a 4-bit nibble into the low mantissa of fp16 1024.0 (0x6400)
     bitcasts to exactly 1024+n. Doing it on a full 32-bit lane dequants two

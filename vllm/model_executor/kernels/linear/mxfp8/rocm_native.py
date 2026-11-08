@@ -45,8 +45,9 @@ _TINY = float(torch.finfo(torch.float32).tiny)
 
 @triton.jit
 def _quant_mxfp8_tile(x, FP8_MAX: tl.constexpr, TINY: tl.constexpr):
-    """MXFP8-quantize a [BLOCK_M, BLOCK_K] tile: bit-exact with `mxfp8_e4m3_quantize`
-    (see `_mxfp8_quant_triton_kernel` for why the scale is applied as a reciprocal)."""
+    """MXFP8-quantize a [BLOCK_M, BLOCK_K] tile: bit-exact with
+    `mxfp8_e4m3_quantize` (see `_mxfp8_quant_triton_kernel` for why the
+    scale is applied as a reciprocal)."""
     BM: tl.constexpr = x.shape[0]
     BK: tl.constexpr = x.shape[1]
     xb = tl.reshape(x.to(tl.float32), (BM, BK // 32, 32))

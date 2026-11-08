@@ -527,7 +527,8 @@ def stage_moe_weights_for_humming(
 ) -> str:
     """Install canonical weights and scales for Humming's layer-based converter.
 
-    Returns the scale parameter name used, `weight_scale` or `weight_scale_inv`.
+    Returns the scale parameter name used, `weight_scale` or
+    `weight_scale_inv`.
     """
     scale_name = (
         "weight_scale_inv" if hasattr(layer, "w13_weight_scale_inv") else "weight_scale"

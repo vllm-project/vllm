@@ -249,10 +249,11 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
     def _register_swapab_warmup(self) -> None:
         """Register the compile key this layer's swap-AB decode steps launch.
 
-        Every field is fixed at construction. The compressed cache is read in kernel
-        blocks of this backend's single size, which hold
-        `kernel_block // compress_ratio` compressed slots each, whatever the KV cache
-        manager's block size is. Layers sharing a key register it once.
+        Every field is fixed at construction. The compressed cache is read in
+        kernel blocks of this backend's single size, which hold
+        `kernel_block // compress_ratio` compressed slots each, whatever the
+        KV cache manager's block size is. Layers sharing a key register it
+        once.
         """
         from vllm.models.deepseek_v41.nvidia.ops.swapab_decode_attn import (
             _SWAPAB_DECODE_KERNEL,
@@ -433,12 +434,13 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
     ) -> None:
         """Mega attention over the paged quantized caches, in place into `out`.
 
-        The caches are `[num_blocks, page, 1, bytes]`, the record taken from `bytes`
-        (528 V4.1 fp8, 288 V4.1 NVFP4; NVFP4 only as the compressed cache beside an fp8
-        SWA one), and the indices `[s_q, topk]` int32 slot ids (`block * page + offset`,
-        `-1` invalid). Where `_use_swapab` holds, steps of at most `_SWAPAB_MAX_TOKENS`
-        tokens take the swap-AB kernel instead, which reads the same inputs and writes
-        the same output layout.
+        The caches are `[num_blocks, page, 1, bytes]`, the record taken from
+        `bytes` (528 V4.1 fp8, 288 V4.1 NVFP4; NVFP4 only as the compressed
+        cache beside an fp8 SWA one), and the indices `[s_q, topk]` int32
+        slot ids (`block * page + offset`, `-1` invalid). Where
+        `_use_swapab` holds, steps of at most `_SWAPAB_MAX_TOKENS` tokens
+        take the swap-AB kernel instead, which reads the same inputs and
+        writes the same output layout.
         """
         extra_cache, extra_idx, extra_len = self._decode_compressed_kv_and_topk(
             flashmla_metadata, swa_metadata

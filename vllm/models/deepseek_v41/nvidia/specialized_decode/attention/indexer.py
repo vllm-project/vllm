@@ -5,12 +5,13 @@
 `decode_rows` runs a dense indexer (`SparseAttnIndexer`) on a copy of the
 varlen decode branch of `sparse_attn_indexer`, with two additions:
 
-- Row sharding. The indexer is replicated across the TP ranks. In a uniform decode step
-  of at least `ROW_SHARD_MIN_ROWS` rows, each rank scores, selects candidates for and
-  top-k's only its contiguous slice of the rows (an even number of them, so the last
-  ranks' slices may be short or empty); TP all-gathers of the int32 rows (see
-  `_all_gather_rows`; the executor's `LamportAllGather`) rebuild `topk_indices_buffer`
-  and, in the candidate source, the candidate blocks.
+- Row sharding. The indexer is replicated across the TP ranks. In a uniform
+  decode step of at least `ROW_SHARD_MIN_ROWS` rows, each rank scores,
+  selects candidates for and top-k's only its contiguous slice of the rows
+  (an even number of them, so the last ranks' slices may be short or empty);
+  TP all-gathers of the int32 rows (see `_all_gather_rows`; the executor's
+  `LamportAllGather`) rebuild `topk_indices_buffer` and, in the candidate
+  source, the candidate blocks.
   A slice may split a request: varlen rows are independent.
 - Selection from the BF16 logits. For up to 64 rows per rank, `decode_topk`
   (`decode_topk_cute`) selects the token top-k, and in the candidate source
@@ -22,10 +23,11 @@ varlen decode branch of `sparse_attn_indexer`, with two additions:
 
 Steps it does not take run the stock indexer.
 
-`decode_rows` runs in two parts. `plan_decode_rows` takes the gates, resets the top-k
-rows and builds the slice's DeepGEMM schedule: none of it reads the layer's index query
-or keys, so the attention step issues it while the current stream would otherwise wait
-for them. `finish_decode_rows` scores, selects and gathers once they are ready.
+`decode_rows` runs in two parts. `plan_decode_rows` takes the gates,
+resets the top-k rows and builds the slice's DeepGEMM schedule: none of it
+reads the layer's index query or keys, so the attention step issues it while
+the current stream would otherwise wait for them. `finish_decode_rows`
+scores, selects and gathers once they are ready.
 
 `CandidateOverlap` moves the candidate consumers' candidate expansion and
 sparse MQA-logits schedule onto a side stream.
@@ -90,8 +92,9 @@ ROW_SHARD_MIN_ROWS = 12
 
 
 def row_shard_rows(num_rows: int, num_requests: int, world_size: int) -> int | None:
-    """Rows each rank's slice spans in a pure-decode step, or None when the step stays
-    replicated. Rank `r` scores rows `[r n, (r + 1) n)` clipped to the step's rows.
+    """Rows each rank's slice spans in a pure-decode step, or None when the
+    step stays replicated. Rank `r` scores rows `[r n, (r + 1) n)`
+    clipped to the step's rows.
 
     Slices start on an even row: DeepGEMM's paged MQA logits needs its int32
     `indices` 8-byte aligned. Varlen rows are independent, so a slice may
@@ -109,8 +112,9 @@ def row_shard_rows(num_rows: int, num_requests: int, world_size: int) -> int | N
 def row_shard_bounds(
     num_rows: int, num_requests: int, world_size: int, rank: int
 ) -> tuple[int, int] | None:
-    """Rows `[start, end)` that `rank` scores in a pure-decode step (an empty range for
-    a rank past the last row), or None when the step stays replicated."""
+    """Rows `[start, end)` that `rank` scores in a pure-decode step (an
+    empty range for a rank past the last row), or None when the step stays
+    replicated."""
     rows = row_shard_rows(num_rows, num_requests, world_size)
     if rows is None:
         return None
@@ -153,9 +157,10 @@ def _all_gather_rows(
     num_rows: int,
     all_gather: "LamportAllGather | None",
 ) -> None:
-    """Gather every rank's `rows`-row slice of `buffer` into its first `num_rows` rows;
-    rows past `num_rows` (a short or empty last slice) are dropped. The slices go
-    through `all_gather` when it takes them, else NCCL."""
+    """Gather every rank's `rows`-row slice of `buffer` into its first
+    `num_rows` rows; rows past `num_rows` (a short or empty last slice)
+    are dropped. The slices go through `all_gather` when it takes them,
+    else NCCL."""
     group = get_tp_group()
     local = buffer[group.rank_in_group * rows : (group.rank_in_group + 1) * rows]
     # Not the custom all-gather: its MNNVL Lamport kernel never waits for a

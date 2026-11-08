@@ -153,8 +153,9 @@ def export_entries(
     that PyTorch registers a reference for each IPC mapping's lifetime.
 
     Returns:
-        A `(entries, aliases)` pair where `entries` maps a canonical name to its
-        `TensorEntry` and `aliases` maps each duplicate name to its canonical name.
+        A `(entries, aliases)` pair where `entries` maps a canonical name to
+        its `TensorEntry` and `aliases` maps each duplicate name to its
+        canonical name.
 
     """
     entries: dict[str, TensorEntry] = {}

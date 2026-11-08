@@ -59,11 +59,12 @@ class MoeBuild:
 
 @dataclass(frozen=True)
 class RouteShape:
-    """A build's routing: `experts` routed experts, `topk` a token of `tokens`, the task
-    counts and placements that follow, and the route table `load_route` lays out in LDS:
-    every token's (ids, weights), |U|, the experts of U, each (t, k)'s slot in U, each
-    expert's slot, the picks in slot order and each slot's first position in it (past
-    one token tile also each slot's first pick tile and each pick tile's slot)."""
+    """A build's routing: `experts` routed experts, `topk` a token of
+    `tokens`, the task counts and placements that follow, and the route table
+    `load_route` lays out in LDS: every token's (ids, weights), |U|, the
+    experts of U, each (t, k)'s slot in U, each expert's slot, the picks in slot
+    order and each slot's first position in it (past one token tile also each
+    slot's first pick tile and each pick tile's slot)."""
 
     experts: int
     topk: int

@@ -132,8 +132,9 @@ class NormParams(NamedTuple):
 
     @property
     def is_identity(self) -> bool:
-        """Whether `weight = rescale/std` and `bias = -mean/std` are numerically the
-        identity transform (mirrors `torch.allclose`'s default fp32 tolerances)."""
+        """Whether `weight = rescale/std` and `bias = -mean/std` are
+        numerically the identity transform (mirrors `torch.allclose`'s
+        default fp32 tolerances)."""
         return all(
             math.isclose(self.rescale_factor / s, 1.0, rel_tol=1e-5, abs_tol=1e-8)
             and math.isclose(m / s, 0.0, abs_tol=1e-8)

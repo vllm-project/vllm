@@ -32,12 +32,13 @@ gathers the vocab-parallel logits. A few hundred kilobytes at most, so the
 latency of the collective, not its bandwidth, is what counts.
 
 vLLM's custom all-gather has a Lamport kernel for NVLink multicast
-(`mnnvl_lamport_all_gather`), but it never waits for the rank's own multicast copy: it
-takes its own slot from registers, and a copy that lands after the next call has cleaned
-its stage stays there. A later gather of another size lays the slots out differently and
-can read that word as a peer's payload. A stress test of back-to-back gathers of
-alternating sizes in CUDA graphs hits this hundreds of times in a few million gathers.
-This module is a gather of the same shape that cannot leave a word behind.
+(`mnnvl_lamport_all_gather`), but it never waits for the rank's own
+multicast copy: it takes its own slot from registers, and a copy that lands
+after the next call has cleaned its stage stays there. A later gather of
+another size lays the slots out differently and can read that word as a
+peer's payload. A stress test of back-to-back gathers of alternating sizes in
+CUDA graphs hits this hundreds of times in a few million gathers. This module
+is a gather of the same shape that cannot leave a word behind.
 
 The mailbox is symmetric memory with a multicast mapping, laid out as
 16-byte packs::
@@ -49,17 +50,19 @@ A call runs one kernel, one thread a 16-byte pack of the rank's input:
 1. Publish: the thread stores its pack through the multicast address into
    every rank's `mailbox[g][rank][pack]`. A word equal to the Lamport
    sentinel (`0x80000000`: FP32 negative zero, INT32_MIN) goes out as 0.
-2. Collect: it polls `mailbox[g][r][pack]` of every rank `r`, its own included, until no
-   word of it is the sentinel; writes each rank's pack to the output, rank-major as NCCL
-   lays out a dim-0 gather; and stores the sentinel back into the slots it read. Every
-   slot a call writes is read after it has landed and reset by the same call, so no call
-   leaves a word for a later one, whatever the sizes.
-3. Generation: `state[0]` is the call's generation. Each CTA reads it once and counts
-   itself in `state[1]`; the last CTA to arrive advances the generation and clears the
-   count. A rank can be at most one call ahead of a peer (finishing a call needs every
-   rank's payload), so a rank writing the next generation never touches the slots a
-   slower peer still reads; three generations, as vLLM's and FlashInfer's Lamport
-   kernels use, leave one more in between.
+2. Collect: it polls `mailbox[g][r][pack]` of every rank `r`, its own
+   included, until no word of it is the sentinel; writes each rank's pack to
+   the output, rank-major as NCCL lays out a dim-0 gather; and stores the
+   sentinel back into the slots it read. Every slot a call writes is read
+   after it has landed and reset by the same call, so no call leaves a word
+   for a later one, whatever the sizes.
+3. Generation: `state[0]` is the call's generation. Each CTA reads it once
+   and counts itself in `state[1]`; the last CTA to arrive advances the
+   generation and clears the count. A rank can be at most one call ahead of
+   a peer (finishing a call needs every rank's payload), so a rank writing
+   the next generation never touches the slots a slower peer still reads;
+   three generations, as vLLM's and FlashInfer's Lamport kernels use, leave
+   one more in between.
 
 The kernel triggers its PDL dependents once it has published. The output
 holds the sanitized words on every rank, its own slot included, so all ranks
@@ -325,9 +328,10 @@ class LamportAllGather:
     """TP all-gather along dim 0 over NVLink multicast, for inputs of up to
     `rank_capacity_bytes` a rank (a multiple of 16 bytes).
 
-    Construction is collective over the TP group: every rank compiles the kernel and
-    allocates its mailbox, and it raises when NVLink multicast is unavailable. `accepts`
-    tells whether a tensor fits, from its size alone, so every rank decides alike.
+    Construction is collective over the TP group: every rank compiles the
+    kernel and allocates its mailbox, and it raises when NVLink multicast is
+    unavailable. `accepts` tells whether a tensor fits, from its size
+    alone, so every rank decides alike.
     """
 
     def __init__(self, *, rank_capacity_bytes: int, device: torch.device) -> None:
@@ -368,7 +372,8 @@ class LamportAllGather:
         dist.barrier(group=group)
 
     def accepts(self, inp: torch.Tensor) -> bool:
-        """Whether `inp` fits: 1 to `rank_capacity_bytes` bytes, a multiple of 16."""
+        """Whether `inp` fits: 1 to `rank_capacity_bytes` bytes, a
+        multiple of 16."""
         return 0 < inp.nbytes <= self.rank_capacity_bytes and not inp.nbytes % 16
 
     def __call__(self, inp: torch.Tensor) -> torch.Tensor:

@@ -65,8 +65,9 @@ class Step(NamedTuple):
 def step_reason(
     attn_metadata, kda_prefix: str, width: int, mla_prefix: str = ""
 ) -> str | None:
-    """None if a step's KDA and MLA metadata (identical on every TP rank) are a pure
-    spec-verify step of whole uniform requests filling `width` rows, else why not."""
+    """None if a step's KDA and MLA metadata (identical on every TP rank) are a
+    pure spec-verify step of whole uniform requests filling `width` rows, else
+    why not."""
     if not isinstance(attn_metadata, dict):
         return "no metadata"
     m: Any = attn_metadata.get(kda_prefix)

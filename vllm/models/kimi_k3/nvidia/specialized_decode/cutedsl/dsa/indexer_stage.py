@@ -94,14 +94,15 @@ class IndexerStage:
 
     # --- DCP top-k merge (#63) ---------------------------------------------------
     def merge_rows(self, q_fp8, head_w, metadata, stride_rows, batch, q=1):
-        """DCP: this rank's flat KV rows of the merged global top-k of the first `batch`
-        rows (`q` per request; compacted to a prefix, at most N per row) and their
-        counts, as `dcp_stage.local_slots` of the op's global ids; `metadata`: the MLA
-        layer's. None when the step does not fit the merge (the caller then runs the op
-        and the filter). One all-gather over the DCP group, so every rank takes the same
-        branch. The logits must hold no NaN: DeepSelect then returns out-of-range ids,
-        on which the merge's pack faults; no per-step check here (finite query, head
-        weights and cached keys keep them finite)."""
+        """DCP: this rank's flat KV rows of the merged global top-k of the first
+        `batch` rows (`q` per request; compacted to a prefix, at most N per
+        row) and their counts, as `dcp_stage.local_slots` of the op's global
+        ids; `metadata`: the MLA layer's. None when the step does not fit the
+        merge (the caller then runs the op and the filter). One all-gather over
+        the DCP group, so every rank takes the same branch. The logits must hold
+        no NaN: DeepSelect then returns out-of-range ids, on which the merge's
+        pack faults; no per-step check here (finite query, head weights and
+        cached keys keep them finite)."""
         from vllm.forward_context import get_forward_context
         from vllm.model_executor.layers.indexer_topk import (
             SparseIndexerTopk,

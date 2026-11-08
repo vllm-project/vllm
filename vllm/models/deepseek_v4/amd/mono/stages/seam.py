@@ -243,7 +243,8 @@ def slice_mix(c, task, t0, n):
 
 # ---------------------------------------------------------------- gate
 def _row(v, lane, q):
-    """Comb lanes 8..23 hold `comb[r][c]` at lane 8 + 4 r + c: element q of the row."""
+    """Comb lanes 8..23 hold `comb[r][c]` at lane 8 + 4 r + c: element q of
+    the row."""
     return lane_f32(v, (lane - 8) // 4 * 4 + 8 + q)
 
 

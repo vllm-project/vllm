@@ -10,14 +10,16 @@ with two changes, neither of which issues a collective:
   the others reuse it; the first layer of such a run also builds, on a side stream, the
   tables its later layers look up in other SWA KV-cache groups.
 - Persistent multi-CTA KV counters. Without a caller-owned counter buffer,
-  `trtllm_batch_decode_sparse_mla_dsv4` allocates and zeroes a fresh one before every
-  call, a small fill kernel ahead of each decode launch. The kernel returns every
-  counter to zero when it finishes, so a buffer zeroed once stays valid for launches
-  that do not overlap, as in the FlashInfer MLA backend.
+  `trtllm_batch_decode_sparse_mla_dsv4` allocates and zeroes a fresh one
+  before every call, a small fill kernel ahead of each decode launch. The
+  kernel returns every counter to zero when it finishes, so a buffer zeroed
+  once stays valid for launches that do not overlap, as in the FlashInfer MLA
+  backend.
 
-Batches whose clusters fit the GPU at once (at width 640, up to 8 requests with DSpark
-on a GB300) run the CuTe DSL kernel of `sparse_mla_cute` instead of TRTLLM-gen: it
-spreads a token's columns over one CTA per 128 instead of at most 3.
+Batches whose clusters fit the GPU at once (at width 640, up to 8 requests with
+DSpark on a GB300) run the CuTe DSL kernel of `sparse_mla_cute` instead of
+TRTLLM-gen: it spreads a token's columns over one CTA per 128 instead of at most
+3.
 """
 
 import inspect

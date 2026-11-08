@@ -194,9 +194,10 @@ def gemma_fused_add_rmsnorm_mxfp8(
     Bit-identical to `mxfp8_e4m3_quantize(gemma_fused_add_rmsnorm(...)[0])`.
 
     Returns:
-        `(x_q, x_scale, residual_out)`: `x_q` float8_e4m3fn `[M, N]` and `x_scale` uint8
-        E8M0 `[M, N // 32]` (row-major, not swizzled), with the leading dims of `x`
-        flattened into `M`; `residual_out` has the shape of `x`.
+        `(x_q, x_scale, residual_out)`: `x_q` float8_e4m3fn `[M, N]` and
+        `x_scale` uint8 E8M0 `[M, N // 32]` (row-major, not swizzled), with
+        the leading dims of `x` flattened into `M`; `residual_out` has
+        the shape of `x`.
 
     """
     n = x.shape[-1]

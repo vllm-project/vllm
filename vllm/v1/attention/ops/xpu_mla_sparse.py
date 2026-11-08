@@ -196,8 +196,9 @@ def triton_bf16_mla_sparse_interface(
             prefill where RoPE is not split out).
 
     Returns:
-        `out` `[num_tokens, num_heads_q, d_v]`, `max_logits` `[num_tokens, num_heads_q]`
-        and the logsumexp `lse` `[num_tokens, num_heads_q]`.
+        `out` `[num_tokens, num_heads_q, d_v]`, `max_logits`
+        `[num_tokens, num_heads_q]` and the logsumexp `lse`
+        `[num_tokens, num_heads_q]`.
 
     """
     num_tokens, num_heads_q, dim_qk = q.shape

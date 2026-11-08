@@ -79,10 +79,11 @@ def plan_replayssm_decode(
 ) -> None:
     """Plan one Triton ReplaySSM standard-decode step on the GPU.
 
-    `ring_pos[slot]` counts the tokens buffered since the slot's last full-state write.
-    For each decode row this writes the step's `write_pos`/`is_flush` (read by every
-    layer of the cache group) and advances the slot's counter, so the runner supplies no
-    ring metadata. Prefill resets the counters in the same layer.
+    `ring_pos[slot]` counts the tokens buffered since the slot's last
+    full-state write. For each decode row this writes the step's
+    `write_pos`/`is_flush` (read by every layer of the cache group) and
+    advances the slot's counter, so the runner supplies no ring metadata.
+    Prefill resets the counters in the same layer.
 
     With `align_block_size` > 0 (mamba `align` prefix caching), the ring
     restarts at each block's first step and flushes on the step completing a

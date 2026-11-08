@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DSpark draft's residual boundary, bitwise equal to the eager chain.
 
-One boundary is the eager post -> connection -> pre chain: `post_norm(branch)` rounded
-to BF16, the gated FP32 residual `alpha * stream + beta * branch` with each product
-rounded, then the next pre-norm of the stream rounded to BF16. The norms use the stock
-single-tile norm's order and roundings (`row_norm.py`). The branch is read as is (-0.0,
-subnormals, NaN and infinities included).
+One boundary is the eager post -> connection -> pre chain: `post_norm(branch)`
+rounded to BF16, the gated FP32 residual `alpha * stream + beta * branch`
+with each product rounded, then the next pre-norm of the stream rounded to
+BF16. The norms use the stock single-tile norm's order and roundings
+(`row_norm.py`). The branch is read as is (-0.0, subnormals, NaN and
+infinities included).
 
 `boundary_fragments` is that arithmetic over one thread's 8-column
 fragments, with the row sums supplied by the caller. Two kernels use it:
@@ -17,9 +18,10 @@ fragments, with the row sums supplied by the caller. Two kernels use it:
   (`cutedsl/oproj/draft_all_reduce_boundary.py`), one fragment per thread
   over a cluster of 8 CTAs.
 
-Gates and norm weights load before the PDL wait for up to one row per SM, and after it
-above that (`late_gates`). With PDL, every CTA releases its dependents right after the
-wait; the next kernel waits for this grid's end before it reads the output.
+Gates and norm weights load before the PDL wait for up to one row per SM, and
+after it above that (`late_gates`). With PDL, every CTA releases its
+dependents right after the wait; the next kernel waits for this grid's end
+before it reads the output.
 """
 
 import functools
@@ -386,10 +388,11 @@ def compile_draft_boundary(
     late_gates: bool = False,
 ):
     """cute.compile one kernel; the row count is a runtime argument. Call:
-    (branch, stream_in, alpha, beta, post_weight, pre_weight, stream_out, out, m,
-    stream), a weight None where its norm has none and `stream_out` None without
-    `store_stream`; `pdl`: launched with programmatic dependent launch
-    (`host.pdl_supported`). Call before CUDA graph capture."""
+    (branch, stream_in, alpha, beta, post_weight, pre_weight, stream_out,
+    out, m, stream), a weight None where its norm has none and
+    `stream_out` None without `store_stream`; `pdl`: launched with
+    programmatic dependent launch (`host.pdl_supported`). Call before CUDA
+    graph capture."""
     assert_not_capturing("the draft boundary")
     gate = make_fake_compact_tensor(Float32, (H,), assumed_align=32)
     rows_f32 = make_fake_dynamic_compact_tensor(Float32, alignment=32, divisibility=H)
@@ -481,10 +484,11 @@ class BoundaryOperands:
 
 
 class DraftBoundary:
-    """One draft boundary of an all-reduced branch, bound at build: its constants and
-    its constant operands (`BoundaryOperands`), and its kernel of each variant by
-    (stream BF16, store stream, late gates: rows above the device's SM count), compiled
-    once per process and variant (`prepare` them before CUDA graph capture)."""
+    """One draft boundary of an all-reduced branch, bound at build: its
+    constants and its constant operands (`BoundaryOperands`), and its
+    kernel of each variant by (stream BF16, store stream, late gates: rows
+    above the device's SM count), compiled once per process and variant
+    (`prepare` them before CUDA graph capture)."""
 
     def __init__(
         self,
@@ -510,7 +514,8 @@ class DraftBoundary:
 
     def prepare(self, stream_bf16: bool, store_stream: bool, late_gates: bool = False):
         """The kernel of one variant, kept for the calls that launch it
-        (`compile_draft_boundary`: compiled on its first use in the process)."""
+        (`compile_draft_boundary`: compiled on its first use in the
+        process)."""
         key = (stream_bf16, store_stream, late_gates)
         kernel = self._kernels.get(key)
         if kernel is None:

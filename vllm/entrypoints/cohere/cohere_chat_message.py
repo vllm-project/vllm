@@ -6,15 +6,17 @@ This module keeps the OpenAI chat completion protocol classes
 (`ChatMessage` / `DeltaMessage`) free of Cohere-specific fields.
 It provides two things:
 
-* `Citation` / `CitationSource`: the vLLM-internal citation representation produced by
-  the Cohere parser (`vllm.parser.cohere_command`) and consumed by
-  `vllm.entrypoints.cohere.serving`. This is *not* the on-wire Cohere SDK shape -- that
-  conversion happens in the serving layer.
-* `CohereChatMessage` / `CohereDeltaMessage`: `ChatMessage` / `DeltaMessage` subclasses
-  that add a `citations` field. They are only instantiated by the citation-aware serving
-  handler (`vllm.entrypoints.cohere.serving.CohereServingChatV2`) and by the Cohere
-  reasoning parser's streaming path. Non-Cohere code paths continue to construct plain
-  `ChatMessage` / `DeltaMessage`.
+* `Citation` / `CitationSource`: the vLLM-internal citation
+  representation produced by the Cohere parser
+  (`vllm.parser.cohere_command`) and consumed by
+  `vllm.entrypoints.cohere.serving`. This is *not* the on-wire Cohere
+  SDK shape -- that conversion happens in the serving layer.
+* `CohereChatMessage` / `CohereDeltaMessage`: `ChatMessage`
+  / `DeltaMessage` subclasses that add a `citations` field. They
+  are only instantiated by the citation-aware serving handler
+  (`vllm.entrypoints.cohere.serving.CohereServingChatV2`) and by the
+  Cohere reasoning parser's streaming path. Non-Cohere code paths continue
+  to construct plain `ChatMessage` / `DeltaMessage`.
 
 The module intentionally does *not* import the `cohere` Python SDK so the
 reasoning parser (which is Cohere-model-specific but ships without the SDK
@@ -39,13 +41,16 @@ class CitationSource(OpenAIBaseModel):
     (`document` or `tool`); `id` is the citing document/tool-output identifier;
     `document` and `tool_output` carry the original payload that produced the citation.
 
-    Sources are fully resolved by the parser at emit time (see `_melody_sources_to_vllm`
-    in `vllm.parser.cohere_command`) using the `POSITION_TO_SOURCE_KEY` map forwarded
-    through `chat_template_kwargs` by
+    Sources are fully resolved by the parser at emit time
+    (see `_melody_sources_to_vllm` in
+    `vllm.parser.cohere_command`) using the
+    `POSITION_TO_SOURCE_KEY` map forwarded through
+    `chat_template_kwargs` by
     `vllm.entrypoints.cohere.serving.CohereServingChatV2._apply_cohere_template_kwargs`.
-    That means every instance that reaches the serving / wire layer already has `type` /
-    `id` populated; the serving layer only has to coerce to `cohere.types.Citation` and
-    rewrite `THINKING_CONTENT` -> `PLAN` for non-reasoning models.
+    That means every instance that reaches the serving / wire layer
+    already has `type` / `id` populated; the serving layer only has
+    to coerce to `cohere.types.Citation` and rewrite
+    `THINKING_CONTENT` -> `PLAN` for non-reasoning models.
     """
 
     type: Literal["document", "tool"] | None = None
@@ -112,9 +117,10 @@ class CohereChatMessage(ChatMessage):
 class CohereDeltaMessage(DeltaMessage):
     """`DeltaMessage` extension carrying grounding citations for streaming.
 
-    Emitted by `vllm.parser.cohere_command.CohereCommandParser` on delta events whose
-    payload includes citations. Non-Cohere parsers return plain `DeltaMessage`, so their
-    streamed shape is unchanged.
+    Emitted by `vllm.parser.cohere_command.CohereCommandParser`
+    on delta events whose payload includes citations. Non-Cohere parsers
+    return plain `DeltaMessage`, so their streamed shape is
+    unchanged.
 
     The response envelope declares `delta: SerializeAsAny[DeltaMessage]`, so pydantic
     serializes this subclass with its own schema when it flows through

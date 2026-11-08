@@ -11,14 +11,15 @@ single-token rows, each with its own copy of the request's block table. Every ro
 then streams the request's whole latent cache again: `k` times the KV bytes, and
 each CTA's MMA sees only the `H` local heads of one token (8 at TP8).
 
-Absorbed MLA decode is MQA (one latent KV head), so query heads are independent rows
-over a shared key set. Folding the `k` tokens of a request into the head axis,
-`[R * k, H, D] -> [R, 1, k * H, D]`, gives one decode row per request with `k * H` heads
-over the same keys. That is the same attention, exactly: every (token, head) pair still
-gets its own full softmax over the identical key set, at the same precision (FP8 Q and
-KV, the stock bmm scales); only the kernel's tiling (which CTA holds which head, the KV
-split) can differ. The KV is read once per request instead of `k` times, and the MMA M
-grows `k`-fold (32-56 heads at TP8, 256-448 at TP1 / DCP).
+Absorbed MLA decode is MQA (one latent KV head), so query heads are independent
+rows over a shared key set. Folding the `k` tokens of a request into the head
+axis, `[R * k, H, D] -> [R, 1, k * H, D]`, gives one decode row per request with
+`k * H` heads over the same keys. That is the same attention, exactly: every
+(token, head) pair still gets its own full softmax over the identical key set, at
+the same precision (FP8 Q and KV, the stock bmm scales); only the kernel's tiling
+(which CTA holds which head, the KV split) can differ. The KV is read once per
+request instead of `k` times, and the MMA M grows `k`-fold (32-56 heads at TP8,
+256-448 at TP1 / DCP).
 
 The output `[R, 1, k * H, L]` and LSE `[R, k * H]` are the stock
 `[R * k, H, L]` / `[R * k, H]` in the same memory order (token-major,
@@ -322,12 +323,13 @@ def _plan_kernel():
 
 
 def _balanced_tables(cache: dict | None, bt, sl, tot, split_rows, pairs):
-    """Which rows the split tiers take, cached per batch like `_group_tables` (every
-    draft layer of a step sees the same lengths): of the `split_rows` longest (longest
-    first), those longer than `MOVE` of a pair's share of the batch's keys
-    (`sum / pairs`). Returns (each tier row's batch row, or `rows` when it stays in the
-    unsplit launch; every row's length in the unsplit launch, 0 for the moved ones; the
-    tier rows' block table, lengths (0 when not moved) and global lengths)."""
+    """Which rows the split tiers take, cached per batch like `_group_tables`
+    (every draft layer of a step sees the same lengths): of the `split_rows`
+    longest (longest first), those longer than `MOVE` of a pair's share of the
+    batch's keys (`sum / pairs`). Returns (each tier row's batch row, or
+    `rows` when it stays in the unsplit launch; every row's length in the
+    unsplit launch, 0 for the moved ones; the tier rows' block table, lengths
+    (0 when not moved) and global lengths)."""
     rows = sl.shape[0]
     key = ("draft_balanced", rows, split_rows)
     if cache is not None and key in cache:

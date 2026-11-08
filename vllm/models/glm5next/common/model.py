@@ -1469,8 +1469,9 @@ def _num_fused_shared_experts(n_shared_experts: int | None, enabled: bool) -> in
 
 
 def _fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
-    """Point a checkpoint `mlp.shared_experts.*` tensor at the fused MoE's shared-expert
-    slot, which follows the routed experts; other names are returned unchanged."""
+    """Point a checkpoint `mlp.shared_experts.*` tensor at the fused MoE's
+    shared-expert slot, which follows the routed experts; other names are
+    returned unchanged."""
     return name.replace("mlp.shared_experts.", f"mlp.experts.{n_routed_experts}.", 1)
 
 

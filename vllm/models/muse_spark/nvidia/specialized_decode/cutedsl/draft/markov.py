@@ -2,26 +2,29 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CuTe DSL kernels of the fused DSpark Markov sampling loop.
 
-Per draft step the Markov w2 GEMV runs unchanged, then `markov_step` (bias, output
-transform, cache store, Gumbel block argmax, and in the row's last block the final
-argmax, token and next w1 row). With a vocab-parallel w2 each rank works on its vocab
-range, its last block writes a packet instead of the token, and `markov_pick` picks the
-winner from the gathered per-rank packets; `cache_fill` scatters the gathered
-draft-logits shards after the loop. `anchor_embed` starts a call.
+Per draft step the Markov w2 GEMV runs unchanged, then `markov_step`
+(bias, output transform, cache store, Gumbel block argmax, and in the row's
+last block the final argmax, token and next w1 row). With a vocab-parallel w2
+each rank works on its vocab range, its last block writes a packet instead of
+the token, and `markov_pick` picks the winner from the gathered per-rank
+packets; `cache_fill` scatters the gathered draft-logits shards after the
+loop. `anchor_embed` starts a call.
 
-The arithmetic is bit for bit that of the speculator's eager loop: its output transform
-(BF16 add, multiplier, optional soft cap `cap * tanh(x * inv_cap)`) and the stock
-`gumbel_noised_argmax` and `gumbel_block_argmax` of
-`vllm/v1/worker/gpu/sample/gumbel.py` (MurmurHash3 noise of seed, step, position and
-global vocab id). It is written as explicit PTX, the instructions Triton 3.8 emits for
-those kernels on SM 10.x, including libdevice `tanhf` and `logf` under FTZ.
+The arithmetic is bit for bit that of the speculator's eager loop: its
+output transform (BF16 add, multiplier, optional soft cap
+`cap * tanh(x * inv_cap)`) and the stock `gumbel_noised_argmax` and
+`gumbel_block_argmax` of `vllm/v1/worker/gpu/sample/gumbel.py`
+(MurmurHash3 noise of seed, step, position and global vocab id). It is written
+as explicit PTX, the instructions Triton 3.8 emits for those kernels on
+SM 10.x, including libdevice `tanhf` and `logf` under FTZ.
 
-Every argmax takes the first NaN, else the first maximum (the order of `torch.argmax`).
-That is a total order on (value, index), so the block argmax, the argmax over the blocks
-and the pick over the ranks give the same id in any reduction order: the lowest vocab id
-whose noised logit is NaN, else the lowest id of the maximum, at every block size,
-layout and vocab shard. On rows without NaN this is the eager loop's id; on a row with a
-NaN the eager loop's Triton block argmax can differ, and is not reproduced.
+Every argmax takes the first NaN, else the first maximum (the order of
+`torch.argmax`). That is a total order on (value, index), so the block
+argmax, the argmax over the blocks and the pick over the ranks give the same
+id in any reduction order: the lowest vocab id whose noised logit is NaN, else
+the lowest id of the maximum, at every block size, layout and vocab shard. On
+rows without NaN this is the eager loop's id; on a row with a NaN the eager
+loop's Triton block argmax can differ, and is not reproduced.
 
 Each step's blocks count their arrivals; the row's last block reduces the
 blocks' (value, id) results with the same combine.
@@ -162,7 +165,8 @@ def _load_words(
     loc=None,
     ip=None,
 ) -> list:
-    """`nbytes` (2, 4, 8 or 16, aligned) as 32-bit words if `predicate` (else zeros)."""
+    """`nbytes` (2, 4, 8 or 16, aligned) as 32-bit words if `predicate`
+    (else zeros)."""
     kind, words = _COPY_OPS[nbytes]
     outs = ", ".join(f"${i}" for i in range(words))
     braced = f"{{{outs}}}" if words > 1 else outs
@@ -214,8 +218,9 @@ def _store_words(
 
 
 def _copy(copies: list, nbytes: int) -> None:
-    """Copy `nbytes` (2, 4, 8 or 16, aligned) for each `(source, destination,
-    predicate)`: every load issued before the first store (traced inline)."""
+    """Copy `nbytes` (2, 4, 8 or 16, aligned) for each `(source,
+    destination, predicate)`: every load issued before the first store
+    (traced inline)."""
     loaded = [_load_words(source, nbytes, predicate) for source, _, predicate in copies]
     for (_, destination, predicate), words in zip(copies, loaded):
         _store_words(destination, words, nbytes, predicate)
@@ -308,8 +313,9 @@ def _combine_in_order(
 
 @dsl_user_op
 def _combine(v1: Float32, i1: Int32, v2: Float32, i2: Int32, *, loc=None, ip=None):
-    """The first pair if `v1 > v2`, or `v1 == v2` with `i1 < i2` (ordered compares), or
-    `v1` is NaN and `v2` is not or `i1 < i2`; else the second."""
+    """The first pair if `v1 > v2`, or `v1 == v2` with `i1 < i2`
+    (ordered compares), or `v1` is NaN and `v2` is not or `i1 < i2`;
+    else the second."""
     struct = _asm(
         llvm.StructType.get_literal([T.f32(), T.i32()]),
         _values((Float32(v1), Int32(i1), Float32(v2), Int32(i2)), loc=loc, ip=ip),
@@ -460,8 +466,9 @@ def _murmur_prefix(
 
 
 def _logf(x: str, out: str, tag: str, addend: str) -> str:
-    """Libdevice logf under FTZ of the normal-or-special `x` (the exponent term `addend`
-    added), into `out`; NaN, +-inf and negatives through `fma(x, inf, inf)`."""
+    """Libdevice logf under FTZ of the normal-or-special `x` (the exponent
+    term `addend` added), into `out`; NaN, +-inf and negatives through
+    `fma(x, inf, inf)`."""
     return (
         f"mov.b32 i{tag}, {x};\n\t"
         f"add.s32 e{tag}, i{tag}, -1059760811;\n\t"
@@ -976,13 +983,14 @@ class _StepKernel:
         emb: Int64,
         packets: Int64,
     ) -> None:
-        """The first `finish_warps` warps of the row's last block: the first NaN, else
-        the first maximum, over the blocks' (value, global id) results (a global id
-        rises with the block), then the token and next w1 row, or the packet
-        `[value bits, global id, 0, 0]`. Every thread loads its share of the results at
-        once, then reduces them, then the warps, then (several warps) their results in
-        shared memory; the combine is a total order, so every lane ends with the winner
-        and no load waits for it."""
+        """The first `finish_warps` warps of the row's last block: the
+        first NaN, else the first maximum, over the blocks' (value, global
+        id) results (a global id rises with the block), then the token and
+        next w1 row, or the packet `[value bits, global id, 0, 0]`. Every
+        thread loads its share of the results at once, then reduces them,
+        then the warps, then (several warps) their results in shared
+        memory; the combine is a total order, so every lane ends with the
+        winner and no load waits for it."""
         blocks, threads = self.blocks, self.finish_warps * WARP
         first = row * Int64(blocks)
         got = _lane_results(
@@ -1170,10 +1178,11 @@ def _fill_entries(
 
 
 class _CacheFillKernel:
-    """Grid (rows * steps, vocab blocks), THREADS threads of FILL_BLOCK // THREADS
-    consecutive entries: scatter the gathered `[tp, rows, steps,
-    shard]` draft logits (rank stride `src_s0`) into the full-vocab cache. `vectorized`:
-    one 16-byte copy per thread (shard, vocab, strides and pointers 16-byte aligned)."""
+    """Grid (rows * steps, vocab blocks), THREADS threads of FILL_BLOCK //
+    THREADS consecutive entries: scatter the gathered `[tp, rows, steps,
+    shard]` draft logits (rank stride `src_s0`) into the full-vocab
+    cache. `vectorized`: one 16-byte copy per thread (shard, vocab,
+    strides and pointers 16-byte aligned)."""
 
     def __init__(self, *, vectorized: bool) -> None:
         self.vectorized = vectorized
@@ -1242,8 +1251,9 @@ class _CacheFillKernel:
 
 
 class Operand(NamedTuple):
-    """Where a BF16 operand of the step lies: its byte address and element strides,
-    which decide whether the step moves it in vectors (`vectorized`)."""
+    """Where a BF16 operand of the step lies: its byte address and element
+    strides, which decide whether the step moves it in vectors
+    (`vectorized`)."""
 
     address: int
     strides: tuple[int, ...]
@@ -1300,8 +1310,9 @@ def vectorized(
 def fill_vectorized(
     *, gathered: int, src_s0: int, cache: Operand, shard: int, vocab: int
 ) -> bool:
-    """Whether the cache fill copies 16-byte vectors: the shard, the vocab, the strides
-    and the pointers (`gathered` the address of the gathered logits) 16-byte aligned."""
+    """Whether the cache fill copies 16-byte vectors: the shard, the vocab,
+    the strides and the pointers (`gathered` the address of the gathered
+    logits) 16-byte aligned."""
     return (
         shard % 8 == 0
         and vocab % 8 == 0
@@ -1314,10 +1325,11 @@ def fill_vectorized(
 
 
 def copy_chunk(row_bytes: int, threads: int, *tensors: torch.Tensor) -> int:
-    """Bytes per access of a row copy by `threads` threads: up to 16, no more than a
-    thread's share (2 when a row is narrower than the threads), within the alignment of
-    every row pointer. The chunk divides the row bytes (both powers of two), so it is
-    the same for every row of a row-major table."""
+    """Bytes per access of a row copy by `threads` threads: up to 16, no
+    more than a thread's share (2 when a row is narrower than the threads),
+    within the alignment of every row pointer. The chunk divides the row
+    bytes (both powers of two), so it is the same for every row of a
+    row-major table."""
     chunk = 2
     while chunk < VECTOR_BYTES and chunk * 2 * threads <= row_bytes:
         chunk *= 2
@@ -1496,11 +1508,12 @@ def _launch_pick(
 
 class MarkovKernels:
     """The kernels of one loop over the BF16 Markov w1 table `w1` `[V,
-    R]` with Markov embedding rows in `embeds` and `width` vocab entries per rank (a
-    shard over `tp` ranks, or the whole vocab with `tp` None), compiled here, before
-    CUDA graph capture: the anchor, the step at each `(block, PDL, vector)` of `steps`,
-    and with a vocab shard the pick (`pick_pdl`) and the cache fill (`fill_vector`). A
-    step at another `(block, PDL, vector)` compiles when it first runs (never under
+    R]` with Markov embedding rows in `embeds` and `width` vocab entries
+    per rank (a shard over `tp` ranks, or the whole vocab with `tp`
+    None), compiled here, before CUDA graph capture: the anchor, the step at
+    each `(block, PDL, vector)` of `steps`, and with a vocab shard
+    the pick (`pick_pdl`) and the cache fill (`fill_vector`). A step at
+    another `(block, PDL, vector)` compiles when it first runs (never under
     capture)."""
 
     def __init__(
@@ -1625,7 +1638,8 @@ class MarkovKernels:
         step: int,
         emb: torch.Tensor,
     ) -> None:
-        """`markov_pick` over this loop's w1, `emb` a row view of `embeds`."""
+        """`markov_pick` over this loop's w1, `emb` a row view of
+        `embeds`."""
         _launch_pick(self._pick, packets, rows, tokens, step, self.w1, emb)
 
 
@@ -1636,8 +1650,9 @@ def anchor_embed(
     emb: torch.Tensor,
     arrivals: torch.Tensor,
 ) -> None:
-    """`emb[r] = w1[input_ids[anchor_idx[r]]]` and `arrivals[r] = 0` for the
-    `arrivals.numel()` rows (int32 ids, int64 anchors, rows of `emb` contiguous)."""
+    """`emb[r] = w1[input_ids[anchor_idx[r]]]` and `arrivals[r] = 0` for
+    the `arrivals.numel()` rows (int32 ids, int64 anchors, rows of `emb`
+    contiguous)."""
     assert input_ids.dtype == torch.int32 and anchor_idx.dtype == torch.int64
     row_bytes, chunk = _row_copy(w1, emb, THREADS)
     compile_anchor(row_bytes=row_bytes, chunk=chunk, w1_rows=w1.shape[0])(
@@ -1678,10 +1693,11 @@ def markov_step(
     block: int,
     pdl: bool,
 ) -> None:
-    """One step over `width` vocab entries from `vocab_offset` for the `base.shape[0]`
-    rows: `base` and `bias` BF16 rows, `cache` the draft-logits cache
-    `[req, step, vocab]` or, sharded, `[row, step, width]`, `idx_map` and `pos` the
-    step's int64 columns, `block_argmax` int64 and `block_max` FP32 with `rows * blocks`
+    """One step over `width` vocab entries from `vocab_offset` for the
+    `base.shape[0]` rows: `base` and `bias` BF16 rows, `cache` the
+    draft-logits cache `[req, step, vocab]` or, sharded, `[row, step,
+    width]`, `idx_map` and `pos` the step's int64 columns,
+    `block_argmax` int64 and `block_max` FP32 with `rows * blocks`
     elements, `packets` int32 `[rows, 4]`, `w1` and `emb` BF16."""
     for tensor, dtype in (
         (idx_map, torch.int64),

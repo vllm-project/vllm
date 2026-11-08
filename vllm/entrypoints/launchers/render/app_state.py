@@ -26,9 +26,10 @@ async def init_render_app_state(
 ) -> None:
     """Initialise FastAPI app state for a CPU-only render server.
 
-    Unlike `init_app_state` this function does not require an `EngineClient`; it
-    bootstraps the preprocessing pipeline (renderer, input_processor) directly from the
-    `VllmConfig`.
+    Unlike `init_app_state` this function does not require an
+    `EngineClient`; it bootstraps the
+    preprocessing pipeline (renderer, input_processor)
+    directly from the `VllmConfig`.
     """
     served_model_names = args.served_model_name or [args.model]
     model_registry = OpenAIModelRegistry(

@@ -102,8 +102,9 @@ class PeerBuffer:
 
 
 def tp_agree(ok: bool, group) -> bool:
-    """True when every rank of `group` passed `ok` true. Every rank must call it at the
-    same point; `group` is a CPU (gloo) process group, or None for a single rank."""
+    """True when every rank of `group` passed `ok` true. Every rank must call
+    it at the same point; `group` is a CPU (gloo) process group, or None for a
+    single rank."""
     if group is None:
         return ok
     flag = torch.tensor([int(ok)], dtype=torch.int32)

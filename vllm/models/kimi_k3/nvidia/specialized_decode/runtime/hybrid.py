@@ -18,8 +18,9 @@ layout) for attention, and runs the MLPs exactly as stock does:
   attention          the TP-G specialized input projection and core (KDA, DSA; the
                      wide-step providers of `providers.Attention`), the stock
                      o_proj partial, one all-reduce
-  MoE the stock SP MoE module on this rank's row shard (stock `sp_shard`, zero padding
-                     marked as padding for MegaMoE), all-gathered back to the group rows
+  MoE                the stock SP MoE module on this rank's row shard (stock
+                     `sp_shard`, zero padding marked as padding for MegaMoE),
+                     all-gathered back to the group rows
   dense MLP          the stock (replicated) dense MLP on all rows
 
 Precision is the stock layer's at every stage (BF16 GEMMs with FP32 accumulation,

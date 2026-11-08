@@ -11,18 +11,20 @@ The backend's tactics are close when tuned in isolation, but split-K tactics
 are slower inside the back-to-back PDL chain of a decode step, so the 5-8-row
 bucket of the GB300 TP4 shapes is tuned over one pinned tactic.
 
-Up to `WIDE_LOW_LATENCY_MAX_ROWS` rows the GB300 TP4 shapes keep the low-latency kernel,
-which the backend's runner offers only with an 8-row activation tile: this module
-compiles FlashInfer's kernel class itself with a 16-, 32- or 48-row tile and a fixed
-tactic per tile. The kernel loads the weights before its programmatic grid wait and lets
-its dependents launch once its weight loads are issued, so in the PDL chain of a decode
-step the weight read overlaps the previous kernel; `cute-dsl` waits before any load.
+Up to `WIDE_LOW_LATENCY_MAX_ROWS` rows the GB300 TP4 shapes keep the
+low-latency kernel, which the backend's runner offers only with an 8-row
+activation tile: this module compiles FlashInfer's kernel class itself with a
+16-, 32- or 48-row tile and a fixed tactic per tile. The kernel loads the
+weights before its programmatic grid wait and lets its dependents launch once
+its weight loads are issued, so in the PDL chain of a decode step the weight
+read overlaps the previous kernel; `cute-dsl` waits before any load.
 
-Above that, the projections stay on `cute-dsl`, whose tuner picks a tactic per
-power-of-two row bucket at every server start. Timed in isolation the candidates are
-close, so the pick varies from start to start, and inside a decode step one start's pick
-can be much slower than another's. The GB300 TP4 shapes therefore run a fixed tactic per
-row range, chosen in the chain of the three projections, and skip the tuner.
+Above that, the projections stay on `cute-dsl`, whose tuner picks a tactic
+per power-of-two row bucket at every server start. Timed in isolation the
+candidates are close, so the pick varies from start to start, and inside a
+decode step one start's pick can be much slower than another's. The GB300
+TP4 shapes therefore run a fixed tactic per row range, chosen in the chain of
+the three projections, and skip the tuner.
 """
 
 import importlib

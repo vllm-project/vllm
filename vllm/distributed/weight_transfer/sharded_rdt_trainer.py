@@ -162,11 +162,12 @@ class ShardedRDTTrainerInitInfo(TrainerInitInfo):
     workers_per_replica: int = 0
     """Consumers per inference DEPLOYMENT (`num_consumers // num_replicas`).
 
-    Fixes the slot-sharing groups: consumers whose ids differ by a multiple of this are
-    the same worker of different deployments, so they bake identical plans and pull
-    byte-identical chunks, and ONE registered serve slot can serve all of them. 0
-    disables sharing, and so does the single-deployment value `num_consumers`, which
-    makes every group a singleton and the serve path identical to the unshared one.
+    Fixes the slot-sharing groups: consumers whose ids differ by a multiple of
+    this are the same worker of different deployments, so they bake identical
+    plans and pull byte-identical chunks, and ONE registered serve slot can
+    serve all of them. 0 disables sharing, and so does the single-deployment
+    value `num_consumers`, which makes every group a singleton and the serve
+    path identical to the unshared one.
     """
     trainer_actor_namespace: str | None = None
     """Ray namespace the engine spawns its serve actors in. The inference
@@ -186,10 +187,11 @@ class ShardedRDTTrainerInitInfo(TrainerInitInfo):
 
 
 class _RDTProducerServer:
-    """Per-rank NIXL serve surface: an internal Ray actor sharing the trainer rank's GPU
-    over CUDA IPC. Holds the gather cache, per-consumer serve rings, the per-group free
-    barrier and the packed serve. The engine feeds it with `publish_group`; workers pull
-    with `rdt_produce_weights_batched` and signal with `free_group`.
+    """Per-rank NIXL serve surface: an internal Ray actor sharing the trainer
+    rank's GPU over CUDA IPC. Holds the gather cache, per-consumer serve rings,
+    the per-group free barrier and the packed serve. The engine feeds it with
+    `publish_group`; workers pull with `rdt_produce_weights_batched` and
+    signal with `free_group`.
 
     A plain class — the engine wraps it with `ray.remote(...)` at spawn so the
     actor options live in one place.

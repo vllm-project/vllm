@@ -144,8 +144,9 @@ def _resolve_fi_ar_backend(group: ProcessGroup) -> tuple[str | None, bool]:
     """Resolve the flashinfer allreduce backend for the current setup.
 
     Returns:
-        A `(backend, allow_trtllm_fallback)` tuple. `backend` is `None` when automatic
-        selection has no supported backend for the process group.
+        A `(backend, allow_trtllm_fallback)` tuple. `backend` is `None`
+        when automatic selection has no supported backend for the process
+        group.
 
     """
     backend = envs.VLLM_FLASHINFER_ALLREDUCE_BACKEND
@@ -204,10 +205,11 @@ def get_fi_ar_workspace(
 ):
     """Return the allreduce workspace for non-quant patterns, initializing if needed.
 
-    Used by AllReduceFusionPass (non-quant patterns) and FlashInferAllReduce for
-    standalone allreduce. Backend is controlled by VLLM_FLASHINFER_ALLREDUCE_BACKEND env
-    var. `resolved_backend` is a `_resolve_fi_ar_backend` result taken while the vLLM
-    config was current; lazy creation can run outside it.
+    Used by AllReduceFusionPass (non-quant patterns) and FlashInferAllReduce
+    for standalone allreduce. Backend is controlled by
+    VLLM_FLASHINFER_ALLREDUCE_BACKEND env var. `resolved_backend` is a
+    `_resolve_fi_ar_backend` result taken while the vLLM config was current;
+    lazy creation can run outside it.
     """
     global _fi_ar_workspace, _fi_ar_workspace_failed
     if _fi_ar_workspace is not None or _fi_ar_workspace_failed:

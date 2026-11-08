@@ -558,11 +558,12 @@ class OnlineDerenderer:
     ) -> tuple[str, DerenderStreamState]:
         """Incrementally detokenize `delta_token_ids` from prior stream state.
 
-        Resumes decoding from the offsets carried in `state` rather than replaying token
-        history. `state.prev_token_ids` holds the trailing decode window (from
-        `prefix_offset` onward) that `detokenize_incrementally` still needs to reproduce
-        any partially read multi-byte character (tracked by `read_offset`). The delta
-        tokens are fed straight onto it.
+        Resumes decoding from the offsets carried in `state` rather than
+        replaying token history. `state.prev_token_ids` holds the trailing
+        decode window (from `prefix_offset` onward) that
+        `detokenize_incrementally` still needs to reproduce any partially read
+        multi-byte character (tracked by `read_offset`). The delta tokens are
+        fed straight onto it.
 
         The window is bounded. `detokenize_incrementally` never reads before
         `prefix_offset`, so after each token we trim the window to that
@@ -799,13 +800,14 @@ class OnlineDerenderer:
         `parse_delta` (discarding the result) before processing this
         chunk's tokens for real.
 
-        Every chunk, replayed or live, goes through one `parse_delta` call with the
-        tokens it arrived with (more than one under e.g. speculative decoding). Replay
-        recovers those boundaries from `state.output_chunk_lens`, so the rebuilt parser
-        state matches standard serving, which calls `parse_delta` once per engine step.
-        Text comes from a fresh incremental detokenizer with special tokens preserved
-        (see `_decode_params`), seeded from the prompt tail on every call since replay
-        starts from scratch.
+        Every chunk, replayed or live, goes through one `parse_delta` call
+        with the tokens it arrived with (more than one under e.g.
+        speculative decoding). Replay recovers those boundaries from
+        `state.output_chunk_lens`, so the rebuilt parser state matches
+        standard serving, which calls `parse_delta` once per engine step.
+        Text comes from a fresh incremental detokenizer with special tokens
+        preserved (see `_decode_params`), seeded from the prompt tail on
+        every call since replay starts from scratch.
 
         Logprobs need no replay: a generate chunk's `logprobs` cover exactly
         that chunk's tokens, so they are resolved once and attached to
