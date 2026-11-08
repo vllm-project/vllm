@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MuseSpark1x post-expert finalize kernels: CuTe-DSL and Triton."""
+"""Muse Spark post-expert finalize kernels: CuTe-DSL and Triton."""
 
 import pytest
 import torch
@@ -36,7 +36,7 @@ def _ref_finalize(rows, norm_weight, weights, eps, weight_first, gain_center=1.0
 
 
 # 2048 is the widest row served by a single warp; wider rows reduce through
-# shared memory. MuseSpark1x's compressed MoE hidden dim is 4096.
+# shared memory. Muse Spark's compressed MoE hidden dim is 4096.
 @requires_cutedsl_finalize
 @pytest.mark.parametrize("hidden_dim", [2048, 4096])
 @pytest.mark.parametrize("weight_before_norm", [False, True])

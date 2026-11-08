@@ -519,7 +519,7 @@ class Unpooler:
         mailbox: LamportMailbox | None = None,
         **options: Any,
     ) -> "Unpooler":
-        """The unpooler of a MuseSpark1xMoE: rows [rank N, (rank + 1) N) of its
+        """The unpooler of a MuseSparkMoE: rows [rank N, (rank + 1) N) of its
         replicated [hidden, K] weight, N = hidden / tp (as the stock
         _project_local_columns takes them)."""
         weight = moe.unpooler.weight

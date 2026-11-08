@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pre-expert RMSNorm fused with the TRT-LLM MoE's NVFP4 input quantization.
 
-Matches ``MuseSpark1xRMSNorm`` (one BF16 rounding) followed by
+Matches ``MuseSparkRMSNorm`` (one BF16 rounding) followed by
 ``scaled_fp4_quant(..., is_sf_swizzled_layout=False)`` with the static global
 scale, and reads the pooler output either contiguous or in the rank-block
 layout ``[tp, M, H / tp]`` left by a column all-gather.

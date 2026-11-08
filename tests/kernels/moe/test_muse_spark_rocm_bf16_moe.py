@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MuseSpark1x ROCm MoE experts, deployment checks and post-expert finalize."""
+"""Muse Spark ROCm MoE experts, deployment checks and post-expert finalize."""
 
 from collections.abc import Callable
 from dataclasses import fields
@@ -875,9 +875,9 @@ def test_rocm_ep_ranks_sum_to_the_unsharded_output(
 
 
 def _post_expert_norm_module(hidden_size: int) -> torch.nn.Module:
-    from vllm.models.muse_spark.common.layers import MuseSpark1xRMSNormWithInputScale
+    from vllm.models.muse_spark.common.layers import MuseSparkRMSNormWithInputScale
 
-    norm = MuseSpark1xRMSNormWithInputScale(
+    norm = MuseSparkRMSNormWithInputScale(
         hidden_size=hidden_size,
         eps=1e-8,
         has_weight=True,

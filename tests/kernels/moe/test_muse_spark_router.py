@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Numeric unit tests for MuseSpark1xRouter and its fused Triton kernel."""
+"""Numeric unit tests for MuseSparkRouter and its fused Triton kernel."""
 
 import pytest
 import torch
 
-from vllm.models.muse_spark.common.ops.fused_routing import fused_musespark1x_routing
-from vllm.models.muse_spark.nvidia.muse_moe_runner import MuseSpark1xRouter
+from vllm.models.muse_spark.common.ops.fused_routing import fused_muse_spark_routing
+from vllm.models.muse_spark.nvidia.muse_moe_runner import MuseSparkRouter
 
 LOGITS = torch.tensor(
     [
@@ -47,7 +47,7 @@ def _route(
     division_eps=None,
     indices_type=None,
 ):
-    router = MuseSpark1xRouter(
+    router = MuseSparkRouter(
         top_k=top_k,
         num_experts=LOGITS.shape[-1],
         expert_bias=(bias if bias is not None else torch.zeros(LOGITS.shape[-1])),
@@ -117,7 +117,7 @@ def test_output_dtypes():
 
 def test_invalid_normalization_rejected():
     with pytest.raises(ValueError, match="router_score_normalization"):
-        MuseSpark1xRouter(
+        MuseSparkRouter(
             top_k=2,
             num_experts=4,
             expert_bias=torch.zeros(4),
@@ -141,7 +141,7 @@ def test_fused_routing_matches_reference(
     torch.manual_seed(0)
     logits = torch.randn(num_tokens, num_experts, device="cuda")
     bias = torch.randn(num_experts, device="cuda")
-    router = MuseSpark1xRouter(
+    router = MuseSparkRouter(
         top_k=top_k,
         num_experts=num_experts,
         expert_bias=bias,
@@ -151,7 +151,7 @@ def test_fused_routing_matches_reference(
         router_score_division_eps=division_eps,
     )
 
-    weights, ids = fused_musespark1x_routing(
+    weights, ids = fused_muse_spark_routing(
         logits,
         bias,
         top_k,
@@ -182,7 +182,7 @@ def test_fused_routing_writes_into_preallocated_buffers():
     weights = torch.full((64, top_k), -7.0, device="cuda")
     ids = torch.full((64, top_k), -7, device="cuda", dtype=torch.int32)
 
-    w_view, id_view = fused_musespark1x_routing(
+    w_view, id_view = fused_muse_spark_routing(
         logits, bias, top_k, 1.0, topk_weights=weights, topk_ids=ids
     )
     assert w_view.data_ptr() == weights.data_ptr()
@@ -199,11 +199,11 @@ def test_routing_padding_is_zero_with_nonfinite_logits(num_experts):
     logits = torch.randn(8, num_experts, device="cuda")
     bias = torch.randn(num_experts, device="cuda")
     padding = torch.zeros(8, dtype=torch.bool, device="cuda")
-    router = MuseSpark1xRouter(8, num_experts, bias, 1.0)
+    router = MuseSparkRouter(8, num_experts, bias, 1.0)
     expected_weights, expected_ids = router._compute_routing(None, logits, None)
 
     def route():
-        return fused_musespark1x_routing(logits, bias, 8, 1.0, is_padding=padding)
+        return fused_muse_spark_routing(logits, bias, 8, 1.0, is_padding=padding)
 
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
@@ -300,7 +300,7 @@ def test_cuda_muse_routing_matches_triton(tokens, case):
     assert torch.equal(w, ref_w)
     assert (i[padding] == -1).all()
     assert (w[padding] == 0).all()
-    out_w, out_i = fused_musespark1x_routing(
+    out_w, out_i = fused_muse_spark_routing(
         logits,
         bias,
         8,
@@ -332,7 +332,7 @@ def test_cuda_muse_routing_graph_replay():
     ids = torch.empty(48, 8, device="cuda", dtype=torch.int32)
 
     def route():
-        return fused_musespark1x_routing(
+        return fused_muse_spark_routing(
             logits,
             bias,
             8,

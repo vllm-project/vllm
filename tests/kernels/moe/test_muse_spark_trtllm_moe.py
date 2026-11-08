@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Numeric tests for the MuseSpark1x BF16/NVFP4 MoE on TRT-LLM and MegaMoE."""
+"""Numeric tests for the Muse Spark BF16/NVFP4 MoE on TRT-LLM and MegaMoE."""
 
 import functools
 
@@ -32,8 +32,8 @@ from vllm.distributed import get_tp_group
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.models.muse_spark.common.layers import (
-    MuseSpark1xRMSNorm,
-    MuseSpark1xRMSNormWithInputScale,
+    MuseSparkRMSNorm,
+    MuseSparkRMSNormWithInputScale,
 )
 from vllm.models.muse_spark.nvidia.mega_moe import MuseSparkMegaMoEExperts
 from vllm.models.muse_spark.nvidia.muse_moe_runner import (
@@ -204,7 +204,7 @@ def test_megamoe_bf16_nvfp4_shared_buffer(
     )
     torch.manual_seed(42)
     experts, hidden, intermediate, topk = 8, 4096, 1024, 4
-    norm = MuseSpark1xRMSNormWithInputScale(
+    norm = MuseSparkRMSNormWithInputScale(
         hidden_size=hidden,
         eps=1e-8,
         has_weight=True,
@@ -321,7 +321,7 @@ def test_megamoe_staging_preserves_quantization_and_padding(num_tokens):
 def test_muse_spark_bf16_moe_numeric(dist_init, workspace_init):
     """The norm sits between GEMM2 and the reduce, matching the fp32 reference."""
     ckpt = _bf16_checkpoint()
-    router, _, norm, vllm_config, runner = build_moe(MuseSpark1xRMSNorm, ckpt)
+    router, _, norm, vllm_config, runner = build_moe(MuseSparkRMSNorm, ckpt)
 
     x, logits = _inputs(1)
     out = run_moe(runner, vllm_config, x, logits)
@@ -344,7 +344,7 @@ def test_muse_spark_nvfp4_moe_numeric(dist_init, workspace_init):
     torch.manual_seed(0)
     ckpt = _nvfp4_checkpoint()
     router, routed, norm, vllm_config, runner = build_moe(
-        MuseSpark1xRMSNormWithInputScale, ckpt, nvfp4_quant_config()
+        MuseSparkRMSNormWithInputScale, ckpt, nvfp4_quant_config()
     )
 
     # Gate scalar from the w1 column, g1_scale_c from the w3 column.
@@ -392,7 +392,7 @@ def test_muse_spark_nvfp4_moe_numeric(dist_init, workspace_init):
 def test_muse_spark_bf16_moe_kernel_router_matches_reference(dist_init, workspace_init):
     """The fused router must select on biased scores but weight by unbiased ones."""
     ckpt = _bf16_checkpoint(seed=3)
-    router, routed, _, vllm_config, runner = build_moe(MuseSpark1xRMSNorm, ckpt)
+    router, routed, _, vllm_config, runner = build_moe(MuseSparkRMSNorm, ckpt)
 
     captured: list[UnfinalizedMoEOutput] = []
     experts = routed.quant_method.moe_kernel.fused_experts
@@ -438,7 +438,7 @@ def test_muse_spark_moe_cudagraph(nvfp4, dist_init, workspace_init):
         ckpt, quant_config = _nvfp4_checkpoint(), nvfp4_quant_config()
     else:
         ckpt, quant_config = _bf16_checkpoint(), None
-    _, _, _, vllm_config, runner = build_moe(MuseSpark1xRMSNorm, ckpt, quant_config)
+    _, _, _, vllm_config, runner = build_moe(MuseSparkRMSNorm, ckpt, quant_config)
     assert_cudagraph_replays(runner, vllm_config, *_inputs(5), *_inputs(6))
 
 
@@ -452,7 +452,7 @@ def test_megamoe_trtllm_weight_layout_matches_native(dist_init, workspace_init):
 
     torch.manual_seed(137)
     ckpt = _nvfp4_checkpoint()
-    norm = MuseSpark1xRMSNormWithInputScale(
+    norm = MuseSparkRMSNormWithInputScale(
         hidden_size=K,
         eps=1e-8,
         has_weight=True,

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CuTeDSL fused QK-norm for MuseSpark1x attention."""
+"""CuTeDSL fused QK-norm for Muse Spark attention."""
 
 import operator
 from typing import Any

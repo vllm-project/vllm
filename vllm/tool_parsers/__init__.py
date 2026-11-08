@@ -191,7 +191,7 @@ _TOOL_PARSERS_TO_REGISTER = {
         "MuseGlimmerToolParser",
     ),
     # Alias of "muse".
-    "musespark1x": (
+    "musespark": (
         "muse_tool_parser",
         "MuseToolParser",
     ),

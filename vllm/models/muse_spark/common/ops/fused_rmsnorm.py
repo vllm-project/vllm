@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton RMSNorm for MuseSpark1x, optionally fused with the gated residual add."""
+"""Triton RMSNorm for Muse Spark, optionally fused with the gated residual add."""
 
 import torch
 

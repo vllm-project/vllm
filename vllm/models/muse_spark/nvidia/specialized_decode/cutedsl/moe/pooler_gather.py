@@ -592,7 +592,7 @@ class PoolerLayer(NamedTuple):
 
 
 def pooler_layer(moe: Any, tp: int, rank: int) -> PoolerLayer:
-    """The pooler of one stock MuseSpark1xMoE, checked against what the fused
+    """The pooler of one stock MuseSparkMoE, checked against what the fused
     path assumes (the stock path's own conditions for its fused gather)."""
     weight = moe.pooler.weight
     if weight.shape != (POOLED, HIDDEN) or weight.dtype != torch.bfloat16:

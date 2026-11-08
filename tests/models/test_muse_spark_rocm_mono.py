@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Host side of the Muse Spark monokernel (``--monokernel``).
 
-The guards run on real vLLM configs and on a tiny real MuseSpark1x model
+The guards run on real vLLM configs and on a tiny real Muse Spark model
 (Quark MXFP4 experts, ROCm AITER FA, a bf16 LBHNC KV cache). The FlyDSL
 launches build only for the TEP8 checkpoint shapes, so the step tests run
 them as the stock layer pieces they replace: from layer i's attention output
@@ -352,7 +352,7 @@ def _on_gfx950() -> bool:
 
 
 requires_gfx950 = pytest.mark.skipif(
-    not _on_gfx950(), reason="MuseSpark1x on ROCm needs AITER's gfx950 kernels"
+    not _on_gfx950(), reason="Muse Spark on ROCm needs AITER's gfx950 kernels"
 )
 
 
@@ -766,7 +766,7 @@ class Step:
         ).to(device)
 
     def run(self, tiny: TinyModel, mode=CUDAGraphMode.NONE):
-        """MuseSpark1xModel.forward on zeroed KV caches; returns the hidden
+        """MuseSparkModel.forward on zeroed KV caches; returns the hidden
         states, the aux hidden states and the KV caches after the step."""
         from vllm.forward_context import set_forward_context
         from vllm.v1.worker.utils import bind_kv_cache
