@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Checkpoint FP8 KV-cache scales must reach MiniMax-M3's sparse attention.
 
-``MiniMaxM3SparseAttention`` owns its KV cache (it is not ``Attention``), so
-its scales live at ``<prefix>.self_attn.{k,v}_scale``.
+`MiniMaxM3SparseAttention` owns its KV cache (it is not `Attention`), so
+its scales live at `<prefix>.self_attn.{k,v}_scale`.
 """
 
 import pytest
