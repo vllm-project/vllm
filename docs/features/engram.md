@@ -172,6 +172,46 @@ and falls back to per-replica (or DP-sharded) tables with a warning when:
 Requirements: `cpu_offload` enabled, `--data-parallel-size > 1`, and a shared
 IPC namespace across the co-located replicas.
 
+## Troubleshooting host-memory exhaustion
+
+CPU offload saves GPU memory but still requires host memory for the Engram
+tables. Budget for checkpoint-loading buffers, file cache, and the other
+processes in the container as well as the resident tables. Sufficient GPU
+memory alone does not establish that a DeepSeek-V4.1 deployment can load.
+
+Distinguish two limits when diagnosing a worker killed during loading:
+
+- **Shared-memory filesystem capacity:** `df -h /dev/shm` shows whether the
+  filesystem has space for shared tables. Increasing `--shm-size` addresses
+  this limit, but does not increase the container's host-memory allowance.
+- **Container memory allowance:** inspect the worker's memory cgroup and the
+  kernel or container-runtime OOM report. A memory-cgroup OOM is different
+  from a CUDA out-of-memory error; reducing GPU KV-cache allocation does not
+  resolve a host-memory limit reached while loading weights.
+
+For a container whose cgroup mount is rooted at its own memory cgroup, these
+read-only commands show current usage, the configured limit, and limit events:
+
+```bash
+# cgroup v2
+cat /sys/fs/cgroup/memory.current
+cat /sys/fs/cgroup/memory.max
+cat /sys/fs/cgroup/memory.events
+cat /sys/fs/cgroup/memory.stat
+```
+
+On cgroup v1, the corresponding files are commonly under
+`/sys/fs/cgroup/memory/`: `memory.usage_in_bytes`, `memory.limit_in_bytes`,
+`memory.failcnt`, and `memory.stat`. Mounts and cgroup paths vary; collect the
+worker container's counters rather than another container's or the host root's.
+
+In [cgroup v2 accounting](https://docs.kernel.org/admin-guide/cgroup-v2.html#memory),
+`file` includes shared memory and tmpfs, while `shmem` identifies the
+swap-backed subset. Do not add these counters together, or assume that
+`shmem` measures only files visible in `/dev/shm`. Include the vLLM version,
+Engram configuration, TP/DP topology, memory limit, and counter samples taken
+during loading when reporting a host-memory failure.
+
 ## Limitations
 
 - CUDA-alike platforms only.
