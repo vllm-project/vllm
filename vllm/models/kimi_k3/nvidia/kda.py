@@ -3,7 +3,7 @@
 
 from collections.abc import Callable
 from dataclasses import replace
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import torch
 from einops import rearrange
@@ -81,6 +81,9 @@ from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.kernels.kda.deferred_recoverssm import KdaDeferredVerify
 
 logger = init_logger(__name__)
 
@@ -732,6 +735,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.recoverssm_backend: Literal["cute", "triton"] | None = None
         self.recoverssm_records: KDARecoverSSMRecords | None = None
         self.recoverssm_verify: CuteRecoverSSMVerify | None = None
+        # Deferred RecoverSSM (FP32 state, SM10x): each verify replays the last
+        # step's accepted tokens itself and runs the conv, the F_B gate and the
+        # gated RMSNorm with it; the commit after sampling only records them
+        # (installed with the runner state, see model_state.py).
+        self.deferred_verify: KdaDeferredVerify | None = None
         if self.use_recoverssm:
             self.recoverssm_records = KDARecoverSSMRecords.allocate(
                 vllm_config.scheduler_config.max_num_seqs,
@@ -768,6 +776,36 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 lower_bound=self.gate_lower_bound,
             )
             self.recoverssm_backend = "cute" if supported else "triton"
+            bf16, f32 = torch.bfloat16, torch.float32
+            dtypes = (
+                vllm_config.model_config.dtype,
+                conv_state_dtype,
+                recurrent_state_dtype,
+                self.f_b_proj.weight.dtype,
+            )
+            if (
+                self.recoverssm_backend == "triton"
+                and current_platform.is_cuda()
+                and current_platform.is_device_capability_family(100)
+                and (self.head_dim, self.conv_size) == (128, 4)
+                and self.conv1d.bias is None
+                and self.gate_lower_bound is not None
+                and dtypes == (bf16, bf16, f32, bf16)
+            ):
+                from vllm.model_executor.kernels.kda import deferred_recoverssm
+
+                if deferred_recoverssm.tensor_cores_fit(
+                    self.local_num_heads,
+                    self.spec_query_len,
+                    is_conv_state_dim_first(),
+                    bf16.itemsize,
+                    max_num_seqs,
+                    self.conv1d.weight.device,
+                ):
+                    logger.info_once("Using the deferred KDA RecoverSSM verify.")
+                    self.deferred_verify = deferred_recoverssm.KdaDeferredVerify(
+                        self.local_num_heads, self.spec_query_len, max_num_seqs
+                    )
             if self.recoverssm_backend == "triton":
                 logger.info_once(
                     "Using the Triton KDA RecoverSSM verify and commit: the CuTe "
@@ -794,6 +832,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if (
             self.kda_decode_backend != "triton"
             or self.kda_spec_decode_backend == "flashinfer"
+            or self.deferred_verify is not None
         ):
             decode_conv1d_weight = torch.empty(
                 3,
@@ -946,7 +985,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 run_kda_projection_overlap,
             )
 
-            projected_qkvg, g1, beta = run_kda_projection_overlap(
+            projected_qkvg, g1, beta, f_a = run_kda_projection_overlap(
                 hidden_states,
                 self.in_proj_qkvgfab.weight,
                 self.f_b_proj.weight,
@@ -981,6 +1020,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
         self._forward(
             mixed_qkv=mixed_qkv,
+            f_a=f_a,
             g1=g1,
             g2=g2,
             beta=beta,
@@ -1083,6 +1123,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
     def _forward(
         self,
         mixed_qkv: torch.Tensor,
+        f_a: torch.Tensor,
         g1: torch.Tensor,
         g2: torch.Tensor,
         beta: torch.Tensor,
@@ -1119,6 +1160,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         checkpoint = m.checkpoint
         has_spec_decode = m.num_spec_decodes > 0
         mixed_qkv = mixed_qkv[:num_actual_tokens]
+        f_a = f_a[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
 
@@ -1250,6 +1292,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         # Spec-decode multi-query path.
         core_attn_out_spec = None
+        spec_normalized = False
         if has_spec_decode:
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
@@ -1261,7 +1304,55 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             )
             if spec_token_start is not None:
                 spec_out = core_attn_out[:, spec_slice]
-            if self.use_recoverssm:
+            deferred = getattr(m, "recoverssm_deferred", None)
+            if (
+                deferred is not None
+                and self.deferred_verify is not None
+                # q tokens per request
+                and m.num_spec_decode_tokens == m.num_spec_decodes * self.spec_query_len
+            ):
+                if spec_out is None:
+                    assert spec_token_indx is not None
+                    f_a_spec = f_a.index_select(0, spec_token_indx)
+                    g2_spec = g2.index_select(0, spec_token_indx)
+                    spec_out = core_attn_out.new_empty(
+                        (1, mixed_qkv_spec.shape[0], *core_attn_out.shape[2:])
+                    )
+                else:
+                    start = spec_token_start or 0
+                    rows = slice(start, start + mixed_qkv_spec.shape[0])
+                    f_a_spec, g2_spec = f_a[rows], g2[rows]
+                records = self.recoverssm_records
+                assert records is not None
+                assert num_accepted_tokens is not None
+                assert self.decode_conv1d_weight is not None
+                assert self.decode_norm_weight is not None
+                assert self.gate_lower_bound is not None
+                self.deferred_verify(
+                    qkv=mixed_qkv_spec,
+                    gate=g2_spec.flatten(-2),
+                    f_a=f_a_spec,
+                    beta=beta_spec[0],
+                    conv_weight=self.decode_conv1d_weight,
+                    conv_state=conv_state,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    f_b_weight=self.f_b_proj.weight,
+                    norm_weight=self.decode_norm_weight,
+                    norm_eps=self.o_norm.eps,
+                    lower_bound=self.gate_lower_bound,
+                    state=recurrent_state,
+                    state_indices=spec_state_indices_tensor[: m.num_spec_decodes],
+                    num_accepted_tokens=num_accepted_tokens,
+                    correction=records.correction,
+                    key_gate=records.key_gate,
+                    record_rows=deferred.record_rows,
+                    pending=deferred.pending,
+                    out=spec_out[0].flatten(-2),
+                )
+                core_attn_out_spec = spec_out
+                spec_normalized = True
+            elif self.use_recoverssm:
                 core_attn_out_spec = self._recoverssm_verify(
                     m,
                     mixed_qkv_spec,
@@ -1551,4 +1642,17 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             assert core_attn_out_spec is not None
         # Triton normalizes in place, so this is a self-copy with no device
         # work. Keep it for the out-of-place native implementation.
-        core_attn_out.copy_(self.o_norm(core_attn_out, g2))
+        if not spec_normalized:
+            core_attn_out.copy_(self.o_norm(core_attn_out, g2))
+        elif core_attn_out_non_spec is not None:
+            # The deferred verify wrote the speculative rows normalized.
+            if spec_token_start is not None:
+                rows_out = core_attn_out[:, non_spec_slice]
+                rows_out.copy_(self.o_norm(rows_out, g2[non_spec_slice]))
+            else:
+                assert non_spec_token_indx is not None
+                rows_out = core_attn_out.index_select(1, non_spec_token_indx)
+                gate_ns = g2.index_select(0, non_spec_token_indx)
+                core_attn_out.index_copy_(
+                    1, non_spec_token_indx, self.o_norm(rows_out, gate_ns)
+                )

@@ -764,7 +764,7 @@ def run_kda_projection_overlap(
     f_b_weight: torch.Tensor,
     aux_stream: torch.cuda.Stream,
     events: tuple[torch.cuda.Event, torch.cuda.Event],
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run the TP8 KDA decode projection branches concurrently.
 
     Args:
@@ -776,7 +776,7 @@ def run_kda_projection_overlap(
         events: Start and completion events for the stream fork and join.
 
     Returns:
-        The Q/K/V/G projection, F_B output, and beta projection.
+        The Q/K/V/G projection, F_B output, beta projection and F_A projection.
 
     """
     num_tokens = hidden_states.shape[0]
@@ -803,7 +803,7 @@ def run_kda_projection_overlap(
             )
         return torch.mm(hidden_states, qkvg_weight.t())
 
-    def run_fab_fb() -> tuple[torch.Tensor, torch.Tensor]:
+    def run_fab_fb() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if num_tokens == 1:
             projected_fab = shape_dynamic_skinny_gemm(
                 hidden_states,
@@ -817,6 +817,7 @@ def run_kda_projection_overlap(
                 (1, 1536), dtype=hidden_states.dtype, device=hidden_states.device
             )
             ops.dsv3_fused_a_gemm(g1, f_a, f_b_weight.t(), enable_pdl=True)
+            return g1, beta, f_a
         else:
             from vllm.models.kimi_k3.nvidia.ops.cute_dsl.kda_skinny_gemm import (
                 kda_skinny_gemm,
@@ -837,16 +838,16 @@ def run_kda_projection_overlap(
                 g1 = kda_skinny_gemm.run_k(projected_fab, f_b_weight)
             else:
                 g1 = torch.mm(projected_fab[:, :128], f_b_weight.t())
-        return g1, beta
+            return g1, beta, projected_fab[:, :128]
 
-    projected_qkvg, (g1, beta) = maybe_execute_in_parallel(
+    projected_qkvg, (g1, beta, f_a) = maybe_execute_in_parallel(
         run_qkvg,
         run_fab_fb,
         events[0],
         events[1],
         aux_stream,
     )
-    return projected_qkvg, g1, beta
+    return projected_qkvg, g1, beta, f_a
 
 
 def autotune_kda_qkvg(model: nn.Module) -> None:

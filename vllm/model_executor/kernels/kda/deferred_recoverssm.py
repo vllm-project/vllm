@@ -27,14 +27,13 @@ import cutlass.cute as cute
 import torch
 from cutlass.cute.runtime import make_fake_stream
 
-from vllm.models.common.ops.moe_tail_fusion.primitives import to_cute
 from vllm.triton_utils import tl, triton
 
 from .cute_dsl import fused_tc, fused_ws
 from .cute_dsl.fused import KdaFused
 from .cute_dsl.fused_tc import KdaFusedTC
 from .cute_dsl.fused_ws import KdaFusedWS
-from .cute_dsl.host import fake, layout, stream
+from .cute_dsl.host import fake, layout
 
 K = 128
 # (request, head) items from which KdaFusedWS takes the step where KdaFusedTC does not
@@ -52,10 +51,22 @@ def decode_conv_weight(weight: torch.Tensor) -> torch.Tensor:
     return weight.detach().view(3, -1, width).transpose(1, 2).contiguous()
 
 
-def _kernel(heads, requests, tokens, conv_state, qkv):
+def tensor_cores_fit(heads, tokens, conv_dim_first, conv_size, max_requests, device):
+    """Whether KdaFusedTC runs a layer of ``heads`` x 128 at q ``tokens`` (conv
+    window q + 2 of ``conv_size``-byte elements) for steps of up to
+    ``max_requests`` requests: its operands fit shared memory."""
+    sms = torch.cuda.get_device_properties(device).multi_processor_count
+    items = fused_tc.cta_items(heads, max_requests, sms)
+    smem = fused_tc.shared_bytes(
+        tokens, tokens, conv_dim_first, tokens + 2, conv_size, items
+    )
+    return tokens >= 3 and 2 * tokens <= fused_tc.PROBES and smem <= fused_tc.SMEM_LIMIT
+
+
+def _kernel(heads, max_requests, requests, tokens, conv_state, qkv):
     """KdaFusedTC where its operands stream in (16-byte aligned rows, a conv window
-    of at least q + 2) and fit shared memory, else KdaFusedWS from WS_MIN_ITEMS
-    items, else KdaFused."""
+    of at least q + 2) and fit shared memory at ``max_requests`` requests (any
+    batch up to that), else KdaFusedWS from WS_MIN_ITEMS items, else KdaFused."""
     items = heads * requests
     shape, stride = conv_state.shape, conv_state.stride()
     window = shape[-1]
@@ -66,11 +77,13 @@ def _kernel(heads, requests, tokens, conv_state, qkv):
         aligned = aligned and (stride[-1] * size) % 16 == 0
     streams = aligned and window >= tokens + 2 and tokens >= 3
     sms = torch.cuda.get_device_properties(qkv.device).multi_processor_count
+    if (
+        streams
+        and window == tokens + 2
+        and tensor_cores_fit(heads, tokens, dim_first, size, max_requests, qkv.device)
+    ):
+        return KdaFusedTC(heads, tokens, 0, False, dim_first, window, sms, max_requests)
     ctas = -(-items // max(2, -(-items // sms)))
-    cta_items = fused_tc.cta_items(heads, requests, ctas)
-    tc = fused_tc.shared_bytes(tokens, tokens, dim_first, window, size, cta_items)
-    if streams and 2 * tokens <= fused_tc.PROBES and tc <= fused_tc.SMEM_LIMIT:
-        return KdaFusedTC(heads, tokens, 0, False, dim_first, window, ctas)
     if streams and items >= WS_MIN_ITEMS:
         smem = partial(fused_ws.shared_bytes, tokens, tokens, dim_first, window, size)
         stage_fb = smem(True) <= fused_ws.SMEM_LIMIT
@@ -82,12 +95,18 @@ def _kernel(heads, requests, tokens, conv_state, qkv):
     return KdaFused(heads, tokens, 0, False, split)
 
 
-class KdaDeferredVerify:
-    """The deferred RecoverSSM verify of one KDA layer shape (heads, window); the
-    kernels compile per operand layout (batch), before CUDA graph capture."""
+# The operands whose leading dimension follows the batch (or the cache's slots).
+_BATCH_OPERANDS = frozenset((0, 3, 4, 5, 8, 9, 10, 11, 14, 15, 16, 17, 18))
 
-    def __init__(self, num_heads: int, window: int) -> None:
+
+class KdaDeferredVerify:
+    """The deferred RecoverSSM verify of one KDA layer shape (heads, window) for
+    steps of up to ``max_requests`` requests. KdaFusedTC compiles once per operand
+    layout with the batch read at run time; the fallbacks compile per batch."""
+
+    def __init__(self, num_heads: int, window: int, max_requests: int) -> None:
         self.num_heads, self.window = num_heads, window
+        self.max_requests = max_requests
         self._compiled: dict[tuple, Callable[..., None]] = {}
 
     def __call__(
@@ -134,18 +153,35 @@ class KdaDeferredVerify:
             record_rows[:requests], pending,
         )  # fmt: skip
         scalars = tuple(map(cutlass.Float32, (lower_bound, K**-0.5, norm_eps)))
-        key = tuple(map(layout, operands))
+        assert requests <= self.max_requests
+        kernel = _kernel(
+            self.num_heads, self.max_requests, requests, self.window, conv_state, qkv
+        )
+        specs = list(map(layout, operands))
+        if isinstance(kernel, KdaFusedTC):
+            for i in _BATCH_OPERANDS:
+                shape, stride, dtype = specs[i]
+                specs[i] = ((None, *shape[1:]), stride, dtype)
+        key = (type(kernel), *specs)
         compiled = self._compiled.get(key)
         if compiled is None:
-            kernel = _kernel(self.num_heads, requests, self.window, conv_state, qkv)
-            fakes = tuple(fake(*spec) for spec in key)
+            fakes = []
+            for shape, stride, dtype in specs:
+                if shape[0] is None:
+                    shape = (cute.sym_int(), *shape[1:])
+                fakes.append(fake(shape, stride, dtype))
             with torch.accelerator.device_index(qkv.device.index):
                 compiled = cute.compile(
-                    kernel, *fakes[:13], *scalars, *fakes[13:], make_fake_stream()
+                    kernel,
+                    *fakes[:13],
+                    *scalars,
+                    *fakes[13:],
+                    make_fake_stream(use_tvm_ffi_env_stream=True),
+                    options="--enable-tvm-ffi",
                 )
             self._compiled[key] = compiled
-        views = tuple(to_cute(t, 16) for t in operands)
-        compiled(*views[:13], *scalars, *views[13:], stream(qkv.device))
+        # TVM-FFI launch on the current stream, straight from the torch tensors.
+        compiled(*operands[:13], lower_bound, K**-0.5, norm_eps, *operands[13:])
         return out
 
 

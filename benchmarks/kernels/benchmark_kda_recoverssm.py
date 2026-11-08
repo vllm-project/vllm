@@ -280,10 +280,10 @@ def benchmark_batch(args, heads, num_layers, window, batch) -> dict:
     rows = torch.randperm(batch, device="cuda", generator=gen).int()
     pending = torch.full((batch,), args.accepted, dtype=torch.int32, device="cuda")
     out = torch.empty(batch * window, heads * K, dtype=torch.bfloat16, device="cuda")
-    verify = KdaDeferredVerify(heads, window)
+    verify = KdaDeferredVerify(heads, window, batch)
     check(layers[0], verify, inputs, slots, starts, ones, accepted, window)
     kernel = deferred_recoverssm._kernel(
-        heads, batch, window, conv_view(layers[0]), inputs[0]
+        heads, batch, batch, window, conv_view(layers[0]), inputs[0]
     )
 
     ctx = KDARecoverSSMCommitContext.create(

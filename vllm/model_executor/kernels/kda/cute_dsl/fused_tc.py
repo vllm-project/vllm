@@ -278,7 +278,7 @@ def staging_bytes(tokens, rq, conv_dim_first, window, conv_size):
 
 
 def cta_items(heads, requests, ctas):
-    """Items of the CTA with the most."""
+    """Items of the CTA with the most at ``requests`` requests."""
     tiles = -(-requests // TILE) * heads
     return -(-tiles // ctas) * TILE
 
@@ -293,13 +293,15 @@ def shared_bytes(tokens, rq, conv_dim_first, window, conv_size, items):
 
 
 class KdaFusedTC(KdaFusedWS):
-    """KdaFused's operands and semantics on ``ctas`` persistent CTAs."""
+    """KdaFused's operands and semantics on ``ctas`` persistent CTAs, for steps of
+    up to ``max_requests`` requests (the batch is read at run time)."""
 
     def __init__(self, heads, tokens, gate_mode, has_bias, conv_dim_first, window,
-                 ctas):  # fmt: skip
+                 ctas, max_requests):  # fmt: skip
         assert 2 <= 2 * tokens <= PROBES and gate_mode in (0, 1)
         super().__init__(heads, tokens, gate_mode, has_bias, conv_dim_first, window,
                          ctas)  # fmt: skip
+        self.max_requests = max_requests
 
     @cute.jit
     def __call__(self, *args):
@@ -338,7 +340,7 @@ class KdaFusedTC(KdaFusedWS):
     def tile_count(self, args):
         """This CTA's head tiles (tile t: requests TILE (t // H) ..., head t % H)."""
         requests = args[10].shape[0] // self.tokens
-        tiles = -(-requests // TILE) * self.heads
+        tiles = (requests + TILE - 1) // TILE * self.heads
         cta, _, _ = cute.arch.block_idx()
         return (Int32(tiles) - Int32(cta) + self.ctas - 1) // self.ctas
 
@@ -405,7 +407,7 @@ class KdaFusedTC(KdaFusedWS):
         weights, bias, beta = args[1], args[2], args[5]
         a_log, dt_bias = args[6], args[7]
         dim: cutlass.Constexpr = self.heads * K
-        requests: cutlass.Constexpr = args[10].shape[0] // self.tokens
+        requests = args[10].shape[0] // self.tokens
         cta, _, _ = cute.arch.block_idx()
         tile = Int32(cta) + (j // TILE) * self.ctas
         head = tile % self.heads
@@ -490,8 +492,9 @@ class KdaFusedTC(KdaFusedWS):
         psums = alloc(smem, Float32, (2, 64, 4))
         out_sums = alloc(smem, Float32, (8, 4))
         gate_s = alloc(smem, BFloat16, (2, self.tokens, K), align=16)
-        requests: cutlass.Constexpr = args[10].shape[0] // T
-        table = alloc(smem, Int32, (cta_items(self.heads, requests, self.ctas), 3))
+        requests = args[10].shape[0] // T
+        items: cutlass.Constexpr = cta_items(self.heads, self.max_requests, self.ctas)
+        table = alloc(smem, Int32, (items, 3))
         bars = alloc(smem, cutlass.Int64, (24,), align=8)
         tmem_base = alloc(smem, Uint32, (1,), align=4)
         b0 = bars.iterator
