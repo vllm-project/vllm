@@ -99,7 +99,7 @@ def flashinfer_bf16_mm(
 
 # This is the storage path for the cubins, it can be replaced
 # with a local path for testing.
-# Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35  # noqa: E501
+# Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35
 FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
     "FLASHINFER_CUBINS_REPOSITORY",
     "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/",  # noqa: E501
@@ -451,23 +451,20 @@ def has_flashinfer_packed_fused_kda_decode() -> bool:
 
 @functools.cache
 def has_flashinfer_nvlink_two_sided() -> bool:
-    """Return `True` if FlashInfer mnnvl all2all is available."""
+    """Return whether FlashInfer exposes the NVLink two-sided MoE EP wrapper."""
     if not has_flashinfer_comm():
         return False
-
-    # Check if all required functions are available
-    required_functions = [
-        ("flashinfer.comm", "Mapping"),
-        ("flashinfer.comm.mnnvl", "MnnvlMemory"),
-        ("flashinfer.comm.trtllm_alltoall", "MnnvlMoe"),
-        ("flashinfer.comm.trtllm_alltoall", "MoEAlltoallInfo"),
-    ]
-
-    for module_name, attr_name in required_functions:
-        mod = _get_submodule(module_name)
-        if not mod or not hasattr(mod, attr_name):
-            return False
-    return True
+    mod = _get_submodule("flashinfer.moe_ep")
+    return mod is not None and all(
+        hasattr(mod, name)
+        for name in (
+            "BootstrapConfig",
+            "MoEEpCommParams",
+            "NVLinkTwoSidedAlltoAll",
+            "NVLinkTwoSidedConfig",
+            "create_communication",
+        )
+    )
 
 
 @functools.cache

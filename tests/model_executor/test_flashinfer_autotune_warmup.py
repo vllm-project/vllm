@@ -16,6 +16,7 @@ import torch
 
 import vllm.model_executor.warmup.kernel_warmup as warmup
 import vllm.utils.flashinfer as fi_utils
+from vllm.config.utils import hash_config
 from vllm.model_executor.warmup.kernel_warmup import (
     _flashinfer_autotune_token_counts,
     _run_flashinfer_autotune_dummy_runs,
@@ -58,6 +59,7 @@ def _make_runner(modules, *, max_tokens: int = 8192):
             return_value=SimpleNamespace(modules=Mock(return_value=modules))
         ),
         _dummy_run=Mock(),
+        speculator=None,
     )
 
 
@@ -92,11 +94,10 @@ def test_flashinfer_autotune_token_counts_are_bounded_and_deduplicated():
 
 @pytest.mark.parametrize("skip_attn", [False, True])
 def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run(skip_attn):
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as V2Runner
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner as V1Runner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
     runner = _make_runner([])
-    dummy_run_signature = signature((V2Runner if skip_attn else V1Runner)._dummy_run)
+    dummy_run_signature = signature(GPUModelRunner._dummy_run)
     runner._dummy_run.side_effect = lambda **kwargs: dummy_run_signature.bind(
         None, **kwargs
     )
@@ -296,7 +297,7 @@ def test_flashinfer_autotune_lifecycle(
     [(1, False, 1), (2, False, 1), (1, True, 1), (1, False, 2)],
 )
 @pytest.mark.parametrize("world_size,rank", [(1, 0), (2, 0), (2, 1)])
-@pytest.mark.parametrize("model_runner_v2,max_reqs", [(False, 2), (True, 1), (True, 2)])
+@pytest.mark.parametrize("max_reqs", [1, 2])
 def test_sparse_autotune_respects_cache_selection(
     monkeypatch,
     tmp_path,
@@ -305,19 +306,17 @@ def test_sparse_autotune_respects_cache_selection(
     pp_size,
     world_size,
     rank,
-    model_runner_v2,
     max_reqs,
 ):
     import vllm.model_executor.warmup.flashinfer_sparse_mla_warmup as sparse
 
     runner = _make_runner([])
     runner.max_num_reqs = max_reqs
-    runner.vllm_config.use_v2_model_runner = model_runner_v2
     runner.vllm_config.kernel_config = SimpleNamespace(enable_flashinfer_autotune=True)
     runner.vllm_config.parallel_config.enable_elastic_ep = elastic_ep
     runner.vllm_config.parallel_config.pipeline_parallel_size = pp_size
     runner.vllm_config.compilation_config = SimpleNamespace(cudagraph_capture_sizes=[])
-    runner.uniform_decode_query_len = runner.decode_query_len = 1
+    runner.decode_query_len = 1
     worker = SimpleNamespace(
         model_runner=runner,
         vllm_config=runner.vllm_config,
@@ -399,7 +398,7 @@ def test_sparse_autotune_respects_cache_selection(
         world.broadcast_object.assert_not_called()
         tuner.load_configs.assert_not_called()
         assert world.barrier.call_count == (1 if world_size > 1 else 0)
-    assert mixed.call_count == (1 if model_runner_v2 and max_reqs >= 2 else 0)
+    assert mixed.call_count == (1 if max_reqs >= 2 else 0)
     assert runner._dummy_run.call_count == (0 if mixed.called else 1)
 
 
@@ -680,14 +679,11 @@ def test_autotune_cache_key_normalizes_kv_init_fields():
     mutated.kv_cache_layout = "LBHNC"
 
     # Negative control: the write-backs are hashed factors.
-    assert mutated.compute_hash() != fresh.compute_hash()
+    assert hash_config(mutated) != hash_config(fresh)
     normalized = _normalize_cache_config_for_hash(mutated)
-    assert normalized.compute_hash() == fresh.compute_hash()
+    assert hash_config(normalized) == hash_config(fresh)
     # Factory state is returned untouched.
     assert _normalize_cache_config_for_hash(fresh) is fresh
     # block_size stays significant (the daemon keys on the resolved value).
-    resolved = CacheConfig(block_size=64)
-    assert (
-        _normalize_cache_config_for_hash(resolved).compute_hash()
-        != fresh.compute_hash()
-    )
+    resolved = CacheConfig(block_size=32)
+    assert hash_config(_normalize_cache_config_for_hash(resolved)) != hash_config(fresh)

@@ -220,7 +220,7 @@ class Gemma4MTPAttention(nn.Module):
         )
 
         # kv_sharing_target_layer_name is set after model construction
-        # by Gemma4Proposer._setup_gemma4_kv_sharing().
+        # by Gemma4Speculator._setup_gemma4_kv_sharing().
         self.is_kv_shared_layer = True
         self.attn = Attention(
             self.num_heads,
@@ -551,11 +551,7 @@ class Gemma4MTP(nn.Module):
     def _get_full_lm_head_weight(self) -> torch.Tensor:
         if self._stable_full_lm_head_weight is not None:
             return self._stable_full_lm_head_weight
-        lm_head_weight = self._gather_full_lm_head_weight()
-        if get_tensor_model_parallel_world_size() > 1:
-            # only when post-load processing never ran
-            self._stable_full_lm_head_weight = lm_head_weight
-        return lm_head_weight
+        return self._gather_full_lm_head_weight()
 
     def _gather_full_lm_head_weight(self) -> torch.Tensor:
         assert self.masked_embedding is not None
