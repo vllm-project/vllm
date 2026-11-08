@@ -22,7 +22,7 @@ SF_ROW_TILE = 128
 
 @triton.jit
 def _swizzled_scale_offsets(row, g, PADDED_COLS: tl.constexpr):
-    """Offsets of row ``row``'s UE8M0 scales (blocks ``g``) in the 128x4
+    """Offsets of row `row`'s UE8M0 scales (blocks `g`) in the 128x4
     swizzled layout [m_tile, k_tile, 32, 4, 4]."""
     SF_ROW_TILE: tl.constexpr = 128
     return (
@@ -38,7 +38,7 @@ def _swizzled_scale_offsets(row, g, PADDED_COLS: tl.constexpr):
 def _store_mxfp8_row(y, out_ptr, sf_ptr, sf_off, row, cols, mask, g, G: tl.constexpr):
     """Quantize a [blocks, 32] BF16 row to E4M3 + UE8M0 and store both; the
     scale rounds the block amax / 448 up to a power of two (FlashInfer's
-    ``mxfp8_quantize`` arithmetic)."""
+    `mxfp8_quantize` arithmetic)."""
     H: tl.constexpr = G * 32
     amax = tl.max(tl.abs(y.to(tl.float32)), axis=1)
     scale = amax * (1.0 / 448.0)

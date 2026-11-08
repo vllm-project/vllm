@@ -4,17 +4,17 @@
 Gemma RMSNorm (+ MXFP8 quantization) for token-sharded batches.
 
 Under MiniMax-M3's large-batch sequence parallelism, each rank owns a
-contiguous shard of ``S`` tokens of the residual stream, while the
+contiguous shard of `S` tokens of the residual stream, while the
 tensor-parallel experts see the whole batch. Unfused, a MoE layer ends with the
 experts' top-k finalize, the shared-expert add, a reduce-scatter of the
 TP-partial rows and the next norm. Here two kernels and a barrier do it:
 
-1. ``_finalize_scatter_kernel`` sums each token's routed expert rows (as
-   ``do_finalize=False`` left them) and its shared-expert row, and stores the
-   BF16 partial row straight into its owner rank's (``t // S``) symmetric
-   mailbox ``[generations, tp, S_max, hidden]``, in this rank's slot.
+1. `_finalize_scatter_kernel` sums each token's routed expert rows (as
+   `do_finalize=False` left them) and its shared-expert row, and stores the
+   BF16 partial row straight into its owner rank's (`t // S`) symmetric
+   mailbox `[generations, tp, S_max, hidden]`, in this rank's slot.
 2. A symmetric-memory barrier.
-3. ``_reduce_norm_kernel`` sums the ``tp`` slots of each owned row in rank
+3. `_reduce_norm_kernel` sums the `tp` slots of each owned row in rank
    order, adds the residual (stored back), and writes the Gemma RMSNorm as
    MXFP8 (E4M3 + 128x4-swizzled UE8M0 scales) or BF16.
 

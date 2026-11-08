@@ -246,12 +246,12 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
 
 
 def _use_large_batch_sequence_parallel(vllm_config: VllmConfig) -> bool:
-    """Whether batches of ``_SEQUENCE_PARALLEL_MIN_TOKENS`` or more shard the
+    """Whether batches of `_SEQUENCE_PARALLEL_MIN_TOKENS` or more shard the
     residual stream by token, on top of a replicated (all-reduce) TP layout.
 
     The routed experts stay tensor-parallel and see the all-gathered batch.
     Expert parallelism is left out: with MegaMoE the stream is always sharded
-    (``_use_sequence_parallel``), and the other EP backends were not measured.
+    (`_use_sequence_parallel`), and the other EP backends were not measured.
     """
     parallel_config = vllm_config.parallel_config
     return (
@@ -403,7 +403,7 @@ def _consumes_mxfp8_128x4(linear: nn.Module) -> bool:
 
 @contextmanager
 def _deferring(moe_config, max_num_tokens: int, enable: bool = True):
-    """Let the experts defer calls of up to ``max_num_tokens`` for a while."""
+    """Let the experts defer calls of up to `max_num_tokens` for a while."""
     if not enable:
         yield
         return
@@ -538,7 +538,7 @@ class MiniMaxM3MLP(nn.Module):
     def forward(
         self, x: torch.Tensor, sequence_parallel: bool | None = None
     ) -> torch.Tensor:
-        """With ``sequence_parallel`` (default: the static layout), ``x`` is
+        """With `sequence_parallel` (default: the static layout), `x` is
         this rank's token shard and so is the output."""
         if sequence_parallel is None:
             sequence_parallel = self.use_sequence_parallel
@@ -726,10 +726,10 @@ class MiniMaxM3MoE(nn.Module):
         to the consumer; return whether the experts accepted.
 
         Replicated batches are finalized by the next all-reduce: the experts
-        then defer every call up to ``max_num_tokens`` and the layer must call
-        ``forward_unfinalized``. Token-sharded batches (``sharded``) are
+        then defer every call up to `max_num_tokens` and the layer must call
+        `forward_unfinalized`. Token-sharded batches (`sharded`) are
         finalized by the next norm's reduce-scatter; they defer only inside
-        ``forward_unfinalized(sharded=True)``, so the experts' deferral state
+        `forward_unfinalized(sharded=True)`, so the experts' deferral state
         is left as it is. Call it before any replicated deferral, which lowers
         the experts' limit. Only the TRTLLM-Gen NVFP4 experts can stop after
         GEMM2.
@@ -923,7 +923,7 @@ class MiniMaxM3Attention(nn.Module):
         hidden_states: torch.Tensor,
         sequence_parallel: bool | None = None,
     ) -> torch.Tensor:
-        """With ``sequence_parallel`` (default: the static layout) the output is
+        """With `sequence_parallel` (default: the static layout) the output is
         reduce-scattered to this rank's token shard; otherwise it is the
         un-reduced TP partial."""
         if sequence_parallel is None:
@@ -1216,7 +1216,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         hidden_states: torch.Tensor | QuantizedActivation,
         sequence_parallel: bool | None = None,
     ) -> torch.Tensor:
-        """With ``sequence_parallel`` (default: the static layout) the output is
+        """With `sequence_parallel` (default: the static layout) the output is
         reduce-scattered to this rank's token shard; otherwise it is the
         un-reduced TP partial."""
         if sequence_parallel is None:
@@ -1451,7 +1451,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         sequence_parallel: bool | None = None,
     ) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor]:
-        """With ``sequence_parallel`` (default: the static layout), the input
+        """With `sequence_parallel` (default: the static layout), the input
         and the residual are this rank's token shard."""
         if sequence_parallel is None:
             sequence_parallel = self.use_sequence_parallel
@@ -1516,7 +1516,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
         residual: torch.Tensor,
         sequence_parallel: bool | None = None,
     ) -> tuple[torch.Tensor | MoEOutput, torch.Tensor]:
-        """With ``sequence_parallel`` (default: the static layout), the input,
+        """With `sequence_parallel` (default: the static layout), the input,
         the residual and the output are this rank's token shard."""
         if sequence_parallel is None:
             sequence_parallel = self.use_sequence_parallel
