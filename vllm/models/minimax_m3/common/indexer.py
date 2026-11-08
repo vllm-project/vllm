@@ -20,6 +20,7 @@ from typing import ClassVar
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.config.attention import IndexerKVDType
 from vllm.config.cache import CacheDType
@@ -253,7 +254,12 @@ class MiniMaxM3IndexerMetadataBuilder(
         text_config = getattr(hf_config, "text_config", hf_config)
         # Index-query head count from model config (cache spec has 1 vec/token).
         total_index_heads = text_config.index_n_heads
-        tp_size = get_tensor_model_parallel_world_size()
+        # Replicated attention keeps every index head on every rank.
+        tp_size = (
+            1
+            if envs.VLLM_MINIMAX_M3_REPLICATE_ATTN
+            else get_tensor_model_parallel_world_size()
+        )
         if total_index_heads >= tp_size:
             assert total_index_heads % tp_size == 0
         else:

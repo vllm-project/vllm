@@ -1442,6 +1442,7 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         replicate_index_q: bool = False,
+        disable_tp: bool = False,
     ) -> None:
         # index_q rides the KV-head sharding/replication path, so its head count
         # must match the KV heads.
@@ -1458,7 +1459,7 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         self.index_head_size = index_head_size
         self.replicate_index_q = replicate_index_q
 
-        tp_size = get_tensor_model_parallel_world_size()
+        tp_size = 1 if disable_tp else get_tensor_model_parallel_world_size()
         self.num_heads = divide(self.total_num_heads, tp_size)
         if tp_size >= self.total_num_kv_heads:
             self.num_kv_heads = 1
@@ -1496,6 +1497,7 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
             gather_output=False,
             quant_config=quant_config,
             prefix=prefix,
+            disable_tp=disable_tp,
         )
 
     def _get_shard_offset_mapping(self, loaded_shard_id: str) -> int | None:
