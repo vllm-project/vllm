@@ -506,15 +506,41 @@ def test_reentered_tag(free_x_early):
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
 def test_runtime_state_survives_sleep():
-    """Runtime state is offloaded and restored by the first
+    """What the model runner allocates while the worker builds it (e.g. a
+    drafter's buffers) is runtime state: offloaded and restored by the first
     selective wake; a nested kv_cache pool keeps its own tag."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
     from vllm.device_allocator.sleep_mode_backend import CuMemBackend
+    from vllm.v1.worker import gpu_worker
 
     allocator = get_mem_allocator_instance()
-    with allocator.use_memory_pool("runtime"):
-        state = torch.arange(1 << 20, device=DEVICE_TYPE)
+    built = {}
+
+    def make_runner():
+        built["state"] = torch.arange(1 << 20, device=DEVICE_TYPE)
         with allocator.use_memory_pool("kv_cache"):
-            kv = torch.zeros(1 << 20, device=DEVICE_TYPE)
+            built["kv"] = torch.zeros(1 << 20, device=DEVICE_TYPE)
+        return SimpleNamespace()
+
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(enable_dbo=False),
+            model_config=SimpleNamespace(enable_cumem_allocator=True),
+            speculative_config=None,
+        ),
+        device=torch.device(DEVICE_TYPE, torch.accelerator.current_device_index()),
+        use_v2_model_runner=True,
+        rank=1,
+        _make_model_runner=make_runner,
+    )
+    worker._maybe_get_memory_pool_context = lambda tag: (
+        gpu_worker.Worker._maybe_get_memory_pool_context(worker, tag)
+    )
+    with patch.object(gpu_worker, "init_workspace_manager"):
+        gpu_worker.Worker._init_workspace_and_model_runner(worker)
+    state, kv = built["state"], built["kv"]
     assert {d.tag for d in allocator.pointer_to_data.values()} == {
         "runtime",
         "kv_cache",
