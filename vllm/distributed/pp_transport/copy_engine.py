@@ -199,15 +199,24 @@ class CopyEngineTransport(PPTransport):
             self.pending: deque[tuple[Any, torch.cuda.Event]] = deque()
 
     def recv(self, pp_group: "GroupCoordinator") -> IntermediateTensors:
-        """This step's tensors, as views of the persistent tensors."""
+        """This step's tensors, as views of the persistent tensors. The wait
+        for the previous stage and the copy are queued on the current stream
+        when ``.tensors`` is first read, so GPU work queued before then (input
+        preparation) overlaps the transfer, as with NCCL."""
+        from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
+
         meta = pp_group.recv_object(src=self.src)
-        stream = torch.cuda.current_stream()
-        _wait_flag(stream, self.full, meta["seq"])
-        out = {}
-        for key, src in _views(self.recv_buf, self.recv_layout, meta["rows"]).items():
-            out[key] = self.persistent[key][: src.shape[0]].copy_(src)
-        _write_flag(stream, self.peer_empty, meta["seq"])
-        return IntermediateTensors(out)
+        src = _views(self.recv_buf, self.recv_layout, meta["rows"])
+        out = {k: self.persistent[k][: v.shape[0]] for k, v in src.items()}
+
+        def copy_in() -> None:
+            stream = torch.cuda.current_stream()
+            _wait_flag(stream, self.full, meta["seq"])
+            for key, view in src.items():
+                out[key].copy_(view)
+            _write_flag(stream, self.peer_empty, meta["seq"])
+
+        return AsyncIntermediateTensors(out, comm_postprocess=[copy_in])
 
     def send(self, tensors: dict, pp_group: "GroupCoordinator") -> None:
         from cuda.bindings import runtime as cudart
