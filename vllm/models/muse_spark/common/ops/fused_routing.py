@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused CUDA and Triton kernels for MuseSpark1x's top-k router."""
+"""Fused CUDA and Triton kernels for Muse Spark's top-k router."""
 
 import torch
 
@@ -136,7 +136,7 @@ def _padded_num_experts(num_experts: int) -> int:
     return 1 << max(3, (num_experts - 1).bit_length())
 
 
-def fused_musespark1x_routing(
+def fused_muse_spark_routing(
     gating_output: torch.Tensor,
     bias: torch.Tensor,
     topk: int,
@@ -149,7 +149,7 @@ def fused_musespark1x_routing(
     *,
     is_padding: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run MuseSpark1x's router in one kernel.
+    """Run Muse Spark's router in one kernel.
 
     Passing both destinations keeps the call allocation-free (graph-capturable).
     """
