@@ -578,8 +578,9 @@ class OnlineRenderer:
             # Decode-side token reuse: feed the forwarded ids straight to the
             # engine. Harmony has no adjust_request hook to preserve.
             engine_input = tokens_input(reuse_ids, cache_salt=request.cache_salt)
-        if getattr(request, "cache_salt_start_idx", None) is not None:
-            engine_input["cache_salt_start_idx"] = request.cache_salt_start_idx
+            start_idx = getattr(request, "cache_salt_start_idx", None)
+            if start_idx is not None:
+                engine_input["cache_salt_start_idx"] = start_idx
             return [], [engine_input]
 
         messages: list[OpenAIMessage] = []
@@ -876,7 +877,11 @@ class OnlineRenderer:
                 tok_params,
                 prompt_extras={
                     k: v
-                    for k in ("mm_processor_kwargs", "cache_salt", "cache_salt_start_idx")
+                    for k in (
+                        "mm_processor_kwargs",
+                        "cache_salt",
+                        "cache_salt_start_idx",
+                    )
                     if (v := getattr(request, k, None)) is not None
                 },
                 skip_mm_cache=skip_mm_cache,
