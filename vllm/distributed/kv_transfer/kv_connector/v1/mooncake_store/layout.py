@@ -874,6 +874,9 @@ class MambaStoreLayout(TPShardedStoreLayout):
                         start, count = self._shard_slice(
                             (offset, width, 1), shard, self.shards_per_rank
                         )
+                        # Keep projection/row boundaries identical across shards.
+                        if self.shards_per_rank > 1:
+                            first_segment = len(bases)
                         append_view(
                             row.narrow(0, start, count),
                             bases,
