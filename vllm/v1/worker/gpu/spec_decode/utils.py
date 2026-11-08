@@ -9,6 +9,7 @@ import torch
 from vllm.config import LoadConfig, replace
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np, new_d2h_stream
@@ -128,7 +129,8 @@ class DraftTokensHandler:
         # Only occurs if we have more than max_concurrent_batches in-flight.
         copy_pending_container = copy_barrier.pending
         if copy_pending_container.pending:
-            copy_event.synchronize()
+            with gpu_sync_allowed():
+                copy_event.synchronize()
             copy_pending_container.pending = False
 
         current_stream = torch.cuda.current_stream(self.device)
