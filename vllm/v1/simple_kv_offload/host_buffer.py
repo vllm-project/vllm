@@ -23,7 +23,7 @@ _MAP_HUGE_SHIFT = 26
 
 
 def parse_hugepage_size(value: object) -> int | None:
-    """Parse ``cpu_hugepage_block_size``; ``None`` or ``"none"`` disables it."""
+    """Parse `cpu_hugepage_block_size`; `None` or `"none"` disables it."""
     key = str(value or "none").upper()
     if key == "NONE":
         return None

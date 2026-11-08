@@ -32,9 +32,9 @@ EPS = 1e-6
 
 
 def packed_cache(blocks, block, row, gap=GAP):
-    """One layer's view of a packed (BLHNC) cache: ``blocks`` blocks of ``block``
-    rows, ``gap`` rows of other layers' pages between two consecutive blocks
-    (``FAR``: as many as spread the blocks over ``FAR`` bytes)."""
+    """One layer's view of a packed (BLHNC) cache: `blocks` blocks of `block`
+    rows, `gap` rows of other layers' pages between two consecutive blocks
+    (`FAR`: as many as spread the blocks over `FAR` bytes)."""
     stride = FAR // blocks // 256 * 256 if gap == FAR else (block + gap) * row
     raw = torch.zeros(blocks * stride, dtype=torch.uint8, device="cuda")
     return torch.as_strided(raw, (blocks, block, row), (stride, row, 1))
@@ -95,7 +95,7 @@ E2M1 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
 def nvfp4_rows(rows, e4m3=False):
     """Dequantized [..., 576] values of nvfp4_ds_mla rows [..., 352]: E2M1 latent
-    (low nibble first) times its block's E4M3 scale, then the E4M3 k_pe. ``e4m3``:
+    (low nibble first) times its block's E4M3 scale, then the E4M3 k_pe. `e4m3`:
     the latent rounded to E4M3, as prims_ts converts it for its FP8 MMAs."""
     table = torch.tensor(E2M1, device=rows.device)
     table = torch.cat([table, -table])
@@ -182,7 +182,7 @@ def test_query_and_cache_insert(batch, block, gap):
 
 
 def call_query(kernel, args, eps, query, q_c, weights, projected):
-    """compile_query's kernel over MlaQuery's arguments (``args`` without eps and
+    """compile_query's kernel over MlaQuery's arguments (`args` without eps and
     the outputs): MlaQuery, or the split query (WideQuery, wide batches)."""
     import cutlass
 
@@ -750,7 +750,7 @@ FUSED_INDEXER_CASES = {
 
 def fused_indexer_inputs(contexts, q, gap, ties, seed):
     """A packed indexer cache of random FP8 keys and UE8M0 scales under a random
-    block table, the per-row ends (row j of a request sees ``context + 1 + j``
+    block table, the per-row ends (row j of a request sees `context + 1 + j`
     keys), the FP8 query and BF16 head weights."""
     gen = torch.Generator(device="cuda").manual_seed(seed)
     pages = [-(-(c + q) // UNIT) for c in contexts]
@@ -788,8 +788,8 @@ def fused_indexer_inputs(contexts, q, gap, ties, seed):
 
 
 def deepgemm_head_sum(score, weights):
-    """Stock's (DeepGEMM SM100 paged MQA logits) head sum of ``score`` [H, L] =
-    relu(q . k) in FP32 and the BF16 ``weights`` [H]: each head's value rounded
+    """Stock's (DeepGEMM SM100 paged MQA logits) head sum of `score` [H, L] =
+    relu(q . k) in FP32 and the BF16 `weights` [H]: each head's value rounded
     to BF16, four BF16 accumulators (heads h = j mod 4) by BF16 FMAs, then BF16
     adds (0 + 2, 1 + 3, then the two). Returns FP32 [L] (BF16 values)."""
     bf = torch.bfloat16
@@ -803,7 +803,7 @@ def deepgemm_head_sum(score, weights):
 
 
 def check_fused_logits(got, x, t, r, length):
-    """Row ``t`` (request ``r``) of the fused scorer's BF16 logits (int16 bits),
+    """Row `t` (request `r`) of the fused scorer's BF16 logits (int16 bits),
     against stock's precision (deepgemm_head_sum) over the dequantized keys: equal
     up to the FP32 q . k summation order (a BF16 rounding of a head's value or of
     an accumulator may flip)."""
@@ -824,7 +824,7 @@ def check_fused_logits(got, x, t, r, length):
 
 
 def exact_topk(bits, k):
-    """Key indices of the top ``k`` of BF16 ``bits`` (ties to the lowest index),
+    """Key indices of the top `k` of BF16 `bits` (ties to the lowest index),
     in key order."""
     pos = torch.arange(bits.shape[0], device=bits.device)
     key = order16(bits.int()).long() << 32 | (2**32 - 1 - pos)
@@ -839,7 +839,7 @@ def test_fused_indexer_selects_exact_topk(case, gap, mla_page):
     (deepgemm_head_sum) over the dequantized keys, up to BF16 rounding flips of the
     FP32 q . k order, and its selection exactly the
     top-2048 of its own logits (ties to the lowest key index), as the MLA cache's
-    physical rows in key order, -1 past the count, with the counts. ``mla_page``:
+    physical rows in key order, -1 past the count, with the counts. `mla_page`:
     the MLA cache's tokens per block (2048: the hybrid model's attention pages,
     with 64-token indexer pages)."""
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.indexer import (
@@ -1205,7 +1205,7 @@ LAYER_CORES = {
 
 
 def dsa_layer(config, topk_buffer, heads=HEADS):
-    """A real KimiK3DSAAttention (``heads`` over all TP ranks) on random weights,
+    """A real KimiK3DSAAttention (`heads` over all TP ranks) on random weights,
     its MLA weights processed."""
     from vllm.models.kimi_k3.nvidia.dsa import KimiK3DSAAttention
     from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
@@ -1261,7 +1261,7 @@ def dsa_layer(config, topk_buffer, heads=HEADS):
 
 
 def paged_rows(lengths, block, row, gap, gen):
-    """A packed paged cache with ``gap`` rows of other layers' pages between its
+    """A packed paged cache with `gap` rows of other layers' pages between its
     blocks, each request's blocks in a random order, and their block table."""
     pages = [max(-(-n // block), 1) for n in lengths]
     cache = packed_cache(sum(pages) + 2, block, row, gap)
@@ -1275,8 +1275,8 @@ def paged_rows(lengths, block, row, gap, gen):
 
 
 def owned_slots(table, positions, world=1, rank=0):
-    """Cache slots of each request's token ``positions`` on DCP rank ``rank`` of
-    ``world`` (interleave 1: position p lives on rank p % world, at p // world);
+    """Cache slots of each request's token `positions` on DCP rank `rank` of
+    `world` (interleave 1: position p lives on rank p % world, at p // world);
     -1 where another rank owns the token."""
     slots = []
     for r, pos in enumerate(positions):
@@ -1312,8 +1312,8 @@ def common_metadata(contexts, q, table, slots, world=1, rank=0):
 
 
 def cache_rows(cache, table, ids, request, kv):
-    """Dequantized [len(ids), 576] rows of a request's logical tokens ``ids`` in a
-    ``kv`` (cache dtype) cache."""
+    """Dequantized [len(ids), 576] rows of a request's logical tokens `ids` in a
+    `kv` (cache dtype) cache."""
     block = cache.shape[1]
     rows = cache[table[request, ids // block].long(), ids % block]
     if kv == "fp8":  # per-tensor FP8 (unit scale)
@@ -1329,7 +1329,7 @@ def cache_rows(cache, table, ids, request, kv):
 
 def layer_reference(attn, projected, cache, table, topk, q, kv):
     """The gated attention rows in FP32 from the packed projection rows: the query
-    unquantized, the keys and values as cached, over each row's ``topk``."""
+    unquantized, the keys and values as cached, over each row's `topk`."""
     wrapper = attn.mla_attn
     layer = wrapper.mla_attn
     heads = layer.W_UK_T.shape[0]
@@ -1356,10 +1356,10 @@ TP_OVERLAPS = ("serial", "fork", "front", "late", "late_front")
 
 
 def exact_topk_widths(index, table, contexts, q, query, weights, ids, world=1):
-    """Each row's ``ids`` (its top-k: logical, or global under DCP) against the
+    """Each row's `ids` (its top-k: logical, or global under DCP) against the
     exact top-k of indexer logits at stock's precision (deepgemm_head_sum) over
-    the dequantized keys of the same FP8 query and BF16 head weights (``query``
-    [B, 32, 128] bytes, ``weights`` [B, 32]): the largest distance of a swapped
+    the dequantized keys of the same FP8 query and BF16 head weights (`query`
+    [B, 32, 128] bytes, `weights` [B, 32]): the largest distance of a swapped
     key's exact logit from the exact K-th one, in BF16 steps of the K-th (inf: a
     key far outside the exact top-k). Under DCP every rank scores its keys and
     the candidates are all-gathered. Exact selection up to the BF16 rounding of
@@ -1460,7 +1460,7 @@ def fp8_codes_adjacent(ours, theirs):
 
 def check_layer_step(step, q, reference=True):
     """The specialized decode's step against the stock one: the top-k, the gated
-    attention rows (and, ``reference``: each against FP32 attention over its own
+    attention rows (and, `reference`: each against FP32 attention over its own
     top-k), the MLA rows and the indexer keys (their SM100 MX scales exact) the
     step inserts, and every other cache byte as it was."""
     # The top-k: the same keys up to near-ties at the boundary (the indexer queries
@@ -1627,10 +1627,10 @@ def test_dcp_partials_policy():
 
 
 def dcp_value_reference(rows, lse, live, w_uv, gate, partials):
-    """DcpValue's output from every rank's partial ``rows`` [DCP, B, H, 512] (FP32)
-    of this rank's H heads, their base-2 ``lse`` [DCP, B, H] and ``live`` sources:
+    """DcpValue's output from every rank's partial `rows` [DCP, B, H, 512] (FP32)
+    of this rank's H heads, their base-2 `lse` [DCP, B, H] and `live` sources:
     the LSE-weighted merge ("bf16": of the BF16 rows), one BF16 rounding, W_UV
-    [H, 512, 128] and the ``gate``. "proj": each source's rows through W_UV,
+    [H, 512, 128] and the `gate`. "proj": each source's rows through W_UV,
     rounded to BF16, then the merge and one BF16 rounding. "fp32": the merge and
     W_UV without intermediate rounding (what both BF16 exchanges approximate)."""
     if partials in ("proj", "fp32"):
@@ -1825,7 +1825,7 @@ def check_dcp_value(policy, layout, batch, q, lse_base_e):
         assert (q_box[:, gathered:] == 0).all()
 
     def collective(fn):
-        """``fn`` on every rank; all ranks raise if any failed (no rank is left
+        """`fn` on every rank; all ranks raise if any failed (no rank is left
         waiting in the next launch)."""
         error = None
         try:
@@ -1897,7 +1897,7 @@ def test_wide_batches_match_64_row_kernels(batch, fp8):
     unit = torch.ones(1, device=dev, dtype=torch.float32)
 
     def run(rows, start, mla, index):
-        """The kernels of ``rows`` rows over rows start.. (zero-padded past the
+        """The kernels of `rows` rows over rows start.. (zero-padded past the
         end; padded rows have slot -1)."""
         n = min(rows, batch - start)
 
@@ -1948,7 +1948,7 @@ def test_wide_batches_match_64_row_kernels(batch, fp8):
 def _dcp_mailbox_worker(rank, size, port, batch, q, dsa, partials="bf16"):
     """One DCP rank: MlaQuery publishes this rank's query heads into every rank's
     q mailbox, then DcpValue merges every rank's partial rows of this rank's heads
-    (exchanged as ``partials``), checked against the all-gathered tensors."""
+    (exchanged as `partials`), checked against the all-gathered tensors."""
     import cutlass
     import torch.distributed as dist
 
@@ -2205,7 +2205,7 @@ def test_front_overlap_rows():
 
 def exact_rows(rows, cols, gen, *, signed=True, nonzero=None):
     """[rows, cols] BF16 values +-k/16 (k in 16..31): their squares sum exactly in
-    any order. ``nonzero``: only that many leading columns are nonzero."""
+    any order. `nonzero`: only that many leading columns are nonzero."""
     k = torch.randint(16, 32, (rows, cols), generator=gen, device="cuda")
     x = k.float() / 16
     if signed:
