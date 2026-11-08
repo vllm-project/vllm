@@ -118,7 +118,7 @@ impl ToolParser for Internlm2ToolParser {
     }
 
     /// Clear parser state and return currently uncommitted buffered text.
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.inner.reset()
     }
 }

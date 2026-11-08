@@ -82,10 +82,11 @@ impl StructuredEventState {
         kind: AssistantBlockKind,
         delta: String,
         token_count: Option<usize>,
+        text_logprobs: Option<DecodedLogprobs>,
     ) -> Result<Vec<ChatEvent>> {
         let mut events = Vec::new();
         self.close_open_tool_call(&mut events);
-        self.push_text_delta(kind, delta, token_count, &mut events);
+        self.push_text_delta(kind, delta, token_count, text_logprobs, &mut events);
         Ok(events)
     }
 
@@ -160,6 +161,7 @@ impl StructuredEventState {
         kind: AssistantBlockKind,
         delta: String,
         token_count: Option<usize>,
+        text_logprobs: Option<DecodedLogprobs>,
         events: &mut Vec<ChatEvent>,
     ) {
         if delta.is_empty() {
@@ -175,6 +177,7 @@ impl StructuredEventState {
                     kind,
                     delta,
                     token_count,
+                    text_logprobs,
                 });
             }
             // Otherwise, close the currently open block (if any) and start a
@@ -193,6 +196,7 @@ impl StructuredEventState {
                     kind,
                     delta,
                     token_count,
+                    text_logprobs,
                 });
             }
         }
@@ -274,8 +278,9 @@ pub(crate) async fn structured_chat_event_stream(
                 kind,
                 delta,
                 token_count,
+                text_logprobs,
             } => {
-                for next in state.process_text_delta(kind, delta, token_count)? {
+                for next in state.process_text_delta(kind, delta, token_count, text_logprobs)? {
                     y.yield_ok(next).await;
                 }
             }
@@ -453,6 +458,7 @@ mod tests {
     async fn structured_stream_numbers_tool_calls_independent_of_text_blocks() {
         let events = stream::iter(vec![
             Ok(AssistantEvent::TextDelta {
+                text_logprobs: None,
                 kind: AssistantBlockKind::Text,
                 delta: "before".to_string(),
                 token_count: None,
@@ -517,6 +523,7 @@ mod tests {
                 delta: r#"{"city":"Paris"}"#.to_string(),
             }),
             Ok(AssistantEvent::TextDelta {
+                text_logprobs: None,
                 kind: AssistantBlockKind::Text,
                 delta: "done".to_string(),
                 token_count: None,
@@ -641,6 +648,7 @@ mod tests {
                 prompt_logprobs: None,
             }),
             Ok(AssistantEvent::TextDelta {
+                text_logprobs: None,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
                 token_count: Some(3),

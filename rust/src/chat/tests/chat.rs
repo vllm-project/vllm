@@ -404,6 +404,7 @@ async fn chat_streams_text_events() {
     assert_eq!(
         next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
+            text_logprobs: None,
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "H".to_string(),
@@ -413,6 +414,7 @@ async fn chat_streams_text_events() {
     assert_eq!(
         next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
+            text_logprobs: None,
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "i".to_string(),
@@ -513,6 +515,7 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
     assert_eq!(
         next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
+            text_logprobs: None,
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "你".to_string(),
@@ -600,6 +603,7 @@ async fn chat_stream_flushes_held_text_on_finish() {
     assert_eq!(
         next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
+            text_logprobs: None,
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "ok st".to_string(),
@@ -788,6 +792,7 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
     assert_eq!(
         next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
+            text_logprobs: None,
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "Hi!".to_string(),
@@ -886,6 +891,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
     assert_eq!(
         next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
+            text_logprobs: None,
             index: 0,
             kind: AssistantBlockKind::Reasoning,
             delta: "reason ".to_string(),
@@ -895,6 +901,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
     assert_eq!(
         next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
+            text_logprobs: None,
             index: 0,
             kind: AssistantBlockKind::Reasoning,
             delta: "more".to_string(),
@@ -920,6 +927,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
     assert_eq!(
         next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
+            text_logprobs: None,
             index: 1,
             kind: AssistantBlockKind::Text,
             delta: "answer".to_string(),
@@ -1399,6 +1407,7 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
     assert_eq!(
         next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
+            text_logprobs: None,
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "H".to_string(),

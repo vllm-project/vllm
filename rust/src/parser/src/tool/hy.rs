@@ -125,7 +125,7 @@ enum HyEvent {
 /// HY marker tokens are added-vocabulary tokens rather than tokenizer special
 /// tokens, so the default `preserve_special_tokens() == false` is sufficient.
 pub(crate) struct HyToolParser {
-    buffer: String,
+    buffer: DecodedText,
     mode: HyMode,
     emitted_tool_count: usize,
     tool_parameters: ToolSchemas,
@@ -139,7 +139,7 @@ impl HyToolParser {
     pub(crate) fn new(tools: &[Tool], suffix: &str, dialect: HyDialect) -> Self {
         let markers = Arc::new(HyToolMarkers::new(suffix, dialect));
         Self {
-            buffer: String::new(),
+            buffer: DecodedText::default(),
             mode: HyMode::Text,
             emitted_tool_count: 0,
             tool_parameters: ToolSchemas::from_tools(tools),
@@ -153,7 +153,7 @@ impl HyToolParser {
     fn apply_event(&mut self, event: HyEvent, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             HyEvent::Text { len: consumed_len } => {
-                output.push_text(&self.buffer[..consumed_len]);
+                output.push_text(self.buffer.prefix(consumed_len));
             }
             HyEvent::ToolBlockStart => {
                 self.mode = HyMode::ToolBlock {
@@ -198,13 +198,13 @@ impl ToolParser for HyToolParser {
     }
 
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(&chunk.text);
+        self.buffer.append(chunk);
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
+        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
             parse_next_hy_event(input, &mut self.mode, &self.markers, self.dialect)
         })? {
             self.apply_event(event, output)?;
-            self.buffer.drain(..consumed_len);
+            let _ = self.buffer.drain_prefix(consumed_len);
         }
 
         Ok(())
@@ -213,7 +213,7 @@ impl ToolParser for HyToolParser {
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match self.mode {
-            HyMode::Text => output.push_text(&self.buffer),
+            HyMode::Text => output.push_text(self.buffer.take()),
             HyMode::ToolBlock { .. } => {
                 return Err(ToolParserError::IncompleteToolCall {
                     parser: self.dialect.label(),
@@ -225,7 +225,7 @@ impl ToolParser for HyToolParser {
         Ok(output)
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.mode = HyMode::Text;
         self.emitted_tool_count = 0;
         std::mem::take(&mut self.buffer)

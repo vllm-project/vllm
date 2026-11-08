@@ -72,7 +72,7 @@ impl ToolParser for SeedOssToolParser {
         self.inner.finish()
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.inner.reset()
     }
 }

@@ -240,7 +240,7 @@ impl MinimaxM3ToolParser {
     fn apply_event(&mut self, event: MinimaxM3Event, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             MinimaxM3Event::Text { len: consumed_len } => {
-                output.push_text(&self.buffer.text[..consumed_len]);
+                output.push_text(self.buffer.prefix(consumed_len));
             }
             MinimaxM3Event::ToolBlockStart => self.mode = MinimaxM3Mode::ToolBlock,
             MinimaxM3Event::InvokeStart { name } => {
@@ -342,7 +342,7 @@ impl ToolParser for MinimaxM3ToolParser {
         let mut output = ToolParserOutput::default();
         match self.mode {
             MinimaxM3Mode::Text => {
-                output.push_text(&self.buffer.text);
+                output.push_text(self.buffer.take());
             }
             MinimaxM3Mode::ToolBlock => {
                 if !self.buffer.text.trim_start().is_empty() {
@@ -362,10 +362,10 @@ impl ToolParser for MinimaxM3ToolParser {
         Ok(output)
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.mode = MinimaxM3Mode::Text;
         self.emitted_tool_count = 0;
-        std::mem::take(&mut self.buffer).text
+        std::mem::take(&mut self.buffer)
     }
 }
 
@@ -1089,7 +1089,7 @@ mod tests {
         assert_eq!(output.events.len(), 2);
         assert_eq!(
             output.events[0],
-            ToolParserEvent::Text("Let me check. ".to_string())
+            ToolParserEvent::Text(decode(&dedicated("Let me check. ")))
         );
         let ToolParserEvent::ToolCall(call) = &output.events[1] else {
             panic!("expected tool-call event");

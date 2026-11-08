@@ -86,7 +86,7 @@ enum QwenCoderEvent {
 /// Note: parallel calls are represented as repeated
 /// `<tool_call>...</tool_call>` blocks, not as multiple calls inside one tag.
 pub struct Qwen3CoderToolParser {
-    buffer: String,
+    buffer: DecodedText,
     mode: QwenCoderMode,
     emitted_tool_count: usize,
     tool_parameters: ToolSchemas,
@@ -103,7 +103,7 @@ impl Qwen3CoderToolParser {
     /// different tool-call wrapper (e.g. Seed-OSS).
     pub(crate) fn with_config(tools: &[Tool], config: QwenCoderConfig) -> Self {
         Self {
-            buffer: String::new(),
+            buffer: DecodedText::default(),
             mode: QwenCoderMode::Text,
             emitted_tool_count: 0,
             tool_parameters: ToolSchemas::from_tools(tools),
@@ -115,7 +115,7 @@ impl Qwen3CoderToolParser {
     fn apply_event(&mut self, event: QwenCoderEvent, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             QwenCoderEvent::Text { len: consumed_len } => {
-                output.push_text(&self.buffer[..consumed_len]);
+                output.push_text(self.buffer.prefix(consumed_len));
             }
             QwenCoderEvent::ToolCallStart => {
                 self.mode = QwenCoderMode::ToolCall {
@@ -141,7 +141,7 @@ impl Qwen3CoderToolParser {
         Ok(())
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.mode = QwenCoderMode::Text;
         self.emitted_tool_count = 0;
         std::mem::take(&mut self.buffer)
@@ -161,14 +161,14 @@ impl ToolParser for Qwen3CoderToolParser {
     }
 
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(&chunk.text);
+        self.buffer.append(chunk);
         let config = self.config;
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
+        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
             parse_next_qwen_coder_event(input, &mut self.mode, config, self.emitted_tool_count > 0)
         })? {
             self.apply_event(event, output)?;
-            self.buffer.drain(..consumed_len);
+            let _ = self.buffer.drain_prefix(consumed_len);
         }
 
         Ok(())
@@ -176,21 +176,21 @@ impl ToolParser for Qwen3CoderToolParser {
 
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
-        if !self.buffer.is_empty() {
+        if !self.buffer.text.is_empty() {
             if matches!(self.mode, QwenCoderMode::ToolCall { .. })
-                || self.buffer.starts_with(self.config.tool_call_start)
+                || self.buffer.text.starts_with(self.config.tool_call_start)
             {
                 return Err(ToolParserError::IncompleteToolCall {
                     parser: self.config.parser_name,
                 });
             }
-            output.push_text(&self.buffer);
+            output.push_text(self.buffer.take());
         }
         let _ = self.reset();
         Ok(output)
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         Qwen3CoderToolParser::reset(self)
     }
 }

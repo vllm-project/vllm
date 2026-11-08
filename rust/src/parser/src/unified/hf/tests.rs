@@ -180,7 +180,7 @@ fn message(events: &[UnifiedParserEvent]) -> Value {
     let mut calls: BTreeMap<usize, (String, String)> = BTreeMap::new();
     for event in events {
         match event {
-            UnifiedParserEvent::Text(text) => content.push_str(text),
+            UnifiedParserEvent::Text(text) => content.push_str(&text.text),
             UnifiedParserEvent::Reasoning(piece) => reasoning.push_str(&piece.text),
             UnifiedParserEvent::ToolCall(delta) => {
                 let call = calls.entry(delta.tool_index).or_default();
@@ -427,6 +427,7 @@ fn gemma4_streams_text_and_starts_calls_at_the_opener() {
                         DecodedText {
                             text: "Check",
                             attributions: [],
+                            sources: [],
                         },
                     ),
                 ],
@@ -438,6 +439,7 @@ fn gemma4_streams_text_and_starts_calls_at_the_opener() {
                         DecodedText {
                             text: " the weather.",
                             attributions: [],
+                            sources: [],
                         },
                     ),
                 ],
@@ -446,7 +448,11 @@ fn gemma4_streams_text_and_starts_calls_at_the_opener() {
                 "<channel|>Sure",
                 [
                     Text(
-                        "Sure",
+                        DecodedText {
+                            text: "Sure",
+                            attributions: [],
+                            sources: [],
+                        },
                     ),
                 ],
             ),
@@ -454,7 +460,11 @@ fn gemma4_streams_text_and_starts_calls_at_the_opener() {
                 ". <|tool_call>call:get_weather",
                 [
                     Text(
-                        ".",
+                        DecodedText {
+                            text: ".",
+                            attributions: [],
+                            sources: [],
+                        },
                     ),
                 ],
             ),
@@ -708,6 +718,7 @@ fn stripped_reasoning_whitespace_keeps_its_tokens() {
     let mut output = UnifiedParserOutput::default();
     for (index, c) in text.chars().enumerate() {
         let piece = DecodedText {
+            sources: Default::default(),
             text: c.to_string(),
             attributions: [TokenAttribution {
                 token_id: u32::try_from(index).unwrap(),
@@ -746,7 +757,7 @@ fn reset_returns_uncommitted_text() {
             &mut output,
         )
         .unwrap();
-    assert_eq!(parser.reset(), "<|tool_call>call:f{a:<|\"|>x");
+    assert_eq!(parser.reset().text, "<|tool_call>call:f{a:<|\"|>x");
 }
 
 #[test]

@@ -83,7 +83,12 @@ pub async fn create_responses(
         created_at,
     );
 
-    let items = OutputItemStreamer::new(prepared.include_reasoning, prepared.tool_names);
+    let items = OutputItemStreamer::new(
+        prepared.include_reasoning,
+        prepared.tool_names,
+        prepared.output_logprobs,
+        api_server_options.default_return_tokens_as_token_ids,
+    );
     if stream_requested {
         let event_stream = responses_event_stream(
             chat_stream,
@@ -153,7 +158,7 @@ async fn collect_responses(
             )
         })?;
         // Only the final output matters here; the item events are discarded.
-        items.on_event(&event);
+        items.on_event(&event)?;
         if let Some(terminal) = TerminalOutput::from_event(event) {
             break terminal;
         }
@@ -306,7 +311,27 @@ async fn responses_event_stream(
     while let Some(next) = stream.next().await {
         match next {
             Ok(event) => {
-                for event in items.on_event(&event) {
+                let item_events = match items.on_event(&event) {
+                    Ok(events) => events,
+                    Err(error) => {
+                        error!(?error, "failed to format response logprobs");
+                        for event in items.on_stream_end(None) {
+                            y.yield_ok(event).await;
+                        }
+                        let failed = failed_response(
+                            response,
+                            items.into_output_items(),
+                            "Failed to format output logprobs.",
+                            None,
+                        );
+                        y.yield_ok(ResponseStreamEvent::Failed {
+                            response: Arc::new(failed),
+                        })
+                        .await;
+                        return Ok(());
+                    }
+                };
+                for event in item_events {
                     y.yield_ok(event).await;
                 }
                 if let Some(output) = TerminalOutput::from_event(event) {

@@ -81,7 +81,7 @@ pub(crate) enum JsonToolCallEvent {
 #[derive(Debug)]
 struct JsonToolCallParser {
     config: JsonToolCallConfig,
-    buffer: String,
+    buffer: DecodedText,
     mode: JsonToolCallMode,
     active_tool_index: Option<usize>,
     emitted_tool_count: usize,
@@ -92,7 +92,7 @@ impl JsonToolCallParser {
     fn new(config: JsonToolCallConfig) -> Self {
         Self {
             config,
-            buffer: String::new(),
+            buffer: DecodedText::default(),
             mode: JsonToolCallMode::Text,
             active_tool_index: None,
             emitted_tool_count: 0,
@@ -100,14 +100,14 @@ impl JsonToolCallParser {
     }
 
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(&chunk.text);
+        self.buffer.append(chunk);
         let config = self.config;
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
+        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
             parse_next_json_tool_call_event(input, &mut self.mode, config)
         })? {
             self.apply_event(event, output)?;
-            self.buffer.drain(..consumed_len);
+            let _ = self.buffer.drain_prefix(consumed_len);
         }
 
         Ok(())
@@ -116,7 +116,7 @@ impl JsonToolCallParser {
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match &self.mode {
-            JsonToolCallMode::Text => output.push_text(&self.buffer),
+            JsonToolCallMode::Text => output.push_text(self.buffer.take()),
             JsonToolCallMode::Header | JsonToolCallMode::Arguments { .. } => {
                 return Err(ToolParserError::IncompleteToolCall {
                     parser: self.config.parser_name,
@@ -135,7 +135,7 @@ impl JsonToolCallParser {
     ) -> Result<()> {
         match event {
             JsonToolCallEvent::Text { len: consumed_len } => {
-                output.push_text(&self.buffer[..consumed_len]);
+                output.push_text(self.buffer.prefix(consumed_len));
             }
             JsonToolCallEvent::ToolCallStart => self.mode = JsonToolCallMode::Header,
             JsonToolCallEvent::ToolCallHeader { function_name } => {
@@ -161,7 +161,7 @@ impl JsonToolCallParser {
                 output.push_call(ToolCallDelta {
                     tool_index,
                     name: None,
-                    arguments: self.buffer[..consumed_len].to_string(),
+                    arguments: self.buffer.text[..consumed_len].to_string(),
                 });
             }
             JsonToolCallEvent::ToolCallDelimiter => {
@@ -176,7 +176,7 @@ impl JsonToolCallParser {
         Ok(())
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.mode = JsonToolCallMode::Text;
         self.active_tool_index = None;
         self.emitted_tool_count = 0;
@@ -547,7 +547,11 @@ mod tests {
             ToolParserOutput {
                 events: [
                     Text(
-                        " trailing text",
+                        DecodedText {
+                            text: " trailing text",
+                            attributions: [],
+                            sources: [],
+                        },
                     ),
                     ToolCall(
                         ToolCallDelta {

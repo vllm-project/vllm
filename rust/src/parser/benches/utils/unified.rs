@@ -62,7 +62,7 @@ pub fn feed_unified_parser(
     let mut tool_indices = BTreeSet::new();
     for event in output.events {
         match event {
-            UnifiedParserEvent::Text(text) => summary.normal_text.push_str(&text),
+            UnifiedParserEvent::Text(text) => summary.normal_text.push_str(&text.text),
             UnifiedParserEvent::Reasoning(reasoning) => {
                 summary.reasoning_text.push_str(&reasoning.text);
             }
