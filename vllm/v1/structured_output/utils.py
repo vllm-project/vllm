@@ -18,6 +18,7 @@ from cachetools import LRUCache
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import LazyLoader
+from vllm.utils.torch_utils import available_cpu_count
 
 if TYPE_CHECKING:
     import outlines_core as oc
@@ -96,24 +97,17 @@ def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
 
 
 def grammar_compile_max_workers(cpu_count: int | None = None) -> int:
-    """Number of workers for the grammar-compilation thread pool.
-
-    Grammar compilation is CPU-bound, so the pool is capped at 8 workers
-    (mirroring the fill-bitmask pool) instead of scaling with the host CPU
-    count: ``multiprocessing.cpu_count()`` is not cgroup-aware, so inside a
-    container with a CFS quota (e.g. a Kubernetes pod with a low ``cpu``
-    limit scheduled on a many-core host) an uncapped pool oversubscribes
-    the quota, triggers CFS throttling, and stalls the engine loop.
+    """Bound outer compilation concurrency by host and available CPUs.
 
     Set ``VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS`` to a positive value
-    to override the automatic sizing.
+    to override automatic sizing, including its available-CPU cap.
     """
     override = envs.VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS
     if override > 0:
         return override
     if cpu_count is None:
         cpu_count = multiprocessing.cpu_count()
-    return max(1, min(cpu_count // 2, 8))
+    return max(1, min(cpu_count // 2, available_cpu_count(), 8))
 
 
 class OutlinesVocabulary:

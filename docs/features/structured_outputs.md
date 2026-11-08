@@ -38,6 +38,28 @@ differ: in particular, LM Format Enforcer uses Python-style regex syntax, while
 XGrammar and Guidance use Rust-style regex syntax. Changing backends can change
 which tokens are allowed and therefore the generated output.
 
+## Grammar compilation concurrency
+
+`VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS` controls the outer thread pool
+used to compile structured-output grammars. The default, `0`, selects
+`max(1, min(host_cpu_count // 2, available_cpu_count(), 8))` workers.
+The available CPU count uses process affinity and detected cgroup CPU quota
+on Linux, and the host CPU count on other platforms.
+
+For example, a 172-core host with a detected 6-CPU quota uses six compile
+workers; without a smaller detected limit, the pool is capped at eight.
+Set a positive value to override automatic sizing, including its CPU cap:
+
+```bash
+VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS=4 vllm serve Qwen/Qwen2.5-1.5B-Instruct
+```
+
+This setting limits outer compilation concurrency. It does not reserve CPU
+for decode or change backend-internal compilation threads or the fill-bitmask
+pool. CPU detection is best-effort, so tune the override for your workload;
+the automatic setting does not guarantee that CFS throttling is eliminated.
+Lower limits can increase queueing and schema-burst completion latency.
+
 ## Online Serving (OpenAI API)
 
 You can generate structured outputs using the OpenAI's [Completions](https://platform.openai.com/docs/api-reference/completions) and [Chat](https://platform.openai.com/docs/api-reference/chat) API.

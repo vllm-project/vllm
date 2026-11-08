@@ -1782,11 +1782,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_REGEX_COMPILATION_TIMEOUT_S", "5")
     ),
     # Maximum number of worker threads for the structured-output grammar
-    # compilation thread pool. 0 (default) sizes the pool automatically as
-    # min(cpu_count // 2, 8), matching the fill-bitmask pool. The pool is
-    # deliberately capped because cpu_count() is not cgroup-aware: sizing by
-    # host CPU count oversubscribes container CPU quotas (CFS throttling)
-    # and stalls decode while grammars compile.
+    # compilation thread pool. 0 (default) uses
+    # max(1, min(host_cpu_count // 2, available_cpu_count(), 8)). Available CPUs
+    # account for affinity and detected cgroup quota on Linux. A positive value
+    # overrides automatic sizing, including its CPU cap. This does not reserve
+    # CPU for decode or limit backend-internal threads; throttling can remain.
     "VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS": lambda: int(
         os.getenv("VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS", "0")
     ),
