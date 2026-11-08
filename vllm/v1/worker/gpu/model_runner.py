@@ -80,6 +80,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    get_block_table_width,
 )
 from vllm.v1.outputs import (
     DraftTokenIds,
@@ -92,7 +93,6 @@ from vllm.v1.watermarking.spec_decode import (
     create_speculative_target_watermarker,
     speculative_target_watermark_key,
 )
-from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.extensible_kv_cache import ExtensibleKVCache
 from vllm.v1.worker.gpu import pcp_manager as pcp
@@ -789,7 +789,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
             self.decode_query_len,
-            use_v2_model_runner=True,
             kv_cache_config=self.kv_cache_config,
             max_num_reqs=self.max_num_reqs,
             is_profiling=is_profiling,
@@ -907,11 +906,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # would exceed the token budget.
         num_reqs = min(num_tokens, self.max_num_reqs)
         if uniform_decode:
-            # HACK(lucas): for now since the worker is shared between MRV1 and MRV2,
-            # and for spec-decode with MTP we want to make sure the dummy runs use
-            # 1+num_speculative_tokens we use max here, this will likely be eventually
-            # changed in the worker: https://github.com/vllm-project/vllm/pull/35243
-            num_tokens = max(num_tokens, self.decode_query_len)
             num_reqs = num_tokens // self.decode_query_len
             assert num_tokens % self.decode_query_len == 0
         elif self.speculator is not None:
@@ -1179,7 +1173,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.attn_groups,
                         self.kv_cache_config,
                         pcp_manager=self.pcp_manager,
-                        has_lora=self.lora_config is not None,
                         use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
                         lora_capture_hook=create_lora_capture_hook(
                             self.lora_config, self
@@ -1278,7 +1271,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
-            assert new_req_data.prefill_token_ids is not None
             req_id = new_req_data.req_id
 
             # Streaming input update: request already exists from a prior
@@ -2125,7 +2117,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(
                 num_tokens=input_batch.num_tokens_after_padding,
-                has_lora=self.lora_config is not None,
                 num_active_loras=batch_desc.num_active_loras,
             )
 
@@ -2295,9 +2286,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Prepare the model runner output.
         model_runner_output = ModelRunnerOutput(
             req_ids=input_batch.req_ids,
-            # NOTE(woosuk): req_id_to_index is unused in this model runner.
-            # Only for compatibility with the existing model runner and scheduler.
-            req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
@@ -2442,7 +2430,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Build the model runner output.
         model_runner_output = ModelRunnerOutput(
             req_ids=input_batch.req_ids,
-            req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             kv_connector_output=kv_connector_output,
             ec_connector_output=ec_connector_output,
         )

@@ -241,7 +241,6 @@ def _write_minimal_moe_config(
             "swiglu_alpha": 1.702,
             "swiglu_limit": 7.0,
             "scoring_func": "sigmoid",
-            "use_routing_bias": True,
             "routed_scaling_factor": 2.0,
             "num_local_experts": 4,
             "moe_layer_freq": [1],
