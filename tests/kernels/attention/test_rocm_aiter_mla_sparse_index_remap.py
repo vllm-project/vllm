@@ -47,6 +47,8 @@ def _reset_index_epochs():
 def _make_metadata():
     return SimpleNamespace(
         num_actual_tokens=NUM_TOKENS,
+        num_prefills=0,
+        num_decodes=NUM_TOKENS,
         req_id_per_token=torch.zeros(NUM_TOKENS, dtype=torch.int32, device="cpu"),
         block_table=torch.arange(16, dtype=torch.int32, device="cpu").view(2, 8),
         paged_kv_indptr=torch.zeros(NUM_TOKENS + 1, dtype=torch.int32, device="cpu"),
