@@ -14,7 +14,7 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
-from vllm.distributed import get_pp_group, get_world_group, in_single_pp_stage
+from vllm.distributed import get_world_group, in_single_pp_stage
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
@@ -233,11 +233,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         selected_files = hf_weights_files
         # Other pipeline stages do not load a model built as a single stage.
         is_distributed = self._is_distributed and not in_single_pp_stage()
-        distributed = is_distributed and torch.distributed.is_initialized()
-        # Drafts load only on the last PP stage; RunAI is invoked without a
-        # model-specific group, so retain its existing full-list path with PP.
-        can_select = not distributed or get_pp_group().world_size == 1
-        if is_unused_weight is not None and can_select:
+        if is_unused_weight is not None:
             if is_runai_obj_uri(model_or_path):
                 selected_files = _filter_remote_weights(
                     hf_weights_files, model_or_path, is_unused_weight
@@ -246,7 +242,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                 selected_files = filter_safetensors_files_by_weight_name(
                     hf_weights_files, is_unused_weight
                 )
-        if distributed and can_select:
+        if is_distributed and torch.distributed.is_initialized():
             # RunAI broadcasts across node-local or WORLD groups, not just TP.
             # A rank that cannot filter safely keeps the group on the full list.
             group = get_world_group()
