@@ -350,13 +350,13 @@ def test_flashinfer_sm90_fp8_mla_decode_without_rope():
 def test_flashinfer_mla_decode_workspace_supports_autotune():
     """VLLM's FlashInfer MLA decode workspace must be int8 for autotuning.
 
-    Model Runner V2's warmup autotunes ``trtllm_batch_decode_mla``, which makes
+    Model Runner V2's warmup autotunes `trtllm_batch_decode_mla`, which makes
     the FlashInfer autotuner enumerate the CuteDSL tactic. That tactic asserts
-    ``workspace_buffer.dtype == torch.int8``; the trtllm-gen path (used for
+    `workspace_buffer.dtype == torch.int8`; the trtllm-gen path (used for
     normal, non-autotuned inference) instead views the buffer as uint8, so a
     uint8 workspace only fails once the autotuner tries CuteDSL. That regressed
     every DeepSeek MLA test on Blackwell under V2 with
-    ``workspace_buffer must be torch.int8`` (vllm-project/vllm#46646).
+    `workspace_buffer must be torch.int8` (vllm-project/vllm#46646).
     """
     from flashinfer.autotuner import autotune
 
