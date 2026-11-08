@@ -162,7 +162,7 @@ Block-level KV-load failure recovery rewinds a request's computed tokens. vLLM r
 - A background thread writes; it never blocks the forward. One TP rank writes (the others compute identical rows and skip); "key already exists" counts as success.
 - **Host work off the critical path.** The writing rank also captures and assembles every request's rows each step. Done inline, under the lock the engine's output path holds, that work stalled the rank's GPU while the other ranks waited for it in collectives, and it, not the bytes, was most of the cost of the indexer and hidden states (experiments: engine overhead). Capture therefore runs on its own thread, fed by one ordered queue from inside the lock: the queue preserves the order in which the output path handled requests, so first computation wins exactly as if the work ran inline. The queue is bounded, and an error on the capture thread is raised at the engine's next step instead of being lost.
 - **Encoding off the writer thread:** indexer compression (zstd, which releases the GIL) runs on a small thread pool ahead of the writer. The writer takes the results in order. Manifests stay on the writer thread, because they read the sizes of the objects put before them. At 512K context, a single writer thread spent 46% of its time in zstd and the engine paused about 3% of the time on writer backlog. The pool removes most of that wait.
-- **Full pool:** objects must never be evicted (§9). A put into a full pool fails and is retried until it lands. Each worker caps pending bytes, and beyond the cap the engine schedules no new tokens until writes catch up.
+- **Full memory:** objects must never be lost (§9). A put that does not fit is retried until it lands, while the store offloads to disk (SSD-first) or releases free the pool (pinned). Each worker caps pending bytes, and beyond the cap the engine schedules no new tokens until writes catch up. Writers report a stall when no put has landed for a deadline, and the driver aborts (§8).
 - **A failed block write:** that object is lost for good, and its exact name is marked lost. Later recomputations are not substituted: they can be of another version, and the version record of those positions describes the lost computation. The block stays missing, and every manifest that lists it reports it.
 - **A failed manifest, tail or chunk write:** the writer writes the request's error marker (retrying ~1 s). A reader that finds the marker fails that request at once instead of waiting; siblings are unaffected.
 - Tail and manifest are written as soon as the request finishes, not at a later engine step (an idle engine never runs one).
@@ -218,15 +218,31 @@ aux.release_session(job, session)  # after the session is consumed and the step 
 
 ## 8. Driver
 
-1. **In-flight cap:** admit at most `C` sessions with `C × max_session_bytes ≤ 0.75 × pool`, where `max_session_bytes = longest context × bytes/token × branching factor`. The next turn of an admitted session is always admitted. Count bytes, not requests; cap each policy separately.
-2. **Release** as in §7.
-3. **Deadlock fallback:** if the pool fills and no session completes for a while (default 60 s), abort the most recently admitted sessions, delete their objects and regenerate them.
+1. **Admission by disk, not by memory.** With the store backed by local SSD (§9), memory is a cache and the limit is disk. Admit a new group of sessions only if `free disk − segment − reserve − reserved ≥ group bytes`, where `group bytes = longest context × bytes/token × branching factor × group size` and `reserved` is the sum over admitted groups not yet released. Re-check before each new group, not once per job; when the check fails, pause admission until releases free space. The next turn of an admitted session is always admitted. Count bytes, not requests; reserve per policy. Without an SSD tier, the cap is `0.75 × pool` instead, and objects must be pinned (§9).
+2. **Release** as in §7, with force removal: a read takes a short lease on its keys (about one second, renewed by every existence check or get), and a plain removal inside the lease silently removes nothing. Write the release marker first, then remove, then wait until every writer has reported nothing pending for the session and remove again; count keys that came back.
+3. **Stall and liveness.** Abort the step, with its context, if a store holder or the master process dies, or if writers report no successful put for a deadline (default 600 s) while puts are pending. A dead holder takes its memory and its disk copies with it: the master still lists the keys, but every get returns empty. Never restart a holder in the same job; regenerate.
+4. **Deadlock fallback** without an SSD tier: if the pool fills and no session completes for a while (default 60 s), abort the most recently admitted sessions, delete their objects and regenerate them.
 
 ## 9. Store
 
-- **No eviction.** A listed object that disappears breaks invariant 4 silently: the reader can only time out. Objects are written hard-pinned, or soft-pinned with eviction of soft-pinned objects disabled on the master. They leave the store only through session release or the abort fallback. Without pinning, an overfull pool evicted 1.81M keys and the readers hung.
+Every acked object must stay readable until its session is released. A listed object that disappears breaks invariant 4 silently: the reader can only time out. There are two ways to hold that.
+
+**SSD-first (default).** Each holder's segment is a memory cache in front of a local NVMe directory; objects leave memory by offload, never by loss.
+
+- Master flags: `--enable_offload=true --offload_on_evict=true --offload_force_evict=false --enable_disk_eviction=false --client_ttl=600`. Objects are not pinned: a pinned object is never evicted, hence never offloaded.
+- **Offload on eviction only.** With `--offload_on_evict=false` (offload at put) the store evicts objects whose disk write has not completed and loses them without any error or counter: 3% of 100K small objects, and every session of a full rollout read back incomplete, at about 20× slower turns.
+- **`client_ttl` well above any holder pause.** A holder silent for longer than the TTL is dropped with every object in memory (10 s default: a 30 s pause lost all of them; 600 s: none).
+- **One fresh directory per holder and job.** Removal is logical: bucket files are not reclaimed, and a holder restarted on an old directory re-registers keys that were removed. The holder must start on an empty directory it owns, and the directory is deleted when the job ends. Space is reused across removals, so disk use follows the peak live bytes, not the total written.
+- **Disk failure stalls, it does not lose acked data.** A failed bucket write is logged (`FILE_WRITE_FAIL`), leaves the partial file behind, and memory stays full, so every later put fails. The put-stall deadline of §8 turns that into an abort; monitor free disk, since `--quota_bytes` does not bound the offload directory.
+- **Every holder eligible for placement is SSD-backed**, or objects placed on a memory-only holder can be evicted.
+- Cost: at 14.6K context × 512 sessions with all outputs, an 8 GB segment spilling 36 GB to disk ran rollouts as fast as a 96 GB pinned pool, with nothing missing (experiments: SSD tier).
+
+**Pinned memory (no SSD).** Objects are written hard-pinned, or soft-pinned with eviction of soft-pinned objects disabled on the master. They leave the store only through session release or the abort fallback. Without pinning, an overfull pool evicted 1.81M keys and the readers hung. The pool must hold every in-flight session (§8).
+
+**Both:**
+
 - **Segment lifetime.** Mooncake keeps one replica per object by default, so an object lives in whichever segment it was placed in. A node's segment must stay up until every consumer of every object placed on it has read and released. Taking down one replica's segment when that replica finished removed other replicas' objects.
-- **Sizing with real bytes per token.** At 512K context the indexer is 10 KB per token packed and about 5.6 KB after zstd (ratio ~1.8, against 4.6–6.7 at short context); under partial capture blocks omit the deep indexer slots, which shrinks it further. R3 adds 480 B per token, and hidden states 16 KB per generated token as exact float32 (about 4.1 KB as fp8). The in-flight cap of §8 must use the numbers of the configured codecs at the target context; a cap computed from short-context sizes over-admits by about 2×.
+- **Sizing with real bytes per token.** At 512K context the indexer is 10 KB per token packed and about 5.6 KB after zstd (ratio ~1.8, against 4.6–6.7 at short context); under partial capture blocks omit the deep indexer slots, which shrinks it further. R3 adds 480 B per token, and hidden states 16 KB per generated token as exact float32 (about 4.1 KB as fp8). Admission (§8) must use the numbers of the configured codecs at the target context; a cap computed from short-context sizes over-admits by about 2×.
 - At job end, delete everything under `<job>/` and report the number of keys as a leak metric (expected 0).
 
 ## 10. Checklist
@@ -238,7 +254,7 @@ Inference framework:
 
 Training framework:
 1. Carry the manifest reference through shuffling, packing and rank sharding.
-2. Keep the in-flight cap; release after the step commits.
+2. Admit by disk (or by pool without SSD); release with force removal after the step commits.
 3. Read per rank, truncate to `L−1`, fail collectively.
 4. Hook R3 replay where the model computes routing (some MoE implementations call `route` directly, bypassing a router-level hook).
 5. Run the train-inference consistent build; otherwise invariant 3 does not hold and siblings must not share rows.
@@ -254,7 +270,8 @@ Training framework:
 | In-flight weight update | pause, reset, stash running requests, bump the version, resume |
 | Preemption | stash and resume; no rows lost or replaced |
 | Speculative decoding | accepted rows only; hash-lagging blocks delivered in the tail |
-| Full pool | writer blocks, engine pauses scheduling; nothing dropped |
+| Full memory | SSD-first: objects offload to disk; pinned: writer blocks and the engine pauses scheduling; nothing dropped |
+| Holder or disk failure | holder death: keys listed but unreadable, step aborts; disk write failure: puts stall, deadline aborts |
 | Write failure | reported as missing or as an error marker; never substituted |
 | Cross-session prefix hit | truncated |
 | Context rewriting / compaction | rewritten prefixes hash differently and are rewritten |
