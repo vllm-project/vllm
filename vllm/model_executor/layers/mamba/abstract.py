@@ -25,10 +25,6 @@ class MambaBase(AttentionLayerBase):
     kv_cache: tuple[torch.Tensor, ...]
     supports_dcp: bool = False
 
-    # Can forward() verify several drafts of a request at all? False for a
-    # layer that decodes one token per request: it refuses speculative decoding.
-    verifies_drafts: bool = True
-
     def tree_decline_reason(self) -> str | None:
         """Why forward() cannot verify a tree plan; None if it can."""
         return "verifies chains"

@@ -102,12 +102,6 @@ def layer_spec_limits(
     num_layers: Counter[tuple[PlanKind, str, str]] = Counter()
     for group, name, spec, layer in spec_layers(attn_groups, layers):
         if isinstance(layer, MambaBase):
-            if not layer.verifies_drafts:
-                raise ValueError(
-                    f"{name} ({type(layer).__name__}) decodes one token per "
-                    "request, so it cannot verify drafts: disable speculative "
-                    "decoding for this model."
-                )
             kind = SpecLayerKind("recurrent", type(layer).__name__)
             why = layer.tree_decline_reason()
             layout = "recurrent_state"

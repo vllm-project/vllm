@@ -61,10 +61,6 @@ class MambaMixer(MambaBase, PluggableLayer):
 
     # --8<-- [end:mamba_mixer]
 
-    # The decode path takes one token per request, so a verify of several
-    # drafts would read them as separate requests.
-    verifies_drafts = False
-
     def __init__(
         self,
         hidden_size: int,

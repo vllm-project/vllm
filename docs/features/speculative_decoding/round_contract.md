@@ -67,8 +67,7 @@ decline reason (None: trees); vLLM knows no model family.
   plugin swaps in its own layer with `PluggableLayer.register_oot`) and the
   registry holds a `layout:recurrent_state/commit` kernel. Row `i` of a request
   stores its state at `spec_state_indices_tensor[b, i]` and continues from the
-  state of its parent row (`KernelContext.tree_parents`). A layer with
-  `verifies_drafts = False` (Mamba1) refuses speculative decoding at startup.
+  state of its parent row (`KernelContext.tree_parents`).
 - **The model state** verifies chains when `ModelState.tree_decline_reason()`
   says it cannot resume from a tree path (recurrent align prefix caching,
   recovery or replay). On a tree step the runner passes each request's last

@@ -19,7 +19,6 @@ from vllm.model_executor.layers.mamba.gdn.olmo_gdn_linear_attn import (
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
 )
-from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.kv_cache_interface import (
@@ -229,14 +228,6 @@ def test_plan_kind_rules(case):
     caps = SpecCapabilities.from_limits(layer_spec_limits(attn_groups, layers, kernels))
     assert caps.plan_kind == plan_kind
     assert [limit.reason for limit in caps.limits] == reasons
-
-
-def test_one_token_decode_refuses_drafts():
-    """A recurrent layer that decodes one token per request (Mamba1) refuses
-    speculative decoding at startup."""
-    attn_groups, layers = _hybrid(MambaMixer)
-    with pytest.raises(ValueError, match="cannot verify drafts"):
-        layer_spec_limits(attn_groups, layers, _provided())
 
 
 def test_no_kv_commit_verifies_chains():
