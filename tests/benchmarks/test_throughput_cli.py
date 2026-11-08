@@ -9,10 +9,12 @@ serve-side dataset coverage.
 """
 
 import subprocess
+import warnings
 from argparse import Namespace
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import SampleRequest
@@ -22,6 +24,7 @@ from vllm.benchmarks.throughput import (
     add_cli_args,
     assign_loras,
     get_requests,
+    validate_args,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -322,6 +325,68 @@ def test_to_serve_args_keeps_legacy_flag_fallback() -> None:
     assert not serve_args.enable_multimodal_chat
 
 
+def _parse_throughput_args(*argv: str) -> Namespace:
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    return parser.parse_args(["--model", MODEL_NAME, *argv])
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        # Neither flag: the RandomDataset defaults.
+        ([], (1024, 128, 0)),
+        # Legacy flags alone are honored.
+        (
+            ["--input-len", "2048", "--output-len", "512", "--prefix-len", "64"],
+            (2048, 512, 64),
+        ),
+        # Explicit --random-* wins, including an explicit 0.
+        (
+            [
+                "--input-len",
+                "2048",
+                "--random-input-len",
+                "300",
+                "--prefix-len",
+                "64",
+                "--random-prefix-len",
+                "0",
+            ],
+            (300, 128, 0),
+        ),
+    ],
+)
+def test_parsed_lengths_follow_flag_precedence(argv, expected) -> None:
+    """Lengths from the real parser: --random-* > legacy flags > defaults."""
+    serve_args = _to_serve_args(_parse_throughput_args(*argv))
+
+    assert (
+        serve_args.random_input_len,
+        serve_args.random_output_len,
+        serve_args.random_prefix_len,
+    ) == expected
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--input-len", "32", "--output-len", "1", "--prefix-len", "8"],
+        ["--random-input-len", "32", "--random-output-len", "1"],
+        ["--random-prefix-len", "64"],
+        ["--random-prefix-len", "0"],
+    ],
+)
+def test_one_flag_per_length_does_not_warn(argv) -> None:
+    """Only the legacy or only the --random-* flag: no "Both ... are specified"."""
+    args = _parse_throughput_args(*argv)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        validate_args(args)
+
+    assert not [str(w.message) for w in caught if "are specified" in str(w.message)]
+
+
 @pytest.mark.benchmark
 def test_get_requests_random_mm_with_mm_processor_args(
     hf_tokenizer: PreTrainedTokenizerBase,
@@ -367,3 +432,53 @@ def test_get_requests_random_mm_with_mm_processor_args(
         assert isinstance(req.prompt, list)
         assert req.prompt[0]["role"] == "user"
         assert any(item.get("type") == "image_url" for item in req.prompt[0]["content"])
+
+
+@pytest.mark.benchmark
+def test_get_requests_hf_dataset_with_mm_processor_args(
+    monkeypatch: pytest.MonkeyPatch,
+    hf_tokenizer: PreTrainedTokenizerBase,
+) -> None:
+    """Regression: bench mm-processor's HF sampling must not crash.
+
+    bench mm-processor has no --hf-name, and get_samples reads args.hf_name when
+    it builds any HF dataset. Only the HF download is stubbed.
+    """
+    import vllm.benchmarks.datasets.datasets as dsmod
+    from vllm.benchmarks.mm_processor import add_cli_args as add_mm_cli_args
+
+    class _DownloadedDataset(list):
+        def shuffle(self, seed: int) -> "_DownloadedDataset":  # noqa: ARG002
+            return self
+
+    item = {
+        "conversation": [[{"content": "What is this?"}]],
+        "images": [Image.new("RGB", (8, 8))],
+    }
+    monkeypatch.setattr(
+        dsmod, "load_dataset", lambda *_, **__: _DownloadedDataset([item] * 3)
+    )
+
+    parser = FlexibleArgumentParser()
+    add_mm_cli_args(parser)
+    args = parser.parse_args(
+        [
+            "--dataset-name",
+            "hf",
+            "--dataset-path",
+            "lmarena-ai/VisionArena-Chat",
+            "--hf-split",
+            "train",
+            "--num-prompts",
+            "3",
+        ]
+    )
+
+    requests = get_requests(args, hf_tokenizer)
+
+    assert len(requests) == 3
+    for req in requests:
+        assert isinstance(req.prompt, list)
+        assert req.prompt[0]["role"] == "user"
+        content_types = {part["type"] for part in req.prompt[0]["content"]}
+        assert content_types == {"text", "image_url"}

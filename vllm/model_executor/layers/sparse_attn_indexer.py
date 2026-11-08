@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+import math
+
 import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+from vllm import _cpu_ops as cpu_ops
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -17,8 +20,6 @@ from vllm.config import (
 from vllm.distributed import (
     get_dcp_group,
     get_pcp_group,
-    get_tensor_model_parallel_rank,
-    get_tp_group,
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -29,9 +30,18 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     select_candidate_blocks as _select_candidate_blocks,
 )
+from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
+    fused_mqa_topk_chunk,
+    fused_mqa_topk_key_scales,
+    fused_mqa_topk_prefill,
+    get_fused_mqa_topk_workspaces,
+    use_fused_mqa_topk,
+)
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
+    deep_select_topk,
     get_indexer_topk,
+    is_deep_select_supported,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
@@ -41,20 +51,24 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
+    get_paged_mqa_logits_metadata,
     has_deep_gemm,
     mqa_logits_mx_inputs,
     mqa_logits_use_mx_scales,
 )
 from vllm.utils.import_utils import has_cutedsl
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
 )
 from vllm.v1.attention.backends.mla.indexer import (
+    DeepSeekV32IndexerDecodeMetadata,
     DeepseekV32IndexerMetadata,
-    tp_prefill_row_sharding_supported,
+    dense_logits_rows,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
@@ -100,6 +114,8 @@ def _merge_dcp_topk_global(
     dcp_world_size: int,
     cp_interleave: int,
     row_starts: torch.Tensor | None = None,
+    logits_dtype: torch.dtype = torch.float32,
+    num_positions: int | None = None,
 ) -> None:
     """Merge each DCP rank's local top-K into the global top-K.
 
@@ -112,6 +128,9 @@ def _merge_dcp_topk_global(
     score row. Overwrites ``topk_indices`` with global token ids (``-1`` for
     padding); the attention backend localizes them back to physical slots per
     rank.
+    The selector keys only the score bits that ``logits_dtype`` (the dtype the
+    MQA logits were computed in, before the FP32 upcast) carries and the id
+    bits that positions below ``num_positions`` use.
     """
     if dcp_world_size <= 1:
         return
@@ -121,6 +140,8 @@ def _merge_dcp_topk_global(
     # stable-topk selector.
     _assert_cutedsl_dcp_merge_supported(logits, topk_indices, topk_tokens)
     from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        dcp_topk_id_bits,
+        dcp_topk_score_bits,
         pack_dcp_topk_candidates_cutedsl,
         stable_topk_from_gathered_candidates_cutedsl,
     )
@@ -139,9 +160,16 @@ def _merge_dcp_topk_global(
         cp_interleave,
         row_starts,
     )
-    gathered = get_dcp_group().all_gather(packed, dim=1)
+    # Gather along dim 0 and let the selector read the rank-major
+    # [world_size, rows, topk, 2] result: a dim-1 gather would reorder it into
+    # [rows, world_size * topk, 2] with a full extra copy.
+    gathered = get_dcp_group().all_gather(packed, dim=0)
     stable_topk_from_gathered_candidates_cutedsl(
-        gathered, topk_tokens, out=topk_indices
+        gathered.view(dcp_world_size, *packed.shape),
+        topk_tokens,
+        out=topk_indices,
+        score_bits=dcp_topk_score_bits(logits_dtype),
+        id_bits=32 if num_positions is None else dcp_topk_id_bits(num_positions),
     )
 
 
@@ -302,7 +330,7 @@ def _upcast_logits_kernel(src_ptr, dst_ptr, row_ends_ptr, stride, BLOCK: tl.cons
 
 
 def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor:
-    """Upcast SM100's BF16 MQA logits for the FP32 top-k kernels.
+    """Upcast BF16 MQA logits for the FP32 top-k kernels.
 
     Only columns below ``row_ends`` (int32, one per row) are converted, the
     span the consumers read; DeepGEMM's aligned row stride is kept.
@@ -322,6 +350,103 @@ def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor
         logits, out, row_ends.contiguous(), logits.stride(0), BLOCK=block
     )
     return out
+
+
+def _decode_chunk_ranges(
+    rows: int, width: int, budget: int, itemsize: int
+) -> list[tuple[int, int]]:
+    """Partition independent Q rows under a payload budget of logits whose
+    elements take ``itemsize`` bytes."""
+    if budget < 0:
+        raise ValueError("Decode logits budget must be nonnegative")
+    if not rows or not budget or rows * width * itemsize <= budget:
+        return []
+    limit = budget // (itemsize * width) // 16 * 16
+    if limit < 16:
+        raise ValueError("Decode logits budget must fit at least 16 logits rows")
+    units = (rows + 15) // 16
+    count = (units + limit // 16 - 1) // (limit // 16)
+    base, extra = divmod(units, count)
+    ranges = []
+    start = 0
+    # Allocate the largest scratch first so later graph nodes can reuse it.
+    for i in range(count):
+        end = min(rows, start + 16 * (base + (i < extra)))
+        ranges.append((start, end))
+        start = end
+    return ranges
+
+
+def _varlen_decode_rows(
+    q: torch.Tensor,
+    q_scale: torch.Tensor | None,
+    weights: torch.Tensor,
+    kv_cache: torch.Tensor,
+    decode: DeepSeekV32IndexerDecodeMetadata,
+    max_model_len: int,
+    max_seq_len: int,
+    topk_backend: str,
+    topk_tokens: int,
+    topk_indices_buffer: torch.Tensor,
+    candidate_blocks: torch.Tensor | None,
+    candidate_block_size: int,
+    candidate_write: bool,
+    logits_dtype: torch.dtype,
+    start: int,
+    end: int,
+) -> None:
+    """The varlen (SM100) decode logits, candidate selection and top-k of rows
+    ``[start, end)``, with the slice's own DeepGEMM schedule."""
+    assert decode.indices is not None
+    seq_lens = decode.seq_lens[start:end]
+    indices = decode.indices[start:end]
+    schedule = decode.schedule_metadata
+    if end - start < decode.seq_lens.shape[0]:
+        schedule = get_paged_mqa_logits_metadata(
+            seq_lens, kv_cache.shape[1], schedule.shape[0] - 1, indices=indices
+        )
+    logits = fp8_fp4_paged_mqa_logits(
+        (q[start:end], q_scale[start:end] if q_scale is not None else None),
+        kv_cache,
+        weights[start:end],
+        seq_lens,
+        decode.block_table[start:end],
+        schedule,
+        max_model_len=max_model_len,
+        logits_dtype=logits_dtype,
+        indices=indices,
+    )
+    row_ends = seq_lens.view(-1)
+    selector = get_indexer_topk(topk_backend)
+    if not selector.takes_bf16_logits(logits, topk_tokens, end - start):
+        logits = as_fp32_logits(logits, row_ends)
+    if candidate_blocks is not None:
+        candidates = candidate_blocks[start:end]
+        if candidate_write:
+            _select_candidate_blocks(
+                logits,
+                None,
+                row_ends,
+                candidates.shape[1],
+                candidate_block_size,
+                candidates,
+                1,
+                score_dtype=(
+                    torch.float32 if topk_backend in ("auto", "persistent") else None
+                ),
+            )
+        else:
+            _apply_candidate_mask(
+                logits, None, row_ends, candidates, candidate_block_size, 1
+            )
+    selector(
+        logits,
+        seq_lens,
+        1,
+        topk_indices_buffer[start:end, :topk_tokens],
+        topk_tokens,
+        max_seq_len,
+    )
 
 
 def _gather_workspace_shapes(
@@ -365,75 +490,6 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
-class PrefillRowShard:
-    """One TP rank's contiguous slice of the replicated prefill rows.
-
-    Rows are independent, so each rank scores only its slice and the group
-    exchanges final int32 top-k indices instead of the logits."""
-
-    def __init__(self, num_decode_tokens: int, sizes: list[int], rank: int):
-        self.num_decode_tokens = num_decode_tokens
-        self.sizes = sizes
-        self.start = num_decode_tokens + sum(sizes[:rank])
-        self.stop = self.start + sizes[rank]
-
-    @classmethod
-    def from_metadata(
-        cls, prefill_metadata, num_decode_tokens: int
-    ) -> "PrefillRowShard | None":
-        sizes = getattr(prefill_metadata, "row_shard_sizes", None)
-        if sizes is None:
-            return None
-        return cls(num_decode_tokens, sizes, get_tensor_model_parallel_rank())
-
-    def narrow(self, chunk) -> "tuple[int, int, torch.Tensor, torch.Tensor] | None":
-        """Row window and narrowed causal bounds of ``chunk`` for this rank."""
-        start = max(chunk.token_start, self.start)
-        end = min(chunk.token_end, self.stop)
-        if start >= end:
-            return None
-        lo, hi = start - chunk.token_start, end - chunk.token_start
-        return start, end, chunk.cu_seqlen_ks[lo:hi], chunk.cu_seqlen_ke[lo:hi]
-
-    def exchange_topk(self, topk_buffer: torch.Tensor, width: int) -> None:
-        """Gather per-rank final indices back into global row order."""
-        # The local input must outlive the async PyNCCL gather's enqueued copy.
-        local = topk_buffer[self.start : self.stop, :width].contiguous()
-        end = self.num_decode_tokens + sum(self.sizes)
-        topk_buffer[self.num_decode_tokens : end, :width] = get_tp_group().all_gatherv(
-            local, dim=0, sizes=self.sizes
-        )
-
-
-def _reserve_row_shard_exchange_transient(
-    topk_indices_buffer: torch.Tensor, device: torch.device
-) -> None:
-    """Profiling/dummy runs return before ``exchange_topk`` executes; reserve
-    its worst-case transient so the memory profile accounts for it.
-
-    The exchange stages this rank's contiguous slice and the all_gatherv
-    wrapper allocates the full gathered tensor; each is bounded by the
-    buffer's row capacity times its (tile-padded) width.
-    """
-    cfg = get_current_vllm_config_or_none()
-    if cfg is None:
-        return
-    parallel = cfg.parallel_config
-    if not tp_prefill_row_sharding_supported(
-        cfg,
-        parallel.decode_context_parallel_size,
-        parallel.prefill_context_parallel_size > 1,
-        get_tp_group().world_size,
-    ):
-        return
-    rows, width = topk_indices_buffer.shape[:2]
-    _ = torch.empty(
-        2 * rows * width * topk_indices_buffer.element_size(),
-        dtype=torch.uint8,
-        device=device,
-    )
-
-
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -463,6 +519,7 @@ def sparse_attn_indexer(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
     topk_backend: str = "auto",
+    logits_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -477,6 +534,28 @@ def sparse_attn_indexer(
             "v4.1 two-level candidate filtering is not supported with DCP."
         )
         assert candidate_block_size > 0
+
+    fused_mqa_topk = use_fused_mqa_topk(
+        query_shape=q_quant.shape[1:],
+        topk=topk_tokens,
+        fp4_cache=use_fp4_cache,
+        full_context=use_pcp or dcp_world_size == 1,
+        candidate_selection=candidate_blocks is not None,
+    )
+
+    # DeepSelect ranks BF16 decode logits directly; other top-k backends and
+    # the DCP merge read an FP32 copy.
+    fp32_decode_logits = topk_backend != "deep_select" or dcp_world_size != 1
+
+    decode_budget = envs.VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB * 1024 * 1024
+    chunk_decode = (
+        decode_budget > 0
+        and current_platform.is_device_capability_family(100)
+        and not use_pcp
+        and dcp_world_size == 1
+        and topk_backend in ("auto", "persistent")
+        and topk_tokens in (512, 1024, 2048)
+    )
 
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
@@ -497,17 +576,51 @@ def sparse_attn_indexer(
             )
             profile_specs.extend(gather_spec * 2)
         current_workspace_manager().get_simultaneous(*profile_specs)
+        if fused_mqa_topk:
+            # Allocate the largest fused_mqa_topk workspaces so they are
+            # accounted for (freed again, they overlap the dense logits below).
+            get_fused_mqa_topk_workspaces(q_quant.device, q_quant.shape[0])
 
-        # Dummy allocation to simulate for peak logits tensor memory during inference.
-        # FP8 elements so elements == bytes
-        max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-        _ = torch.empty(
-            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
+        # Decode rows per step: each decode is padded to 1 + speculative tokens.
+        # The profiling run sets the vLLM config; other dummy runs may not.
+        max_decode_tokens = 0
+        if (cfg := get_current_vllm_config_or_none()) is not None:
+            max_decode_tokens = min(
+                cfg.scheduler_config.max_num_seqs,
+                cfg.scheduler_config.max_num_batched_tokens,
+            ) * (1 + cfg.num_speculative_tokens)
+
+        # Needed with the fused kernel too: chunks fused_mqa_topk_chunk keeps
+        # dense take this path (row-split to stay within the budget).
+        # Dummy allocation for the peak logits memory during inference: a
+        # prefill chunk's, or the decode logits, which eager and piecewise
+        # steps allocate outside the CUDA graph pools. DeepGEMM emits them in
+        # `logits_dtype`, each row holding whole KV splits at a 1024-byte
+        # stride; an FP32 copy of BF16 logits keeps that stride. Prefill always
+        # reads FP32 logits, and the chunk splitter caps them at the budget.
+        split_kv = 384 if current_platform.is_device_capability_family(100) else 256
+        row_align = math.lcm(split_kv, 1024 // logits_dtype.itemsize)
+        copy_bytes = 0 if logits_dtype == torch.float32 else torch.float32.itemsize
+        decode_copy_bytes = copy_bytes if fp32_decode_logits else 0
+        if chunk_decode:
+            # A decode chunk holds at most the budget, read in place by top-k.
+            max_decode_tokens = min(
+                max_decode_tokens,
+                decode_budget // (logits_dtype.itemsize * max_model_len),
+            )
+            decode_copy_bytes = 0
+        prefill_budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        max_logits_bytes = max(
+            prefill_budget
+            // torch.float32.itemsize
+            * (logits_dtype.itemsize + copy_bytes),
+            max_decode_tokens
+            * round_up(max_model_len, row_align)
+            * (logits_dtype.itemsize + decode_copy_bytes),
         )
-
-        # The dummy run returns before exchange_topk executes, so reserve its
-        # worst-case transient for the memory profile.
-        _reserve_row_shard_exchange_transient(topk_indices_buffer, hidden_states.device)
+        _ = torch.empty(
+            max_logits_bytes, dtype=torch.uint8, device=hidden_states.device
+        )
 
         return sparse_attn_indexer_fake(
             hidden_states,
@@ -537,7 +650,12 @@ def sparse_attn_indexer(
     assert isinstance(attn_metadata_narrowed, DeepseekV32IndexerMetadata)
     slot_mapping = attn_metadata_narrowed.slot_mapping
     has_decode = attn_metadata_narrowed.num_decodes > 0
-    has_prefill = attn_metadata_narrowed.num_prefills > 0
+    prefill_metadata = attn_metadata_narrowed.prefill
+    # If all prefills are shorter than the compression ratio, chunks are empty:
+    # there are no compressed KV entries to score or select with top-k.
+    # Skip prefill workspace setup, which calls max() on the chunks and would
+    # raise ValueError for an empty list.
+    has_prefill = prefill_metadata is not None and bool(prefill_metadata.chunks)
     num_decode_tokens = attn_metadata_narrowed.num_decode_tokens
 
     # q_scale is required iff the FP4 cache path is enabled; the FP8 path
@@ -606,13 +724,18 @@ def sparse_attn_indexer(
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
 
-        # Get the full shared workspace buffers once (will allocate on first use).
+        # Get the shared workspace buffers once, sized for this batch's largest
+        # chunk rather than the profiled bound (total_seq_lens), so the scratch
+        # stays at the workspace head and leaves retained tail spans intact.
         # Layout switches between FP8 (head_dim bytes + 4-byte fp32 scale) and
         # MXFP4 (head_dim/2 bytes packed + head_dim/MXFP4_BLOCK_SIZE ue8m0
         # scales) based on use_fp4_cache.
         workspace_manager = current_workspace_manager()
         values_spec, scales_spec = _gather_workspace_shapes(
-            total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
+            max(c.max_local_total_seq_lens for c in prefill_metadata.chunks),
+            head_dim,
+            fp8_dtype,
+            use_fp4_cache,
         )
         # PCP + DCP needs two more pairs: the rank-major all-gather destination
         # and the de-interleaved result.
@@ -636,12 +759,13 @@ def sparse_attn_indexer(
             scales_spec,
             *gather_specs,
         )
-        # One row window per rank; DSV4.1 candidate rows stay replicated.
-        row_shard = (
-            None
-            if candidate_blocks is not None
-            else PrefillRowShard.from_metadata(prefill_metadata, num_decode_tokens)
-        )
+        # Under ShardQ the chunks index the shardq_gather_indices tokens.
+        prefill_q, prefill_q_scale, prefill_weights = q_quant, q_scale, weights
+        if (indices := prefill_metadata.shardq_gather_indices) is not None:
+            assert candidate_blocks is None
+            prefill_q, prefill_weights = q_quant[indices], weights[indices]
+            if q_scale is not None:
+                prefill_q_scale = q_scale[indices]
         for chunk in prefill_metadata.chunks:
             cu_seqlen_ks = chunk.cu_seqlen_ks
             cu_seqlen_ke = chunk.cu_seqlen_ke
@@ -657,14 +781,7 @@ def sparse_attn_indexer(
                     chunk.local_cu_seq_lens,
                 )
 
-            # Narrow scoring to this rank; KV gathers remain unconditional for
-            # continuation chunks that reuse the workspace.
             row_start, row_end = chunk.token_start, chunk.token_end
-            if row_shard is not None:
-                narrowed = row_shard.narrow(chunk)
-                if narrowed is None:
-                    continue
-                row_start, row_end, cu_seqlen_ks, cu_seqlen_ke = narrowed
 
             # PCP + DCP KV all-gather.
             deinterleave_idx = chunk.pcp_deinterleave_idx
@@ -683,16 +800,40 @@ def sparse_attn_indexer(
                     out_scales,
                 )
 
-            q_slice = q_quant[row_start:row_end]
-            q_scale_slice = q_scale[row_start:row_end] if q_scale is not None else None
+            q_slice = prefill_q[row_start:row_end]
+            q_scale_slice = (
+                prefill_q_scale[row_start:row_end]
+                if prefill_q_scale is not None
+                else None
+            )
             topk_indices = topk_indices_buffer[row_start:row_end, :topk_tokens]
 
             # DeepGEMM returns compressed logits: row i starts at K position
             # cu_seqlen_ks[i]. None means every row starts at column zero.
             row_starts: torch.Tensor | None = None
+            # Rows per dense logits call under the logits budget.
+            dense_rows = dense_logits_rows(chunk.max_seqlen_k)
+            use_deep_select = False
             if chunk.local_total_seq_lens == 0 or q_slice.shape[0] == 0:
                 logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
                 topk_indices.fill_(-1)
+            elif fused_mqa_topk and fused_mqa_topk_chunk(
+                chunk.max_seqlen_k,
+                k_quant.shape[0],
+                topk_tokens,
+                q_slice.shape[0],
+                dense_rows,
+            ):
+                fused_mqa_topk_prefill(
+                    q_slice,
+                    k_quant,
+                    fused_mqa_topk_key_scales(k_scale),
+                    prefill_weights[row_start:row_end],
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
+                    topk_indices,
+                )
+                logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
             else:
                 # DeepGEMM scalar-type tags (zero-copy): MXFP4 values → int8
                 # (kPackedFP4), scales → int32 squeezed to 1-D kv_sf / 2-D q_sf.
@@ -706,70 +847,98 @@ def sparse_attn_indexer(
                     k_scale_cast = k_scale.view(
                         torch.int32 if mqa_logits_use_mx_scales() else torch.float32
                     ).squeeze(-1)
-                if current_platform.is_xpu():
-                    if q_scale_slice is not None:
-                        raise RuntimeError("XPU fp8_mqa_logits does not support FP4 Q")
-                    logits = torch.ops.vllm.xpu_fp8_mqa_logits(
-                        q_slice_cast,
-                        k_quant_cast,
-                        k_scale_cast,
-                        weights[row_start:row_end],
-                        cu_seqlen_ks,
-                        cu_seqlen_ke,
-                    )
-                    row_starts = cu_seqlen_ks
-                    row_ends = cu_seqlen_ke
-                else:
-                    q_scale_slice, chunk_weights = mqa_logits_mx_inputs(
-                        q_slice_cast, q_scale_slice, weights[row_start:row_end]
-                    )
-                    row_ends = cu_seqlen_ke - cu_seqlen_ks
-                    logits = as_fp32_logits(
-                        fp8_fp4_mqa_logits(
-                            (q_slice_cast, q_scale_slice),
+                # Chunks planned for fused_mqa_topk are not bounded by the logits
+                # budget: split their rows (budget-planned chunks, the only ones
+                # under DCP, are one window, so the merge below sees all the
+                # rows).
+                for sub in range(0, q_slice.shape[0], dense_rows):
+                    rows = slice(sub, min(sub + dense_rows, q_slice.shape[0]))
+                    tokens = slice(row_start + rows.start, row_start + rows.stop)
+                    if current_platform.is_xpu():
+                        if q_scale_slice is not None:
+                            raise RuntimeError(
+                                "XPU fp8_mqa_logits does not support FP4 Q"
+                            )
+                        logits = torch.ops.vllm.xpu_fp8_mqa_logits(
+                            q_slice_cast[rows],
+                            k_quant_cast,
+                            k_scale_cast,
+                            prefill_weights[tokens],
+                            cu_seqlen_ks[rows],
+                            cu_seqlen_ke[rows],
+                        )
+                        row_starts = cu_seqlen_ks[rows]
+                        row_ends = cu_seqlen_ke[rows]
+                    else:
+                        q_scale_rows, chunk_weights = mqa_logits_mx_inputs(
+                            q_slice_cast[rows],
+                            q_scale_slice[rows] if q_scale_slice is not None else None,
+                            prefill_weights[tokens],
+                            logits_dtype,
+                        )
+                        row_ends = cu_seqlen_ke[rows] - cu_seqlen_ks[rows]
+                        logits = fp8_fp4_mqa_logits(
+                            (q_slice_cast[rows], q_scale_rows),
                             (k_quant_cast, k_scale_cast),
                             chunk_weights,
-                            cu_seqlen_ks,
-                            cu_seqlen_ke,
+                            cu_seqlen_ks[rows],
+                            cu_seqlen_ke[rows],
                             chunk.max_seqlen_k,
-                        ),
-                        row_ends,
-                    )
-                num_rows = logits.shape[0]
-                if candidate_blocks is not None:
-                    # Two-level selection (v4.1): the candidate source
-                    # publishes its top blocks; later indexers mask their
-                    # scores to them. Both before the row top-k.
-                    chunk_candidates = candidate_blocks[
-                        chunk.token_start : chunk.token_end
-                    ]
-                    if candidate_write:
-                        _select_candidate_blocks(
+                            logits_dtype=logits_dtype,
+                        )
+                        # DeepSelect ranks the bf16 logits in place of their exact
+                        # fp32 copy; fp32 logits keep the per-row top-k.
+                        use_deep_select = (
+                            topk_backend == "deep_select"
+                            and logits.dtype == torch.bfloat16
+                            and dcp_world_size == 1
+                            and is_deep_select_supported(logits, topk_tokens)
+                        )
+                        if not use_deep_select:
+                            logits = as_fp32_logits(logits, row_ends)
+                    num_rows = logits.shape[0]
+                    if candidate_blocks is not None:
+                        # Two-level selection (v4.1): the candidate source
+                        # publishes its top blocks; later indexers mask their
+                        # scores to them. Both before the row top-k.
+                        chunk_candidates = candidate_blocks[tokens]
+                        if candidate_write:
+                            _select_candidate_blocks(
+                                logits,
+                                row_starts,
+                                row_ends,
+                                chunk_candidates.shape[1],
+                                candidate_block_size,
+                                chunk_candidates,
+                            )
+                        else:
+                            _apply_candidate_mask(
+                                logits,
+                                row_starts,
+                                row_ends,
+                                chunk_candidates,
+                                candidate_block_size,
+                            )
+                    if use_deep_select:
+                        deep_select_topk(
                             logits,
-                            row_starts,
-                            row_ends,
-                            chunk_candidates.shape[1],
-                            candidate_block_size,
-                            chunk_candidates,
+                            topk_tokens,
+                            end=row_ends,
+                            output_idx=topk_indices[rows],
                         )
                     else:
-                        _apply_candidate_mask(
+                        ops.top_k_per_row_prefill(
                             logits,
-                            row_starts,
+                            torch.zeros_like(row_ends)
+                            if row_starts is None
+                            else row_starts,
                             row_ends,
-                            chunk_candidates,
-                            candidate_block_size,
+                            topk_indices[rows],
+                            num_rows,
+                            logits.stride(0),
+                            logits.stride(1),
+                            topk_tokens,
                         )
-                ops.top_k_per_row_prefill(
-                    logits,
-                    torch.zeros_like(row_ends) if row_starts is None else row_starts,
-                    row_ends,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
 
             if deinterleave_idx is None:
                 # Under the PCP path the top-k already ran over the whole
@@ -782,11 +951,11 @@ def sparse_attn_indexer(
                     dcp_world_size,
                     cp_kv_cache_interleave_size,
                     row_starts=row_starts,
+                    logits_dtype=logits_dtype,
+                    num_positions=max_model_len,
                 )
-
-        if row_shard is not None:
-            # Rows are already fully ranked, so this is a layout gather.
-            row_shard.exchange_topk(topk_indices_buffer, topk_tokens)
+            # Free this chunk's logits before the next chunk allocates its own.
+            del logits
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
@@ -858,6 +1027,43 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
+        if chunk_decode:
+            assert decode_metadata.indices is not None
+            assert decode_metadata.global_seq_lens is None
+            assert not needs_padded_path
+            ranges = _decode_chunk_ranges(
+                num_padded_tokens,
+                max_model_len,
+                decode_budget,
+                logits_dtype.itemsize,
+            )
+            if ranges:
+                padded_q_scale, decode_weights = mqa_logits_mx_inputs(
+                    padded_q_quant_cast,
+                    padded_q_scale,
+                    weights[:num_padded_tokens],
+                    logits_dtype,
+                )
+                for start, end in ranges:
+                    _varlen_decode_rows(
+                        padded_q_quant_cast,
+                        padded_q_scale,
+                        decode_weights,
+                        kv_cache,
+                        decode_metadata,
+                        max_model_len,
+                        attn_metadata_narrowed.max_seq_len,
+                        topk_backend,
+                        topk_tokens,
+                        topk_indices_buffer,
+                        candidate_blocks,
+                        candidate_block_size,
+                        candidate_write,
+                        logits_dtype,
+                        start,
+                        end,
+                    )
+                return topk_indices_buffer
         if current_platform.is_xpu():
             if padded_q_scale is not None:
                 raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
@@ -875,7 +1081,10 @@ def sparse_attn_indexer(
             )
         else:
             padded_q_scale, decode_weights = mqa_logits_mx_inputs(
-                padded_q_quant_cast, padded_q_scale, weights[:num_padded_tokens]
+                padded_q_quant_cast,
+                padded_q_scale,
+                weights[:num_padded_tokens],
+                logits_dtype,
             )
             logits = fp8_fp4_paged_mqa_logits(
                 (padded_q_quant_cast, padded_q_scale),
@@ -885,11 +1094,14 @@ def sparse_attn_indexer(
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
                 max_model_len=max_model_len,
+                logits_dtype=logits_dtype,
                 indices=decode_metadata.indices,
             )
-            # Keeping bf16 halves top-k/candidate reads; other top-k backends and
-            # DCP need fp32. SM100 decode is varlen: one context length per row.
-            if topk_backend != "deep_select" or dcp_world_size != 1:
+            # Keeping bf16 halves top-k/candidate reads. SM100 decode is varlen:
+            # one context length per row.
+            if dcp_world_size != 1 or not get_indexer_topk(
+                topk_backend
+            ).takes_bf16_logits(logits, topk_tokens, logits.shape[0]):
                 logits = as_fp32_logits(logits, seq_lens.view(-1))
         num_rows = logits.shape[0]
         if candidate_blocks is not None:
@@ -910,6 +1122,11 @@ def sparse_attn_indexer(
                     candidate_block_size,
                     decode_candidates,
                     row_repeat,
+                    score_dtype=(
+                        torch.float32
+                        if topk_backend in ("auto", "cooperative", "persistent")
+                        else None
+                    ),
                 )
             else:
                 _apply_candidate_mask(
@@ -941,6 +1158,8 @@ def sparse_attn_indexer(
                 dcp_rank,
                 dcp_world_size,
                 cp_kv_cache_interleave_size,
+                logits_dtype=logits_dtype,
+                num_positions=max_model_len,
             )
 
         if needs_padded_path:
@@ -985,6 +1204,7 @@ def sparse_attn_indexer_fake(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
     topk_backend: str = "auto",
+    logits_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -1052,6 +1272,9 @@ class SparseAttnIndexer(CustomOp):
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
+        self.logits_dtype = STR_DTYPE_TO_TORCH_DTYPE[
+            vllm_config.attention_config.resolve_indexer_logits_dtype("float32")
+        ]
         self._parallel_config = parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
@@ -1149,6 +1372,7 @@ class SparseAttnIndexer(CustomOp):
             candidate_block_size=self.candidate_block_size,
             candidate_write=self.candidate_write,
             topk_backend=self.topk_backend,
+            logits_dtype=self.logits_dtype,
         )
 
     def forward_xpu(
@@ -1171,12 +1395,11 @@ class SparseAttnIndexer(CustomOp):
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )
-        from vllm.platforms.rocm import on_gfx11, on_gfx950
+        from vllm.platforms.rocm import on_gfx950
 
         if (
             rocm_aiter_ops.is_enabled()
             or rocm_aiter_ops.is_rdna_aiter_enabled()
-            or on_gfx11()
             # The so-called AITER sparse indexer op has a native gfx950 path:
             # its cache insert, MQA logits, and top-k fallbacks are implemented
             # by local Triton/C++ kernels and do not require the aiter package.
@@ -1204,7 +1427,7 @@ class SparseAttnIndexer(CustomOp):
             )
         raise RuntimeError(
             "Sparse attention indexer ROCm path requires AITER or a supported "
-            "native architecture (gfx950/gfx11)."
+            "native architecture (gfx950)."
         )
 
     def forward_cpu(
@@ -1318,7 +1541,7 @@ class SparseAttnIndexer(CustomOp):
                 # flat-gather buffer this paged path no longer allocates).
                 max_seq_len = int(local_seq_lens.max().item())
 
-                logits = ops.fp8_paged_mqa_logits_cpu(
+                logits = cpu_ops.fp8_paged_mqa_logits_cpu(
                     q_slice,
                     kv_view,
                     weights[chunk.token_start : chunk.token_end],
@@ -1332,7 +1555,7 @@ class SparseAttnIndexer(CustomOp):
                     dtype=torch.int32,
                     device=kv_cache.device,
                 )
-                ops.topk_transform_512_cpu(
+                cpu_ops.topk_transform_512_cpu(
                     logits,
                     local_seq_lens,
                     page_table,
@@ -1369,7 +1592,7 @@ class SparseAttnIndexer(CustomOp):
                 block_size = kv_cache.shape[1]
                 kv_view = kv_cache.view(kv_cache.shape[0], -1)
 
-                logits = ops.fp8_paged_mqa_logits_cpu(
+                logits = cpu_ops.fp8_paged_mqa_logits_cpu(
                     q_quant[:num_decode_tokens],
                     kv_view,
                     weights[:num_decode_tokens],
@@ -1389,7 +1612,7 @@ class SparseAttnIndexer(CustomOp):
                     dtype=torch.int32,
                     device=kv_cache.device,
                 )
-                ops.topk_transform_512_cpu(
+                cpu_ops.topk_transform_512_cpu(
                     logits,
                     seq_lens,
                     block_table,

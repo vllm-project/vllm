@@ -609,11 +609,6 @@ def has_tilelang() -> bool:
     return True
 
 
-def has_arctic_inference() -> bool:
-    """Whether the optional `arctic_inference` package is available."""
-    return _has_module("arctic_inference")
-
-
 def has_helion() -> bool:
     """Whether the optional `helion` package is available.
 
@@ -637,6 +632,32 @@ def has_aiter() -> bool:
 def has_mori() -> bool:
     """Whether the optional `mori` package is available."""
     return _has_module("mori")
+
+
+# First release with single-node CCO windows (ROCm/mori#704).
+MORI_EPV2_MIN_VERSION = "1.2.4"
+
+
+def mori_epv2_unavailable_reason() -> str | None:
+    """Why the installed MoRI cannot run EPv2, or None if it can.
+
+    Requires the cco and dispatch_combine_v2 modules and MoRI >= 1.2.4.
+    """
+    if not _has_module("mori"):
+        return "MoRI is not installed"
+    if not (_has_module("mori.cco") and _has_module("mori.ops.dispatch_combine_v2")):
+        return "the installed MoRI has no EPv2 modules"
+    import mori  # type: ignore[import-not-found]
+    from packaging.version import InvalidVersion, Version
+
+    version = getattr(mori, "__version__", "unknown")
+    try:
+        too_old = Version(version) < Version(MORI_EPV2_MIN_VERSION)
+    except InvalidVersion:
+        too_old = True
+    if too_old:
+        return f"MoRI {version} is older than {MORI_EPV2_MIN_VERSION}"
+    return None
 
 
 def has_fbgemm_gpu() -> bool:

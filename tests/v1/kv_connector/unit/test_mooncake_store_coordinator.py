@@ -36,6 +36,7 @@ def _make_coord(
     use_eagle=False,
     retention_interval=None,
     enable_partial_hash_hits=False,
+    num_hash_lookahead_tokens=0,
 ):
     """Construct a coordinator using the natural LCM of group block sizes as
     the scheduler block size — mirrors ``resolve_kv_cache_block_sizes`` for
@@ -49,6 +50,7 @@ def _make_coord(
         use_eagle=use_eagle,
         retention_interval=retention_interval,
         enable_partial_hash_hits=enable_partial_hash_hits,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
 
 
@@ -452,7 +454,9 @@ def test_store_mask_retention_interval_zero_eagle_round_trip(num_prompt_tokens):
     exists: set[tuple[int, bytes]] = set()
     store_masks = coord.store_mask(96, num_prompt_tokens=num_prompt_tokens)
     for gid, (group, mask) in enumerate(zip(groups, store_masks, strict=True)):
-        group_hashes = coord.block_hashes_for_spec(hashes, group.kv_cache_spec)
+        group_hashes = chunk_hashes_for_block_size(
+            hashes, coord.hash_block_size, group.kv_cache_spec.block_size
+        )
         for chunk_id, block_hash in enumerate(group_hashes):
             if mask is None or mask[chunk_id]:
                 exists.add((gid, bytes(block_hash)))
@@ -484,7 +488,9 @@ def test_load_mask_restores_mtp_replay_tail(extra_retained_tokens):
     exists: set[tuple[int, bytes]] = set()
     store_masks = coord.store_mask(96, num_prompt_tokens=96)
     for gid, (group, mask) in enumerate(zip(groups, store_masks, strict=True)):
-        group_hashes = coord.block_hashes_for_spec(hashes, group.kv_cache_spec)
+        group_hashes = chunk_hashes_for_block_size(
+            hashes, coord.hash_block_size, group.kv_cache_spec.block_size
+        )
         for chunk_id, block_hash in enumerate(group_hashes):
             if mask is None or mask[chunk_id]:
                 exists.add((gid, bytes(block_hash)))
@@ -588,12 +594,13 @@ def test_load_mask_with_eagle_does_not_double_prune_full_attention():
     coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(16, {(0, bytes(h)) for h in hs})
-    _masks, hit = coord.find_longest_cache_hit(
+    lookup_masks, hit = coord.find_longest_cache_hit(
         hs, max_length=64, cached_block_pool=cmap
     )
     assert hit == 48  # eagle popped 1 block
 
     masks = coord.load_mask(hs, token_len=hit)
+    assert lookup_masks == masks  # Lookup leases and receives need the same blocks.
     # Every chunk that process_tokens(token_len=48, ...) would yield must
     # have a corresponding mask slot. process_tokens emits chunk_id 0..2
     # (start=0, 16, 32), so the mask must be length 3, all True.
@@ -612,13 +619,14 @@ def test_load_mask_with_eagle_hybrid_full_plus_swa():
     hs = _hashes(4)
     exists = {(g, bytes(h)) for g in (0, 1) for h in hs}
     cmap = ExternalCachedBlockPool(16, exists)
-    _masks, hit = coord.find_longest_cache_hit(
+    lookup_masks, hit = coord.find_longest_cache_hit(
         hs, max_length=64, cached_block_pool=cmap
     )
     # FullAttn dictates the convergence; eagle pops one block off it.
     assert hit == 48
 
     masks = coord.load_mask(hs, token_len=hit)
+    assert lookup_masks == masks  # Lookup leases and receives need the same blocks.
     # FullAttn: all chunks populated locally.
     assert masks[0] == [True, True, True]
     # SWA: tail-window only (ceil((32-1)/16) = 2 trailing blocks).
@@ -666,12 +674,11 @@ def test_lookup_with_eagle_hybrid_full_plus_mamba_no_overrun():
     hs = _hashes(4)
     exists = {(g, bytes(h)) for g in (0, 1) for h in hs}
     cmap = ExternalCachedBlockPool(16, exists)
-    _masks, hit = coord.find_longest_cache_hit(
-        hs, max_length=64, cached_block_pool=cmap
-    )
+    masks, hit = coord.find_longest_cache_hit(hs, max_length=64, cached_block_pool=cmap)
     # FullAttn matches 4 blocks, eagle pops 1 -> 48 verified tokens. The
     # Mamba group must serve its state@48 snapshot, not peek to state@64.
     assert hit == 48
+    assert masks == coord.load_mask(hs, token_len=hit)
 
 
 def test_eagle_flag_propagates_to_all_merged_swa_groups():
@@ -714,6 +721,33 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
     assert hit == 64
 
 
+@pytest.mark.cpu_test
+def test_lookahead_lookup_and_store_masks_match():
+    groups = [
+        KVCacheGroupSpec(["full"], _full(64)),
+        KVCacheGroupSpec(
+            ["mtp"],
+            _swa(block_size=16, sliding_window=32),
+            is_eagle_group=True,
+        ),
+    ]
+    coord = _make_coord(
+        groups, hash_block_size=16, use_eagle=True, num_hash_lookahead_tokens=2
+    )
+
+    store_masks = coord.store_mask(128)
+    lookup_masks = coord.lookup_mask(128)
+
+    assert (
+        lookup_masks
+        == store_masks
+        == (
+            None,
+            [False, False, True, True] * 2,
+        )
+    )
+
+
 def test_dsv4_five_group_eagle_store_lookup_round_trip():
     """Cover the five KV groups observed with DeepSeek-V4-Flash + MTP.
 
@@ -738,7 +772,9 @@ def test_dsv4_five_group_eagle_store_lookup_round_trip():
     exists: set[tuple[int, bytes]] = set()
     store_masks = coord.store_mask(token_len)
     for gid, (group, mask) in enumerate(zip(groups, store_masks, strict=True)):
-        group_hashes = coord.block_hashes_for_spec(hashes, group.kv_cache_spec)
+        group_hashes = chunk_hashes_for_block_size(
+            hashes, coord.hash_block_size, group.kv_cache_spec.block_size
+        )
         for chunk_id, block_hash in enumerate(group_hashes):
             if mask is None or mask[chunk_id]:
                 exists.add((gid, bytes(block_hash)))

@@ -156,7 +156,7 @@ class _LookupBlockPool(BlockPool):
         if block is None:
             block = KVCacheBlock(
                 block_id=len(self.hit_blocks) + 1,
-                _block_hash=make_block_hash_with_group_id(
+                block_hash=make_block_hash_with_group_id(
                     BlockHash(block_hash), kv_cache_group_ids[0]
                 ),
             )
@@ -691,7 +691,6 @@ class UMBPStoreConnectorScheduler:
 
         block_state = getattr(scheduler_output, "kv_connector_block_state", None)
         cached_reqs = scheduler_output.scheduled_cached_reqs
-        resumed_ids: set[str] = set(getattr(cached_reqs, "resumed_req_ids", ()))
         for request_id in cached_reqs.req_ids:
             load_plans = self._pending_loads.pop(request_id, [])
             self._load_specs.pop(request_id, None)
@@ -716,10 +715,7 @@ class UMBPStoreConnectorScheduler:
                                 self.kv_cache_config.prefix_cacheable_group_ids
                             )
                         )
-                        if request_id in resumed_ids:
-                            cached_tracker.replace_blocks(selected)
-                        else:
-                            cached_tracker.update_blocks(selected)
+                        cached_tracker.update_blocks(selected)
                     # The appended table keeps blocks core has since freed, such
                     # as sliding-window blocks out of the window, which a store
                     # would read; core's current table does not.

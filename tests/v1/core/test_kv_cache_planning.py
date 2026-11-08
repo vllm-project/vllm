@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import mmap
 import subprocess
 import sys
@@ -12,7 +13,6 @@ import torch
 
 import vllm.v1.core.kv_cache_planning as kv_cache_planning
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-import vllm.v1.hisparse.runtime as hisparse_runtime_module
 from tests.v1.core.utils import (
     get_kv_cache_configs,
     new_kv_cache_spec,
@@ -20,6 +20,7 @@ from tests.v1.core.utils import (
     new_mla_spec,
     new_sliding_window_spec,
 )
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import (
     CacheConfig,
     ModelConfig,
@@ -27,6 +28,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.attention import HiSparseConfig
+from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_planning import (
     check_enough_kv_cache_memory,
@@ -70,7 +72,9 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     monkeypatch, gpu_block_size, shared_host_pool
 ):
     monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
     specs = {
         "model.layers.0.self_attn": MLAAttentionSpec(
@@ -190,7 +194,9 @@ def test_hisparse_pool_must_fit_max_model_len(
     plus the null block. Auto-fit (-1) must pick a length that passes the same
     check."""
     monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
     monkeypatch.setattr(
         kv_cache_planning, "get_hisparse_host_pool_bytes", lambda _: 2**30
@@ -674,6 +680,42 @@ def test_project_kv_cache_groups_to_worker():
     proj_spec = projected[0].kv_cache_spec
     assert isinstance(proj_spec, UniformTypeKVCacheSpecs)
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
+
+
+def test_kv_cache_config_skips_uniform_group_owned_by_other_pp_stage():
+    """A PP stage that owns none of a uniform-type group's layers keeps the
+    global spec, but must not allocate cache for the other stage's layers."""
+    spec_a = new_kv_cache_spec()
+    spec_b = new_kv_cache_spec(num_kv_heads=4)
+    global_groups = [
+        KVCacheGroupSpec(
+            ["layer1", "layer2"],
+            UniformTypeKVCacheSpecs(
+                block_size=16, kv_cache_specs={"layer1": spec_a, "layer2": spec_a}
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["layer3"],
+            UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"layer3": spec_b}),
+        ),
+    ]
+    groups = kv_cache_planning._project_kv_cache_groups_to_worker(
+        global_groups, {"layer2": spec_a}
+    )
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
+        ),
+    )
+    kv_cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
+        config, groups, available_memory=2**20
+    )
+    assert [tensor.layers for tensor in kv_cache_config.kv_cache_tensors] == [
+        ["layer2"]
+    ]
 
 
 @pytest.mark.parametrize("with_draft", [False, True])
@@ -1466,11 +1508,27 @@ def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
     )
 
 
-def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm):
+@pytest.mark.parametrize(
+    ("draft", "promoted_cls"),
+    [
+        (new_sliding_window_spec(block_size=16), FullAttentionSpec),
+        (
+            replace(
+                new_swa_mla_spec(),
+                bounded_replay=True,
+                non_causal_multi_token_decode=True,
+            ),
+            MLAAttentionSpec,
+        ),
+    ],
+    ids=["swa", "swa_mla"],
+)
+def test_mla_with_incompatible_swa_uses_one_full_allocation_group(
+    caplog_vllm, draft, promoted_cls
+):
     # Sparse MLA pages cannot be padded safely. Keeping the draft's attention
     # compute sliding-window while promoting only its allocation semantics lets
     # every layer share the target's block table and remain contiguous.
-    draft = new_sliding_window_spec(block_size=16)
     specs = {
         "target.0.attn": new_mla_spec(block_size=64),
         "target.0.indexer": new_indexer_mla_spec(block_size=64),
@@ -1484,10 +1542,12 @@ def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm):
     assert isinstance(group_spec, UniformTypeKVCacheSpecs)
     assert group_spec.block_size == 64
     promoted_draft = group_spec.kv_cache_specs["draft.0"]
-    assert isinstance(promoted_draft, FullAttentionSpec)
-    assert not isinstance(promoted_draft, SlidingWindowSpec)
+    assert type(promoted_draft) is promoted_cls
     assert promoted_draft.block_size == 64
     assert promoted_draft.sliding_window == draft.sliding_window
+    assert getattr(promoted_draft, "non_causal_multi_token_decode", False) == (
+        getattr(draft, "non_causal_multi_token_decode", False)
+    )
     assert specs["draft.0"] is draft
     assert "attention compute is unchanged" in caplog_vllm.text
 
@@ -1948,12 +2008,12 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
 def _spec_decode_kv_cache_groups(worker_specs, use_eagle_block_drop=True):
     config = VllmConfig(model_config=ModelConfig(max_model_len=64))
     config.cache_config.kv_cache_layout = "BLHNC"
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method="dflash",
         use_eagle=lambda: True,
         use_eagle_block_drop=lambda: use_eagle_block_drop,
         use_multi_module_mtp=lambda: False,
-        parallel_drafting=False,
+        draft_model_config=SimpleNamespace(architectures=[]),
     )
     configs = get_kv_cache_configs(config, worker_specs, [2**30] * len(worker_specs))
     return generate_scheduler_kv_cache_config(configs).kv_cache_groups
@@ -2133,3 +2193,189 @@ def test_kv_cache_groups_tp_replicas(specs, tp_size, dcp_size, expected):
     """Replicas are the gcd of each layer's tp_size // max_tp_shards."""
     groups = [KVCacheGroupSpec([f"l.{i}"], spec) for i, spec in enumerate(specs)]
     assert kv_cache_groups_tp_replicas(groups, tp_size, dcp_size) == expected
+
+
+def test_shrink_kv_cache_configs_keeps_tensors_and_checks_fit():
+    """Shrinking to the measured block count lowers `num_blocks` and the
+    tensors' sizes; their placements keep describing the reserved capacity.
+    A count too small for `max_model_len` is rejected."""
+    spec = new_kv_cache_spec()
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=spec.block_size * 4)
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [KVCacheGroupSpec(["layer.0", "layer.1"], spec)]
+    config = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 16
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([config])
+    assert config.num_blocks == 16
+    tensors_before = copy.deepcopy(config.kv_cache_tensors)
+
+    kv_cache_planning.shrink_kv_cache_configs(
+        vllm_config, [config, scheduler_config], 10
+    )
+    assert config.num_blocks == 10
+    assert scheduler_config.num_blocks == 10
+    assert config.kv_cache_tensors == [
+        replace(tensor, size=tensor.size * 10 // 16) for tensor in tensors_before
+    ]
+
+    # 4 blocks are needed for max_model_len plus the null block.
+    with pytest.raises(ValueError, match="max seq len"):
+        kv_cache_planning.shrink_kv_cache_configs(vllm_config, [config], 4)
+    kv_cache_planning.shrink_kv_cache_configs(vllm_config, [config], 5)
+    assert config.num_blocks == 5
+
+
+def test_finalize_extensible_kv_cache_keeps_measured_count():
+    """The smallest count measured across ranks becomes every config's
+    num_blocks, not rounded to granules."""
+    from vllm.v1.worker.worker_base import CompilationTimes
+
+    spec = new_kv_cache_spec()
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=spec.block_size * 4)
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [KVCacheGroupSpec(["layer.0", "layer.1"], spec)]
+    capacity = 1000
+    config = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * spec.page_size_bytes * capacity
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([config])
+
+    measured = [
+        CompilationTimes(0.0, 0.0, num_kv_blocks=num_blocks)
+        for num_blocks in (999, 997)
+    ]
+    assert (
+        kv_cache_planning.finalize_extensible_kv_cache(
+            vllm_config, [config], scheduler_config, measured
+        )
+        == 997
+    )
+    assert config.num_blocks == scheduler_config.num_blocks == 997
+    assert vllm_config.cache_config.num_gpu_blocks == 997
+
+
+def test_finalize_extensible_kv_cache_refits_auto_max_model_len():
+    """With `--max-model-len auto`, the context length fitted to the reserved
+    capacity is fitted again to the count measured after warmup, instead of
+    failing startup."""
+    from vllm.v1.worker.worker_base import CompilationTimes
+
+    spec = new_kv_cache_spec()
+    model_config = ModelConfig(max_model_len=spec.block_size * 16)
+    model_config.original_max_model_len = -1
+    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [KVCacheGroupSpec(["layer.0", "layer.1"], spec)]
+    config = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 32
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([config])
+
+    measured = [CompilationTimes(0.0, 0.0, num_kv_blocks=9)]
+    kv_cache_planning.finalize_extensible_kv_cache(
+        vllm_config, [config], scheduler_config, measured
+    )
+    # 8 usable blocks besides the null block.
+    assert vllm_config.model_config.max_model_len == spec.block_size * 8
+    assert config.num_blocks == 9
+
+
+@pytest.mark.parametrize("short", [True, False])
+def test_finalize_extensible_kv_cache_auto_max_model_len_warns_when_short(
+    short, monkeypatch, caplog_vllm
+):
+    """A re-fit length below AUTO_FIT_SHORT_MAX_MODEL_LEN is a warning that says
+    what gets rejected; a longer one is logged at info."""
+    from vllm.v1.worker.worker_base import CompilationTimes
+
+    spec = new_kv_cache_spec()
+    fitted = spec.block_size * 8
+    monkeypatch.setattr(
+        kv_cache_planning,
+        "AUTO_FIT_SHORT_MAX_MODEL_LEN",
+        fitted + 1 if short else fitted,
+    )
+    model_config = ModelConfig(max_model_len=spec.block_size * 16)
+    model_config.original_max_model_len = -1
+    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [KVCacheGroupSpec(["layer.0", "layer.1"], spec)]
+    config = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 32
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([config])
+
+    caplog_vllm.clear()
+    measured = [CompilationTimes(0.0, 0.0, num_kv_blocks=9)]
+    kv_cache_planning.finalize_extensible_kv_cache(
+        vllm_config, [config], scheduler_config, measured
+    )
+    assert vllm_config.model_config.max_model_len == fitted
+    records = [
+        r for r in caplog_vllm.records if "auto reduced max_model_len" in r.getMessage()
+    ]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert f"to {fitted} (" in message
+    if short:
+        assert records[0].levelname == "WARNING"
+        assert f"longer than {fitted} tokens will be rejected" in message
+        assert "gpu_memory_utilization" in message
+    else:
+        assert records[0].levelname == "INFO"
+
+
+def test_finalize_extensible_kv_cache_auto_max_model_len_no_room():
+    """When CUDA graphs and warmup leave no KV cache blocks, the auto-fit error
+    points at what the user can change, not at max_model_len."""
+    from vllm.v1.worker.worker_base import CompilationTimes
+
+    spec = new_kv_cache_spec()
+    model_config = ModelConfig(max_model_len=spec.block_size * 16)
+    model_config.original_max_model_len = -1
+    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [KVCacheGroupSpec(["layer.0", "layer.1"], spec)]
+    config = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 32
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([config])
+
+    # Only the null block fits.
+    measured = [CompilationTimes(0.0, 0.0, num_kv_blocks=1)]
+    with pytest.raises(ValueError, match="gpu_memory_utilization"):
+        kv_cache_planning.finalize_extensible_kv_cache(
+            vllm_config, [config], scheduler_config, measured
+        )
+
+
+def test_shrink_kv_cache_configs_leaves_host_resident_tensors():
+    """HiSparse's host pool is sized by its own block count, not the device
+    pool's, so the measured shrink leaves host-resident tensors as is."""
+    spec = new_kv_cache_spec()
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=spec.block_size * 4)
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [KVCacheGroupSpec(["layer.0", "layer.1"], spec)]
+    config = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 16
+    )
+    host_tensor = KVCacheTensor(
+        size=16 * 3000,
+        layers=["host.0"],
+        layer_stride=16 * 3000,
+        block_stride=3000,
+        host_resident=True,
+    )
+    config.kv_cache_tensors.insert(0, host_tensor)
+
+    kv_cache_planning.shrink_kv_cache_configs(vllm_config, [config], 10)
+    assert config.num_blocks == 10
+    assert config.kv_cache_tensors[0] == host_tensor
+    assert config.kv_cache_tensors[1].size == 2 * spec.page_size_bytes * 10

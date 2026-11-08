@@ -3,8 +3,10 @@
 """CPU byte-copy runtime for UMBP connector contract tests."""
 
 import ctypes
+import multiprocessing as mp
 import threading
-from collections.abc import Sequence
+import traceback
+from collections.abc import Callable, Sequence
 from types import SimpleNamespace
 
 import torch
@@ -224,6 +226,45 @@ class MemoryRuntime(IUMBPRuntime):
     ) -> UMBPWorkerHandle:
         del namespace
         return _MemoryWorkerHandle(self._store, topology, layout)
+
+    def evict_all(self) -> None:
+        self._store.clear()
+
+
+def mori_has_umbp() -> bool:
+    try:
+        from mori.cpp import UMBPClient  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _report(errors, target: Callable, *args) -> None:
+    try:
+        target(*args)
+    except BaseException:
+        errors.put(traceback.format_exc())
+        raise
+    errors.put(None)
+
+
+def run_in_new_process(target: Callable, *args, timeout: float = 120) -> None:
+    """Run target in a fresh interpreter that must finish and exit cleanly."""
+    context = mp.get_context("spawn")
+    errors = context.Queue()
+    process = context.Process(target=_report, args=(errors, target, *args))
+    process.start()
+    try:
+        error = errors.get(timeout=timeout)
+        assert error is None, error
+        process.join(30)
+        assert process.exitcode == 0, "process did not exit after its work"
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join(10)
+        errors.close()
+        errors.join_thread()
 
 
 def install_memory_runtime(monkeypatch):

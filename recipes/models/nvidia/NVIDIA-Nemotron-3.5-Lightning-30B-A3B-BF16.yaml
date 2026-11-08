@@ -26,15 +26,13 @@ model:
   base_args:
     - "--mamba-backend"
     - "flashinfer"
-    - "--mamba-cache-mode"
-    - "align"
     - "--enable-prefix-caching"
     - "--max-num-batched-tokens"
     - "16384"
   base_env: {}
 
 dependencies:
-  - command: 'uv pip install "fastokens>=0.2.0"'
+  - command: 'uv pip install "fastokens>=0.3.5"'
     note: "Required by the BF16 variant, which sets VLLM_USE_FASTOKENS=1; vLLM does not bundle it yet (vllm-project/vllm#47859)"
 
 features:
@@ -157,8 +155,6 @@ variants:
           - "--attention-config"
           - '{"use_trtllm_attention":true}'
           - "--enable-flashinfer-autotune"
-          - "--mamba-cache-mode"
-          - "none"
           - "--async-scheduling"
           - "--enable-chunked-prefill"
           - "--gpu-memory-utilization"
@@ -249,7 +245,7 @@ guide: |
     MTP — choose it in the Speculative Decoding panel above.
   - **DGX Spark (GB10)**: the selectable config is the one measured on 2026-08-31 with
     aiperf 0.12.0 on vLLM `0.28.1rc1.dev130+g44fe2a392` — DSpark drafting 7 tokens at
-    `--gpu-memory-utilization 0.7`, `--mamba-cache-mode align` and fastsafetensors
+    `--gpu-memory-utilization 0.7`, prefix caching and fastsafetensors
     loading, served from `vllm/vllm-openai:nightly`. On SPEED-Bench at 8K input / 256
     output, concurrency 1, it reached 7,252 prefill tok/s and 93.3 decode tok/s at a
     3.98 s mean end-to-end latency.

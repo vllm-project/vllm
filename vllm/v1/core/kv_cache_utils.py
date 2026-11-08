@@ -6,6 +6,7 @@ import copy
 import hashlib
 import math
 import os
+import weakref
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from typing import (
@@ -15,6 +16,7 @@ from typing import (
     NewType,
     TypeAlias,
     TypeVar,
+    cast,
     overload,
 )
 
@@ -34,11 +36,13 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
+from vllm.v1.token_buffer import token_slice
 from vllm.v1.utils import tensor_data
 
 if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
+    from vllm.v1.engine import EngineCoreRequest, PrefixHashConfig
 
 
 # BlockHash represents the hash of a single KV-cache block used for
@@ -166,16 +170,16 @@ class KVCacheBlock:
     block_id: int
     # Reference count.
     ref_cnt: int = 0
-    # Deferred frees may contain blocks from multiple pools.
-    pool: "BlockPool | None" = field(
+    # Deferred frees may contain blocks from multiple pools. Weak to avoid ref cycles.
+    pool: "weakref.ref[BlockPool] | None" = field(
         default=None, repr=False, compare=False, kw_only=True
     )
     # The hash key (block hash + group id) of the block, only available
     # when the block is full and cached.
-    _block_hash: BlockHashWithGroupId | None = None
-    # Number of prefix tokens covered by _block_hash. For full blocks this is
+    block_hash: BlockHashWithGroupId | None = None
+    # Number of prefix tokens covered by block_hash. For full blocks this is
     # the full block boundary; partial entries can end inside a cache block.
-    _block_hash_num_tokens: int | None = None
+    block_hash_num_tokens: int | None = None
 
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
@@ -185,29 +189,21 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
-    @property
-    def block_hash(self) -> BlockHashWithGroupId | None:
-        return self._block_hash
-
-    @property
-    def block_hash_num_tokens(self) -> int | None:
-        return self._block_hash_num_tokens
-
     def set_block_hash(
         self,
         block_hash: BlockHashWithGroupId,
         num_tokens: int | None = None,
     ) -> None:
-        assert self.block_hash is None and self._block_hash_num_tokens is None, (
+        assert self.block_hash is None and self.block_hash_num_tokens is None, (
             "The block already has a hash. This should not happen."
         )
-        self._block_hash = block_hash
-        self._block_hash_num_tokens = num_tokens
+        self.block_hash = block_hash
+        self.block_hash_num_tokens = num_tokens
 
     def reset_hash(self):
         """Reset the block hash when the block is evicted."""
-        self._block_hash = None
-        self._block_hash_num_tokens = None
+        self.block_hash = None
+        self.block_hash_num_tokens = None
 
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
@@ -217,8 +213,8 @@ class KVCacheBlock:
         return (
             f"KVCacheBlock(block_id={self.block_id}, "
             f"ref_cnt={self.ref_cnt}, "
-            f"_block_hash={self._block_hash!r}, "
-            f"_block_hash_num_tokens={self._block_hash_num_tokens}, "
+            f"block_hash={self.block_hash!r}, "
+            f"block_hash_num_tokens={self.block_hash_num_tokens}, "
             f"prev_free_block={prev_block_id}, "
             f"next_free_block={next_block_id})"
         )
@@ -1019,8 +1015,10 @@ def get_request_block_hasher(
                     request, start_token_idx, end_token_idx, curr_mm_idx
                 )
 
-            # Compute the hash of the current block
-            block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
+            # Compute the hash of the current block.
+            block_tokens = token_slice(
+                request._all_token_ids, start_token_idx, end_token_idx
+            )
             block_hash = hash_block_tokens(
                 caching_hash_fn, prev_block_hash_value, block_tokens, extra_keys
             )
@@ -1032,6 +1030,29 @@ def get_request_block_hasher(
         return new_block_hashes
 
     return request_block_hasher
+
+
+def frontend_block_hashes(
+    request: "EngineCoreRequest", prefix_hash_config: "PrefixHashConfig | None"
+) -> list[BlockHash] | None:
+    """Return the frontend's prompt block hashes, unless their count doesn't
+    match the prompt, in which case the engine hashes the prompt itself."""
+    block_hashes = request.block_hashes
+    if block_hashes is None:
+        return None
+    prompt_ids = request.prompt_token_ids
+    prompt_len = len(prompt_ids) if prompt_ids is not None else 0
+    # The engine hashes a block once its lookahead tokens exist too.
+    if prefix_hash_config is None or len(block_hashes) != (
+        max(prompt_len - prefix_hash_config.num_lookahead_tokens, 0)
+        // prefix_hash_config.hash_block_size
+    ):
+        logger.warning_once(
+            "Ignoring frontend-computed prompt block hashes that don't match the "
+            "engine's prefix hash config; hashing prompts in the engine instead."
+        )
+        return None
+    return cast(list[BlockHash], block_hashes)
 
 
 def generate_lookahead_block_hash_extra_keys(
@@ -1102,8 +1123,8 @@ def generate_scheduler_kv_cache_config(
         cfg.hisparse_host_num_blocks == kv_cache_configs[0].hisparse_host_num_blocks
         for cfg in kv_cache_configs
     )
-    # All workers have the same kv_cache_config except layer names, so use
-    # an arbitrary one to initialize the scheduler.
+    # Worker configs share scheduler geometry and the resolved zeroing
+    # decision, so use an arbitrary one to initialize the scheduler.
     cfg = copy.deepcopy(kv_cache_configs[0])
     for group in cfg.kv_cache_groups:
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
