@@ -479,3 +479,18 @@ def test_mha_attn_fp8_rejects_wrong_backend(default_vllm_config):
             MMEncoderAttention(4, 64)
     finally:
         vllm_config.model_config = old_model_config
+
+
+def test_torch_sdpa_varlen_rejects_cuda_graph_capture():
+    """Splitting packed sequences reads cu_seqlens on the host, which a CUDA
+    graph cannot capture: fail with a clear error instead of a capture one."""
+    from vllm.v1.attention.ops.vit_attn_wrappers import torch_sdpa_wrapper
+
+    q = k = v = torch.randn(1, 8, 2, 16)
+    cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32)
+    with (
+        patch.object(current_platform, "is_cuda_alike", return_value=True),
+        patch("torch.cuda.is_current_stream_capturing", return_value=True),
+        pytest.raises(RuntimeError, match="cannot be captured in a CUDA graph"),
+    ):
+        torch_sdpa_wrapper(q, k, v, cu_seqlens=cu_seqlens)

@@ -417,6 +417,17 @@ class TestExecuteLocalPacking:
         assert runs == [([0], "default", 256)]
         assert mgr.graph_misses == 1
 
+    def test_eager_only_item_skips_graphs(self):
+        mgr = _make_manager_with_budgets([256, 4096])
+        specs = [
+            self._spec(100),
+            EncoderItemSpec(input_size=50, output_tokens=50, eager_only=True),
+            self._spec(100),
+        ]
+        runs = _run_packing(mgr, specs)
+        assert runs == [([0, 2], "default", 256)]
+        assert mgr.graph_misses == 1
+
     def test_multi_path_deferral_skips_zero_token_paths(self):
         mgr = _make_manager_with_budgets([256, 4096, 8192])
         mgr.path_token_budgets = {

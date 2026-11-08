@@ -25,7 +25,7 @@ import torch
 import torch._dynamo
 from torch import nn
 from torch.nn import functional as F
-from transformers import AutoModel, DiffusionGemmaConfig
+from transformers import DiffusionGemmaConfig
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -49,9 +49,10 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4MultimodalEmbedder,
     Gemma4MultiModalProcessor,
     Gemma4ProcessingInfo,
+    _tower_lora_enabled,
 )
+from vllm.model_executor.models.gemma4_vision import Gemma4VisionModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -190,12 +191,9 @@ class DiffusionGemmaForConditionalGeneration(
         text_config.attention_k_eq_v = True
 
         # ---- Vision tower ----
-        # Gemma4's image path, borrowed below, reads this flag.
-        lora_config = vllm_config.lora_config
-        self._enable_mm_lora = bool(
-            lora_config is not None and lora_config.enable_tower_connector_lora
-        )
+        self._tower_lora = _tower_lora_enabled(vllm_config)
         vision_config = getattr(config, "vision_config", None)
+        self.vision_tower: Gemma4VisionModel | None
         self.embed_vision: Gemma4MultimodalEmbedder | None
         if vision_config is not None:
             quant_config = vllm_config.quant_config
@@ -214,18 +212,17 @@ class DiffusionGemmaForConditionalGeneration(
                 tower_quant = quant_config if quantizable else None
 
             with self._mark_tower_model(vllm_config, {"image", "video"}):
-                self.vision_tower = AutoModel.from_config(config=vision_config)
+                self.vision_tower = Gemma4VisionModel(
+                    vision_config,
+                    quant_config=tower_quant,
+                    prefix=maybe_prefix(prefix, "vision_tower"),
+                )
                 self.vision_input_norm = build_mm_input_norm(vllm_config.model_config)
                 self.embed_vision = Gemma4MultimodalEmbedder(
                     vision_config,
                     text_config,
                     quant_config=tower_quant,
                     prefix=maybe_prefix(prefix, "embed_vision"),
-                )
-                recursive_replace_linear(
-                    self.vision_tower,
-                    tower_quant,
-                    prefix=maybe_prefix(prefix, "vision_tower"),
                 )
         else:
             self.vision_tower = None
@@ -287,9 +284,9 @@ class DiffusionGemmaForConditionalGeneration(
     _parse_and_validate_multimodal_inputs = (
         Gemma4ForConditionalGeneration._parse_and_validate_multimodal_inputs
     )
-    _encoder_chunk = staticmethod(Gemma4ForConditionalGeneration._encoder_chunk)
-    _get_max_soft_tokens = Gemma4ForConditionalGeneration._get_max_soft_tokens
-    _embed_patches = Gemma4ForConditionalGeneration._embed_patches
+    _encode_vision = Gemma4ForConditionalGeneration._encode_vision
+    _pack_vision = Gemma4ForConditionalGeneration._pack_vision
+    _embed_vision = Gemma4ForConditionalGeneration._embed_vision
     _process_image_input = Gemma4ForConditionalGeneration._process_image_input_local
     _process_video_input = Gemma4ForConditionalGeneration._process_video_input_local
     _process_image_input_local = (

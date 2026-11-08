@@ -578,7 +578,11 @@ class EncoderCudaGraphManager:
         per_item_out_tokens = [spec.output_tokens for spec in item_specs]
         max_path_budgets = {path: max(self.path_token_budgets[path]) for path in paths}
 
-        sorted_indices = sorted(range(num_items), key=lambda i: per_item_out_tokens[i])
+        eager_indices = [i for i, spec in enumerate(item_specs) if spec.eager_only]
+        sorted_indices = sorted(
+            (i for i, spec in enumerate(item_specs) if not spec.eager_only),
+            key=lambda i: per_item_out_tokens[i],
+        )
         batches: list[tuple[list[int], dict[str, int | None]]] = []
         current_batch: list[int] = []
         current_tokens = dict.fromkeys(paths, 0)
@@ -628,6 +632,8 @@ class EncoderCudaGraphManager:
                 current_tokens[path] += item_tokens[path]
 
         append_current_batch()
+        if eager_indices:
+            batches.append((eager_indices, dict.fromkeys(paths, None)))
 
         outputs_by_orig_idx: dict[int, torch.Tensor] = {}
         for batch_indices, path_budgets in batches:
