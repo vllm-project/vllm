@@ -127,12 +127,17 @@ def _fused_mlp_tiles() -> list[tuple[int, int]]:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 @pytest.mark.parametrize("kc", [None, _RANK // 2, _RANK // 4])
 @pytest.mark.parametrize(
-    "do_mlp,ht,num_stages",
-    [(None, 64, None), (False, 64, 1)]
-    + [(True, ht, s) for ht, s in _fused_mlp_tiles()],
+    "do_mlp,rc,ht,num_stages",
+    [(None, None, 64, None)]
+    + [(False, rc, 64, 1) for rc in (None, 16, _RANK)]
+    + [(True, None, ht, s) for ht, s in _fused_mlp_tiles()],
 )
 def test_latent_pass_matches_reference(
-    do_mlp: bool | None, kc: int | None, ht: int, num_stages: int | None
+    do_mlp: bool | None,
+    rc: int | None,
+    kc: int | None,
+    ht: int,
+    num_stages: int | None,
 ):
     set_random_seed(0)
     n, v = 5, 1000
@@ -174,6 +179,7 @@ def test_latent_pass_matches_reference(
         torch.cat([buf["wg_t"], buf["wu_t"]], dim=1),
         do_mlp=do_mlp,
         kc=kc,
+        rc=rc,
         ht=ht,
         num_stages=num_stages,
     )

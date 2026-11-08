@@ -87,14 +87,16 @@ def _xpress_latent_kernel(
     H: tl.constexpr,
     BP: tl.constexpr,
     KC: tl.constexpr,
+    RC: tl.constexpr,
     HT: tl.constexpr,
     DO_MLP: tl.constexpr,
 ):
     """The latent stage of one Jacobi pass for one block, fused end to end.
 
-    Grid: (N,), one program per block. For every slot b it gathers the previous
-    slot's token embedding (slot 0 reads the anchor's predecessor ``am1``),
-    adds the pass-invariant hidden cache, applies the folded causal mixer
+    Grid: (N, R // RC), one program per block and RC latent channels. For every
+    slot b it gathers the previous slot's token embedding (slot 0 reads the
+    anchor's predecessor ``am1``), adds the pass-invariant hidden cache, applies
+    the folded causal mixer
     ``u[b] = sum_{j <= b} L[b, j, :] * x[j]``, then a SwiGLU MLP with a
     residual, and writes the latent for slots 1..B-1 (slot 0 is the anchor and
     is never read out).
@@ -117,6 +119,9 @@ def _xpress_latent_kernel(
         H: MLP hidden size.
         BP: B rounded up to a power of two (tile size).
         KC: rank chunk of the embedding projection; R holds all of W_lat at once.
+        RC: latent channels per program. Below R the MLP cannot run here, and the
+            mixer becomes one [BP, BP, RC] product, which only fits registers when
+            RC is small.
         HT: MLP hidden tile size.
         DO_MLP: whether to run the SwiGLU MLP here. False stops after the mixer
             and hands its output back, so ``xpress_latent_pass`` can run the
@@ -126,7 +131,9 @@ def _xpress_latent_kernel(
     """
     n = tl.program_id(0).to(tl.int64)
     offs_b = tl.arange(0, BP)
-    offs_r = tl.arange(0, R)
+    offs_r = tl.arange(0, RC)
+    if RC < R:
+        offs_r += tl.program_id(1) * RC
     mask_b = offs_b < B
 
     x = tl.load(
@@ -150,15 +157,26 @@ def _xpress_latent_kernel(
         )
         x += tl.dot(lat, wlat, out_dtype=tl.float32)
 
-    u = tl.zeros([BP, R], dtype=tl.float32)
-    for j in tl.static_range(B):
-        lj = tl.load(
-            mixl_ptr + offs_b[:, None] * B * R + j * R + offs_r[None, :],
-            mask=mask_b[:, None],
+    if RC < R:
+        mix = tl.load(
+            mixl_ptr
+            + offs_b[:, None, None] * B * R
+            + offs_b[None, :, None] * R
+            + offs_r[None, None, :],
+            mask=mask_b[:, None, None] & mask_b[None, :, None],
             other=0.0,
         ).to(tl.float32)
-        xj = tl.sum(tl.where(offs_b[:, None] == j, x, 0.0), axis=0)
-        u += lj * xj[None, :]
+        u = tl.sum(mix * x[None, :, :], axis=1)
+    else:
+        u = tl.zeros([BP, R], dtype=tl.float32)
+        for j in tl.static_range(B):
+            lj = tl.load(
+                mixl_ptr + offs_b[:, None] * B * R + j * R + offs_r[None, :],
+                mask=mask_b[:, None],
+                other=0.0,
+            ).to(tl.float32)
+            xj = tl.sum(tl.where(offs_b[:, None] == j, x, 0.0), axis=0)
+            u += lj * xj[None, :]
 
     ub = u.to(wg_ptr.dtype.element_ty)
     x = u
@@ -206,6 +224,7 @@ def xpress_latent_pass(
     wgu_t: torch.Tensor | None = None,
     do_mlp: bool | None = None,
     kc: int | None = None,
+    rc: int | None = None,
     ht: int = 64,
     num_stages: int | None = None,
 ) -> None:
@@ -214,24 +233,32 @@ def xpress_latent_pass(
     The caller follows this with the readout matmul ``lat_out @ W2`` and one of
     the fused argmax entry points below. ``do_mlp`` runs the SwiGLU MLP in the
     kernel, else as GEMMs after it on ``wgu_t`` ([R, 2 * H], ``wg_t`` and ``wu_t``
-    side by side). ``kc``, ``ht`` and ``num_stages`` set the kernel's ``KC``,
-    ``HT`` and pipelining depth; None picks the platform default.
+    side by side). ``kc``, ``rc``, ``ht`` and ``num_stages`` set the kernel's
+    ``KC``, ``RC``, ``HT`` and pipelining depth; None picks the platform default.
     """
     N, B = blk.shape
     R = xh.shape[-1]
     H = wg_t.shape[-1]
     rocm = current_platform.is_rocm()
     if do_mlp is None:
-        # MI355, one pass at bs=1 (latent + top-C readout + argmax): 54.0us fused
-        # with the one stage gfx950's LDS fits at HT=64, 44.8us fused with 3 stages
-        # at HT=32, 31.1us with the MLP as GEMMs.
+        # On MI355 the in-kernel MLP cannot pipeline within gfx950's LDS at HT=64,
+        # and running it as GEMMs after the kernel is faster than any fused config.
         do_mlp = not rocm
     if kc is None:
         # As fast as R on MI355, and at R=256 the W_lat tile then fits gfx942's 64KB.
         kc = R // 2 if rocm else R
     if kc <= 0 or kc & (kc - 1) or R % kc:
         raise ValueError(f"kc must be a positive power of two dividing R={R}, got {kc}")
-    _xpress_latent_kernel[(N,)](
+    if rc is None:
+        # MI355, the kernel alone at N = 1/64/256: 11.7/12.0/12.3us with one
+        # 8-warp program per block, 3.1/3.7/6.8us with one warp per 32 channels.
+        rc = R if do_mlp else min(R, 32)
+    if rc != R and (do_mlp or rc < 16 or rc & (rc - 1) or R % rc):
+        raise ValueError(
+            f"rc must be R={R}, or without the MLP a power of two >= 16 dividing R"
+            f", got {rc}"
+        )
+    _xpress_latent_kernel[(N, R // rc)](
         blk,
         tok_am1,
         xh,
@@ -247,9 +274,10 @@ def xpress_latent_pass(
         H=H,
         BP=triton.next_power_of_2(B),
         KC=kc,
+        RC=rc,
         HT=ht,
         DO_MLP=do_mlp,
-        num_warps=8,
+        num_warps=8 if rc == R else 1,
         # 3 stages, measured: one pass at bs=1 drops 76.7us -> 61.0us, because the
         # weight loads (wlat, wg, wu, wd: ~940KB per program) then overlap with the
         # dots instead of each one exposing its full latency. 4+ stages do not
