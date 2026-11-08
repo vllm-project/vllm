@@ -12,6 +12,15 @@ from vllm.model_executor.layers.dash_attention import (
 )
 from vllm.platforms import current_platform
 
+DASH_BACKENDS = (
+    ["ROCM_AITER_FA"] if current_platform.is_rocm() else ["FLASH_ATTN", "FLASHINFER"]
+)
+DASH_FLASH_VERSIONS = (
+    [("ROCM_AITER_FA", None)]
+    if current_platform.is_rocm()
+    else [("FLASH_ATTN", None), ("FLASH_ATTN", 2), ("FLASHINFER", None)]
+)
+
 
 def test_page_coordinates_continue_across_prompt_and_response():
     roles = torch.tensor([0, 2, 1, 1, 2, 1, 1, 1, 0, 2, 0, 0, 2, 0])
@@ -101,11 +110,7 @@ def test_page_filter_excludes_other_page_remote_values():
 @pytest.mark.parametrize("rswa", [False, True])
 @pytest.mark.parametrize(
     "dtype,backend,fa_version",
-    [
-        (torch.bfloat16, "FLASH_ATTN", None),
-        (torch.bfloat16, "FLASH_ATTN", 2),
-        (torch.bfloat16, "FLASHINFER", None),
-    ],
+    [(torch.bfloat16, backend, version) for backend, version in DASH_FLASH_VERSIONS],
 )
 @pytest.mark.parametrize("block_size", [16, 32])
 def test_paged_decode_graph_replay_tracks_requests_and_page_markers(
@@ -117,7 +122,7 @@ def test_paged_decode_graph_replay_tracks_requests_and_page_markers(
         _check_paged_decode_graph(dtype, backend, block_size, rswa, high_cache=False)
 
 
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("backend", DASH_BACKENDS)
 def test_paged_decode_large_physical_cache_offsets(backend):
     """Read/write offsets beyond int32 while replaying the real paged kernels."""
     _check_paged_decode_graph(torch.bfloat16, backend, 16, True, high_cache=True)
@@ -333,7 +338,7 @@ def test_rswa_keeps_input_and_bounds_1000_output_tokens(block_size):
 
 @pytest.mark.parametrize(
     "backend,fa_version",
-    [("FLASH_ATTN", None), ("FLASH_ATTN", 2), ("FLASHINFER", None)],
+    DASH_FLASH_VERSIONS,
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_flash_prefill_preserves_route_priors_and_gqa(backend, fa_version, dtype):
@@ -387,7 +392,7 @@ def test_decode_rope_preserves_long_position_rounding(dtype, main):
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("backend", DASH_BACKENDS)
 def test_chunked_prefill_matches_full_prompt_across_page_and_block_boundaries(backend):
     """Chunks can end before an image, inside it, or at the instruction tail."""
     from vllm.model_executor.layers.dash_attention import prompt_page_positions
@@ -516,7 +521,7 @@ def test_chunked_prefill_matches_full_prompt_across_page_and_block_boundaries(ba
         torch.testing.assert_close(actual, expected, atol=0.00390625, rtol=0.01)
 
 
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("backend", DASH_BACKENDS)
 @pytest.mark.parametrize("extra_marker", [False, True])
 @pytest.mark.parametrize("tail_tokens", [1, 2])
 def test_recomputed_output_remains_outside_remote_input_prefix(
@@ -643,6 +648,7 @@ def test_recomputed_output_remains_outside_remote_input_prefix(
     torch.testing.assert_close(actual, expected[start:], atol=0.00390625, rtol=0.01)
 
 
+@pytest.mark.skipif(current_platform.is_rocm(), reason="requires CUDA FlashInfer")
 def test_flashinfer_plan_cache_is_bounded_without_invalidating_graphs():
     """Tail plans are evicted while captured plans keep their buffers alive."""
     from vllm.v1.attention.ops.dash_attention import (
@@ -830,19 +836,3 @@ def test_rocm_aiter_ck_segments_preserve_gqa_priors_and_masked_padding(
     )
     assert torch.isfinite(actual).all()
     assert torch.count_nonzero(actual[2]) == 0
-
-
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm AITER CK")
-@pytest.mark.parametrize("block_size", [16, 32])
-@pytest.mark.parametrize("rswa", [False, True])
-def test_rocm_aiter_ck_decode_graph_tracks_pages(block_size, rswa):
-    _check_paged_decode_graph(
-        torch.bfloat16, "ROCM_AITER_FA", block_size, rswa, high_cache=False
-    )
-
-
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm AITER CK")
-def test_rocm_aiter_ck_chunked_prefill_preserves_pages():
-    test_chunked_prefill_matches_full_prompt_across_page_and_block_boundaries(
-        "ROCM_AITER_FA"
-    )
