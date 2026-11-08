@@ -654,9 +654,8 @@ mod tests {
         let tokenizer = Arc::new(tokenizer());
         let reasoning = Qwen3ReasoningParser::create(tokenizer.clone()).unwrap();
         let tool = Qwen3JsonToolParser::create(&tools, tokenizer.clone()).unwrap();
+        let visible = tool.build_visible_format(&ctx).unwrap().unwrap();
         let mut parser = CombinedParser::new(Some(reasoning), Some(tool));
-        parser.initialize(&[]).unwrap();
-        let outside = parser.build_output_grammar(&ctx).unwrap().unwrap().format;
 
         for (prompt, remaining) in [
             ("</think>", "\n\n"),
@@ -666,14 +665,42 @@ mod tests {
             parser.initialize(&tokenizer.encode(prompt, false).unwrap()).unwrap();
             let actual = parser.build_output_grammar(&ctx).unwrap().unwrap();
             let expected = if remaining.is_empty() {
-                outside.clone()
+                visible.clone()
             } else {
-                Format::sequence(vec![Format::const_string(remaining), outside.clone()])
+                Format::sequence(vec![Format::const_string(remaining), visible.clone()])
             };
             assert_eq!(actual.coverage, GrammarCoverage::FromTokenZero);
             assert_eq!(
                 normalize_builder_parity(actual.format),
                 normalize_builder_parity(expected),
+                "{prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_closed_reasoning_constrains_answer_from_token_zero() {
+        // Templates with thinking disabled close reasoning in the prompt; the
+        // answer must start right away instead of after a new reasoning block.
+        let tools = test_tools();
+        let auto = ToolChoice::auto();
+        let answer = Format::json_schema(serde_json::json!({ "type": "object" }));
+        let ctx = grammar_ctx(&tools, &auto, Some(&answer));
+        let tokenizer = Arc::new(tokenizer());
+        type Create = fn(DynTokenizer) -> crate::reasoning::Result<Box<dyn ReasoningParser>>;
+        let cases: [(&str, Create); 4] = [
+            ("</think>\n\n", Qwen3ReasoningParser::create),
+            ("</think>", DeepSeekV3ReasoningParser::create),
+            ("</think>\n", Glm45ReasoningParser::create),
+            ("</think>\n", NemotronV3ReasoningParser::create),
+        ];
+        for (prompt, create) in cases {
+            let reasoning = create(tokenizer.clone()).unwrap();
+            let mut parser = CombinedParser::new(Some(reasoning), None);
+            parser.initialize(&tokenizer.encode(prompt, false).unwrap()).unwrap();
+            assert_eq!(
+                parser.build_output_grammar(&ctx).unwrap(),
+                Some(BuiltOutputGrammar::from_token_zero(answer.clone())),
                 "{prompt:?}"
             );
         }
