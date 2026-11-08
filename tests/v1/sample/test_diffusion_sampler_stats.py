@@ -12,6 +12,12 @@ import torch
 from vllm.model_executor.models.diffusion_gemma_sampler import (
     sample_row_stats,
     sample_row_stats_reference,
+    stash_converged_logprobs,
+)
+from vllm.sampling_params import SamplingParams
+from vllm.v1.worker.gpu.sample.logprob import (
+    LogprobTokenIdsState,
+    compute_topk_scores,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -130,3 +136,104 @@ def test_leading_masked_block_keeps_a_finite_entropy():
     torch.testing.assert_close(probs, ref_probs, atol=1e-5, rtol=1e-4)
     assert argmax.tolist() == [8500, 8500, 8500]
     assert sample[0].item() == 8500
+
+
+def _by_value_then_id(ids: torch.Tensor, lps: torch.Tensor) -> torch.Tensor:
+    """Ids ordered by logprob, ties by id: torch.topk orders tied top-k ids
+    arbitrarily, the stash kernels by id."""
+    by_id = ids.argsort(dim=-1, stable=True)
+    lps = lps.gather(-1, by_id)
+    return ids.gather(-1, by_id).gather(
+        -1, lps.argsort(dim=-1, descending=True, stable=True)
+    )
+
+
+@pytest.mark.parametrize("num_logprobs", [0, 5, 128])
+@pytest.mark.parametrize("with_ids", [False, True])
+@pytest.mark.parametrize("logits_mode", [False, True])
+def test_stashed_logprobs_match_compute_topk_scores(
+    num_logprobs: int, with_ids: bool, logits_mode: bool
+):
+    """The stash kernels report what compute_topk_scores reports for the
+    scaled rows, up to the order of tied top-k ids, and touch only the
+    converged slots' real rows. bf16 logits tie often, so the argmax, rank
+    and top-k tie conventions are exercised."""
+    torch.manual_seed(0)
+    # A row spans several kernel chunks of 16 * 1024 logits.
+    n, W, vocab, max_reqs, cl = 5, 4, 40001, 8, 6
+    tile = (torch.randn(n * W, vocab, device="cuda") * 3).to(torch.bfloat16)
+    # A max tied across chunks: the argmax is the first, the rank counts both.
+    tile[1, [7, 39000]] = 20.0
+    # A row top_k left 3 logits of: the rest of its top-k ties at -inf.
+    tile[3 * W] = float("-inf")
+    tile[3 * W, [5, 17000, 40000]] = 1.0
+    local = torch.tensor([0, 2, 3], device="cuda")  # requests that want logprobs
+    slots = torch.tensor([6, 1, 4], device="cuda")
+    keep = torch.tensor([True, False, True], device="cuda")
+    temps = torch.tensor([0.7, 1.0, 1.3], device="cuda")
+    # The last request's canvas is truncated: its last row is padding.
+    valid = torch.tensor([W, W, W - 1], device="cuda")
+
+    ids_state = LogprobTokenIdsState(max_reqs, torch.device("cuda"))
+    if with_ids:
+        ids_state.add_request(4, SamplingParams(logprob_token_ids=[3, 5, 8000]))
+        ids_state.apply_staged_writes()
+    max_ids = 3 if with_ids else 0
+
+    scaled = tile.view(n, W, vocab)[local].float() / temps[:, None, None]
+    scaled = scaled.view(-1, vocab)
+    ref = compute_topk_scores(
+        scaled,
+        num_logprobs,
+        scaled.argmax(dim=-1),
+        logprob_token_ids_state=ids_state if with_ids else None,
+        expanded_idx_mapping=(
+            slots.to(torch.int32).repeat_interleave(W) if with_ids else None
+        ),
+        max_per_req_token_ids=max_ids,
+        logits_mode=logits_mode,
+    )
+
+    stash_w = 1 + max(num_logprobs, max_ids) + 2
+    stash_ids = torch.full((max_reqs, cl, stash_w), 77, device="cuda")
+    stash_lps = torch.ones(max_reqs, cl, stash_w, device="cuda")
+    stash_ranks = torch.full((max_reqs, cl), 99, device="cuda")
+    stash_converged_logprobs(
+        tile,
+        W,
+        local,
+        slots,
+        keep,
+        valid,
+        temps,
+        num_logprobs,
+        ids_state.num_token_ids.gpu,
+        ids_state.token_ids.gpu if with_ids else None,
+        stash_ids,
+        stash_lps,
+        stash_ranks,
+        logits_mode,
+    )
+
+    width = ref.logprobs.shape[1]
+    for j, slot in enumerate(slots.tolist()):
+        v = int(valid[j])
+        rows = slice(j * W, j * W + v)
+        if not keep[j]:
+            assert (stash_ids[slot] == 77).all() and (stash_ranks[slot] == 99).all()
+            continue
+        ids, lps = stash_ids[slot, :v, :width], stash_lps[slot, :v, :width]
+        # Both sides divide by the temperature with IEEE fp32 division, so
+        # ids and ranks match exactly; the logsumexp is a float reduction.
+        torch.testing.assert_close(lps, ref.logprobs[rows], rtol=1.3e-6, atol=1e-5)
+        assert torch.equal(stash_ranks[slot, :v], ref.selected_token_ranks[rows])
+        assert torch.equal(ids[:, 0], ref.logprob_token_ids[rows, 0])
+        assert torch.equal(
+            _by_value_then_id(ids[:, 1:], lps[:, 1:]),
+            _by_value_then_id(ref.logprob_token_ids[rows, 1:], ref.logprobs[rows, 1:]),
+        )
+        # Padded as compute_topk_scores pads a mixed batch.
+        assert not stash_ids[slot, :v, width:].any()
+        assert torch.isneginf(stash_lps[slot, :v, width:]).all()
+        # Padding rows and positions past this tile's width are left alone.
+        assert (stash_ranks[slot, v:] == 99).all()

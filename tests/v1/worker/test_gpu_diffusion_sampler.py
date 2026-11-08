@@ -10,8 +10,10 @@ import numpy as np
 import pytest
 import torch
 
+import vllm.utils.gpu_sync_debug as gsd
 from vllm.model_executor.models import diffusion_gemma as dg
 from vllm.sampling_params import SamplingParams
+from vllm.utils.gpu_sync_debug import with_gpu_sync_check
 from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 from vllm.v1.worker.gpu.sample.states import SamplingStates
 
@@ -20,7 +22,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires 
 DEVICE = "cuda"
 
 
-def _make_sampler(num_reqs, canvas_len, vocab, hidden, weight, top_k=0):
+def _make_sampler(num_reqs, canvas_len, vocab, hidden, weight, top_k=0, params=None):
     states = dg.DiffusionGemmaRequestStates(
         max_num_reqs=num_reqs,
         canvas_length=canvas_len,
@@ -54,7 +56,7 @@ def _make_sampler(num_reqs, canvas_len, vocab, hidden, weight, top_k=0):
         normalizer=torch.tensor(1.0, device=DEVICE),
     )
     for i in range(num_reqs):
-        sampler.add_request(i, SamplingParams(top_k=top_k))
+        sampler.add_request(i, params[i] if params else SamplingParams(top_k=top_k))
         states.is_encoder_phase[i] = False
     sampler.apply_staged_writes()
     return sampler, states
@@ -142,3 +144,114 @@ def test_profile_run_resets_state():
     sampler.profile_run(torch.zeros(num_reqs, hidden, device=DEVICE))
     assert bool(states.is_encoder_phase[0])
     assert int(states.step[0]) == 0
+
+
+@pytest.fixture
+def sync_check_error(monkeypatch):
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gsd, "_sync_check_enabled", False)
+    gsd.enable_gpu_sync_check()
+
+
+def test_logprobs_reach_the_emitting_step_without_a_host_sync(sync_check_error):
+    """Logprobs stashed on the converging step are reported when the slot
+    emits: a read at once (and again after its next read), a generation on
+    its commit step. A request without logprobs gets no rows. The host never
+    learns which slots converged, so no step syncs with the GPU."""
+    num_reqs, canvas_len, vocab, hidden = 3, 16, 1024, 32
+    torch.manual_seed(0)
+    weight = torch.randn(vocab, hidden, device=DEVICE)
+    one_step = {"diffusion_max_steps": 1}
+    params = [
+        SamplingParams(extra_args=one_step),
+        SamplingParams(logprobs=2, extra_args=one_step),
+        SamplingParams(logprobs=2, extra_args={**one_step, "diffusion_read_only": 1}),
+    ]
+    sampler, _ = _make_sampler(
+        num_reqs, canvas_len, vocab, hidden, weight, params=params
+    )
+    hs = torch.randn(num_reqs * canvas_len, hidden, device=DEVICE)
+    step = with_gpu_sync_check(sampler)
+
+    emitted = []
+    for _ in range(2):
+        out = step(hs, _make_batch(num_reqs, [canvas_len] * num_reqs))
+        lists = out.logprobs_tensors.tolists()
+        assert len(lists.logprobs) == 2 * canvas_len
+        for i, k in enumerate(out.num_sampled.tolist()):
+            if k and params[i].logprobs:
+                lp = lists.slice_request(i, k)
+                tokens = out.sampled_token_ids[i, :k].tolist()
+                assert lp.logprob_token_ids[:, 0].tolist() == tokens
+                assert (lp.logprobs[:, :3] <= 0).all()
+                emitted.append(i)
+
+    assert emitted == [2, 1, 2]
+
+
+def test_constrained_reads_report_their_allowed_ids_without_a_host_sync(
+    sync_check_error,
+):
+    """Read-only reads sharing one allowed set (the structured-decisions
+    path) emit at convergence with every allowed id's logprob, without a
+    host sync."""
+    num_reqs, canvas_len, vocab, hidden = 2, 16, 1024, 32
+    torch.manual_seed(0)
+    weight = torch.randn(vocab, hidden, device=DEVICE)
+    allowed = [3, 5, 700, 1000]
+    extra = {"diffusion_max_steps": 1, "diffusion_read_only": 1}
+    params = [
+        SamplingParams(
+            logprobs=0,
+            logprob_token_ids=allowed,
+            extra_args={**extra, "diffusion_constrained": 1},
+        )
+        for _ in range(num_reqs)
+    ]
+    sampler, _ = _make_sampler(
+        num_reqs, canvas_len, vocab, hidden, weight, params=params
+    )
+    hs = torch.randn(num_reqs * canvas_len, hidden, device=DEVICE)
+
+    out = with_gpu_sync_check(sampler)(hs, _make_batch(num_reqs, [canvas_len] * 2))
+
+    lists = out.logprobs_tensors.tolists()
+    for i in range(num_reqs):
+        lp = lists.slice_request(i, canvas_len)
+        tokens = out.sampled_token_ids[i, :canvas_len].tolist()
+        assert set(tokens) <= set(allowed)
+        assert lp.logprob_token_ids[:, 0].tolist() == tokens
+        assert (lp.logprob_token_ids[:, 1:] == allowed).all()
+        assert np.allclose(np.exp(lp.logprobs[:, 1:]).sum(axis=1), 1.0, atol=1e-4)
+
+
+def test_full_vocab_logprobs_come_on_the_commit_step(sync_check_error):
+    """logprobs=-1 under --max-logprobs -1 asks for every vocab id, next to a
+    top-2 request in the same batch. Both get their rows on the step they
+    emit, through syncs the checker is told about."""
+    num_reqs, canvas_len, vocab, hidden = 2, 16, 1024, 32
+    torch.manual_seed(0)
+    weight = torch.randn(vocab, hidden, device=DEVICE)
+    one_step = {"diffusion_max_steps": 1}
+    params = [
+        SamplingParams(logprobs=-1, extra_args=one_step),
+        SamplingParams(logprobs=2, extra_args=one_step),
+    ]
+    sampler, _ = _make_sampler(
+        num_reqs, canvas_len, vocab, hidden, weight, params=params
+    )
+    hs = torch.randn(num_reqs * canvas_len, hidden, device=DEVICE)
+    step = with_gpu_sync_check(sampler)
+
+    batch = _make_batch(num_reqs, [canvas_len] * num_reqs)
+    # Both converge on the first step and emit on the commit step.
+    assert step(hs, batch).logprobs_tensors is None
+    out = step(hs, batch)
+
+    lists = out.logprobs_tensors.tolists()
+    for i, num_cols in enumerate((1 + vocab, 3)):
+        lp = lists.slice_request(i, canvas_len)
+        tokens = out.sampled_token_ids[i, :canvas_len].tolist()
+        assert lp.logprob_token_ids[:, 0].tolist() == tokens
+        assert np.isfinite(lp.logprobs[:, :num_cols]).all()
+        assert np.isneginf(lp.logprobs[:, num_cols:]).all()
