@@ -144,9 +144,9 @@ class KVCacheCoordinator(ABC):
             logger.warning(
                 "EAGLE/MTP is enabled but no KV cache group was identified as "
                 "a draft group; assuming the drafter shares KV with the target "
-                "model and skipping the trailing-block drop. If this model has "
-                "independent draft KV layers, mark them with "
-                "non_causal_multi_token_decode=True."
+                "model and skipping the trailing-block drop. If this model does "
+                "own draft KV layers, they must be marked as draft layers so "
+                "that get_kv_cache_spec tags their specs with is_draft=True."
             )
         # Lookahead hashes clear ``use_eagle``: groups stay flagged, none drops.
         self.drop_eagle_group_ids = self.eagle_group_ids if use_eagle else set()
