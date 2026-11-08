@@ -69,6 +69,7 @@ from vllm.model_executor.models.transformers.utils import (
     can_enable_torch_compile,
     disable_noop_dynamic_rope,
     get_feature_request_tip,
+    has_bidirectional_attention,
     init_on_device_without_buffers,
     log_replacement,
     named_state,
@@ -713,11 +714,11 @@ class Base(
 
     def _get_attn_cls(self) -> type[AttentionLayerBase]:
         """Return the `Attention` class to use for this model's layers."""
-        # In encoder models, the attention layers will have `is_causal=False`
-        is_encoder = lambda module: not getattr(module, "is_causal", True)
-        has_encoder = lambda model: any(is_encoder(m) for m in model.modules())
+        # Like vLLM's own models, honour `is_causal=False` set on the config
+        is_causal = getattr(self.text_config, "is_causal", True)
+        is_encoder = not is_causal or has_bidirectional_attention(self.model)
         # A VLM's text model may be bidirectional over the multimodal prefix
-        if has_encoder(self.model) and not self.model_config.is_multimodal_model:
+        if is_encoder and not self.model_config.is_multimodal_model:
             return EncoderOnlyAttention
         if self.model_config.use_mla:
             if any(

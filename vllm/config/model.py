@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from dataclasses import InitVar, field
+from dataclasses import InitVar, field, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
@@ -761,6 +761,21 @@ class ModelConfig:
         self._model_info = model_info
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
+
+        # Backend pooling classes wrap encoders and decoders, so default per model
+        if (
+            model_info.is_pooling_model
+            and not model_info.supports_multimodal
+            and self.using_transformers_backend()
+        ):
+            from vllm.model_executor.models.transformers.utils import (
+                get_default_seq_pooling_type,
+            )
+
+            seq_pooling_type = get_default_seq_pooling_type(self)
+            self._model_info = replace(
+                model_info, default_seq_pooling_type=seq_pooling_type
+            )
 
         # Set default tokenizer modes based on model architecture
         if self.tokenizer_mode == "auto":

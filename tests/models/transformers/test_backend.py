@@ -381,6 +381,32 @@ def test_pooling(
     )
 
 
+@pytest.mark.parametrize("is_causal", [True, False])
+def test_embed_decoder_base_model(vllm_runner, example_prompts, is_causal):
+    """A decoder `*Model` checkpoint without a Sentence Transformers config embeds
+    like vLLM's own implementation: last token pooling, honouring `is_causal`."""
+    hf_overrides = {"architectures": ["LlamaModel"], "is_causal": is_causal}
+    outputs = {}
+    for model_impl in ("vllm", "transformers"):
+        with vllm_runner(
+            "meta-llama/Llama-3.2-1B-Instruct",
+            runner="pooling",
+            model_impl=model_impl,
+            hf_overrides=hf_overrides,
+            max_model_len=512,
+            enforce_eager=True,
+            gpu_memory_utilization=0.3,
+        ) as vllm_model:
+            outputs[model_impl] = vllm_model.embed(example_prompts)
+
+    check_embeddings_close(
+        embeddings_0_lst=outputs["vllm"],
+        embeddings_1_lst=outputs["transformers"],
+        name_0="vllm",
+        name_1="transformers",
+    )
+
+
 VOCAB_SIZE = 64
 PER_LAYER_VOCAB_SIZE = 32
 NUM_POSITIONS = 16

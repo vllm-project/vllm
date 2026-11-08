@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar
 
 import torch
 from torch import nn
+from transformers import AutoModel
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
@@ -39,7 +40,8 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.config import iter_rope_parameters
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config.pooler import SequencePoolingType
     from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
@@ -405,3 +407,17 @@ def disable_noop_dynamic_rope(model: nn.Module, vllm_config: "VllmConfig") -> No
             }
         elif rope_type == "dynamic":
             module.rope_type = "default"
+
+
+def has_bidirectional_attention(model: nn.Module) -> bool:
+    """Whether any of the attention layers in `model` has `is_causal=False`."""
+    return any(not getattr(module, "is_causal", True) for module in model.modules())
+
+
+def get_default_seq_pooling_type(model_config: "ModelConfig") -> "SequencePoolingType":
+    """`CLS` for encoders and `LAST` for decoders, like vLLM's own pooling models."""
+    with torch.device("meta"):
+        model = AutoModel.from_config(
+            model_config.hf_config, trust_remote_code=model_config.trust_remote_code
+        )
+    return "CLS" if has_bidirectional_attention(model) else "LAST"
