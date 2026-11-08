@@ -1139,6 +1139,15 @@ ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
 # We can specify the standard or nightly build of PyTorch
 ARG PYTORCH_NIGHTLY
 
+# Add the source tree before the wheel installs. It does not depend on the
+# build stage, so on a cached build it starts right away and pulls the
+# test-deps layers while the wheel is still building.
+ADD . /vllm-workspace/
+
+# install development dependencies (for testing)
+RUN --mount=type=cache,target=/opt/uv/cache \
+    uv pip install --system -e tests/vllm_test_utils
+
 # Install vLLM and EP kernel wheels after the stable test dependencies so
 # source-only changes do not invalidate the dependency layers above.
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
@@ -1173,12 +1182,6 @@ RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm
 
 # See the matching comment in the vllm-base stage.
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
-
-ADD . /vllm-workspace/
-
-# install development dependencies (for testing)
-RUN --mount=type=cache,target=/opt/uv/cache \
-    uv pip install --system -e tests/vllm_test_utils
 
 # The installs above may move packages the KV connector layer relied on.
 RUN if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] \
