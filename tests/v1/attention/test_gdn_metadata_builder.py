@@ -222,18 +222,16 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
 @pytest.mark.parametrize(
     "test_case", GDN_BUILD_TEST_CASES.values(), ids=GDN_BUILD_TEST_CASES.keys()
 )
-def test_cross_group_build(
+def test_update_block_table_matches_build(
     test_case: GDNBuildTestCase, full_cuda_graph: bool, mamba_cache_mode: str
 ):
-    """Share batch metadata while retaining each group's state indices."""
+    """update_block_table() on another group's metadata matches build()."""
     batch = BatchSpec(seq_lens=test_case.seq_lens, query_lens=test_case.query_lens)
     src, dst, ref = (
         _create_gdn_builder(test_case.num_speculative_tokens, full_cuda_graph)
         for _ in range(3)
     )
-    source_common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
-        _cross_group_cache={}
-    )
+    source_common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
     common = source_common.replace(
         block_table_tensor=source_common.block_table_tensor + 100
     )
@@ -250,8 +248,10 @@ def test_cross_group_build(
         )
     draft_tokens = test_case.num_decode_draft_tokens
     source = _build(src, batch, draft_tokens, source_common)
-    meta = _build(dst, batch, draft_tokens, common)
-    expected = _build(ref, batch, draft_tokens, common.replace(_cross_group_cache=None))
+    meta = dst.update_block_table(
+        source, common.block_table_tensor, common.slot_mapping
+    )
+    expected = _build(ref, batch, draft_tokens, common)
 
     state_fields = (
         "spec_state_indices_tensor",
@@ -524,14 +524,13 @@ def test_checkpoint_metadata_preserves_non_spec_order(
 
 
 @pytest.mark.parametrize("num_spec", [0, 3])
-def test_cross_group_build_regathers_checkpoint(num_spec):
+def test_update_block_table_regathers_checkpoint(num_spec):
     """Checkpoint pages come from the target group's block table, not the
     source group's (otherwise the target group's checkpoint page is never
     written while the prefix cache treats it as valid)."""
     src, common, kwargs = _create_checkpoint_builder_and_batch(num_spec)
     dst, _, _ = _create_checkpoint_builder_and_batch(num_spec)
     ref, _, _ = _create_checkpoint_builder_and_batch(num_spec)
-    common = common.replace(_cross_group_cache={})
     other_table = common.block_table_tensor + 100
     other = common.replace(block_table_tensor=other_table)
     dst.mamba_aligned_state_indices = mamba_get_block_table_tensor(
@@ -539,8 +538,8 @@ def test_cross_group_build_regathers_checkpoint(num_spec):
     )
 
     source = src.build(0, common, **kwargs)
-    expected = ref.build(0, other.replace(_cross_group_cache=None), **kwargs)
-    actual = dst.build(0, other, **kwargs)
+    expected = ref.build(0, other, **kwargs)
+    actual = dst.update_block_table(source, other_table, other.slot_mapping)
 
     assert source.checkpoint is not None and expected.checkpoint is not None
     assert actual.checkpoint is not None

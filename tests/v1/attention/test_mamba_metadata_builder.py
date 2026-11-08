@@ -32,6 +32,7 @@ def _make_vllm_config(
         SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
             use_eagle_block_drop=lambda: False,
+            max_num_new_slots_for_drafting=0,
         )
         if num_speculative_tokens > 0
         else None
@@ -82,7 +83,9 @@ def test_mamba_single_token_prompt_runs_as_prefill():
 )
 @pytest.mark.parametrize("num_prefills", [0, 1])
 @pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
-def test_cross_group_build(builder_cls, num_spec, num_prefills, mamba_cache_mode):
+def test_update_block_table_matches_build(
+    builder_cls, num_spec, num_prefills, mamba_cache_mode
+):
     """Share batch metadata while keeping state indices and FULL buffers local."""
     config = _make_vllm_config(48, 4, num_speculative_tokens=num_spec, block_size=16)
     config.cache_config.mamba_cache_mode = mamba_cache_mode
@@ -99,7 +102,6 @@ def test_cross_group_build(builder_cls, num_spec, num_prefills, mamba_cache_mode
         batch, 16, torch.device("cpu"), arange_block_indices=True
     ).replace(
         is_prefilling=torch.tensor([False, False, bool(num_prefills)]),
-        _cross_group_cache={},
     )
     second_common = first_common.replace(
         block_table_tensor=first_common.block_table_tensor + 100
@@ -113,8 +115,10 @@ def test_cross_group_build(builder_cls, num_spec, num_prefills, mamba_cache_mode
                 common.block_table_tensor, common.seq_lens, spec, "align"
             )
     first_meta = first.build(0, first_common, **kwargs)
-    meta = second.build(0, second_common, **kwargs)
-    expected = ref.build(0, second_common.replace(_cross_group_cache=None), **kwargs)
+    meta = second.update_block_table(
+        first_meta, second_common.block_table_tensor, second_common.slot_mapping
+    )
+    expected = ref.build(0, second_common, **kwargs)
 
     for field in fields(meta):
         actual = getattr(meta, field.name)

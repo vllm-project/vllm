@@ -197,7 +197,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.use_full_cuda_graph: bool = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
-        if device.type in ("cuda", "xpu"):
+        # update_block_table() keeps the source group's batch-level FULL graph
+        # buffers, which is safe because the runner reuses metadata at capture.
+        self.supports_update_block_table = device.type in ("cuda", "xpu")
+        if self.supports_update_block_table:
             # Opts into MRV2's aligned-index precompute.
             self.mamba_aligned_state_indices: torch.Tensor | None = None
 
@@ -328,14 +331,20 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         fast_build: bool = False,
     ) -> GDNAttentionMetadata:
         m = common_attn_metadata
-        group_cache = m._cross_group_cache
-        cache_key = (self.kv_cache_spec, type(self))
-        if group_cache is not None and cache_key in group_cache:
-            return self._update_state_indices(group_cache[cache_key], m)
 
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
+        aligned_state_indices = getattr(self, "mamba_aligned_state_indices", None)
+        if aligned_state_indices is not None:
+            block_table_tensor = aligned_state_indices[: m.num_reqs]
+        else:
+            block_table_tensor = mamba_get_block_table_tensor(
+                m.block_table_tensor,
+                m.seq_lens,
+                self.kv_cache_spec,
+                self.vllm_config.cache_config.mamba_cache_mode,
+            )
 
         uniform_spec_sequence_length = None
         spec_sequence_masks_cpu: torch.Tensor | None = None
@@ -668,10 +677,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
-        if group_cache is not None:
-            # Capture and replay share the first group's batch-level buffers.
-            group_cache[cache_key] = attn_metadata
-        return self._update_state_indices(attn_metadata, m)
+        return self._update_state_indices(
+            attn_metadata, m.block_table_tensor, block_table_tensor
+        )
 
     def _stage_spec_decode(
         self,
@@ -700,25 +708,33 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and num_decodes <= self.decode_cudagraph_max_bs
         )
 
+    def update_block_table(
+        self,
+        metadata: GDNAttentionMetadata,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> GDNAttentionMetadata:
+        """Re-gather this group's state indices. The other fields are
+        batch-level and stay shared with ``metadata``."""
+        state_indices = blk_table
+        if self.vllm_config.cache_config.mamba_cache_mode == "align":
+            assert self.mamba_aligned_state_indices is not None
+            state_indices = self.mamba_aligned_state_indices
+        return self._update_state_indices(metadata, blk_table, state_indices)
+
     def _update_state_indices(
-        self, metadata: GDNAttentionMetadata, common: CommonAttentionMetadata
+        self,
+        metadata: GDNAttentionMetadata,
+        block_table: torch.Tensor,
+        state_indices: torch.Tensor,
     ) -> GDNAttentionMetadata:
         """Add this group's state indices and checkpoint destinations to the
         batch-level ``metadata``, which groups with the same spec and builder
         share."""
-        aligned_state_indices = getattr(self, "mamba_aligned_state_indices", None)
-        if aligned_state_indices is not None:
-            state_indices = aligned_state_indices[: common.num_reqs]
-        else:
-            state_indices = mamba_get_block_table_tensor(
-                common.block_table_tensor,
-                common.seq_lens,
-                self.kv_cache_spec,
-                self.vllm_config.cache_config.mamba_cache_mode,
-            )
         m = metadata
+        num_reqs = state_indices.shape[0]
         checkpoint = (
-            m.checkpoint.regather_state_indices(common.block_table_tensor)
+            m.checkpoint.regather_state_indices(block_table)
             if m.checkpoint is not None
             else None
         )
@@ -742,14 +758,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.spec_state_indices_tensor[: m.num_spec_decodes].copy_(
                 spec_indices, non_blocking=True
             )
-            spec_indices = self.spec_state_indices_tensor[: common.num_reqs]
+            spec_indices = self.spec_state_indices_tensor[:num_reqs]
             spec_indices[m.num_spec_decodes :].fill_(NULL_BLOCK_ID)
 
         if self._stage_decode(m.num_prefills, m.num_decodes, m.num_spec_decodes):
             self.non_spec_state_indices_tensor[: m.num_decodes].copy_(
                 non_spec_indices, non_blocking=True
             )
-            non_spec_indices = self.non_spec_state_indices_tensor[: common.num_reqs]
+            non_spec_indices = self.non_spec_state_indices_tensor[:num_reqs]
             non_spec_indices[m.num_decodes :].fill_(NULL_BLOCK_ID)
 
         return replace(

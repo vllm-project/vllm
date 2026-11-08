@@ -89,7 +89,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     reorder_batch_threshold: int = 1
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
-    # Will be disabled if speculative decoding is used
     supports_update_block_table: bool = True
     needs_causal_conv1d_metadata: bool = True
 
@@ -101,7 +100,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        if torch.device(device).type == "cuda" and vllm_config.use_v2_model_runner:
+        if torch.device(device).type == "cuda":
             # Opts into MRV2's CUDA-only aligned-index precompute.
             self.mamba_aligned_state_indices: torch.Tensor | None = None
 
@@ -188,8 +187,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
 
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
-        if self.use_spec_decode:
-            self.supports_update_block_table = False
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -228,19 +225,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         """Default build implementation for Mamba-like attention backends.
         Subclasses can extend _compute_common_metadata with batch-level fields.
         """
-        group_cache = common_attn_metadata._cross_group_cache
-        cache_key = (self.kv_cache_spec, type(self))
-        if group_cache is not None and cache_key in group_cache:
-            return self._update_state_indices(
-                group_cache[cache_key], common_attn_metadata.block_table_tensor
-            )
         metadata = self._compute_common_metadata(
             common_attn_metadata,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
-        if group_cache is not None:
-            group_cache[cache_key] = metadata
         return self._update_state_indices(
             metadata, common_attn_metadata.block_table_tensor
         )

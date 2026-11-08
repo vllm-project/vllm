@@ -138,8 +138,8 @@ def test_builder_emits_one_checkpoint_entry_per_prefill_row():
     assert meta.cu_chunk_seqlen_p[ckpt_chunk + 1].item() == 768
 
 
-def test_cross_group_build_regathers_checkpoint_blocks():
-    """Groups sharing a spec reuse one group's metadata.
+def test_update_block_table_regathers_checkpoint_blocks():
+    """Groups sharing a spec reuse one group's metadata via update_block_table.
 
     Checkpoint destinations are block-table entries, so each group needs its
     own: layers of different groups share physical tensors, and reusing the
@@ -150,14 +150,16 @@ def test_cross_group_build_regathers_checkpoint_blocks():
         MAMBA_BLOCK_SIZE,
         DEVICE,
         arange_block_indices=True,
-    ).replace(is_prefilling=torch.ones(2, dtype=torch.bool), _cross_group_cache={})
-    _create_mamba2_builder().build(0, common)
+    ).replace(is_prefilling=torch.ones(2, dtype=torch.bool))
+    meta = _create_mamba2_builder().build(0, common)
 
     # A second group's table: same shape as the first, disjoint block ids.
     other_table = common.block_table_tensor + 1000
     other = common.replace(block_table_tensor=other_table)
-    updated = _create_mamba2_builder().build(0, other)
-    expected = _create_mamba2_builder().build(0, other.replace(_cross_group_cache=None))
+    updated = _create_mamba2_builder().update_block_table(
+        meta, other_table, other.slot_mapping
+    )
+    expected = _create_mamba2_builder().build(0, other)
     torch.testing.assert_close(asdict(updated), asdict(expected))
 
     # Row 0 checkpoints in column cdiv(900, 256) - 2 == 2; row 1 declined.
