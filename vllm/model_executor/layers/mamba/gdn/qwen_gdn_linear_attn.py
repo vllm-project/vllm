@@ -1243,6 +1243,23 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> torch.Tensor:
         return self._forward_method(hidden_states)
 
+    def _core_attn_out_dtype(self, activation_dtype: torch.dtype) -> torch.dtype:
+        """Precision for the GDN readout buffer.
+
+        The readout ``o = state @ q`` is unnormalized until ``RMSNormGated``.
+        With fp16 activations and an fp32 SSM state it can exceed fp16's 65504,
+        so an fp16 buffer would overflow to ``inf`` and the norm would turn that
+        into ``NaN``. bf16 shares fp32's exponent range, so only fp16 widens.
+        """
+        if activation_dtype is not torch.float16:
+            return activation_dtype
+        kv_cache = getattr(self, "kv_cache", None)
+        if kv_cache is None or len(kv_cache) < 2:
+            return activation_dtype
+        if getattr(kv_cache[1], "dtype", None) is torch.float32:
+            return torch.float32
+        return activation_dtype
+
     def _output_projection(
         self,
         core_attn_out: torch.Tensor,
@@ -1254,6 +1271,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         by the compilation pass when fuse_norm_quant is enabled.
         """
         core_attn_out = self.norm(core_attn_out, z)
+        if core_attn_out.dtype != z.dtype:
+            core_attn_out = core_attn_out.to(z.dtype)
         output, _ = self.out_proj(core_attn_out.flatten(-2))
         return output
 
@@ -1271,7 +1290,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             projected_states_ba = projected_states_ba.view(num_tokens, -1)
             core_attn_out = torch.empty(
                 (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-                dtype=hidden_states.dtype,
+                dtype=self._core_attn_out_dtype(hidden_states.dtype),
                 device=hidden_states.device,
             )
             z = torch.empty(
@@ -1376,7 +1395,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # are only read by row-wise ops and never reach sampled outputs.
         core_attn_out = torch.empty(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
+            dtype=self._core_attn_out_dtype(hidden_states.dtype),
             device=hidden_states.device,
         )
 
@@ -1439,7 +1458,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
+            dtype=self._core_attn_out_dtype(hidden_states.dtype),
             device=hidden_states.device,
         )
 
@@ -1457,7 +1476,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 layer_name=_encode_layer_name(self.prefix),
             )
         else:
-            z = torch.empty_like(core_attn_out)
+            z = torch.empty(
+                core_attn_out.shape,
+                dtype=hidden_states.dtype,
+                device=core_attn_out.device,
+            )
             torch.ops.vllm.gdn_attention_core_xpu(
                 core_attn_out,
                 z,
@@ -1500,7 +1523,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_tokens = hidden_states.size(0)
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
+            dtype=self._core_attn_out_dtype(hidden_states.dtype),
             device=hidden_states.device,
         )
 
@@ -2029,9 +2052,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             if self.gdn_prefill_backend == "flashinfer":
                 # Without spec decodes the prefill rows follow the peeled
                 # decodes contiguously, so FlashInfer writes them straight
-                # into core_attn_out. Spec batches scatter by token index.
+                # into core_attn_out. Spec batches scatter by token index, and
+                # a readout buffer widened past the activation dtype is copied.
                 prefill_out = None
-                if spec_sequence_masks is None:
+                if (
+                    spec_sequence_masks is None
+                    and core_attn_out.dtype == query_non_spec.dtype
+                ):
                     prefill_out = core_attn_out[num_decode_tokens:num_actual_tokens]
                 core_attn_out_non_spec, last_recurrent_state = (
                     self._forward_flashinfer_prefill(
