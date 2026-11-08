@@ -1077,7 +1077,7 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
     renderer = renderer_from_config(VllmConfig(model_config=model_config))
     renderer._mm_processor_cache = sender
 
-    def release():
+    def release(reset_connector: bool):
         if release_error:
             raise RuntimeError(release_error)
         receiver.clear_cache()
