@@ -82,6 +82,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # to detect "registered but never fulfilled" failures (e.g. the P
         # node disappeared after registration). Keyed by D request_id.
         self._push_registration_deadlines: dict[ReqId, float] = {}
+        self._unavailable_requests: set[ReqId] = set()
 
         # P-side: block IDs for finished requests, kept for the lease and
         # used to drive ``has_pending_push_work``.
@@ -300,11 +301,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         meta = super().build_connector_meta(scheduler_output)
         assert isinstance(meta, NixlConnectorMetadata)
 
-        # Watchdog: any D-side registration whose deadline has passed without
-        # a corresponding push completion is treated as failed and cleaned up.
-        # The corresponding request is already tracked via _reqs_need_recv;
-        # the engine layer will eventually time it out via the lease, but we
-        # at least drop the stale registration so we don't keep retrying.
+        # Report expiry separately from transfer completion: P may still WRITE
+        # into the registered blocks after the request has failed.
         now = time.perf_counter()
         # Deadlines are inserted in non-decreasing order (monotonic clock +
         # constant timeout, armed once per request), and dict insertion order
@@ -316,6 +314,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 break
             expired.append(rid)
         for rid in expired:
+            self._unavailable_requests.add(rid)
             self._push_registration_deadlines.pop(rid, None)
             # Avoid resending a registration that already timed out.
             self._push_pending_registrations.pop(rid, None)
@@ -338,6 +337,10 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             self._newly_finished_push_blocks.clear()
 
         return meta
+
+    def take_unavailable_requests(self) -> set[str]:
+        unavailable, self._unavailable_requests = self._unavailable_requests, set()
+        return unavailable
 
     def has_pending_push_work(self) -> bool:
         # Keep the engine main loop alive while we have:

@@ -690,6 +690,15 @@ class KVConnectorBase_V1(ABC):
         """
         return ()
 
+    def take_unavailable_requests(self) -> set[str]:
+        """Take scheduler-side failures that must terminate requests.
+
+        This does not signal transfer completion: outstanding transfers must
+        still report ``finished_recving`` before their blocks can be reused.
+        Unlike a failed KV load, these failures cannot be locally recomputed.
+        """
+        return set()
+
     def has_pending_block_frees(self) -> bool:
         """Whether pending transfers can release blocks instead of preemption."""
         return False

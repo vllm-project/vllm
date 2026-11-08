@@ -2144,3 +2144,188 @@ def test_push_handshake_rejects_different_block_sizes(
 
     with pytest.raises(NotImplementedError, match="identical P/D block sizes"):
         worker._validate_remote_parallel_config(metadata)
+
+
+@pytest.mark.cpu_test
+def test_push_heartbeat_renews_producer_lease(monkeypatch, dist_init):
+    """A router ID and independently randomized P/D IDs renew the same lease."""
+    import os
+
+    from vllm.config import set_current_vllm_config
+    from vllm.platforms import current_platform
+
+    from .test_nixl_desc_geometry import _RecordingNixl as FakeNixlWrapper
+    from .utils import create_model_runner_output, create_scheduler, create_vllm_config
+
+    monkeypatch.setattr(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    # Respect the CPU test runner's affinity when the worker reserves a core.
+    monkeypatch.setattr(
+        current_platform,
+        "discover_numa_topology",
+        lambda: [list(os.sched_getaffinity(0))],
+    )
+    clock = [100.0]
+    monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
+    config = create_vllm_config(kv_connector="NixlPushConnector", kv_role="kv_producer")
+    config.kv_transfer_config.kv_buffer_device = "cpu"
+    p = create_scheduler(config, num_blocks=32)
+    d = create_scheduler(create_vllm_config(kv_connector="NixlPushConnector"))
+    import torch
+
+    from tests.v1.attention.utils import dense_kv_cache_views
+    from vllm.v1.kv_cache_interface import KVCacheLayout
+
+    with set_current_vllm_config(config):
+        worker = NixlPushConnectorWorker(config, "producer", p.kv_cache_config)
+        spec = p.kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        raw = torch.zeros(spec.page_size_bytes * 32, dtype=torch.int8)
+        (cache,) = dense_kv_cache_views(raw, spec, 32, 1, KVCacheLayout.LBNHC)
+        worker.register_kv_caches({"layer": cache})
+    try:
+        prefill = create_request(num_tokens=32, do_remote_decode=True)
+        prefill.request_id = "cmpl-shared-0-aaaaaaaa"
+        p.add_request(prefill)
+        step = p.schedule()
+        worker.start_load_kv(step.kv_connector_metadata)
+        p.update_from_output(step, create_model_runner_output([prefill]))
+        worker.start_load_kv(p.schedule().kv_connector_metadata)
+
+        clock[0] = 120.0
+        decode = create_request(num_tokens=32, do_remote_prefill=True)
+        decode.request_id = "cmpl-shared-0-bbbbbbbb"
+        decode.kv_transfer_params["remote_request_id"] = "shared"
+        d.add_request(decode)
+        heartbeat_meta = d.schedule().kv_connector_metadata
+        for heartbeat in heartbeat_meta.heartbeat_by_engine.values():
+            worker._handle_heartbeat(",".join(heartbeat.req_ids))
+
+        clock[0] = 131.0
+        assert prefill.request_id not in worker.get_transfer_results().finished_sending
+        clock[0] = 141.0
+        assert worker.get_transfer_results().finished_sending == {prefill.request_id}
+    finally:
+        worker.shutdown()
+        p.shutdown()
+        d.shutdown()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("policy", ["fail", "recompute"])
+@pytest.mark.parametrize("multi", [False, True])
+def test_push_watchdog_ends_request_without_reusing_blocks(monkeypatch, policy, multi):
+    """Expiry ends the request; only a late completion makes its blocks reusable."""
+    from vllm.v1.engine import EngineCoreOutput
+    from vllm.v1.request import RequestStatus
+
+    from .utils import create_model_runner_output, create_scheduler, create_vllm_config
+
+    clock = [100.0]
+    monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
+    extra: dict[str, Any] = {"push_registration_timeout": 10}
+    if multi:
+        extra = {
+            "connectors": [
+                {
+                    "kv_connector": "NixlPushConnector",
+                    "kv_role": "kv_consumer",
+                    "kv_connector_extra_config": extra,
+                }
+            ]
+        }
+    config = create_vllm_config(
+        kv_connector="MultiConnector" if multi else "NixlPushConnector",
+        kv_connector_extra_config=extra,
+        kv_load_failure_policy=policy,
+    )
+    scheduler = create_scheduler(config, num_blocks=32)
+    try:
+        pool = scheduler.kv_cache_manager.block_pool
+        initial_free = pool.get_num_free_blocks()
+        request = create_request(num_tokens=32, do_remote_prefill=True)
+        scheduler.add_request(request)
+        step = scheduler.schedule()
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        held = scheduler.kv_cache_manager.get_blocks(request.request_id).get_block_ids()
+        free_while_waiting = pool.get_num_free_blocks()
+        assert free_while_waiting < initial_free
+        scheduler.update_from_output(step, create_model_runner_output([]))
+
+        clock[0] = 111.0
+        errors: list[EngineCoreOutput] = []
+        for _ in range(3):
+            step = scheduler.schedule()
+            outputs = scheduler.update_from_output(step, create_model_runner_output([]))
+            errors.extend(
+                output for batch in outputs.values() for output in batch.outputs
+            )
+        assert request.status == RequestStatus.FINISHED_ERROR
+        assert [output.request_id for output in errors] == [request.request_id]
+        assert errors[0].finish_reason == request.get_finished_reason()
+        assert pool.get_num_free_blocks() == free_while_waiting
+        assert all(pool.blocks[bid].ref_cnt > 0 for group in held for bid in group)
+
+        # Independent requests can use other blocks while the timed-out transfer
+        # still owns its destination. No local recompute may touch that destination.
+        healthy = create_request(num_tokens=16, max_tokens=1)
+        scheduler.add_request(healthy)
+        step = scheduler.schedule()
+        assert request.request_id not in step.num_scheduled_tokens
+        healthy_blocks = scheduler.kv_cache_manager.get_blocks(healthy.request_id)
+        assert not {bid for group in held for bid in group}.intersection(
+            bid for group in healthy_blocks.get_block_ids() for bid in group
+        )
+        scheduler.update_from_output(step, create_model_runner_output([healthy]))
+        assert healthy.is_finished()
+        assert pool.get_num_free_blocks() == free_while_waiting
+
+        step = scheduler.schedule()
+        scheduler.update_from_output(
+            step,
+            create_model_runner_output([], finished_recving={request.request_id}),
+        )
+        assert request.request_id not in scheduler.requests
+        assert pool.get_num_free_blocks() == initial_free
+    finally:
+        scheduler.shutdown()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("completion_time", [109.0, 111.0])
+def test_push_completion_precedes_watchdog_failure(monkeypatch, completion_time):
+    """A completed receive wins even when its report coincides with expiry."""
+    from vllm.v1.request import RequestStatus
+
+    from .utils import create_model_runner_output, create_scheduler, create_vllm_config
+
+    clock = [100.0]
+    monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
+    config = create_vllm_config(
+        kv_connector="NixlPushConnector",
+        kv_connector_extra_config={"push_registration_timeout": 10},
+    )
+    scheduler = create_scheduler(config, num_blocks=32)
+    try:
+        pool = scheduler.kv_cache_manager.block_pool
+        initial_free = pool.get_num_free_blocks()
+        request = create_request(num_tokens=32, do_remote_prefill=True, max_tokens=1)
+        scheduler.add_request(request)
+        step = scheduler.schedule()
+        scheduler.update_from_output(step, create_model_runner_output([]))
+
+        clock[0] = completion_time
+        step = scheduler.schedule()
+        scheduler.update_from_output(
+            step, create_model_runner_output([], finished_recving={request.request_id})
+        )
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        clock[0] = 200.0
+        step = scheduler.schedule()
+        assert request.request_id in step.num_scheduled_tokens
+        scheduler.update_from_output(step, create_model_runner_output([request]))
+        assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+        assert pool.get_num_free_blocks() == initial_free
+    finally:
+        scheduler.shutdown()

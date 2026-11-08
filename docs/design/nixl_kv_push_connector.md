@@ -288,6 +288,11 @@ across TP ranks, so producer TP1 to consumer TP2 is supported.
 * `finished_sending` (P side) clears the lease entry.
 * `finished_recving` (D side) clears the watchdog deadline.
 
+Push heartbeats carry the same D-side internal request ID as `PUSH_REG`.
+P matches it against its lease IDs after stripping the per-engine random
+suffix, using the existing push pairing convention. Pull heartbeats continue
+to use the exact P-side request ID.
+
 ## Timeouts and watchdogs
 
 Two per-request timers are armed on the scheduler:
@@ -296,11 +301,18 @@ Two per-request timers are armed on the scheduler:
   If a registered request does not see a push completion within
   ``push_registration_timeout`` seconds (defaults to
   ``decoder_kv_blocks_ttl``), ``build_connector_meta`` drops the stale
-  registration and the pending entry, logs a warning, and stops trying
-  to resend the registration. The corresponding request remains tracked
-  in ``_reqs_need_recv``; it is the engine's request-level abort path
-  (or the user / proxy timing out the HTTP call) that ultimately fails
-  the request.
+  registration and reports the request through
+  ``take_unavailable_requests``. The scheduler ends it with an error,
+  including when ``kv_load_failure_policy`` is ``recompute``: a remote
+  WRITE may still target the allocated blocks, so local recomputation into
+  them would be unsafe. Completion received in the same worker output
+  takes precedence over the watchdog.
+
+  Ending the request does not free its blocks. They remain held until all
+  workers report receive completion through the existing delayed-free path.
+  If the producer disappears permanently, those blocks remain unavailable
+  until the engine is restarted. The watchdog bounds the request's wait;
+  it is not evidence that a remote WRITE has stopped.
 * **P-side block lease** — same ``_kv_lease_duration`` used by pull
   mode. ``request_finished`` sets the expiration in ``_reqs_need_send``
   and ``update_connector_output(finished_sending=...)`` clears it on

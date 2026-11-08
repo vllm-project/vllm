@@ -6860,6 +6860,7 @@ def test_scheduler_kv_connector_stats():
             GenericKVConnectorStats(data=scheduler_data) if scheduler_data else None
         )
         scheduler.connector = Mock()
+        scheduler.connector.take_unavailable_requests.return_value = set()
         scheduler.connector.get_kv_connector_stats.return_value = (
             scheduler_stats if worker_stats is None else None
         )
