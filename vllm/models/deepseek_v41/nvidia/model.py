@@ -683,14 +683,35 @@ class DeepseekV4DecoderLayer(nn.Module):
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
         pre_mix: torch.Tensor,
-        post_mix: torch.Tensor,
-        res_mix: torch.Tensor,
-        residual: torch.Tensor,
+        post_mix: torch.Tensor | None,
+        res_mix: torch.Tensor | None,
+        residual: torch.Tensor | None,
     ) -> None:
         """Write the KV ``forward`` would for the replay layers' inputs, skipping
         the rest of the layer; the replay batch then reruns its rows."""
         # The replay batch rules out Engram and sequence parallel here.
         assert self.engram is None and not self.use_sequence_parallel
+        if residual is None:
+            # This layer starts the PP stage: like ``forward``, collapse the hc
+            # streams the previous stage sent with the pre-mix it carried.
+            assert isinstance(x, torch.Tensor) and x.dim() == 3
+            _, _, x, _ = mhc_pre_delayed_tilelang(
+                x,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+                pre_mix=pre_mix,
+                norm_weight=self.attn_norm.weight,
+                norm_eps=self.attn_norm.variance_epsilon,
+            )
+            self.attn.forward_kv(positions, x)
+            return
+        assert post_mix is not None and res_mix is not None
         *_, x, _, _ = mhc_shifted_post_pre(
             x,
             residual,
@@ -1116,19 +1137,22 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             if self.use_sequence_parallel:
                 pre_mix = sp_shard(pre_mix)
         aux_hidden_by_layer: dict[int, torch.Tensor] = {}
-        hidden_states, residual, post_mix, res_mix, pre_mix = self._run_layers(
-            range(self.start_layer, self.decoder_replay_start),
-            hidden_states,
-            positions,
-            input_ids,
-            pre_mix,
-            post_mix,
-            res_mix,
-            residual,
-            aux_hidden_by_layer,
-            engram_hashes,
-            engram_mask,
-        )
+        # A stage starting at the last KV source (such as the default 20/20 split
+        # of PP2) holds replay layers only.
+        if self.start_layer < self.decoder_replay_start:
+            hidden_states, residual, post_mix, res_mix, pre_mix = self._run_layers(
+                range(self.start_layer, self.decoder_replay_start),
+                hidden_states,
+                positions,
+                input_ids,
+                pre_mix,
+                post_mix,
+                res_mix,
+                residual,
+                aux_hidden_by_layer,
+                engram_hashes,
+                engram_mask,
+            )
         late_aux: list[torch.Tensor] = []
         if self.decoder_replay_layers is not None:
             hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
@@ -1143,6 +1167,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 residual,
             )
         else:
+            assert residual is not None and post_mix is not None
+            assert res_mix is not None
             hidden_states = self._collapse(
                 hidden_states,
                 residual,
@@ -1276,12 +1302,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
         pre_mix: torch.Tensor,
-        post_mix: torch.Tensor,
-        res_mix: torch.Tensor,
-        residual: torch.Tensor,
+        post_mix: torch.Tensor | None,
+        res_mix: torch.Tensor | None,
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, ...]:
         """Layers ``decoder_replay_start``.. on the given rows; returns their output,
-        the last FFN's pre-mix and the aux hidden states they capture."""
+        the last FFN's pre-mix and the aux hidden states they capture. The mixes
+        and residual are None when the stage starts at the replay layers."""
         assert self.decoder_replay_layers is not None
         if (
             input_ids is not None
