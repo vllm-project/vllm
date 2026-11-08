@@ -82,7 +82,16 @@
                 {{-  tool_call.name + '(' -}}
             {%- for param in tool_call.arguments %}
                 {{- param + '=' -}}
-                {{- tool_call.arguments[param] | tojson -}}
+                {#- A Python literal per type, so a replayed call reads back
+                    as the type the caller sent. -#}
+                {%- set value = tool_call.arguments[param] -%}
+                {%- if value is boolean -%}
+                    {{- 'True' if value else 'False' -}}
+                {%- elif value is none -%}
+                    {{- 'None' -}}
+                {%- else -%}
+                    {{- value | tojson -}}
+                {%- endif -%}
                 {% if not loop.last %}, {% endif %}
             {%- endfor %}
             {{- ')' -}}
