@@ -4100,7 +4100,8 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
         nope_head_dim: NoPE width of `d`.
         rope_head_dim: RoPE width of `d`.
         num_splits: Number of KV splits per query.
-        out: Optional destination with `d` trailing elements.
+        out: Optional destination holding the leading `out.shape[-1] <= d`
+            output lanes; the width must be a power of two.
 
     Returns:
         The attention output, `out` when provided.
@@ -4132,22 +4133,22 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
     )
     if out is None:
         out = torch.empty_like(q)
-    assert out.shape[-1] == head_dim, (
-        f"expected out trailing dim {head_dim}, got {out.shape[-1]}"
+    comb_dim = out.shape[-1]
+    assert comb_dim <= head_dim and triton.next_power_of_2(comb_dim) == comb_dim, (
+        f"expected power-of-two out trailing dim <= {head_dim}, got {comb_dim}"
     )
 
     block_h = _SPARSE_DECODE_BF16_BLOCK_H
     block_d = triton.next_power_of_2(head_dim)
     block_k = _SPARSE_DECODE_BF16_BLOCK_K
     heads_blocks = triton.cdiv(num_heads, block_h)
-    comb_dim = nope_head_dim + rope_head_dim
 
     part_m = torch.empty(
         (num_queries, num_splits, num_heads), dtype=torch.float32, device=q.device
     )
     part_l = torch.empty_like(part_m)
     part_acc = torch.empty(
-        (num_queries, num_splits, num_heads, comb_dim),
+        (num_queries, num_splits, num_heads, head_dim),
         dtype=torch.float32,
         device=q.device,
     )
@@ -4761,17 +4762,6 @@ def rocm_sparse_attn_decode_bf16(
         rope_head_dim,
         "rocm_sparse_attn_decode_bf16",
     )
-    num_queries, num_heads = q.shape[0], q.shape[1]
-    direct = output.shape[-1] == head_dim
-    out = (
-        output
-        if direct
-        else torch.empty(
-            (num_queries, num_heads, head_dim),
-            dtype=output.dtype,
-            device=output.device,
-        )
-    )
     _rocm_sparse_attn_decode_ragged_bf16_triton(
         q=q,
         kv=kv.squeeze(1),
@@ -4782,10 +4772,8 @@ def rocm_sparse_attn_decode_bf16(
         nope_head_dim=nope_head_dim,
         rope_head_dim=rope_head_dim,
         num_splits=num_splits,
-        out=out,
+        out=output,
     )
-    if not direct:
-        output.copy_(out[..., : output.shape[-1]])
 
 
 def rocm_sparse_attn_decode(

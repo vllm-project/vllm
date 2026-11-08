@@ -77,27 +77,29 @@ def _require_aiter() -> None:
 
 
 @pytest.mark.parametrize(
-    ("real_heads", "cache_kind"),
+    ("real_heads", "cache_kind", "long_len"),
     [
-        (1, "bf16"),
-        (4, "bf16"),
-        (8, "bf16"),
-        (8, "fp8"),
-        (32, "fp8"),
-        (64, "fp8"),
-        (12, "bf16"),
-        (16, "bf16"),
-        (24, "bf16"),
-        (32, "bf16"),
-        (40, "bf16"),
-        (48, "bf16"),
-        (64, "bf16"),
-        (80, "bf16"),
+        (1, "bf16", 23),
+        (4, "bf16", 23),
+        (8, "bf16", 23),
+        (8, "fp8", 23),
+        (32, "fp8", 23),
+        (64, "fp8", 23),
+        (12, "bf16", 23),
+        (16, "bf16", 23),
+        (24, "bf16", 23),
+        (32, "bf16", 23),
+        (40, "bf16", 23),
+        (48, "bf16", 23),
+        (64, "bf16", 23),
+        (80, "bf16", 23),
+        # Past _SPARSE_DECODE_BF16_MIN_SPLIT_LEN, so Triton decode uses split-K.
+        (64, "bf16", 600),
     ],
 )
 @torch.inference_mode()
 def test_sparse_mla_sink_matches_ragged_reference(
-    real_heads: int, cache_kind: str
+    real_heads: int, cache_kind: str, long_len: int
 ) -> None:
     """Exercise ragged sink decode, head padding, and FP8 scale forwarding."""
     _require_aiter()
@@ -108,7 +110,7 @@ def test_sparse_mla_sink_matches_ragged_reference(
 
     set_random_seed(real_heads * 17 + (cache_kind == "fp8"))
     device = torch.device("cuda")
-    seq_lens = [0, 1, 5, 23, 17]
+    seq_lens = [0, 1, 5, long_len, 17]
     batch_size = len(seq_lens)
 
     q_source = torch.randn(batch_size, real_heads, Q_HEAD_DIM, device=device) * 0.2
@@ -185,6 +187,16 @@ def test_sparse_mla_sink_matches_ragged_reference(
         torch.stack(values) for values in zip(*references)
     )
 
+    from vllm.platforms.rocm import on_gfx942, on_gfx950
+
+    # gfx950's nonpersistent BF16 AITER kernels for 33-128 heads are
+    # nondeterministic (ROCm/aiter#7631), so those shapes must use Triton.
+    triton_sink = (
+        cache_kind == "bf16"
+        and real_heads > 32
+        and (on_gfx950() or (on_gfx942() and real_heads <= 64))
+    )
+    assert (lse is None) == triton_sink
     assert output.dtype == torch.bfloat16
     if lse is not None:
         assert lse.dtype == torch.float32
@@ -199,10 +211,6 @@ def test_sparse_mla_sink_matches_ragged_reference(
         lse_allowance = score_error + 2 * ulp
         assert torch.all(lse_error <= lse_allowance)
         torch.testing.assert_close(lse[0].double(), expected_lse[0], atol=0, rtol=0)
-    else:
-        from vllm.platforms.rocm import on_gfx942
-
-        assert cache_kind == "bf16" and real_heads in (40, 48, 64) and on_gfx942()
     _assert_sink_output_close(
         output,
         expected,
