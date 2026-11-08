@@ -15,7 +15,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from dataclasses import fields as dataclass_fields
-from enum import Enum
+from enum import StrEnum
 from typing import Any, NamedTuple, overload
 
 import torch
@@ -51,7 +51,7 @@ def _page_segments(
     num_blocks: int,
     layout: KVCacheLayout,
 ) -> tuple[tuple[int, int], ...]:
-    """Byte ``(offset, length)`` runs of a layer's page from its block start.
+    """Byte `(offset, length)` runs of a layer's page from its block start.
 
     Empty when the page is one contiguous run. LHBNC and BHLNC store each
     head's tokens as a separate run.
@@ -93,7 +93,7 @@ def _spec_fingerprint(spec: KVCacheSpec) -> dict[str, str]:
 def _model_fingerprint(model_config: Any) -> dict[str, Any]:
     """Effective model settings that change the KV a checkpoint produces.
 
-    ``hf_config`` already has ``hf_overrides`` applied, so overridden RoPE or
+    `hf_config` already has `hf_overrides` applied, so overridden RoPE or
     attention settings separate engines that share the same model path.
     """
     hf_config = getattr(model_config, "hf_config", None)
@@ -195,7 +195,7 @@ class UMBPNamespace:
 
     @classmethod
     def configured(cls, vllm_config: Any) -> UMBPNamespace | None:
-        """Return the explicit ``key_namespace``, or None when it is derived."""
+        """Return the explicit `key_namespace`, or None when it is derived."""
         extra = vllm_config.kv_transfer_config.kv_connector_extra_config
         configured = extra.get("key_namespace", "auto")
         if configured == "auto":
@@ -791,7 +791,7 @@ class RequestTracker:
 TRANSFER_NOT_ATTEMPTED = "transfer not attempted"
 
 
-class TransferJobStatus(str, Enum):
+class TransferJobStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"

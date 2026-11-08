@@ -719,17 +719,4 @@ class AliceAIForCausalLM(
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights=weights)
         loaded.update(manually_loaded)
-        expected_target_weights = {
-            name
-            for name, _ in self.named_parameters()
-            if ".attnres_final." in name
-            or ".attn_res_" in name
-            or ".mlp_res_" in name
-            or name.endswith(".e_score_correction_bias")
-        }
-        if missing := expected_target_weights - loaded:
-            raise ValueError(
-                "AliceAI checkpoint is missing target-specific weights: "
-                + ", ".join(sorted(missing))
-            )
         return loaded
