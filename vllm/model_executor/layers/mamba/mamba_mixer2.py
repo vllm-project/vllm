@@ -59,6 +59,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import (
     LoaderFunction,
     composed_weight_loader,
+    default_weight_loader,
     sharded_weight_loader,
 )
 from vllm.model_executor.parameter import BasevLLMParameter
@@ -99,10 +100,12 @@ class Mixer2RMSNormGated(CustomOp):
         full_n_groups: int,
         use_rms_norm: bool = True,
         eps: float = 1e-6,
+        replicate: bool = False,
     ):
         super().__init__()
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
+        # replicate: the whole hidden size lives on every rank, no collectives.
+        self.tp_size = 1 if replicate else get_tensor_model_parallel_world_size()
+        self.tp_rank = 0 if replicate else get_tensor_model_parallel_rank()
         self.full_hidden_size = full_hidden_size
         self.group_size = full_hidden_size // full_n_groups
         self.per_rank_hidden_size = full_hidden_size // self.tp_size
@@ -113,7 +116,10 @@ class Mixer2RMSNormGated(CustomOp):
         if self.use_rms_norm:
             # Register norm weight only if we're actually applying RMSNorm
             self.weight = nn.Parameter(torch.ones(self.per_rank_hidden_size))
-            set_weight_attrs(self.weight, {"weight_loader": sharded_weight_loader(0)})
+            norm_loader = (
+                default_weight_loader if replicate else sharded_weight_loader(0)
+            )
+            set_weight_attrs(self.weight, {"weight_loader": norm_loader})
         else:
             # Avoid checkpoint mismatch by skipping unused parameter
             self.register_parameter("weight", None)
@@ -296,6 +302,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        replicate: bool = False,
     ):
         super().__init__()
 
@@ -313,8 +320,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
         #   may be replicated to follow the head shard.
         # - NOTE: currently for the world size DOES NOT divide groups
         #   case, we only support the case when n_groups == 1
-        self.tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
+        # replicate: every rank builds all heads/groups and keeps the full state;
+        # out_proj then needs no all-reduce.
+        self.replicate = replicate
+        self.tp_size = 1 if replicate else get_tensor_model_parallel_world_size()
+        tp_rank = 0 if replicate else get_tensor_model_parallel_rank()
 
         assert num_heads % self.tp_size == 0, (
             "Tensor parallel world size must divide num heads."
@@ -360,6 +370,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 bias=use_conv_bias,
                 quant_config=None,
                 prefix=f"{prefix}.conv1d",
+                disable_tp=replicate,
             )
 
             self.in_proj = MergedColumnParallelLinear(
@@ -374,6 +385,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 bias=use_bias,
                 quant_config=quant_config,
                 prefix=f"{prefix}.in_proj",
+                disable_tp=replicate,
             )
         else:
             # This is the n_groups == 1 case,
@@ -494,12 +506,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.dt_bias = nn.Parameter(torch.ones(num_heads // self.tp_size))
         self.use_rms_norm = use_rms_norm
 
-        set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader(0)})
+        # sharded_weight_loader narrows by the global TP rank.
+        head_loader = default_weight_loader if replicate else sharded_weight_loader(0)
+        set_weight_attrs(self.D, {"weight_loader": head_loader})
         a_weight_loader = composed_weight_loader(
-            sharded_weight_loader(0), lambda x: -torch.exp(x.float())
+            head_loader, lambda x: -torch.exp(x.float())
         )
         set_weight_attrs(self.A, {"weight_loader": a_weight_loader})
-        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
+        set_weight_attrs(self.dt_bias, {"weight_loader": head_loader})
 
         self.out_proj = RowParallelLinear(
             intermediate_size,
@@ -508,10 +522,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
             input_is_parallel=True,
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
+            disable_tp=replicate,
         )
 
         self.norm = Mixer2RMSNormGated(
-            intermediate_size, n_groups, self.use_rms_norm, eps=rms_norm_eps
+            intermediate_size,
+            n_groups,
+            self.use_rms_norm,
+            eps=rms_norm_eps,
+            replicate=replicate,
         )
 
         self._ssd_kernels_warmed_up = False
@@ -1194,7 +1213,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         return base_dtype
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
-        tp_world_size = get_tensor_model_parallel_world_size()
+        tp_world_size = self.tp_size
         base_shape = MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=self.intermediate_size,
             tp_world_size=tp_world_size,

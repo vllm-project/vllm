@@ -25,6 +25,7 @@ import torch
 from torch import nn
 from transformers import NemotronHConfig
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -404,6 +405,7 @@ class NemotronHMambaDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.mixer",
+            replicate=envs.VLLM_NEMOTRON_H_REPLICATE_MIXER,
         )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
@@ -433,10 +435,12 @@ class NemotronHAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        replicate: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
+        # replicate: every rank holds all Q/KV heads, o_proj output is complete.
+        tp_size = 1 if replicate else get_tensor_model_parallel_world_size()
         self.total_num_heads = config.num_attention_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -466,6 +470,7 @@ class NemotronHAttention(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            disable_tp=replicate,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -473,6 +478,7 @@ class NemotronHAttention(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            disable_tp=replicate,
         )
 
         # Get per-layer sliding window from config (for heterogeneous models)
@@ -525,6 +531,7 @@ class NemotronHAttentionDecoderLayer(nn.Module):
             cache_config,
             quant_config,
             prefix=f"{prefix}.mixer",
+            replicate=envs.VLLM_NEMOTRON_H_REPLICATE_MIXER,
         )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
@@ -579,6 +586,14 @@ class NemotronHModel(nn.Module, EagleModelMixin):
         parallel_config = vllm_config.parallel_config
 
         self.config = config
+        if (
+            envs.VLLM_NEMOTRON_H_REPLICATE_MIXER
+            and parallel_config.use_sequence_parallel_moe
+        ):
+            raise NotImplementedError(
+                "VLLM_NEMOTRON_H_REPLICATE_MIXER is not supported with "
+                "sequence-parallel MoE."
+            )
 
         self.vocab_size = config.vocab_size
 
@@ -799,9 +814,15 @@ class NemotronHForCausalLM(
         hf_config = vllm_config.model_config.hf_config
         intermediate_size = hf_config.mamba_num_heads * hf_config.mamba_head_dim
 
+        # Replicated Mamba2 mixers keep the full conv/SSM state on every rank.
+        tp_size = (
+            1
+            if envs.VLLM_NEMOTRON_H_REPLICATE_MIXER
+            else parallel_config.tensor_parallel_size
+        )
         base_shape = MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=intermediate_size,
-            tp_world_size=parallel_config.tensor_parallel_size,
+            tp_world_size=tp_size,
             n_groups=hf_config.n_groups,
             num_heads=hf_config.mamba_num_heads,
             head_dim=hf_config.mamba_head_dim,
@@ -813,7 +834,7 @@ class NemotronHForCausalLM(
             return MambaStateShapeCalculator.append_replayssm_ring(
                 base_shapes=base_shape,
                 n_groups=hf_config.n_groups,
-                tp_world_size=parallel_config.tensor_parallel_size,
+                tp_world_size=tp_size,
                 logical_window=cache_config.replayssm_buffer_len,
                 backend=vllm_config.mamba_config.backend,
                 num_speculative_tokens=vllm_config.num_speculative_tokens,
