@@ -11,6 +11,10 @@ from vllm import envs
 from vllm.config.logging import LogFormatter
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
+from vllm.plugins.endpoint_plugins.interface import (
+    start_endpoint_plugins,
+    stop_endpoint_plugins,
+)
 from vllm.utils.gc_utils import freeze_gc_heap
 
 logger = init_logger(__name__)
@@ -89,21 +93,25 @@ async def lifespan(app: FastAPI):
         else:
             task = None
 
-        # Mark the startup heap as static so that it's ignored by GC.
-        # Reduces pause times of oldest generation collections.
-        freeze_gc_heap()
         try:
+            await start_endpoint_plugins(app.state)
+            # Mark the startup heap as static so that it's ignored by GC.
+            # Reduces pause times of oldest generation collections.
+            freeze_gc_heap()
             yield
         finally:
             if task is not None:
                 task.cancel()
-            for attr_name in (
-                "openai_serving_transcription",
-                "openai_serving_translation",
-            ):
-                serving = getattr(app.state, attr_name, None)
-                if serving is not None and hasattr(serving, "shutdown"):
-                    serving.shutdown()
+            try:
+                await stop_endpoint_plugins(app.state)
+            finally:
+                for attr_name in (
+                    "openai_serving_transcription",
+                    "openai_serving_translation",
+                ):
+                    serving = getattr(app.state, attr_name, None)
+                    if serving is not None and hasattr(serving, "shutdown"):
+                        serving.shutdown()
     finally:
         # Ensure app state including engine ref is gc'd
         del app.state

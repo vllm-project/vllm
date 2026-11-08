@@ -66,6 +66,7 @@ class NoSignalServer(uvicorn.Server):
         self.peer_loads = peer_loads
         self._accept_tasks: set[asyncio.Task] = set()
         self._connecting = 0
+        self.startup_complete = asyncio.Event()
 
     @contextlib.contextmanager
     def capture_signals(self) -> Generator[None, None, None]:
@@ -82,6 +83,12 @@ class NoSignalServer(uvicorn.Server):
         return loads[index] <= min(loads)
 
     async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        try:
+            await self._startup(sockets)
+        finally:
+            self.startup_complete.set()
+
+    async def _startup(self, sockets: list[socket.socket] | None) -> None:
         if not (self.peer_loads and sockets):
             return await super().startup(sockets)
         # With no sockets uvicorn starts no asyncio server; _accept serves
@@ -229,6 +236,16 @@ async def serve_http(
 
     loop = asyncio.get_running_loop()
 
+    shutdown_event = asyncio.Event()
+
+    def request_shutdown() -> None:
+        if shutdown_event.is_set():
+            return
+        logger.info_once("[shutdown] API server: shutdown triggered")
+        shutdown_event.set()
+
+    app.state.request_shutdown = request_shutdown
+
     engine_client = app.state.engine_client
     watchdog_task = (
         loop.create_task(watchdog_loop(server, engine_client))
@@ -247,14 +264,6 @@ async def serve_http(
             ca_path=config.ssl_ca_certs,
         )
     )
-
-    shutdown_event = asyncio.Event()
-
-    def signal_handler() -> None:
-        if shutdown_event.is_set():
-            return
-        logger.info_once("[shutdown] API server: shutdown triggered")
-        shutdown_event.set()
 
     async def dummy_shutdown() -> None:
         pass
@@ -277,6 +286,9 @@ async def serve_http(
             )
             logger.info_once("[shutdown] API server: engine client stopped")
 
+        # Finish binding before requesting exit: older Uvicorn otherwise skips
+        # shutdown, and cancelling create_server can orphan its listener.
+        await server.startup_complete.wait()
         server.should_exit = True
         logger.info_once("[shutdown] API server: signalling HTTP server shutdown")
         server_task.cancel()
@@ -285,8 +297,8 @@ async def serve_http(
 
     shutdown_task = None
     try:
-        loop.add_signal_handler(signal.SIGINT, signal_handler)
-        loop.add_signal_handler(signal.SIGTERM, signal_handler)
+        loop.add_signal_handler(signal.SIGINT, request_shutdown)
+        loop.add_signal_handler(signal.SIGTERM, request_shutdown)
         shutdown_task = loop.create_task(handle_shutdown())
 
         await server_task

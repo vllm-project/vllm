@@ -28,6 +28,7 @@ either exclude `"render"` from `required_tasks` or check for `None` in
 `init_state`/their route handlers and degrade gracefully.
 """
 
+import asyncio
 from argparse import Namespace
 from copy import copy
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -90,6 +91,32 @@ class EndpointPlugin(Protocol):
         `None` explicitly (e.g. skip engine dependent setup, or have route
         handlers return an error) if the plugin is loadable for `render` but
         cannot function without an engine.
+        """
+        ...
+
+
+@runtime_checkable
+class SupportsStart(Protocol):
+    """Optional endpoint plugin startup capability."""
+
+    async def start(self, state: State) -> None:
+        """Acquire resources after state initialization, before HTTP accepts.
+
+        If startup fails or is cancelled, clean up partially acquired resources
+        before raising. The server only stops plugins whose startup completed.
+        """
+        ...
+
+
+@runtime_checkable
+class SupportsStop(Protocol):
+    """Optional endpoint plugin cleanup capability."""
+
+    async def stop(self, state: State) -> None:
+        """Release resources before app state is deleted.
+
+        The engine may already be stopped. Cleanup is cooperative and has no
+        deadline; it must settle any background work owned by the plugin.
         """
         ...
 
@@ -162,3 +189,27 @@ async def init_endpoint_plugins_state(
     """
     for plugin in getattr(state, "endpoint_plugins", []):
         await plugin.init_state(engine_client, state, args)
+
+
+async def start_endpoint_plugins(state: State) -> None:
+    """Start plugins in load order, recording those eligible for cleanup."""
+    started: list[EndpointPlugin] = []
+    state.started_endpoint_plugins = started
+    for plugin in getattr(state, "endpoint_plugins", []):
+        if isinstance(plugin, SupportsStart):
+            await plugin.start(state)
+        started.append(plugin)
+
+
+async def stop_endpoint_plugins(state: State) -> None:
+    """Stop eligible plugins once in reverse order, deferring cancellation."""
+    started: list[EndpointPlugin] = getattr(state, "started_endpoint_plugins", [])
+    while started:
+        plugin = started.pop()
+        if isinstance(plugin, SupportsStop):
+            try:
+                await plugin.stop(state)
+            except (Exception, asyncio.CancelledError):
+                logger.exception("Endpoint plugin %s failed to stop", plugin.name)
+    if (task := asyncio.current_task()) is not None and task.cancelling():
+        raise asyncio.CancelledError

@@ -76,6 +76,44 @@ class MyAdminEndpointPlugin:
 
 A complete and tested version of this example is in-repo as `tests/plugins/vllm_add_dummy_endpoint_plugin` and is exercised e2e (including a real HTTP request) in `tests/plugins_tests/test_endpoint_plugins.py`.
 
+## Optional startup and cleanup
+
+An endpoint plugin can implement [`SupportsStart`][vllm.plugins.endpoint_plugins.interface.SupportsStart], [`SupportsStop`][vllm.plugins.endpoint_plugins.interface.SupportsStop], or both. These capabilities are independent of `EndpointPlugin`; existing plugins need no new methods.
+
+The server awaits `start(state)` during lifespan startup, after `init_state` and before accepting HTTP requests. Hooks run in load order. If a hook raises or is cancelled, startup fails and the server calls `stop(state)` on preceding eligible plugins in reverse order. The failing plugin must release its own partially acquired resources before raising. A plugin with only `stop` becomes eligible when startup reaches its position in load order.
+
+On shutdown, the server awaits each eligible `stop(state)` once in reverse order before deleting app state. An exception or cancellation from a stop hook does not skip other plugins or native serving cleanup. Cancellation of the lifespan task is re-raised after cleanup. Stop hooks must settle their owned background work; cleanup is cooperative and has no hard deadline.
+
+The existing shutdown order stops the engine before HTTP shutdown and plugin cleanup. **A stop hook cannot rely on a running engine.** These hooks do not drain accepted plugin sessions before engine shutdown. The API server's `/health` behavior is unchanged.
+
+For example, this subclass acquires and closes an HTTP client used by its routes:
+
+```python
+import httpx
+from starlette.datastructures import State
+
+from vllm.plugins.endpoint_plugins.interface import SupportsStart, SupportsStop
+
+
+class ResourceEndpointPlugin(MyAdminEndpointPlugin):
+    async def start(self, state: State) -> None:
+        state.plugin_http_client = httpx.AsyncClient()
+
+    async def stop(self, state: State) -> None:
+        await state.plugin_http_client.aclose()
+
+
+plugin = ResourceEndpointPlugin()
+startup: SupportsStart = plugin
+cleanup: SupportsStop = plugin
+```
+
+The assignments let a static type checker validate the hook signatures. Runtime protocol checks detect capability members; they do not validate signatures or whether methods are asynchronous.
+
+### Requesting process shutdown
+
+`serve_http` exposes the synchronous callback `state.request_shutdown()` before startup hooks run. Call it on the server's event loop to request the same process-local shutdown as SIGINT or SIGTERM. Repeated calls are idempotent. It is available to hooks and route handlers, but not during `init_state`; it does not request deployment-wide shutdown. A startup hook that calls it must still finish or release its partial resources and raise.
+
 ## Registering the entry point
 
 Register a zero argument factory (a class or function) under the `vllm.endpoint_plugins` group. The factory must return an object satisfying `EndpointPlugin`:
