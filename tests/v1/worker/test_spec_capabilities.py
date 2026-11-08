@@ -261,7 +261,6 @@ def _resolve(**settings):
     runner.cache_config, runner.parallel_config = CacheConfig(), ParallelConfig()
     runner.use_pp, runner.pcp_manager, runner.dcp_size = False, None, 1
     runner.batch_sharder, runner.adaptive_verification = None, None
-    runner.speculator_plans = True
     runner.speculator = _Speculator({"plan", "tree_accept"})
     for setting, value in settings.items():
         setattr(runner, setting, value)

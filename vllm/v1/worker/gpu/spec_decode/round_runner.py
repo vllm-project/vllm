@@ -52,23 +52,21 @@ class SpecRound:
         max_num_tokens: int,
         num_speculative_steps: int,
         device: torch.device,
-        plans: bool = False,
     ):
         self.vllm_config = vllm_config
         self.max_num_reqs = max_num_reqs
         self.max_num_tokens = max_num_tokens
         self.max_rows = num_speculative_steps + 1
         self.device = device
-        # The plan of a step without a speculator plan.
+        # The plan of a step whose speculator returns None: the scheduled chain.
         self.chain_plan = VerifyPlan(
             parent=arange_table(max_num_reqs, self.max_rows, device, start=-1),
             is_chain=True,
         )
-        # The accepted path of a chain round, path[r, j] == j; only with a
-        # speculator plan.
-        self.chain_path = (
-            arange_table(max_num_reqs, self.max_rows, device) if plans else None
-        )
+        # The accepted path of a chain round, path[r, j] == j.
+        self.chain_path = arange_table(max_num_reqs, self.max_rows, device)
+        # Whether this rank's speculator overrides ``plan``; resolved at startup.
+        self.plans = False
         self.layout: PlanLayout | None = None
         # Declared; set_resources lowers it before capture.
         self.resources = resources
@@ -87,7 +85,9 @@ class SpecRound:
 
     def resolve_capabilities(self, runner: "GPUModelRunner") -> SpecCapabilities:
         """What this rank's target layers and runner settings verify."""
-        if runner.adaptive_verification is not None and runner.speculator_plans:
+        speculator = runner.speculator
+        self.plans = speculator is not None and "plan" in speculator.overridden_hooks()
+        if runner.adaptive_verification is not None and self.plans:
             raise ValueError(
                 "Adaptive verification sets each request's verified drafts, so it "
                 "cannot run a speculator that overrides plan. Pass "
@@ -145,7 +145,7 @@ class SpecRound:
 
     def plan_batch(
         self,
-        speculator: "BaseSpeculator",
+        speculator: "BaseSpeculator | None",
         scheduler_output: "SchedulerOutput",
         sampler: "Sampler | None",
         req_ids: list[str],
@@ -153,10 +153,14 @@ class SpecRound:
         num_scheduled_tokens: np.ndarray,
         num_draft_tokens: np.ndarray,
         has_prefill: bool,
-    ) -> tuple[torch.Tensor, VerifyPlan | None, tuple[np.ndarray, np.ndarray] | None]:
-        """Ask the speculator for the batch's plan. Returns the device
-        ``idx_mapping``, the plan (None: the scheduled chain), and the trimmed
-        token and draft counts when the plan verifies fewer rows (else None)."""
+    ) -> tuple[torch.Tensor | None, VerifyPlan, tuple[np.ndarray, np.ndarray] | None]:
+        """Ask the speculator for the batch's plan; a speculator that does not
+        plan verifies the scheduled chain, without a step of its own. Returns the
+        device ``idx_mapping`` (None when not copied yet), the plan, and the
+        trimmed token and draft counts when the plan verifies fewer rows."""
+        if not self.plans:
+            return None, self.chain_plan, None
+        assert speculator is not None
         idx_mapping = async_tensor_h2d(
             idx_mapping_np, device=self.device, dtype=torch.int64
         )
@@ -173,7 +177,7 @@ class SpecRound:
             )
         )
         if verify_plan is None:
-            return idx_mapping, None, None
+            return idx_mapping, self.chain_plan, None
         rows = verify_plan.rows
         self._check_plan(verify_plan, num_draft_tokens + 1 if rows is None else rows)
         assert verify_plan.is_chain or not chain_only, (
@@ -251,8 +255,9 @@ class SpecRound:
     def accept_result(
         self, sampler_output: "SamplerOutput", input_batch: "InputBatch"
     ) -> AcceptResult | None:
-        """The accepted path; None without drafts or a speculator plan."""
-        if self.chain_path is None or input_batch.verify_plan is None:
+        """The accepted path; None without drafts. A chain's is a view of
+        ``chain_path``."""
+        if input_batch.verify_plan is None:
             return None
         return accept_result_of(sampler_output, self.chain_path)
 
@@ -263,7 +268,7 @@ class SpecRound:
         verify row each request's recurrent state resumes from; None for a
         chain, which commits nothing."""
         plan = input_batch.verify_plan
-        if result is None or is_chain(plan):
+        if result is None or plan is None or plan.is_chain:
             return None
         assert self.rows is not None
         assert self.kernels is not None, "set_resources binds the commit kernels"
@@ -325,8 +330,3 @@ def trim_draft_tokens(
     )
     num_trimmed = num_draft_tokens - num_verified_drafts
     return num_scheduled_tokens - num_trimmed, num_verified_drafts
-
-
-def is_chain(plan: VerifyPlan | None) -> bool:
-    """Whether a batch's plan keeps chain positions (no plan: no drafts)."""
-    return plan is None or plan.is_chain

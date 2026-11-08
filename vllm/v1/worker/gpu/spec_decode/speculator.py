@@ -173,8 +173,8 @@ class BaseSpeculator(ABC):
         raise NotImplementedError
 
     def overridden_hooks(self) -> frozenset[str]:
-        """The optional per-step hooks this speculator overrides. The model
-        runner reads them once and skips the no-op defaults on every step."""
+        """The optional hooks this speculator overrides, read once at startup
+        to resolve its capabilities."""
         return frozenset(
             name
             for name in ("plan", "tree_accept")

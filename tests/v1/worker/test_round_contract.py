@@ -270,12 +270,16 @@ def test_spec_round_lays_out_only_a_branching_speculator(max_branching):
         assert batch.tree_parents is not None
         assert batch.tree_parents.tolist() == [-1, 0, 1, -1, 0, 1]
 
-    # A speculator without ``plan`` verifies the scheduled chains: no result.
+    # A chain's accepted path is a view of the constant chain path, and its
+    # commit launches nothing.
     batch.verify_plan = spec_round.chain_plan
     zeros = torch.zeros(2, 4, dtype=torch.int32, device=DEVICE)
     sampled = SamplerOutput(zeros, None, None, zeros[:, 0], zeros[:, 0])
     result = spec_round.accept_result(sampled, batch)
-    assert (result is None) == (max_branching == 1)
+    assert result is not None
+    assert result.path.data_ptr() == spec_round.chain_path.data_ptr()
+    assert result.path.tolist() == [[0, 1, 2, 3]] * 2
+    assert spec_round.commit(batch, result) is None
 
 
 @requires_kernels
