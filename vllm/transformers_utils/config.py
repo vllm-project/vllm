@@ -156,7 +156,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
     midashenglm="MiDashengLMConfig",
-    minimax_m3_vl="MiniMaxM3Config",
+    minimax_m3_vl="MiniMaxM3VLConfig",  # Upstream class, hub code uses old schema
     minimax_m3_mtp="MiniMaxM3MTPConfig",
     ming_v3_asr="MingV3ASRConfig",
     moondream3="Moondream3Config",
@@ -943,7 +943,7 @@ def get_config(
         except Exception as e:
             error_message = (
                 "Invalid repository ID or local directory specified:"
-                " '{model}'.\nPlease verify the following requirements:\n"
+                f" '{model}'.\nPlease verify the following requirements:\n"
                 "1. Provide a valid Hugging Face repository ID.\n"
                 "2. Specify a local directory that contains a recognized "
                 "configuration file.\n"
@@ -951,7 +951,7 @@ def get_config(
                 "'config.json'.\n"
                 "   - For Mistral models: ensure the presence of a "
                 "'params.json'.\n"
-            ).format(model=model)
+            )
 
             raise ValueError(error_message) from e
 

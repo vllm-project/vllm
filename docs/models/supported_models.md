@@ -659,12 +659,12 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `UnlimitedOCRForCausalLM` | Unlimited-OCR | T + I<sup>+</sup> | `baidu/Unlimited-OCR`, etc. | ✅︎ | ✅︎ |
 | `UnlimitedOCRForCausalLM` | Unlimited-OCR-2 | T + I<sup>+</sup> | `baidu/Unlimited-OCR-2` | | |
 
-Unlimited-OCR-2 requires Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`).
-On ROCm, DASH defaults to `ROCM_AITER_FA` and uses AITER CK varlen attention;
-the vision encoder also defaults to `ROCM_AITER_FA`. Select the DASH path explicitly
-with `attention_config={"backend": "ROCM_AITER_FA"}` when needed. NVIDIA defaults
+On ROCm, Unlimited-OCR-2 DASH defaults to `ROCM_AITER_FA` and uses AITER CK
+varlen attention; the vision encoder also defaults to `ROCM_AITER_FA`.
+Select the DASH path explicitly with
+`attention_config={"backend": "ROCM_AITER_FA"}` when needed. NVIDIA defaults
 remain unchanged.
-Its optional page-count guard respects sampling constraints, preserving EOS
+Unlimited-OCR-2's optional page-count guard respects sampling constraints, preserving EOS
 when it is the only remaining permitted token.
 
 Some models are supported only via the [Transformers modeling backend](#transformers). The purpose of the table below is to acknowledge models which we officially support in this way. The logs will say that the Transformers modeling backend is being used, and you will see no warning that this is fallback behaviour. This means that, if you have issues with any of the models listed below, please [make an issue](https://github.com/vllm-project/vllm/issues/new/choose) and we'll do our best to fix it!

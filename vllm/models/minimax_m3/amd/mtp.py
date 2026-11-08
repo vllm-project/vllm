@@ -20,7 +20,6 @@ a dedicated refactor diff to keep this AMD-enablement change NVIDIA-untouched.
 from collections.abc import Iterable
 from typing import NamedTuple
 
-import regex as re
 import torch
 import torch.nn as nn
 from transformers import PreTrainedConfig
@@ -38,9 +37,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
+from vllm.model_executor.model_loader.reload import weight_update_active
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -76,20 +73,16 @@ class _SparseIndexerContext(NamedTuple):
 def _build_sparse_indexer_context(
     config: PreTrainedConfig, vllm_config: VllmConfig
 ) -> _SparseIndexerContext:
-    sparse_cfg = getattr(config, "sparse_attention_config", None)
-    if sparse_cfg is None:
-        return _SparseIndexerContext()
-
     # Reserved top-k indices buffer shared by all the sparse-attention indexer
     # layers below; the indexer writes its per-head decode/prefill block
     # selection into it, the attend reads it back.
     tp_size = get_tensor_model_parallel_world_size()
-    num_index_heads = max(1, sparse_cfg["sparse_num_index_heads"] // tp_size)
+    num_index_heads = max(1, config.index_n_heads // tp_size)
     max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     topk_indices_buffer = torch.empty(
         num_index_heads,
         max_tokens,
-        sparse_cfg["sparse_topk_blocks"],
+        config.index_topk_blocks,
         dtype=torch.int32,
     )
 
@@ -97,11 +90,10 @@ def _build_sparse_indexer_context(
     indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype("bf16")
 
     impl_cls = select_msa_indexer_impl_cls(
-        topk_blocks=sparse_cfg["sparse_topk_blocks"],
-        sparse_block_size=sparse_cfg["sparse_block_size"],
-        index_head_dim=sparse_cfg["sparse_index_dim"],
+        topk_blocks=config.index_topk_blocks,
+        sparse_block_size=config.index_block_size,
+        index_head_dim=config.index_head_dim,
         indexer_kv_dtype=indexer_kv_dtype,
-        score_type=sparse_cfg.get("sparse_score_type", "max"),
     )
     msa_indexer_impl_cls = None
     sparse_bt_buffer = None
@@ -115,8 +107,7 @@ def _build_sparse_indexer_context(
         msa_indexer_impl_cls = impl_cls
         sparse_bt_buffer = torch.empty(
             rows,
-            sparse_cfg["sparse_topk_blocks"]
-            * (sparse_cfg["sparse_block_size"] // ASM_PAGE_SIZE),
+            config.index_topk_blocks * (config.index_block_size // ASM_PAGE_SIZE),
             dtype=torch.int32,
         )
         sparse_ctx_buffer = torch.empty(rows, dtype=torch.int32)
@@ -275,9 +266,7 @@ class MiniMaxM3MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        self._tracks_own_embed = (
-            vllm_config.use_v2_model_runner and get_pp_group().world_size > 1
-        )
+        self._tracks_own_embed = get_pp_group().world_size > 1
         if self._tracks_own_embed:
             # Preserve embeddings from loaders that bypass load_weights.
             self.has_own_embed_tokens = vllm_config.load_config.load_format != "dummy"
@@ -322,11 +311,6 @@ class MiniMaxM3MTP(nn.Module):
         return self.logits_processor(
             self.lm_head, mtp_layer.final_layernorm(hidden_states)
         )
-
-    def _get_mtp_layer_idx_from_weight_name(self, name: str) -> int | None:
-        """Return the MTP layer index in *.mtp.layers.{idx}.*, else None."""
-        match = re.search(r"\.mtp\.layers\.(\d+)\.", name)
-        return int(match.group(1)) if match else None
 
     def _map_checkpoint_name(self, name: str) -> str | None:
         """Map a full checkpoint key to this MTP module's parameter name.
@@ -379,9 +363,7 @@ class MiniMaxM3MTP(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        loaded_mtp_layers: set[int] = set()
         for name, loaded_weight in weights:
-            mtp_layer = self._get_mtp_layer_idx_from_weight_name(name)
             mapped_name = self._map_checkpoint_name(name)
             if mapped_name is None:
                 # This weight does not belong to the MTP module, so skip it.
@@ -438,23 +420,11 @@ class MiniMaxM3MTP(nn.Module):
                     weight_loader(param, loaded_weight)
 
             loaded_params.add(name)
-            if mtp_layer is not None:
-                loaded_mtp_layers.add(mtp_layer)
-
-        # Validate that weights were loaded for each MTP layer.
-        for layer_idx in range(self.model.num_mtp_layers):
-            if (
-                layer_idx not in loaded_mtp_layers
-                and is_mtp_completeness_check_enabled()
-            ):
-                raise ValueError(
-                    f"Failed to load MTP layer {layer_idx} weights from checkpoint."
-                )
 
         if self._tracks_own_embed:
             if "model.embed_tokens.weight" in loaded_params:
                 self.has_own_embed_tokens = True
-            elif is_mtp_completeness_check_enabled():
+            elif not weight_update_active():
                 # A complete checkpoint without embeddings borrows the target's.
                 self.has_own_embed_tokens = False
         return loaded_params

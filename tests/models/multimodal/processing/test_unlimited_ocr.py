@@ -226,21 +226,13 @@ async def test_v2_async_rendering_rejects_bad_layout_and_preserves_image_cache()
         renderer.shutdown()
 
 
-@pytest.mark.parametrize(
-    "env, kwargs, message",
-    [
-        ("0", {}, "requires Model Runner V2"),
-        ("1", {"quantization": "fp8"}, "does not support quantized weights"),
-    ],
-)
-def test_v2_rejects_unsupported_runtime_before_loading(
-    monkeypatch, env, kwargs, message
-):
+def test_v2_rejects_unsupported_runtime_before_loading():
     from vllm.engine.arg_utils import EngineArgs
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env)
-    with pytest.raises(ValueError, match=message):
-        EngineArgs(model="baidu/Unlimited-OCR-2", **kwargs).create_engine_config()
+    with pytest.raises(ValueError, match="does not support quantized weights"):
+        EngineArgs(
+            model="baidu/Unlimited-OCR-2", quantization="fp8"
+        ).create_engine_config()
 
 
 def test_v2_preprocessed_features_validate_page_layout_at_admission():
