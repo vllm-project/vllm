@@ -920,10 +920,9 @@ class TestArgValueExtender:
         assert streaming_conversions(lines=20) == streaming_conversions(lines=200)
 
     @pytest.mark.parametrize("size", [1, 7])
-    def test_repeated_closed_params_stream_non_streaming_arguments(
+    def test_repeated_parameters_drop_only_the_affected_call(
         self, mock_tokenizer, mock_request, write_tool, size
     ):
-        """Covers a duplicate open key and a second call sharing the first pair."""
         from vllm.parser.qwen3 import Qwen3Parser
 
         mock_request.tools = [write_tool]
@@ -950,9 +949,16 @@ class TestArgValueExtender:
         results.append((parser.finish_streaming(), text))
         result = make_parser().extract_tool_calls(text, mock_request)
 
-        assert len(result.tool_calls) == 2
-        assert collect_tool_arguments(results) == "".join(
-            c.function.arguments for c in result.tool_calls
+        assert len(result.tool_calls) == 1
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "path": "/repo/app.py"
+        }
+        streamed_calls = [
+            call for delta, _ in results if delta for call in delta.tool_calls or []
+        ]
+        assert [call.index for call in streamed_calls] == [0]
+        assert (
+            collect_tool_arguments(results) == result.tool_calls[0].function.arguments
         )
 
     def test_closed_params_are_parsed_once(
@@ -984,7 +990,8 @@ class TestArgValueExtender:
                 return param_re.sub(count, *args)
 
         monkeypatch.setattr(qwen3, "_PARAM_RE", CountingPattern())
-        text = LOOP_HEAD + LOOP_PARAMS * 200 + LOOP_TAIL
+        params = "".join(f"<parameter=key_{i}>value</parameter>\n" for i in range(400))
+        text = LOOP_HEAD + params + LOOP_TAIL
         simulate_tool_streaming(
             qwen3.Qwen3Parser(
                 mock_tokenizer, chat_template_kwargs={"enable_thinking": False}
@@ -1709,3 +1716,30 @@ class TestParameterValueKeepsCopiedClosers:
         finish = parser.finish_streaming()
         names = _call_names([delta for delta, _ in results] + [finish])
         assert names == ["get_weather", "get_time"]
+
+
+@pytest.mark.parametrize(
+    "guard", ["", "<parameter=dry_run>true</parameter>\n"], ids=["set", "override"]
+)
+def test_balanced_repeated_parameter_suppresses_call(
+    mock_tokenizer, mock_request, guard
+):
+    text = (
+        "<tool_call>\n<function=drain_node>\n"
+        f"{guard}<parameter=note>maintenance</parameter>\n"
+        "<parameter=dry_run>false</parameter>\n"
+        "<parameter=note>ticket</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    adapter = Qwen3ParserToolAdapter(mock_tokenizer)
+    assert adapter.extract_tool_calls(text, mock_request).tool_calls == []
+
+    parser = Qwen3Parser(
+        mock_tokenizer, chat_template_kwargs={"enable_thinking": False}
+    )
+    chunks = text.splitlines(keepends=True)
+    deltas = [
+        parser.parse_delta(chunk, [], mock_request, finished=index == len(chunks) - 1)
+        for index, chunk in enumerate(chunks)
+    ]
+    assert all(delta is None or not delta.tool_calls for delta in deltas)

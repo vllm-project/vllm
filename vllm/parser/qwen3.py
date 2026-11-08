@@ -79,6 +79,16 @@ def _trim_wrapping_newlines(value: str) -> str:
     return value
 
 
+def _has_repeated_params(raw_args: str) -> bool:
+    seen: set[str] = set()
+    for match in _PARAM_OPEN_RE.finditer(raw_args):
+        name = match.group(1)
+        if name in seen:
+            return True
+        seen.add(name)
+    return False
+
+
 def _greedy_qwen_args(raw_args: str) -> str:
     """Keep the first parameter through the final closer.
 
@@ -389,6 +399,7 @@ class Qwen3Parser(ParserEngine):
     ) -> None:
         self._qwen_source_chunks: list[str] = []
         self._held_later_calls: list[DeltaToolCall] = []
+        self._first_call_emitted = False
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         self.thinking_enabled = chat_kwargs.get("enable_thinking", True)
         kwargs.setdefault(
@@ -420,6 +431,7 @@ class Qwen3Parser(ParserEngine):
         super()._reset(initial_state=initial_state)
         self._qwen_source_chunks.clear()
         self._held_later_calls = []
+        self._first_call_emitted = False
 
     def _feed(
         self,
@@ -461,28 +473,52 @@ class Qwen3Parser(ParserEngine):
         result = super()._build_extracted_result(*deltas)
         if not result.tool_calls:
             return result
+
+        repeated = {
+            slot.id for slot in self._tool_slots if _has_repeated_params(slot.args)
+        }
+
         text = "".join(self._qwen_source_chunks)
-        if not self._closers_exceed_openers(text):
-            return result
-        collapsed = self._collapsed_call(text)
-        if collapsed is None:
-            if len(result.tool_calls) <= 1:
-                return result
-            return ExtractedToolCallInformation(
-                tools_called=True,
-                tool_calls=result.tool_calls[:1],
-                content=result.content,
-            )
-        name, args_json = collapsed
-        tool_call = ToolCall(
-            id=result.tool_calls[0].id,
-            function=FunctionCall(name=name, arguments=args_json),
-        )
-        return ExtractedToolCallInformation(
-            tools_called=True,
-            tool_calls=[tool_call],
-            content=result.content,
-        )
+        if self._closers_exceed_openers(text):
+            first = result.tool_calls[0]
+            if first.id in repeated:
+                result.tool_calls = []
+            else:
+                collapsed = self._collapsed_call(text)
+                if collapsed is not None:
+                    name, args_json = collapsed
+                    first = ToolCall(
+                        id=first.id,
+                        function=FunctionCall(name=name, arguments=args_json),
+                    )
+                result.tool_calls = [first]
+        elif repeated:
+            result.tool_calls = [
+                call for call in result.tool_calls if call.id not in repeated
+            ]
+        result.tools_called = bool(result.tool_calls)
+        return result
+
+    def _handle_arg_chunk(
+        self,
+        event: SemanticEvent,
+        deltas: list[DeltaToolCall],
+    ) -> None:
+        # A later parameter can make an already streamed call ambiguous.
+        if event.value:
+            self._tool_slots[event.tool_index].append_args(event.value)
+
+    def _handle_tool_end(
+        self,
+        event: SemanticEvent,
+        deltas: list[DeltaToolCall],
+    ) -> None:
+        index = event.tool_index
+        if index < len(self._tool_slots) and _has_repeated_params(
+            self._tool_slots[index].args
+        ):
+            return
+        super()._handle_tool_end(event, deltas)
 
     def _park_later_calls(self, delta: DeltaMessage | None) -> DeltaMessage | None:
         if delta is None or not delta.tool_calls:
@@ -492,6 +528,7 @@ class Qwen3Parser(ParserEngine):
             if call.index > 0:
                 self._held_later_calls.append(call)
             else:
+                self._first_call_emitted = True
                 kept.append(call)
         delta.tool_calls = kept
         if not delta.tool_calls and not delta.content and not delta.reasoning:
@@ -504,6 +541,8 @@ class Qwen3Parser(ParserEngine):
         self._held_later_calls = []
         if not later or self._closers_exceed_openers("".join(self._qwen_source_chunks)):
             return delta
+        for index, call in enumerate(later, start=int(self._first_call_emitted)):
+            call.index = index
         if delta is None:
             return DeltaMessage(tool_calls=later)
         delta.tool_calls = list(delta.tool_calls) + later

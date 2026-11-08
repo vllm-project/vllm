@@ -225,3 +225,69 @@ async def test_response_format_with_tool_choice_required(
     assert choice.finish_reason == "tool_calls"
     assert choice.message.tool_calls is not None
     assert len(choice.message.tool_calls) > 0
+
+
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND, reason="Exercises the Python Qwen XML parser"
+)
+def test_qwen_xml_rejects_repeated_parameters():
+    from tests.utils import RemoteOpenAIServer
+
+    model = "Qwen/Qwen3-0.6B"
+    args = [
+        "--enable-auto-tool-choice",
+        "--tool-call-parser",
+        "qwen3_coder",
+        "--dtype",
+        "float32",
+        "--max-model-len",
+        "1024",
+        "--enforce-eager",
+    ]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "check_note",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "note": {"type": "string"},
+                        "dry_run": {"type": "boolean"},
+                    },
+                },
+            },
+        }
+    ]
+    control = "<parameter=note>maintenance</parameter>"
+    repeated = (
+        f"{control}\n"
+        "<parameter=dry_run>false</parameter>\n"
+        "<parameter=note>ticket</parameter>"
+    )
+    with RemoteOpenAIServer(model, args) as server, server.get_client() as client:
+        for parameters, expected in [
+            (control, True),
+            (repeated, False),
+            ("<parameter=dry_run>true</parameter>\n" + repeated, False),
+        ]:
+            output = (
+                f"<tool_call>\n<function=check_note>\n{parameters}\n"
+                "</function>\n</tool_call>"
+            )
+            request = {
+                "model": model,
+                "messages": [{"role": "user", "content": "Check the note."}],
+                "tools": tools,
+                "temperature": 0,
+                "max_completion_tokens": 120,
+                "extra_body": {
+                    "chat_template_kwargs": {"enable_thinking": False},
+                    "structured_outputs": {"choice": [output]},
+                },
+            }
+            result = client.chat.completions.create(**request)
+            assert bool(result.choices[0].message.tool_calls) is expected
+            with client.chat.completions.create(**request, stream=True) as stream:
+                deltas = [choice for chunk in stream for choice in chunk.choices]
+            assert any(choice.delta.tool_calls for choice in deltas) is expected
