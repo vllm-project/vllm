@@ -179,18 +179,21 @@ def _store_concurrently(address: str, writer: int, start) -> None:
 
 def _close_while_server_stopped(address: str, server_pid: int, scenario: str):
     torch.accelerator.set_device_index(0)
-    runtime = _runtime(address, timeout_ms=200, lookup_timeout_ms=200)
-    worker = runtime.create_worker_handle("ns", RankTopology(), None)
-    scheduler = runtime.create_scheduler_handle("ns", RankTopology(), None)
     source = torch.arange(_LAYER_BYTES, dtype=torch.uint8, device="cuda:0")
-    worker.register_buffers({"kv": source})
     kv_range = KVRange("kv", 0, 0, source.data_ptr(), _LAYER_BYTES, _LAYER_BYTES, 0)
     plan = BlockTransferPlan("stuck", 0, ranges=(kv_range,))
     if scenario == "load":
-        stored = worker.wait(worker.store([plan]))
+        writer = _runtime(address).create_worker_handle("ns", RankTopology(), None)
+        writer.register_buffers({"kv": source})
+        stored = writer.wait(writer.store([plan]))
         assert stored.status is TransferJobStatus.COMPLETED, stored.error
-        worker.publish(stored)
+        writer.publish(stored)
+        writer.close()
 
+    runtime = _runtime(address, timeout_ms=200, lookup_timeout_ms=200)
+    worker = runtime.create_worker_handle("ns", RankTopology(), None)
+    scheduler = runtime.create_scheduler_handle("ns", RankTopology(), None)
+    worker.register_buffers({"kv": source})
     os.kill(server_pid, signal.SIGSTOP)
     if scenario in ("store", "load"):
         job = getattr(worker, scenario)([plan])
