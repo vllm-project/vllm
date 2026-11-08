@@ -27,8 +27,8 @@ impl ToolParser for DefaultParser {
         Ok(ToolParserOutput::default())
     }
 
-    fn reset(&mut self) -> String {
-        String::new()
+    fn reset(&mut self) -> DecodedText {
+        DecodedText::default()
     }
 }
 
@@ -55,13 +55,13 @@ fn tool_parser_output_coalesces_adjacent_text_events() {
     assert_eq!(
         output.events,
         vec![
-            ToolParserEvent::Text("hello world".to_string()),
+            ToolParserEvent::Text("hello world".into()),
             ToolParserEvent::ToolCall(ToolCallDelta {
                 tool_index: 0,
                 name: Some("lookup".to_string()),
                 arguments: "{}".to_string(),
             }),
-            ToolParserEvent::Text("!".to_string()),
+            ToolParserEvent::Text("!".into()),
         ]
     );
 }
@@ -88,13 +88,13 @@ fn tool_parser_output_append_coalesces_adjacent_text_events() {
     assert_eq!(
         output.events,
         vec![
-            ToolParserEvent::Text("hello world".to_string()),
+            ToolParserEvent::Text("hello world".into()),
             ToolParserEvent::ToolCall(ToolCallDelta {
                 tool_index: 0,
                 name: Some("lookup".to_string()),
                 arguments: "{}".to_string(),
             }),
-            ToolParserEvent::Text("!".to_string()),
+            ToolParserEvent::Text("!".into()),
         ]
     );
 }
@@ -151,8 +151,8 @@ fn default_parse_complete_delegates_through_parse_chunk_and_finish() {
             Ok(output)
         }
 
-        fn reset(&mut self) -> String {
-            String::new()
+        fn reset(&mut self) -> DecodedText {
+            DecodedText::default()
         }
     }
 

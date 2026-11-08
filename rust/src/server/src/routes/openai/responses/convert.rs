@@ -71,6 +71,7 @@ pub(crate) struct PreparedResponsesRequest {
     pub meta: ResponseMeta,
     /// Whether reasoning items appear in the output.
     pub include_reasoning: bool,
+    pub output_logprobs: Option<i32>,
     /// Maps called tool names back to namespaced functions in the output.
     pub tool_names: ResponsesToolNames,
     pub chat_request: ChatRequest,
@@ -85,6 +86,11 @@ pub(crate) fn prepare_responses_request(
 ) -> Result<PreparedResponsesRequest, ApiError> {
     validate::validate_request_compat(&request)?;
     lora_resolution.model_names.check(request.model.as_deref())?;
+    let output_logprobs = request
+        .include
+        .as_ref()
+        .is_some_and(|include| include.iter().any(|field| field == "message.output_text.logprobs"))
+        .then_some(request.top_logprobs.unwrap_or(0));
 
     let request_id = format!("resp_{}", ctx.request_id);
 
@@ -231,7 +237,7 @@ pub(crate) fn prepare_responses_request(
             max_tokens: max_output_tokens,
             min_tokens,
             thinking_token_budget,
-            logprobs: None,
+            logprobs: output_logprobs,
             prompt_logprobs: None,
             prompt_logprob_token_ids: None,
             prompt_logprob_start: None,
@@ -279,6 +285,7 @@ pub(crate) fn prepare_responses_request(
         session_id,
         lora_request: lora_resolution.lora_request.clone(),
         return_prompt_text: false,
+        attribute_text_logprobs: output_logprobs.is_some(),
     };
 
     let meta = ResponseMeta {
@@ -302,6 +309,7 @@ pub(crate) fn prepare_responses_request(
         include_reasoning,
         tool_names,
         chat_request,
+        output_logprobs,
     })
 }
 

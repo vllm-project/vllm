@@ -64,7 +64,7 @@ enum KimiK2Event {
 /// Arguments are already OpenAI-style JSON text, so they are streamed as raw
 /// argument deltas without schema conversion or JSON normalization.
 pub struct KimiK2ToolParser {
-    buffer: String,
+    buffer: DecodedText,
     mode: KimiK2Mode,
     active_tool_index: Option<usize>,
     call_ids: BTreeMap<usize, String>,
@@ -74,7 +74,7 @@ impl KimiK2ToolParser {
     /// Create a Kimi K2 tool parser.
     fn new(_tools: &[Tool]) -> Self {
         Self {
-            buffer: String::new(),
+            buffer: DecodedText::default(),
             mode: KimiK2Mode::Text,
             active_tool_index: None,
             call_ids: BTreeMap::new(),
@@ -85,7 +85,7 @@ impl KimiK2ToolParser {
     fn apply_event(&mut self, event: KimiK2Event, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             KimiK2Event::Text { len: consumed_len } => {
-                output.push_text(&self.buffer[..consumed_len]);
+                output.push_text(self.buffer.prefix(consumed_len));
             }
             KimiK2Event::ToolCallsStart => self.mode = KimiK2Mode::ToolBlock,
             KimiK2Event::ToolCallStart => self.mode = KimiK2Mode::Header,
@@ -115,7 +115,7 @@ impl KimiK2ToolParser {
                 output.push_call(ToolCallDelta {
                     tool_index,
                     name: None,
-                    arguments: self.buffer[..consumed_len].to_string(),
+                    arguments: self.buffer.text[..consumed_len].to_string(),
                 });
             }
             KimiK2Event::ToolCallEnd => {
@@ -131,7 +131,7 @@ impl KimiK2ToolParser {
         Ok(())
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.mode = KimiK2Mode::Text;
         self.active_tool_index = None;
         self.call_ids.clear();
@@ -160,13 +160,13 @@ impl ToolParser for KimiK2ToolParser {
     }
 
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(&chunk.text);
+        self.buffer.append(chunk);
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
+        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
             parse_next_kimi_k2_event(input, &mut self.mode)
         })? {
             self.apply_event(event, output)?;
-            self.buffer.drain(..consumed_len);
+            let _ = self.buffer.drain_prefix(consumed_len);
         }
 
         Ok(())
@@ -175,7 +175,7 @@ impl ToolParser for KimiK2ToolParser {
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match &self.mode {
-            KimiK2Mode::Text => output.push_text(&self.buffer),
+            KimiK2Mode::Text => output.push_text(self.buffer.take()),
             KimiK2Mode::ToolBlock | KimiK2Mode::Done => {}
             KimiK2Mode::Header | KimiK2Mode::Arguments { .. } => {
                 return Err(ToolParserError::IncompleteToolCall { parser: "Kimi K2" });
@@ -185,7 +185,7 @@ impl ToolParser for KimiK2ToolParser {
         Ok(output)
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         KimiK2ToolParser::reset(self)
     }
 }

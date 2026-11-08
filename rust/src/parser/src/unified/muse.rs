@@ -163,7 +163,7 @@ impl MuseUnifiedParser {
         output: &mut UnifiedParserOutput,
     ) {
         match event {
-            MuseEvent::Text => output.push_text(piece.text),
+            MuseEvent::Text => output.push_text(piece),
             MuseEvent::Reasoning => output.push_reasoning(piece),
             MuseEvent::Skip => {}
             MuseEvent::SegmentHeader { recipient } => {
@@ -256,7 +256,7 @@ impl UnifiedParser for MuseUnifiedParser {
             // visible text, matching how other unified parsers treat
             // incomplete output.
             MuseMode::Header { .. } | MuseMode::Text => {
-                output.push_text(self.buffer.take().text);
+                output.push_text(self.buffer.take());
             }
             MuseMode::Reasoning => output.push_reasoning(self.buffer.take()),
             MuseMode::Skip | MuseMode::Done => self.buffer.clear(),
@@ -269,10 +269,10 @@ impl UnifiedParser for MuseUnifiedParser {
         Ok(output)
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.mode = MuseMode::default();
         self.emitted_call_count = 0;
-        self.buffer.take().text
+        self.buffer.take()
     }
 }
 
@@ -590,7 +590,7 @@ mod tests {
             self.events
                 .iter()
                 .filter_map(|event| match event {
-                    UnifiedParserEvent::Text(text) => Some(text.as_str()),
+                    UnifiedParserEvent::Text(text) => Some(text.text.as_str()),
                     _ => None,
                 })
                 .collect()
@@ -1042,7 +1042,7 @@ mod tests {
 
         let raw = parser.reset();
 
-        assert_eq!(raw, "<|eo");
+        assert_eq!(raw.text, "<|eo");
 
         output = parser.parse_chunk(&format!(" to=user{MESSAGE}again")).unwrap();
         output.append(parser.finish().unwrap());
@@ -1134,10 +1134,15 @@ mod tests {
                         DecodedText {
                             text: "Think.",
                             attributions: [],
+                            sources: [],
                         },
                     ),
                     Text(
-                        "Checking. ",
+                        DecodedText {
+                            text: "Checking. ",
+                            attributions: [],
+                            sources: [],
+                        },
                     ),
                     ToolCall(
                         ToolCallDelta {
@@ -1152,10 +1157,15 @@ mod tests {
                         DecodedText {
                             text: "Recheck.",
                             attributions: [],
+                            sources: [],
                         },
                     ),
                     Text(
-                        "Done.",
+                        DecodedText {
+                            text: "Done.",
+                            attributions: [],
+                            sources: [],
+                        },
                     ),
                 ],
             }

@@ -322,7 +322,7 @@ impl KimiK3UnifiedParser {
         output: &mut UnifiedParserOutput,
     ) -> Result<()> {
         match event {
-            KimiK3Event::Text => output.push_text(piece.text),
+            KimiK3Event::Text => output.push_text(piece),
             KimiK3Event::Reasoning => output.push_reasoning(piece),
             // Marker and noise spans are drained and dropped with their tokens.
             KimiK3Event::Skip => {}
@@ -429,10 +429,10 @@ impl KimiK3UnifiedParser {
         }
     }
 
-    fn reset_state(&mut self) -> String {
+    fn reset_state(&mut self) -> DecodedText {
         self.mode = KimiK3Mode::Idle;
         self.emitted_call_count = 0;
-        self.buffer.take().text
+        self.buffer.take()
     }
 }
 
@@ -482,7 +482,7 @@ impl UnifiedParser for KimiK3UnifiedParser {
 
         match &self.mode {
             KimiK3Mode::Idle | KimiK3Mode::Response => {
-                output.push_text(self.buffer.take().text);
+                output.push_text(self.buffer.take());
             }
             KimiK3Mode::Reasoning | KimiK3Mode::PrefilledReasoning => {
                 output.push_reasoning(self.buffer.take());
@@ -500,7 +500,7 @@ impl UnifiedParser for KimiK3UnifiedParser {
         Ok(output)
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.reset_state()
     }
 }
@@ -909,7 +909,7 @@ mod tests {
             self.events
                 .iter()
                 .filter_map(|event| match event {
-                    UnifiedParserEvent::Text(text) => Some(text.as_str()),
+                    UnifiedParserEvent::Text(text) => Some(text.text.as_str()),
                     _ => None,
                 })
                 .collect()
@@ -1508,7 +1508,7 @@ mod tests {
 
         let raw = parser.reset();
 
-        assert_eq!(raw, "<|close|>resp");
+        assert_eq!(raw.text, "<|close|>resp");
     }
 
     // --- Ordinary marker spellings ------------------------------------------

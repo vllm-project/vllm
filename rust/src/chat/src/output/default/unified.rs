@@ -14,6 +14,7 @@ use thiserror_ext::AsReport;
 use tracing::warn;
 use vllm_parser::unified::{UnifiedParser, UnifiedParserEvent, UnifiedParserOutput};
 use vllm_text::output::{DecodedText, DecodedTextEvent, SampledDelta};
+use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs};
 
 use crate::Result;
 use crate::error::Error;
@@ -35,6 +36,10 @@ struct UnifiedParserState {
     /// produce the final count on `Done`; per-delta counts are carried by
     /// each `TextDelta` event itself.
     reasoning_tokens: usize,
+    sampled_count: usize,
+    /// Requested rows indexed by generated occurrence. Taking a row assigns it
+    /// only to the first visible piece, including after a split inside a token.
+    logprobs: Option<Vec<Option<DecodedPositionLogprobs>>>,
 }
 
 impl UnifiedParserState {
@@ -45,6 +50,8 @@ impl UnifiedParserState {
             parser_failed: false,
             open_call_index: None,
             reasoning_tokens: 0,
+            sampled_count: 0,
+            logprobs: None,
         }
     }
 
@@ -52,12 +59,12 @@ impl UnifiedParserState {
     fn process_delta(&mut self, delta: DecodedText) -> Result<Vec<AssistantEvent>> {
         if self.parser_failed {
             self.open_call_index = None;
-            return Ok(text_event(AssistantBlockKind::Text, delta.text).into_iter().collect());
+            return Ok(self.text_event(delta).into_iter().collect());
         }
 
         // The parser consumes the delta; keep its text for the fallback path
         // that re-emits it as plain text.
-        let fallback_text = delta.text.clone();
+        let fallback_text = delta.clone();
         let mut output = UnifiedParserOutput::default();
         match self.parser.parse_into(delta, &mut output) {
             Ok(()) => {
@@ -78,9 +85,9 @@ impl UnifiedParserState {
 
                 let recovered = self.parser.reset();
                 if recovered.is_empty() && events.is_empty() {
-                    push_text_delta(&mut events, AssistantBlockKind::Text, fallback_text);
+                    events.extend(self.text_event(fallback_text));
                 } else {
-                    push_text_delta(&mut events, AssistantBlockKind::Text, recovered);
+                    events.extend(self.text_event(recovered));
                 }
                 Ok(events)
             }
@@ -112,7 +119,7 @@ impl UnifiedParserState {
                 self.parser_failed = true;
                 self.open_call_index = None;
                 let recovered = self.parser.reset();
-                push_text_delta(&mut events, AssistantBlockKind::Text, recovered);
+                events.extend(self.text_event(recovered));
             }
         }
 
@@ -129,7 +136,7 @@ impl UnifiedParserState {
             match event {
                 UnifiedParserEvent::Text(delta) => {
                     self.open_call_index = None;
-                    push_text_delta(events, AssistantBlockKind::Text, delta);
+                    events.extend(self.text_event(delta));
                 }
                 UnifiedParserEvent::Reasoning(piece) => {
                     self.open_call_index = None;
@@ -146,6 +153,34 @@ impl UnifiedParserState {
         }
 
         Ok(())
+    }
+
+    fn record_sampled(&mut self, token_ids: &[u32], logprobs: &Option<DecodedLogprobs>) {
+        if let Some(logprobs) = logprobs {
+            let pending = self.logprobs.get_or_insert_with(Vec::new);
+            pending.resize(self.sampled_count, None);
+            pending.extend(logprobs.positions.iter().cloned().map(Some));
+        }
+        self.sampled_count += token_ids.len();
+    }
+
+    fn text_event(&mut self, piece: DecodedText) -> Option<AssistantEvent> {
+        if piece.text.is_empty() {
+            return None;
+        }
+        let text_logprobs = self.logprobs.as_mut().map(|pending| DecodedLogprobs {
+            positions: piece
+                .sources
+                .iter()
+                .filter_map(|source| pending.get_mut(source.token_index).and_then(Option::take))
+                .collect(),
+        });
+        Some(AssistantEvent::TextDelta {
+            kind: AssistantBlockKind::Text,
+            delta: piece.text,
+            token_count: None,
+            text_logprobs,
+        })
     }
 
     /// Apply one parsed tool-call delta emitted by the parser.
@@ -197,26 +232,6 @@ impl UnifiedParserState {
     }
 }
 
-/// Build one plain text event with no measured tokens, if `delta` is
-/// non-empty.
-fn text_event(kind: AssistantBlockKind, delta: String) -> Option<AssistantEvent> {
-    if delta.is_empty() {
-        return None;
-    }
-    Some(AssistantEvent::TextDelta {
-        kind,
-        delta,
-        token_count: None,
-    })
-}
-
-/// Push one plain text delta if it is non-empty.
-fn push_text_delta(events: &mut Vec<AssistantEvent>, kind: AssistantBlockKind, delta: String) {
-    if let Some(event) = text_event(kind, delta) {
-        events.push(event);
-    }
-}
-
 /// Push one attributed delta, counting its tokens, if its text is non-empty.
 fn push_piece_delta(
     events: &mut Vec<AssistantEvent>,
@@ -230,6 +245,7 @@ fn push_piece_delta(
         kind,
         delta: piece.text,
         token_count: Some(piece.attributions.len()),
+        text_logprobs: None,
     });
 }
 
@@ -238,6 +254,7 @@ fn push_piece_delta(
 pub(crate) async fn unified_event_stream(
     decoded_stream: impl DecodedTextEventStream,
     parser: Box<dyn UnifiedParser>,
+    attribute_text_logprobs: bool,
     mut y: TryYielder<AssistantEvent, Error>,
 ) -> Result<()> {
     pin_mut!(decoded_stream);
@@ -267,6 +284,9 @@ pub(crate) async fn unified_event_stream(
                     },
                 finished,
             } => {
+                if attribute_text_logprobs {
+                    state.record_sampled(&token_ids, &logprobs);
+                }
                 for next in state.process_delta(decoded)? {
                     y.yield_ok(next).await;
                 }
@@ -409,8 +429,8 @@ mod tests {
             Ok(self.finish_output.take().unwrap_or_default())
         }
 
-        fn reset(&mut self) -> String {
-            std::mem::take(&mut self.reset_text)
+        fn reset(&mut self) -> DecodedText {
+            std::mem::take(&mut self.reset_text).into()
         }
     }
 
@@ -444,7 +464,7 @@ mod tests {
         events: Vec<vllm_text::output::DecodedTextEvent>,
     ) -> Vec<AssistantEvent> {
         let stream = stream::iter(events.into_iter().map(Ok));
-        unified_event_stream(stream, Box::new(parser))
+        unified_event_stream(stream, Box::new(parser), false)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -474,6 +494,7 @@ mod tests {
             .collect();
         let mut output = UnifiedParserOutput::default();
         output.push_reasoning(DecodedText {
+            sources: Default::default(),
             text: delta.to_string(),
             attributions,
         });
@@ -536,7 +557,7 @@ mod tests {
         );
 
         let stream = stream::iter(vec![d1, d2].into_iter().map(Ok));
-        let events = unified_event_stream(stream, Box::new(parser))
+        let events = unified_event_stream(stream, Box::new(parser), false)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -581,6 +602,7 @@ mod tests {
         assert_eq!(
             events,
             vec![AssistantEvent::TextDelta {
+                text_logprobs: None,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "thinking".to_string(),
                 token_count: Some(0),
@@ -628,6 +650,7 @@ mod tests {
             events,
             vec![
                 AssistantEvent::TextDelta {
+                    text_logprobs: None,
                     kind: AssistantBlockKind::Reasoning,
                     delta: "thinking".to_string(),
                     token_count: Some(0),
@@ -658,6 +681,7 @@ mod tests {
             events,
             vec![
                 AssistantEvent::TextDelta {
+                    text_logprobs: None,
                     kind: AssistantBlockKind::Text,
                     delta: "visible ".to_string(),
                     token_count: None,
@@ -698,6 +722,7 @@ mod tests {
                     delta: r#"{"location":"Paris"}"#.to_string(),
                 },
                 AssistantEvent::TextDelta {
+                    text_logprobs: None,
                     kind: AssistantBlockKind::Text,
                     delta: " done".to_string(),
                     token_count: None,
@@ -721,16 +746,19 @@ mod tests {
             events,
             vec![
                 AssistantEvent::TextDelta {
+                    text_logprobs: None,
                     kind: AssistantBlockKind::Text,
                     delta: "committed".to_string(),
                     token_count: None,
                 },
                 AssistantEvent::TextDelta {
+                    text_logprobs: None,
                     kind: AssistantBlockKind::Text,
                     delta: "buffered".to_string(),
                     token_count: None,
                 },
                 AssistantEvent::TextDelta {
+                    text_logprobs: None,
                     kind: AssistantBlockKind::Text,
                     delta: "later".to_string(),
                     token_count: None,
@@ -752,6 +780,7 @@ mod tests {
             events,
             vec![
                 AssistantEvent::TextDelta {
+                    text_logprobs: None,
                     kind: AssistantBlockKind::Text,
                     delta: "buffered".to_string(),
                     token_count: None,
@@ -785,17 +814,20 @@ mod tests {
             events,
             vec![
                 AssistantEvent::TextDelta {
+                    text_logprobs: None,
                     kind: AssistantBlockKind::Reasoning,
                     delta: "think".to_string(),
                     token_count: Some(2),
                 },
                 // Non-reasoning deltas carry no token count.
                 AssistantEvent::TextDelta {
+                    text_logprobs: None,
                     kind: AssistantBlockKind::Text,
                     delta: "visible".to_string(),
                     token_count: None,
                 },
                 AssistantEvent::TextDelta {
+                    text_logprobs: None,
                     kind: AssistantBlockKind::Reasoning,
                     delta: "more".to_string(),
                     token_count: Some(3),
@@ -827,11 +859,13 @@ mod tests {
             events,
             vec![
                 AssistantEvent::TextDelta {
+                    text_logprobs: None,
                     kind: AssistantBlockKind::Text,
                     delta: "visible".to_string(),
                     token_count: None,
                 },
                 AssistantEvent::TextDelta {
+                    text_logprobs: None,
                     kind: AssistantBlockKind::Reasoning,
                     delta: "tail".to_string(),
                     token_count: Some(2),
@@ -872,22 +906,26 @@ mod tests {
             events,
             vec![
                 AssistantEvent::TextDelta {
+                    text_logprobs: None,
                     kind: AssistantBlockKind::Reasoning,
                     delta: "think".to_string(),
                     token_count: Some(2),
                 },
                 // Committed reasoning still counts before the failure fallback.
                 AssistantEvent::TextDelta {
+                    text_logprobs: None,
                     kind: AssistantBlockKind::Reasoning,
                     delta: "more".to_string(),
                     token_count: Some(3),
                 },
                 AssistantEvent::TextDelta {
+                    text_logprobs: None,
                     kind: AssistantBlockKind::Text,
                     delta: "buffered".to_string(),
                     token_count: None,
                 },
                 AssistantEvent::TextDelta {
+                    text_logprobs: None,
                     kind: AssistantBlockKind::Text,
                     delta: "later".to_string(),
                     token_count: None,
@@ -930,7 +968,7 @@ mod tests {
                 finished_delta("world<|\"|>"),
             ];
             let stream = stream::iter(events.into_iter().map(Ok));
-            let events = unified_event_stream(stream, Box::new(parser))
+            let events = unified_event_stream(stream, Box::new(parser), false)
                 .collect::<Vec<_>>()
                 .await
                 .into_iter()
@@ -938,6 +976,7 @@ mod tests {
                 .unwrap();
 
             let text = (!prefix.is_empty()).then(|| AssistantEvent::TextDelta {
+                text_logprobs: None,
                 kind: AssistantBlockKind::Text,
                 delta: prefix.to_string(),
                 token_count: None,
@@ -978,7 +1017,7 @@ mod tests {
                 .map(|delta| Ok(decoded_delta(delta)))
                 .chain([Ok(finished_delta(last))])
                 .collect();
-            let events = unified_event_stream(stream::iter(events), Box::new(parser))
+            let events = unified_event_stream(stream::iter(events), Box::new(parser), false)
                 .collect::<Vec<_>>()
                 .await
                 .into_iter()

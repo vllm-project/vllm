@@ -83,6 +83,9 @@ struct HarmonyState {
 impl HarmonyChatOutputProcessor {
     /// Build one request-scoped Harmony processor after backend policy checks.
     pub fn new(request: &ChatRequest) -> ChatResult<Self> {
+        if request.attribute_text_logprobs {
+            return Err(crate::error::Error::HarmonyTextLogprobsUnsupported);
+        }
         Ok(Self {
             encoding: harmony_encoding()?,
             tool_calls_enabled: request.tool_parsing_enabled(),
@@ -311,6 +314,7 @@ impl HarmonyState {
                         kind,
                         delta: "\n".to_string(),
                         token_count: None,
+                        text_logprobs: None,
                     });
                 }
 
@@ -323,6 +327,7 @@ impl HarmonyState {
                 kind,
                 delta: group.text,
                 token_count,
+                text_logprobs: None,
             });
             return;
         }

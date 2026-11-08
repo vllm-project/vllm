@@ -66,7 +66,7 @@ impl UnifiedParser for HyV4UnifiedParser {
         self.inner.finish()
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.inner.reset()
     }
 }
@@ -147,6 +147,10 @@ mod tests {
             parser.parse_into(chunk, &mut output).unwrap();
         }
         output.append(parser.finish().unwrap());
+        let mut answer = decode_chunks(tokenizer.as_ref(), &["answer"]).remove(0);
+        for source in &mut answer.sources {
+            source.token_index += 10;
+        }
 
         assert_eq!(
             output.events,
@@ -154,7 +158,7 @@ mod tests {
                 UnifiedParserEvent::Reasoning(
                     decode_chunks(tokenizer.as_ref(), &["reasoning"]).remove(0),
                 ),
-                UnifiedParserEvent::Text("answer".to_string()),
+                UnifiedParserEvent::Text(answer),
                 UnifiedParserEvent::ToolCall(crate::tool::ToolCallDelta {
                     tool_index: 0,
                     name: Some("get_weather".to_string()),

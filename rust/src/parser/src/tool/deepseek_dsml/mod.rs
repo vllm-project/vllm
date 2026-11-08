@@ -229,7 +229,7 @@ impl DeepSeekDsmlToolParser {
     fn apply_event(&mut self, event: DsmlEvent, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             DsmlEvent::Text { len: consumed_len } => {
-                output.push_text(&self.buffer.text[..consumed_len]);
+                output.push_text(self.buffer.prefix(consumed_len));
             }
             DsmlEvent::ToolCallsStart => self.mode = DsmlMode::ToolBlock,
             DsmlEvent::InvokeStart { name } => {
@@ -311,10 +311,10 @@ impl DeepSeekDsmlToolParser {
         Ok(())
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.mode = DsmlMode::Text;
         self.emitted_invoke_count = 0;
-        std::mem::take(&mut self.buffer).text
+        std::mem::take(&mut self.buffer)
     }
 
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
@@ -336,7 +336,7 @@ impl DeepSeekDsmlToolParser {
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match self.mode {
-            DsmlMode::Text => output.push_text(&self.buffer.text),
+            DsmlMode::Text => output.push_text(self.buffer.take()),
             DsmlMode::Done => {}
             DsmlMode::ToolBlock | DsmlMode::Invoke { .. } => {
                 return Err(ToolParserError::IncompleteToolCall {

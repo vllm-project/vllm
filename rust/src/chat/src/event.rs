@@ -207,6 +207,9 @@ pub enum ChatEvent {
         delta: String,
         /// Number of generated tokens attributed to this delta, when available.
         token_count: Option<usize>,
+        /// Original sampled-token probabilities attributed to this visible delta.
+        /// A source occurrence appears at most once across all text blocks.
+        text_logprobs: Option<DecodedLogprobs>,
     },
     /// Per-decoded-update sample metadata: logprobs and/or output token IDs.
     LogprobsDelta {

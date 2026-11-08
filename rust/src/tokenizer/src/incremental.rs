@@ -6,7 +6,7 @@ use crate::{Result, Tokenizer};
 mod attribution;
 
 use attribution::AttributedTextBuffer;
-pub use attribution::{DecodedText, TokenAnchor, TokenAttribution};
+pub use attribution::{DecodedText, TokenAnchor, TokenAttribution, TokenSource};
 
 /// Stateful incremental decoder that emits text chunks one token at a time.
 pub trait IncrementalDecoder: Send {

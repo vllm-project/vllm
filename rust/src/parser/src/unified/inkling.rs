@@ -146,7 +146,7 @@ impl InklingUnifiedParser {
         output: &mut UnifiedParserOutput,
     ) -> Result<()> {
         match event {
-            InklingEvent::Text => output.push_text(piece.text),
+            InklingEvent::Text => output.push_text(piece),
             InklingEvent::Reasoning => output.push_reasoning(piece),
             InklingEvent::MessageStart => {
                 self.mode = InklingMode::MessageHeader {
@@ -195,7 +195,7 @@ impl InklingUnifiedParser {
             InklingEvent::BlockEnd => {
                 let mode = std::mem::take(&mut self.mode);
                 if let InklingMode::MessageHeader { pending } = mode {
-                    output.push_text(pending.text);
+                    output.push_text(pending);
                 }
                 self.active_tool_index = None;
             }
@@ -203,14 +203,14 @@ impl InklingUnifiedParser {
         Ok(())
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         let mut uncommitted = match std::mem::take(&mut self.mode) {
-            InklingMode::MessageHeader { pending } => pending.text,
-            _ => String::new(),
+            InklingMode::MessageHeader { pending } => pending,
+            _ => DecodedText::default(),
         };
         self.active_tool_index = None;
         self.emitted_tool_count = 0;
-        uncommitted.push_str(&self.buffer.take().text);
+        uncommitted.append(self.buffer.take());
         uncommitted
     }
 }
@@ -252,10 +252,10 @@ impl UnifiedParser for InklingUnifiedParser {
         let mut output = UnifiedParserOutput::default();
 
         match &mut self.mode {
-            InklingMode::Idle | InklingMode::Text => output.push_text(self.buffer.take().text),
+            InklingMode::Idle | InklingMode::Text => output.push_text(self.buffer.take()),
             InklingMode::MessageHeader { pending } => {
                 pending.append(self.buffer.take());
-                output.push_text(std::mem::take(pending).text);
+                output.push_text(std::mem::take(pending));
             }
             InklingMode::Reasoning => output.push_reasoning(self.buffer.take()),
             InklingMode::ToolJsonHeader
@@ -269,7 +269,7 @@ impl UnifiedParser for InklingUnifiedParser {
         Ok(output)
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         InklingUnifiedParser::reset(self)
     }
 }
@@ -519,7 +519,7 @@ mod tests {
             self.events
                 .iter()
                 .filter_map(|event| match event {
-                    UnifiedParserEvent::Text(text) => Some(text.as_str()),
+                    UnifiedParserEvent::Text(text) => Some(text.text.as_str()),
                     _ => None,
                 })
                 .collect()
@@ -591,6 +591,7 @@ mod tests {
     #[test]
     fn inkling_reasoning_events_conserve_token_attributions() {
         let chunk = |token_id: u32, text: &str| DecodedText {
+            sources: Default::default(),
             text: text.to_string(),
             attributions: [TokenAttribution {
                 token_id,
@@ -794,7 +795,7 @@ mod tests {
         parser.parse_chunk("plain ").unwrap();
         parser.parse_chunk("answer").unwrap();
 
-        assert_eq!(parser.reset(), "plain answer");
+        assert_eq!(parser.reset().text, "plain answer");
     }
 
     #[test]

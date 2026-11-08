@@ -158,7 +158,7 @@ impl UnifiedParser for BeamUnifiedParser {
         self.inner.finish()
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.inner.reset()
     }
 }

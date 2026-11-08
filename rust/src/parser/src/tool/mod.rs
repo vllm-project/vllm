@@ -82,7 +82,7 @@ pub struct ToolCallDelta {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolParserEvent {
     /// Plain assistant text that is not part of any tool call.
-    Text(String),
+    Text(DecodedText),
     /// A tool-call update extracted from assistant text.
     ToolCall(ToolCallDelta),
 }
@@ -96,15 +96,16 @@ pub struct ToolParserOutput {
 
 impl ToolParserOutput {
     /// Append one visible text event if `text` is non-empty.
-    pub fn push_text(&mut self, text: impl AsRef<str> + Into<String>) {
-        if text.as_ref().is_empty() {
+    pub fn push_text(&mut self, text: impl Into<DecodedText>) {
+        let text = text.into();
+        if text.text.is_empty() {
             return;
         }
         if let Some(ToolParserEvent::Text(last_text)) = self.events.last_mut() {
-            last_text.push_str(text.as_ref());
+            last_text.append(text);
             return;
         }
-        self.events.push(ToolParserEvent::Text(text.into()));
+        self.events.push(ToolParserEvent::Text(text));
     }
 
     /// Append one tool-call update event.
@@ -120,7 +121,7 @@ impl ToolParserOutput {
         self.events
             .iter()
             .filter_map(|event| match event {
-                ToolParserEvent::Text(text) => Some(text.as_str()),
+                ToolParserEvent::Text(text) => Some(text.text.as_str()),
                 ToolParserEvent::ToolCall(_) => None,
             })
             .collect()
@@ -163,7 +164,12 @@ impl ToolParserOutput {
     pub fn coalesce(self) -> Self {
         let mut merged = BTreeMap::<usize, ToolCallDelta>::new();
         let mut order = Vec::new();
-        let normal_text = self.normal_text();
+        let mut normal_text = DecodedText::default();
+        for event in &self.events {
+            if let ToolParserEvent::Text(text) = event {
+                normal_text.append(text.clone());
+            }
+        }
 
         for call in self.calls() {
             match merged.entry(call.tool_index) {
@@ -295,7 +301,7 @@ pub trait ToolParser: Send {
     ///
     /// Callers may use this to recover any text that failed to parse after an error
     /// and output it as normal text.
-    fn reset(&mut self) -> String;
+    fn reset(&mut self) -> DecodedText;
 }
 
 /// The tool choice with an optional call made obligatory, or `None` when the

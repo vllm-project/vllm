@@ -39,6 +39,7 @@ use crate::{Error, Result as ChatResult};
 pub struct DefaultChatOutputProcessor {
     parser: Box<dyn UnifiedParser>,
     max_tool_calls: Option<usize>,
+    attribute_text_logprobs: bool,
     /// Request facts the initialized parser needs to build its output grammar.
     /// Absent for the plain-text-only processor, which never builds one.
     grammar_inputs: Option<GrammarInputs>,
@@ -138,6 +139,7 @@ impl DefaultChatOutputProcessor {
 
         Ok(Self {
             parser,
+            attribute_text_logprobs: request.attribute_text_logprobs,
             max_tool_calls: request.max_tool_calls(),
             grammar_inputs: Some(GrammarInputs {
                 tools: request.tools().to_vec(),
@@ -157,6 +159,7 @@ impl DefaultChatOutputProcessor {
     pub fn plain_text_only() -> Self {
         Self {
             parser: Box::new(CombinedParser::plain_text_only()),
+            attribute_text_logprobs: false,
             max_tool_calls: None,
             grammar_inputs: None,
         }
@@ -297,7 +300,7 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
     /// 1. [`unified_event_stream`] — reasoning and tool-call parsing
     /// 2. [`structured_chat_event_stream`] — final block assembly
     fn process(self: Box<Self>, decoded: DynDecodedTextEventStream) -> Result<DynChatEventStream> {
-        let parsed = unified_event_stream(decoded, self.parser);
+        let parsed = unified_event_stream(decoded, self.parser, self.attribute_text_logprobs);
         let structured = structured_chat_event_stream(parsed, self.max_tool_calls);
 
         Ok(structured.boxed())

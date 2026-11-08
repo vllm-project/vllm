@@ -18,7 +18,9 @@ mod unavailable;
 
 pub use error::{Result, TokenizerError};
 pub use hf::HuggingFaceTokenizer;
-pub use incremental::{DecodedText, IncrementalDecoder, TokenAnchor, TokenAttribution};
+pub use incremental::{
+    DecodedText, IncrementalDecoder, TokenAnchor, TokenAttribution, TokenSource,
+};
 pub use tekken::TekkenTokenizer;
 pub use tiktoken::TiktokenTokenizer;
 pub use unavailable::UnavailableTokenizer;

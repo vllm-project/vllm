@@ -5906,6 +5906,7 @@ dependencies = [
  "vllm-engine-core-client",
  "vllm-llm",
  "vllm-metrics",
+ "vllm-parser",
  "vllm-proto",
  "vllm-text",
  "vllm-tokenizer",

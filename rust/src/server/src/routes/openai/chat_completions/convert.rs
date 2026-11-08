@@ -157,6 +157,7 @@ pub(super) fn prepare_chat_request(
     .map_err(|error| chat_submit_error("failed to resolve request tools", error))?;
 
     let chat_request = ChatRequest {
+        attribute_text_logprobs: false,
         request_id: request_id.clone(),
         messages,
         sampling_params: SamplingParams {
