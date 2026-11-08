@@ -50,7 +50,9 @@ class EncoderCudaGraphPathConfig:
     """Capture policy for one independently replayable encoder path."""
 
     min_token_budget: int | None = None
-    """Smallest capture budget, or the model default minimum when unset."""
+    """Output tokens of one item on this path, for paths whose items all have
+    the same size. Budgets are then multiples of it, so few-item batches fit
+    exactly. Unset: the model default range and grid."""
 
     allow_zero_tokens: bool = False
     """Whether a batch may omit this path entirely."""
@@ -82,7 +84,9 @@ class EncoderCudaGraphConfig:
     )
     """Optional per-buffer replay padding/copy logic.
     If absent for a key, the manager zeros the capture buffer and slice-copies
-    the replay buffer into it."""
+    the replay buffer into it. A padding logic must write the whole capture
+    buffer: budgets share buffers, so rows it leaves untouched may hold another
+    budget's data."""
 
     max_frames_per_video: int = 1
     """Maximum number of frames per video.

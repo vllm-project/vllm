@@ -381,8 +381,7 @@ class LLM(
 
         PoolingOfflineMixin.__init__(self)
 
-        # Cache for __repr__ to avoid repeated collective_rpc calls
-        self._cached_repr: str | None = None
+        self._cached_model_inspection: str | None = None
 
     @classmethod
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLM":
@@ -918,15 +917,13 @@ class LLM(
         """
         return self.llm_engine.get_metrics()
 
-    def __repr__(self) -> str:
-        """Return a transformers-style hierarchical view of the model."""
-        # Cache the result to avoid repeated collective_rpc calls
-        if self._cached_repr is None:
+    def get_model_inspection(self) -> str:
+        """Return a cached transformers-style hierarchical view of the model."""
+        if self._cached_model_inspection is None:
             results = self.llm_engine.collective_rpc("get_model_inspection")
-            # In distributed settings, we get results from all workers
-            # Just return the first one (they should all be the same)
-            if results:
-                self._cached_repr = results[0]
-            else:
-                self._cached_repr = f"LLM(model={self.model_config.model!r})"
-        return self._cached_repr
+            self._cached_model_inspection = results[0] if results else repr(self)
+        return self._cached_model_inspection
+
+    def __repr__(self) -> str:
+        """Return a local model summary without querying workers."""
+        return f"LLM(model={self.model_config.model!r})"
