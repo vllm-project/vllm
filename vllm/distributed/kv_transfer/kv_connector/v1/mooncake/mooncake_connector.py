@@ -27,6 +27,7 @@ from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
+    check_compressed_kernel_split,
     get_current_attn_backends,
     get_current_attn_backends_and_specs,
 )
@@ -1019,6 +1020,20 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
 
     _cache_hit_source = CacheHitSource.P2P
 
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        return True
+
+    @property
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        # A decode pulls the unhashed blocks of every transfer group, so the
+        # recurrent-state slot arrives even when the attention prefix is local.
+        # Roles that prefill locally keep the lookup that finds the shared
+        # prefix boundary.
+        return self._pulls_mamba_state
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1030,6 +1045,13 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
+        self._pulls_mamba_state = (
+            vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+            and any(
+                isinstance(group.kv_cache_spec, MambaSpec)
+                for group in kv_cache_config.transfer_groups
+            )
+        )
 
         self.connector_scheduler: MooncakeConnectorScheduler | None = None
         self.connector_worker: MooncakeConnectorWorker | None = None
@@ -1359,6 +1381,11 @@ class MooncakeConnectorScheduler:
             request._all_token_ids.pop()
             request.num_prompt_tokens -= 1
             request.max_tokens = 1
+            hash_block_size = self.kv_cache_config.hash_block_size
+            assert hash_block_size is not None
+            request.truncate_block_hashes(
+                hash_block_size, self.vllm_config.num_hash_lookahead_tokens
+            )
             params["_p_side_truncated"] = True
 
     def on_new_request(self, request: "Request") -> None:
@@ -1604,6 +1631,19 @@ class MooncakeConnectorWorker:
         logger.info("Initializing Mooncake Transfer Engine worker %s", engine_id)
 
         self.vllm_config = vllm_config
+        # nvidia-peermem cannot pin VMM-backed memory; the transfer engine must
+        # register the extensible KV cache through DMA-BUF. Read at
+        # engine.initialize(), so settle it before constructing the engine.
+        if (
+            vllm_config.cache_config.enable_extensible_kv_cache
+            and os.environ.setdefault("WITH_NVIDIA_PEERMEM", "0") != "0"
+        ):
+            raise RuntimeError(
+                "WITH_NVIDIA_PEERMEM=1 is incompatible with the extensible KV "
+                "cache: nvidia-peermem cannot register VMM-backed memory. "
+                "Unset it to use Mooncake's DMA-BUF registration, or disable "
+                "the extensible KV cache."
+            )
         # Capture device BEFORE TransferEngine init — MNNVL's NVLink allocator
         # may change the current CUDA device during engine.initialize().
         self.device_id = torch.accelerator.current_device_index()
@@ -1796,6 +1836,9 @@ class MooncakeConnectorWorker:
             self.vllm_config, self.kv_cache_config, backends
         )
         kernel_block_size = select_common_block_size(self.block_size, backends, specs)
+        check_compressed_kernel_split(
+            self.vllm_config, self.kv_cache_config, kernel_block_size
+        )
         if self.block_size != kernel_block_size:
             logger.info_once(
                 "User-specified logical block size (%s) does not match"

@@ -28,6 +28,7 @@ from vllm.entrypoints.serve.elastic_ep.middleware import (
     set_scaling_elastic_ep,
 )
 from vllm.exceptions import (
+    EngineFaultedError,
     GenerationError,
     GracefulHTTPError,
     MaxQueuedTokensError,
@@ -345,10 +346,23 @@ class AsyncLLM(EngineClient):
             request_id: Request id, used for logging only.
 
         Raises:
+            EngineFaultedError: If the engine has faulted and is awaiting
+                FT recovery.
             QueueOverflowError: If ``max_num_queued_reqs`` would be exceeded.
             MaxQueuedTokensError: If ``max_num_queued_tokens`` would be exceeded.
 
         """
+        if (
+            self.vllm_config.parallel_config.enable_fault_tolerance
+            and self.engine_core.engine_status.get("status") != "healthy"
+        ):
+            logger.info(
+                "Engine %s - rejecting request %s.",
+                self.engine_core.engine_status.get("status"),
+                request_id,
+            )
+            raise EngineFaultedError()
+
         max_num_reqs = self.scheduler_config.max_num_queued_reqs
         if max_num_reqs is not None:
             current_requests = (
@@ -1195,17 +1209,19 @@ class AsyncLLM(EngineClient):
     async def reset_encoder_cache(self) -> None:
         await self.engine_core.reset_encoder_cache_async()
 
-    async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+    async def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
         if level >= 1:
             await self.renderer.clear_mm_cache_async()
-        await self.engine_core.sleep_async(level, mode)
+        await self.engine_core.sleep_async(level, mode, reset_connector)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
-    async def release_kv_cache_memory(self) -> None:
+    async def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         await self.renderer.clear_mm_cache_async()
-        await self.engine_core.release_kv_cache_memory_async()
+        await self.engine_core.release_kv_cache_memory_async(reset_connector)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, 0)
