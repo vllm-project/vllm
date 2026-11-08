@@ -1019,8 +1019,8 @@ class DecodeBatch:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
-class MooncakeControlChannel:
-    """Bridge model-thread transfer decisions and sender-loop control messages.
+class MooncakeLayerwiseRequestHandler:
+    """Handle layerwise D-ready requests and completion replies across threads.
 
     Sender-loop owns sockets, ACK contexts and the layout LRU. The queue
     publishes destinations whose layouts remain alive through task references.
@@ -2284,7 +2284,9 @@ class MooncakeConnectorWorker:
         if meta.protocol_version != int(self._layerwise):
             raise ValueError("Mooncake peers must use the same transfer_mode")
         if self._layerwise:
-            await self._control_channel.receive_decode_ready(identity, sock, meta)
+            await self._layerwise_request_handler.receive_decode_ready(
+                identity, sock, meta
+            )
             return
         pending_reqs: dict[ReqId, SendBlockMeta] = {}
         remote_tp_ranks = self.transfer_topo.handshake_target_ranks(meta.remote_tp_size)
@@ -3981,7 +3983,7 @@ class MooncakeConnectorWorker:
         self.prefilling_transfer_ids: tuple[str, ...] = ()
         self.logical_block_size = self.vllm_config.cache_config.block_size
         self._received_layers: dict[str, set[str]] = {}
-        self._control_channel = MooncakeControlChannel(self)
+        self._layerwise_request_handler = MooncakeLayerwiseRequestHandler(self)
         self._pending_sends: list[tuple[tuple[SendTask, ...], Future[SendResult]]] = []
         # Shared across layer submissions within one forward, then cleared.
         self.cached_block_slices: dict[tuple, _BlockSlice | None] = {}
@@ -4229,11 +4231,11 @@ class MooncakeConnectorWorker:
         ]
 
     def process_decode_ready_requests(self) -> None:
-        for destination in self._control_channel.get_decode_ready_requests():
+        for destination in self._layerwise_request_handler.get_decode_ready_requests():
             meta = destination.meta
             transfer_id, _ = meta.req_blocks[destination.remote_req_id]
             if transfer_id in self.retired_transfer_expiry_times:
-                self._control_channel.schedule_completion_ack(
+                self._layerwise_request_handler.schedule_completion_ack(
                     transfer_id, meta.worker_key, "P transfer already retired"
                 )
                 continue
@@ -4246,7 +4248,7 @@ class MooncakeConnectorWorker:
                     time.monotonic() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
                 )
             if meta.worker_key in state.destinations:
-                self._control_channel.schedule_completion_ack(
+                self._layerwise_request_handler.schedule_completion_ack(
                     transfer_id, meta.worker_key, "Duplicate D-ready"
                 )
                 continue
@@ -4554,7 +4556,7 @@ class MooncakeConnectorWorker:
                 )
             ):
                 continue
-            self._control_channel.schedule_completion_ack(
+            self._layerwise_request_handler.schedule_completion_ack(
                 state.transfer_id, worker_key, state.error
             )
             state.ack_scheduled_workers.add(worker_key)
@@ -4570,7 +4572,7 @@ class MooncakeConnectorWorker:
                 time.monotonic() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
             )
             self.sender_loop.call_soon_threadsafe(
-                self._control_channel.retire,
+                self._layerwise_request_handler.retire,
                 transfer_id,
                 self.retired_transfer_expiry_times[transfer_id],
             )
