@@ -138,7 +138,7 @@ class NameSeededWeightLoader(DummyModelLoader):
 
 
 class LoaderInWorkers:
-    """Worker extension (``worker_extension_cls``): it brings this module, and
+    """Worker extension (`worker_extension_cls`): it brings this module, and
     so the load format, into the workers."""
 
 
