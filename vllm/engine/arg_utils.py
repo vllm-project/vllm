@@ -2820,7 +2820,7 @@ class EngineArgs:
             mamba_config.stochastic_rounding_philox_rounds = (
                 self.mamba_cache_philox_rounds
             )
-        mamba_config.validate_ssu_algorithm()
+        mamba_config.__post_init__()
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)
