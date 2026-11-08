@@ -86,6 +86,8 @@ steps:
   timeout_in_minutes: 180
   working_dir: /vllm-workspace/
   source_file_dependencies:
+  - tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_logprob_parity.py
+  - tests/models/mono_logprob_parity.py
   - vllm/models/deepseek_v41/
   - vllm/models/deepseek_v4/
   - vllm/v1/worker/gpu/spec_decode/dspark/
@@ -102,6 +104,7 @@ steps:
   commands:
   - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_numerics.py -k vllm_ops
   - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_mono_layers.py -k "not (test_mono_decode_matches_the_model and (2-8 or 8-8 or 8-28))"
+  - pytest -v -s --timeout=900 --timeout-method=thread tests/models/deepseek_v41/amd_specialized_decode/test_dsv41_logprob_parity.py
   - PYTHONPATH=/vllm-workspace pytest -v -s tests/evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/monokernels/models.yaml -k DeepSeek-V4.1
 
 - label: ":amd: (MI300) DeepSeek-V4.1 gfx942 Mono I/O"
@@ -230,6 +233,8 @@ steps:
   timeout_in_minutes: 120
   working_dir: /vllm-workspace/
   source_file_dependencies:
+  - tests/models/test_dsv4_logprob_parity.py
+  - tests/models/mono_logprob_parity.py
   - vllm/models/deepseek_v4/
   - docker/Dockerfile.rocm_base
   - tests/models/test_dsv4_mono_numerics.py
@@ -241,6 +246,7 @@ steps:
   - tests/evals/gsm8k/configs/monokernels/DeepSeek-V4-Pro-Mono-TP8-MI355.yaml
   commands:
   - pytest -v -s --timeout=900 --timeout-method=thread tests/models/test_dsv4_mono_numerics.py
+  - PYTHONPATH=/vllm-workspace pytest -v -s --timeout=900 --timeout-method=thread tests/models/test_dsv4_logprob_parity.py
   - PYTHONPATH=/vllm-workspace pytest -v -s tests/evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/monokernels/models.yaml -k DeepSeek-V4-Pro
 
 # MiniMax-M3 FFN monokernel (--monokernel), built on DeepSeek-V4.1's mono/common.
@@ -253,6 +259,8 @@ steps:
   timeout_in_minutes: 90
   working_dir: /vllm-workspace/
   source_file_dependencies:
+  - tests/models/minimax_m3/amd_specialized_decode/test_logprob_parity.py
+  - tests/models/mono_logprob_parity.py
   - vllm/models/minimax_m3/
   - vllm/models/deepseek_v41/__init__.py
   - vllm/models/deepseek_v41/amd/mono/common/
@@ -271,6 +279,7 @@ steps:
   - pytest -v -s tests/models/minimax_m3/amd_specialized_decode/test_ops.py -k vllm_ops
   - pytest -v -s tests/models/minimax_m3/test_dspark_drafter.py
   - ulimit -c 0 && pytest -v -s tests/models/minimax_m3/amd_specialized_decode/test_model.py -k "not (test_model_matches_native and eager)"
+  - ulimit -c 0 && pytest -v -s tests/models/minimax_m3/amd_specialized_decode/test_logprob_parity.py
   - PYTHONPATH=/vllm-workspace pytest -v -s tests/evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/monokernels/models.yaml -k MiniMax-M3
 
 # Kimi-K3 specialized decode (decode_backend=latency_specialized), TP8.
@@ -338,6 +347,8 @@ steps:
   timeout_in_minutes: 120
   working_dir: /vllm-workspace/
   source_file_dependencies:
+  - tests/models/mono_logprob_parity.py
+  - tests/v1/attention/test_rocm_aiter_mla_dcp_cprr_numerics.py
   - vllm/models/kimi_k3/
   - vllm/v1/worker/gpu/spec_decode/dspark/
   - docker/Dockerfile.rocm_base
@@ -352,4 +363,5 @@ steps:
   - pytest -v -s tests/models/kimi_k3/amd_specialized_decode/test_numerics.py -k vllm_ops
   - pytest -v -s tests/models/kimi_k3/amd_specialized_decode/test_e2e_parity.py -k test_verify_steps_replay_the_kernels
   - ulimit -c 0 && pytest -v -s tests/models/kimi_k3/amd_specialized_decode/test_engine_fault.py
+  - pytest -v -s tests/models/kimi_k3/amd_specialized_decode/test_logprob_parity.py
   - PYTHONPATH=/vllm-workspace pytest -v -s tests/evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/monokernels/models.yaml -k Kimi-K3

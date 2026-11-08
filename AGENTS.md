@@ -107,8 +107,11 @@ When adding tests:
   NVIDIA step): a blocking `Mono I/O` step checking every fused stage against a
   slow float64 plain-torch reference with bounded error (never another vLLM,
   AITER or Triton kernel), plus one engine parity
-  smoke; and an optional `[Nightly] Mono E2E` step running the real checkpoint's
-  gsm8k with an engagement check. A model that already has steps extends them.
+  smoke; and an optional `[Nightly] Mono E2E` step running a random-weight,
+  teacher-forced logprob parity test against mono off (the shared
+  `mono_logprob_parity` harness; bounds calibrated from off-vs-off runs, one
+  injected mono bug must fail them) and the real checkpoint's gsm8k with an
+  engagement check. A model that already has steps extends them.
   Assert accuracy, not which class or code path ran: every tolerance must be
   derived from the formats and accumulation involved (state the derivation),
   not tuned until CI passes. Run both steps at least 10 times in a row before
