@@ -24,8 +24,7 @@ Key benefits:
 
 !!! note
     Weight preloading is only supported on CUDA and ROCm platforms. Tensor,
-    expert and data parallelism are supported, including across nodes;
-    pipeline parallelism is rejected when launching the daemon.
+    expert, pipeline and data parallelism are supported, including across nodes.
 
 ## Quick start
 
@@ -309,6 +308,13 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   The engine reuses the quantized weights and scales without running online
   quantization again. This does not enable online MoE quantization or
   conversion from an already quantized checkpoint.
+  Serialized `compressed-tensors` W8A8 FP8 dense linear layers support
+  per-tensor and per-channel weights with static per-tensor or dynamic
+  per-token activations when both processes select the CUTLASS linear
+  backend. Engines retain the processed tensor layout and scales and rebuild
+  attention scale metadata from the cached scale buffers. Other
+  compressed-tensors schemes, transform wrappers, block FP8 and MoE are
+  not enabled by this support.
   Serialized ModelOpt `FP8` (per-tensor) and `FP8_PER_CHANNEL_PER_TOKEN`
   linear layers also support CUDA IPC with the CUTLASS linear backend.
   Set the same `--kernel-config '{"linear_backend": "cutlass"}'` on the daemon

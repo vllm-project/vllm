@@ -325,8 +325,8 @@ The daemon accepts the standard engine arguments (model, dtype, quantization,
 tensor-parallel-size, ...) plus `--weight-cache-socket-dir` to override the
 directory holding the per-GPU Unix sockets, and `--weight-cache-master-port` /
 `--weight-cache-draft-master-port` to pin the daemon rendezvous ports for
-multi-node and speculative-decoding setups. Tensor, expert and data
-parallelism are supported; pipeline parallelism is rejected at launch.
+multi-node and speculative-decoding setups. Tensor, expert, pipeline and data
+parallelism are supported, including across nodes.
 
 See [Preload](../features/preload.md) for how it works, cache modes, and
 limitations, and [vllm preload](./preload.md) for the full reference of all

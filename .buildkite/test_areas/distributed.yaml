@@ -839,6 +839,23 @@ steps:
       - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
       - TARGET_TEST_SUITE=MI355 pytest -v -s basic_correctness/models/test_basic_correctness.py -k "ray"
 
+- label: ":nvidia: (B200) Compressed-tensors FP8 Preload"
+  key: preload-compressed-fp8
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  device: b200-k8s
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/model_loader/weight_cache/
+  - vllm/model_executor/layers/quantization/compressed_tensors/
+  - vllm/model_executor/kernels/linear/scaled_mm/
+  - vllm/entrypoints/cli/preload.py
+  - tests/model_executor/model_loader/test_weight_cache.py
+  - tests/quantization/test_compressed_tensors.py
+  commands:
+  - pytest -v -s model_executor/model_loader/test_weight_cache.py -k 'compressed_fp8 or compressed_block_fp8'
+  - pytest -v -s quantization/test_compressed_tensors.py -k 'compressed_fp8_preprocessed or compressed_block_fp8_preprocessed'
+
 - label: ":nvidia: (L4) Distributed Preload"
   key: preload-2-gpus
   automatic_shard: true
