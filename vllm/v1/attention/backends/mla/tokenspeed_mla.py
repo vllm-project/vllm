@@ -80,6 +80,7 @@ class TokenspeedMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     # block can remain fused instead of being flattened to single tokens.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
     supports_non_causal_multi_token_dcp: ClassVar[bool] = True
+    supports_fp8_dcp_context: ClassVar[bool] = True
 
     def __init__(
         self,

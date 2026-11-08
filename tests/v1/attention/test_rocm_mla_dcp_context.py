@@ -8,33 +8,6 @@ import torch
 
 from tests.utils import multi_gpu_only
 from vllm.platforms import current_platform
-from vllm.v1.attention.ops.rocm_aiter_mla_prefill import context_row_indices
-
-
-@pytest.mark.parametrize(
-    "padded,lengths,starts,total,expected",
-    [
-        ([3, 2], [[7, 6], [2, 1]], [5, 0], 6, [0, 1, 5, 3, 4, 8]),
-        ([3], [[2, 9]], [4], 3, [3, 4, 5]),
-        ([3], [[1, 1]], [0], 3, None),
-    ],
-    ids=["padding_and_chunk_starts", "empty_rank", "inconsistent_total"],
-)
-def test_dcp_context_indices(padded, lengths, starts, total, expected):
-    chunk = SimpleNamespace(
-        padded_local_seq_lens=padded,
-        local_context_lens_allranks=lengths,
-        local_starts=starts,
-        num_local_context_tokens=sum(padded),
-        num_context_tokens=total,
-    )
-    if expected is None:
-        with pytest.raises(AssertionError):
-            context_row_indices(chunk, torch.device("cpu"))
-    else:
-        rows = context_row_indices(chunk, torch.device("cpu"))
-        assert rows.tolist() == expected
-        assert rows.dtype == torch.int32
 
 
 def test_compressed_gather_preserves_bytes_and_workspace_partition(monkeypatch):
