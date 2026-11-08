@@ -145,6 +145,21 @@ def test_custom_compile_config(
 
 
 @create_new_process_for_each_test("spawn")
+def test_compile_range_warmup_stays_within_max_model_len():
+    """#66242: the uncovered range [33, 3072] must not warm up past 1 * 2048."""
+    run_model(
+        CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            compile_ranges_endpoints=[8, 32],
+        ),
+        "microsoft/phi-2",
+        max_model_len=2048,
+        max_num_seqs=1,
+        max_num_batched_tokens=3072,
+    )
+
+
+@create_new_process_for_each_test("spawn")
 def test_depyf_integration(disable_vllm_compile_cache):
     """Compile with depyf's debugging hooks installed.
 

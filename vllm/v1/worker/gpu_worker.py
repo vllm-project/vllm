@@ -174,7 +174,32 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
     return torch_reserved
 
 
+def get_compile_warmup_sizes(
+    warmup_sizes: list[int],
+    cg_capture_sizes: list[int],
+    compile_ranges: list["Range"],
+    max_reachable_tokens: int,
+) -> list[int]:
+    """Sizes to warm up so every compile range gets compiled.
+
+    Sizes above `max_reachable_tokens` would need a dummy request longer than
+    max_model_len, which overruns the block table in attention.
+    """
+    sizes = [
+        x for x in warmup_sizes if isinstance(x, int) and x <= max_reachable_tokens
+    ]
+    covered = set(cg_capture_sizes) | set(sizes)
+    for compile_range in compile_ranges:
+        if any(x in compile_range for x in covered):
+            continue
+        size = min(compile_range.end, max_reachable_tokens)
+        if size >= compile_range.start:
+            sizes.append(size)
+    return sizes
+
+
 if TYPE_CHECKING:
+    from vllm.config.utils import Range
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -1038,15 +1063,16 @@ class Worker(WorkerBase):
                 cg_capture_sizes = [] if cg_sizes is None else cg_sizes
                 warmup_sizes = [x for x in warmup_sizes if x not in cg_capture_sizes]
 
-            compile_ranges = self.vllm_config.compilation_config.get_compile_ranges()
-            # For each compile_range, if none of the batch sizes
-            # in warmup_sizes or cudagraph_capture_sizes are in the range,
-            # add the end of the range to ensure compilation/warmup.
-            all_sizes = set(cg_capture_sizes)
-            all_sizes.update([x for x in warmup_sizes if isinstance(x, int)])
-            for compile_range in compile_ranges:
-                if not any(x in compile_range for x in all_sizes):
-                    warmup_sizes.append(compile_range.end)
+            warmup_sizes = get_compile_warmup_sizes(
+                warmup_sizes,
+                cg_capture_sizes,
+                self.vllm_config.compilation_config.get_compile_ranges(),
+                max_reachable_tokens=min(
+                    self.scheduler_config.max_num_batched_tokens,
+                    self.scheduler_config.max_num_seqs
+                    * self.model_config.max_model_len,
+                ),
+            )
 
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
