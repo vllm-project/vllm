@@ -400,8 +400,9 @@ class ModelConfig:
     Takes effect with enable_sleep_mode, the cumem backend and CUDA graphs."""
     enable_nccl_comm_suspend: bool = False
     """Enable releasing NCCL communicator memory during sleep mode
-    (``ncclCommSuspend``/``ncclCommResume``). Experimental; when disabled
-    (the default) sleep still releases weights/KV-cache memory as before."""
+    (``ncclCommSuspend``/``ncclCommResume``), and DeepEP all2all buffers when
+    CUDA graphs and DeepEP MNNVL are off. Experimental; when disabled (the
+    default) sleep still releases weights/KV-cache memory as before."""
     checkpoint_prepare_on_startup: bool = False
     """Prepare each engine for a process checkpoint once it starts, as
     `/checkpoint/prepare` does. It serves only after `/checkpoint/restore`.
