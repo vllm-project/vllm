@@ -87,7 +87,7 @@ def test_mega_moe_expert_weight_follows_the_qat_recipe():
 
 
 def _load_checkpoint(moe, tensors: dict[str, torch.Tensor]) -> None:
-    """``MiniMaxM3Model.load_weights`` for one MegaMoE block's tensors."""
+    """`MiniMaxM3Model.load_weights` for one MegaMoE block's tensors."""
     experts = moe.experts
     mapping = _mega_moe_expert_params_mapping(experts.num_experts)
     for name, tensor in tensors.items():

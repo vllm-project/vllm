@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GPU numerics for the AITER ASM cprr DCP-verify route.
 
-Runs the REAL metadata builder (``AiterMLAMetadataBuilder.build``, so
-``get_mla_metadata_v1`` is exercised with the cprr kwargs and the persistent
+Runs the REAL metadata builder (`AiterMLAMetadataBuilder.build`, so
+`get_mla_metadata_v1` is exercised with the cprr kwargs and the persistent
 schedule buffers are produced) and the REAL asm kernel, on ONE GPU with the DCP
 ranks simulated one after another.
 
 That is legitimate because the aiter MLA backend contains no collective on this
 path: the query all-gather happens in the *layer*, strictly before
-``forward_mqa``, so the head fold, the round-robin kernel call and the un-fold
-are pure per-rank local arithmetic in which ``cp_world_size``/``cp_rank`` are
+`forward_mqa`, so the head fold, the round-robin kernel call and the un-fold
+are pure per-rank local arithmetic in which `cp_world_size`/`cp_rank` are
 just numbers feeding the causal-mask maths. Restricting a shard to a residue
 class of global positions is exactly what DCP rank r sees.
 
@@ -19,7 +19,7 @@ Three properties are checked:
     with causality applied on the GLOBAL position (the thing cprr reconstructs
     in-kernel and the segmented route instead carries in per-row lengths);
   * the LSE merge of all shards reproduces full-context attention;
-  * a shard told the wrong ``cp_rank`` fails both -- without this positive
+  * a shard told the wrong `cp_rank` fails both -- without this positive
     control a passing run proves nothing, since a kernel that ignored global
     positions still produces plausible-looking output.
 """
@@ -86,9 +86,9 @@ requires_cprr = pytest.mark.skipif(
 def _torch_reference(q_f32, kv_f32, ctx, qlen, scale, positions):
     """Exact absorbed-MLA decode over an explicit set of GLOBAL KV positions.
 
-    A shard sees only ``positions``, but causality still uses the global
+    A shard sees only `positions`, but causality still uses the global
     position: query token i (global position ctx + i) may attend to any p in
-    positions with p <= ctx + i. Restricting ``positions`` to a round-robin
+    positions with p <= ctx + i. Restricting `positions` to a round-robin
     residue class is precisely DCP rank r's view.
     """
     nr, _, heads, _ = q_f32.shape
@@ -127,7 +127,7 @@ def _merge_partials(os_, lses):
 
 
 class _FakeGroup(GroupCoordinator):
-    """Rank-simulating stub; ``GroupCoordinator.__init__`` is never run."""
+    """Rank-simulating stub; `GroupCoordinator.__init__` is never run."""
 
     def __init__(self, world_size: int, rank: int):
         self.world_size = world_size
@@ -193,7 +193,7 @@ def _restore_parallel_groups():
 
 
 class _PrefillBackendStub:
-    """The base builder does ``attention_layer.prefill_backend.clone()``.
+    """The base builder does `attention_layer.prefill_backend.clone()`.
 
     prefill_backend is consulted only from the chunked-context prefill path,
     which a decode-only test never enters.
@@ -206,8 +206,8 @@ class _PrefillBackendStub:
 def _make_ctx_layer(vllm_config, monkeypatch: pytest.MonkeyPatch):
     """Stand-in for the registered attention layer in static_forward_context.
 
-    ``MLACommonMetadataBuilder.__init__`` reads the MLA dims, ``dcp_manager``
-    and ``prefill_backend`` off this object. ``dcp_manager`` is the Direct-DCP
+    `MLACommonMetadataBuilder.__init__` reads the MLA dims, `dcp_manager`
+    and `prefill_backend` off this object. `dcp_manager` is the Direct-DCP
     symmetric-memory workspace, used ONLY by the chunked-prefill KV all-gather;
     it is constructed without running __init__ so no peer pointers are exchanged
     and no collective is issued. That is what keeps this test single-process.
@@ -232,8 +232,8 @@ def _make_ctx_layer(vllm_config, monkeypatch: pytest.MonkeyPatch):
 def _ensure_workspace_manager(device: torch.device) -> None:
     """Init the global workspace manager, which GPUModelRunner does in production.
 
-    ``AiterMLAMetadataBuilder.__init__`` reserves the fp8 prefill
-    persistent-scheduling scratch through ``current_workspace_manager()``, so
+    `AiterMLAMetadataBuilder.__init__` reserves the fp8 prefill
+    persistent-scheduling scratch through `current_workspace_manager()`, so
     merely constructing a builder outside a serve trips its assert. Idempotent:
     one builder is constructed per DCP shard. Deliberately does NOT lock the
     workspace -- production locks only after warmup, and this keeps allocating
@@ -285,7 +285,7 @@ def _make_vllm_config(heads_per_rank: int):
     DeepSeek-R1's config supplies the MLA dims (kv_lora_rank 512, rope 64,
     nope 128) that the aiter asm kernel is built for; only the head count is
     overridden, to place the GATHERED count (heads_per_rank * DCP) on the
-    kernel variant under test. ``get_num_attention_heads`` reads
+    kernel variant under test. `get_num_attention_heads` reads
     model_arch_config, a snapshot taken at config-creation time, so patching
     hf_config alone would be inert.
     """
@@ -333,7 +333,7 @@ def _run_shard(
 ):
     """Build real metadata for one DCP rank and run the real asm kernel.
 
-    ``kern_rank`` is separate from ``cp_rank`` so the positive control can hand
+    `kern_rank` is separate from `cp_rank` so the positive control can hand
     rank r's pages to the kernel while telling it that it is rank r+1.
     """
     from vllm.v1.attention.backend import CommonAttentionMetadata

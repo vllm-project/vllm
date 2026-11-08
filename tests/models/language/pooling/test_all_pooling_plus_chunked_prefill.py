@@ -73,11 +73,11 @@ _RERANKER_TEMPLATE = VLLM_PATH / "examples/pooling/score/template/qwen3_reranker
 def test_last_pool_score_chunked_prefill_matches_unchunked(vllm_runner, model: str):
     """LAST-pooling score must not depend on whether the prompt is chunked.
 
-    Regression test for a wrong-score bug where, under ``torch.compile`` (i.e.
-    not ``enforce_eager``), a query+document pair long enough to be split across
+    Regression test for a wrong-score bug where, under `torch.compile` (i.e.
+    not `enforce_eager`), a query+document pair long enough to be split across
     prefill chunks produced a corrupted last-token hidden state and thus a
     wrong relevance score, while the same input scored correctly unchunked.
-    The existing pooling+chunked-prefill coverage runs ``enforce_eager=True``
+    The existing pooling+chunked-prefill coverage runs `enforce_eager=True`
     and so never exercised the compiled path.
     """
     chat_template = _RERANKER_TEMPLATE.read_text()

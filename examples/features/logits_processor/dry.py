@@ -141,9 +141,9 @@ _DRY_DEFAULTS: dict[str, Any] = {
 def max_exponent(base: float) -> int:
     """Exponent clamp, mirroring llama.cpp bit-for-bit.
 
-    llama.cpp computes ``FLOAT_MAX_LOG / std::log(dry_base)`` entirely in
+    llama.cpp computes `FLOAT_MAX_LOG / std::log(dry_base)` entirely in
     float32. Computing the quotient in float64 lands on the wrong side of
-    the integer truncation for some bases: at ``base=2.0`` float64 gives
+    the integer truncation for some bases: at `base=2.0` float64 gives
     127.99999998 -> 127 while float32 gives exactly 128.0 -> 128.
     """
     if base <= 1.000001:
@@ -161,7 +161,7 @@ def _dry_penalties(
 ) -> dict[int, float]:
     """Compute DRY penalties for one request.
 
-    Port of the scan in ``llama_sampler_dry_apply``: a reverse-direction
+    Port of the scan in `llama_sampler_dry_apply`: a reverse-direction
     Z-algorithm finds, for each position, the length of the match between
     the window suffix and the sequence ending at that position; each
     match's follower token is charged the penalty for the longest repeat
@@ -253,9 +253,9 @@ def dry_core(
 
     Args:
       logits: [B, vocab] float tensor, modified in place.
-      row_idx: [R] int64, row of ``logits`` for each DRY request.
+      row_idx: [R] int64, row of `logits` for each DRY request.
       W: [R, N] int64 windows, right-aligned (window tokens occupy the
-        trailing ``n_r`` columns; leading columns are ignored via ``n_r``
+        trailing `n_r` columns; leading columns are ignored via `n_r`
         masks, whatever they hold).
       n_r: [R] int64 window lengths.
       allowed: [R] int64 per-request allowed length.
@@ -264,7 +264,7 @@ def dry_core(
         through float32, as llama.cpp stores it.
       base: [R] float32 per-request base, >= 1, rounded the same way.
       breaker_masks: per-request [vocab] bool masks (or None for no
-        breakers). ``vocab`` must equal ``logits.shape[-1]``.
+        breakers). `vocab` must equal `logits.shape[-1]`.
       j_budget: max(allowed + max_exp), <= _J_BUDGET, computed by the caller on
         the host.
 
@@ -404,7 +404,7 @@ def dry_core(
 class _VocabIndex(NamedTuple):
     """A tokenizer's decoded vocabulary, plus a character index into it.
 
-    ``char_ids`` maps every character in ``texts`` to the ids of the tokens
+    `char_ids` maps every character in `texts` to the ids of the tokens
     whose text contains it.
     """
 
@@ -425,7 +425,7 @@ _breaker_ids_cache: "weakref.WeakKeyDictionary[Any, _BreakerIdsPerTokenizer]" = 
 
 
 def _vocab_index(tokenizer: Any) -> _VocabIndex:
-    """Decode every token of ``tokenizer`` once and index its characters."""
+    """Decode every token of `tokenizer` once and index its characters."""
     index = _vocab_index_cache.get(tokenizer)
     if index is None:
         # Include added tokens above vocab_size, which llama.cpp's scan also covers.
@@ -443,9 +443,9 @@ def _vocab_index(tokenizer: Any) -> _VocabIndex:
 def resolve_dry_breakers(tokenizer: Any, breaker_strs: tuple[str, ...]) -> list[int]:
     """Resolve breaker strings to the ids of every token whose text contains one.
 
-    This is llama.cpp's ``get_overlapping_token_sequences`` rule, without its
-    multi-token restart sequences. Resolution runs in ``add_request``, inside
-    ``execute_model``, so a single-character breaker (llama.cpp's defaults and
+    This is llama.cpp's `get_overlapping_token_sequences` rule, without its
+    multi-token restart sequences. Resolution runs in `add_request`, inside
+    `execute_model`, so a single-character breaker (llama.cpp's defaults and
     most custom sets) resolves by lookup in the character index instead of a
     vocabulary scan. Results are cached per (tokenizer, breaker set).
     """
@@ -481,7 +481,7 @@ def _dry_args(sampling_params: SamplingParams) -> dict[str, Any]:
     """Read the request's DRY arguments, filling in the defaults.
 
     A key present with value None counts as unset, matching how
-    ``SamplingParams`` coerces its own None-valued arguments.
+    `SamplingParams` coerces its own None-valued arguments.
     """
     extra = sampling_params.extra_args or {}
     return {
@@ -568,7 +568,7 @@ class DryState(LogitsProcessor):
 
     @classmethod
     def validate_params(cls, sampling_params: SamplingParams) -> None:
-        """Check the ``dry_*`` keys of ``extra_args`` at request admission.
+        """Check the `dry_*` keys of `extra_args` at request admission.
 
         Raises:
             ValueError: on an unknown or out-of-range DRY argument.

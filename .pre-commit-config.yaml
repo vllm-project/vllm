@@ -334,7 +334,8 @@ repos:
     entry: python tools/pre_commit/check_docstring_style.py
     language: python
     types: [python]
-    files: ^vllm/
+    # Its own docstrings show the forms it rewrites
+    exclude: ^tools/pre_commit/check_docstring_style\.py$
     additional_dependencies: [regex]
   - id: check-trust-remote-code
     name: Check for hardcoded trust_remote_code=True

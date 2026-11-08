@@ -436,8 +436,8 @@ def test_select_common_block_size_no_valid_option():
 
 
 def _mock_backend(supported: list, *, exact: bool = False):
-    """Backend accepting multiples of ``supported``, or only those exact sizes
-    when ``exact`` (as CPU_MLA does)."""
+    """Backend accepting multiples of `supported`, or only those exact sizes
+    when `exact` (as CPU_MLA does)."""
     from vllm.v1.attention.backend import AttentionBackend
 
     class _MockBackendCls(AttentionBackend):

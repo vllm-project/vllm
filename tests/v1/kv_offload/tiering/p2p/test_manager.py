@@ -73,7 +73,7 @@ def _remote_prefiller_kv_params(
     remote_port: int = 8000,
     kv_request_id: str = "req-1",
 ) -> dict:
-    """Decoder-side kv_transfer_params: ``remote_prefiller`` sub-dict carries
+    """Decoder-side kv_transfer_params: `remote_prefiller` sub-dict carries
     kv_request_id + remote_host + remote_port."""
     return {
         "remote_prefiller": {
@@ -89,8 +89,8 @@ def _remote_kv_source_kv_params(
     remote_port: int = 8000,
     kv_request_id: str = "req-1",
 ) -> dict:
-    """Symmetric-P2P consumer kv_transfer_params: ``remote_kv_source`` sub-dict has
-    the same shape as ``remote_prefiller`` (kv_request_id + remote_host + port)."""
+    """Symmetric-P2P consumer kv_transfer_params: `remote_kv_source` sub-dict has
+    the same shape as `remote_prefiller` (kv_request_id + remote_host + port)."""
     return {
         "remote_kv_source": {
             "kv_request_id": kv_request_id,
@@ -101,7 +101,7 @@ def _remote_kv_source_kv_params(
 
 
 def _remote_decoder_kv_params(kv_request_id: str = "req-1") -> dict:
-    """Prefiller-side kv_transfer_params: ``remote_decoder`` sub-dict carries
+    """Prefiller-side kv_transfer_params: `remote_decoder` sub-dict carries
     kv_request_id only."""
     return {"remote_decoder": {"kv_request_id": kv_request_id}}
 
@@ -337,9 +337,9 @@ class TestLookup:
         assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.HIT
 
     def test_lookup_returns_miss_without_prefill_key(self):
-        """No ``remote_prefiller`` sub-dict means the request was not routed for
+        """No `remote_prefiller` sub-dict means the request was not routed for
         remote prefill — local prefill should run instead, so lookup()
-        returns MISS even when a stale ``remote_decoder`` block is present."""
+        returns MISS even when a stale `remote_decoder` block is present."""
         mgr = _make_manager()
         ctx = _req_context(kv_params=_remote_decoder_kv_params())
         assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
@@ -444,14 +444,14 @@ class TestServeExternalRequests:
 
 class TestSubmitStore:
     def test_no_decode_succeeds_immediately(self):
-        """Without a ``remote_decoder`` block, job succeeds immediately."""
+        """Without a `remote_decoder` block, job succeeds immediately."""
         mgr = _make_manager()
         job = _job_metadata(job_id=1, kv_params={})
         mgr.submit_store(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=True)]
 
     def test_missing_kv_request_id_fails(self):
-        """Missing kv_request_id inside ``remote_decoder`` fails the job."""
+        """Missing kv_request_id inside `remote_decoder` fails the job."""
         mgr = _make_manager()
         params: dict = {"remote_decoder": {}}
         job = _job_metadata(job_id=1, kv_params=params)
@@ -511,7 +511,7 @@ class TestSubmitStore:
     def test_extra_top_level_keys_are_ignored(self):
         """Producer-side kv_transfer_params should not pre-create a
         session even when a stale caller still passes a top-level
-        ``remote_host``/``remote_port`` next to ``remote_decoder``."""
+        `remote_host`/`remote_port` next to `remote_decoder`."""
         mgr = _make_manager()
         params = _remote_decoder_kv_params()
         params["remote_host"] = "stale"
@@ -763,7 +763,7 @@ class TestOnRequestFinished:
         assert "req-1" in mgr._failed_req_ids
 
     def test_decoder_side_calls_session_finish_request(self):
-        """Decoder-side finish (``remote_prefiller`` set) still routes via peer_id
+        """Decoder-side finish (`remote_prefiller` set) still routes via peer_id
         because the consumer addresses the producer it loaded from. The
         session's finish_request cancels the client-role load."""
         mgr = _make_manager()
@@ -775,7 +775,7 @@ class TestOnRequestFinished:
         assert session.finishes == ["req-1"]
 
     def test_p2p_consumer_side_calls_session_finish_request(self):
-        """Symmetric-P2P consumer finish (``remote_kv_source`` set) routes via peer_id
+        """Symmetric-P2P consumer finish (`remote_kv_source` set) routes via peer_id
         so the session drops any pending lookups (cancel_lookups) and
         cancels any inbound load."""
         mgr = _make_manager()
@@ -2422,8 +2422,8 @@ class TestBindHostPortDefaults:
         """Build a manager with the transports/file-mapper stubbed out.
 
         The host is used verbatim (no resolution). The transport constructor
-        args are recorded into ``calls`` (when given) so tests can assert the
-        ZMQ identity (``host:port``) stays decoupled from the NIXL agent name
+        args are recorded into `calls` (when given) so tests can assert the
+        ZMQ identity (`host:port`) stays decoupled from the NIXL agent name
         (a uuid).
         """
         monkeypatch.setenv("PYTHONHASHSEED", "0")

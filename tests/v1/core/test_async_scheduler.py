@@ -549,7 +549,7 @@ def test_kv_pressure_preemption_with_inflight_output(num_spec: int):
 
     Regression for the num_output_placeholders underflow EngineCore crash:
     with the fix reverted, the num_spec=3 variant fails with exactly
-    ``assert request.num_output_placeholders >= 0`` when a stale spec output
+    `assert request.num_output_placeholders >= 0` when a stale spec output
     returns after the preempted request was resumed and sampled.
     """
     max_tokens = 24

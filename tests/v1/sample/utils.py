@@ -200,7 +200,7 @@ class LogitsprocsTestFakes(NamedTuple):
         """Yield logits processors of a specific class.
 
         Args:
-          cls: :class:`LogitsProcessor` subclass
+          cls: `LogitsProcessor` subclass
 
         Returns:
           Iterator over logits processors
@@ -235,10 +235,10 @@ def fake_apply_logitsprocs(
 ) -> torch.Tensor:
     """Imitate application of logits processors in engine core.
 
-    When ``thinking_budget_state_holder`` has tracked requests, this mirrors
-    :meth:`Sampler.apply_logits_processors` by refreshing per-slot
-    ``output_token_ids`` (if ``slot_output_token_ids`` is provided), then
-    ``update_state`` + ``apply_to_logits`` on the holder after built-in logits
+    When `thinking_budget_state_holder` has tracked requests, this mirrors
+    `Sampler.apply_logits_processors` by refreshing per-slot
+    `output_token_ids` (if `slot_output_token_ids` is provided), then
+    `update_state` + `apply_to_logits` on the holder after built-in logits
     processors.
     """
     logits = test_fakes.logits[torch.tensor(slice_indices, dtype=torch.long)].clone()

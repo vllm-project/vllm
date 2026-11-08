@@ -1777,7 +1777,7 @@ def test_v1_model_runner_rejects_v2_only_features():
 
 def test_batch_sharded_sampling_rejects_return_sampling_mask():
     """The batch-sharded gather drops sampling masks, so the combination must
-    fail loudly instead of returning ``sampling_mask=None``."""
+    fail loudly instead of returning `sampling_mask=None`."""
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             enable_batch_sharded_sampling=True, tensor_parallel_size=2
@@ -2327,9 +2327,9 @@ def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
 def test_nnodes_within_dp_when_replicas_outnumber_nodes(data_parallel_size):
     """A replica that fits on one node spans one node, never zero.
 
-    External LB pins ``data_parallel_size_local`` to 1, so the ratio rounds
+    External LB pins `data_parallel_size_local` to 1, so the ratio rounds
     down to 0 as soon as there are more DP replicas than nodes. Anything
-    dividing by ``nnodes_within_dp`` then raises ZeroDivisionError.
+    dividing by `nnodes_within_dp` then raises ZeroDivisionError.
     """
     parallel_config = ParallelConfig(
         data_parallel_size=data_parallel_size,

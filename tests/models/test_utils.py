@@ -250,7 +250,7 @@ def _double(weights):
 
 
 def _pair_halves(weights):
-    """Stateful merge: cat a name's ``.first``/``.second`` halves on arrival."""
+    """Stateful merge: cat a name's `.first`/`.second` halves on arrival."""
     pending: dict[str, dict[str, torch.Tensor]] = {}
     for name, tensor in weights:
         for half in (".first", ".second"):
@@ -343,7 +343,7 @@ def test_weights_mapper_or_concatenates_transforms_in_order():
 
 
 def _double_w(weights):
-    """Stateless dispatch by name, the idiomatic inline ``endswith`` form."""
+    """Stateless dispatch by name, the idiomatic inline `endswith` form."""
     for name, tensor in weights:
         if name.endswith(".w"):
             tensor = tensor * 2

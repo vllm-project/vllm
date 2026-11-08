@@ -567,10 +567,10 @@ def _thinking_budget_validate(
     request_params: LogitsProcsRequestParams,
     step_idx: int,
 ) -> None:
-    """Validate ``ThinkingBudgetStateHolder`` thinking-budget behavior.
+    """Validate `ThinkingBudgetStateHolder` thinking-budget behavior.
 
     State is keyed by **batch slot** (same index space as logits rows), matching
-    ``sync_batch`` / sampler integration (see PR #34668 discussion).
+    `sync_batch` / sampler integration (see PR #34668 discussion).
     """
     holder = test_fakes.sampling_metadata.thinking_budget_state_holder
     assert holder is not None
@@ -893,7 +893,7 @@ def _assert_valid(
 def _slot_outputs_for_metadata(
     persistent_batch: list[LogitsProcsRequestParams], pad_len: int
 ) -> list[list[int]]:
-    """Per-batch-slot output token ids aligned with ``SamplingMetadata`` rows."""
+    """Per-batch-slot output token ids aligned with `SamplingMetadata` rows."""
     rows: list[list[int]] = [[] for _ in range(pad_len)]
     for i, req in enumerate(persistent_batch):
         if i < pad_len:
@@ -1241,11 +1241,11 @@ def test_thinking_budget_enforced_without_penalties():
 
     When thinking_budget_tracks_reqs=True and no penalties/bad_words are set,
     the old code computed needs_output_token_ids=False (inverted condition:
-    ``or not thinking_budget_tracks_reqs``), causing update_state to receive
+    `or not thinking_budget_tracks_reqs`), causing update_state to receive
     an empty list and skip _update_think_state for every request.
 
-    Fix: changed ``or not thinking_budget_tracks_reqs`` to
-    ``or thinking_budget_tracks_reqs`` so that output_token_ids is populated
+    Fix: changed `or not thinking_budget_tracks_reqs` to
+    `or thinking_budget_tracks_reqs` so that output_token_ids is populated
     whenever the thinking budget state holder has tracked requests.
 
     This test verifies that update_state correctly calls _update_think_state

@@ -378,7 +378,7 @@ class _LegacyProfileWorker:
 
 
 def test_executor_rejects_overrides_unsupported_by_worker():
-    """Out-of-tree workers with the old ``profile`` signature are rejected
+    """Out-of-tree workers with the old `profile` signature are rejected
     before dispatch, so a failed collective_rpc cannot leave replies queued."""
     executor = MagicMock()
     executor.vllm_config.parallel_config.worker_cls = f"{__name__}._LegacyProfileWorker"

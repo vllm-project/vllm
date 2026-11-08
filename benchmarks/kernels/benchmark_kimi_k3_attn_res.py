@@ -5,11 +5,10 @@
 The benchmark uses a zero delta so repeated in-place launches remain stable.
 
 Example:
-
-.. code-block:: console
-
-    .venv/bin/python benchmarks/kernels/benchmark_kimi_k3_attn_res.py \
-      --output /tmp/attn_res.json
+```console
+.venv/bin/python benchmarks/kernels/benchmark_kimi_k3_attn_res.py \
+  --output /tmp/attn_res.json
+```
 
 """
 

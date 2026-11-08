@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fail-stop end to end: a TP rank that stalls inside a served Kimi-K3
 specialized decode step fails a request, and the engine stops instead of
-hanging: every TP rank must stop at the same step (``guards.FailStop``), or the
+hanging: every TP rank must stop at the same step (`guards.FailStop`), or the
 ranks that went on would wait in the next collective for ever."""
 
 import json

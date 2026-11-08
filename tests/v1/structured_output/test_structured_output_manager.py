@@ -74,8 +74,8 @@ class MockReasoner:
 
 
 class MockEngineReasoner(ParserEngineReasoningAdapter):
-    """Ends reasoning implicitly on ``marker``, which is also content, and
-    explicitly on ``end_marker`` when one is given."""
+    """Ends reasoning implicitly on `marker`, which is also content, and
+    explicitly on `end_marker` when one is given."""
 
     def __init__(self, tokenizer, marker: int, end_marker: int | None = None):
         self.marker = marker

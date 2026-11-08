@@ -340,7 +340,7 @@ class _DummyVLMConfig(PreTrainedConfig):
     """Minimal composite config that mimics VLMs like Kimi-K2.5 or LLaVA.
 
     The text model's parameters (hidden_size, num_attention_heads, …) live
-    exclusively under ``text_config``; the top-level config has none of them.
+    exclusively under `text_config`; the top-level config has none of them.
     """
 
     model_type = "test_vlm"

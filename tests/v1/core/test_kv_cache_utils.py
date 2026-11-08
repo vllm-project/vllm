@@ -2385,7 +2385,7 @@ def test_resolve_block_hashes_rejects_mismatched_view():
 
 
 def test_is_full_attention_spec_unwraps_uniform_type_specs():
-    """``UniformTypeKVCacheSpecs`` is not a ``FullAttentionSpec``, so callers
+    """`UniformTypeKVCacheSpecs` is not a `FullAttentionSpec`, so callers
     scanning groups with a bare isinstance miss DeepSeek-V4-shaped configs."""
     common = dict(num_kv_heads=1, head_size=1, dtype=torch.float32)
     full = FullAttentionSpec(block_size=4, **common)

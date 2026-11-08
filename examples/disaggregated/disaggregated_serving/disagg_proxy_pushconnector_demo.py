@@ -66,15 +66,15 @@ class RoundRobinSchedulingPolicy(SchedulingPolicy):
 class PushProxy:
     """Push-mode proxy.
 
-    The structure mirrors the pull-mode ``Proxy`` in
-    ``disagg_proxy_demo.py``: an APIRouter with ``/v1/completions``,
-    ``/v1/chat/completions``, ``/status`` and ``/instances/add``, plus
+    The structure mirrors the pull-mode `Proxy` in
+    `disagg_proxy_demo.py`: an APIRouter with `/v1/completions`,
+    `/v1/chat/completions`, `/status` and `/instances/add`, plus
     round-robin scheduling across multiple P / D instances.
 
     Push-specific differences are confined to the request-handling
-    methods (``create_completion`` / ``create_chat_completion``):
+    methods (`create_completion` / `create_chat_completion`):
 
-    * D's ``kv_transfer_params`` is built from CLI-provided P
+    * D's `kv_transfer_params` is built from CLI-provided P
       coordinates instead of being derived from P's response.
     * P and D requests are issued concurrently — D registers blocks and
       waits while P prefills and pushes.
@@ -209,7 +209,7 @@ class PushProxy:
     def _build_decode_kv_params(self, request_id: str) -> dict:
         """Push-mode kv_transfer_params for D.
 
-        ``remote_block_ids`` is intentionally omitted: D allocates its
+        `remote_block_ids` is intentionally omitted: D allocates its
         own blocks and registers them with P; P determines the
         prefill-side block IDs and ships them via the WRITE.
         """

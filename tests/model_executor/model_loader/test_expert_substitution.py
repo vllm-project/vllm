@@ -33,7 +33,7 @@ MODEL_CONFIG = SimpleNamespace(
 
 
 def _compression_config(value_names: dict[int, dict[int, str]]) -> dict:
-    """Explicitly named constants given as ``{layer: {expert: tensor name}}``."""
+    """Explicitly named constants given as `{layer: {expert: tensor name}}`."""
     targets = {
         f"model.layers.{layer}.mlp.experts": {
             "num_logical_experts": 3,

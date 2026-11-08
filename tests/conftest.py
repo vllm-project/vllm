@@ -1858,8 +1858,8 @@ def disable_vllm_compile_cache(monkeypatch, use_fresh_inductor_cache):
     This forces compilation (and any custom compile passes) to actually run
     instead of being served from a warm cache left behind by previous runs
     (e.g. on persistent CI agents). Use this for tests that inspect what
-    happens during compilation; use ``use_fresh_inductor_cache`` (or
-    ``fresh_vllm_cache``) instead when the vLLM compile cache must stay
+    happens during compilation; use `use_fresh_inductor_cache` (or
+    `fresh_vllm_cache`) instead when the vLLM compile cache must stay
     enabled (e.g. cache save/load tests).
     """
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
@@ -1908,11 +1908,11 @@ def fake_vllm_ir(monkeypatch):
     """
     Pytest fixture to allow isolated IR op registration in tests.
 
-    Replaces IrOp.registry with an empty dict and swaps ``vllm_ir_torch_lib`` for a
-    fresh ``Library`` with a unique namespace per test (see ``Library.ns``).
+    Replaces IrOp.registry with an empty dict and swaps `vllm_ir_torch_lib` for a
+    fresh `Library` with a unique namespace per test (see `Library.ns`).
 
     Torch keeps registrations for the process lifetime; reusing the fragment
-    name ``vllm_ir`` and defining the same op string again can segfault. A
+    name `vllm_ir` and defining the same op string again can segfault. A
     random library name keeps each fixture run on a disjoint namespace.
 
     The test Library is kept alive until after monkeypatch teardown so PyTorch's

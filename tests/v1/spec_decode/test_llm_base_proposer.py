@@ -3,12 +3,12 @@
 """Tests for SpecDecodeBaseProposer.initialize_attn_backend.
 
 Block tables are stored at manager-block granularity, so the proposer's
-``block_size`` (used for slot-mapping math) must be the KV cache manager's
+`block_size` (used for slot-mapping math) must be the KV cache manager's
 block size. Attention groups map to kernel blocks for their metadata builders.
 The value must also be deterministic:
-``_draft_attn_layer_names`` is a set, whose iteration order varies across
+`_draft_attn_layer_names` is a set, whose iteration order varies across
 processes, so anything derived from iteration order must not leak into
-``block_size``.
+`block_size`.
 """
 
 from types import SimpleNamespace

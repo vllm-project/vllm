@@ -149,7 +149,7 @@ def _impl(dcp_rank: int, heads_per_rank: int, fp8_kv: bool):
 
 
 def _run_rank(config, spec, layer_name, group, rank, q, kv_cache_src, k_scale):
-    """Shard the KV round-robin onto ``rank`` and run its verify step."""
+    """Shard the KV round-robin onto `rank` and run its verify step."""
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAMetadataBuilder
 

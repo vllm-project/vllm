@@ -4,15 +4,15 @@
 the production dtypes (FP32 conv weight, BF16 conv state, FP32 recurrent state)
 and TP8 heads.
 
-Stock decode per step kind (``vllm/models/kimi_k3/nvidia/kda.py``):
-- verify (q > 1), DS conv layout (production): Triton ``causal_conv1d_update``
-  (Q/K/V stored BF16) -> ``fused_recurrent_kda`` (output stored BF16) -> gated
-  RMSNorm (``rms_norm_gated``);
-- verify, SD conv layout: FlashInfer ``packed_fused_kda_decode`` (BF16 Q/K/V and
+Stock decode per step kind (`vllm/models/kimi_k3/nvidia/kda.py`):
+- verify (q > 1), DS conv layout (production): Triton `causal_conv1d_update`
+  (Q/K/V stored BF16) -> `fused_recurrent_kda` (output stored BF16) -> gated
+  RMSNorm (`rms_norm_gated`);
+- verify, SD conv layout: FlashInfer `packed_fused_kda_decode` (BF16 Q/K/V and
   output in shared memory);
-- q = 1 next to a speculative config (production, ``kda_decode_backend ==
-  "triton"``): Triton ``causal_conv1d_update`` ->
-  ``fused_recurrent_kda_packed_decode`` -> gated RMSNorm.
+- q = 1 next to a speculative config (production, `kda_decode_backend ==
+  "triton"`): Triton `causal_conv1d_update` ->
+  `fused_recurrent_kda_packed_decode` -> gated RMSNorm.
 
 KdaSplit runs each stage at stock precision; only the reduction order differs. So
 the states it writes match stock to FP32 reduction noise and almost every output
@@ -114,7 +114,7 @@ def _gated_norm(attention, core, g2):
 
 
 def _stock_verify_triton(attention, projected, conv, state, table, accepted, q):
-    """The stock verify on the DS conv layout (kda.py ``_forward``, native)."""
+    """The stock verify on the DS conv layout (kda.py `_forward`, native)."""
     n = projected.shape[0]
     mixed, g1, g2, beta = _split(attention, projected)
     starts = torch.arange(0, n + 1, q, dtype=torch.int32, device=DEVICE)
@@ -149,7 +149,7 @@ def _stock_verify_triton(attention, projected, conv, state, table, accepted, q):
 
 def _stock_verify_flashinfer(attention, projected, conv, state, table, accepted, q):
     """The stock verify on the SD conv layout (FlashInfer packed fused decode);
-    ``conv`` is the [slot, dim, window] view of the SD cache."""
+    `conv` is the [slot, dim, window] view of the SD cache."""
     from vllm.utils.flashinfer import flashinfer_packed_fused_kda_decode
 
     n = projected.shape[0]
@@ -233,7 +233,7 @@ def _view(cache, dim_first):
 
 
 def _run_verify(attention, projected, conv, state, table, accepted, q, dim_first):
-    """``conv``: the conv cache in the deployment's layout."""
+    """`conv`: the conv cache in the deployment's layout."""
     requests = table.shape[0]
     caches = (conv, state)
     kda = PreparedKda(attention, {(requests, q): (PITCH, 1)}, dim_first)
@@ -300,7 +300,7 @@ def test_verify_matches_stock(requests, q, dim_first):
 @torch.inference_mode()
 def test_verify_key_record_matches_stock_convolution(q):
     """RecoverSSM's key record is the convolution's BF16 key: bit for bit the
-    stock ``causal_conv1d_update`` output."""
+    stock `causal_conv1d_update` output."""
     requests = 4
     attention = _attention(q)
     records = KDARecoverSSMRecords.allocate(
@@ -355,7 +355,7 @@ def test_decode_matches_stock(batch):
 def test_div_full_is_reciprocal_product():
     """KdaSplit's composed precision divides by a positive b as a * rcp.approx(b),
     both scaled by 1/4 past b = 2^126 (and takes reciprocals of shared divisors
-    once), relying on Triton's FP32 ``/`` (div.full.f32) being exactly that: here
+    once), relying on Triton's FP32 `/` (div.full.f32) being exactly that: here
     over random operands and bit patterns."""
     from vllm.triton_utils import tl, triton
 
