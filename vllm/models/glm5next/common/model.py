@@ -8,6 +8,7 @@ import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
@@ -492,12 +493,19 @@ class Glm5NextDecoderLayer(nn.Module):
         is_kda_layer = not is_mtp_layer and _is_kda_layer(config, layer_idx)
         self.layer_kind = "kda" if is_kda_layer else "mla"
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        replicate = envs.VLLM_GLM5NEXT_REPLICATE_MIXER
+        if replicate and self.is_sequence_parallel:
+            raise NotImplementedError(
+                "VLLM_GLM5NEXT_REPLICATE_MIXER is not supported with "
+                "sequence-parallel MoE."
+            )
 
         if is_kda_layer:
             self.self_attn = Glm5NextLinearAttention(
                 config=config,
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.self_attn",
+                replicate=replicate,
             )
         else:
             # MLA layers require the latent head dims, which are guaranteed set
@@ -523,6 +531,7 @@ class Glm5NextDecoderLayer(nn.Module):
                 # MTP draft steps reuse each token slot's top-k, which
                 # ShardQ's compact per-rank layout would break.
                 shardq_eligible=not is_mtp_layer,
+                replicate=replicate,
             )
 
         # MTP layers sit past the base model's hidden layers (layer_idx >=
@@ -1337,7 +1346,12 @@ class Glm5NextForCausalLM(
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
-        tp_size = parallel_config.tensor_parallel_size
+        # Replicated KDA keeps the full recurrent state on every rank.
+        tp_size = (
+            1
+            if envs.VLLM_GLM5NEXT_REPLICATE_MIXER
+            else parallel_config.tensor_parallel_size
+        )
         num_spec = (
             vllm_config.speculative_config.num_speculative_tokens
             if vllm_config.speculative_config

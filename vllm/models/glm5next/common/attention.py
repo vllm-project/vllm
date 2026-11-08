@@ -406,6 +406,7 @@ class Glm5NextMLAAttention(nn.Module):
         input_size: int | None = None,
         skip_rope: bool | None = False,
         shardq_eligible: bool = False,
+        replicate: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -418,7 +419,8 @@ class Glm5NextMLAAttention(nn.Module):
         self.kv_lora_rank = kv_lora_rank
 
         self.num_heads = num_heads
-        tp_size = get_tensor_model_parallel_world_size()
+        # replicate: every rank holds all heads, o_proj output is complete.
+        tp_size = 1 if replicate else get_tensor_model_parallel_world_size()
         assert num_heads % tp_size == 0
         self.num_local_heads = num_heads // tp_size
 
@@ -453,6 +455,7 @@ class Glm5NextMLAAttention(nn.Module):
                 bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.q_b_proj",
+                disable_tp=replicate,
             )
         else:
             self.q_proj = ColumnParallelLinear(
@@ -461,6 +464,7 @@ class Glm5NextMLAAttention(nn.Module):
                 bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.q_proj",
+                disable_tp=replicate,
             )
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
@@ -469,6 +473,7 @@ class Glm5NextMLAAttention(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj",
+            disable_tp=replicate,
         )
         self.o_proj = RowParallelLinear(
             self.num_heads * self.v_head_dim,
@@ -476,6 +481,7 @@ class Glm5NextMLAAttention(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            disable_tp=replicate,
         )
 
         # `Glm5NextTextConfig` is NoPE-only and so declares no `rope_parameters`;
@@ -571,7 +577,8 @@ class Glm5NextMLAAttention(nn.Module):
             prefix,
             skip_topk=False,
             fuse_qkv_rmsnorm=True,
-            shardq_eligible=shardq_eligible,
+            # ShardQ splits heads across TP ranks; replicated heads stay whole.
+            shardq_eligible=shardq_eligible and not replicate,
         )
 
     def forward(
