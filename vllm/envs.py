@@ -222,7 +222,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_ENABLE_GEMM_RS: bool = False
-    VLLM_GLM5NEXT_REPLICATE_MIXER: bool = False
+    VLLM_GLM5NEXT_REPLICATE_MIXER: str = "0"
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_USE_LOCALITY_DOMAINS: bool = False
@@ -1756,11 +1756,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # attention/shared-expert projections, DeepSeek-V4.1 ``wo_b``). All TP
     # ranks must belong to one NVLink domain.
     "VLLM_ENABLE_GEMM_RS": lambda: bool(int(os.getenv("VLLM_ENABLE_GEMM_RS", "0"))),
-    # Experimental: GLM-5.x-Next keeps every mixer (KDA and MLA) whole on each TP
-    # rank (no mixer all-reduce); MoE/MLP stay tensor-parallel. For TP over slow links.
-    "VLLM_GLM5NEXT_REPLICATE_MIXER": lambda: bool(
-        int(os.getenv("VLLM_GLM5NEXT_REPLICATE_MIXER", "0"))
-    ),
+    # Experimental: GLM-5.x-Next keeps mixers whole on each TP rank (no mixer
+    # all-reduce); MoE/MLP stay tensor-parallel. "1"/"all", "mla" or "kda".
+    "VLLM_GLM5NEXT_REPLICATE_MIXER": lambda: os.getenv(
+        "VLLM_GLM5NEXT_REPLICATE_MIXER", "0"
+    ).lower(),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
