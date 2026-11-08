@@ -14,15 +14,8 @@ GEMMA4_EXPECTED_ACCEPTANCE_LENGTHS = {
 
 # One case per dataset, so CI can run the datasets in different shards.
 @pytest.mark.parametrize("dataset", list(GEMMA4_EXPECTED_ACCEPTANCE_LENGTHS))
-@pytest.mark.parametrize("use_mrv2", [False, True])
-def test_gemma4_mtp_acceptance_lengths(
-    monkeypatch: pytest.MonkeyPatch,
-    use_mrv2: bool,
-    dataset: str,
-    vllm_runner,
-):
+def test_gemma4_mtp_acceptance_lengths(dataset: str, vllm_runner):
     run_acceptance_length_eval(
-        monkeypatch,
         vllm_runner,
         spec_config={
             "model": "google/gemma-4-E4B-it",
@@ -41,5 +34,4 @@ def test_gemma4_mtp_acceptance_lengths(
             dataset: GEMMA4_EXPECTED_ACCEPTANCE_LENGTHS[dataset],
         },
         chat_template_kwargs={},
-        use_mrv2=use_mrv2,
     )
