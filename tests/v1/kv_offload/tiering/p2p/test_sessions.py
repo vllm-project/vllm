@@ -736,6 +736,45 @@ class TestClientFlows:
         assert session.close().failed_jobs == []
         assert _released(failure)
 
+    def test_abort_loads_fails_each_load_once(self):
+        """abort_loads aborts every load not already aborting and fails it
+        at once; the AbortAck only releases it."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=1, kv_request_id="req-1", keys=[OffloadKey(b"a")], block_ids=[0]
+        )
+        session.request_blocks(
+            job_id=2, kv_request_id="req-2", keys=[OffloadKey(b"b")], block_ids=[1]
+        )
+        session.finish_request("req-1")
+
+        session.abort_loads()
+        session.abort_loads()
+
+        aborts = [m for m in conn._sent if m[TYPE_KEY] == AbortFetchMsg.TYPE]
+        assert sorted(m[AbortFetchMsg.KV_REQUEST_ID] for m in aborts) == [
+            "req-1",
+            "req-2",
+        ]
+        failures = session.poll().loads
+        assert sorted((f.job_id, f.success) for f in failures) == [
+            (1, False),
+            (2, False),
+        ]
+        assert not any(_released(f) for f in failures)
+        for req_id in ("req-1", "req-2"):
+            conn.enqueue(
+                {
+                    TYPE_KEY: AbortAckMsg.TYPE,
+                    AbortAckMsg.ROUND_SEQ: 0,
+                    AbortAckMsg.KV_REQUEST_ID: req_id,
+                }
+            )
+        assert session.poll().loads == []
+        assert all(_released(f) for f in failures)
+        assert session._client.has_active_loads is False
+
     def test_late_transfer_done_after_abort_ack_is_ignored(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -3021,6 +3060,70 @@ class TestPendingSession:
 
 
 class TestDisconnect:
+    @pytest.mark.parametrize("terminal_type", [TransferDoneMsg, AbortAckMsg])
+    @pytest.mark.parametrize("monitor_disconnect", [False, True])
+    def test_buffered_terminal_settles_load_after_disconnect(
+        self, terminal_type, monitor_disconnect
+    ):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(7, "req-7", [OffloadKey(b"key")], [0])
+        session.request_blocks(8, "req-8", [OffloadKey(b"other")], [1])
+        failure = None
+        if terminal_type is AbortAckMsg:
+            session.finish_request("req-7")
+            (failure,) = session.poll().loads
+            assert not failure.success
+            assert not _released(failure)
+        if monitor_disconnect:
+            conn.mark_dead()
+        else:
+            conn.enqueue({TYPE_KEY: DisconnectMsg.TYPE})
+        terminal = {
+            TYPE_KEY: terminal_type.TYPE,
+            TransferDoneMsg.KV_REQUEST_ID: "req-7",
+            TransferDoneMsg.ROUND_SEQ: 0,
+        }
+        if terminal_type is TransferDoneMsg:
+            terminal[TransferDoneMsg.SUCCESS] = True
+        conn.enqueue(terminal)
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "new-work",
+                FetchMsg.KEYS: [b"new"],
+                FetchMsg.BLOCK_INDEXES: [2],
+                FetchMsg.ROUND_SEQ: 0,
+            }
+        )
+        result = session.poll()
+        if failure is None:
+            assert result.loads == [LoadResult(7, "req-7", success=True)]
+        else:
+            assert result.loads == []
+            assert _released(failure)
+        assert not result.new_fetch_ids
+        assert session.close().failed_jobs == [8]
+
+    @pytest.mark.parametrize("peer_first", [False, True])
+    def test_local_protocol_fault_rejects_buffered_success(self, peer_first):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(7, "req-7", [OffloadKey(b"key")], [0])
+        if peer_first:
+            conn.enqueue({TYPE_KEY: DisconnectMsg.TYPE})
+        conn.enqueue({TYPE_KEY: TransferDoneMsg.TYPE, TransferDoneMsg.SUCCESS: True})
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.KV_REQUEST_ID: "req-7",
+                TransferDoneMsg.ROUND_SEQ: 0,
+                TransferDoneMsg.SUCCESS: True,
+            }
+        )
+        assert session.poll().loads == []
+        assert session.close().failed_jobs == [7]
+
     @pytest.mark.parametrize(
         "completion", ["abort_ack", "transfer_done", "timeout", "close"]
     )
@@ -3085,6 +3188,73 @@ class TestDisconnect:
             }
         )
         assert session.poll().loads == [LoadResult(8, "req-7", success=False)]
+
+    @pytest.mark.parametrize("finished", [False, True])
+    @pytest.mark.parametrize("ack_before_poll", [False, True])
+    def test_unsent_fetch_retires_without_abort(
+        self, lookup_clock, finished, ack_before_poll, caplog
+    ):
+        session, conn, _ = _make_session()
+        session.request_blocks(7, "req-7", [OffloadKey(b"key")], [0])
+        if finished:
+            session.finish_request("req-7")
+        else:
+            lookup_clock.now = _PD_LOAD_TIMEOUT_S
+        if ack_before_poll:
+            conn.enqueue(_peer_connect_msg())
+            conn.enqueue(
+                {TYPE_KEY: ConnectAckMsg.TYPE, ConnectAckMsg.PEER_ID: "peer:8000"}
+            )
+        assert session.poll().loads == [
+            LoadResult(7, "req-7", success=False, request_finished=finished)
+        ]
+        if not finished:
+            assert "queued fetch req-7" in caplog.text
+        assert not session.has_pending_work
+        session.request_blocks(8, "req-7", [OffloadKey(b"replacement")], [1])
+        if not ack_before_poll:
+            _activate(session, conn)
+        assert [
+            msg[FetchMsg.BLOCK_INDEXES]
+            for msg in conn._sent
+            if msg[TYPE_KEY] == FetchMsg.TYPE
+        ] == ([[], [1]] if ack_before_poll else [[1]])
+        assert not any(msg[TYPE_KEY] == AbortFetchMsg.TYPE for msg in conn._sent)
+        assert session.close().failed_jobs == [8]
+
+    @pytest.mark.parametrize("already_dead", [False, True])
+    def test_dead_connection_does_not_flush_unsent_fetch(
+        self, lookup_clock, already_dead
+    ):
+        class FailedFetchConnection(FakeConnection):
+            def send(self, msg):
+                if msg[TYPE_KEY] == FetchMsg.TYPE:
+                    raise ConnectionError("failed fetch send")
+                super().send(msg)
+
+        conn = FailedFetchConnection()
+        session, _, _ = _make_session(conn=conn)
+        if already_dead:
+            _activate(session, conn)
+            conn.mark_dead()
+        session.request_blocks(1, "req-1", [OffloadKey(b"first")], [0])
+        session.request_blocks(2, "req-2", [OffloadKey(b"second")], [1])
+        if not already_dead:
+            _activate(session, conn)
+        lookup_clock.now = _PD_LOAD_TIMEOUT_S + 1
+        loads = session.poll().loads
+        assert {result.job_id for result in loads} == {1, 2}
+        assert all(not result.success for result in loads)
+        assert next(r for r in loads if r.job_id == 2).deferred_release is None
+        first = next(r for r in loads if r.job_id == 1)
+        if already_dead:
+            assert first.deferred_release is None
+        else:
+            assert first.deferred_release is not None
+            assert not first.deferred_release.is_set()
+            session.close()
+            assert first.deferred_release.is_set()
+        assert not any(msg[TYPE_KEY] == FetchMsg.TYPE for msg in conn._sent)
 
     def test_disconnect_marks_session_dead(self):
         session, conn, _ = _make_session()
@@ -3283,13 +3453,18 @@ class TestDispatchErrorHandling:
         assert not session.alive
         assert any(m[TYPE_KEY] == DisconnectMsg.TYPE for m in conn._sent)
 
-    def test_transfer_done_missing_field_disconnects(self):
+    @pytest.mark.parametrize("already_dead", [False, True])
+    def test_transfer_done_missing_field_disconnects(self, already_dead):
         """Same contract for a malformed TransferDoneMsg from the peer."""
         session, conn, _ = _make_session()
         _activate(session, conn)
+        session.request_blocks(7, "req-7", [OffloadKey(b"key")], [0])
+        if already_dead:
+            conn.mark_dead()
         conn.enqueue({TYPE_KEY: TransferDoneMsg.TYPE, TransferDoneMsg.SUCCESS: True})
-        session.poll()
+        assert session.poll().loads == []
         assert not session.alive
+        assert session.close().failed_jobs == [7]
 
     def test_internal_error_does_not_disconnect_once(self, monkeypatch):
         """A non-ValueError raised by a handler is treated as an internal

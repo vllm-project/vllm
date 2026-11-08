@@ -353,7 +353,6 @@ def test_lookahead_mamba_partial_tail_survives_finish(
             step,
             ModelRunnerOutput(
                 req_ids=[req.request_id],
-                req_id_to_index={req.request_id: 0},
                 sampled_token_ids=[[99] if is_final else []],
             ),
         )
@@ -572,6 +571,7 @@ def make_scheduler_output(
                     block_ids=block_ids,
                     num_computed_tokens=0,
                     lora_request=None,
+                    prefill_token_ids=[],
                 )
             )
 
@@ -580,9 +580,7 @@ def make_scheduler_output(
         cached_new_block_ids = [cached_req_new_blocks[rid] for rid in cached_req_ids]
         cached_reqs = CachedRequestData(
             req_ids=cached_req_ids,
-            resumed_req_ids=set(),
             new_token_ids=[[] for _ in cached_req_ids],
-            all_token_ids={},
             new_block_ids=cached_new_block_ids,
             num_computed_tokens=[0] * len(cached_req_ids),
             num_output_tokens=[0] * len(cached_req_ids),
@@ -1355,6 +1353,56 @@ def test_lazy_walk_covers_bounded_replay_swa_groups() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 2e: Lazy stores return offloaded blocks to the eviction end
+# ---------------------------------------------------------------------------
+def test_lazy_store_returns_blocks_to_eviction_end() -> None:
+    """Lazy: the allocator evicts offloaded blocks before newer cached ones."""
+    fix = make_scheduler(num_cpu_blocks=32, num_gpu_blocks=32, lazy=True)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    target = sched._target_free
+
+    for _ in range(2):
+        req = make_request(num_blocks=target)
+        gpu_pool.free_blocks(_allocate_gpu_blocks(gpu_pool, req, target))
+    fillers = _flush_old_blocks_to_lru_head(
+        gpu_pool, num_filler_blocks=gpu_pool.get_num_free_blocks() - 2 * target
+    )
+
+    # The scan offloads the older request's blocks.
+    meta = sched.build_connector_meta(make_scheduler_output({}))
+    assert len(meta.store_gpu_blocks) == target
+    simulate_store_completion(sched, meta.store_event)
+
+    evicted = gpu_pool.get_new_blocks(target)
+    assert [b.block_id for b in evicted] == list(meta.store_gpu_blocks)
+    gpu_pool.free_blocks(fillers + evicted)
+
+
+# ---------------------------------------------------------------------------
+# Test 2f: Lazy walk stays at the eviction end
+# ---------------------------------------------------------------------------
+def test_lazy_walk_does_not_offload_past_eviction_window() -> None:
+    """Lazy: blocks past target_free from the queue head are not offloaded yet."""
+    fix = make_scheduler(num_cpu_blocks=32, num_gpu_blocks=32, lazy=True)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    target = sched._target_free
+
+    req = make_request(num_blocks=target)
+    gpu_pool.free_blocks(_allocate_gpu_blocks(gpu_pool, req, target))
+    # The queue now holds target uncached blocks, then target cached ones.
+    fillers = _flush_old_blocks_to_lru_head(
+        gpu_pool, num_filler_blocks=gpu_pool.get_num_free_blocks() - 2 * target
+    )
+
+    for _ in range(2):
+        meta = sched.build_connector_meta(make_scheduler_output({}))
+        assert not meta.store_gpu_blocks
+    gpu_pool.free_blocks(fillers)
+
+
+# ---------------------------------------------------------------------------
 # Test 3: LRU eviction order
 # ---------------------------------------------------------------------------
 def test_lru_eviction_order() -> None:
@@ -1919,12 +1967,8 @@ def test_chunked_prefill_reads_live_block_ids() -> None:
     assert len(meta2.store_gpu_blocks) == 2
 
 
-@pytest.mark.parametrize("use_v2_model_runner", [False, True])
 @pytest.mark.parametrize("same_output", [False, True])
-def test_eager_store_resets_block_cursor_after_preemption(
-    use_v2_model_runner: bool,
-    same_output: bool,
-) -> None:
+def test_eager_store_resets_block_cursor_after_preemption(same_output: bool) -> None:
     """A resumed request stores its confirmed tail after preemption."""
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=8, lazy=False)
     sched = fix.scheduler
@@ -1948,17 +1992,10 @@ def test_eager_store_resets_block_cursor_after_preemption(
 
     resumed_blocks = _alloc_and_register(fix, req, num_blocks=3)
     sched.update_state_after_alloc(req, resumed_blocks, num_external_tokens=0)
-    if use_v2_model_runner:
-        resumed_output = make_scheduler_output(
-            {req.request_id: 3 * BLOCK_SIZE},
-            new_reqs={req.request_id: resumed_blocks.get_block_ids()},
-        )
-    else:
-        resumed_output = make_scheduler_output(
-            {req.request_id: 3 * BLOCK_SIZE},
-            cached_req_new_blocks={req.request_id: resumed_blocks.get_block_ids()},
-        )
-        resumed_output.scheduled_cached_reqs.resumed_req_ids.add(req.request_id)
+    resumed_output = make_scheduler_output(
+        {req.request_id: 3 * BLOCK_SIZE},
+        new_reqs={req.request_id: resumed_blocks.get_block_ids()},
+    )
     if same_output:
         resumed_output.preempted_req_ids = {req.request_id}
 
@@ -2330,7 +2367,6 @@ def test_reset_pending_lazy_stores() -> None:
     assert sched.reset() is False
     assert len(sched._store_event_to_blocks) == 0
     assert len(sched._abandoned_store_event_to_blocks) == 1
-    assert sched._cursor is None
 
     simulate_store_completion(sched, meta.store_event)
     assert len(sched._abandoned_store_event_to_blocks) == 0

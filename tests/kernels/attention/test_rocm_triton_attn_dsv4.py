@@ -1877,9 +1877,11 @@ def test_dsv4_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
     )
     vllm_config.speculative_config = SimpleNamespace(
         num_speculative_tokens=upper_query_len - 1,
-        parallel_drafting=False,
+        max_num_new_slots_for_drafting=0,
         enable_adaptive_verification=True,
         use_dspark=lambda: True,
+        method="dspark",
+        speculator_config=SimpleNamespace(speculator_class=None),
     )
     mla_spec = MLAAttentionSpec(
         block_size=block_size,
@@ -2126,9 +2128,11 @@ def test_dsv41_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
     )
     vllm_config.speculative_config = SimpleNamespace(
         num_speculative_tokens=upper_query_len - 1,
-        parallel_drafting=False,
+        max_num_new_slots_for_drafting=0,
         enable_adaptive_verification=True,
         use_dspark=lambda: True,
+        method="dspark",
+        speculator_config=SimpleNamespace(speculator_class=None),
     )
     mla_spec = MLAAttentionSpec(
         block_size=block_size,

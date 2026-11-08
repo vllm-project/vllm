@@ -797,6 +797,40 @@ class TestOnRequestFinished:
         assert bound.finishes == ["req-1"]
         assert "req-1" not in mgr._kv_to_session
 
+    @pytest.mark.parametrize("shared_session", [False, True])
+    @pytest.mark.parametrize("shared_request_id", [False, True])
+    def test_dual_role_finish_cleans_both_sessions(
+        self, shared_session, shared_request_id
+    ):
+        """Finish each distinct session/request pair exactly once."""
+        mgr = _make_manager()
+        source = _FakeSession(peer_id="source:1", connected=True)
+        decoder = (
+            source
+            if shared_session
+            else _FakeSession(peer_id="decoder:2", connected=True)
+        )
+        source_id = "req-1"
+        dest_id = source_id if shared_request_id else "req-2"
+        mgr._sessions[source.peer_id] = source
+        mgr._sessions[decoder.peer_id] = decoder
+        mgr._kv_to_session[dest_id] = decoder
+        params = _remote_kv_source_kv_params(
+            remote_host="source", remote_port=1, kv_request_id=source_id
+        )
+        params["remote_decoder"] = {"kv_request_id": dest_id}
+
+        mgr.on_request_finished(_req_context(kv_params=params))
+
+        if shared_session:
+            assert source.finishes == (
+                [source_id] if shared_request_id else [source_id, dest_id]
+            )
+        else:
+            assert source.finishes == [source_id]
+            assert decoder.finishes == [dest_id]
+        assert dest_id not in mgr._kv_to_session
+
     def test_prefiller_unbound_id_leaves_batches_parked(self):
         """Prefiller-side finish for an id with parked unbound batches
         and no session binding is a no-op on `_unbound_stores`. The
@@ -917,6 +951,9 @@ class _FakeSession:
 
     def finish_request(self, kv_request_id):
         self.finishes.append(kv_request_id)
+
+    def abort_loads(self):
+        pass
 
     def close(self):
         return SessionCloseResult(
@@ -1158,6 +1195,7 @@ class TestHasPendingWork:
             scheduler.running = []
             scheduler.waiting = []
             scheduler.kv_holding_waiting = []
+            scheduler.async_kv_waiting = []
             scheduler.num_waiting_for_streaming_input = 0
             scheduler.finished_req_ids = set()
             scheduler.requests = {}
@@ -1215,6 +1253,7 @@ class TestHasPendingWork:
             scheduler.running = []
             scheduler.waiting = []
             scheduler.kv_holding_waiting = []
+            scheduler.async_kv_waiting = []
             scheduler.num_waiting_for_streaming_input = 0
             scheduler.finished_req_ids = set()
             scheduler.requests = {}
@@ -1410,7 +1449,7 @@ class _LoopbackControl:
         # Peer is calling our poll → return all messages we've sent toward
         # peer_local_id (which is the peer's own local_id).
         out: list[tuple[str, dict]] = []
-        for pid, conn in list(self._inbound_outbound.items()):
+        for conn in list(self._inbound_outbound.values()):
             # Each outgoing message goes to peer_local_id and is tagged
             # with the sender's local_id (i.e., self._local_id).
             for msg in conn._outbox:
@@ -1538,6 +1577,29 @@ def _build_paired_managers() -> tuple[P2PSecondaryTierManager, P2PSecondaryTierM
 
 class TestBidirectionalManager:
     """Two managers each load FROM and serve TO the other over a single peer."""
+
+    def test_retired_unsent_fetch_releases_parked_producer_blocks(
+        self, lookup_clock, monkeypatch
+    ):
+        from vllm.v1.kv_offload.tiering.p2p.session.client import _PD_LOAD_TIMEOUT_S
+
+        monkeypatch.setenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "120")
+        consumer, producer = _build_paired_managers()
+        producer.submit_store(
+            _job_metadata(9, kv_params=_remote_decoder_kv_params("retired"))
+        )
+        params = _remote_prefiller_kv_params("B", 2, kv_request_id="retired")
+        consumer.on_new_request(_req_context(params))
+        consumer.submit_load(_job_metadata(7, kv_params=params))
+        lookup_clock.now = _PD_LOAD_TIMEOUT_S + 1
+        failed = list(consumer.get_finished_jobs())
+        assert len(failed) == 1 and failed[0].job_id == 7 and not failed[0].success
+        producer_results: list[JobResult] = []
+        for _ in range(10):
+            producer_results.extend(producer.get_finished_jobs())
+            list(consumer.get_finished_jobs())
+        assert "retired" not in producer._unbound_stores
+        assert [r.job_id for r in producer_results] == [9]
 
     def test_unanswered_lookup_falls_back_to_local_prefill(self, lookup_clock):
         mgr_a, mgr_b = _build_paired_managers()
@@ -2920,6 +2982,84 @@ class TestRetainedTransfers:
         assert polls[0] == 3
         assert mgr._retained == {}
         assert JobResult(job_id=1, success=False) in mgr._finished_jobs
+
+
+def test_reset_cache_aborts_load_from_silent_peer(monkeypatch):
+    """A decoder's reset must not wait out the load timeout of a fetch its
+    prefiller never serves: the drain aborts the load, fails it at once, and
+    returns as soon as the AbortAck releases the chunk."""
+    from tests.v1.kv_offload.tiering.p2p.test_sessions import (
+        FakeConnection,
+        FakeDataTransport,
+        _activate,
+    )
+    from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+    from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
+    from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
+        AbortAckMsg,
+        AbortFetchMsg,
+    )
+
+    peer = "10.0.0.1:8000"
+    p2p_tier = _make_manager()
+    p2p_tier._control = _DrainCtrl()  # type: ignore[assignment]
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=4, mmap_region=_mock_mmap_region(4)
+    )
+    tiering = TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[p2p_tier],
+        tier_poll_interval_s=0.0,
+    )
+    conn = FakeConnection(peer_id=peer)
+    session = P2PSession(
+        peer_id=peer,
+        local_id=p2p_tier._local_id,
+        transport=FakeDataTransport(),
+        local_block_len=4096,
+        local_hash_seed="0",
+        conn=conn,
+    )
+    _activate(session, conn, peer_id=peer)
+    p2p_tier._sessions[peer] = session
+
+    key = OffloadKey(b"remote-block")
+    ctx = _req_context(_remote_prefiller_kv_params())
+    prepared = primary.prepare_write([key], ctx)
+    assert prepared is not None
+    assert isinstance(prepared.store_spec, CPULoadStoreSpec)
+    job = TransferJob(
+        job_id=7,
+        keys=[key],
+        chunk_ids=prepared.store_spec.chunk_ids,
+        is_promotion=True,
+        req_context=ctx,
+    )
+    tiering._register_job(job, tier_idx=0)
+    p2p_tier.submit_load(job)
+
+    sleeps = [0]
+
+    def ack_after_abort(_s):
+        # The silent prefiller answers only the drain's AbortFetch; without
+        # one the drain would spin until the load timeout.
+        sleeps[0] += 1
+        assert sleeps[0] < 5, "drain_jobs waited on a load no peer will write"
+        if any(m[TYPE_KEY] == AbortFetchMsg.TYPE for m in conn._sent):
+            conn.enqueue(
+                {
+                    TYPE_KEY: AbortAckMsg.TYPE,
+                    AbortAckMsg.KV_REQUEST_ID: "req-1",
+                    AbortAckMsg.ROUND_SEQ: 0,
+                }
+            )
+
+    monkeypatch.setattr(manager_module.time, "sleep", ack_after_abort)
+    tiering.reset_cache()
+
+    assert 7 not in tiering._jobs
+    assert session.alive
+    assert primary.num_deferred_release_chunks == 0
 
 
 class TestReconnectBackoff:

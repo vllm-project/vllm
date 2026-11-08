@@ -493,27 +493,42 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         no session has bound the id yet, this is a no-op: parked batches
         in `_unbound_stores` are left in place and cleaned up only by
         `_reap_unbound_stores` after `_unbound_store_timeout_s`.
+
+        A PD prefiller request may carry both roles: ``remote_kv_source``
+        (pull cached blocks from a P2P source) and ``remote_decoder`` (serve
+        the decoder). Each role is finished independently, on its own
+        session. Both roles may share one session when the source and the
+        decoder are the same node; that session is then finished once per
+        distinct kv_request_id.
         """
         source = req_context.get_state(P2PSourceInfo)
         dest = req_context.get_state(P2PDestInfo)
-        kv_request_id = source.kv_request_id if source is not None else None
-        if kv_request_id is None and dest is not None:
-            kv_request_id = dest.kv_request_id
-        if not kv_request_id:
+        source_id = source.kv_request_id if source is not None else None
+        dest_id = dest.kv_request_id if dest is not None else None
+        if source_id is None and dest_id is None:
             return
-        self._failed_req_ids.discard(kv_request_id)
+        if source_id is not None:
+            self._failed_req_ids.discard(source_id)
+        if dest_id is not None and dest_id != source_id:
+            self._failed_req_ids.discard(dest_id)
 
+        source_session = None
         if source is not None:
-            session = self._sessions.get(source.peer_id)
-            if session is not None:
-                session.finish_request(kv_request_id)
-            return
+            source_session = self._sessions.get(source.peer_id)
+            if source_session is not None:
+                source_session.finish_request(source.kv_request_id)
 
-        # Prefiller-side finish: identify the session via kv_request_id.
-        session = self._kv_to_session.pop(kv_request_id, None)
-        if session is not None:
-            session.finish_request(kv_request_id)
-            return
+        if dest_id is not None:
+            # Prefiller-side finish: identify the session via kv_request_id.
+            dest_session = self._kv_to_session.pop(dest_id, None)
+            # Same node as source and decoder (e.g. multi-turn with fixed
+            # P/D, P pulls the previous turn back from D): both roles share
+            # one session, and finish_request above already finished the
+            # server role for this id.
+            if dest_session is not None and not (
+                dest_session is source_session and dest_id == source_id
+            ):
+                dest_session.finish_request(dest_id)
 
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
@@ -684,15 +699,19 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         accumulate in ``_finished_jobs`` and are surfaced by the next
         ``get_finished_jobs()`` call.
 
-        A load already failed with a deferred release stays pending until
-        its AbortAck, or until a missed AbortAck disconnects the session and
-        the reap's close() sets the event, so every event is set on return.
+        Inbound loads are aborted up front rather than waited out: a peer
+        that never writes would otherwise block the reset for the full load
+        timeout. Each is failed at once with a deferred release and stays
+        pending until its AbortAck, or until a missed AbortAck disconnects
+        the session and the reap's close() sets the event, so every event
+        is set on return.
         """
         start = time.monotonic()
         self._reap_unbound_stores(force=True)
         self._kv_to_session.clear()
         for session in self._sessions.values():
             self._drain_session_stores(session)
+            session.abort_loads()
 
         warned = False
         while True:
@@ -1169,6 +1188,13 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             # inline in dispatch, so the replayed add_stored_blocks calls
             # match that demand and submit transfers immediately.
             for kv_request_id in result.new_fetch_ids:
+                if kv_request_id in result.terminal_fetch_ids:
+                    self._kv_to_session.pop(kv_request_id, None)
+                    for batch in self._unbound_stores.pop(kv_request_id, ()):
+                        self._finished_jobs.append(
+                            JobResult(job_id=batch.job_id, success=False)
+                        )
+                    continue
                 if kv_request_id in self._reaped_stores:
                     # This id's blocks were already reaped, so no
                     # submit_store will ever satisfy the demand on_fetch

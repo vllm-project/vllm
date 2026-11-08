@@ -157,7 +157,6 @@ def test_connector_receives_block_hashes(_load_plugin):
 def _make_model_runner_output(scheduler: Scheduler) -> ModelRunnerOutput:
     return ModelRunnerOutput(
         req_ids=[req.request_id for req in scheduler.running],
-        req_id_to_index={req.request_id: i for i, req in enumerate(scheduler.running)},
         sampled_token_ids=[[1000]] * len(scheduler.running),
         logprobs=None,
         prompt_logprobs_dict={},
