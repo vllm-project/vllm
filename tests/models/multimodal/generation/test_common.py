@@ -13,6 +13,7 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    AutoModelForMultimodalLM,
     AutoModelForTextToWaveform,
     AutoProcessor,
 )
@@ -691,6 +692,47 @@ VLM_TEST_SETTINGS = {
         tensor_parallel_size=1,
         vllm_output_post_proc=model_utils.kimiv_vl_vllm_to_hf_output,
         marks=[large_gpu_mark(min_gb=48)],
+    ),
+    "lfm3_audio": VLMTestInfo(
+        models=["LiquidAI/LFM3-Audio-2B"],
+        test_type=VLMTestType.AUDIO,
+        prompt_formatter=lambda audio_prompt: (
+            f"<|startoftext|><|im_start|>user\n{audio_prompt}<|im_end|>\n<|im_start|>assistant\n<think></think>"  # noqa: E501
+        ),
+        audio_idx_to_prompt=lambda idx: "<|audio|>",
+        max_model_len=4096,
+        max_num_seqs=2,
+        num_logprobs=20,
+        dtype="bfloat16",
+        auto_cls=AutoModelForMultimodalLM,
+        vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        patch_hf_runner=model_utils.lfm3_audio_patch_hf_runner,
+        # Hybrid conv/attention model: Mamba prefix caching needs chunked prefill
+        vllm_runner_kwargs={"enable_chunked_prefill": True},
+    ),
+    "lfm3_vl": VLMTestInfo(
+        models=["LiquidAI/LFM3-VL-2B"],
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+            VLMTestType.VIDEO,
+        ),
+        needs_video_metadata=True,
+        prompt_formatter=lambda img_prompt: (
+            f"<|startoftext|><|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n<think></think>"  # noqa: E501
+        ),
+        img_idx_to_prompt=lambda idx: "<|vision_start|><|image|><|vision_end|>",
+        video_idx_to_prompt=lambda idx: "<|vision_start|><|video|><|vision_end|>",
+        max_model_len=4096,
+        max_num_seqs=2,
+        num_logprobs=20,
+        dtype="bfloat16",
+        auto_cls=AutoModelForImageTextToText,
+        vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        patch_hf_runner=model_utils.lfm3_vl_patch_hf_runner,
+        # Hybrid conv/attention model: Mamba prefix caching needs chunked prefill
+        vllm_runner_kwargs={"enable_chunked_prefill": True},
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
     ),
     "llama4": VLMTestInfo(
         models=["meta-llama/Llama-4-Scout-17B-16E-Instruct"],

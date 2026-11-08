@@ -21,6 +21,7 @@ from transformers import (
     GenerationConfig,
     GenerationMixin,
 )
+from transformers.generation.utils import GenerateDecoderOnlyOutput
 from transformers.masking_utils import create_causal_mask
 from transformers.utils import ModelOutput
 from transformers.video_utils import VideoMetadata
@@ -1117,6 +1118,72 @@ def qwen3_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
     hf_model.processor = processor
     return hf_model
+
+
+def _lfm3_text_generate_patch(hf_model: HfRunner) -> HfRunner:
+    """Make the remote `generate` of the LFM3 speech models usable by the runner.
+
+    It samples text and speech in one loop and rejects `output_hidden_states`.
+    Generate text only, then replay the tokens through the backbone to get the
+    hidden states that `HfRunner` turns into logprobs.
+    """
+    model = hf_model.model
+    generate = model.generate
+    # Generation arguments; everything else is a multimodal input of the model
+    passthrough_exclude = {
+        "input_ids",
+        "attention_mask",
+        "use_cache",
+        "do_sample",
+        "max_new_tokens",
+        "tokenizer",
+        "output_hidden_states",
+        "return_dict_in_generate",
+    }
+
+    def text_generate(**kwargs):
+        input_ids = kwargs["input_ids"]
+        output = generate(
+            generation_mode="text",
+            repetition_penalty=1.0,
+            **{
+                k: v
+                for k, v in kwargs.items()
+                if k not in {"tokenizer", "output_hidden_states"}
+            },
+        )
+        sequences = output.sequences
+        num_prompt = input_ids.shape[1]
+        num_generated = sequences.shape[1] - num_prompt
+        mm_kwargs = {k: v for k, v in kwargs.items() if k not in passthrough_exclude}
+        hidden = model.model(
+            input_ids=sequences,
+            attention_mask=torch.ones_like(sequences),
+            **mm_kwargs,
+        ).last_hidden_state
+        # Position t - 1 predicts generated token t
+        step_hidden = hidden[0, num_prompt - 1 : num_prompt - 1 + num_generated]
+        return GenerateDecoderOnlyOutput(
+            sequences=sequences,
+            hidden_states=tuple((h.view(1, 1, -1),) for h in step_hidden),
+        )
+
+    model.generate = text_generate
+    return hf_model
+
+
+def lfm3_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner to use for LFM3-VL."""
+    hf_model = qwen3_vl_patch_hf_runner(hf_model)
+    # The checkpoint's generation config sets a repetition penalty, which
+    # vLLM does not apply to the explicit greedy sampling params of the test.
+    hf_model.model.generation_config.repetition_penalty = 1.0
+    return hf_model
+
+
+def lfm3_audio_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner to use for LFM3-Audio."""
+    return _lfm3_text_generate_patch(hf_model)
 
 
 def cohere_compass_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
