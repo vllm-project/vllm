@@ -129,6 +129,12 @@ def _reused_prompt_token_ids(
             "echo is set, so messages are rendered instead."
         )
         return None
+    if getattr(request, "return_prompt_text", False):
+        logger.debug(
+            "Ignoring kv_transfer_params['prompt_token_ids']: "
+            "return_prompt_text is set, so messages are rendered instead."
+        )
+        return None
     if has_non_text_content(messages):
         logger.debug(
             "Ignoring kv_transfer_params['prompt_token_ids']: "
