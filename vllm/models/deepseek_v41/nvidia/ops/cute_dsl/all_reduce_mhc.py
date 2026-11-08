@@ -670,7 +670,7 @@ class _OwnerReduceMulticastDeviceKernel:
                 residual_pointer = cute.make_ptr(
                     BFloat16,
                     (
-                        residual.iterator
+                        residual.iterator  # type: ignore[union-attr]
                         + (Int64(token) * self.hidden + Int64(fragment) * VEC_BF16)
                     ).llvm_ptr,
                     cute.AddressSpace.gmem,
