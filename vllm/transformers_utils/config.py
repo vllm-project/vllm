@@ -12,6 +12,7 @@ from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
 import torch
+import transformers
 import transformers.configuration_utils as hf_configuration_utils
 from huggingface_hub import constants
 from huggingface_hub.utils import HFValidationError, validate_repo_id
@@ -143,7 +144,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     kimi_vl="KimiVLConfig",
     kimi_k25="Kimi_K25Config",  # Upstream class, hub remote code uses old schema
     muse_spark_dspark="MuseSparkDSparkConfig",
-    musespark1x_text="MuseSpark1xTextConfig",
     muse_spark_text="MuseSparkTextConfig",
     muse_spark_vision="MuseSparkVisionConfig",
     muse_spark_audio="MuseSparkAudioConfig",
@@ -160,7 +160,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     minimax_m3_mtp="MiniMaxM3MTPConfig",
     ming_v3_asr="MingV3ASRConfig",
     moondream3="Moondream3Config",
-    moss_transcribe_diarize="MossTranscribeDiarizeConfig",
     nemo_speechlm="Nemotron3_5TranscribeConfig",
     eagle="EAGLEConfig",
     speculators="SpeculatorsConfig",
@@ -429,6 +428,19 @@ class HFConfigParser(ConfigParserBase):
                 config_dict["num_labels"] = config_dict.pop("classify_num")
             kwargs.setdefault("name_or_path", str(model))
             config = Qwen3ASRConfig.from_dict(config_dict, **kwargs)
+        elif (
+            model_type == "moss_transcribe_diarize"
+            and config_dict["audio_config"]["model_type"] == "whisper"
+            and hasattr(transformers, "MossTranscribeDiarizeConfig")
+        ):
+            from transformers import MossTranscribeDiarizeConfig, WhisperConfig
+
+            # Original checkpoints use a plain Whisper encoder
+            audio_config = WhisperConfig.from_dict(config_dict["audio_config"])
+            config_dict["audio_config"] = audio_config
+            config_dict.pop("adaptor_input_dim", None)
+            kwargs.setdefault("name_or_path", str(model))
+            config = MossTranscribeDiarizeConfig.from_dict(config_dict, **kwargs)
         elif model_type in _ARCHITECTURE_TO_MODEL_TYPE.values():
             from transformers import CONFIG_MAPPING
 

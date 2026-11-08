@@ -84,7 +84,7 @@ import multiprocessing
 import os
 import select
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 import torch
 
@@ -219,11 +219,12 @@ class WeightCacheDaemon:
         dp_rank: int = 0,
         pp_rank: int = 0,
         seed_config: SeedConfig | None = None,
+        warmup_cache_stores: Iterable[str] = (),
     ):
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_eplb:
             raise ValueError("The weight cache daemon does not support EPLB.")
-        self.warmup_caches = [FlashInferWarmupCache()]
+        self.warmup_caches = [FlashInferWarmupCache(warmup_cache_stores)]
         self.d2d = SeedTransport(self.warmup_caches, seed_config)
         self.tp_size = parallel_config.tensor_parallel_size
         self.pp_size = parallel_config.pipeline_parallel_size
@@ -576,6 +577,7 @@ def _run_daemon(
     dp_rank: int = 0,
     pp_rank: int = 0,
     seed_config: SeedConfig | None = None,
+    warmup_cache_stores: Iterable[str] = (),
 ) -> None:
     # Spawned daemons start with logging unconfigured, like engine workers.
     if logging_config := getattr(vllm_config, "logging_config", None):
@@ -590,6 +592,7 @@ def _run_daemon(
         dp_rank,
         pp_rank,
         seed_config=seed_config,
+        warmup_cache_stores=warmup_cache_stores,
     )
     daemon.load_model()
     daemon.warmup()
