@@ -25,6 +25,8 @@ def test_custom_layer_partition(monkeypatch: pytest.MonkeyPatch):
         _verify("4,6,6,4", 20, 4, [(0, 4), (4, 10), (10, 16), (16, 20)])
         # Put reminder somewhere
         _verify("5,6,5,6", 22, 4, [(0, 5), (5, 11), (11, 16), (16, 22)])
+        # A single stage, such as a draft model under PP, holds every layer
+        _verify("5,5,5,5", 6, 1, [(0, 6)])
         # Invalid partition strings
         with pytest.raises(ValueError):
             _verify("5,5,5,5,", 20, 4, [(0, 5), (5, 10), (10, 15), (15, 20)])

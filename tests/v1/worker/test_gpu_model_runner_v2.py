@@ -580,9 +580,6 @@ def test_standalone_draft_kv_dtype_override(
     monkeypatch.setattr(ar_module, "get_model", get_model)
     monkeypatch.setattr(ar_module, "set_model_tag", lambda _: contextlib.nullcontext())
     monkeypatch.setattr(ar_module, "get_draft_load_config", lambda _: LoadConfig())
-    monkeypatch.setattr(
-        ar_module, "get_pp_safe_draft_load_config", lambda load_config: load_config
-    )
 
     speculator.load_draft_model(object(), set())
 

@@ -10,7 +10,7 @@ from transformers import Qwen3_5MoeTextConfig, Qwen3_5TextConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -45,7 +45,6 @@ from .utils import (
     PPMissingLayer,
     _merge_multimodal_embeddings,
     get_fused_shared_expert_layers,
-    get_pp_stage,
     make_empty_intermediate_tensors_factory,
     maybe_fuse_shared_experts,
     maybe_prefix,
@@ -78,7 +77,6 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         config: Qwen3_5TextConfig | Qwen3_5MoeTextConfig = model_config.hf_text_config
 
         self.config = config
-        self.pp_stage = get_pp_stage()
 
         self.vocab_size = config.vocab_size
 
@@ -183,7 +181,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             residual=residual,
         )
 
-        if not self.pp_stage.is_last_rank:
+        if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
@@ -239,7 +237,7 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp")
         )
 
-        if get_pp_stage().is_last_rank:
+        if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,

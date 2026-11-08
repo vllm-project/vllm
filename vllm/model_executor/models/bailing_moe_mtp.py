@@ -10,6 +10,7 @@ from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -29,12 +30,7 @@ from vllm.model_executor.models.bailing_moe_linear import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .utils import (
-    PPMissingLayer,
-    get_pp_stage,
-    is_pp_missing_parameter,
-    maybe_prefix,
-)
+from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
 
 
 def _get_draft_hf_config(vllm_config: VllmConfig) -> PreTrainedConfig:
@@ -151,7 +147,7 @@ class BailingMoeV25MultiTokenPredictor(nn.Module):
                 )
             }
         )
-        if get_pp_stage().is_first_rank:
+        if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,

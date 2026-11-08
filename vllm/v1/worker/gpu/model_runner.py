@@ -19,8 +19,8 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
-from collections.abc import Iterable
-from contextlib import AbstractContextManager
+from collections.abc import Iterable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any, NamedTuple
@@ -43,7 +43,11 @@ from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
     get_aux_output_connector,
 )
-from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
+from vllm.distributed.parallel_state import (
+    get_dcp_group,
+    get_pp_group,
+    single_pp_stage,
+)
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -423,7 +427,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if self.pp_handler is not None:
                     self.pp_handler.configure_aux_hidden_state_relay(self.model)
             if isinstance(self.speculator, DraftModelSpeculator):
-                with use_workspace_lane(self._draft_workspace_lane):
+                with self.draft_context():
                     self.speculator.load_model(self.model)
                     eplb_models_added = self.eplb.maybe_register_speculator(
                         self.speculator, self.speculative_config, load_dummy_weights
@@ -587,6 +591,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not isinstance(speculator, DraftModelSpeculator):
             return None
         return speculator.model
+
+    @contextmanager
+    def draft_context(self) -> Iterator[None]:
+        """Build and run the draft model in its own workspace lane and as the
+        only pipeline stage: it runs whole on the last PP rank."""
+        with use_workspace_lane(self._draft_workspace_lane), single_pp_stage():
+            yield
 
     def reset_lora_state(self) -> None:
         super().reset_lora_state()
@@ -998,7 +1009,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.prepare_watermarking(
                     self.sampler, input_batch.idx_mapping
                 )
-            with use_workspace_lane(self._draft_workspace_lane):
+            with self.draft_context():
                 self.speculator.propose(
                     input_batch=input_batch,
                     attn_metadata=attn_metadata,
@@ -1182,7 +1193,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.cudagraph_manager.capture_stream,
                     )
                     if self.speculator is not None:
-                        with use_workspace_lane(self._draft_workspace_lane):
+                        with self.draft_context():
                             self.speculator.capture()
                     if self.adaptive_verification is not None and not profile_only:
                         with self.step_timing.collect() as timings:
@@ -2348,7 +2359,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_hidden_states = get_drafter_hidden_states(
                 self.model, draft_hidden_states
             )
-            with use_workspace_lane(self._draft_workspace_lane):
+            with self.draft_context():
                 draft_tokens = self.speculator.propose(
                     input_batch,
                     attn_metadata,

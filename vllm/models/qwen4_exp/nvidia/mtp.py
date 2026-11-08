@@ -22,6 +22,7 @@ from transformers import Qwen4ExpTextConfig
 
 from vllm import envs
 from vllm.config import VllmConfig, replace, set_current_vllm_config
+from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
@@ -39,7 +40,6 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     get_draft_quant_config,
     get_fused_shared_expert_layers,
-    get_pp_stage,
     make_empty_intermediate_tensors_factory,
     maybe_fuse_shared_experts,
     maybe_prefix,
@@ -188,7 +188,6 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         config: Qwen4ExpTextConfig = model_config.hf_text_config
 
         self.config = config
-        self.pp_stage = get_pp_stage()
         # MoE SP also enables HC SP, while HC SP can be enabled independently.
         self.use_hc_sequence_parallel = is_hc_sequence_parallel_enabled(vllm_config)
         self.use_sequence_parallel = (
@@ -371,7 +370,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
             query_start_loc=None,
             ngram_context=None,
         )
-        if not self.pp_stage.is_last_rank:
+        if not get_pp_group().is_last_rank:
             # As in the target model, PP carries a materialized tensor rather
             # than the delayed hidden/output/injection tuple.
             hidden_states = layer.mlp_hyper_connection.combine(
@@ -444,7 +443,7 @@ class Qwen4ExpMTP(nn.Module, SupportsHCSP, SupportsPP, Qwen4ExpMixtureOfExperts)
             prefix=maybe_prefix(prefix, "mtp"),
         )
 
-        if get_pp_stage().is_last_rank:
+        if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
             else:

@@ -89,7 +89,6 @@ def make_vllm_config(
 
 @pytest.fixture
 def patch_heavy_modules(monkeypatch):
-    monkeypatch.setattr(eagle_mod, "get_pp_group", lambda: DummyPPGroup())
     monkeypatch.setattr(deepseek_mod, "get_pp_group", lambda: DummyPPGroup())
 
     monkeypatch.setattr(eagle_mod, "VocabParallelEmbedding", DummyEmbedding)

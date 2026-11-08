@@ -9,6 +9,7 @@ from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
@@ -32,7 +33,6 @@ from .interfaces import (
 from .utils import (
     AutoWeightsLoader,
     _merge_multimodal_embeddings,
-    get_pp_stage,
     maybe_prefix,
 )
 
@@ -52,7 +52,6 @@ class Exaone4_5MultiTokenPredictor(ExaoneMoeMultiTokenPredictor):
         text_config = config.text_config
 
         self.config = config
-        self.pp_stage = get_pp_stage()
         self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
 
@@ -103,7 +102,7 @@ class Exaone4_5MultiTokenPredictor(ExaoneMoeMultiTokenPredictor):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        if self.pp_stage.is_first_rank:
+        if get_pp_group().is_first_rank:
             if inputs_embeds is None:
                 inputs_embeds = self.get_input_embeddings(input_ids)
             assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
@@ -124,7 +123,7 @@ class Exaone4_5MultiTokenPredictor(ExaoneMoeMultiTokenPredictor):
             residual=residual,
         )
 
-        if not self.pp_stage.is_last_rank:
+        if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )

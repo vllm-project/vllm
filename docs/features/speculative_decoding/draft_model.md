@@ -76,6 +76,10 @@ The code used to request completions as a client remains unchanged:
         print(completion)
     ```
 
+## Draft Models with Pipeline Parallelism
+
+With pipeline parallelism (`pipeline_parallel_size > 1`), the draft model runs as a whole model on the last pipeline stage, as it would at `pipeline_parallel_size=1`. A custom `VLLM_PP_LAYER_PARTITION` applies only to the target model.
+
 !!! warning
     Note: Please use `--speculative-config` to set all configurations related
     to speculative decoding. The previous method of specifying the model

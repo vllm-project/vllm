@@ -10,7 +10,7 @@ from transformers import Qwen3NextConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -31,7 +31,6 @@ from vllm.sequence import IntermediateTensors
 from .utils import (
     AutoWeightsLoader,
     get_fused_shared_expert_layers,
-    get_pp_stage,
     make_empty_intermediate_tensors_factory,
     maybe_fuse_shared_experts,
     maybe_prefix,
@@ -65,7 +64,6 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
         config: Qwen3NextConfig = model_config.hf_config
 
         self.config = config
-        self.pp_stage = get_pp_stage()
 
         self.vocab_size = config.vocab_size
 
@@ -134,7 +132,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        if self.pp_stage.is_first_rank:
+        if get_pp_group().is_first_rank:
             if inputs_embeds is None:
                 inputs_embeds = self.embed_input_ids(input_ids)
             assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
@@ -160,7 +158,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
             residual=residual,
         )
 
-        if not self.pp_stage.is_last_rank:
+        if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )

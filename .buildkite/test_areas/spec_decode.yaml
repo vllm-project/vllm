@@ -445,7 +445,8 @@ steps:
   num_devices: 2
   source_file_dependencies:
     - vllm/v1/worker/gpu/spec_decode/eagle/
-    - vllm/v1/worker/gpu/spec_decode/speculator.py
+    - vllm/distributed/parallel_state.py
+    - vllm/v1/worker/gpu/model_runner.py
     - vllm/model_executor/models/deepseek_mtp.py
     - vllm/model_executor/models/deepseek_v2.py
     - vllm/model_executor/models/qwen3_next_mtp.py

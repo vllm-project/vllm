@@ -24,11 +24,12 @@ If you only need to use the distributed environment without model/pipeline
 """
 
 import contextlib
+import copy
 import gc
 import pickle
 import weakref
 from collections import deque, namedtuple
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
@@ -1643,11 +1644,48 @@ def get_dcp_world_size_and_rank(enabled: bool = True) -> tuple[int, int]:
 
 
 _PP: GroupCoordinator | None = None
+# Single-rank view of `_PP` while `single_pp_stage()` is active. A module global,
+# like the forward context, so that torch.compile traces `get_pp_group()`.
+_PP_SINGLE_STAGE: GroupCoordinator | None = None
 
 
 def get_pp_group() -> GroupCoordinator:
+    if _PP_SINGLE_STAGE is not None:
+        return _PP_SINGLE_STAGE
     assert _PP is not None, "pipeline model parallel group is not initialized"
     return _PP
+
+
+@contextmanager
+def single_pp_stage() -> Iterator[None]:
+    """Run models on this rank as the only pipeline stage.
+
+    Within the context, `get_pp_group()` returns a view of the PP group that
+    contains only this rank. Speculative decoding runs the draft model whole on
+    the last PP rank: built and run in this context, model code that reads its
+    stage from the PP group behaves as at PP=1. The view does not support PP
+    communication.
+    """
+    global _PP_SINGLE_STAGE
+    pp_group = get_pp_group()
+    if pp_group.world_size == 1:
+        yield
+        return
+    view = copy.copy(pp_group)
+    view.ranks = [pp_group.rank]
+    view.world_size = 1
+    view.rank_in_group = 0
+    _PP_SINGLE_STAGE = view
+    try:
+        yield
+    finally:
+        _PP_SINGLE_STAGE = None
+
+
+def in_single_pp_stage() -> bool:
+    """Whether `single_pp_stage()` is active on a PP group of more than one
+    rank, i.e. the other pipeline stages do not run the current model."""
+    return _PP_SINGLE_STAGE is not None
 
 
 _DP: GroupCoordinator | None = None

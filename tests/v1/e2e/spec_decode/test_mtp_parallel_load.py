@@ -271,12 +271,12 @@ async def test_deepseek_mtp_load_dp(monkeypatch: pytest.MonkeyPatch, dp_size: in
 
 
 @multi_gpu_only(num_gpus=2)
-def test_mtp_drafter_built_as_one_pp_stage(vllm_runner):
-    """The drafter runs whole on the last PP rank, so it is built as one stage.
+def test_mtp_drafter_runs_as_one_pp_stage(vllm_runner):
+    """The drafter runs whole on the last PP rank, as one pipeline stage.
 
-    Qwen3-Next's MTP head branches on its pipeline stage; given the target's
-    stage, the last rank's drafter expected intermediate tensors and the engine
-    failed to start.
+    Qwen3-Next's MTP head branches on its pipeline stage. Built and run with the
+    target's stage, the last rank's drafter expects intermediate tensors and the
+    engine fails to start.
     """
     with vllm_runner(
         QWEN3_NEXT,

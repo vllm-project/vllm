@@ -100,6 +100,7 @@ from vllm.distributed import (
     ensure_model_parallel_initialized,
     get_world_group,
     init_distributed_environment,
+    single_pp_stage,
 )
 from vllm.distributed.device_communicators.flashinfer_all_reduce import (
     destroy_fi_ar_workspace,
@@ -270,6 +271,8 @@ class WeightCacheDaemon:
         # Engine watch connections, held open for the daemon's lifetime.
         self._watchers: list[socket.socket] = []
         key_dp_size, key_dp_rank = get_engine_dp_placement(vllm_config, dp_rank)
+        # The engine builds a draft model as the only pipeline stage.
+        key_pp_size, key_pp_rank = (1, 0) if is_draft else (self.pp_size, self.pp_rank)
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
         self.cache_key = WeightCacheKey.from_model_config(
@@ -277,8 +280,8 @@ class WeightCacheDaemon:
             cache_config=vllm_config.cache_config,
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
-            pp_size=self.pp_size,
-            pp_rank=self.pp_rank,
+            pp_size=key_pp_size,
+            pp_rank=key_pp_rank,
             dp_size=key_dp_size,
             dp_rank=key_dp_rank,
             is_draft=is_draft,
@@ -306,7 +309,8 @@ class WeightCacheDaemon:
         )
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(self.tp_size, self.pp_size)
-            self.model = self.get_model()
+            with single_pp_stage() if self.is_draft else contextlib.nullcontext():
+                self.model = self.get_model()
         # In-place reloads use configs already normalized by model construction.
         self.loaded_rope_parameters_hash = hash_rope_parameters(self.model_config)
         # Loading and post-processing leave freed transients in the caching
