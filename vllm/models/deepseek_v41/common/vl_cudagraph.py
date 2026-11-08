@@ -64,15 +64,6 @@ class DeepseekV4VLEncoderCudaGraphMixin:
 
     # -- helpers shared with the eager multimodal path --
 
-    def _encode_image(
-        self,
-        patches: torch.Tensor,
-        n_vit_h: int,
-        n_vit_w: int,
-    ) -> torch.Tensor:
-        # Aligner rows in reading order, one per IMAGE slot.
-        return self.aligner(self.vision(patches, n_vit_h, n_vit_w), n_vit_h, n_vit_w)
-
     def _build_image_span(
         self, image_embeds: torch.Tensor, types: torch.Tensor
     ) -> torch.Tensor:
@@ -93,8 +84,6 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         if isinstance(grid, torch.Tensor):
             grid = grid.tolist()
         return [[int(v) for v in row] for row in grid]
-
-    _encoder_cg_pad_totals: dict[int, int] = {}
 
     # -- SupportsEncoderCudaGraph protocol --
 
@@ -129,24 +118,13 @@ class DeepseekV4VLEncoderCudaGraphMixin:
                 "cudagraph_mm_encoder."
             )
 
-        pad_totals = self._encoder_cg_pad_totals
-
         def pad_cu_seqlens(dst: torch.Tensor, src: torch.Tensor) -> None:
-            # Varlen attention requires cu_seqlens[-1] to equal the number of
-            # rows actually passed in. The captured buffers are sized for the
-            # full token budget, so a smaller real batch is completed with one
-            # trailing padding sequence; declaring fewer rows than the buffer
-            # holds is undefined behaviour and returns NaN on FlashAttn.
-            total = pad_totals.get(dst.data_ptr())
-            if total is None:
-                raise RuntimeError(
-                    "cu_seqlens replay buffer was not registered at capture "
-                    "time; the manager must replay into the capture-time "
-                    "buffers."
-                )
+            # Zero-length padding (same as Qwen): tail slots repeat the last
+            # real offset, so FlashAttn schedules no work for padding rows.
             n = min(src.shape[0], dst.shape[0])
             dst[:n].copy_(src[:n])
-            dst[n:] = total
+            if n < dst.shape[0]:
+                dst[n:] = src[-1] if n else 0
 
         return EncoderCudaGraphConfig(
             modalities=["image"],
@@ -268,8 +246,8 @@ class DeepseekV4VLEncoderCudaGraphMixin:
             max_seqlen_override=total_patches,
             cached=False,
         )
-        # Spare cu_seqlens slots let replay append a padding sequence that
-        # covers the rows a smaller real batch does not fill.
+        # Spare cu_seqlens slots: replay pads smaller real batches with
+        # zero-length sequences (tail slots repeat the last real offset).
         real_cu = metadata.pop("cu_seqlens")
         cu_seqlens = torch.full(
             (max_batch_size + 2,), total_patches, dtype=torch.int32, device=device
@@ -277,8 +255,6 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         cu_seqlens[: real_cu.numel()] = real_cu
 
         merge = build_packed_merge_metadata(grids, r, device=device, dtype=dtype)
-
-        self._encoder_cg_pad_totals[cu_seqlens.data_ptr()] = total_patches
 
         return EncoderCudaGraphCaptureInputs(
             values={
@@ -303,7 +279,7 @@ class DeepseekV4VLEncoderCudaGraphMixin:
             patches = patches.to(dtype)
 
         # Unpadded: the manager zero-pads patches/cos/sin/merge buffers, and
-        # pad_cu_seqlens appends the padding sequence covering the tail rows.
+        # pad_cu_seqlens pads the tail with zero-length sequences.
         metadata = build_packed_vit_metadata(
             vit_grid,
             rope_dim=self.vision.rope_dim,
@@ -341,19 +317,19 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         mm_kwargs: dict[str, Any],
         path: str = "default",
     ) -> torch.Tensor:
-        patches = mm_kwargs["patches"].to(self.aligner.w1.weight.dtype)
+        """Run all images as one unpadded varlen batch."""
         vit_grid = self._get_grid_list(mm_kwargs, "vit_grid")
-        outs: list[torch.Tensor] = []
-        offset = 0
-        for n_vit_h, n_vit_w in vit_grid:
-            n_vit = n_vit_h * n_vit_w
-            outs.append(
-                self._encode_image(patches[offset : offset + n_vit], n_vit_h, n_vit_w)
+        if not vit_grid:
+            return mm_kwargs["patches"].new_zeros(
+                (0, self.config.hidden_size), dtype=self.aligner.w1.weight.dtype
             )
-            offset += n_vit
-        if not outs:
-            return patches.new_zeros((0, self.config.hidden_size))
-        return torch.cat(outs, dim=0)
+        inputs = self.prepare_encoder_cudagraph_replay_buffers(
+            mm_kwargs,
+            max_batch_size=len(vit_grid),
+            max_frames_per_batch=0,
+            path=path,
+        )
+        return self.encoder_cudagraph_forward(inputs.values, path=path)
 
     def postprocess_encoder_output(
         self,

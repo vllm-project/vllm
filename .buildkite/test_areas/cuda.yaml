@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) CUDA Platform"
   key: platform-tests
+  automatic_shard: true
   timeout_in_minutes: 20
   device: h200_18gb
   source_file_dependencies:
@@ -19,6 +20,7 @@ steps:
     - pytest -v -s cuda/test_cuda_compatibility_path.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) CUDA Platform"
       dind: false
       device: mi355_dpx
@@ -33,10 +35,10 @@ steps:
 - label: ":nvidia: (H200 MIG 18GB) CUDAGraph"
   device: h200_18gb
   key: cudagraph
+  automatic_shard: true
   timeout_in_minutes: 45
   source_file_dependencies:
   - tests/v1/cudagraph
-  - vllm/v1/cudagraph_dispatcher.py
   - vllm/config/compilation.py
   - vllm/config/vllm.py
   - vllm/compilation
@@ -51,8 +53,10 @@ steps:
     - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
     - pytest -v -s v1/cudagraph/test_breakable_cudagraph.py
     - pytest -v -s v1/cudagraph/test_encoder_cudagraph.py
+    - pytest -v -s v1/cudagraph/test_encoder_only_full_cudagraph.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI250) CUDAGraph"
       dind: false
       device: mi250_1
@@ -61,7 +65,6 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - tests/v1/cudagraph
-      - vllm/v1/cudagraph_dispatcher.py
       - vllm/config/compilation.py
       - vllm/compilation
       - vllm/platforms/rocm.py

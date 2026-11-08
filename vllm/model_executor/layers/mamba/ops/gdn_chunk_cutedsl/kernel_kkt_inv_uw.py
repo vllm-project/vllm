@@ -101,7 +101,8 @@ class Sm100ChunkUWKernel:
         U_tma = self._make_tma_args(U, self.V_dim, 1, tma_s2g)
         W_tma = self._make_tma_args(W, self.K_dim, 1, tma_s2g)
 
-        grid = (num_sms // self.Hv, self.Hv, 1)
+        # Grid-stride kernel: at least one CTA per head even when Hv > num_sms.
+        grid = (cutlass.max(num_sms // self.Hv, 1), self.Hv, 1)
         block = (self.num_warps * 32, 1, 1)
         self.kernel(
             K_tma,
@@ -263,7 +264,7 @@ class Sm100ChunkUWKernel:
             # LBO=BT*128 is ignored for K-major
             sdesc_template = _tcgen05.make_sdesc_128B_swizzle(BT * 128)
 
-            for global_chunk_id in range(bid, num_global_chunks, grid_x):
+            for _ in range(bid, num_global_chunks, grid_x):
                 U_tmem = U_tmem_base + V_dim * stage_id
                 W_tmem = U_tmem | (16 << 16)
                 Ab_tmem = Ab_tmem_base

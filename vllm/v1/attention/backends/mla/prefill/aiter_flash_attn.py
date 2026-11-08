@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 
@@ -31,7 +32,10 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
         return "ROCM_AITER_FA"
 
     @classmethod
-    def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
+    def supports_compute_capability(
+        cls,
+        device_capability: "DeviceCapability | None",
+    ) -> bool:
         if not current_platform.is_rocm():
             return False
         from vllm.platforms.rocm import on_mi3xx
@@ -43,6 +47,15 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
         from vllm._aiter_ops import rocm_aiter_ops
 
         return rocm_aiter_ops.is_enabled()
+
+    @classmethod
+    def validate_configuration(cls, device_capability, selector_config):
+        invalid_reasons = super().validate_configuration(
+            device_capability, selector_config
+        )
+        if envs.VLLM_BATCH_INVARIANT:
+            invalid_reasons.append("batch invariance not supported")
+        return invalid_reasons
 
     def __init__(
         self,

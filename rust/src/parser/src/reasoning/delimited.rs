@@ -2,10 +2,14 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use vllm_tokenizer::{DecodedText, DynTokenizer, Tokenizer};
+use winnow::Parser;
+use winnow::combinator::alt;
+use winnow::error::ErrMode;
+use winnow::stream::StreamIsPartial;
 use xgrammar_structural_tag::format::Format;
 
 use super::{ReasoningDelta, ReasoningError, Result};
-use crate::utils::partial_prefix_len;
+use crate::utils::{Marker, SpecialToken, attributed_with_markers, safe_text_len_mul};
 
 /// Build a delimited reasoning parser with fixed text at each boundary.
 pub(crate) struct DelimitedReasoningParserBuilder {
@@ -73,12 +77,22 @@ impl DelimitedReasoningParserBuilder {
             }
         })?;
 
+        let delimiter = |token: String, id: u32, before: &str| {
+            let token = SpecialToken { text: token, id };
+            (
+                Marker::special(&token),
+                Marker::text(before).then_special(&token),
+            )
+        };
+        let (start, framed_start) = delimiter(self.start_token, start_token_id, self.before_start);
+        let (end, framed_end) = delimiter(self.end_token, end_token_id, self.before_end);
+
         Ok(DelimitedReasoningParser {
             tokenizer: self.tokenizer,
-            framed_start_token: format!("{}{}", self.before_start, self.start_token),
-            start_token: self.start_token,
-            framed_end_token: format!("{}{}", self.before_end, self.end_token),
-            end_token: self.end_token,
+            start,
+            framed_start,
+            end,
+            framed_end,
             start_token_id,
             end_token_id,
             after_start: self.after_start,
@@ -101,16 +115,21 @@ impl DelimitedReasoningParserBuilder {
 /// hardcoding model-family conventions. That means families with the same
 /// delimiters can often reuse this implementation even if their chat templates
 /// prefill different prompts.
+///
+/// A delimiter counts only where its dedicated token produced it: the same
+/// bytes spelled by ordinary tokens (the model quoting `</think>`) stay body
+/// text, as in the Python parsers' streaming path. The parser therefore needs
+/// attributed input; fed unattributed text, it never crosses a delimiter.
 pub(crate) struct DelimitedReasoningParser {
     tokenizer: DynTokenizer,
-    start_token: String,
-    framed_start_token: String,
-    end_token: String,
+    start: Marker,
+    framed_start: Marker,
+    end: Marker,
+    framed_end: Marker,
     start_token_id: u32,
     end_token_id: u32,
     after_start: &'static str,
     after_end: &'static str,
-    framed_end_token: String,
 
     // Mutable state.
     current_in_reasoning: bool,
@@ -149,14 +168,19 @@ impl DelimitedReasoningParser {
         self.current_in_reasoning
     }
 
+    /// The end delimiter, guarded by its token.
+    pub(crate) fn end_marker(&self) -> &Marker {
+        &self.end
+    }
+
     /// Wrap visible output from the initialized reasoning and framing state.
     pub(crate) fn wrap_visible_format(&self, visible: &Format) -> Format {
         let begin = if self.current_in_reasoning {
             "".to_string()
         } else {
-            self.framed_start_token.clone()
+            self.framed_start.as_str().to_string()
         };
-        let mut reasoning = Format::tag(begin, Format::any_text(), self.end_token.clone());
+        let mut reasoning = Format::tag(begin, Format::any_text(), self.end.as_str());
         if !self.after_end.is_empty() {
             reasoning = Format::sequence(vec![reasoning, Format::const_string(self.after_end)]);
         }
@@ -202,39 +226,41 @@ impl DelimitedReasoningParser {
             }
 
             let (marker, framed_marker) = if self.current_in_reasoning {
-                (&self.end_token, &self.framed_end_token)
+                (&self.end, &self.framed_end)
             } else {
-                (&self.start_token, &self.framed_start_token)
+                (&self.start, &self.framed_start)
             };
-            if let Some(index) = self.buffer.text.find(marker) {
-                let before = &framed_marker[..framed_marker.len() - marker.len()];
-                let body_len = if self.buffer.text[..index].ends_with(before) {
-                    index - before.len()
-                } else {
-                    index
-                };
-                let boundary_len = index + marker.len() - body_len;
-                let body = self.buffer.drain_prefix(body_len);
-                self.push_body(&mut delta, body);
-                let _ = self.buffer.drain_prefix(boundary_len);
-                self.current_in_reasoning = !self.current_in_reasoning;
-                self.pending_after = if self.current_in_reasoning {
-                    self.after_start
-                } else {
-                    self.after_end
-                };
-                continue;
+            let mut input = attributed_with_markers(&self.buffer, &());
+            if finishing {
+                // Partial delimiters at the end of the stream are body text.
+                let _ = input.complete();
             }
-
-            let keep_len = if finishing {
-                0
-            } else {
-                partial_prefix_len(&self.buffer.text, marker)
-                    .max(partial_prefix_len(&self.buffer.text, framed_marker))
+            let boundary = alt((framed_marker, marker)).map(str::len).parse_next(&mut input);
+            let body_len = match boundary {
+                Ok(boundary_len) => {
+                    // Zero-width tokens before the delimiter stay in the current state.
+                    let body = self.buffer.drain_prefix(0);
+                    self.push_body(&mut delta, body);
+                    let _ = self.buffer.drain_prefix(boundary_len);
+                    self.current_in_reasoning = !self.current_in_reasoning;
+                    self.pending_after = if self.current_in_reasoning {
+                        self.after_start
+                    } else {
+                        self.after_end
+                    };
+                    continue;
+                }
+                // A delimiter may start here once more input arrives.
+                Err(ErrMode::Incomplete(_)) => None,
+                // Body text runs up to the next delimiter that may start; the
+                // rest is held back. Fails only on an empty input.
+                Err(_) => safe_text_len_mul(&mut input, &[framed_marker, marker]).ok(),
             };
-            let body = self.buffer.drain_prefix(self.buffer.text.len() - keep_len);
+            let body = self.buffer.drain_prefix(body_len.unwrap_or(0));
             self.push_body(&mut delta, body);
-            break;
+            if body_len.is_none() {
+                break;
+            }
         }
         delta
     }

@@ -8,9 +8,9 @@ This is similar in concept to the `collections` module.
 import math
 from collections import defaultdict
 from collections.abc import Callable, Generator, Hashable, Iterable, Mapping, Sequence
-from typing import Generic, Literal, TypeVar
+from typing import Generic, Literal, TypeVar, assert_never, overload
 
-from typing_extensions import TypeIs, assert_never, overload
+from typing_extensions import TypeIs
 
 T = TypeVar("T")
 
@@ -123,17 +123,3 @@ def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
         groups[key(value)].append(value)
 
     return groups.items()
-
-
-def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
-    """Swap values between two keys."""
-    v1 = obj.get(key1)
-    v2 = obj.get(key2)
-    if v1 is not None:
-        obj[key2] = v1
-    else:
-        obj.pop(key2, None)
-    if v2 is not None:
-        obj[key1] = v2
-    else:
-        obj.pop(key1, None)

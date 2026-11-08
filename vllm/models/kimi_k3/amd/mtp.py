@@ -239,6 +239,8 @@ class KimiK3MTP(nn.Module):
                 (".fused_qkv_a_proj", ".q_a_proj", 0),
                 (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
             ]
+            if self.config.mla_use_output_gate:
+                stacked_params_mapping.append((".fused_qkv_a_proj", ".g_proj", 2))
 
         expert_params_mapping = (
             fused_moe_make_expert_params_mapping(
@@ -348,24 +350,6 @@ class KimiK3MTP(nn.Module):
                     )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
-
-        # Validate that weights were loaded for each expected MTP layer.
-        loaded_layers: set[int] = set()
-        for param_name in loaded_params:
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, param_name)
-            if spec_layer is not None:
-                loaded_layers.add(spec_layer)
-        for layer_idx in range(
-            self.model.mtp_start_layer_idx,
-            self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
-        ):
-            if layer_idx not in loaded_layers:
-                raise ValueError(
-                    f"MTP speculative decoding layer {layer_idx} weights "
-                    f"missing from checkpoint. The checkpoint may not include "
-                    f"the MTP layer weights. Use a checkpoint that includes "
-                    f"MTP layer weights, or disable speculative decoding."
-                )
 
         return loaded_params
 

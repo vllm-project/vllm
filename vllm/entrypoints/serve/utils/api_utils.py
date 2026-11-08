@@ -2,35 +2,52 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import dataclasses
 import functools
-import os
-from argparse import Namespace
-from logging import Logger
-from string import Template
+from collections.abc import Sequence
+from http import HTTPStatus
 from typing import Any
 
+import orjson
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel
 from starlette.background import BackgroundTask, BackgroundTasks
 
-from vllm import envs
-from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
-from vllm.logger import current_formatter_type, init_logger
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
-VLLM_SUBCMD_PARSER_EPILOG = (
-    "For full list:            vllm {subcmd} --help=all\n"
-    "For a section:            vllm {subcmd} --help=ModelConfig    (case-insensitive)\n"  # noqa: E501
-    "For a flag:               vllm {subcmd} --help=max-model-len  (_ or - accepted)\n"  # noqa: E501
-    "Documentation:            https://docs.vllm.ai\n"
-)
+
+def create_json_response(
+    result: BaseModel | Sequence[BaseModel] | dict[str, Any],
+    *,
+    status_code: int = HTTPStatus.OK,
+) -> Response:
+    """Encode models or JSON dictionaries, including native NumPy values."""
+    if isinstance(result, ErrorResponse):
+        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+
+    if isinstance(result, BaseModel):
+        content: Any = result.model_dump()
+    elif isinstance(result, dict):
+        content = result
+    else:
+        content = [item.model_dump() for item in result]
+    try:
+        body = orjson.dumps(
+            content, option=orjson.OPT_NON_STR_KEYS | orjson.OPT_SERIALIZE_NUMPY
+        )
+    except TypeError:
+        # Preserve JSONResponse support for integers outside the 64-bit range.
+        return JSONResponse(content=content, status_code=status_code)
+    return Response(
+        content=body, status_code=status_code, media_type="application/json"
+    )
 
 
 async def listen_for_disconnect(request: Request) -> None:
@@ -88,9 +105,78 @@ def with_cancellation(handler_func):
 
         if handler_task in done:
             return handler_task.result()
-        return None
+        # The client is gone; an empty response skips response_model validation.
+        return Response()
 
     return wrapper
+
+
+_ERROR_REF = {"$ref": "#/components/schemas/ErrorResponse"}
+
+
+def _sse_event_schema(chunk_ref: dict[str, str]) -> dict[str, Any]:
+    # One SSE event: `data` is a JSON chunk, a JSON error, or "[DONE]". This is
+    # the envelope FastAPI emits for EventSourceResponse routes, but published
+    # under `schema` because OpenAPI 3.1 has no `itemSchema`.
+    return {
+        "type": "object",
+        "required": ["data"],
+        "properties": {
+            "data": {
+                "type": "string",
+                "anyOf": [
+                    {"const": "[DONE]"},
+                    {
+                        "contentMediaType": "application/json",
+                        "contentSchema": chunk_ref,
+                    },
+                    {
+                        "contentMediaType": "application/json",
+                        "contentSchema": _ERROR_REF,
+                    },
+                ],
+            },
+            "event": {"type": "string"},
+            "id": {"type": "string"},
+            "retry": {"type": "integer", "minimum": 0},
+        },
+    }
+
+
+def json_or_sse_responses(
+    unary_model: type[BaseModel],
+    chunk_model: type[BaseModel],
+    error_responses: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
+    """Route kwargs for an endpoint answering with ``unary_model`` as JSON, or
+    with SSE ``data`` events carrying ``chunk_model`` when ``stream=true``.
+
+    FastAPI only registers models reachable from ``response_model`` or an
+    additional response's ``model``. The chunk model rides on the 200 entry,
+    which also overwrites the JSON schema, so ``openapi_extra`` restores it.
+    """
+    unary_ref = {"$ref": f"#/components/schemas/{unary_model.__name__}"}
+    chunk_ref = {"$ref": f"#/components/schemas/{chunk_model.__name__}"}
+    return {
+        "response_model": unary_model,
+        "responses": {
+            HTTPStatus.OK.value: {
+                "model": chunk_model,
+                "description": (
+                    "JSON body when stream=false; SSE events when stream=true."
+                ),
+                "content": {
+                    "text/event-stream": {"schema": _sse_event_schema(chunk_ref)}
+                },
+            },
+            **error_responses,
+        },
+        "openapi_extra": {
+            "responses": {
+                "200": {"content": {"application/json": {"schema": unary_ref}}}
+            }
+        },
+    }
 
 
 def decrement_server_load(request: Request):
@@ -121,7 +207,7 @@ def load_aware_call(func):
             raw_request.app.state.server_load_metrics -= 1
             raise
 
-        if isinstance(response, (JSONResponse, StreamingResponse)):
+        if isinstance(response, Response):
             if response.background is None:
                 response.background = BackgroundTask(decrement_server_load, raw_request)
             elif isinstance(response.background, BackgroundTasks):
@@ -143,27 +229,6 @@ def load_aware_call(func):
         return response
 
     return wrapper
-
-
-def cli_env_setup():
-    # The safest multiprocessing method is `spawn`, as the default `fork` method
-    # is not compatible with some accelerators. The default method will be
-    # changing in future versions of Python, so we should use it explicitly when
-    # possible.
-    #
-    # We only set it here in the CLI entrypoint, because changing to `spawn`
-    # could break some existing code using vLLM as a library. `spawn` will cause
-    # unexpected behavior if the code is not protected by
-    # `if __name__ == "__main__":`.
-    #
-    # References:
-    # - https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods
-    # - https://pytorch.org/docs/stable/notes/multiprocessing.html#cuda-in-multiprocessing
-    # - https://pytorch.org/docs/stable/multiprocessing.html#sharing-cuda-tensors
-    # - https://docs.habana.ai/en/latest/PyTorch/Getting_Started_with_PyTorch_and_Gaudi/Getting_Started_with_PyTorch.html?highlight=multiprocessing#torch-multiprocessing-for-dataloaders
-    if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
-        logger.debug("Setting VLLM_WORKER_MULTIPROC_METHOD to 'spawn'")
-        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 def get_max_tokens(
@@ -205,87 +270,6 @@ def get_max_tokens(
     )
 
 
-def get_non_default_args(args: Namespace | EngineArgs) -> dict[str, Any]:
-    from vllm.entrypoints.launchers.cli_args import make_arg_parser
-
-    non_default_args = {}
-
-    # Handle Namespace
-    if isinstance(args, Namespace):
-        parser = make_arg_parser(FlexibleArgumentParser())
-        for arg, default in vars(parser.parse_args([])).items():
-            if default != getattr(args, arg):
-                non_default_args[arg] = getattr(args, arg)
-
-    # Handle EngineArgs instance
-    elif isinstance(args, EngineArgs):
-        default_args = EngineArgs(model=args.model)  # Create default instance
-        for field in dataclasses.fields(args):
-            current_val = getattr(args, field.name)
-            default_val = getattr(default_args, field.name)
-            if current_val != default_val:
-                non_default_args[field.name] = current_val
-        if default_args.model != EngineArgs.model:
-            non_default_args["model"] = default_args.model
-    else:
-        raise TypeError(
-            "Unsupported argument type. Must be Namespace or EngineArgs instance."
-        )
-
-    return non_default_args
-
-
-def _jsonify_arg_value(value: Any) -> Any:
-    if value is None or isinstance(value, bool | int | float | str):
-        return value
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return {
-            key: _jsonify_arg_value(val)
-            for key, val in dataclasses.asdict(value).items()
-        }
-    if isinstance(value, dict):
-        return {str(key): _jsonify_arg_value(val) for key, val in value.items()}
-    if isinstance(value, tuple | list):
-        return [_jsonify_arg_value(item) for item in value]
-    if (model_dump := getattr(value, "model_dump", None)) is not None:
-        return _jsonify_arg_value(model_dump(mode="json"))
-    if (to_dict := getattr(value, "dict", None)) is not None:
-        return _jsonify_arg_value(to_dict())
-    return repr(value)
-
-
-def jsonify_non_default_args(
-    args: Namespace | EngineArgs,
-    *,
-    exclude: set[str] | None = None,
-) -> dict[str, Any]:
-    non_default_args = get_non_default_args(args)
-    if exclude is not None:
-        for key in exclude:
-            non_default_args.pop(key, None)
-
-    return {key: _jsonify_arg_value(value) for key, value in non_default_args.items()}
-
-
-# Fields whose values must never be logged verbatim.
-_SENSITIVE_ARG_FIELDS = frozenset({"api_key", "hf_token", "watermark_config"})
-
-
-def redact_sensitive_args(args: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of `args` with sensitive values redacted for logging."""
-    if not any(key in _SENSITIVE_ARG_FIELDS for key in args):
-        return args
-    return {
-        key: ("***" if key in _SENSITIVE_ARG_FIELDS else value)
-        for key, value in args.items()
-    }
-
-
-def log_non_default_args(args: Namespace | EngineArgs):
-    non_default_args = get_non_default_args(args)
-    logger.info("non-default args: %s", redact_sensitive_args(non_default_args))
-
-
 def should_include_usage(
     stream_options: StreamOptions | None, enable_force_include_usage: bool
 ) -> tuple[bool, bool]:
@@ -320,31 +304,6 @@ def process_lora_modules(
         else:
             lora_modules += default_mm_lora_paths
     return lora_modules
-
-
-def log_version_and_model(lgr: Logger, version: str, model_name: str) -> None:
-    if envs.VLLM_DISABLE_LOG_LOGO or (formatter := current_formatter_type(lgr)) is None:
-        message = "vLLM server version %s, serving model %s"
-    else:
-        logo_template = Template(
-            "\n       ${w}█     █     █▄   ▄█${r}\n"
-            " ${o}▄▄${r} ${b}▄█${r} ${w}█     █     █ ▀▄▀ █${r}  version ${w}%s${r}\n"
-            "  ${o}█${r}${b}▄█▀${r} ${w}█     █     █     █${r}  model   ${w}%s${r}\n"
-            "   ${b}▀▀${r}  ${w}▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀${r}\n"
-        )
-        colors = {
-            "w": "\033[1m",  # bold, default foreground
-            "o": "\033[93m",  # orange
-            "b": "\033[94m",  # blue
-            "r": "\033[0m",  # reset
-        }
-        if formatter != "color":
-            # monochrome logo (no ansi escape codes)
-            colors = dict.fromkeys(colors, "")
-
-        message = logo_template.substitute(colors)
-
-    lgr.info(message, version, model_name)
 
 
 async def validate_json_request(raw_request: Request):
