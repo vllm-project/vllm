@@ -11,9 +11,26 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
+import anyio
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from starlette.types import Receive, Scope, Send
+
+
+class _DecodeStreamingResponse(StreamingResponse):
+    """Own the decode response even if downstream body streaming never starts."""
+
+    def __init__(self, response: httpx.Response, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.upstream_response = response
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with anyio.CancelScope(shield=True):
+                await self.upstream_response.aclose()
 
 
 def maybe_wrap_ipv6_address(address: str) -> str:
@@ -339,7 +356,8 @@ async def _handle_completions(api: str, request: Request):
                 async for chunk in response.aiter_bytes():
                     yield chunk
             finally:
-                await response.aclose()
+                with anyio.CancelScope(shield=True):
+                    await response.aclose()
 
         content_type = response.headers.get("content-type")
         response_headers = {"content-type": content_type} if content_type else None
@@ -348,8 +366,9 @@ async def _handle_completions(api: str, request: Request):
             media_type = (
                 "text/event-stream" if req_data.get("stream") else "application/json"
             )
-        return StreamingResponse(
-            generate_stream(),
+        return _DecodeStreamingResponse(
+            response,
+            content=generate_stream(),
             status_code=response.status_code,
             headers=response_headers,
             media_type=media_type,
