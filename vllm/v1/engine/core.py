@@ -994,7 +994,7 @@ class EngineCore:
         self.reset_mm_cache()
         self.reset_encoder_cache()
 
-    def _finish_pause(self, clear_cache: bool) -> None:
+    def _finish_pause(self, clear_cache: bool, reset_connector: bool) -> None:
         # The drain of a checkpoint prepare is complete. A failure leaves the
         # engine FAILED instead of serving, as nothing waits on this pause.
         preparing = self._checkpoint_state == CheckpointState.PREPARING
@@ -1003,7 +1003,7 @@ class EngineCore:
             # the last dummy batch an idle DP rank launches.
             self.model_executor.collective_rpc("synchronize_device")
             if clear_cache:
-                self._reset_caches()
+                self._reset_caches(reset_connector=reset_connector)
                 self._set_kv_cache_reclaimable(True)
             if preparing:
                 self.release_kv_cache_memory()
@@ -1016,7 +1016,10 @@ class EngineCore:
             self._fail_checkpoint(e)
 
     def pause_scheduler(
-        self, mode: PauseMode = "abort", clear_cache: bool = True
+        self,
+        mode: PauseMode = "abort",
+        clear_cache: bool = True,
+        reset_connector: bool = True,
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
@@ -1030,6 +1033,9 @@ class EngineCore:
           optionally clear caches, then complete the returned Future.
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
+
+        ``reset_connector`` decides whether clearing caches also resets the
+        KV connector's cache.
         """
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
@@ -1041,7 +1047,16 @@ class EngineCore:
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
-        self._finish_pause(clear_cache)
+        if clear_cache and not reset_connector:
+            # Pending connector stores still read the KV cache that a sleep
+            # discards. Step until they finish, as EngineCoreProc does before
+            # it completes a pause.
+            while self.scheduler.has_requests() or self.batch_queue:
+                _, model_executed = self.step_fn()
+                self.post_step(model_executed)
+                if not model_executed:
+                    time.sleep(0.001)
+        self._finish_pause(clear_cache, reset_connector)
 
         return None
 
@@ -1072,7 +1087,12 @@ class EngineCore:
         """Return whether the scheduler is in any pause state."""
         return self.scheduler.pause_state != PauseState.UNPAUSED
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None | Future:
+    def sleep(
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        reset_connector: bool = True,
+    ) -> None | Future:
         """Put the engine to sleep at the specified level.
 
         Args:
@@ -1083,6 +1103,8 @@ class EngineCore:
                 - Level 2: Discard model parameters and KV cache.
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
+            reset_connector: Also reset the KV connector's cache; see
+                ``LLM.sleep``.
 
         """
         if self._checkpoint_state != CheckpointState.RUNNING:
@@ -1091,7 +1113,11 @@ class EngineCore:
             )
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
-        pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
+        pause_future = self.pause_scheduler(
+            mode=mode,
+            clear_cache=clear_prefix_cache,
+            reset_connector=reset_connector,
+        )
         if level < 1:
             return pause_future
 
@@ -1145,10 +1171,10 @@ class EngineCore:
             self.resume_scheduler()
         return fully_awake
 
-    def release_kv_cache_memory(self) -> None:
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         """Discard KV cache physical memory. Requires a completed pause
         and all executor memory to be resident. Kept requests are recomputed
-        after wake-up.
+        after wake-up. ``reset_connector`` is as for ``sleep``.
         """
         if not (
             self.is_scheduler_paused()
@@ -1162,7 +1188,7 @@ class EngineCore:
             raise RuntimeError(
                 "release_kv_cache_memory() requires all executor memory to be resident"
             )
-        self._reset_caches()
+        self._reset_caches(reset_connector=reset_connector)
         self.model_executor.discard(("kv_cache",))
 
     def checkpoint_state(self) -> tuple[CheckpointState, str | None]:
@@ -2381,7 +2407,10 @@ class EngineCoreProc(EngineCore):
         )
 
     def pause_scheduler(
-        self, mode: PauseMode = "abort", clear_cache: bool = True
+        self,
+        mode: PauseMode = "abort",
+        clear_cache: bool = True,
+        reset_connector: bool = True,
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
@@ -2401,7 +2430,7 @@ class EngineCoreProc(EngineCore):
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
             try:
-                engine._finish_pause(clear_cache)
+                engine._finish_pause(clear_cache, reset_connector)
             except Exception as e:
                 future.set_exception(e)
             else:
@@ -2417,7 +2446,7 @@ class EngineCoreProc(EngineCore):
         self.scheduler.set_pause_state(pause_state)
 
         if self._pause_complete():
-            self._finish_pause(clear_cache)
+            self._finish_pause(clear_cache, reset_connector)
             return None
 
         future = Future[Any]()
@@ -2972,12 +3001,12 @@ class EngineCoreActorMixin:
         # To bypass 2, we need to also set
         # RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES, but vLLM workers created
         # thereafter would have CUDA_VISIBLE_DEVICES set, which is sticky:
-        # https://github.com/ray-project/ray/blob/e752fc319ddedd9779a0989b6d3613909bad75c9/python/ray/_private/worker.py#L456 # noqa: E501
+        # https://github.com/ray-project/ray/blob/e752fc319ddedd9779a0989b6d3613909bad75c9/python/ray/_private/worker.py#L456
         # This is problematic because when the vLLM worker (a Ray actor)
         # executes a task, it indexes into the sticky CUDA_VISIBLE_DEVICES
         # rather than directly using the GPU ID, potentially resulting in
         # index out of bounds error. See:
-        # https://github.com/ray-project/ray/pull/40461/files#diff-31e8159767361e4bc259b6d9883d9c0d5e5db780fcea4a52ead4ee3ee4a59a78R1860 # noqa: E501
+        # https://github.com/ray-project/ray/pull/40461/files#diff-31e8159767361e4bc259b6d9883d9c0d5e5db780fcea4a52ead4ee3ee4a59a78R1860
         # and get_accelerator_ids_for_accelerator_resource() in worker.py
         # of ray.
         self._set_visible_devices(vllm_config, local_dp_rank)

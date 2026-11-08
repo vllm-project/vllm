@@ -26,7 +26,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import (
     has_flashinfer_prims_ts_sparse_mla,
     prims_ts_sparse_mla_format_error,
-    prims_ts_sparse_mla_schedules_native_heads,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -493,15 +492,7 @@ _PRIMS_TS_FORMATS = {
     # RoPE, E4M3 block scales).
     "nvfp4_ds_mla": "nvfp4.fp8rope",
 }
-# FlashInfer builds without flashinfer-ai/flashinfer#7984 choose the 2-CTA
-# schedule (KV rows loaded and converted once per CTA pair) only for exactly 128
-# query heads; other counts in (64, 128) run as two M64 tiles that load every KV
-# row twice, 1.7x (fp8) to 2.7x (nvfp4) slower at 96 heads (DCP8 decode). There
-# such queries are zero-padded to 128 heads. Builds with it schedule 96 heads on
-# the same 2-CTA tile directly, which saves the padded query/output copies.
-_PRIMS_TS_2CTA_HEADS = 128
-# Rows per prims_ts call. Bounds the head-padded query/output of long prefill
-# steps.
+# Rows per prims_ts call. Bounds the query/output of long prefill steps.
 _PRIMS_TS_MAX_ROWS = 4096
 
 
@@ -886,18 +877,11 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm2_scale *= layer._k_scale_float
 
-    def _prims_ts_query_heads(self, num_heads: int) -> int:
-        if 64 < num_heads < _PRIMS_TS_2CTA_HEADS and (
-            not prims_ts_sparse_mla_schedules_native_heads()
-        ):
-            return _PRIMS_TS_2CTA_HEADS
-        return num_heads
-
     def _get_prims_ts_plans(self, device: torch.device, heads: int, max_topk: int):
         return _prims_ts_plans.get(
             device,
             self.prims_ts_buckets,
-            self._prims_ts_query_heads(heads),
+            heads,
             self.prims_ts_format,
             max_topk,
             self.need_to_return_lse_for_decode,
@@ -921,7 +905,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                     self.topk_indices_buffer.shape[1],
                 )
         # Claim the transient peak of one long prefill step in the profile run:
-        # one chunk's head-padded query, output and LSE, and, for a step of
+        # one chunk's query, output and LSE, and, for a step of
         # several chunks, the step output.
         # A ShardQ step attends only this rank's token slice, with every head.
         vllm_config = get_current_vllm_config()
@@ -938,9 +922,8 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         _ = torch.empty(peak, dtype=torch.uint8, device=current_platform.device_type)
 
     def _prims_ts_peak_bytes(self, num_tokens: int, heads: int) -> int:
-        padded = self._prims_ts_query_heads(heads)
         rows = min(num_tokens, self.prims_ts_buckets[-1])
-        peak = rows * padded * (self.kv_lora_rank + self.qk_rope_head_dim + 1024 + 4)
+        peak = rows * heads * (self.kv_lora_rank + self.qk_rope_head_dim + 1024 + 4)
         if num_tokens > rows:
             peak += num_tokens * heads * self.kv_lora_rank * 2
         return peak
@@ -959,7 +942,6 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         of ``topk_indices`` (-1 entries are masked)."""
         assert q.dtype == torch.float8_e4m3fn, q.dtype
         num_tokens, heads, _ = q.shape
-        padded = self._prims_ts_query_heads(heads)
         # Storage rows; the backend aligns block strides to whole rows.
         is_fp8 = self.prims_ts_format == "native"
         rows, _ = flat_kv_row_view(
@@ -968,14 +950,9 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         kv_descale = layer._k_scale_float if is_fp8 else 1.0
         softmax_scale = self.scale * layer._q_scale_float * kv_descale
         buckets = self.prims_ts_buckets
-        # A call of one chunk (every decode step) returns views of the kernel's
-        # head-padded output and LSE: the DCP combine reads them in place.
-        out_heads = padded if num_tokens <= buckets[-1] else heads
-        out = q.new_empty(
-            (num_tokens, out_heads, self.kv_lora_rank), dtype=torch.bfloat16
-        )
+        out = q.new_empty((num_tokens, heads, self.kv_lora_rank), dtype=torch.bfloat16)
         lse = (
-            q.new_empty((num_tokens, out_heads), dtype=torch.float32)
+            q.new_empty((num_tokens, heads), dtype=torch.float32)
             if self.need_to_return_lse_for_decode
             else None
         )
@@ -987,39 +964,19 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             plan, qo_indptr = plans[capacity]
             if n < capacity:
                 qo_indptr = qo_indptr.clamp(max=n)
-            query = q[start:end]
-            chunk_out, chunk_lse = (
-                out[start:end],
-                None if lse is None else lse[start:end],
-            )
-            if padded != heads:
-                # Zero query heads: computed, then dropped.
-                query = _pad_query_heads(query, padded)
-            if out_heads != padded:
-                chunk_out = out.new_empty((n, padded, self.kv_lora_rank))
-                if lse is not None:
-                    chunk_lse = lse.new_empty((n, padded))
             plan.run(
-                query,
+                q[start:end],
                 rows,
                 topk_indices[start:end],
                 valid_counts[start:end],
                 qo_indptr=qo_indptr,
                 softmax_scale=softmax_scale,
                 output_scale=kv_descale,
-                out=chunk_out,
-                lse=chunk_lse,
+                out=out[start:end],
+                lse=None if lse is None else lse[start:end],
                 validate=False,
             )
-            if out_heads != padded:
-                # The copy moves 8-byte words (1 KiB output rows).
-                out[start:end].view(torch.int64).copy_(
-                    chunk_out.view(torch.int64)[:, :heads]
-                )
-                if lse is not None:
-                    assert chunk_lse is not None
-                    lse[start:end] = chunk_lse[:, :heads]
-        return out[:, :heads], None if lse is None else lse[:, :heads]
+        return out, lse
 
     def autotune_hisparse_decode(self, layer: AttentionLayer) -> None:
         """Autotune the largest legal HiSparse decode batch."""

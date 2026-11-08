@@ -38,6 +38,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_transfer.kv_connector.utils import CircuitBreaker
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
@@ -2793,13 +2794,22 @@ class LookupKeyServer:
 # ============================================================
 
 
+# Consecutive failed lookups that open the breaker, and how long it stays open.
+LOOKUP_BREAKER_FAILURE_THRESHOLD = 3
+LOOKUP_BREAKER_COOLDOWN_S = 30.0
+# Reset drains pending saves on the server before replying, so allow longer.
+RESET_TIMEOUT_S = 60.0
+
+
 @dataclasses.dataclass
 class LookupState:
     future: Future[MooncakeLookupResult]
     signature: tuple[int, int, bytes]
+    deadline: float
     # Freshness runs from when the RPC returned, not when it was queued.
     completed_at: float | None = None
-    error_logged: bool = False
+    # Repeated reads of a cached outcome must not update the breaker again.
+    result: MooncakeLookupResult | None = None
 
     def __post_init__(self) -> None:
         self.future.add_done_callback(self._mark_completed)
@@ -2827,7 +2837,20 @@ class LookupKeyClient:
     of every request is a named tag from ``protocol.py``.
     """
 
+    class _LookupExpired(TimeoutError):
+        """The deadline passed while queued, before any RPC was sent."""
+
     def __init__(self, vllm_config: VllmConfig):
+        assert vllm_config.kv_transfer_config is not None
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        self._lookup_timeout_s = extra_config.get("lookup_timeout_s", 1.0)
+        assert self._lookup_timeout_s > 0, "lookup_timeout_s must be positive"
+        self.circuit_breaker = CircuitBreaker(
+            "Mooncake lookup",
+            LOOKUP_BREAKER_COOLDOWN_S,
+            LOOKUP_BREAKER_FAILURE_THRESHOLD,
+            probe_window_s=self._lookup_timeout_s,
+        )
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lookup(vllm_config)
         self.socket = make_zmq_socket(
@@ -2837,22 +2860,38 @@ class LookupKeyClient:
             bind=False,
         )
 
+        # Allow a new request after a timeout and discard late replies to it.
+        self.socket.setsockopt(zmq.REQ_RELAXED, 1)
+        self.socket.setsockopt(zmq.REQ_CORRELATE, 1)
+
         # Async lookup support
+        # One shared ZMQ REQ socket requires serial send/receive operations.
         self.executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="MooncakeLookupClient"
         )
         self._lookups: dict[str, LookupState] = {}
-        assert vllm_config.kv_transfer_config is not None
-        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         prefetch_limit = extra_config.get("lookup_prefetch_limit", 0)
         self._prefetch_slots = (
             threading.BoundedSemaphore(prefetch_limit) if prefetch_limit > 0 else None
         )
         self._lookup_ttl_s = extra_config.get("lookup_prefetch_ttl_s", 2.0)
 
+    def _wait_for_socket(self, event: int, deadline: float) -> None:
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0 or not self.socket.poll(remaining_ms, event):
+            raise TimeoutError("Mooncake lookup timed out")
+
+    def _request(self, frames: Sequence[bytes], deadline: float) -> bytes:
+        self._wait_for_socket(zmq.POLLOUT, deadline)
+        self.socket.send_multipart(frames, copy=False, flags=zmq.NOBLOCK)
+        self._wait_for_socket(zmq.POLLIN, deadline)
+        return self.socket.recv(flags=zmq.NOBLOCK)
+
     def _lookup(
-        self, num_tokens: int, block_hashes: list[BlockHash]
+        self, num_tokens: int, block_hashes: list[BlockHash], deadline: float
     ) -> MooncakeLookupResult:
+        if time.monotonic() >= deadline:
+            raise self._LookupExpired("Mooncake lookup expired while queued")
         hash_len = len(block_hashes[0]) if block_hashes else 0
         all_frames = (
             LOOKUP_MSG,
@@ -2860,9 +2899,7 @@ class LookupKeyClient:
             hash_len.to_bytes(2, byteorder="big"),
             b"".join(block_hashes),
         )
-        self.socket.send_multipart(all_frames, copy=False)
-        resp = self.socket.recv()
-        return decode_lookup_response(resp)
+        return decode_lookup_response(self._request(all_frames, deadline))
 
     def lookup(
         self,
@@ -2886,22 +2923,35 @@ class LookupKeyClient:
             self.discard(req_id)
             state = None
         if state is None:
+            # Only new lookups are gated; pending ones are bounded by deadline.
+            if not self.circuit_breaker.allow():
+                return MooncakeLookupResult(0)
+            deadline = now + self._lookup_timeout_s
             state = LookupState(
                 future=self.executor.submit(
-                    self._lookup, num_tokens, list(block_hashes)
+                    self._lookup, num_tokens, list(block_hashes), deadline
                 ),
                 signature=signature,
+                deadline=deadline,
             )
             self._lookups[req_id] = state
-        if non_block and not state.future.done():
-            return None
-        try:
-            result = state.future.result()
-        except Exception as e:
-            if not state.error_logged:
-                state.error_logged = True
-                logger.error("Async Mooncake lookup failed for %s: %s", req_id, e)
-            result = MooncakeLookupResult(0)
+        if state.result is None:
+            remaining_s = state.deadline - time.monotonic()
+            if non_block and not state.future.done() and remaining_s > 0:
+                return None
+            try:
+                state.result = state.future.result(timeout=max(0, remaining_s))
+                self.circuit_breaker.record_success()
+            except Exception as e:
+                # Expiring queued behind other lookups says nothing about the
+                # store; cancel() is True only if the lookup never started.
+                if isinstance(e, self._LookupExpired) or state.future.cancel():
+                    logger.debug("Mooncake lookup expired for %s", req_id)
+                else:
+                    self.circuit_breaker.record_failure()
+                    logger.error("Mooncake lookup failed for %s: %s", req_id, e)
+                state.result = MooncakeLookupResult(0)
+        result = state.result
         if not non_block:
             self.discard(req_id)
         return result
@@ -2916,8 +2966,14 @@ class LookupKeyClient:
         slots = self._prefetch_slots
         if slots is None or not slots.acquire(blocking=False):
             return False
+        if not self.circuit_breaker.allow():
+            slots.release()
+            return False
         try:
-            future = self.executor.submit(self._lookup, num_tokens, list(block_hashes))
+            deadline = time.monotonic() + self._lookup_timeout_s
+            future = self.executor.submit(
+                self._lookup, num_tokens, list(block_hashes), deadline
+            )
         except RuntimeError:  # executor shut down
             slots.release()
             return False
@@ -2925,6 +2981,7 @@ class LookupKeyClient:
         self._lookups[req_id] = LookupState(
             future=future,
             signature=_lookup_signature(num_tokens, block_hashes),
+            deadline=deadline,
         )
         return True
 
@@ -2940,10 +2997,13 @@ class LookupKeyClient:
         Ordering assumption: caller MUST ensure no in-flight Mooncake
         lookups or transfers when invoking reset. In RL workflows this
         holds naturally at the step boundary after weight updates and
-        rollout drain. Returns True on ACK, False on NACK.
+        rollout drain. Returns True on ACK, False on NACK or timeout.
         """
-        self.socket.send(RESET_MSG)
-        resp = self.socket.recv()
+        try:
+            resp = self._request((RESET_MSG,), time.monotonic() + RESET_TIMEOUT_S)
+        except TimeoutError:
+            logger.error("Mooncake store reset timed out")
+            return False
         return bytes(resp) == RESP_OK
 
     def reset(self) -> bool:

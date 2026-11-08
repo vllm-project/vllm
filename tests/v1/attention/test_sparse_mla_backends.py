@@ -4338,11 +4338,9 @@ def test_hisparse_keeps_speculative_rows_as_decodes():
         attention_config=SimpleNamespace(hisparse_config=object()),
         speculative_config=SimpleNamespace(
             num_speculative_tokens=3,
-            parallel_drafting=False,
             max_num_new_slots_for_drafting=0,
         ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        use_v2_model_runner=True,
     )
 
     builder._init_reorder_batch_threshold(256, supports_spec_as_decode=True)
@@ -4737,11 +4735,9 @@ def test_hisparse_flashmla_reorders_full_speculative_window_as_decode():
         attention_config=SimpleNamespace(hisparse_config=object()),
         speculative_config=SimpleNamespace(
             num_speculative_tokens=3,
-            parallel_drafting=False,
             max_num_new_slots_for_drafting=0,
         ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        use_v2_model_runner=True,
     )
 
     builder._init_reorder_batch_threshold(

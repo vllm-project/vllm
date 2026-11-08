@@ -1079,7 +1079,7 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
     )
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
     from vllm.v1.attention.ops.dcp_shardq import context as dcp
-    from vllm.v1.worker.block_table import get_block_table_width
+    from vllm.v1.kv_cache_interface import get_block_table_width
     from vllm.v1.worker.workspace import init_workspace_manager
 
     torch.accelerator.set_device_index(rank)
@@ -1392,7 +1392,7 @@ def _profile_worker(rank, world, init_file, cache_dtype, kernel):
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
     from vllm.v1.attention.ops.dcp import get_dcp_workspace_max_num_tokens
     from vllm.v1.attention.ops.dcp_shardq import context as dcp
-    from vllm.v1.worker.block_table import get_block_table_width
+    from vllm.v1.kv_cache_interface import get_block_table_width
     from vllm.v1.worker.workspace import init_workspace_manager
 
     torch.accelerator.set_device_index(rank)

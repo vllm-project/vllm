@@ -371,11 +371,8 @@ def run_worker(rank, world, init_method):
                 model_config=SimpleNamespace(max_model_len=world << 17),
                 scheduler_config=config.scheduler_config,
                 compilation_config=config.compilation_config,
-                speculative_config=SimpleNamespace(
-                    num_speculative_tokens=Q - 1, parallel_drafting=False
-                ),
+                speculative_config=SimpleNamespace(num_speculative_tokens=Q - 1),
                 num_speculative_tokens=Q - 1,
-                use_v2_model_runner=True,
             )
             assert init_dcp_topk_merge(gate, TOPK), "merge disabled"
             _check(get_dcp_group())

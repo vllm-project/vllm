@@ -131,7 +131,7 @@ class SpeculatorsConfig(PreTrainedConfig):
             "num_speculative_tokens": num_speculative_tokens,
         }
         if result["method"] == "peagle":
-            result.update({"method": "eagle3", "parallel_drafting": True})
-        elif result["method"] == "dflash2":
+            raise ValueError("P-EAGLE (parallel drafting EAGLE-3) is not supported.")
+        if result["method"] == "dflash2":
             result["method"] = "dflash"
         return result
