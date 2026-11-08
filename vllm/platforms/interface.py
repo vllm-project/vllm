@@ -1108,6 +1108,28 @@ class Platform:
         attn_block_size = backend_block_alignment * cdiv(
             attn_block_size, backend_block_alignment
         )
+        # Prefix-cacheable block sizes must be multiples of prefix_match_unit.
+        # The size derived from the mamba state can be divisor-poor (e.g. 2112
+        # or 2096 tokens), so round it up; the mamba page is padded to the
+        # attention page below anyway.
+        if (
+            unit := cache_config.prefix_match_unit
+        ) is not None and attn_block_size % unit != 0:
+            step = lcm(kernel_block_alignment_size, backend_block_alignment, unit)
+            rounded = step * cdiv(attn_block_size, step)
+            growth = rounded / attn_block_size - 1
+            log = logger.warning if growth > 0.1 else logger.info
+            log(
+                "Rounding attention block size %d up to %d tokens (+%.0f%% "
+                "mamba page padding) so it is divisible by "
+                "prefix_match_unit=%d. A unit that divides %d avoids it.",
+                attn_block_size,
+                rounded,
+                100 * growth,
+                unit,
+                attn_block_size,
+            )
+            attn_block_size = rounded
 
         if cache_config.block_size < attn_block_size:
             cache_config.block_size = attn_block_size
