@@ -146,8 +146,8 @@ def _to_trtllm_weights(
     k: int,
     is_gated_act: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Shuffle ``make_test_quant_config`` NvFP4 weights and their (swizzled)
-    scales into the TRTLLM-Gen layout, updating ``quant_config``'s scales."""
+    """Shuffle `make_test_quant_config` NvFP4 weights and their (swizzled)
+    scales into the TRTLLM-Gen layout, updating `quant_config`'s scales."""
     quant_blocksize = 16
     w1_scale_reference = quant_config.w1_scale
     w2_scale_reference = quant_config.w2_scale

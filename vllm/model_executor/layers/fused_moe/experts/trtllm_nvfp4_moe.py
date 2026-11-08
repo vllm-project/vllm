@@ -55,7 +55,7 @@ class NvFp4PerTokenInputHandoff:
 
     def quantize(self, hidden_states: torch.Tensor) -> NvFp4PerTokenInput:
         """The experts' input quantization: the provided result if
-        ``hidden_states`` is the very tensor it was computed from (same
+        `hidden_states` is the very tensor it was computed from (same
         storage, shape, strides and dtype), a fresh one otherwise."""
         entry = self._entry
         if entry is not None:
@@ -71,8 +71,8 @@ class NvFp4PerTokenInputHandoff:
 
     @contextlib.contextmanager
     def provide(self, hidden_states: torch.Tensor, quantized: NvFp4PerTokenInput):
-        """Within the block, ``quantize(hidden_states)`` returns ``quantized``,
-        which must be ``quantize(hidden_states)`` computed earlier. The caller
+        """Within the block, `quantize(hidden_states)` returns `quantized`,
+        which must be `quantize(hidden_states)` computed earlier. The caller
         orders its producing stream before the MoE call."""
         assert quantized[0].shape[0] == hidden_states.shape[0]
         prev = self._entry

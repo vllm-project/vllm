@@ -672,7 +672,7 @@ class MiniMaxM3MoE(nn.Module):
         self, hidden_states: torch.Tensor
     ) -> NvFp4PerTokenInputHandoff | None:
         """The routed experts' NVFP4 input handoff if they quantize their input
-        per token themselves (TRTLLM-Gen) and receive ``hidden_states``
+        per token themselves (TRTLLM-Gen) and receive `hidden_states`
         unchanged: no dispatch, all-gather, input transform or padding. Not
         with dual-batch overlap, whose micro-batch threads would share this
         layer's events and handoff. Checked per call: a weight reload may
@@ -704,7 +704,7 @@ class MiniMaxM3MoE(nn.Module):
         """Yield the router logits; run the MoE call inside the block.
 
         The router GEMM and the routed experts' NVFP4 input quantization both
-        read only ``hidden_states``, yet the experts quantize after routing. So
+        read only `hidden_states`, yet the experts quantize after routing. So
         quantize on the aux stream while the router GEMM runs and hand the
         result to the experts for the block.
 

@@ -84,7 +84,7 @@ def _trtllm_moe_block(hidden_size=1024, intermediate_size=512):
 
 
 def _count_provides(handoff) -> list[int]:
-    """Count ``handoff.provide`` calls, i.e. MoE calls given an input
+    """Count `handoff.provide` calls, i.e. MoE calls given an input
     quantization made on the aux stream."""
     calls = [0]
     provide = handoff.provide
