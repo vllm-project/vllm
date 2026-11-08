@@ -492,11 +492,14 @@ def _is_moe_lora_target(
 
     return is_in_target_modules(
         layer_name, lora_config.target_modules, packed_modules_mapping
-    ) or any(
-        # Dynamic expert mappings are expanded from the instantiated model
-        # later, so retain the opt-in for targets that may reach them.
-        target.startswith("experts.")
-        for target in lora_config.target_modules or ()
+    ) or (
+        layer_name.rsplit(".", 1)[-1] == "experts"
+        and any(
+            # Dynamic expert mappings are expanded from the instantiated model
+            # later, so retain the opt-in for targets that may reach them.
+            target.startswith("experts.")
+            for target in lora_config.target_modules or ()
+        )
     )
 
 

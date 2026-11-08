@@ -91,6 +91,23 @@ def test_moe_lora_target_selection(lora_config, packed_modules_mapping, expected
         assert candidates == backend_to_kernel_cls(backend)
 
 
+@pytest.mark.skip_global_cleanup
+def test_dynamic_expert_target_is_scoped_to_expert_module():
+    from vllm.model_executor.layers.fused_moe.layer import _is_moe_lora_target
+
+    model = torch.nn.Module()
+    model.mlp = torch.nn.Module()
+    model.mlp.experts = torch.nn.Module()
+    model.mlp.shared_experts = torch.nn.Module()
+    lora_config = _lora_config(["experts.0.gate_proj"])
+    decisions = {
+        name: _is_moe_lora_target(lora_config, name, {})
+        for name, _ in model.named_modules()
+    }
+    assert decisions["mlp.experts"] is True
+    assert decisions["mlp.shared_experts"] is False
+
+
 def test_attention_only_lora_keeps_native_moe_backend(dist_init):
     vllm_config = VllmConfig()
     vllm_config.lora_config = _lora_config(["q_proj", "k_proj", "v_proj", "o_proj"])
