@@ -3577,6 +3577,10 @@ class Scheduler(SchedulerInterface):
         reserved = self._parked_reserved_blocks
         if exclude is not None:
             reserved -= self._parked_reservations.get(exclude, 0)
+        if parked_only and self.kv_cache_config.hisparse_host_num_blocks is not None:
+            # Summed on demand, HiSparse loads can return the host-pool admission
+            # sentinel; like their host pages, they gate async loads only.
+            return reserved
         return reserved + sum(
             self._request_remaining_blocks(req)
             for req in self._inflight_prefills

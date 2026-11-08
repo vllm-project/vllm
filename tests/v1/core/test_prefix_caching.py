@@ -1081,8 +1081,8 @@ def test_hisparse_admitted_async_loads_can_finish_with_nothing_running(
 
 
 def test_hisparse_import_reservation_does_not_gate_local_admissions(tmp_path):
-    """Like the GPU pool's, the host reservation only gates async loads; a
-    local admission runs and can be preempted, so it cannot strand an import."""
+    """The host reservation only gates async loads; a local admission runs and
+    can be preempted, so it cannot strand an import."""
     # Seven usable host blocks: the import holds one and reserves five, leaving
     # one, so gating the local request's two pages on the reservation fails.
     scheduler, _ = _make_hisparse_scheduler(tmp_path, 8, HISPARSE_BLOCK_SIZE)
@@ -1095,6 +1095,33 @@ def test_hisparse_import_reservation_does_not_gate_local_admissions(tmp_path):
     )
     local = _add_hisparse_request(scheduler, "local", 2, offset=1000)
     assert local in scheduler.running
+
+
+def test_hisparse_import_host_shortfall_does_not_preempt_running(tmp_path):
+    """A parked import whose host pages no longer fit must not block running
+    requests' GPU allocations: its on-demand reservation is then the host
+    admission sentinel, larger than the whole GPU pool."""
+    # The local request's first two-page chunk leaves four free host blocks,
+    # one fewer than the import still needs.
+    scheduler, _ = _make_hisparse_scheduler(
+        tmp_path,
+        8,
+        HISPARSE_BLOCK_SIZE,
+        long_prefill_token_threshold=2 * HISPARSE_BLOCK_SIZE,
+    )
+    _add_hisparse_request(scheduler, "import", 6)
+    match_external = scheduler.connector.get_num_new_matched_tokens
+    scheduler.connector.get_num_new_matched_tokens = lambda request, num_computed: (
+        (0, False)
+        if request.request_id == "local"
+        else match_external(request, num_computed)
+    )
+    local = _add_hisparse_request(scheduler, "local", 3, offset=1000)
+    assert local in scheduler.running
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens.get(local.request_id) == HISPARSE_BLOCK_SIZE
+    assert local.status == RequestStatus.RUNNING
 
 
 @pytest.mark.parametrize(
