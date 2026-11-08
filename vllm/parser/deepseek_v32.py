@@ -27,6 +27,7 @@ from vllm.parser.deepseek_v4 import (
     DSML_INVOKE_PREFIX,
     DSML_PARAM_CLOSE,
     DSML_PARAM_START,
+    DsmlStreamingEngine,
     _dsml_arg_converter,
     _dsml_arg_value_extender,
     _unwrap_wrapper_args,
@@ -123,6 +124,8 @@ def deepseek_v32_config() -> ParserEngineConfig:
 
 
 class DeepSeekV32Parser(ParserEngine):
+    streaming_engine_class = DsmlStreamingEngine
+
     def __init__(
         self,
         tokenizer: TokenizerLike,
