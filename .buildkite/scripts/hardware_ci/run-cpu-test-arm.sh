@@ -38,31 +38,30 @@ print_packages() {
     pip list"
 }
 
-# Shard sizes are balanced from per-test timings on main: the n=64128 cases
-# of test_onednn.py alone take about 13 minutes.
+# Keep test_onednn.py whole (~19 min): its tests draw inputs from one RNG
+# stream, and running a subset makes test_onednn_gemm flaky.
 kernel_tests_0() {
   set -e
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
-    pytest -x -v -s tests/kernels/test_onednn.py -k 64128
-    pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py"
+    pytest -x -v -s tests/kernels/test_onednn.py"
 }
 
 kernel_tests_1() {
   set -e
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
-    pytest -x -v -s tests/kernels/test_onednn.py -k 'not 64128'
     pytest -x -v -s tests/kernels/test_cpu_fused_sampling.py
     pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
-    pytest -x -v -s tests/kernels/core/test_cpu_activation.py"
+    pytest -x -v -s tests/kernels/core/test_cpu_activation.py
+    pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
+    pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py"
 }
 
 kernel_tests_2() {
   set -e
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
-    pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
     pytest -x -v -s tests/kernels/moe/test_cpu_int4_moe.py
     pytest -x -v -s tests/kernels/mamba/test_cpu_short_conv.py
     pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
