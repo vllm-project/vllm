@@ -1652,7 +1652,8 @@ def _assert_mxfp4_equal(got, codes, v, d) -> float:
     known to +-``d``: exact outside the boundary set, one of its two ends
     inside, the set under 1 % -> its fraction."""
     vb, db = v.unflatten(-1, (-1, 32)), d.unflatten(-1, (-1, 32))
-    bc, clo, chi = R.boundary(R.e8m0_roundup6, vb.abs().amax(-1), db.amax(-1))
+    clo, chi = (R.e8m0_roundup6((vb.abs() + e).amax(-1)) for e in (-db, db))
+    bc = clo != chi
     codes = codes.long()
     assert torch.equal(codes[~bc], clo[~bc]), "codes differ"
     assert ((codes == clo) | (codes == chi))[bc].all(), "codes off by > 1"
@@ -1674,6 +1675,39 @@ def _peer(runner, s: int, name: str) -> torch.Tensor:
     half = k2.peer_bytes(s) // 2
     at = PEER_HEAD + int(runner.epoch.item()) % 2 * half + k2.peer_layout(s)[name][0]
     return runner.peers.bytes[at:]
+
+
+def _latq4(peer, s: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """The latent K2 publishes at ``few_rows``, LATQ4 only: (E2M1 values
+    [s, LAT], E8M0 codes [s, LAT / 32])."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.stages.moe import LAT
+
+    q = peer("latq4", s * LAT // 8 + s * LAT // 32, torch.int32)
+    codes = q[s * LAT // 8 :].view(s, LAT // 32)
+    fp4 = q[: s * LAT // 8].view(torch.uint8).view(s, LAT // 2)
+    return R.dequant_mxfp4(fp4, torch.full_like(codes, 127)), codes
+
+
+def _lat_err(x, w):
+    """K2's latent x @ w^T and its a-priori error: in each K half a wave
+    chains the 32-blocks of its 128-chunks (wave + 8 i) through bf16 MFMAs
+    (33 U of |C| + sum |a b| each, test_mono_primitives); then the 8 waves'
+    sum and the halves' (8 U)."""
+    x, w = x.double(), w.double()
+    steps = torch.einsum(
+        "snk,lnk->sln", x.unflatten(-1, (-1, 32)), w.unflatten(-1, (-1, 32))
+    )
+    p = F.pad(steps.unflatten(-1, (2, -1, 4)), (0, 0, 0, 4))
+    p = p.unflatten(-2, (-1, 8)).transpose(-3, -2).flatten(-2)
+    chain = p.cumsum(-1)[..., :-1].abs().sum((-3, -2, -1))
+    return x @ w.T, U * (41 * (x.abs() @ w.abs().T) + 33 * chain)
+
+
+def _bf16_span(c, d):
+    """C +- d rounded to bf16 as (midpoint, half width): the MXFP4 quant of a
+    bf16 value in it lies between those of the two ends."""
+    lo, hi = _rounds(c, d)
+    return (lo + hi) / 2, (hi - lo) / 2
 
 
 def _k2_check(runner, key, w, mw, prefix, out, seed: int) -> dict:
@@ -1728,8 +1762,9 @@ def _k2_check(runner, key, w, mw, prefix, out, seed: int) -> dict:
     # waves' sum, the 4 K parts'
     n = 33 * 8 + 8 + 3
     m["rlog"] = _dot_err(logits, x, mw["w_gate"], out=torch.float32, n=n)
-    lat = peer("lat", s * LAT // 2, bf).view(s, LAT)
-    m["lat"] = _dot_err(lat, x, mw["w_ld"])
+    lat_q, lat_codes = _latq4(peer, s)
+    span = _bf16_span(*_lat_err(x, mw["w_ld"]))
+    m["lat_boundary"] = _assert_mxfp4_equal(lat_q, lat_codes, *span)
     sgu = scratch("sgu", s * SI, bf).view(s, 2 * SI)
     m["sgu"] = _dot_err(sgu, x, mw["w_sgu"])
 
@@ -1762,9 +1797,7 @@ def _k2_check(runner, key, w, mw, prefix, out, seed: int) -> dict:
     g, u = sgu[:, :SI].double(), sgu[:, SI:].double()
     m["h"] = _err(h, R.situ(g, u), _situ_vllm_err(g, u))
 
-    lat_codes = R.e8m0_roundup6(lat.double().abs().unflatten(-1, (-1, 32)).amax(-1))
-    scale = R.e8m0(lat_codes).repeat_interleave(32, -1)
-    latv = R.to_e2m1_rne(lat.double() / scale) * scale
+    latv = lat_q * R.e8m0(lat_codes).repeat_interleave(32, -1)
     m["n_zero_lat_groups"] = int((lat_codes == 0).sum())
     union, slot = ids.unique(return_inverse=True)
     m["n_union"] = union.numel()
@@ -1927,6 +1960,7 @@ def _k2_taps(runner, key, tag: int) -> dict:
         TP,
         UP_N,
         E,
+        few_rows,
     )
 
     s = key.tokens
@@ -1944,11 +1978,18 @@ def _k2_taps(runner, key, tag: int) -> dict:
 
     route = scratch("route", s * 2 * TOPK, torch.int32).view(s, 2, TOPK)
     rlog = peer("rlog", TP * s * (E // TP)).view(TP, s, E // TP)
-    return {
+    if few_rows(s):
+        vals, codes = _latq4(peer, s)
+        lat = {
+            "latq4": (vals, codes),
+            "lat": (vals * R.e8m0(codes).repeat_interleave(32, -1)).to(bf),
+        }
+    else:
+        lat = {"lat": peer("lat", s * LAT // 2, bf).view(s, LAT)}
+    return lat | {
         "ar": peer("ar", TP * s * HIDDEN // 2, bf).view(TP, s, HIDDEN),
         "x": plain("xrow", s * HIDDEN).view(s, HIDDEN),
         "rlog": rlog.transpose(0, 1).reshape(s, E),
-        "lat": peer("lat", s * LAT // 2, bf).view(s, LAT),
         "sgu": scratch("sgu", s * SI, bf).view(s, 2 * SI),
         "h": scratch("h", s * SI // 2, bf).view(s, SI),
         "ids": route[:, 0].long(),
@@ -2082,8 +2123,15 @@ def _k2_vllm_check(runner, key, w, mw, prefix, out, ops, tag: int) -> dict:
     wv = torch.empty_like(wts_v)
     wv.scatter_(1, ids.argsort(-1), wts_v.gather(1, ids_v.argsort(-1)))
     m["route_w_v"] = _outside(wv[same], c_w[same], _r(v_w)[same], torch.float32)
-    for name, wt in (("lat", mw["w_ld"]), ("sgu", mw["w_sgu"])):
-        gemm(name, t[name], t["x"], wt, ops[name])
+    gemm("sgu", t["sgu"], t["x"], mw["w_sgu"], ops["sgu"])
+    if "latq4" in t:
+        # few_rows: K2 publishes only the MXFP4 of its bf16 latent
+        c, v = _dot_var(t["x"], mw["w_ld"])
+        _assert_mxfp4_equal(*t["latq4"], *_bf16_span(c, _r(v)))
+        r_v = _r(v + _split_var(t["x"], mw["w_ld"], parts.get("lat", 1)))
+        m["lat"], m["lat_v"] = 0.0, _outside(ops["lat"](t["x"]), c, r_v)
+    else:
+        gemm("lat", t["lat"], t["x"], mw["w_ld"], ops["lat"])
     g, u = t["sgu"][:, :SI].double(), t["sgu"][:, SI:].double()
     both(
         "h",
@@ -2353,7 +2401,7 @@ def _k2_io_worker(
     m = _k2_io(runner)
     assert m["n_boundary_ties"] > 0 and m["n_zero_lat_groups"] > 0, m
     assert m["n_zero_inter_groups"] > 0 and 0.01 <= m["situ_saturated"] <= 0.2, m
-    stages = ("ar", "xrow", "rlog", "lat", "sgu", "route_w", "h", "latr", "ln", "up")
+    stages = ("ar", "xrow", "rlog", "sgu", "route_w", "h", "latr", "ln", "up")
     assert all(m[k] <= 1 for k in (*stages, "sdown")), m
     _assert_replays_bit_identical(
         runner, _k2_inputs(rank, device), _moe_weights(rank, device)
