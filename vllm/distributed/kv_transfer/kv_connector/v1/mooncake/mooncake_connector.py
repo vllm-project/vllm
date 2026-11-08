@@ -666,7 +666,6 @@ class MooncakeXferMetadata(
     cache_specs: dict[str, str] = msgspec.field(default_factory=dict)
     logical_block_size: int = 0
     kernel_block_size: int = 0
-    recv_timeout_s: float = 0.0
     protocol_version: int = 0
     # Per-request token counts assigned to this connector by D's scheduler.
     # Independent of layout caching; zero means a release-only notification.
@@ -938,7 +937,6 @@ class Destination:
     remote_req_id: str
     meta: MooncakeXferMetadata
     layout: "PeerLayout"
-    send_deadline: float
     required_layers: tuple[str, ...]
 
 
@@ -998,7 +996,6 @@ class SendTask:
 @dataclass
 class SendResult:
     progress: list[tuple[str, WorkerKey, str, int]] = field(default_factory=list)
-    errors: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1077,9 +1074,6 @@ class MooncakeControlChannel:
         worker = self._worker
         if meta.protocol_version != 1:
             raise ValueError("Mooncake peers require the same layerwise protocol")
-        # The send margin covers ready's network/listener delay. Start before
-        # layout processing so it and the model-thread queue consume this budget.
-        send_deadline = time.monotonic() + meta.recv_timeout_s
         if (
             meta.remote_pcp_size < 1
             or not 0 <= meta.remote_pcp_rank < meta.remote_pcp_size
@@ -1173,7 +1167,7 @@ class MooncakeControlChannel:
                 )
                 continue
             self.send_ready_queue.put(
-                Destination(req_id, meta, layout, send_deadline, required_layers)
+                Destination(req_id, meta, layout, required_layers)
             )
 
     async def _send_completion_ack(
@@ -3886,7 +3880,6 @@ class MooncakeConnectorWorker:
             )
             meta.logical_block_size = self.logical_block_size
             meta.kernel_block_size = self.block_size
-            meta.recv_timeout_s = envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT + 60
             if include_layout:
                 meta.cache_specs = self._cache_specs
         return meta
@@ -3983,13 +3976,6 @@ class MooncakeConnectorWorker:
         )
 
     def _init_layerwise_state(self) -> None:
-        kv_config = self.vllm_config.kv_transfer_config
-        assert kv_config is not None
-        self.send_timeout_margin_s = float(
-            kv_config.get_from_extra_config("layerwise_send_timeout_margin_s", 10)
-        )
-        if not 0 <= self.send_timeout_margin_s < float("inf"):
-            raise ValueError("layerwise_send_timeout_margin_s must be finite and >= 0")
         self.requests_to_send: dict[str, RequestState] = {}
         # Transfer IDs of requests prefilling in the current scheduler step.
         self.prefilling_transfer_ids: tuple[str, ...] = ()
@@ -4352,23 +4338,10 @@ class MooncakeConnectorWorker:
             )
             planned_transfers.append((layer_transfer_task, src, dst, sizes))
         event.synchronize()
-        now = time.monotonic()
-        for layer_transfer_task in tasks:
-            if (
-                now + self.send_timeout_margin_s
-                >= layer_transfer_task.destination.send_deadline
-            ):
-                result.errors[layer_transfer_task.transfer_id] = (
-                    "D receive deadline too close for WRITE"
-                )
         batch_src: list[int] = []
         batch_dst: list[int] = []
         batch_sizes: list[int] = []
         for layer_transfer_task, src, dst, sizes in planned_transfers:
-            # Drop every layer of a failed request, retaining healthy requests
-            # in the same WRITE batch.
-            if layer_transfer_task.transfer_id in result.errors:
-                continue
             batch_src.extend(src)
             batch_dst.extend(dst)
             batch_sizes.extend(sizes)
@@ -4405,8 +4378,6 @@ class MooncakeConnectorWorker:
                     self.requests_to_send[transfer_id].sent_tokens[
                         worker_key, layer_name
                     ] = end
-                for transfer_id, error in result.errors.items():
-                    self.requests_to_send[transfer_id].error = error
         self._pending_sends.clear()
 
     def _build_layer_transfer_task(
@@ -4503,13 +4474,6 @@ class MooncakeConnectorWorker:
             if now >= state.deadline and state.error is None:
                 state.error = "Layerwise transfer expired before submission"
                 self.xfer_stats.record_kv_expired_req()
-            if any(
-                worker_key not in state.ack_scheduled_workers
-                and destination.required_layers
-                and now + self.send_timeout_margin_s >= destination.send_deadline
-                for worker_key, destination in state.destinations.items()
-            ):
-                state.error = "D receive deadline too close for WRITE"
             if state.preempted or state.error or not state.block_ids:
                 continue
             for worker_key, destination in state.destinations.items():
