@@ -214,6 +214,7 @@ import torch.nn as nn
 from tqdm import tqdm
 
 import vllm.envs as envs
+from vllm import _cpu_ops as cpu_ops
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -479,6 +480,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_b_proj = kv_b_proj
         self.dcp_q_replicate = dcp_q_replicate
         self.W_UK_T_dcp_qrep: torch.Tensor | None = None
+        self.W_UV_dcp: torch.Tensor | None = None
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
@@ -506,6 +508,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_cache_dtype,
             )
 
+        if sliding_window is not None and kv_cache_dtype in (
+            "fp8_ds_mla",
+            "nvfp4_ds_mla",
+        ):
+            raise ValueError(
+                f"Sliding-window MLA does not support kv_cache_dtype={kv_cache_dtype}."
+            )
         dtype = torch.get_default_dtype()
         self.act_dtype = dtype
         if attn_backend is not None:
@@ -522,6 +531,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 use_mla=True,
                 use_sparse=use_sparse,
                 num_heads=self.num_heads,
+                has_sliding_window=sliding_window is not None,
             )
 
         normalized_kv_cache_dtype = _canonicalize_sparse_mla_kv_cache_dtype(
@@ -1115,7 +1125,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 N, B, P = mqa_q_nope.shape
                 L = self.kv_lora_rank
                 mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
-                ops.bmm_cpu(
+                cpu_ops.bmm_cpu(
                     mqa_ql_nope,
                     mqa_q_nope,
                     self.impl._w_uk_packed,  # type: ignore[attr-defined]
@@ -1209,7 +1219,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Under PCP+DCP the prefill rows attended over the gathered KV,
                 # so only the decode rows carry an LSE and take part in the merge.
                 num_merge_rows = lse.shape[0]
-                if num_merge_rows == attn_out.shape[0]:
+                if self.W_UV_dcp is not None:
+                    assert self.dcp_manager.v_up_proj_combine is not None
+                    self.dcp_manager.v_up_proj_combine(
+                        attn_out,
+                        lse,
+                        self.W_UV_dcp,
+                        mqa_output_slice,
+                        seq_lens=seq_lens,
+                        query_start_loc=query_start_loc,
+                    )
+                elif num_merge_rows == attn_out.shape[0]:
                     attn_out = self.dcp_manager.combine(
                         attn_out,
                         lse,
@@ -1226,8 +1246,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 if self.use_pcp:
                     attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
-            # v_up projection
-            self._v_up_proj(attn_out, out=mqa_output_slice)
+            # v_up projection, unless the DCP merge already applied it
+            if self.W_UV_dcp is None:
+                self._v_up_proj(attn_out, out=mqa_output_slice)
 
         if quant_key is not None:
             quant_idx = num_mqa_tokens if mha_use_quant_output else num_actual_toks
@@ -1422,6 +1443,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     "W_UK_T_dcp_qrep",
                     get_dcp_group().all_gather(self.W_UK_T.contiguous(), dim=0),
                 )
+            if (
+                self.dcp_manager is not None
+                and self.dcp_manager.v_up_proj_combine is not None
+            ):
+                replace_parameter(
+                    self,
+                    "W_UV_dcp",
+                    get_dcp_group().all_gather(self.W_UV.contiguous(), dim=0),
+                )
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
@@ -1461,6 +1491,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             return SlidingWindowMLASpec(
                 **common_kwargs,
                 sliding_window=self.sliding_window,
+                non_causal_multi_token_decode=self.non_causal_multi_token_decode,
             )
         spec = MLAAttentionSpec(
             **common_kwargs,
@@ -1493,7 +1524,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         elif self.is_amx_bmm_enabled:
             # bmm_cpu computes out[n] = mat1[n] @ mat2[n]^T against
             # AMXMLAImpl's own (N, V, L) packed W_UV -- same as prefill.
-            ops.bmm_cpu(
+            cpu_ops.bmm_cpu(
                 out.transpose(0, 1),
                 x,
                 self.impl._w_uv_packed,  # type: ignore[attr-defined]
@@ -3083,7 +3114,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     "CPU MLA context gather fallback only supports "
                     f"non-quantized KV cache, got {self.kv_cache_dtype}"
                 )
-                ops.gather_mla_context_cache_cpu(
+                cpu_ops.gather_mla_context_cache_cpu(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace[:toks],
                     block_table=chunk_block_table,
