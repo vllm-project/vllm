@@ -174,7 +174,6 @@ def run_rocm_pd_accuracy(connector, model, prefill_tp, decode_tp, monkeypatch):
         "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"],
         "VLLM_HOST_IP": "127.0.0.1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_ROCM_USE_AITER": "1",
         "VLLM_KV_CACHE_LAYOUT": "HND",
     }

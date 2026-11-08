@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm import _cpu_ops as cpu_ops
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
@@ -256,9 +257,9 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 def wvsplitkrc_dispatch(n: int, k: int, m: int, cu_count: int) -> tuple[int, bool]:
     """Pick the K-shard split for wvSplitKrc and say whether the shape fits.
 
-    Mirrors wvSplitKrc() in csrc/rocm/skinny_gemms.cu, which is also where the
-    shard cap is explained. Both must pick the same chunkk or the workspace
-    check here bounds the wrong k_rnd.
+    Mirrors wvSplitKrc() in csrc/rocm/skinny_gemms_wvsplitkrc.cu, which is also
+    where the shard cap is explained. Both must pick the same chunkk or the
+    workspace check here bounds the wrong k_rnd.
 
     Returns:
         The CHUNKK the kernel will dispatch with, and whether the CU budget and
@@ -641,11 +642,11 @@ def warmup_rocm_skinny_gemm_workspaces(device: torch.device) -> None:
     """Eagerly allocate wvSplitKrc's per-device split-K workspace pool.
 
     wvSplitKrc partitions one per-device allocation into ``kWvSlots`` slots
-    (csrc/rocm/skinny_gemms.cu) and hands each stream one on first use, so that
-    two streams never share the split-K partials and counters.
+    (csrc/rocm/skinny_gemms_wvsplitkrc.cu) and hands each stream one on first
+    use, so that two streams never share the split-K partials and counters.
 
     The pool is otherwise created lazily on the first qualifying GEMM
-    (csrc/rocm/skinny_gemms.cu), which can be the first real request — after
+    (csrc/rocm/skinny_gemms_wvsplitkrc.cu), which can be the first real request — after
     the KV cache backing buffer exists. If it landed in that segment's rounding
     tail, it would pin the entire segment at engine shutdown; it could also land
     inside a cudagraph capture, where it would be taken from the graph's private
@@ -737,7 +738,7 @@ def dispatch_cpu_unquantized_gemm(
         if (
             (is_arm_bf16 or torch.cpu._is_avx512_bf16_supported())
             and is_causal_conv1d_weight
-            and hasattr(ops, "causal_conv1d_weight_pack")
+            and hasattr(cpu_ops, "causal_conv1d_weight_pack")
         ):
             # prepack conv weight
             unpacked = (
@@ -751,7 +752,7 @@ def dispatch_cpu_unquantized_gemm(
             # Stash the un-packed (dim, width) weight so the speculative-decode
             # and unsupported-layout fallbacks can still use ordinary weights.
             layer._cpu_unpacked_conv_weight = unpacked
-            layer.weight.data = ops.causal_conv1d_weight_pack(unpacked)
+            layer.weight.data = cpu_ops.causal_conv1d_weight_pack(unpacked)
         return
 
     N, K = layer.weight.size()
@@ -800,7 +801,7 @@ def dispatch_cpu_unquantized_gemm(
         packed_weight = torch.ops._C.convert_weight_packed(layer.weight)
         if getattr(layer, "bias", None) is not None:
             layer.bias.data = layer.bias.to(torch.float32)
-        layer.cpu_linear = lambda x, weight, bias: ops.weight_packed_linear_cpu(
+        layer.cpu_linear = lambda x, weight, bias: cpu_ops.weight_packed_linear_cpu(
             x,
             packed_weight,
             N,
@@ -817,13 +818,15 @@ def dispatch_cpu_unquantized_gemm(
         return
 
     if (
-        ops._supports_onednn
+        cpu_ops._supports_onednn
         and current_platform.get_cpu_architecture() != CpuArchEnum.POWERPC
     ):
         try:
             origin_weight = layer.weight
-            handler = ops.create_onednn_mm(origin_weight.t(), 32)
-            layer.cpu_linear = lambda x, weight, bias: ops.onednn_mm(handler, x, bias)
+            handler = cpu_ops.create_onednn_mm(origin_weight.t(), 32)
+            layer.cpu_linear = lambda x, weight, bias: cpu_ops.onednn_mm(
+                handler, x, bias
+            )
             if remove_weight:
                 layer.weight = torch.nn.Parameter(
                     torch.empty(0, dtype=dtype, device=layer.weight.device),
