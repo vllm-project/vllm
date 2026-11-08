@@ -242,7 +242,7 @@ def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int) -> int:
 def fold_local_rank(global_dp_rank: int, dp_size_local: int) -> int:
     """Fold a global DP rank into its pod-local rank [0, dp_size_local).
 
-    ``dp_size_local == 0`` is the external-DP sentinel (local size unknown):
+    `dp_size_local == 0` is the external-DP sentinel (local size unknown):
     return the rank unchanged, since a global DP rank is always < the global
     DP size so no folding is needed and the modulo is skipped (never divides
     by zero).
@@ -253,7 +253,7 @@ def fold_local_rank(global_dp_rank: int, dp_size_local: int) -> int:
 def pod_index(global_dp_rank: int, dp_size_local: int) -> int:
     """Pod index (0-based) a global DP rank lives on for Wide-EP multi-pod.
 
-    ``dp_size_local == 0`` (external-DP sentinel) collapses to a single pod.
+    `dp_size_local == 0` (external-DP sentinel) collapses to a single pod.
     """
     return global_dp_rank // dp_size_local if dp_size_local else 0
 
@@ -261,10 +261,10 @@ def pod_index(global_dp_rank: int, dp_size_local: int) -> int:
 def resolve_host_ip(extra_config: dict) -> str:
     """The IP this MoRIIO process advertises for KV transfer.
 
-    Honors an explicit ``host_ip`` in ``kv_connector_extra_config`` before
-    falling back to ``get_ip()``. An external router/orchestrator can set it to
+    Honors an explicit `host_ip` in `kv_connector_extra_config` before
+    falling back to `get_ip()`. An external router/orchestrator can set it to
     the node's routable address; this is required under frameworks (e.g. Ray)
-    where ``get_ip()`` resolves to an unroutable public IP and ``VLLM_HOST_IP``
+    where `get_ip()` resolves to an unroutable public IP and `VLLM_HOST_IP`
     cannot be propagated to the worker processes that bind the transfer engine.
     """
     return extra_config.get("host_ip") or get_ip()
@@ -463,12 +463,12 @@ def parse_moriio_zmq_address(
 ) -> tuple[str, int, int]:
     """Parse the MoRI-IO zmq address into its components.
 
-    Parses ``"host:IP,handshake:PORT,notify:PORT"`` into
+    Parses `"host:IP,handshake:PORT,notify:PORT"` into
         (host, handshake_port, notify_port).
 
     Each key-value pair is split on the *first* colon so that IPv6 addresses
-    (e.g. ``host:::1``) are handled correctly.  Raises ``ValueError`` if any
-    of ``host``, ``handshake``, or ``notify`` keys are absent or if the port
+    (e.g. `host:::1`) are handled correctly.  Raises `ValueError` if any
+    of `host`, `handshake`, or `notify` keys are absent or if the port
     values are non-numeric.
     """
     parts: dict[str, str] = {}
@@ -493,12 +493,12 @@ def get_peer_zmq_from_request_id(request_id: str, is_producer: bool) -> str | No
     The producer (prefill) needs the decode's address; the consumer (decode)
     needs the prefill's address.
 
-    Returns ``None`` when the request_id does not encode peer info. The
-    llm-d routing sidecar (``llm-d-inference-scheduler``) does not embed
-    addresses in ``request_id``; instead it passes ``remote_host``,
-    ``remote_handshake_port`` and ``remote_notify_port`` explicitly in
-    ``kv_transfer_params``. Callers must handle the ``None`` return by
-    falling back to those fields. See ``add_new_req`` for the canonical
+    Returns `None` when the request_id does not encode peer info. The
+    llm-d routing sidecar (`llm-d-inference-scheduler`) does not embed
+    addresses in `request_id`; instead it passes `remote_host`,
+    `remote_handshake_port` and `remote_notify_port` explicitly in
+    `kv_transfer_params`. Callers must handle the `None` return by
+    falling back to those fields. See `add_new_req` for the canonical
     fallback path.
     """
     if is_producer:
@@ -556,35 +556,35 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         write_mode=False,
     ):
-        """Ingest a peer's ``kv_transfer_params`` into a typed ``ReqMeta``.
+        """Ingest a peer's `kv_transfer_params` into a typed `ReqMeta`.
 
         This is the single place peer info enters the connector. The
-        ``kv_transfer_params`` contract (as produced by the llm-d sidecar /
-        vLLM router, or echoed by the prefill leg's ``request_finished``):
+        `kv_transfer_params` contract (as produced by the llm-d sidecar /
+        vLLM router, or echoed by the prefill leg's `request_finished`):
 
         Required (always):
-          * ``transfer_id``        -- stable id shared by both legs.
-          * ``remote_engine_id``   -- peer engine id for the handshake table.
-          * ``remote_block_ids``   -- peer block ids (may be [] in WRITE mode,
+          * `transfer_id`        -- stable id shared by both legs.
+          * `remote_engine_id`   -- peer engine id for the handshake table.
+          * `remote_block_ids`   -- peer block ids (may be [] in WRITE mode,
                                       where decode allocates its own blocks).
 
         Peer address -- ONE of the following two must resolve:
-          * embedded in ``request_id`` (vLLM-router PD id form), OR
-          * explicit ``remote_host`` + ``remote_handshake_port`` +
-            ``remote_notify_port`` (llm-d sidecar / returnable path).
+          * embedded in `request_id` (vLLM-router PD id form), OR
+          * explicit `remote_host` + `remote_handshake_port` +
+            `remote_notify_port` (llm-d sidecar / returnable path).
           If neither resolves we raise -- there is no safe default host/port.
 
         Optional (defaulted):
-          * ``tp_size``              (default 1) -- peer TP size.
-          * ``remote_dp_size``       (default 1) -- peer GLOBAL DP size.
-          * ``remote_dp_size_local`` (default = ``remote_dp_size``) -- per-pod
+          * `tp_size`              (default 1) -- peer TP size.
+          * `remote_dp_size`       (default 1) -- peer GLOBAL DP size.
+          * `remote_dp_size_local` (default = `remote_dp_size`) -- per-pod
                                       DP size for Wide-EP multi-pod port/host
                                       folding; 0/absent means single-pod.
-          * ``remote_hosts``         (default [remote_host]) -- per-pod IP list
-                                      indexed by ``pod_idx = rank // dp_local``.
+          * `remote_hosts`         (default [remote_host]) -- per-pod IP list
+                                      indexed by `pod_idx = rank // dp_local`.
 
-        Routing keys consumed elsewhere (NOT here): ``remote_dp_rank`` /
-        ``remote_dp_rank_override`` gate the decode->prefill notify target in
+        Routing keys consumed elsewhere (NOT here): `remote_dp_rank` /
+        `remote_dp_rank_override` gate the decode->prefill notify target in
         MoRIIOConnectorScheduler; they are router-authoritative and never
         self-derived (see that class's request routing contract).
         """

@@ -74,7 +74,7 @@ def _parse() -> argparse.Namespace:
 
 
 class _LaunchCapture:
-    """Records the launch in place of ``_fwd_kernel``."""
+    """Records the launch in place of `_fwd_kernel`."""
 
     args: tuple
     kwargs: dict

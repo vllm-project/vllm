@@ -7,10 +7,10 @@ reduction, the shared-expert add and the all-reduce to the next boundary's
 fused kernel, including the layers before an Engram layer and the last one,
 whose boundaries take the kernel's residual-only variant:
 
-- up to ``LOW_BATCH_MAX_ROWS`` rows, on the low-batch routed-expert GEMMs
-  (``routed_expert_gemm``);
-- above that, on the runner's own ``_forward_impl`` with the deferral raised to
-  the step's rows for the call (``deferred_finalize``).
+- up to `routed_expert_gemm.MAX_ROWS` rows, on the low-batch routed-expert
+  GEMMs (`routed_expert_gemm`);
+- above that, on the runner's own `_forward_impl` with the deferral raised to
+  the step's rows for the call (`deferred_finalize`).
 """
 
 from collections.abc import Iterator
@@ -22,6 +22,7 @@ import torch
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
     TrtLlmMxfp4ExpertsModular,
+    TrtLlmMxfp4Mxfp8ExpertsModular,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import (
     MoEOutput,
@@ -32,7 +33,7 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExpertsOrder,
 )
 
-from .routed_expert_gemm import RoutedExpertGemm, front_applies
+from .routed_expert_gemm import RoutedExpertGemm, front_applies, padding_mask
 
 if TYPE_CHECKING:
     from ...model import DeepseekV4MoE
@@ -42,7 +43,7 @@ if TYPE_CHECKING:
 @contextmanager
 def deferred_finalize(config: FusedMoEConfig, max_num_tokens: int) -> Iterator[None]:
     """Within the block, let the experts leave the top-k reduction of calls of
-    up to ``max_num_tokens`` tokens to the caller; then restore the layer's own
+    up to `max_num_tokens` tokens to the caller; then restore the layer's own
     deferral, which the stock forward reads."""
     saved = config._defer_moe_finalize, config.defer_moe_finalize_max_num_tokens
     config._defer_moe_finalize = True
@@ -54,13 +55,13 @@ def deferred_finalize(config: FusedMoEConfig, max_num_tokens: int) -> Iterator[N
 
 
 def defers_finalize(ffn: "DeepseekV4MoE", max_num_tokens: int) -> bool:
-    """Whether ``ffn``'s experts can leave the top-k reduction to the fused
+    """Whether `ffn`'s experts can leave the top-k reduction to the fused
     all-reduce + mHC: the modular TRT-LLM MXFP4 experts without routed scaling,
     on a TP-only deployment."""
     runner = ffn.experts
     experts_cls = getattr(runner.routed_experts.quant_method, "experts_cls", None)
     if (
-        experts_cls is not TrtLlmMxfp4ExpertsModular
+        experts_cls not in (TrtLlmMxfp4ExpertsModular, TrtLlmMxfp4Mxfp8ExpertsModular)
         or runner.routed_scaling_factor != 1.0
         or ffn.use_native_mega_moe
     ):
@@ -88,7 +89,7 @@ class MoEStep:
         if not self.deferrable:
             return self.ffn(x, input_ids, None)
         gemm = self.gemm
-        if step.low_batch and gemm is not None and gemm.accepts(x, self.runner):
+        if gemm is not None and gemm.accepts(x, self.runner):
             routed, shared_output = self._forward_low_batch(gemm, x, input_ids)
             return MoEOutput(routed=routed, shared_output=shared_output)
         # The runner's custom op returns tensors only, so run its body directly.
@@ -108,7 +109,7 @@ class MoEStep:
         hidden_states: torch.Tensor,
         input_ids: torch.Tensor | None,
     ) -> tuple[UnfinalizedMoEOutput, torch.Tensor]:
-        """The runner's ``_forward_impl`` with the routed experts on the
+        """The runner's `_forward_impl` with the routed experts on the
         low-batch GEMMs; the gate and the shared experts run as the runner runs
         them. Returns the unfinalized routed output and the shared output."""
         runner = self.runner
@@ -119,7 +120,13 @@ class MoEStep:
         router_logits, _ = runner.gate(hidden_states)
         runner._maybe_apply_shared_experts(hidden_states, SharedExpertsOrder.NO_OVERLAP)
         if front_applies(gemm, runner):
-            routing = gemm.front(hidden_states, router_logits, input_ids)
+            # The router's padding mask, as select_experts applies it.
+            routing = gemm.front(
+                hidden_states,
+                router_logits,
+                input_ids,
+                padding_mask(hidden_states.size(0)),
+            )
         else:
             topk_weights, topk_ids = runner.router.select_experts(
                 hidden_states=hidden_states,

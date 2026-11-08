@@ -34,6 +34,7 @@ else:
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=DataclassInstance)
+CompileFactors = dict[str, object]
 
 
 @overload
@@ -215,18 +216,23 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
 
 
 @runtime_checkable
-class SupportsHash(Protocol):
-    def compute_hash(self) -> str: ...
+class SupportsCompileFactors(Protocol):
+    def compile_factors(self) -> CompileFactors: ...
 
 
 _config_hash_cache: dict[int, str] = {}
 
 
-def compute_hash_cached(config: SupportsHash) -> str:
-    """Cache config.compute_hash() by object identity.
+def hash_config(config: SupportsCompileFactors) -> str:
+    """Hash the compile factors of a config."""
+    return hash_factors(config.compile_factors())
+
+
+def hash_config_cached(config: SupportsCompileFactors) -> str:
+    """Cache `hash_config(config)` by object identity.
 
     Config objects (ModelConfig, etc.) are long-lived singletons that never
-    mutate after construction, but compute_hash() is expensive (JSON
+    mutate after construction, but hashing them is expensive (JSON
     serialization + SHA-256).  This utility avoids recomputing the hash on
     every forward pass while keeping a single consistent key type for all
     lookup paths.
@@ -234,7 +240,7 @@ def compute_hash_cached(config: SupportsHash) -> str:
     key = id(config)
     result = _config_hash_cache.get(key)
     if result is None:
-        result = config.compute_hash()
+        result = hash_config(config)
         _config_hash_cache[key] = result
     return result
 
@@ -306,6 +312,10 @@ def normalize_value(x):
         qual = getattr(x, "__qualname__", getattr(x, "__name__", ""))
         return ".".join([p for p in (module, qual) if p]) or repr(x)
 
+    # Nested configs define which of their fields affect compilation.
+    if isinstance(x, SupportsCompileFactors):
+        return x.compile_factors()
+
     # Prefer stable uuid identifiers for objects that provide them, even if
     # they are callable instances (e.g., InductorPass wrappers).
     if hasattr(x, "uuid") and callable(getattr(x, "uuid", None)):
@@ -373,11 +383,20 @@ def normalize_value(x):
     )
 
 
-def get_hash_factors(config: ConfigT, ignored_factors: set[str]) -> dict[str, object]:
+def get_compile_factors(config: ConfigT, ignored_factors: set[str]) -> CompileFactors:
     """Gets the factors used for hashing a config class.
     - Includes all dataclass fields not in `ignored_factors`.
-    - Errors on non-normalizable values.
+    - Uses `compile_factors()` for nested configs that define it.
+    - Errors on unknown `ignored_factors` and non-normalizable values.
     """
+    dataclass_fields = getattr(config, "__dataclass_fields__", {})
+    field_names = {f.name for f in fields(config)} | set(dataclass_fields)
+    unknown_ignored = ignored_factors - field_names
+    if unknown_ignored:
+        raise ValueError(
+            f"get_compile_factors: ignored_factors contain unknown fields "
+            f"{sorted(unknown_ignored)} for {type(config).__name__}"
+        )
     factors: dict[str, object] = {}
     for dc_field in fields(config):
         factor = dc_field.name
@@ -388,7 +407,7 @@ def get_hash_factors(config: ConfigT, ignored_factors: set[str]) -> dict[str, ob
             factors[factor] = normalize_value(value)
         except TypeError as e:
             raise TypeError(
-                f"get_hash_factors: unsupported type for key '{factor}' "
+                f"get_compile_factors: unsupported type for key '{factor}' "
                 f"({type(value).__name__})"
             ) from e
     return factors

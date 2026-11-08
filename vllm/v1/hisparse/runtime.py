@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-import math
-import mmap
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -20,6 +18,7 @@ from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context, in_piecewise_cudagraph
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.host_memory import host_registration_ranges
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -32,8 +31,6 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import (
 )
 
 logger = init_logger(__name__)
-
-HOST_REGISTER_CHUNK_BYTES = 256 * 2**30
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
@@ -259,14 +256,12 @@ class HiSparseHostPool:
             ]
             assert config.hisparse_host_num_blocks is not None
             assert config.hisparse_host_block_stride is not None
-            _, self.pinned, self.shared_region = allocate_hisparse_host_pools(
+            self.pinned, self.shared_region = allocate_hisparse_host_pools(
                 self.vllm_config,
                 tensor_sizes,
                 config.hisparse_host_num_blocks,
                 config.hisparse_host_block_stride,
-                use_shared_host_pool=True,
             )
-            assert self.shared_region is not None
             self.registered = self.shared_region.base_tensor
             self.backing = self.registered[:size]
         else:
@@ -316,97 +311,13 @@ def get_hisparse_host_block_stride(
     return page_size_bytes
 
 
-def _hisparse_registration_ranges(
-    tensor_sizes: list[int],
-    num_blocks: int,
-    host_block_stride: int,
-    max_chunk_bytes: int = HOST_REGISTER_CHUNK_BYTES,
-) -> tuple[tuple[int, int], ...]:
-    """Split a shared pool without bisecting any tensor's host block.
-
-    CUDA batch copies reject descriptors spanning adjacent registrations.
-    """
-    total_size = num_blocks * host_block_stride
-    if total_size % mmap.PAGESIZE:
-        raise ValueError("HiSparse host pool must be OS-page aligned.")
-    if max_chunk_bytes < mmap.PAGESIZE:
-        raise ValueError("HiSparse registration chunks must span at least one page.")
-
-    tensors: list[tuple[int, int, int]] = []
-    tensor_start = 0
-    for tensor_size in tensor_sizes:
-        if tensor_size % num_blocks:
-            raise ValueError(
-                f"HiSparse host tensor size {tensor_size} is not divisible by "
-                f"{num_blocks} blocks."
-            )
-        tensor_end = tensor_start + tensor_size
-        tensors.append((tensor_start, tensor_end, tensor_size // num_blocks))
-        tensor_start = tensor_end
-    if tensor_start > total_size:
-        raise ValueError("HiSparse host tensors exceed the shared host pool.")
-
-    def last_safe_boundary(lower: int, upper: int) -> int | None:
-        best = None
-        for start, end, block_bytes in tensors:
-            first_block = max(0, (lower - start) // block_bytes + 1)
-            last_block = min(num_blocks, (min(upper, end) - start) // block_bytes)
-            if first_block > last_block:
-                continue
-            divisor = math.gcd(block_bytes, mmap.PAGESIZE)
-            if start % divisor:
-                continue
-            period = mmap.PAGESIZE // divisor
-            if period == 1:
-                residue = 0
-            else:
-                # Find block boundaries that are also OS-page boundaries.
-                residue = (
-                    (-start // divisor) * pow(block_bytes // divisor, -1, period)
-                ) % period
-            block = last_block - (last_block - residue) % period
-            if block >= first_block:
-                candidate = start + block * block_bytes
-                best = candidate if best is None else max(best, candidate)
-
-        if upper >= tensor_start:
-            candidate = upper // mmap.PAGESIZE * mmap.PAGESIZE
-            if candidate >= tensor_start and candidate > lower:
-                best = candidate if best is None else max(best, candidate)
-        return best
-
-    ranges: list[tuple[int, int]] = []
-    start = 0
-    while total_size - start > max_chunk_bytes:
-        end = last_safe_boundary(start, start + max_chunk_bytes)
-        if end is None:
-            raise ValueError(
-                "A HiSparse host block is too large for the registration chunk limit."
-            )
-        ranges.append((start, end))
-        start = end
-    ranges.append((start, total_size))
-    return tuple(ranges)
-
-
 def allocate_hisparse_host_pools(
     vllm_config: VllmConfig,
     tensor_sizes: list[int],
     num_blocks: int,
     host_block_stride: int,
-    *,
-    use_shared_host_pool: bool,
-) -> tuple[list[torch.Tensor], list[torch.Tensor], SharedOffloadRegion | None]:
-    """Allocate private host tensors or one mmap shared by local TP ranks."""
-    if not use_shared_host_pool:
-        check_hisparse_host_memory(sum(tensor_sizes))
-        private_pools = [allocate_pinned_host_pool(size) for size in tensor_sizes]
-        return (
-            [pool for pool, _ in private_pools],
-            [registered for _, registered in private_pools],
-            None,
-        )
-
+) -> tuple[list[torch.Tensor], SharedOffloadRegion]:
+    """Allocate one host mmap shared by local TP ranks."""
     tp_group = get_tp_group()
     region = SharedOffloadRegion(
         engine_id=(
@@ -424,19 +335,16 @@ def allocate_hisparse_host_pools(
     )
     pinned: list[torch.Tensor] = []
     try:
-        for start, end in _hisparse_registration_ranges(
-            tensor_sizes, num_blocks, host_block_stride
+        for start, end in host_registration_ranges(
+            tensor_sizes, num_blocks, num_blocks * host_block_stride
         ):
             tensor = region.base_tensor[start:end]
             pin_tensor(tensor)
             pinned.append(tensor)
-        pools = [
-            region.create_next_canonical_view(size).view(-1) for size in tensor_sizes
-        ]
     except Exception:
         release_pinned_state(pinned, region)
         raise
-    return pools, pinned, region
+    return pinned, region
 
 
 def release_pinned_state(
@@ -544,11 +452,11 @@ class HiSparsePrefillStagingPlan:
     ) -> None:
         """Resolve which staged rows can be served from the resident cache.
 
-        ``resident_state_rows`` is a resident group's persistent table by
-        request state row and ``state_indices`` holds each staged request's
+        `resident_state_rows` is a resident group's persistent table by
+        request state row and `state_indices` holds each staged request's
         state row. Computed once per plan and resident group (every layer in
         the group shares the table); non-null resident pages become
-        miss_mask=0 rows gathered device-to-device by ``gather_prefill_cache``.
+        miss_mask=0 rows gathered device-to-device by `gather_prefill_cache`.
         """
         source_key = (resident_state_rows.data_ptr(), resident_block_size)
         if self.gpu_source_key == source_key:
@@ -892,9 +800,6 @@ class HiSparseRuntime:
             plan.row_ids,
             plan.dst_rows,
             plan.miss_mask,
-            None,
-            None,
-            0,
         )
         return staged
 
@@ -996,14 +901,12 @@ class HiSparseRuntime:
             request_state_indices,
             self.region_stride,
             self.max_union_rows,
-            None,
             group.swap_stats,
             physical_topk_indices,
             hot.attention_block_stride,
             req_id_per_token[:num_tokens].contiguous(),
             block_table,
             block_size,
-            None,
             valid_topk_counts,
             swap_host_physical_rows,
             swap_device_physical_rows,
@@ -1012,7 +915,6 @@ class HiSparseRuntime:
             resident.view.block_size
             if resident is not None and resident.view is not None
             else 0,
-            0,
             num_valid_rows,
         )
 
@@ -1180,7 +1082,7 @@ def update_hisparse_residency(
 ) -> None:
     """Apply scheduled requests' residency changes.
 
-    ``residency`` is ``[resident groups, state rows, pages]``: the GPU block of
+    `residency` is `[resident groups, state rows, pages]`: the GPU block of
     each page, or block 0 when the page is read from the host.
     """
     if not updates:
@@ -1398,9 +1300,8 @@ def create_hisparse_cache_handle(
         index_group.hisparse_group = runtime.index_group
     logger.info_once(
         "Enabled experimental HiSparse HMA hot cache: top_k=%d, "
-        "device_buffer_size=%d (%d LRU rows), max_num_seqs=%d.",
+        "device_buffer_size=%d, max_num_seqs=%d.",
         config.top_k,
-        config.device_buffer_size,
         config.device_buffer_size,
         max_num_reqs,
     )

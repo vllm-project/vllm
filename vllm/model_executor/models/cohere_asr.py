@@ -492,7 +492,7 @@ class MaskedConvSequential(nn.Sequential):
         mask = self._create_mask(x, current_lengths.long())
 
         # Process through each layer with mask propagation
-        for i, layer in enumerate(self):
+        for layer in self:
             # Apply current mask before layer
             x = self.apply_channel_mask(x, mask)
 
@@ -606,7 +606,7 @@ class ConvSubsampling(nn.Module):
         in_channels = conv_channels
         layers.append(activation)
 
-        for i in range(self._sampling_num - 1):
+        for _ in range(self._sampling_num - 1):
             # [conv_channels, T//2^i, num_melspec//2^i] ->
             # [conv_channels, T//2^(i+1), num_melspec//2^(i+1)]
             # depthwise conv
@@ -670,7 +670,7 @@ class ConvSubsampling(nn.Module):
         through a convolution or max pooling layer"""
         add_pad: float = all_paddings - kernel_size
         one: float = 1.0
-        for i in range(repeat_num):
+        for _ in range(repeat_num):
             lengths = torch.div(lengths.to(dtype=torch.float) + add_pad, stride) + one
             lengths = torch.ceil(lengths) if ceil_mode else torch.floor(lengths)
         return lengths.to(dtype=torch.int)
@@ -1470,7 +1470,7 @@ class ConformerEncoder(nn.Module):
         )
 
         self.layers = nn.ModuleList()
-        for i in range(n_layers):
+        for _ in range(n_layers):
             layer = ConformerLayer(
                 d_model=d_model,
                 d_ff=d_ff,
@@ -1563,7 +1563,7 @@ class ConformerEncoder(nn.Module):
             device=audio_signal.device,
         )
 
-        for lth, layer in enumerate(self.layers):
+        for layer in self.layers:
             audio_signal = layer(
                 x=audio_signal,
                 att_mask=att_mask,
