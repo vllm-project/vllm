@@ -447,7 +447,7 @@ class RejectionSampler:
             chunk_cu_num_logits = input_batch.cu_num_logits[start : end + 1] - lo
             result = None
             plan = input_batch.verify_plan
-            if plan is not None and not plan.is_chain:
+            if plan is not None and not plan.single_branch:
                 assert self.tree_accept is not None
                 plan = slice_plan(plan, start, end)
                 tree_logits, target = self._target_tokens(

@@ -147,7 +147,7 @@ A `VerifyPlan` holds device tensors per scheduled request, with `R` requests and
 | `parent` | `[R, C]` int32. `parent[r, 0] == -1`. `parent[r, i]` is the row candidate `i` continues, in `[0, i)`. Rows are ordered parent first. A chain has `parent[r, i] == i - 1`. |
 | `tokens` | `[R, C]` int32 candidate tokens. `tokens[r, 0]` is ignored. None exactly for a chain, which verifies the drafted tokens. |
 | `rows` | Host `[R]` int32, or `None`. `rows[r]` is how many rows request `r` verifies, at most `scheduled_rows[r]`; the drafts past it leave the batch and count as rejected. `None` verifies every scheduled row. Entries past a request's rows are ignored. |
-| `is_chain` | A host flag. Set it when every `parent[r, i] == i - 1` by construction. The runner then uses the rejection sampler and skips the commit kernels. It never derives this flag from the tensors. |
+| `single_branch` | A host flag. Set it when every `parent[r, i] == i - 1` by construction. The runner then uses the rejection sampler and skips the commit kernels. It never derives this flag from the tensors. |
 
 Row 0 is the root, the request's last committed token. Plan buffers belong to the
 speculator and must stay valid until the commit returns. A plan that is not a chain
@@ -192,7 +192,7 @@ rows[r]`. A failed check is a device assert.
 ### 5. Commit
 
 The runner commits the KV and the recurrent state along `path`. Every other row is
-rejected. Whether the commit moves anything depends on the plan's `is_chain`, not on
+rejected. Whether the commit moves anything depends on the plan's `single_branch`, not on
 the result: a chain commits nothing. A plan that is not a chain runs the bound
 `commit` kernels in the registry.
 

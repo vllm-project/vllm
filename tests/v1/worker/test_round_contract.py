@@ -97,7 +97,9 @@ _PARENT = [[-1, 0, 0, 1]]
         # A chain verifies the drafted tokens.
         (
             lambda: VerifyPlan(
-                parent=_t([[-1, 0, 1, 2]]), tokens=_t([[0, 7, 8, 9]]), is_chain=True
+                parent=_t([[-1, 0, 1, 2]]),
+                tokens=_t([[0, 7, 8, 9]]),
+                single_branch=True,
             ),
             "chain",
         ),
@@ -126,7 +128,7 @@ def test_plan_and_resources_are_validated(make, match):
     with pytest.raises(ValueError, match=match):
         make()
     # Only a chain may leave its tokens to the runner's draft buffer.
-    assert VerifyPlan(parent=_t(_PARENT), is_chain=True).tokens is None
+    assert VerifyPlan(parent=_t(_PARENT), single_branch=True).tokens is None
     resources = SpecResources(capture_rows=(4, 1, 4))
     assert (resources.max_branching, resources.max_rows) == (1, 4)
 
@@ -197,7 +199,7 @@ def test_layout_matches_reference(kind, seed):
         parent = arange_table(num_reqs, max_rows, DEVICE, start=-1).cpu().numpy()
     tokens = gen.integers(100, 1000, (num_reqs, max_rows)).astype(np.int32)
     if kind == "runner-chain":
-        plan = VerifyPlan(parent=_t(parent), is_chain=True)
+        plan = VerifyPlan(parent=_t(parent), single_branch=True)
     elif kind == "bad-tree":
         # Parents at their own row or later are laid out as chain steps.
         rows = np.arange(max_rows)

@@ -46,9 +46,9 @@ class VerifyPlan:
     """``[R, C]`` int32 candidate tokens (``tokens[r, 0]`` is ignored: the root token is
     known). None exactly for a chain, whose tokens are in the runner's draft
     buffer."""
-    is_chain: bool = False
-    """Host flag: every ``parent[r, i] == i - 1`` by construction. The runner
-    then keeps chain positions and compacts no KV."""
+    single_branch: bool = False
+    """Host flag: a chain, every ``parent[r, i] == i - 1`` by construction. The
+    runner then keeps chain positions and compacts no KV."""
     rows: np.ndarray | None = None
     """``[num_reqs]`` host int32: the rows each request verifies, at most the
     ``PlanInputs.scheduled_rows`` the scheduler reserved; the drafts past them leave
@@ -61,9 +61,9 @@ class VerifyPlan:
             check_rows("VerifyPlan.tokens", self.tokens, 2)
             if self.tokens.shape != self.parent.shape:
                 raise ValueError("a plan's tokens must have the shape of its parents")
-        if not self.is_chain and self.tokens is None:
+        if not self.single_branch and self.tokens is None:
             raise ValueError("a plan that is not a chain must carry tokens")
-        if self.is_chain and self.tokens is not None:
+        if self.single_branch and self.tokens is not None:
             raise ValueError("a chain plan must not carry tokens: they are drafted")
 
 

@@ -60,7 +60,7 @@ class SpecRound:
         # The plan of a step whose speculator returns None: the scheduled chain.
         self.chain_plan = VerifyPlan(
             parent=arange_table(max_num_reqs, self.max_rows, device, start=-1),
-            is_chain=True,
+            single_branch=True,
         )
         # The accepted path of a chain round, path[r, j] == j.
         self.chain_path = arange_table(max_num_reqs, self.max_rows, device)
@@ -185,7 +185,7 @@ class SpecRound:
             return idx_mapping, self.chain_plan, None
         rows = verify_plan.rows
         self._check_plan(verify_plan, num_draft_tokens + 1 if rows is None else rows)
-        assert verify_plan.is_chain or not chain_only, (
+        assert verify_plan.single_branch or not chain_only, (
             "the speculator returned a plan that is not a chain for a batch "
             "that can only verify chains (PlanInputs.chain_only)"
         )
@@ -273,7 +273,7 @@ class SpecRound:
         verify row each request's recurrent state resumes from; None for a
         chain, which commits nothing."""
         plan = input_batch.verify_plan
-        if result is None or plan is None or plan.is_chain:
+        if result is None or plan is None or plan.single_branch:
             return None
         assert self.rows is not None
         assert self.kernels is not None, "set_resources binds the commit kernels"
