@@ -45,6 +45,7 @@ class DraftBench:
                     dtype=torch.int32,
                 ),
                 uniform_token_count=None,
+                max_query_len=None,
                 eager=True,
                 num_reqs=self.batch.num_reqs,
             )

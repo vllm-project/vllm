@@ -255,6 +255,15 @@ class TestFindBudgetGraph:
         mgr = _make_manager_with_budgets([8192, 2048, 4096])
         assert mgr.get_num_graphs_to_capture() == 3
 
+    def test_capture_skipped_without_supported_modalities(self):
+        mgr = _make_manager_with_budgets([2048, 4096])
+        mgr.config.modalities = []
+        mgr.model = None  # capture must not touch the model
+
+        assert mgr.get_num_graphs_to_capture() == 0
+        mgr.capture(graph_pool=object())
+        assert not mgr.is_captured()
+
 
 # ---------------------------------------------------------------------------
 # _execute_local greedy packing with budget-cliff deferral (no GPU required)
@@ -1245,7 +1254,9 @@ class MockDeepseekVL2Model(torch.nn.Module, SupportsEncoderCudaGraph):
                 dest[rank] = emb.clone() if clone else emb
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm graph"
+)
 class TestDeepseekVL2CudaGraph:
     """CUDA graph tests for the batched-tile encoder pattern (DeepSeek-VL2)."""
 
@@ -1348,6 +1359,24 @@ class TestEncoderCudaGraphVideoReplay:
     def test_capture_creates_one_graph_per_budget(self):
         assert len(self.mgr.budget_graphs["default"]) == len(_BUDGETS)
         assert set(self.mgr.budget_graphs["default"].keys()) == set(_BUDGETS)
+
+    def test_frame_slots_capped_by_budget(self):
+        """A large per-video frame limit must not inflate small graphs."""
+        mgr = _make_manager_for_gpu(
+            self.model,
+            _BUDGETS,
+            _VIDEO_MAX_BATCH,
+            self.device,
+            self.dtype,
+            max_frames_per_batch=1000,
+        )
+        mgr.capture(graph_pool=current_platform.graph_pool_handle())
+        for budget, meta in mgr.budget_graphs["default"].items():
+            assert meta.max_frames_per_batch == budget
+        grid_thw = [[2, 4, 4], [1, 4, 4]]
+        result = mgr.execute(_make_video_mm_kwargs(grid_thw, self.device, self.dtype))
+        assert result is not None
+        assert [r.shape[0] for r in result] == [8, 4]
 
     # --- output shape ---
 
@@ -1522,3 +1551,95 @@ class TestInitInvariantValidation:
 
         with pytest.raises(ValueError, match="must be positive"):
             CompilationConfig(encoder_cudagraph_token_budgets=[-1, 64])
+
+
+# ---------------------------------------------------------------------------
+# FlashInfer cu_seqlens replay padding (no GPU required)
+# ---------------------------------------------------------------------------
+
+
+class TestFlashInferCuSeqlensPadding:
+    """A replay pads its cu_seqlens into the buffer captured at a larger batch
+    size. The padded buffer must equal the cu_seqlens computed for the same
+    inputs at the capture batch size. FlashInfer packs the q/k/o and v offsets
+    into one tensor and splits it at its midpoint, so each half has to stay in
+    its own half of the capture buffer."""
+
+    HIDDEN_SIZE = 16
+
+    def _cu_seqlens(self, flashinfer: bool, seq_lens: list[int], pad_to: int):
+        import numpy as np
+
+        from vllm.model_executor.layers.attention.mm_encoder_attention import (
+            MMEncoderAttention,
+        )
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        backend = (
+            AttentionBackendEnum.FLASHINFER
+            if flashinfer
+            else AttentionBackendEnum.FLASH_ATTN
+        )
+        cu_seqlens = np.concatenate([[0], np.cumsum(seq_lens)]).astype(np.int32)
+        cu_seqlens = np.concatenate(
+            [cu_seqlens, np.full(pad_to - len(seq_lens), cu_seqlens[-1], np.int32)]
+        )
+        return MMEncoderAttention.maybe_recompute_cu_seqlens(
+            backend,
+            cu_seqlens,
+            self.HIDDEN_SIZE,
+            1,
+            torch.device("cpu"),
+        )
+
+    @staticmethod
+    def _qwen3_vl_padding_fn(flashinfer: bool):
+        from vllm.model_executor.models.qwen3_vl import (
+            Qwen3VLForConditionalGeneration,
+        )
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        backend = (
+            AttentionBackendEnum.FLASHINFER
+            if flashinfer
+            else AttentionBackendEnum.FLASH_ATTN
+        )
+        model = SimpleNamespace(
+            is_multimodal_pruning_enabled=False,
+            get_max_frames_per_video=lambda: 16,
+            visual=SimpleNamespace(attn_backend=backend, out_hidden_size=8),
+        )
+        config = Qwen3VLForConditionalGeneration.get_encoder_cudagraph_config(
+            cast(Any, model)
+        )
+        # Same lookup as EncoderCudaGraphManager replay.
+        return config.padding_logics.get(
+            "cu_seqlens", EncoderCudaGraphManager._copy_padded_buffer
+        )
+
+    # (seq_lens, replay batch size, capture batch size). The FlashInfer batch
+    # buckets are 8, 16, 32 and 64.
+    CASES = [
+        ([49], 2, 16),  # bucket 8 replayed into bucket 16
+        ([49, 196], 2, 16),
+        ([64] * 9, 9, 32),  # bucket 16 replayed into bucket 32
+        ([49] * 3, 3, 8),  # same bucket
+    ]
+
+    @pytest.mark.parametrize("flashinfer", [True, False])
+    @pytest.mark.parametrize(("seq_lens", "replay_batch", "capture_batch"), CASES)
+    def test_replay_padding_matches_capture_size_metadata(
+        self,
+        flashinfer: bool,
+        seq_lens: list[int],
+        replay_batch: int,
+        capture_batch: int,
+    ):
+        capture = self._cu_seqlens(flashinfer, [49] * capture_batch, capture_batch)
+        replay = self._cu_seqlens(flashinfer, seq_lens, replay_batch)
+        want = self._cu_seqlens(flashinfer, seq_lens, capture_batch)
+        assert want.shape == capture.shape
+
+        buf = torch.full_like(capture, -1)
+        self._qwen3_vl_padding_fn(flashinfer)(buf, replay)
+        assert torch.equal(buf, want)

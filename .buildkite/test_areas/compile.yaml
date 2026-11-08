@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H100) Distributed Compile"
   key: distributed-compile-unit-tests-2xh100
+  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/"
   device: h100
@@ -17,6 +18,7 @@ steps:
   - pytest -s -v tests/compile/passes/distributed
   mirror:
     amd:
+      automatic_shard: true
       label: ':amd: (MI300) Distributed Compile'
       dind: false
       device: mi300_2
@@ -36,6 +38,7 @@ steps:
 
 - label: ":nvidia: (B200) Fusion and Compile"
   key: fusion-and-compile-unit-tests-2xb200
+  automatic_shard: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   device: b200-k8s
@@ -65,6 +68,7 @@ steps:
     - pytest -v -s tests/compile/passes/distributed/test_fusion_all_reduce.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Fusion and Compile FP8"
       dind: false
       device: mi355_2
@@ -95,6 +99,7 @@ steps:
 
 - label: ":nvidia: (H100) Fusion E2E Quick"
   key: fusion-e2e-quick-h100
+  automatic_shard: true
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/"
   device: h100
@@ -113,6 +118,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and +quant_fp8 and (qwen3 or deepseek)"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Fusion E2E Quick"
       dind: false
       device: mi355_dpx
@@ -133,11 +139,13 @@ steps:
       - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
       - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and +rms_norm and +quant_fp8 and qwen3'"
 
-- label: ":nvidia: (H100) Fusion E2E Config Sweep"
+- label: ":nvidia: (H100) [Nightly] Fusion E2E Config Sweep"
   key: fusion-e2e-config-sweep-h100
+  automatic_shard: true
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/"
   device: h100
+  optional: true
   num_devices: 1
   source_file_dependencies:
     - csrc/quantization/
@@ -154,6 +162,9 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
   mirror:
     amd:
+      # Run on PRs even when the H100 step is optional (nightly only).
+      optional: false
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Fusion E2E Config Sweep"
       dind: false
       device: mi355_dpx
@@ -177,6 +188,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] Fusion E2E Config Sweep"
   key: fusion-e2e-config-sweep-b200
+  automatic_shard: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   device: b200-k8s
@@ -190,6 +202,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and (FLASHINFER and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek)) or llama-3)"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Fusion E2E FP8 Config Sweep"
       dind: false
       device: mi355_dpx
@@ -212,6 +225,7 @@ steps:
 
 - label: ":nvidia: (H100) Fusion E2E TP2 Quick"
   key: fusion-e2e-tp2-quick-h100
+  automatic_shard: true
   timeout_in_minutes: 35
   working_dir: "/vllm-workspace/"
   device: h100
@@ -228,6 +242,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Fusion E2E TP2 Quick"
       dind: false
       device: mi355_2
@@ -265,14 +280,15 @@ steps:
         VLLM_ROCM_USE_AITER_CUSTOM_AR=1
         pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
         -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
-        not +quant_fp8 and not +rms_norm and DeepSeek-Coder and
-        ROCM_AITER_MLA'
+        not +quant_fp8 and DeepSeek-Coder and ROCM_AITER_MLA'
 
-- label: ":nvidia: (H100) Fusion E2E TP2 AR-RMS Config Sweep"
+- label: ":nvidia: (H100) [Nightly] Fusion E2E TP2 AR-RMS Config Sweep"
   key: fusion-e2e-tp2-ar-rms-config-sweep-h100
+  automatic_shard: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   device: h100
+  optional: true
   num_devices: 2
   source_file_dependencies:
     - csrc/quantization/
@@ -289,6 +305,9 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "llama-3"
   mirror:
     amd:
+      # Run on PRs even when the H100 step is optional (nightly only).
+      optional: false
+      automatic_shard: true
       label: ":amd: (MI355) Fusion E2E TP2 AR-RMS FP8 Config Sweep"
       dind: false
       device: mi355_2
@@ -315,6 +334,7 @@ steps:
 
 - label: ":nvidia: (B200) Fusion E2E TP2"
   key: fusion-e2e-tp2-b200
+  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/"
   device: b200-k8s
@@ -333,6 +353,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "(FLASHINFER and inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))) or Llama-3.1-8B-Instruct-FP4"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Fusion E2E TP2 FP8 BF16 rewrites"
       dind: false
       device: mi355_2
@@ -360,6 +381,7 @@ steps:
 
 - label: ':amd: (MI355) Fusion E2E TP2 AR-RMS (Inductor Partition)'
   key: fusion-e2e-tp2-ar-rms-inductor-partition-amd
+  automatic_shard: true
   dind: false
   device: mi355_2
   num_devices: 2
@@ -381,6 +403,7 @@ steps:
 
 - label: ':amd: (MI355) Fusion E2E TP2 AR-RMS (Dynamo Partition)'
   key: fusion-e2e-tp2-ar-rms-dynamo-partition-amd
+  automatic_shard: true
   dind: false
   device: mi355_2
   num_devices: 2
