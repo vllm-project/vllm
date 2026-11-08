@@ -1708,7 +1708,14 @@ class NixlBaseConnectorWorker:
                 self.device_id = region_device_id
             if is_host_resident:
                 registration_base = cache.data_ptr()
-                registration_len = cache.nbytes
+                # A page rounded up to a kernel/packing alignment has a stride
+                # longer than its payload, so cache.nbytes stops short of the
+                # last block. Register the span the stride addresses instead.
+                registration_len = (
+                    len(cache) * cache.stride(0) * cache.element_size()
+                    if cache.ndim > 1
+                    else cache.nbytes
+                )
             else:
                 registration_base = storage_addr
                 registration_len = storage.nbytes()

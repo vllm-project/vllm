@@ -2142,7 +2142,12 @@ def _make_hybrid_mla_kv_cache_config(num_blocks: int = 4):
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("kernel_block_size", [16, 8])
-def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size):
+@pytest.mark.parametrize("host_page_padding", [0, 64])
+def test_nixl_keeps_device_block_count_with_hisparse_host_pool(
+    kernel_block_size, host_page_padding
+):
+    """A padded host page registers over its stride span and keeps the device
+    block count unchanged."""
     host_num_blocks = 4
     gpu_num_blocks = 9
     spec = MLAAttentionSpec(
@@ -2151,15 +2156,18 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size
         head_size=8,
         dtype=torch.float16,
     )
+    physical_per_logical = spec.block_size // kernel_block_size
+    physical_page_bytes = spec.page_size_bytes // physical_per_logical
+    host_page_stride = physical_page_bytes + host_page_padding
     kv_cache_config = KVCacheConfig(
         num_blocks=gpu_num_blocks,
         hisparse_host_num_blocks=host_num_blocks,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=host_num_blocks * spec.page_size_bytes,
+                size=host_num_blocks * physical_per_logical * host_page_stride,
                 layers=["mla.host"],
-                layer_stride=host_num_blocks * spec.page_size_bytes,
-                block_stride=spec.page_size_bytes,
+                layer_stride=host_num_blocks * physical_per_logical * host_page_stride,
+                block_stride=host_page_stride * physical_per_logical,
                 host_resident=True,
             ),
             KVCacheTensor(
@@ -2189,10 +2197,12 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size
     fake_platform = MagicMock()
     fake_platform.device_type = "cuda"
     fake_platform.get_nixl_memory_type.return_value = "VRAM"
-    physical_per_logical = spec.block_size // kernel_block_size
-    physical_page_bytes = spec.page_size_bytes // physical_per_logical
-    host_cache = torch.zeros(
-        host_num_blocks * physical_per_logical, physical_page_bytes, dtype=torch.uint8
+    host_storage = torch.zeros(
+        host_num_blocks * physical_per_logical * host_page_stride, dtype=torch.uint8
+    )
+    host_cache = host_storage.as_strided(
+        (host_num_blocks * physical_per_logical, physical_page_bytes),
+        (host_page_stride, 1),
     )
     device_cache = torch.zeros(
         gpu_num_blocks * physical_per_logical, physical_page_bytes, dtype=torch.uint8
