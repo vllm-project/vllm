@@ -51,7 +51,8 @@ MLA backend serves DSpark at interleave 1 only.
 
 M1 also needs the `ROCM_AITER_MLA` attention backend (it reads AITER MLA's decode
 metadata), an fp8 E4M3 KV cache (`fp8` or `fp8_e4m3`) and MLA's W_UK / W_UV as
-AITER MXFP4 bmms (`VLLM_ROCM_USE_AITER_FP4BMM=1`). Without them the MLA layers
+AITER MXFP4 bmms (`VLLM_ROCM_USE_AITER_FP4BMM=1`) or BF16
+(`VLLM_ROCM_USE_AITER_FP4BMM=0` and `VLLM_ROCM_USE_AITER_FP8BMM=0`). Without them the MLA layers
 run vLLM's attention ops, then K2, and startup logs why; DCP1 runs only with M1
 and is refused. The KDA layers run K1 and K2 either way.
 

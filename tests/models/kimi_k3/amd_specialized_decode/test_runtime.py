@@ -184,6 +184,14 @@ def test_supported_config_is_accepted(supported_vllm_config):
     assert specialized_decode_config(supported_vllm_config) == DecodeConfig(q=8)
 
 
+@pytest.mark.parametrize("dcp", [1, 8])
+def test_bf16_mla_projections_are_supported(dcp, on_mi355x, monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FP4BMM", "0")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FP8BMM", "0")
+    cfg = _vllm_config(**{"parallel_config.decode_context_parallel_size": dcp})
+    assert specialized_decode_config(cfg) == DecodeConfig(q=8)
+
+
 @pytest.fixture
 def supported_vllm_config(tmp_path, monkeypatch, on_mi355x):
     from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
@@ -295,8 +303,8 @@ _NO_AITER_MLA = [
         ({"cache_config.cache_dtype": "fp8_e5m2"}, {}, "an fp8 (E4M3) KV cache"),
         (
             {},
-            {"VLLM_ROCM_USE_AITER_FP4BMM": "0"},
-            "VLLM_ROCM_USE_AITER_FP4BMM=1",
+            {"VLLM_ROCM_USE_AITER_FP4BMM": "0", "VLLM_ROCM_USE_AITER_FP8BMM": "1"},
+            "BF16 or MXFP4",
         ),
         *((o, e, "the ROCM_AITER_MLA attention backend") for o, e in _NO_AITER_MLA),
     ],
