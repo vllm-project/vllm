@@ -786,8 +786,11 @@ def test_mla_weight_views_fall_back_per_model():
     )
 
 
-def _dsa_impl(topk=None):
-    """A DSA layer's MLA impl as ``dsa.dsa_reasons`` sees it."""
+def _dsa_impl(topk=0):
+    """A DSA layer's MLA impl as ``dsa.dsa_reasons`` sees it (by default its
+    top-k buffer [8, 2048] int32)."""
+    if isinstance(topk, int):
+        topk = torch.empty(8, 2048, dtype=torch.int32)
     return SimpleNamespace(
         get_fp8_ds_mla_row_bytes=lambda: 656, sinks=None, topk_indices_buffer=topk
     )
@@ -826,14 +829,34 @@ def _dsa_layer(**over):
             {"VLLM_KIMI_SD_DSA": "auto", "VLLM_KIMI_SD_DSA_FOLD": "1"},
             1,
             {"impl": _dsa_impl(torch.empty(8, 4096, dtype=torch.int32))},
-            "wider than the top-k",
+            "not [tokens, 2048] dense int32",
         ),
         # the defaults: auto, the fold
         (
             {},
             1,
             {"impl": _dsa_impl(torch.empty(8, 4096, dtype=torch.int32))},
-            "wider than the top-k",
+            "not [tokens, 2048] dense int32",
+        ),
+        # no buffer, a strided view or int64: the fold refuses, FOLD=0 converts
+        ({}, 1, {"impl": _dsa_impl(None)}, "top-k buffer (none)"),
+        (
+            {},
+            1,
+            {"impl": _dsa_impl(torch.empty(8, 4096, dtype=torch.int32)[:, :2048])},
+            "not [tokens, 2048] dense int32",
+        ),
+        (
+            {"VLLM_KIMI_SD_DSA": "fused"},
+            1,
+            {"impl": _dsa_impl(torch.empty(8, 2048, dtype=torch.int64))},
+            "not [tokens, 2048] dense int32",
+        ),
+        (
+            {"VLLM_KIMI_SD_DSA": "fused", "VLLM_KIMI_SD_DSA_FOLD": "0"},
+            1,
+            {"impl": _dsa_impl(None)},
+            None,
         ),
         # split converts the indices regardless
         (

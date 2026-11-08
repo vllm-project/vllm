@@ -16,6 +16,8 @@ TP8 + DCP1 shapes (12 heads a rank, the fp8_ds_mla cache's 656 B records).
 - U6 / U8 / U9 (eight GPUs): K2 with the DSA stage (``dsa`` 2, the fold or
   not) bit-equal to the split launches over graph replays, across the epoch
   tag's wrap, and a stalled DSA CTA failing the step without a hang.
+- U6b (eight GPUs): the same on new inputs every replay, with a token's DSA
+  CTAs late (no stale partial read on another XCD).
 """
 
 import pytest
@@ -754,3 +756,162 @@ def test_dsa_fused_tp8_bit_equal_replays_and_faults(
     wrap. U8: a DSA CTA stalled past the bounds: the combine's ``ardy`` waits
     give up, the step fails, no hang."""
     multi_process_parallel(monkeypatch, 8, 1, _dsa_k2_worker)
+
+
+# ---------------------------------------------------------------- U6b
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _dsa_k2_fresh_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+) -> None:
+    from tests.models.kimi_k3.amd_specialized_decode.test_numerics import (
+        _init_worker,
+        _k2_inputs,
+        _moe_args,
+        _moe_weights,
+    )
+
+    device = _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
+
+    from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_attn
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import HIDDEN
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import GROWS
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ops import (
+        ld_i32,
+        uniform,
+    )
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
+
+    # the fault hook at every epoch (``fault_epoch`` only a build key): the
+    # stall in every replay, the epoch (the tags) advancing as in a run
+    real_stall = k2.stall
+
+    late = []  # the CTAs that stall
+
+    def stall(f_rank, _f_epoch, f_layer, ticks, rank, epoch, layer, cta=0):
+        for b in late:
+            e = uniform(ld_i32(epoch, 0))
+            real_stall(f_rank, e, f_layer, ticks, rank, epoch, layer, b)
+
+    monkeypatch.setattr(k2, "stall", stall)
+    runner = MonoRunner(device)
+    mw = _moe_weights(rank, device)
+    g = torch.Generator().manual_seed(700 + rank)
+    nblk, bsr, layer = 80, 80, 5
+    lens = DSA_LENS[layer]
+    qsl = torch.tensor([0, S], dtype=torch.int32, device=device)
+    rec, bt, topk, iptr = _paged(nblk, bsr, lens, g)
+    x = dict(
+        w=_k2_inputs(rank, device, S, seed=layer),
+        rec=rec, bt=bt, topk=topk, iptr=iptr,
+        idx=_convert(bt, topk, iptr, bsr),
+        q=_q(g),
+        gate=torch.sigmoid(torch.randn(S, GROWS, generator=g)).to(device, bf),
+        w_v=_w_uv(g).transpose(1, 2),
+    )  # fmt: skip
+
+    def fresh():
+        """New query and top-k in place (the graphs' persistent inputs)."""
+        x["q"].copy_(_q(g))
+        _, _, tk, _ = _paged(nblk, bsr, lens, g)
+        x["topk"].copy_(tk)
+        x["idx"].copy_(_convert(bt, x["topk"], iptr, bsr))
+
+    def launch(key, dk, outs):
+        so, sl = dsa_attn.partial_shapes(dk)
+        po = torch.empty(so, dtype=bf, device=device)
+        pl = torch.empty(sl, dtype=torch.float32, device=device)
+        dsa_in = dict(q=x["q"], kv=x["rec"], iptr=x["iptr"], scale=_scale())
+        if dk.fold:
+            dsa_in.update(topk=x["topk"], bt=x["bt"], bsr=bsr, bs=BS)
+        else:
+            dsa_in.update(idx=x["idx"])
+        if key.dsa == 1:
+            dsa_attn.dsa_attn_launch(dk, part_o=po, part_lse=pl, **dsa_in)
+        core, prefix, out = outs
+        m1b_in = dict(
+            o=po[0], lse=pl[0], seq_lens=qsl, qsl=qsl, w_v=x["w_v"],
+            w_v_scale=None, gate=x["gate"],
+        )  # fmt: skip
+        w = x["w"]
+        k2.k2_launch(
+            key, core=core, w_o=w["w_o"], prefix=prefix, blocks=w["blocks"],
+            ares_nw=w["ares_nw"], ares_qk=w["ares_qk"], in_nw=w["in_nw"],
+            out=out, layer=128 + layer, m1b_in=m1b_in,
+            dsa_in=dsa_in if key.dsa == 2 else None,
+            **_moe_args(mw), **runner.launch_args(), **runner.peer_args(),
+        )  # fmt: skip
+
+    def capture(P, dsa, fold, fault):
+        runner.fault = fault
+        key = _dsa_k2(runner, P, dsa, fold)
+        runner.fault = {}
+        dk = dsa_attn.DsaAttnBuild(tokens=S, splits=P, chunk=TOPK // P, fold=fold)
+        outs = [
+            torch.empty(S, GROWS, dtype=bf, device=device),
+            torch.empty(S, HIDDEN, dtype=bf, device=device),
+            torch.empty(S, HIDDEN, dtype=bf, device=device),
+        ]
+        runner.step_begin()
+        launch(key, dk, outs)  # compiled and warm before the capture
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            runner.step_begin()
+            launch(key, dk, outs)
+        return graph, outs
+
+    # token 2's DSA CTAs (all its slices) stall 3 ms (under the waits' bound)
+    # in the fused replays: tokens 0 and 1's combine tasks (CTAs 0 ..
+    # 11, every XCD) read their partial LSEs first, the 128 B lines that also
+    # hold token 2's heads 0 .. 7 (tokens 2 and 3's tasks on CTAs 12 .. 23)
+    e = 4245  # (a key no other test builds)
+    stall_ticks = 300_000
+    for P in (16, 32):
+        cta0 = 256 - S * P
+        late[:] = range(cta0 + 2 * P, cta0 + 3 * P)
+        split, want = capture(P, 1, False, {})
+        for fold in (False, True):
+            us = {}
+            for ticks in (0, stall_ticks):
+                fault = (
+                    dict(fault_rank=rank, fault_epoch=e, fault_layer=128 + layer,
+                         fault_ticks=ticks)
+                    if ticks else {}
+                )  # fmt: skip
+                fused, got = capture(P, 2, fold, fault)
+                times = []
+                for it in range(30):
+                    fresh()
+                    split.replay()
+                    torch.accelerator.synchronize()
+                    ref = [t.clone() for t in want]
+                    ev = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
+                    ev[0].record()
+                    fused.replay()
+                    ev[1].record()
+                    torch.accelerator.synchronize()
+                    times.append(ev[0].elapsed_time(ev[1]) * 1000)
+                    ok = all(torch.equal(a, b) for a, b in zip(got, ref))
+                    assert ok, (rank, P, fold, ticks, it)
+                    assert not runner.health.any() and not runner.flags.any()
+                us[ticks] = sorted(times)[len(times) // 2]
+            # the stall took effect (the replays' median time)
+            assert us[stall_ticks] - us[0] > 20, (P, fold, us)
+
+
+@needs_gfx950
+@multi_gpu_test(num_gpus=8)
+def test_dsa_fused_tp8_fresh_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """U6b: the fused graph replayed on new queries and top-k each replay (the
+    partials' addresses reused: a stale cached partial shows) gives the split
+    graph's bits, P = 16 and 32, with and without the fold, and with one
+    token's DSA CTAs stalled (its partial LSEs late, in the 128 B lines other
+    XCDs' combine tasks read before)."""
+    multi_process_parallel(monkeypatch, 8, 1, _dsa_k2_fresh_worker)

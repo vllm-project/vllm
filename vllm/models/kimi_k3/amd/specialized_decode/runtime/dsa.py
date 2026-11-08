@@ -82,6 +82,12 @@ def layer_shapes(layer) -> tuple:
     )
 
 
+def _desc(t) -> str:
+    if t is None:
+        return "(none)"
+    return f"{tuple(t.shape)} {t.dtype} strides {t.stride()}"
+
+
 def dsa_reasons(runner: MonoRunner, layer) -> list[str]:
     """Why this DSA layer cannot run ``DsaM1Layer`` (empty: it can). The
     deployment's are checked at startup (``runtime.unsupported``), the steps'
@@ -97,14 +103,19 @@ def dsa_reasons(runner: MonoRunner, layer) -> list[str]:
         return ["a layer without DSA's sparse MLA"]
     shapes = layer_shapes(layer)
     topk = getattr(a.impl, "topk_indices_buffer", None)
+    # the fold reads the top-k rows in place: int32, TOPK wide and dense
+    rows_ok = (
+        topk is not None
+        and topk.dtype == torch.int32
+        and topk.dim() == 2
+        and topk.size(-1) == DSA_SHAPES[5]
+        and topk.stride() == (DSA_SHAPES[5], 1)
+    )
     checks = (
         (
-            fused()
-            and envs.VLLM_KIMI_SD_DSA_FOLD
-            and topk is not None
-            and topk.size(-1) != DSA_SHAPES[5],
-            f"a top-k buffer {tuple(topk.shape) if topk is not None else ()} "
-            "wider than the top-k (VLLM_KIMI_SD_DSA_FOLD=0 converts it)",
+            fused() and envs.VLLM_KIMI_SD_DSA_FOLD and not rows_ok,
+            f"a top-k buffer {_desc(topk)} not [tokens, {DSA_SHAPES[5]}] dense "
+            "int32 (VLLM_KIMI_SD_DSA_FOLD=0 converts it)",
         ),
         (
             envs.VLLM_KIMI_SD_DSA_SPLITS not in SPLITS,
