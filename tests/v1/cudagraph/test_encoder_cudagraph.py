@@ -7,9 +7,12 @@ Test organization:
     - TestFindBudgetGraph      — greedy budget selection logic
     - TestGetCumulativeStats   — hit/miss rate statistics
     - TestGetInputModality     — modality routing from mm_kwargs keys
+    - TestDefaultBudgetTable   — subdivided default budgets, user overrides
   GPU required:
     - TestEncoderCudaGraphCaptureReplay — capture, replay, fallback, counters, chunking
     - TestEncoderCudaGraphVideoReplay   — video modality capture, replay
+    - TestSharedCaptureBuffers          — automatic cross-budget buffer sharing
+    - TestSharedBufferFallback          — incompatible buffers keep own allocation
 """
 
 from collections.abc import Hashable
@@ -174,6 +177,8 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     )
     mgr.budget_graphs = {"default": {}}
     mgr.graph_pool = None
+    mgr._shared_input_buffers = {}
+    mgr._shared_output_buffers = {}
     mgr._capture_axes = ()
     mgr.graph_hits = 0
     mgr.graph_misses = 0
@@ -192,23 +197,66 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
 
 
 class TestGenerateBudgets:
-    """Auto-generate power-of-2 budgets from min to max."""
+    """Auto-generate subdivided budgets from min to max."""
 
-    def test_exact_powers_of_2(self):
-        result = EncoderCudaGraphManager._generate_budgets(64, 1024)
-        assert result == [64, 128, 256, 512, 1024]
+    def test_64_to_16384(self):
+        """Quarter-octave steps <=1024, half-octave above."""
+        result = EncoderCudaGraphManager._generate_budgets(64, 16384)
+        assert result == [
+            64,
+            80,
+            96,
+            112,
+            128,
+            160,
+            192,
+            224,
+            256,
+            320,
+            384,
+            448,
+            512,
+            640,
+            768,
+            896,
+            1024,
+            1536,
+            2048,
+            3072,
+            4096,
+            6144,
+            8192,
+            12288,
+            16384,
+        ]
 
-    def test_max_not_power_of_2(self):
-        result = EncoderCudaGraphManager._generate_budgets(64, 800)
-        assert result == [64, 128, 256, 512, 800]
+    def test_includes_off_grid_min_max(self):
+        result = EncoderCudaGraphManager._generate_budgets(100, 5000)
+        assert result[0] == 100
+        assert result[-1] == 5000
+        assert result == sorted(set(result))
+        # Grid points between min and max are all present.
+        assert {128, 160, 192, 224, 256, 1024, 1536, 2048, 3072, 4096} <= set(result)
 
     def test_min_equals_max(self):
-        result = EncoderCudaGraphManager._generate_budgets(64, 64)
-        assert result == [64]
+        assert EncoderCudaGraphManager._generate_budgets(64, 64) == [64]
 
-    def test_large_range(self):
-        result = EncoderCudaGraphManager._generate_budgets(64, 8192)
-        assert result == [64, 128, 256, 512, 1024, 2048, 4096, 8192]
+    def test_small_range(self):
+        result = EncoderCudaGraphManager._generate_budgets(4, 128)
+        assert result[0] == 4
+        assert result[-1] == 128
+        assert result == sorted(set(result))
+        assert {8, 16, 32, 64} <= set(result)
+
+
+def test_item_multiple_budgets_fit_fixed_size_items():
+    """Paths with fixed-size items get budgets that hold N items exactly."""
+    budgets = EncoderCudaGraphManager._item_multiple_budgets(169, 2560)
+    assert budgets == [169 * n for n in range(1, 16)]
+    budgets = EncoderCudaGraphManager._item_multiple_budgets(81, 2560)
+    assert all(b % 81 == 0 for b in budgets)
+    assert budgets[:16] == [81 * n for n in range(1, 17)]
+    assert budgets[-1] == 81 * (2560 // 81)
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +680,8 @@ def _make_manager_for_gpu(
     mgr.use_dp = False
     mgr.budget_graphs = {"default": {}}
     mgr.graph_pool = None
+    mgr._shared_input_buffers = {}
+    mgr._shared_output_buffers = {}
     mgr._capture_axes = ()
     mgr.graph_hits = 0
     mgr.graph_misses = 0
@@ -1254,7 +1304,9 @@ class MockDeepseekVL2Model(torch.nn.Module, SupportsEncoderCudaGraph):
                 dest[rank] = emb.clone() if clone else emb
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm graph"
+)
 class TestDeepseekVL2CudaGraph:
     """CUDA graph tests for the batched-tile encoder pattern (DeepSeek-VL2)."""
 
@@ -1641,3 +1693,197 @@ class TestFlashInferCuSeqlensPadding:
         buf = torch.full_like(capture, -1)
         self._qwen3_vl_padding_fn(flashinfer)(buf, replay)
         assert torch.equal(buf, want)
+
+
+# ---------------------------------------------------------------------------
+# Default budget table (no GPU required)
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultBudgetTable:
+    """The subdivided budget table is the default for every model."""
+
+    def _make_mgr(
+        self,
+        token_budgets=None,
+        max_mm_items: int = 0,
+        min_budget: int = 64,
+        max_budget: int = 16384,
+    ):
+        vllm_config = _MockVllmConfig(token_budgets, max_mm_items)
+        model = _MockModel(min_budget, max_budget)
+        return EncoderCudaGraphManager(
+            vllm_config=vllm_config,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            model=model,
+        )
+
+    def test_default_is_subdivided_table(self):
+        mgr = self._make_mgr()
+        assert mgr.token_budgets == EncoderCudaGraphManager._generate_budgets(64, 16384)
+        assert len(mgr.token_budgets) == 25
+
+    def test_user_max_mm_items_only_still_subdivided(self):
+        mgr = self._make_mgr(max_mm_items=128)
+        assert mgr.max_batch_size == 128
+        assert mgr.token_budgets == EncoderCudaGraphManager._generate_budgets(
+            128, 16384
+        )
+
+    def test_user_budgets_override_default_table(self):
+        mgr = self._make_mgr(token_budgets=[64, 256])
+        assert mgr.token_budgets == [64, 256]
+
+
+# ---------------------------------------------------------------------------
+# Cross-budget buffer sharing (GPU): the manager shares prefix-compatible
+# capture buffers with no model cooperation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not HAS_DEVICE_GRAPH, reason="Requires CUDA, ROCm or XPU graph")
+class TestSharedCaptureBuffers:
+    """All budgets capture into prefix views of one max-size buffer set."""
+
+    def setup_method(self):
+        self.device = torch.device(current_platform.device_type, 0)
+        self.dtype = torch.float16
+        self.model = SimpleMockViTModel().to(self.device).half()
+        self.mgr = _make_manager_for_gpu(
+            self.model, _BUDGETS, _MAX_BATCH, self.device, self.dtype
+        )
+        self.graph_pool = current_platform.graph_pool_handle()
+        self.mgr.capture(graph_pool=self.graph_pool)
+
+    def test_input_buffers_share_one_storage(self):
+        metas = list(self.mgr.budget_graphs["default"].values())
+        assert len(metas) == len(_BUDGETS)
+        for key in ("pixel_values", "dummy_buf"):
+            storages = {
+                m.input_buffers[key].untyped_storage().data_ptr() for m in metas
+            }
+            assert len(storages) == 1
+
+    def test_small_budget_buffers_are_prefix_views(self):
+        small = self.mgr.budget_graphs["default"][_BUDGETS[0]]
+        large = self.mgr.budget_graphs["default"][_BUDGETS[-1]]
+        for key in ("pixel_values", "dummy_buf"):
+            assert small.input_buffers[key].shape[0] < large.input_buffers[key].shape[0]
+            # Views start at the head of the shared buffer.
+            assert (
+                small.input_buffers[key].data_ptr()
+                == large.input_buffers[key].data_ptr()
+            )
+
+    def test_output_buffers_share_storage_with_prefix_slice(self):
+        by_budget = {
+            m.token_budget: m for m in self.mgr.budget_graphs["default"].values()
+        }
+        storages = {
+            m.output_buffer.untyped_storage().data_ptr() for m in by_budget.values()
+        }
+        assert len(storages) == 1
+        small = by_budget[_BUDGETS[0]].output_buffer
+        large = by_budget[_BUDGETS[-1]].output_buffer
+        assert 0 < small.shape[0] < large.shape[0]
+        assert small.data_ptr() == large.data_ptr()
+
+    def test_replay_large_then_small_no_contamination(self):
+        # Alternate large-budget and small-budget batches; every output must
+        # match the eager forward despite the graphs sharing buffers.
+        for grid_thw in ([[1, 8, 8], [1, 8, 8]], [[1, 4, 4]], [[1, 8, 8]]):
+            mm_kwargs = _make_mm_kwargs(grid_thw, self.device, self.dtype)
+            expected = self.model.encoder_eager_forward(mm_kwargs).split(
+                [t * (h // 2) * (w // 2) for t, h, w in grid_thw]
+            )
+            outputs = self.mgr.execute(mm_kwargs)
+            assert len(outputs) == len(grid_thw)
+            for actual, eager in zip(outputs, expected):
+                torch.testing.assert_close(actual, eager)
+        assert self.mgr.graph_hits == 4
+
+    def test_clear_releases_shared_buffers(self):
+        self.mgr.clear()
+        assert self.mgr._shared_input_buffers == {}
+        assert self.mgr._shared_output_buffers == {}
+
+
+class VarShapeMockViTModel(SimpleMockViTModel):
+    """Adds capture buffers that exercise the sharing fallback.
+
+    ``scalar`` is 0-dim and must be shared wholesale; ``odd_buf`` changes
+    its trailing dimension per budget and must keep its own allocation.
+    """
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ) -> EncoderCudaGraphCaptureInputs:
+        inputs = super().prepare_encoder_cudagraph_capture_inputs(
+            token_budget,
+            max_batch_size,
+            max_frames_per_batch,
+            device,
+            dtype,
+            path,
+            axis_keys,
+        )
+        n_rows = inputs.values["pixel_values"].shape[0]
+        inputs.values["scalar"] = torch.full(
+            (), float(token_budget), device=device, dtype=torch.float32
+        )
+        inputs.values["odd_buf"] = torch.zeros(
+            n_rows, token_budget, device=device, dtype=dtype
+        )
+        return inputs
+
+
+@pytest.mark.skipif(not HAS_DEVICE_GRAPH, reason="Requires CUDA, ROCm or XPU graph")
+class TestSharedBufferFallback:
+    """Non-prefix-compatible buffers keep their own per-budget allocation."""
+
+    def setup_method(self):
+        self.device = torch.device(current_platform.device_type, 0)
+        self.dtype = torch.float16
+        self.model = VarShapeMockViTModel().to(self.device).half()
+        self.mgr = _make_manager_for_gpu(
+            self.model, _BUDGETS, _MAX_BATCH, self.device, self.dtype
+        )
+        self.graph_pool = current_platform.graph_pool_handle()
+        self.mgr.capture(graph_pool=self.graph_pool)
+
+    def test_scalar_buffers_are_shared(self):
+        metas = list(self.mgr.budget_graphs["default"].values())
+        storages = {
+            m.input_buffers["scalar"].untyped_storage().data_ptr() for m in metas
+        }
+        assert len(storages) == 1
+
+    def test_incompatible_trailing_dim_keeps_own_allocation(self):
+        metas = list(self.mgr.budget_graphs["default"].values())
+        storages = {
+            m.input_buffers["odd_buf"].untyped_storage().data_ptr() for m in metas
+        }
+        assert len(storages) == len(_BUDGETS)
+        # Prefix-compatible keys of the same model are still shared.
+        shared = {
+            m.input_buffers["pixel_values"].untyped_storage().data_ptr() for m in metas
+        }
+        assert len(shared) == 1
+
+    def test_replay_matches_eager(self):
+        grid_thw = [[1, 8, 8], [1, 4, 4]]
+        mm_kwargs = _make_mm_kwargs(grid_thw, self.device, self.dtype)
+        expected = self.model.encoder_eager_forward(mm_kwargs).split(
+            [t * (h // 2) * (w // 2) for t, h, w in grid_thw]
+        )
+        outputs = self.mgr.execute(mm_kwargs)
+        for actual, eager in zip(outputs, expected):
+            torch.testing.assert_close(actual, eager)

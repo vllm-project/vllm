@@ -51,7 +51,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.counter import Counter
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
-from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.v1.worker.gpu.sample.logits_processor.interface import LogitsProcessor
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -121,7 +121,7 @@ class LLM(
         enable_extensible_kv_cache: Reserve the KV cache address range with
             device virtual memory and commit physical pages after warmup, so
             the cache is sized from the memory actually free after CUDA graph
-            capture. Defaults to on for CUDA and ROCm with the V2 model runner.
+            capture. Defaults to on for CUDA and ROCm.
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data
@@ -843,7 +843,9 @@ class LLM(
             reset_running_requests, reset_connector
         )
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+    def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ):
         """Put the engine to sleep. The engine should not process any requests.
         The caller should guarantee that no requests are being processed
         during the sleep period, before `wake_up` is called.
@@ -857,24 +859,33 @@ class LLM(
                            sleeping and waking up the engine to run the same
                            model again. Please make sure there's enough CPU
                            memory to store the model weights.
-                - Level 2: Discard all GPU memory (weights + KV cache).
-                           Good for sleeping and waking up the engine to run
-                           a different model or update the model, where
-                           previous model weights are not needed. It reduces
+                - Level 2: Discard model parameters and KV cache, and offload
+                           the rest of the model's GPU state to CPU.
+                           Good for sleeping and waking up the engine to update
+                           the model's weights, where the previous weights are
+                           not needed. It reduces
                            CPU memory pressure.
             mode: How to handle any existing requests, can be "abort", "wait",
                 or "keep".
+            reset_connector: Also reset the KV connector's cache, such as
+                blocks offloaded to CPU. Set ``False`` only if the weights do
+                not change before ``wake_up``. Ignored at level 0.
 
         """
-        self.llm_engine.sleep(level=level, mode=mode)
+        self.llm_engine.sleep(level=level, mode=mode, reset_connector=reset_connector)
 
-    def release_kv_cache_memory(self) -> None:
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         """Release the GPU physical memory backing the KV cache.
 
         Requires a completed ``sleep(level=0)`` and resident executor memory.
         Restore with ``wake_up(tags=["kv_cache"])``; kept requests are recomputed.
+
+        Args:
+            reset_connector: Also reset the KV connector's cache; see
+                [sleep][vllm.LLM.sleep].
+
         """
-        self.llm_engine.release_kv_cache_memory()
+        self.llm_engine.release_kv_cache_memory(reset_connector)
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
         """Wake up the engine from sleep mode. See the [sleep][vllm.LLM.sleep]
