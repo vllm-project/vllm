@@ -1739,7 +1739,7 @@ def get_global_kv_cache_groups(
 class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
     """Default grouping and placement, backed by the module-level functions here.
 
-    .. note::
+    !!! note
         This class is part of the experimental `KVCacheConfigBuilder`
         interface and is subject to change.
 

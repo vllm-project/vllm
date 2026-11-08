@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 class KVCacheConfigBuilder(ABC):
     """Interface for platform KV cache placement.
 
-    .. note::
+    !!! note
         This interface is experimental and subject to change. The exact hooks
         and the `num_blocks` contract may evolve before it stabilizes.
 

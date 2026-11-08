@@ -6,6 +6,8 @@
 - Python Sphinx roles become code spans of the text Sphinx would display, e.g.
   :class:`~vllm.LLM` is rewritten to `LLM`. Other roles must be fixed by hand.
 - Sections are Google style (`Args:`), not NumPy style (`Parameters` + `---`).
+- Admonitions and code blocks are Markdown (`!!! note`, fences), not
+  reStructuredText directives (`.. note::`, `.. code-block::`).
 - `[a][b]` is a reference link that mkdocs-autorefs tries to resolve, so shapes
   and indexing written outside code spans produce broken cross-references:
 
@@ -51,6 +53,7 @@ NUMPY_SECTION = re.compile(
     r"Attributes|Notes)[ \t]*\n[ \t]*-{3,}[ \t]*$",
     re.MULTILINE,
 )
+RST_DIRECTIVE = re.compile(r"^[ \t]*\.\. ([a-z][a-z-]*)::", re.MULTILINE)
 QUOTE = re.compile(r"""^[rRuU]?("{3}|'{3}|"|')""")
 # Fully qualified Python paths, e.g. `vllm.LLM` or `torch.Tensor`
 TARGET = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)+")
@@ -317,15 +320,19 @@ def crossref_violations(filepath: str, source: str, tree: ast.Module) -> list[st
     return violations
 
 
-def numpy_violations(filepath: str, tree: ast.Module) -> list[str]:
+def section_violations(filepath: str, tree: ast.Module) -> list[str]:
     violations = []
     for node in docstrings(tree, rendered_only=True):
-        for match in NUMPY_SECTION.finditer(node.value):
-            lineno = node.lineno + node.value.count("\n", 0, match.start())
-            violations.append(
-                f"{filepath}:{lineno}: NumPy-style `{match.group(1)}` section in a "
-                "docstring; use Google style"
-            )
+        for pattern, found, fix in (
+            (NUMPY_SECTION, "NumPy-style `{}` section", "use Google style"),
+            (RST_DIRECTIVE, "reStructuredText `.. {}::`", "use `!!!` or a fence"),
+        ):
+            for match in pattern.finditer(node.value):
+                lineno = node.lineno + node.value.count("\n", 0, match.start())
+                found_text = found.format(match.group(1))
+                violations.append(
+                    f"{filepath}:{lineno}: {found_text} in a docstring; {fix}"
+                )
     return violations
 
 
@@ -349,7 +356,7 @@ def main() -> int:
                 f.write(bom + new_source.encode("utf-8"))
             source, tree = new_source, ast.parse(new_source, filename=filepath)
         failures += fixes + unfixable + crossref_violations(filepath, source, tree)
-        failures += numpy_violations(filepath, tree)
+        failures += section_violations(filepath, tree)
     print("\n".join(failures), end="\n" if failures else "")
     return 1 if failures else 0
 

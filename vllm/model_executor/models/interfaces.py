@@ -680,7 +680,7 @@ def supports_score_template(
 class SupportsKVCacheGrouping(Protocol):
     """The interface required for models that own their KV cache grouping.
 
-    .. note::
+    !!! note
         Experimental. The classmethod contract may change as model-owned
         grouping stabilizes.
 

@@ -1487,7 +1487,7 @@ class Platform:
         """Resolve the fully-qualified class path of the platform's KV cache
         config builder.
 
-        .. note::
+        !!! note
             Experimental, like the `KVCacheConfigBuilder` interface it selects.
 
         The builder supplies grouping (`get_kv_cache_groups`) and tensor placement
