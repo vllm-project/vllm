@@ -253,6 +253,9 @@ class DeepGemmMegaMoEExperts(nn.Module):
             symmetric buffer is sized for it. Defaults to
             ``max_num_batched_tokens``. A caller that hands this layer only its
             sequence-parallel shard of the batch can pass the shard size.
+        l2_input_scale: Fixed ``w2`` ``input_scale`` that replaces the
+            checkpoint's, for QAT recipes that quantize the L2 input with a
+            constant scale.
 
     """
 
@@ -275,6 +278,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         num_logical_experts: int | None = None,
         fast_math: bool = True,
         max_num_tokens: int | None = None,
+        l2_input_scale: float | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -310,6 +314,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         self.weight_format = weight_format
         self.activation = activation
         self.fast_math = fast_math
+        self.l2_input_scale = l2_input_scale
         self._kernel_kwargs = activation.kernel_kwargs()
         self.eplb_state = EplbLayerState()
         # L2 input scale of every logical expert; the NVFP4 kernel takes the max.
@@ -543,6 +548,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 yield from self._load_shared_expert_weights(name, weight)
                 continue
             for expert_id, shard_id, suffix, shard in self._expert_shards(name, weight):
+                suffix, shard = self._checkpoint_tensor(suffix, shard_id, shard)
                 param_name = f"{'w2' if shard_id == 'w2' else 'w13'}_{suffix}"
                 if (param := getattr(self, param_name, None)) is None:
                     continue
@@ -568,6 +574,22 @@ class DeepGemmMegaMoEExperts(nn.Module):
             shards = (tensor,) * n if tensor.numel() == 1 else tensor.chunk(n)
             for shard_id, shard in zip(shard_ids, shards):
                 yield expert_id, shard_id, rest or "weight", shard
+
+    def _checkpoint_tensor(
+        self, suffix: str, shard_id: str, tensor: torch.Tensor
+    ) -> tuple[str, torch.Tensor]:
+        """Map compressed-tensors suffixes and quantization scales to the
+        ModelOpt names and dequantization scales the parameters hold."""
+        if suffix == "weight_packed":
+            return "weight", tensor
+        if suffix == "weight_global_scale":
+            return "weight_scale_2", 1.0 / tensor.float()
+        if suffix == "input_global_scale":
+            suffix, tensor = "input_scale", 1.0 / tensor.float()
+        fixed = self.l2_input_scale
+        if suffix == "input_scale" and shard_id == "w2" and fixed is not None:
+            tensor = torch.full_like(tensor, fixed, dtype=torch.float32)
+        return suffix, tensor
 
     def _load_shared_expert_weights(
         self, name: str, weight: torch.Tensor

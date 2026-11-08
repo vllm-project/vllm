@@ -14,8 +14,6 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
 )
 from vllm.models.minimax_m3.nvidia.model import (
     MEGA_MOE_FC2_INPUT_SCALE,
-    _convert_mega_moe_experts,
-    _mega_moe_expert_weight,
     _redirect_fused_shared_experts,
     _use_mega_moe,
 )
@@ -52,50 +50,12 @@ def test_mega_moe_is_gated_on_nvfp4_checkpoints(moe_backend, moe_quant_algo, exp
         assert _use_mega_moe(vllm_config) is expected
 
 
-def test_mega_moe_expert_weight_follows_the_qat_recipe():
-    """Compressed-tensors quantization scales become ModelOpt dequantization
-    scales; the FC1 input scale is dropped (per-token) and the FC2 one is the
-    fixed QAT scale whatever the checkpoint holds."""
-    prefix = "layers.3.block_sparse_moe.experts.7"
-    packed = torch.randint(0, 255, (4, 8), dtype=torch.uint8)
-    block_scale = torch.rand(4, 1).to(torch.float8_e4m3fn)
-
-    assert _mega_moe_expert_weight(f"{prefix}.w1.weight_packed", packed) == (
-        f"{prefix}.w1.weight",
-        packed,
-    )
-    assert _mega_moe_expert_weight(f"{prefix}.w3.weight_scale", block_scale) == (
-        f"{prefix}.w3.weight_scale",
-        block_scale,
-    )
-    name, scale = _mega_moe_expert_weight(
-        f"{prefix}.w2.weight_global_scale", torch.tensor(448.0)
-    )
-    assert name == f"{prefix}.w2.weight_scale_2"
-    assert torch.equal(scale, torch.tensor(1 / 448, dtype=torch.float32))
-    for shard_id in ("w1", "w3"):
-        assert (
-            _mega_moe_expert_weight(
-                f"{prefix}.{shard_id}.input_global_scale", torch.tensor(1.0)
-            )
-            is None
-        )
-    name, scale = _mega_moe_expert_weight(
-        f"{prefix}.w2.input_global_scale", torch.tensor(1.0)
-    )
-    assert name == f"{prefix}.w2.input_scale"
-    assert scale.item() == MEGA_MOE_FC2_INPUT_SCALE
-
-
 def _load_checkpoint(moe, tensors: dict[str, torch.Tensor]) -> None:
     """Load one MegaMoE block's tensors as ``MiniMaxM3SparseForCausalLM`` does."""
     model = SimpleNamespace(layers=[SimpleNamespace(block_sparse_moe=moe)])
     weights = _redirect_fused_shared_experts(tensors.items(), model)
     prefix = "layers.0.block_sparse_moe.experts."
-    weights = (
-        (name.removeprefix(prefix), tensor)
-        for name, tensor in _convert_mega_moe_experts(weights)
-    )
+    weights = ((name.removeprefix(prefix), tensor) for name, tensor in weights)
     loaded = set(moe.experts.load_weights(weights))
     assert loaded == {name for name, _ in moe.experts.named_parameters()}
 

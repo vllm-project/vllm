@@ -312,41 +312,6 @@ def _mega_moe_expert_params_mapping(
     ]
 
 
-def _mega_moe_expert_weight(
-    name: str, weight: torch.Tensor
-) -> tuple[str, torch.Tensor] | None:
-    """Convert a compressed-tensors NVFP4 routed-expert tensor to the ModelOpt
-    convention ``DeepGemmMegaMoEExperts`` loads, or None to drop it.
-
-    The global scales become dequantization scales. The FC1 input is quantized
-    per token, so its input scale is dropped, and the FC2 input scale is the
-    fixed QAT scale whatever the checkpoint says.
-    """
-    prefix, _, suffix = name.rpartition(".")
-    if suffix == "weight_packed":
-        return f"{prefix}.weight", weight
-    if suffix == "weight_global_scale":
-        return f"{prefix}.weight_scale_2", 1.0 / weight.float()
-    if suffix == "input_global_scale":
-        if not prefix.endswith((".w2", ".down_proj")):
-            return None
-        scale = torch.full_like(weight, MEGA_MOE_FC2_INPUT_SCALE, dtype=torch.float32)
-        return f"{prefix}.input_scale", scale
-    return name, weight
-
-
-def _convert_mega_moe_experts(
-    weights: Iterable[tuple[str, torch.Tensor]],
-) -> Iterable[tuple[str, torch.Tensor]]:
-    """Apply `_mega_moe_expert_weight` to the routed experts."""
-    for name, weight in weights:
-        if ".experts." in name and ".shared_experts." not in name:
-            if (converted := _mega_moe_expert_weight(name, weight)) is None:
-                continue
-            name, weight = converted
-        yield name, weight
-
-
 def _redirect_fused_shared_experts(
     weights: Iterable[tuple[str, torch.Tensor]], model: nn.Module
 ) -> Iterable[tuple[str, torch.Tensor]]:
@@ -678,6 +643,7 @@ class MiniMaxM3MoE(nn.Module):
                 beta=config.swiglu_beta,
             ),
             weight_format=MEGA_MOE_NVFP4,
+            l2_input_scale=MEGA_MOE_FC2_INPUT_SCALE,
             shared_experts=shared_experts,
             prefix=f"{prefix}.experts",
         )
@@ -1759,9 +1725,7 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
             self.lm_head = PPMissingLayer()
         if self.model.use_mega_moe:
             redirect = partial(_redirect_fused_shared_experts, model=self.model)
-            transforms = WeightsMapper(
-                weights_transforms=[redirect, _convert_mega_moe_experts]
-            )
+            transforms = WeightsMapper(weights_transforms=[redirect])
             self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | transforms
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
