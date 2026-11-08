@@ -21,7 +21,6 @@ from huggingface_hub import ResolvedRevision
 from pydantic import ValidationError
 
 import vllm.config.vllm as vllm_config_module
-import vllm.envs as envs
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
@@ -48,10 +47,11 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.mamba import MambaBackendEnum
+from vllm.config.profiler import ProfilerConfig
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field, hash_config
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
-from vllm.platforms import CpuArchEnum, Platform, PlatformEnum, current_platform
+from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
@@ -149,7 +149,6 @@ def test_flashinfer_replayssm_validates_config(
             pipeline_parallel_size=pp_size, use_ubatching=use_ubatching
         ),
         kv_transfer_config=None,
-        use_v2_model_runner=True,
     )
     if error:
         with pytest.raises(ValueError, match=error):
@@ -191,7 +190,6 @@ def test_triton_replayssm_spec_decode_validates_config(
             pipeline_parallel_size=pp_size, use_ubatching=False
         ),
         kv_transfer_config=None,
-        use_v2_model_runner=True,
     )
     if error:
         with pytest.raises(ValueError, match=error):
@@ -279,7 +277,6 @@ def test_rocm_resolves_the_mori_all2all_backend(monkeypatch, backend: str) -> No
 def _sampling_replay_config(
     *,
     return_sampling_mask: bool = True,
-    use_v2_model_runner: bool = True,
     speculative_method: str | None = None,
     rejection_sample_method: str = "standard",
     adaptive: bool = False,
@@ -301,7 +298,6 @@ def _sampling_replay_config(
             logits_processors=logits_processors or [],
             logprobs_mode=logprobs_mode,
         ),
-        use_v2_model_runner=use_v2_model_runner,
         speculative_config=speculative_config,
     )
 
@@ -353,10 +349,6 @@ def _sampling_replay_config(
             _sampling_replay_config(logprobs_mode="raw_logprobs"),
             "requires logprobs_mode='processed_logprobs'",
         ),
-        (
-            _sampling_replay_config(use_v2_model_runner=False),
-            "requires Model Runner V2",
-        ),
     ],
 )
 def test_sampling_replay_config(config, message):
@@ -389,7 +381,6 @@ def test_kda_recoverssm_derivation_is_revalidated():
             use_ubatching=False,
         ),
         kv_transfer_config=None,
-        use_v2_model_runner=True,
     )
 
     VllmConfig.validate_mamba_cached_kernel(config)
@@ -398,10 +389,6 @@ def test_kda_recoverssm_derivation_is_revalidated():
 
     config.cache_config.mamba_cache_mode = "align"
     VllmConfig.validate_mamba_cached_kernel(config)
-    config.use_v2_model_runner = False
-    with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=1"):
-        VllmConfig.validate_mamba_cached_kernel(config)
-    config.use_v2_model_runner = True
     config.cache_config.mamba_cache_mode = "none"
 
     config.model_config.architecture = "NemotronHForCausalLM"
@@ -419,7 +406,6 @@ def test_kda_recoverssm_derivation_is_revalidated():
     config.model_config.architecture = "NemotronHForCausalLM"
     config.num_speculative_tokens = 0
     config.cache_config.use_kda_recoverssm = False
-    config.use_v2_model_runner = False
     VllmConfig.validate_mamba_cached_kernel(config)
 
 
@@ -684,44 +670,6 @@ def test_compile_config_repr_succeeds():
     assert "inductor_passes" in val
 
 
-@pytest.mark.parametrize(
-    ("env_value", "expected"),
-    [
-        (None, None),
-        ("0", False),
-        ("1", True),
-    ],
-)
-def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
-    if env_value is None:
-        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-    else:
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env_value)
-
-    assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
-
-
-@pytest.mark.parametrize("platform_enum", list(PlatformEnum))
-@pytest.mark.parametrize("has_triton", [False, True])
-def test_model_runner_default_preserves_backend_fallback(
-    monkeypatch, platform_enum, has_triton
-):
-    platform = Platform()
-    platform._enum = platform_enum
-    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-    monkeypatch.setattr(vllm_config_module, "current_platform", platform)
-    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", has_triton)
-
-    config = VllmConfig()
-    # non-x86 CPUs support MRv2 without Triton
-    supports_v2_without_triton = (
-        platform.is_cpu() and platform.get_cpu_architecture() != CpuArchEnum.X86
-    )
-    assert config.use_v2_model_runner == (
-        has_triton or platform.is_unspecified() or supports_v2_without_triton
-    )
-
-
 def test_v2_frontend_config_can_be_created_without_triton():
     # Start fresh so config imports observe the frontend's Triton availability.
     subprocess.run(
@@ -729,7 +677,6 @@ def test_v2_frontend_config_can_be_created_without_triton():
             sys.executable,
             "-c",
             textwrap.dedent("""
-                import os
                 import vllm.platforms as platforms
                 from vllm.platforms.interface import UnspecifiedPlatform
 
@@ -737,44 +684,14 @@ def test_v2_frontend_config_can_be_created_without_triton():
                 platforms._current_platform.device_type = "cpu"
                 import vllm.triton_utils
 
-                os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
                 vllm.triton_utils.HAS_TRITON = False
                 from vllm.config import VllmConfig
 
-                config = VllmConfig()
-                assert config.use_v2_model_runner
+                VllmConfig()
             """),
         ],
         check=True,
     )
-
-
-@pytest.mark.parametrize(
-    ("overrides", "feature"),
-    [
-        (
-            {"attention_config": AttentionConfig(hisparse_config=HiSparseConfig())},
-            "HiSparse",
-        ),
-        ({"watermark_config": WatermarkConfig(key=42)}, "watermarking"),
-    ],
-)
-def test_v1_model_runner_rejects_v2_only_config(overrides, feature):
-    config = SimpleNamespace(
-        parallel_config=ParallelConfig(distributed_executor_backend="mp"),
-        scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
-        attention_config=AttentionConfig(),
-        watermark_config=None,
-        speculative_config=None,
-        model_config=None,
-    )
-    config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash_candidate_draft = lambda: False
-    assert VllmConfig._get_v1_model_runner_unsupported_features(config) == []
-
-    for name, value in overrides.items():
-        setattr(config, name, value)
-    assert VllmConfig._get_v1_model_runner_unsupported_features(config) == [feature]
 
 
 def test_hisparse_rejects_decode_context_parallelism(monkeypatch):
@@ -815,7 +732,6 @@ def test_hisparse_rejects_full_cudagraph_mode(monkeypatch):
         lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
     monkeypatch.setattr(current_platform, "support_static_graph_mode", lambda: True)
-    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     with pytest.raises(ValueError, match="does not support cudagraph_mode=FULL"):
         VllmConfig(
             attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
@@ -829,7 +745,6 @@ def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
         "get_hisparse_backend_cls",
         lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
-    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     with pytest.raises(ValueError, match="requires the hybrid KV cache manager"):
         VllmConfig(
             kv_transfer_config=KVTransferConfig(
@@ -964,7 +879,6 @@ def test_hisparse_connector_implies_attention_config(monkeypatch, kv_transfer_co
         "get_hisparse_backend_cls",
         lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
-    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     config = VllmConfig(
         kv_transfer_config=kv_transfer_config,
         # Skip the HMA auto-detect block: it imports the connector class,
@@ -984,7 +898,6 @@ def test_hisparse_connector_preserves_explicit_attention_config(monkeypatch):
         "get_hisparse_backend_cls",
         lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
-    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     config = VllmConfig(
         attention_config=AttentionConfig(
             hisparse_config=HiSparseConfig(device_buffer_size=512)
@@ -1056,7 +969,7 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
     ],
 )
 @pytest.mark.parametrize("with_mtp", [False, True], ids=["no-mtp", "mtp"])
-def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
+def test_dsa_models_default_to_breakable_cudagraph(
     monkeypatch, model, architecture, with_mtp
 ):
     from vllm.compilation.breakable_cudagraph import (
@@ -1066,8 +979,6 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     from vllm.platforms import current_platform
 
     monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
-    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
     default_breakable_cudagraph_architectures.cache_clear()
 
@@ -1089,14 +1000,11 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
             cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
         ),
     )
-    config._dflash_needs_multi_kv_group = lambda: False
-    config._get_v2_model_runner_unsupported_features = lambda: []
     config._uses_breakable_cudagraph_by_default = lambda: (
         VllmConfig._uses_breakable_cudagraph_by_default(config)
     )
 
     try:
-        assert VllmConfig.use_v2_model_runner.fget(config)
         assert VllmConfig._maybe_enable_breakable_cudagraph(config)
         assert is_breakable_cudagraph_enabled(config.compilation_config)
         assert "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
@@ -1303,32 +1211,21 @@ def test_dsa_models_select_matching_mtp(model_type, expected_architecture):
 @pytest.mark.parametrize(
     "method", ["extract_hidden_states", "ngram", "ngram_gpu", "suffix"]
 )
-def test_v2_model_runner_supports_speculative_method(method):
+def test_model_runner_supports_speculative_method(method):
     config = VllmConfig()
     config.speculative_config = cast(
         SpeculativeConfig,
         fake_speculative_config(
             method=method,
-            parallel_drafting=False,
             enable_adaptive_verification=False,
         ),
     )
 
-    assert config._get_v2_model_runner_unsupported_features() == []
+    assert config._get_model_runner_unsupported_features() == []
 
 
-def test_suffix_config_without_arctic_inference(monkeypatch):
-    """Suffix decoding config no longer needs Arctic Inference: Model Runner
-    V2 runs it on the GPU, and the V1 proposer checks for Arctic itself."""
-    from vllm.utils.import_utils import _has_module
-
-    # Make arctic_inference unimportable, whichever way a check looks for it.
-    monkeypatch.setitem(sys.modules, "arctic_inference", None)
-    _has_module.cache_clear()
-    try:
-        config = SpeculativeConfig(method="suffix")
-    finally:
-        _has_module.cache_clear()
+def test_suffix_config_defaults():
+    config = SpeculativeConfig(method="suffix")
     assert config.num_speculative_tokens == 8
     shallow = SpeculativeConfig(method="suffix", suffix_decoding_max_tree_depth=4)
     assert shallow.num_speculative_tokens == 4
@@ -1336,81 +1233,16 @@ def test_suffix_config_without_arctic_inference(monkeypatch):
         SpeculativeConfig(method="suffix", suffix_decoding_corpus_tokens=-1)
 
 
-@pytest.mark.parametrize("use_heterogeneous_vocab", [False, True])
-def test_v2_model_runner_heterogeneous_vocab_draft_falls_back_to_v1(
-    use_heterogeneous_vocab,
-):
-    """The V2 draft-model speculator exchanges token ids with the target
-    without a vocab mapping, so a heterogeneous-vocab (TLI) draft must stay on
-    V1, where VocabMapping translates them."""
-    config = VllmConfig()
-    config.speculative_config = cast(
-        SpeculativeConfig,
-        fake_speculative_config(
-            method="draft_model",
-            parallel_drafting=False,
-            enable_adaptive_verification=False,
-            use_heterogeneous_vocab=use_heterogeneous_vocab,
-        ),
-    )
-
-    expected = ["heterogeneous-vocabulary draft models"]
-    assert config._get_v2_model_runner_unsupported_features() == (
-        expected if use_heterogeneous_vocab else []
-    )
-
-
-def test_v2_model_runner_supports_custom_logits_processors():
+def test_model_runner_supports_custom_logits_processors():
     config = VllmConfig()
     config.model_config = cast(
         ModelConfig, SimpleNamespace(logits_processors=["a.b:C"])
     )
 
-    assert config._get_v2_model_runner_unsupported_features() == []
+    assert config._get_model_runner_unsupported_features() == []
 
 
-@pytest.mark.parametrize(
-    "architecture",
-    ["DFlash2DraftModel", "DFlash2BeamDraftModel", "LiLiCorrDraftModel"],
-)
-def test_dflash_candidate_draft_forces_v2_model_runner(architecture):
-    """A DFlash2 draft must reach the V2 speculator, the only one that runs its
-    candidate selector; on V1 it would draft as DFlash1 without raising."""
-
-    def config(method, architectures):
-        return SimpleNamespace(
-            speculative_config=SimpleNamespace(
-                method=method,
-                draft_model_config=SimpleNamespace(architectures=architectures),
-            )
-        )
-
-    assert VllmConfig._is_dflash_candidate_draft(config("dflash", [architecture]))
-    assert not VllmConfig._is_dflash_candidate_draft(
-        config("dflash", ["DFlashDraftModel"])
-    )
-    assert not VllmConfig._is_dflash_candidate_draft(config("eagle", [architecture]))
-    assert not VllmConfig._is_dflash_candidate_draft(
-        SimpleNamespace(speculative_config=None)
-    )
-    assert not VllmConfig._is_dflash_candidate_draft(
-        SimpleNamespace(
-            speculative_config=SimpleNamespace(method="dflash", draft_model_config=None)
-        )
-    )
-
-
-@pytest.mark.parametrize(
-    ("use_v2_model_runner", "expected_capture_sizes"),
-    [
-        (False, [4, 8, 12, 16]),
-        (True, list(range(1, 17))),
-    ],
-)
-def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
-    use_v2_model_runner,
-    expected_capture_sizes,
-):
+def test_resolve_cudagraph_mode_keeps_spec_decode_sizes():
     compilation_config = CompilationConfig(
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         cudagraph_capture_sizes=list(range(1, 17)),
@@ -1422,11 +1254,10 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         AttentionCGSupport.ALWAYS,
         "FakeAttentionBackend",
         uniform_decode_query_len=4,
-        use_v2_model_runner=use_v2_model_runner,
     )
 
     assert cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
-    assert compilation_config.cudagraph_capture_sizes == expected_capture_sizes
+    assert compilation_config.cudagraph_capture_sizes == list(range(1, 17))
 
 
 @pytest.mark.parametrize(
@@ -1479,7 +1310,6 @@ def test_late_piecewise_restrictions_without_compilation(monkeypatch, engine_kwa
     from vllm.engine.arg_utils import EngineArgs
 
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     config = EngineArgs(
         model="facebook/opt-125m",
         compilation_config=CompilationConfig(mode=CompilationMode.NONE),
@@ -1504,7 +1334,6 @@ def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
             AttentionCGSupport.ALWAYS,
             "FakeAttentionBackend",
             uniform_decode_query_len=1,
-            use_v2_model_runner=True,
             kv_cache_config=kv_cache_config,
             max_num_reqs=256,
         )
@@ -1516,7 +1345,6 @@ def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
         AttentionCGSupport.ALWAYS,
         "FakeAttentionBackend",
         uniform_decode_query_len=1,
-        use_v2_model_runner=True,
         kv_cache_config=kv_cache_config,
         max_num_reqs=256,
         is_profiling=True,
@@ -1546,275 +1374,6 @@ def test_adaptive_verification_requires_full_cudagraphs(graph_mode, should_raise
             VllmConfig._validate_adaptive_verification(config)
     else:
         VllmConfig._validate_adaptive_verification(config)
-
-
-@pytest.mark.parametrize(
-    ("model_config", "expected"),
-    [
-        (
-            SimpleNamespace(
-                model="Qwen/Qwen3-32B",
-                architectures=["Qwen3ForCausalLM"],
-                runner_type="generate",
-                is_moe=False,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="Qwen/Qwen2-7B-Instruct",
-                architectures=["Qwen2ForCausalLM"],
-                runner_type="generate",
-                is_moe=False,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="meta-llama/Llama-3.2-1B",
-                architectures=["LlamaForCausalLM"],
-                runner_type="generate",
-                is_moe=False,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="mistralai/Mistral-7B-v0.1",
-                architectures=["MistralForCausalLM"],
-                runner_type="generate",
-                is_moe=False,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="facebook/opt-125m",
-                architectures=["OPTForCausalLM"],
-                runner_type="generate",
-                is_moe=False,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="google/gemma-2-2b",
-                architectures=["Gemma2ForCausalLM"],
-                runner_type="generate",
-                is_moe=False,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="deepseek-ai/DeepSeek-V2-Lite-Chat",
-                architectures=["DeepseekV2ForCausalLM"],
-                runner_type="generate",
-                is_moe=True,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="deepseek-ai/DeepSeek-V2-Chat",
-                architectures=["DeepseekV2ForCausalLM"],
-                runner_type="generate",
-                is_moe=True,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="deepseek-ai/DeepSeek-V3",
-                architectures=["DeepseekV3ForCausalLM"],
-                runner_type="generate",
-                is_moe=True,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="deepseek-ai/DeepSeek-V4-Flash",
-                architectures=["DeepseekV4ForCausalLM"],
-                runner_type="generate",
-                is_moe=True,
-                is_quantized=True,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="Qwen/Qwen1.5-MoE-A2.7B",
-                architectures=["Qwen2MoeForCausalLM"],
-                runner_type="generate",
-                is_moe=True,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="Qwen/Qwen1.5-MoE-A2.7B-Chat",
-                architectures=["Qwen2MoeForCausalLM"],
-                runner_type="generate",
-                is_moe=True,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="ibm-research/PowerMoE-3b",
-                architectures=["GraniteMoeForCausalLM"],
-                runner_type="generate",
-                is_moe=True,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="thinkingmachines/Inkling",
-                architectures=["InklingForCausalLM"],
-                runner_type="generate",
-                is_moe=True,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="thinkingmachines/Inkling",
-                architectures=["InklingForConditionalGeneration"],
-                runner_type="generate",
-                is_moe=True,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="mistralai/Mixtral-8x7B-Instruct-v0.1",
-                architectures=["MixtralForCausalLM"],
-                runner_type="generate",
-                is_moe=True,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="Qwen/Qwen3-1.7B-FP8",
-                architectures=["Qwen3ForCausalLM"],
-                runner_type="generate",
-                is_moe=False,
-                is_quantized=True,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="Qwen/Qwen3.5-4B",
-                architectures=["Qwen3_5ForConditionalGeneration"],
-                runner_type="generate",
-                is_moe=False,
-                is_quantized=False,
-                is_hybrid=True,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="state-spaces/mamba-130m-hf",
-                architectures=["MambaForCausalLM"],
-                runner_type="generate",
-                is_moe=False,
-                is_quantized=False,
-                is_attention_free=True,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="sentence-transformers/all-MiniLM-L6-v2",
-                architectures=["BertModel"],
-                runner_type="pooling",
-                is_multimodal_model=False,
-                is_moe=False,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="Qwen/Qwen3-Embedding-0.6B",
-                architectures=["Qwen3ForCausalLM"],
-                runner_type="pooling",
-                is_multimodal_model=False,
-                is_moe=False,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
-                model="TomoroAI/tomoro-colqwen3-embed-4b",
-                architectures=["ColQwen3"],
-                runner_type="pooling",
-                is_multimodal_model=True,
-                is_moe=False,
-                is_quantized=False,
-            ),
-            True,
-        ),
-    ],
-)
-def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
-    from vllm.platforms import current_platform
-
-    # The expectations below are the platform-independent defaults; ROCm's
-    # DeepSeek carve-out is covered by test_rocm_keeps_compiled_deepseek_defaults.
-    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
-    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
-    config = SimpleNamespace(
-        model_config=model_config,
-        attention_config=AttentionConfig(),
-    )
-    config._get_v2_model_runner_unsupported_features = lambda: []
-
-    assert VllmConfig.use_v2_model_runner.fget(config) is expected
-
-
-def test_v1_model_runner_rejects_v2_only_features():
-    config = SimpleNamespace(
-        parallel_config=ParallelConfig(
-            prefill_context_parallel_size=2,
-            distributed_executor_backend="mp",
-        ),
-        scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
-        attention_config=AttentionConfig(),
-        watermark_config=None,
-        speculative_config=None,
-        model_config=None,
-    )
-    config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash_candidate_draft = lambda: False
-    config._get_v1_model_runner_unsupported_features = lambda: (
-        VllmConfig._get_v1_model_runner_unsupported_features(config)
-    )
-
-    with pytest.raises(ValueError, match="prefill context parallel"):
-        VllmConfig._validate_v1_model_runner(config)
 
 
 def test_batch_sharded_sampling_rejects_return_sampling_mask():
@@ -1961,49 +1520,6 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
         ),
     )
     assert cfg.scheduler_config.async_scheduling is True
-
-
-def test_v1_model_runner_drops_async_scheduling_with_pipeline_parallelism(monkeypatch):
-    """PP>1 must stay buildable whenever the V1 model runner is selected, such
-    as the external_launcher fallback; async scheduling is dropped instead."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-
-    cfg = VllmConfig(
-        scheduler_config=SchedulerConfig(
-            max_model_len=8192,
-            is_encoder_decoder=False,
-        ),
-        parallel_config=ParallelConfig(
-            pipeline_parallel_size=2,
-            distributed_executor_backend="mp",
-            nnodes=2,
-        ),
-    )
-    assert cfg.scheduler_config.async_scheduling is False
-
-
-def test_v1_model_runner_rejects_pipeline_parallelism_with_async_scheduling():
-    """Only the async combination desyncs the grammar FSM (#45014), so plain
-    PP>1 must stay usable on the V1 model runner."""
-    config = SimpleNamespace(
-        parallel_config=ParallelConfig(
-            pipeline_parallel_size=2,
-            distributed_executor_backend="mp",
-        ),
-        scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
-        attention_config=AttentionConfig(),
-        watermark_config=None,
-        speculative_config=None,
-        model_config=None,
-    )
-    config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash_candidate_draft = lambda: False
-
-    assert VllmConfig._get_v1_model_runner_unsupported_features(config) == []
-
-    config.scheduler_config.async_scheduling = True
-    unsupported = VllmConfig._get_v1_model_runner_unsupported_features(config)
-    assert "pipeline parallelism with async scheduling" in unsupported
 
 
 def test_data_parallel_rpc_port_has_fixed_default():
@@ -2596,27 +2112,57 @@ def test_draft_parallel_config_preserves_ep_without_model(
 
 
 @pytest.mark.parametrize(
-    ("method", "parallel_drafting", "expected_slots"),
+    ("method", "expected_slots"),
     [
-        pytest.param("eagle3", False, 0, id="eagle3"),
-        pytest.param("eagle3", True, 7, id="p-eagle"),
-        pytest.param("dflash", True, 0, id="dflash"),
-        pytest.param("dspark", True, 0, id="dspark"),
-        pytest.param("mtp", False, 0, id="mtp"),
-        pytest.param("ngram", False, 0, id="ngram"),
-        pytest.param("draft_model", False, 1, id="draft-model"),
-        pytest.param("draft_model", True, 8, id="pard"),
+        ("eagle3", 0),
+        ("dflash", 0),
+        ("dspark", 0),
+        ("mtp", 0),
+        ("ngram", 0),
+        ("draft_model", 1),
     ],
 )
-def test_max_num_new_slots_for_drafting(method, parallel_drafting, expected_slots):
+def test_max_num_new_slots_for_drafting(method, expected_slots):
     speculative_config = SpeculativeConfig(
         model="ngram",
         num_speculative_tokens=8,
     )
     speculative_config.method = method
-    speculative_config.parallel_drafting = parallel_drafting
 
     assert speculative_config.max_num_new_slots_for_drafting == expected_slots
+
+
+def test_capture_torch_profiler_is_deprecated(caplog_vllm):
+    msg = "capture_torch_profiler is deprecated"
+    kwargs = {"profiler": "torch", "torch_profiler_dir": "/tmp/mock"}
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
+        ProfilerConfig(**kwargs)
+        assert msg not in caplog_vllm.text
+        ProfilerConfig(**kwargs, capture_torch_profiler=True)
+    assert msg in caplog_vllm.text
+
+
+def test_parallel_drafting_is_deprecated(caplog_vllm):
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
+        SpeculativeConfig(model="ngram", num_speculative_tokens=2)
+        assert "parallel_drafting is deprecated" not in caplog_vllm.text
+        SpeculativeConfig(
+            model="ngram", num_speculative_tokens=2, parallel_drafting=False
+        )
+    assert "parallel_drafting is deprecated" in caplog_vllm.text
+
+    with pytest.raises(ValueError, match="only supported by the dflash and dspark"):
+        SpeculativeConfig(
+            model="ngram", num_speculative_tokens=2, parallel_drafting=True
+        )
+
+
+def test_speculative_config_compile_factors():
+    """get_compile_factors() rejects ignored_factors entries that aren't fields, so
+    a stale entry fails here instead of when compiling a speculative model."""
+    config = SpeculativeConfig(model="ngram", num_speculative_tokens=2)
+    factors = config.compile_factors()
+    assert factors["uses_aux_hidden_states"] is False
 
 
 @dataclass
@@ -4238,7 +3784,6 @@ def test_target_only_gumbel_allows_speculative_decoding(caplog_vllm, disable_log
         method="mtp",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
-        parallel_drafting=False,
     )
 
     with caplog_vllm.at_level(logging.WARNING):
@@ -4258,7 +3803,6 @@ def test_speculative_watermarking_without_context_dedup_does_not_warn(
         method="mtp",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
-        parallel_drafting=False,
     )
 
     caplog_vllm.clear()
@@ -4279,7 +3823,6 @@ def test_speculative_context_dedup_logs_no_unsupported_warning(
         method="mtp",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
-        parallel_drafting=False,
     )
 
     caplog_vllm.clear()
@@ -4298,7 +3841,6 @@ def test_gumbel_rejects_speculative_decoding_without_target_only():
         method="mtp",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
-        parallel_drafting=False,
     )
 
     with pytest.raises(ValueError, match="'gumbel'.*allow_target_only_watermarking"):
@@ -4316,7 +3858,6 @@ def test_dual_key_gumbel_warns_that_configured_alpha_is_unused(
         method="mtp",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
-        parallel_drafting=False,
     )
 
     with caplog_vllm.at_level(logging.WARNING):
@@ -4342,7 +3883,6 @@ def test_dual_key_gumbel_alpha_warning_is_not_emitted(
             method="mtp",
             draft_sample_method="probabilistic",
             rejection_sample_method="standard",
-            parallel_drafting=False,
         )
 
     with caplog_vllm.at_level(logging.WARNING):
@@ -4358,33 +3898,20 @@ def test_dual_key_gumbel_requires_probabilistic_drafting():
         method="mtp",
         draft_sample_method="greedy",
         rejection_sample_method="standard",
-        parallel_drafting=False,
     )
 
     with pytest.raises(ValueError, match="draft_sample_method='probabilistic'"):
         config._check_supports_watermarking()
 
 
-@pytest.mark.parametrize(
-    ("method", "parallel_drafting"),
-    [
-        ("eagle", False),
-        ("eagle3", False),
-        ("mtp", False),
-        ("dspark", True),
-        ("dflash", True),
-    ],
-)
-def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(
-    method, parallel_drafting
-):
+@pytest.mark.parametrize("method", ["eagle", "eagle3", "mtp", "dspark", "dflash"])
+def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(method):
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
     config.speculative_config = fake_speculative_config(
         method=method,
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
-        parallel_drafting=parallel_drafting,
     )
 
     config._check_supports_watermarking()
@@ -4405,7 +3932,6 @@ def test_dual_key_gumbel_rejects_dflash_candidate_drafts(architecture):
         method="dflash",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
-        parallel_drafting=True,
         draft_model_config=SimpleNamespace(architectures=[architecture]),
     )
 
@@ -4420,7 +3946,6 @@ def test_dual_key_gumbel_rejects_unsupported_speculative_method():
         method="ngram",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
-        parallel_drafting=False,
     )
 
     with pytest.raises(ValueError, match="Watermarking supports only"):
@@ -4432,7 +3957,6 @@ def test_dual_key_gumbel_rejects_unsupported_speculative_method():
     [
         ({"rejection_sample_method": "synthetic"}, "rejection_sample_method"),
         ({"rejection_sample_method": "block"}, "rejection_sample_method"),
-        ({"parallel_drafting": True}, "Parallel speculative drafting"),
     ],
 )
 def test_dual_key_gumbel_rejects_incompatible_speculative_modes(overrides, match):
@@ -4442,7 +3966,6 @@ def test_dual_key_gumbel_rejects_incompatible_speculative_modes(overrides, match
         "method": "mtp",
         "draft_sample_method": "probabilistic",
         "rejection_sample_method": "standard",
-        "parallel_drafting": False,
         **overrides,
     }
     config.speculative_config = fake_speculative_config(**values)

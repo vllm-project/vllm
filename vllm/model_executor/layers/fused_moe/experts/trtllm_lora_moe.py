@@ -429,7 +429,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         carries a CPU ``no_lora_flag`` computed once per forward from the
         token->LoRA mapping. Reading it is a host-only check (no device sync),
         and under CUDA graphs the branch is frozen at capture time against the
-        graph's ``has_lora`` dispatch key, so it stays correct on replay.
+        graph's ``num_active_loras`` dispatch key, so it stays correct on replay.
         """
         meta = getattr(lora_context.punica_wrapper, "token_mapping_meta", None)
         if meta is None:

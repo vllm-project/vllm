@@ -326,10 +326,8 @@ class CacheConfig:
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
-    Triton supports 'none' and 'align' on Model Runner V1. FlashInfer supports
-    'none' and 'align' on Model Runner V1 and V2. Mamba2 speculative
-    decoding supports both backends. With prefix caching enabled, Triton supports
-    'align'; FlashInfer supports 'align'. Pipeline parallelism is not
+    Triton and FlashInfer support the 'none' and 'align' Mamba cache modes.
+    Mamba2 speculative decoding supports both backends. Pipeline parallelism is not
     supported. Flushes are most efficient when mamba_block_size is a
     multiple of replayssm_buffer_len, but this is not required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
@@ -392,10 +390,9 @@ class CacheConfig:
     """Reserve the KV cache address range with device virtual memory and commit
     physical pages after warmup, so the cache is sized from the memory actually
     free after CUDA graph capture rather than from a profiling estimate. If
-    unspecified, enabled on CUDA and ROCm with the V2 model runner unless
-    kv_cache_memory_bytes is set; falls back to estimate-based sizing where the
-    driver lacks VMM support. Explicitly requesting it where unsupported is an
-    error."""
+    unspecified, enabled on CUDA and ROCm unless kv_cache_memory_bytes is set;
+    falls back to estimate-based sizing where the driver lacks VMM support.
+    Explicitly requesting it where unsupported is an error."""
 
     kv_offloading_size: float | None = None
     """Size of the KV cache offloading buffer in GiB. When TP > 1, this is
