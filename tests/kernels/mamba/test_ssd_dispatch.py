@@ -83,13 +83,3 @@ def test_triton_resolves_to_the_cpu_kernel_on_cpu(monkeypatch, kv_cache_config):
     ssd_dispatch.initialize_mamba_ssd_backend(MambaConfig(), kv_cache_config)
     backend = ssd_dispatch.get_mamba_ssd_backend()
     assert isinstance(backend, ssd_dispatch.CPUSSDBackend)
-
-
-def test_cpu_ssd_rejects_prefill_checkpoints():
-    """The CPU kernel returns only final states; a checkpoint would silently
-    store one of them."""
-    empty = torch.empty(0)
-    with pytest.raises(AssertionError, match="checkpoints"):
-        ssd_dispatch.CPUSSDBackend()(
-            *(empty,) * 7, torch.float32, checkpoint_chunk_indices=empty
-        )

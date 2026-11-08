@@ -682,9 +682,11 @@ steps:
   - tests/kernels/mamba
   - vllm/model_executor/layers/mamba/checkpoint.py
   - vllm/model_executor/layers/mamba/gdn
+  - vllm/model_executor/layers/mamba/mamba_mixer2.py
   - vllm/models/qwen3_5/
   - vllm/model_executor/layers/mamba/ops
   - vllm/v1/attention/backends/gdn_attn.py
+  - vllm/v1/attention/backends/mamba2_attn.py
   commands:
     - pytest -v -s kernels/mamba
   mirror:
@@ -846,6 +848,7 @@ steps:
   - vllm/cute_utils/
   - vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl/
   - vllm/model_executor/layers/mamba/ops/ssd_dispatch.py
+  - vllm/model_executor/layers/mamba/mamba_mixer2.py
   - vllm/v1/attention/backends/mamba2_attn.py
   - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm100.py
   - cmake/external_projects/fmha_sm100.cmake
