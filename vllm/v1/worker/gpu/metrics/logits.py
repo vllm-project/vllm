@@ -24,7 +24,7 @@ def _num_nans_kernel(
     row_start = tl.load(cu_num_logits_ptr + req_idx)
     row_end = tl.minimum(tl.load(cu_num_logits_ptr + req_idx + 1), num_logits)
     num_nans = tl.zeros((), dtype=tl.int32)
-    for row in range(row_start, row_end):
+    for row in tl.range(row_start, row_end):
         logits = tl.load(
             logits_ptr + row.to(tl.int64) * logits_stride + block,
             mask=mask,
