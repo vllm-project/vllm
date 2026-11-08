@@ -289,8 +289,8 @@ void nixl_dcp_peer_info(int64_t remote_view, Tensor& info, Tensor& peer_ptrs) {
   check_workspace_tensor(info, info, ScalarType::Long);
   check_workspace_tensor(peer_ptrs, info, ScalarType::Long);
   STD_TORCH_CHECK(remote_view != 0 && info.dim() == 3 && info.size(0) > 0 &&
-                      info.size(0) < 8 && info.size(1) > 0 &&
-                      info.size(1) <= 8 && info.size(2) == 4,
+                      info.size(1) > 0 && info.size(1) <= 8 &&
+                      info.size(2) == 4,
                   "invalid NIXL DCP peer-info dimensions");
   STD_TORCH_CHECK(peer_ptrs.dim() == 1 && peer_ptrs.size(0) == info.size(0),
                   "invalid NIXL DCP peer-pointer dimensions");
@@ -332,7 +332,7 @@ void nixl_dcp_a2a_dispatch(const Tensor& output, const Tensor& lse,
   int channels = state.size(1) - 1;
   int64_t tokens = output.size(0), dim = output.size(2);
   STD_TORCH_CHECK(
-      world >= 2 && world <= 8 && rank >= 0 && rank < world && ubatch >= 0 &&
+      world > 1 && rank >= 0 && rank < world && ubatch >= 0 &&
           ubatch < send.size(0) && receive.size(0) == send.size(0) &&
           state.size(0) == send.size(0) && channels >= 1 && channels <= 8 &&
           tile_tokens >= 1 && tile_tokens <= 16384 && tokens > 0 && dim > 0 &&

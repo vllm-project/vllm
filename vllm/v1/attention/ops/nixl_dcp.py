@@ -177,8 +177,8 @@ class NixlDCPA2AWorkspace:
 
         error = None
         try:
-            if not 2 <= self.world_size <= 8:
-                raise ValueError("NIXL DCP requires two to eight ranks")
+            if self.world_size <= 1:
+                raise ValueError("NIXL DCP requires at least two ranks")
             if self.device.type != "cuda" or not torch.cuda.is_available():
                 raise ValueError("NIXL DCP requires CUDA")
             if torch.cuda.is_current_stream_capturing():
