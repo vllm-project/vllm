@@ -202,6 +202,7 @@ class MonoProbe:
             peer_half_bytes,
             scratch_layout,
         )
+        from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
         self._steps: dict[int, int] = {}
         self._records: list = []
@@ -215,7 +216,7 @@ class MonoProbe:
             if not isinstance(md, dict):
                 return False
             swa = md.get(layer.attn.swa_cache_layer.prefix)
-            return swa is not None and swa.num_prefills == 0
+            return isinstance(swa, DeepseekSparseSWAMetadata) and swa.num_prefills == 0
 
         def pre_hook(layer_id, layer):
             def hook(module, args, kwargs):
@@ -240,12 +241,15 @@ class MonoProbe:
             runner = (
                 mono_decode._draft_runner if layer.mono.draft else mono_decode._runner
             )
+            assert runner is not None
             tp = runner.tp
+            # a tuned build writes a scratch of its own (``MonoBuild.tuned``)
+            tuned = runner.tuned(rows, layer.attn.compress_ratio)
             lay = scratch_layout(
-                rows, tp, runner.experts, runner.topk, runner.ug_groups
+                rows, tp, runner.experts, runner.topk, runner.ug_groups, tuned
             )
             off = lay["normed"][0]
-            moe_in = runner.scratch(rows)[off : off + rows * HIDDEN * 2]
+            moe_in = runner.scratch(rows, tuned)[off : off + rows * HIDDEN * 2]
             ep = int(runner.epoch[0]) - 1
             n = tp * rows * HIDDEN // 2
             peer = runner.peer.bytes[(ep & 1) * peer_half_bytes(tp) :]

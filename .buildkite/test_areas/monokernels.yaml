@@ -1,6 +1,7 @@
 # AMD monokernels: persistent kernels that run most of a decoder layer or a
 # decode step in one launch (behind --monokernel or a model decode_backend).
-# Each monokernel has exactly two steps here:
+# Each monokernel has exactly two steps, all here except MiniMax-M3's
+# "Mono I/O", the mirror.amd of "MiniMax M3 MegaMoE" in kernels.yaml:
 # - a blocking "Mono I/O" step: every fused stage checked against a slow
 #   float64 plain-torch reference with bounded error (never against another
 #   vLLM, AITER or Triton kernel), the kernel protocol tests, and one cheap
@@ -16,6 +17,7 @@ steps:
 # DeepSeek-V4.1 mono decode (--monokernel): gfx950 and gfx942.
 - label: ":amd: (MI355) DeepSeek-V4.1 Mono I/O"
   key: dsv41-mono-io-mi355
+  automatic_shard: true
   dind: false
   device: mi355_8
   num_devices: 8
@@ -104,6 +106,7 @@ steps:
 
 - label: ":amd: (MI300) DeepSeek-V4.1 gfx942 Mono I/O"
   key: dsv41-mono-io-mi300
+  automatic_shard: true
   dind: false
   device: mi300_4
   num_devices: 4
@@ -186,6 +189,7 @@ steps:
 # DeepSeek-V4-Pro mono decode layer (--monokernel), TP8.
 - label: ":amd: (MI355) DeepSeek-V4-Pro Mono I/O"
   key: dsv4-mono-io-mi355
+  automatic_shard: true
   dind: false
   device: mi355_8
   num_devices: 8
@@ -240,55 +244,6 @@ steps:
   - PYTHONPATH=/vllm-workspace pytest -v -s tests/evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/monokernels/models.yaml -k DeepSeek-V4-Pro
 
 # MiniMax-M3 FFN monokernel (--monokernel), built on DeepSeek-V4.1's mono/common.
-- label: ":amd: (MI355) MiniMax-M3 Mono I/O"
-  key: minimax-m3-mono-io-mi355
-  dind: false
-  device: mi355_4
-  num_devices: 4
-  timeout_in_minutes: 30
-  working_dir: /vllm-workspace/
-  source_file_dependencies:
-  - vllm/models/minimax_m3/__init__.py
-  - vllm/models/minimax_m3/amd/
-  - vllm/models/minimax_m3/common/
-  - vllm/models/deepseek_v41/__init__.py
-  - vllm/models/deepseek_v41/amd/mono/common/
-  - vllm/transformers_utils/configs/minimax_m3.py
-  - vllm/model_executor/models/interfaces.py
-  - vllm/model_executor/models/llama_eagle3.py
-  - vllm/model_executor/layers/fused_allreduce_gemma_rms_norm.py
-  - vllm/model_executor/layers/fused_moe/experts/rocm_aiter_moe.py
-  - vllm/model_executor/layers/fused_moe/oracle/mxfp4.py
-  - vllm/model_executor/layers/fused_moe/router/
-  - vllm/model_executor/layers/quantization/quark/quark_moe.py
-  - vllm/model_executor/layers/quantization/utils/config_utils.py
-  - vllm/v1/attention/backends/utils.py
-  - vllm/v1/worker/gpu/cudagraph_utils.py
-  - vllm/v1/worker/gpu/model_runner.py
-  - vllm/v1/worker/gpu/model_states/
-  - vllm/v1/worker/gpu/sample/trace_replay.py
-  - vllm/v1/worker/gpu/spec_decode/eagle/
-  - vllm/config/compilation.py
-  - vllm/config/kernel.py
-  - vllm/config/speculative.py
-  - vllm/config/vllm.py
-  - vllm/engine/arg_utils.py
-  - vllm/forward_context.py
-  - vllm/platforms/rocm.py
-  - vllm/_aiter_ops.py
-  - docker/Dockerfile.rocm_base
-  - docker/Dockerfile.rocm
-  - docker/docker-bake-rocm.hcl
-  - requirements/rocm.txt
-  - tests/models/minimax_m3/amd_specialized_decode/
-  - tests/models/mono_reference.py
-  - tests/kernels/models/amd/test_mono_primitives.py
-  commands:
-  # Separate processes: the TP4 rank-skew stress starts without engine state.
-  - ulimit -c 0 && pytest -v -s tests/models/minimax_m3/amd_specialized_decode/test_ops.py tests/models/minimax_m3/amd_specialized_decode/test_runtime.py -k "not vllm_ops"
-  - pytest -v -s tests/kernels/models/amd/test_mono_primitives.py -k minimax
-  - ulimit -c 0 && pytest -v -s tests/models/minimax_m3/amd_specialized_decode/test_model.py -k "test_model_matches_native and eager"
-
 - label: ":amd: (MI355) [Nightly] MiniMax-M3 Mono E2E"
   key: minimax-m3-mono-e2e-mi355
   optional: true
@@ -304,6 +259,7 @@ steps:
   - docker/Dockerfile.rocm_base
   - tests/models/minimax_m3/amd_specialized_decode/test_ops.py
   - tests/models/minimax_m3/amd_specialized_decode/test_model.py
+  - tests/models/minimax_m3/test_dspark_drafter.py
   - tests/evals/gsm8k/test_gsm8k_correctness.py
   - tests/evals/gsm8k/gsm8k_eval.py
   - tests/evals/gsm8k/conftest.py
@@ -313,12 +269,14 @@ steps:
   - tests/evals/gsm8k/configs/monokernels/MiniMax-M3-MXFP4-Mono-EAGLE3-TP4-MI355.yaml
   commands:
   - pytest -v -s tests/models/minimax_m3/amd_specialized_decode/test_ops.py -k vllm_ops
+  - pytest -v -s tests/models/minimax_m3/test_dspark_drafter.py
   - ulimit -c 0 && pytest -v -s tests/models/minimax_m3/amd_specialized_decode/test_model.py -k "not (test_model_matches_native and eager)"
   - PYTHONPATH=/vllm-workspace pytest -v -s tests/evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/monokernels/models.yaml -k MiniMax-M3
 
 # Kimi-K3 specialized decode (decode_backend=latency_specialized), TP8.
 - label: ":amd: (MI355) Kimi-K3 Mono I/O"
   key: kimi-k3-mono-io-mi355
+  automatic_shard: true
   dind: false
   device: mi355_8
   num_devices: 8
@@ -333,6 +291,8 @@ steps:
   - vllm/model_executor/layers/activation.py
   - vllm/model_executor/layers/layernorm.py
   - vllm/model_executor/layers/mla.py
+  - vllm/model_executor/layers/attention/mla_attention.py
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
   - vllm/model_executor/layers/utils.py
   - vllm/model_executor/layers/mamba/mamba_utils.py
   - vllm/model_executor/layers/mamba/ops/causal_conv1d.py
@@ -362,9 +322,10 @@ steps:
   - requirements/rocm.txt
   - tests/models/kimi_k3/amd_specialized_decode/
   - tests/models/mono_reference.py
+  - tests/v1/attention/test_rocm_aiter_mla_dcp_cprr_numerics.py
   - tests/kernels/models/amd/test_mono_primitives.py
   commands:
-  - ulimit -c 0 && pytest -v -s tests/models/kimi_k3/amd_specialized_decode/test_runtime.py tests/models/kimi_k3/amd_specialized_decode/test_numerics.py -k "not vllm_ops"
+  - ulimit -c 0 && pytest -v -s tests/models/kimi_k3/amd_specialized_decode/test_runtime.py tests/models/kimi_k3/amd_specialized_decode/test_numerics.py -k "not matches_vllm_ops"
   - pytest -v -s tests/kernels/models/amd/test_mono_primitives.py -k kimi
   - pytest -v -s tests/models/kimi_k3/amd_specialized_decode/test_e2e_parity.py -k test_layer_kernels_match_vllm_layers
 

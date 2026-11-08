@@ -48,6 +48,7 @@ def _set_gate(monkeypatch, on: bool):
     # model, so they set the recorded flag themselves.
     monkeypatch.setattr(ops, "_monokernel", on)
     ops.enabled.cache_clear()
+    ops.monokernel_cdna3_or_4.cache_clear()
 
 
 class _MarkovW2(torch.nn.Module):

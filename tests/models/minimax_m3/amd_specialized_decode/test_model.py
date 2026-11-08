@@ -506,6 +506,16 @@ def _env():
     rocm_aiter_ops.refresh_env_variables()
 
 
+@pytest.fixture
+def no_gpu_coredump():
+    """For the tests that inject a fault on purpose. Writing the HSA coredump
+    keeps the worker alive long enough that the executor waits out
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS instead of seeing it die."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("HSA_DISABLE_COREDUMP_ON_EXCEPTION", "1")
+        yield
+
+
 @pytest.fixture(scope="module")
 def native(vllm_runner, model_dir):
     """Native eager: each sparse layer's FFN inputs at the first decode step
@@ -794,7 +804,7 @@ def _arm_late_fault(worker, rank, ticks):
 
 
 def test_late_rank_fault_returns_no_tokens_from_full_graphs(
-    vllm_runner, model_dir, capfd
+    vllm_runner, model_dir, capfd, no_gpu_coredump
 ):
     """During a replayed step, rank 2 fails 5 ms after the rest of the step's
     last launch, so the output rank is ahead of it; that step returns no
@@ -878,7 +888,7 @@ def _spec_requests():
     ids=["full_graphs-k3", "eager-k1", "eager-k5"],
 )
 def test_eagle3_verify_steps_match_native(
-    vllm_runner, model_dir, draft_dir, capfd, graphs, spec_tokens
+    vllm_runner, model_dir, draft_dir, capfd, no_gpu_coredump, graphs, spec_tokens
 ):
     """EAGLE3 (random draft) with --monokernel: the verify steps of 1-4
     requests run the fused launches up to 16 rows (k=5: 18 and 24 rows run

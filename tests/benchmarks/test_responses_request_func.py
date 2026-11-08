@@ -277,6 +277,82 @@ def test_usage_is_taken_from_the_terminal_event():
     assert output.output_tokens == 4
 
 
+def tool_delta(delta: str, event_type: str = "response.function_call_arguments.delta"):
+    return sse(event_type, {"output_index": 0, "item_id": "fc_1", "delta": delta})
+
+
+def test_tool_call_only_response_is_timed_and_counted():
+    """A forced tool call streams only argument deltas, no output text.
+
+    These are generated tokens, as `tool_calls` deltas are on `openai-chat`.
+    Counting only text deltas would fail every such request.
+    """
+    output = run(
+        [
+            sse("response.created", {"response": {"status": "in_progress"}}),
+            sse("response.output_item.added", {"item": {"type": "function_call"}}),
+            GAP_PREFILL,
+            tool_delta('{"city": '),
+            GAP_TOKEN,
+            tool_delta('"Paris"'),
+            tool_delta("}"),
+            sse("response.function_call_arguments.done", {"arguments": "{}"}),
+            sse("response.output_item.done", {"output_index": 0}),
+            GAP_FINALIZE,
+            usage_event(20, 6),
+        ]
+    )
+
+    assert output.success, output.error
+    # Tool arguments are not output text, as on `openai-chat`.
+    assert output.generated_text == ""
+    assert output.output_tokens == 6
+    assert GAP_PREFILL * 0.8 <= output.ttft < GAP_PREFILL + GAP_TOKEN * 0.5
+    assert len(output.itl) == 2
+    assert output.itl[0] >= GAP_TOKEN * 0.5
+    assert output.latency - output.ttft == pytest.approx(sum(output.itl), abs=1e-9)
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "response.function_call_arguments.delta",
+        "response.custom_tool_call_input.delta",
+        "response.mcp_call_arguments.delta",
+        "response.code_interpreter_call_code.delta",
+    ],
+)
+def test_every_tool_delta_event_starts_the_clock(event_type: str):
+    """Each tool delta event the server can emit carries generated tokens."""
+    output = run(
+        [
+            PREAMBLE,
+            tool_delta("a", event_type),
+            tool_delta("b", event_type),
+            usage_event(5, 2),
+        ]
+    )
+
+    assert output.success, output.error
+    assert len(output.itl) == 1
+
+
+def test_text_then_tool_call_times_both():
+    """Text before a tool call starts the clock; argument deltas add ITL."""
+    output = run(
+        [
+            PREAMBLE,
+            text_delta("Checking."),
+            tool_delta('{"city": "Paris"}'),
+            usage_event(5, 9),
+        ]
+    )
+
+    assert output.success, output.error
+    assert output.generated_text == "Checking."
+    assert len(output.itl) == 1
+
+
 @pytest.mark.parametrize("event_type", ["response.completed", "response.incomplete"])
 def test_incomplete_response_is_a_successful_request(event_type: str):
     """Hitting max_output_tokens is the Responses form of finish_reason=length.

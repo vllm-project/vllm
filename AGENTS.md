@@ -103,9 +103,10 @@ When adding tests:
 - **Run model evals for model-affecting changes.** Search `tests/evals/` or use
   `vllm bench` and include results in the PR — do not wait for reviewers to ask.
 - **AMD monokernels get exactly two CI steps** in
-  `.buildkite/test_areas/monokernels.yaml`: a blocking `Mono I/O` step checking
-  every fused stage against a slow float64 plain-torch reference with bounded
-  error (never another vLLM, AITER or Triton kernel), plus one engine parity
+  `.buildkite/test_areas/monokernels.yaml` (or as the `mirror.amd` of a matching
+  NVIDIA step): a blocking `Mono I/O` step checking every fused stage against a
+  slow float64 plain-torch reference with bounded error (never another vLLM,
+  AITER or Triton kernel), plus one engine parity
   smoke; and an optional `[Nightly] Mono E2E` step running the real checkpoint's
   gsm8k with an engagement check. A model that already has steps extends them.
   Assert accuracy, not which class or code path ran: every tolerance must be

@@ -28,6 +28,8 @@ rows, checks the arch-independent stages exactly and replays the steps in one
 CUDA graph. The real model's numerics on gfx942 are checked by
 ``test_dsv41_mono_layers.py``."""
 
+import shutil
+import subprocess
 from contextlib import contextmanager
 from functools import partial
 from typing import NamedTuple
@@ -672,17 +674,17 @@ def _k1_taps(runner, taps: dict):
     from vllm.models.deepseek_v41.amd.mono import runner as runner_module
 
     kernels, run = runner.kernels, runner_module._run_compiled
-    k1_tokens: dict[int, int] = {}
+    k1_tokens: dict[int, tuple[int, bool]] = {}
 
-    def tapped(tokens, *key):
-        k1, k2 = kernels(tokens, *key)
-        k1_tokens[id(k1)] = tokens
+    def tapped(tokens, ratio, *key):
+        k1, k2 = kernels(tokens, ratio, *key)
+        k1_tokens[id(k1)] = (tokens, runner.tuned(tokens, ratio))
         return k1, k2
 
     def run_tapped(launcher, *args):
         run(launcher, *args)
         if id(launcher) in k1_tokens:
-            taps["k1"] = runner.scratch(k1_tokens[id(launcher)]).clone()
+            taps["k1"] = runner.scratch(*k1_tokens[id(launcher)]).clone()
 
     runner.kernels = tapped
     runner_module._run_compiled = run_tapped
@@ -702,7 +704,7 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
     buffers for the replay stress."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.distributed import tensor_model_parallel_all_reduce
+    from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
     from vllm.engine.arg_utils import EngineArgs
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.kernels.linear.mxfp8.rocm_block32_gemm import (
@@ -718,7 +720,11 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
     from vllm.models.deepseek_v41.amd.model import DeepseekV4MoE
     from vllm.models.deepseek_v41.amd.mono.attention.plan import KEYS, Dims
     from vllm.models.deepseek_v41.amd.mono.layer import scratch_layout
-    from vllm.models.deepseek_v41.amd.mono.runner import AttnWeights, MonoLayerWeights
+    from vllm.models.deepseek_v41.amd.mono.runner import (
+        AttnWeights,
+        DSV41MonoLayer,
+        MonoLayerWeights,
+    )
     from vllm.models.deepseek_v41.amd.mono.stages.dims import Dims as MoeDims
     from vllm.models.deepseek_v41.amd.rocm import (
         compute_global_topk_ragged_indices_and_indptr,
@@ -765,6 +771,7 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
         inter=2304 // tp,
     )
     e, sh = moe.experts.routed_experts, moe.shared_experts
+    assert sh is not None
     # the checkpoint-format tensors the reference reads, before post-load
     # processing shuffles them for the kernels
     raw = [
@@ -792,6 +799,14 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
         )
     else:
         runner = mono_decode._mono_runner(device)
+    # the tuned builds' reference (``MonoBuild.generic``): at TP2 the ratio-2
+    # steps take the tuned paths; their outputs must match the generic builds'
+    # bit for bit. Only TP2 has tuned builds, so only TP2 makes the reference.
+    generic = (
+        DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device, generic=True)
+        if tp == 2 and not draft
+        else None
+    )
     md = MoeDims(tp)
     inter, real, shi = md.inter, md.inter_real, md.sh_inter
 
@@ -905,12 +920,13 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
 
         stage("rstd", check)
 
-    def ffn_io(tag, M, res, post, comb, pre, outs, hard=False):
+    def ffn_io(tag, M, res, post, comb, pre, outs, hard=False, tuned=False):
         """The FFN seam and the MoE of the last launch, from the partials its
-        attention pushed to this rank."""
+        attention pushed to this rank. ``tuned``: the launch's build's
+        (``MonoBuild.tuned``), whose scratch it wrote."""
         sc, lay = (
-            runner.scratch(M),
-            scratch_layout(M, tp, experts, topk_k, runner.ug_groups),
+            runner.scratch(M, tuned),
+            scratch_layout(M, tp, experts, topk_k, runner.ug_groups, tuned),
         )
         ep = int(runner.epoch[0]) - 1
         t2 = 2 * ep + 2
@@ -1090,9 +1106,10 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
         """K1 and K2 of the last whole-layer launch, stage by stage."""
         x0, res0, post0, comb0, pre0 = ins
         M, n = s["M"], case.R * case.T
+        tuned = runner.tuned(M, case.ratio)
         sc, lay = (
-            runner.scratch(M),
-            scratch_layout(M, tp, experts, topk_k, runner.ug_groups),
+            runner.scratch(M, tuned),
+            scratch_layout(M, tp, experts, topk_k, runner.ug_groups, tuned),
         )
         ep = int(runner.epoch[0]) - 1
         t1 = 2 * ep + 1
@@ -1210,7 +1227,7 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
         attn, _ = _peer(runner, M, ep)
         X8B = R.dequant_fp8(xb[0], xb[1], (1, 32))
         gemv(f"{tag} wo_b", attn[rank, :n], X8B, WOB, "fp8")
-        ffn_io(tag, M, res_mid, post_a, comb_a, pre_a, outs, case.hard)
+        ffn_io(tag, M, res_mid, post_a, comb_a, pre_a, outs, case.hard, tuned)
 
     def check(case: Case):
         ratio = case.ratio
@@ -1251,6 +1268,7 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
             sw2_s=u8(sh.down_proj.weight_scale),
         )  # fmt: skip
         # the layouts vLLM's loading leaves, as the model checks them
+        assert mw.attn is not None
         mw.attn.check(Dims(tp))
         mw.check(tp, experts)
 
@@ -1346,11 +1364,39 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
             mw, *ins, s["positions"], s["slot_mapping"], s["swa_cache"],
             s["swa_indices"], s["swa_lens"], s["token_to_req"],
         )  # fmt: skip
+        tag = f"{'draft ' if draft else ''}{case}"
+        tuned = runner.tuned(M, ratio)
+        want = None
+        if generic is not None and tuned:
+            o = generic.forward(*args, **meta)
+            off = scratch_layout(M, tp)["normed"][0]
+            mid = (generic.res_mid, generic.post_a, generic.comb_a, generic.pre_a)
+            want = [
+                t.clone()
+                for t in (
+                    *o,
+                    generic.scratch(M)[off : off + M * HIDDEN * 2],
+                    *(t[:M] for t in mid),
+                    cache,
+                )
+            ]
+            cache.copy_(empty)
+            if case.index:
+                meta["topk_indices"].fill_(-1)
         taps: dict = {}
         with _k1_taps(runner, taps):
             o = runner.forward(*args, **meta)
         torch.accelerator.synchronize()
-        tag = f"{'draft ' if draft else ''}{case}"
+        if want is not None:
+            off = scratch_layout(M, tp, tuned=True)["normed"][0]
+            mid = (runner.res_mid, runner.post_a, runner.comb_a, runner.pre_a)
+            got = (
+                *o,
+                runner.scratch(M, True)[off : off + M * HIDDEN * 2],
+                *(t[:M] for t in mid),
+                cache,
+            )
+            assert all(map(torch.equal, got, want)), f"{tag}: tuned != generic"
         # the keys K2 attended over, as the step's metadata lists them
         keys, lens = _key_table(s, ratio)
         assert torch.equal(runner.kt[: M * KEYS].view(M, KEYS).cpu(), keys), tag
@@ -1361,8 +1407,10 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
             for t in (runner.res_mid, runner.post_a, runner.comb_a, runner.pre_a)
         )
 
-        off = scratch_layout(M, tp, experts, topk_k, runner.ug_groups)["normed"][0]
-        normed = runner.scratch(M)[off : off + M * HIDDEN * 2].view(bf).view(M, HIDDEN)
+        lay = scratch_layout(M, tp, experts, topk_k, runner.ug_groups, tuned)
+        off = lay["normed"][0]
+        normed = runner.scratch(M, tuned)[off : off + M * HIDDEN * 2]
+        normed = normed.view(bf).view(M, HIDDEN)
         o_n = [t[:n] for t in o]
         if case.vllm:
             # vLLM's chain on the same inputs, stage by stage, within the
@@ -1497,7 +1545,9 @@ def _check_layers(rank: int, tp: int, device, vllm: bool = False) -> None:
 def _check_variants(rank: int, tp: int, device) -> None:
     """Steps of 1 to 33 rows (a GEMV pass takes 16), the first layer's and an
     Engram layer's settled residual, a pad row alone in a pass, contexts under
-    the window and the top-k, and inputs that hit the clamps and zero groups."""
+    the window and the top-k, and inputs that hit the clamps and zero groups;
+    at TP2 the tuned ratio-2 builds' small widths (12 rows) and a partial last
+    token tile (36 rows, every row on the same six experts)."""
     runner, check = _bench(rank, tp, device)
     steps = [
         check(Case(0, 1, 1, entry="embedding")),
@@ -1505,6 +1555,8 @@ def _check_variants(rank: int, tp: int, device) -> None:
         check(Case(2, 17, 1, short=True)),
         check(Case(1, 33, 1, entry="settled", short=True)),
         check(Case(1, 2, 6, hard=True)),
+        check(Case(2, 2, 6)),
+        check(Case(2, 6, 6, hard=True)),
     ]
     _replay(steps, {runner: 2 * len(steps)})
 
@@ -1572,6 +1624,23 @@ def test_mono_index_source_matches_vllm(monkeypatch: pytest.MonkeyPatch):
     multi_process_parallel(monkeypatch, 2, 1, _mono_index)
 
 
+@pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
+@pytest.mark.skipif(not shutil.which("llvm-objdump"), reason="needs llvm-objdump")
+def test_mono_decode_k2_tp4_no_scratch(monkeypatch: pytest.MonkeyPatch):
+    """TP4 K2 at 14 rows, where the MoE push's peer bases spilled: no scratch."""
+    flyc = pytest.importorskip("flydsl.compiler")
+    from vllm.models.deepseek_v41.amd.mono.layer import MonoBuild, build_mono_k2
+    from vllm.models.minimax_m3.amd.specialized_decode.mono.residency import code_object
+
+    monkeypatch.setenv("COMPILE_ONLY", "1")
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    k2 = build_mono_k2(MonoBuild(14, 4, 2))
+    flyc.compile(k2, *[0] * (k2.func.__code__.co_argcount - 1))
+    elf = code_object(k2._last_compiled[1]._ir_text)
+    isa = subprocess.check_output(["llvm-objdump", "-d", "-"], input=elf)
+    assert b"scratch_" not in isa
+
+
 # ---------------------------------------------------------------- gfx942
 
 
@@ -1635,6 +1704,7 @@ def _replay_942(rank: int, tp: int, device) -> None:
     with set_current_vllm_config(vc), set_default_torch_dtype(bf), device:
         moe = DeepseekV4MoE(vc, prefix="model.layers.21.ffn")
     e, sh = moe.experts.routed_experts, moe.shared_experts
+    assert sh is not None
     # The hooks that the model sets at load (mono_decode._copy_942_at_load).
     # The routed experts are copied from the plain tensors before vLLM's MoE
     # backend converts them, and the shared expert from the bf16 weights that
