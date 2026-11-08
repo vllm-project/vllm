@@ -35,10 +35,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     LoadSpec,
     RankTopology,
     RequestTracker,
-    StoreEventResult,
     TransferJobState,
     UMBPConnectorMetadata,
-    UMBPConnectorWorkerMetadata,
     UMBPNamespace,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
@@ -696,45 +694,6 @@ def test_sparse_attention_indexer_forces_async_load(indexer):
         scheduler.close()
 
 
-@pytest.mark.parametrize("boundary", [0, 3, 8, 11, 12, 16])
-def test_scheduler_accepts_only_computed_hash_aligned_tail(boundary, monkeypatch):
-    # Core hashes requests in 4-token units.
-    monkeypatch.setattr(
-        umbp_scheduler, "resolve_kv_cache_block_sizes", lambda *args: (16, 4)
-    )
-    scheduler = UMBPStoreConnectorScheduler(
-        _vllm_config({"mode": "embedded", "load_async": False}),
-        _kv_cache_config(),
-        _SchedulerHandle([]),
-        BlockIdentityCodec(UMBPNamespace("partial")),
-    )
-    request = make_request(
-        "partial",
-        num_tokens=12,
-        block_hashes=[b"a", b"b", b"c"],
-        block_ids=([7],),
-        num_computed_tokens=12,
-    )
-    scheduler.update_state_after_alloc(
-        request,
-        SimpleNamespace(get_block_ids=lambda group_ids: ([7],)),
-        0,
-    )
-
-    pool = BlockPool(8, True, 4)
-    scheduler.bind_gpu_block_pool(pool)
-    assert not scheduler.register_finished_partial_tail(
-        request, ([7],), [(0, 7, boundary)]
-    )
-    metadata = scheduler.build_connector_meta(make_scheduler_output())
-
-    assert len(metadata.store_plans) == (1 if boundary == 12 else 0)
-    if metadata.store_plans:
-        tail = metadata.store_plans[0]
-        assert tail.block_id == 7
-        assert tail.key == scheduler.codec.key(b"c", tail.group_id)
-
-
 def test_scheduler_stores_exact_hybrid_boundary_state():
     scheduler = UMBPStoreConnectorScheduler(
         _vllm_config({"mode": "embedded", "load_async": False}),
@@ -838,65 +797,6 @@ def test_hybrid_fine_hash_lookup_is_not_limited_by_gpu_page_count():
         scheduler.close()
 
 
-def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
-    scheduler = UMBPStoreConnectorScheduler(
-        _vllm_config(
-            {"mode": "embedded", "load_async": False},
-            prefix_match_unit=4,
-            world_size=2,
-        ),
-        _hybrid_kv_cache_config(),
-        _SchedulerHandle([]),
-        BlockIdentityCodec(UMBPNamespace("multi-partial")),
-    )
-    request = make_request(
-        "multi-partial",
-        block_hashes=[b"a", b"b", b"c"],
-        block_ids=([7], [9]),
-        num_computed_tokens=12,
-    )
-    scheduler.update_state_after_alloc(
-        request,
-        SimpleNamespace(get_block_ids=lambda group_ids: ([7], [9])),
-        0,
-    )
-
-    pool = BlockPool(16, True, 4)
-    scheduler.bind_gpu_block_pool(pool)
-    blocks = [pool.blocks[7], pool.blocks[9]]
-    pool.touch(blocks)
-    assert not scheduler.register_finished_partial_tail(
-        request,
-        ([7], [9]),
-        [(1, 9, 12)],
-    )
-    assert [block.ref_cnt for block in blocks] == [2, 2]
-    assert scheduler.request_finished(request, ([7], [9])) == (False, None)
-    pool.free_blocks(blocks)
-    assert [block.ref_cnt for block in blocks] == [1, 1]
-    assert scheduler.has_pending_push_work()
-    metadata = scheduler.build_connector_meta(
-        make_scheduler_output(finished={request.request_id})
-    )
-
-    assert len(metadata.store_plans) == 2
-    assert {(plan.group_id, plan.block_id) for plan in metadata.store_plans} == {
-        (0, 7),
-        (1, 9),
-    }
-    assert [block.ref_cnt for block in blocks] == [1, 1]
-    for rank in range(2):
-        scheduler.update_connector_output(
-            SimpleNamespace(
-                kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
-                    store_events={metadata.store_event: StoreEventResult(1)}
-                )
-            )
-        )
-        assert [block.ref_cnt for block in blocks] == ([1, 1] if rank == 0 else [0, 0])
-    assert not scheduler.has_pending_push_work()
-
-
 @pytest.mark.parametrize(
     "device",
     [
@@ -909,8 +809,8 @@ def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
         ),
     ],
 )
-def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
-    """A hash-only tail survives request cleanup, then restores byte for byte."""
+def test_hybrid_boundary_handoff_restores_every_byte(socket_dir, device):
+    """A sub-block Mamba checkpoint and its attention page restore byte for byte."""
     if device == "cpu":
         runtime = MemoryRuntime()
     else:
@@ -981,12 +881,14 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
     )
     sources = [pool.blocks[1], pool.blocks[2]]
     pool.touch(sources)
-    assert not scheduler.register_finished_partial_tail(
-        request, source_ids, [(1, 2, 12)]
+    # Core hands off the Mamba state at the prompt's sub-block checkpoint; the
+    # scheduler pairs it with the attention page at the same boundary.
+    output = make_scheduler_output(
+        block_state=SimpleNamespace(
+            get_block_ids=lambda request_id: source_ids,
+            boundary_state_offloads={"tail": [(1, 2, 12)]},
+        )
     )
-    assert scheduler.request_finished(request, source_ids) == (False, None)
-    pool.free_blocks(sources)
-    output = make_scheduler_output(finished={"tail"})
     try:
         metadata = scheduler.build_connector_meta(output)
         assert len(metadata.store_plans) == 2
@@ -1002,7 +904,9 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
                 )
             )
             time.sleep(0.001)
-        assert [block.ref_cnt for block in sources] == [0, 0]
+        assert [block.ref_cnt for block in sources] == [1, 1]
+        assert scheduler.request_finished(request, source_ids) == (False, None)
+        pool.free_blocks(sources)
         for cache in caches.values():
             cache.zero_()
 
@@ -1011,8 +915,9 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
         scheduler.update_state_after_alloc(
             request, SimpleNamespace(get_block_ids=lambda group_ids: ([3], [4])), 12
         )
-        output.finished_req_ids = set()
-        worker.start_load_kv(None, scheduler.build_connector_meta(output))
+        worker.start_load_kv(
+            None, scheduler.build_connector_meta(make_scheduler_output())
+        )
         deadline = time.monotonic() + 10
         while (finished := worker.get_finished(set())) == (None, None):
             assert time.monotonic() < deadline, "load completion was not reported"

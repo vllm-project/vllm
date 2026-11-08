@@ -6910,7 +6910,7 @@ class TestMambaHybridOffloadServing:
         assert self._roundtrip_served_tokens(scheduler) == 16
 
 
-def _make_lookahead_hybrid_engine(lookahead=1, eagle=True):
+def _make_lookahead_hybrid_engine(lookahead=1, eagle=True, checkpoint_alignment=None):
     from dataclasses import replace
 
     from tests.v1.kv_connector.unit.utils import make_kv_cache_config
@@ -6940,7 +6940,10 @@ def _make_lookahead_hybrid_engine(lookahead=1, eagle=True):
     caches.kv_cache_groups[0].is_eagle_group = eagle
     group = caches.kv_cache_groups[1]
     group.kv_cache_spec = replace(
-        group.kv_cache_spec, num_speculative_blocks=1, num_prefill_checkpoint_blocks=1
+        group.kv_cache_spec,
+        num_speculative_blocks=1,
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=checkpoint_alignment,
     )
     init_none_hash(sha256)
     return create_scheduler(config, kv_cache_config=caches, hash_block_size=4)
@@ -6971,7 +6974,8 @@ def test_lookahead_partial_lookup_uses_available_hashes(lookahead, eagle):
 @pytest.mark.parametrize("lookahead", [1, 5])
 @pytest.mark.cpu_test
 def test_lookahead_partial_store_uses_checkpoint_hash(lookahead):
-    engine = _make_lookahead_hybrid_engine(lookahead)
+    # The unsplit prefill relies on the backend's internal checkpoint.
+    engine = _make_lookahead_hybrid_engine(lookahead, checkpoint_alignment=4)
     connector = engine.connector
     assert isinstance(connector, OffloadingConnector)
     scheduler = connector.scheduler

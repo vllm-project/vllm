@@ -2680,8 +2680,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     """Test shared prefix detection heuristic for mamba align cache mode
 
     HybridKVCacheCoordinator returns num_uncached_common > 0 when a shared
-    uncached prefix is detected. With mamba_align cache, _mamba_block_aligned_split
-    enforces scheduling aligned with the common prefix.
+    uncached prefix is detected.
     """
     block_size = 16
     manager = make_kv_cache_manager(
@@ -2719,29 +2718,6 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     assert num_computed == 0  # mamba_align doesn't cache intermediate blocks
     # boundary == junction: 2 shared blocks (num_computed 0 + 2 uncached blocks).
     assert shared_prefix_boundary == 2 * block_size
-
-    # Next, validate the align-mode Marconi split. It takes the shared-prefix
-    # junction (absolute) and stops the chunk there (req_2 has num_computed 0).
-    # Create minimal mock with just the needed attributes
-    mock = SimpleNamespace(
-        block_size=block_size,
-        cache_config=SimpleNamespace(block_size=block_size),
-        max_num_scheduled_tokens=3 * block_size,
-        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
-        use_eagle_block_drop=False,
-        num_hash_lookahead_tokens=0,
-        hash_block_size=block_size,
-        mamba_partial_cache_hit=False,
-        mamba_shared_prefix_checkpoint=False,
-        mamba_has_prefill_checkpoint_blocks=False,
-    )
-    req_2.shared_prefix_boundary = shared_prefix_boundary
-    num_new_tokens_adjusted = Scheduler._mamba_block_aligned_split(
-        self=mock,
-        request=req_2,
-        num_new_tokens=3 * block_size,
-    )
-    assert num_new_tokens_adjusted == 2 * block_size  # adjust to the common prefix
 
     manager.allocate_slots(req_2, 3 * block_size, 0, computed_blocks)
     # Cleanup
@@ -4493,6 +4469,11 @@ def test_lookahead_checkpoint_has_available_hash(
     assert manager.allocate_slots(request, len(tokens) - request.num_computed_tokens)
     checkpoint_hash = request.block_hashes[expected_boundary // 64 - 1]
     blocks = manager.block_pool.get_cached_block(checkpoint_hash, [1])
+    if not checkpoint_blocks and expected_boundary % 512:
+        # Without an internal checkpoint, a chunk ending mid-block leaves only
+        # running state, which is never published.
+        assert blocks is None
+        return
     assert blocks is not None
     assert blocks[0].block_hash_num_tokens == expected_boundary
     if checkpoint_blocks:
@@ -4526,8 +4507,12 @@ def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
     mamba_block_size = 544
     token_ids = list(range(1249))
     config = _make_hybrid_kv_cache_config(hash_block_size, 200, ["full", "mamba"])
+    # The backend's internal prefill checkpoint holds the sub-block state.
     config.kv_cache_groups[1].kv_cache_spec = replace(
-        config.kv_cache_groups[1].kv_cache_spec, block_size=mamba_block_size
+        config.kv_cache_groups[1].kv_cache_spec,
+        block_size=mamba_block_size,
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=hash_block_size,
     )
     manager = make_kv_cache_manager(
         config,
@@ -4545,10 +4530,7 @@ def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
         sha256,
         num_hash_lookahead_tokens=1,
     )
-    assert manager.allocate_slots(first, 1248) is not None
-    first.num_computed_tokens = 1248
-    manager.new_step_starts()
-    assert manager.allocate_slots(first, 1) is not None
+    assert manager.allocate_slots(first, 1249) is not None
     first.num_computed_tokens = 1249
     manager.new_step_starts()
     manager.free(first)
@@ -4580,8 +4562,12 @@ def test_mamba_partial_hit_requires_matching_lookahead_tokens(
     mamba_block_size = 544
     prompt_len = 1249
     config = _make_hybrid_kv_cache_config(hash_block_size, 200, ["full", "mamba"])
+    # The backend's internal prefill checkpoint holds the sub-block state.
     config.kv_cache_groups[1].kv_cache_spec = replace(
-        config.kv_cache_groups[1].kv_cache_spec, block_size=mamba_block_size
+        config.kv_cache_groups[1].kv_cache_spec,
+        block_size=mamba_block_size,
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=hash_block_size,
     )
     manager = make_kv_cache_manager(
         config,
@@ -4602,13 +4588,9 @@ def test_mamba_partial_hit_requires_matching_lookahead_tokens(
         sha256,
         num_hash_lookahead_tokens=lookahead,
     )
-    for chunk_end in (boundary, prompt_len):
-        assert (
-            manager.allocate_slots(producer, chunk_end - producer.num_computed_tokens)
-            is not None
-        )
-        producer.num_computed_tokens = chunk_end
-        manager.new_step_starts()
+    assert manager.allocate_slots(producer, prompt_len) is not None
+    producer.num_computed_tokens = prompt_len
+    manager.new_step_starts()
     manager.free(producer)
 
     shared_len = boundary + diverge_offset

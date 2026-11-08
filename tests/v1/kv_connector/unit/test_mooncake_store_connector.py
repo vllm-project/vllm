@@ -1500,13 +1500,11 @@ def test_finish_during_prefill_saves_only_completed_kv(
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("tail_first", [False, True])
-@pytest.mark.parametrize("tail_completes_first", [False, True])
 @pytest.mark.parametrize("stale_in_flight_tokens", [0, 2])
-def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
-    tail_first, tail_completes_first, stale_in_flight_tokens
+def test_finish_stores_newly_hashed_kv_and_releases_its_blocks(
+    stale_in_flight_tokens,
 ):
-    """One request can finish with both a checkpoint and newly hashed KV."""
+    """A finished request stores the KV its final hash update made savable."""
     config = _make_vllm_config()
     config.cache_config.prefix_match_unit = 4
     set_mtp_config(config)
@@ -1588,45 +1586,21 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
     request.num_in_flight_tokens = stale_in_flight_tokens
     request.num_stale_output_tokens = stale_in_flight_tokens
 
-    def finish_tail():
-        connector.register_finished_partial_tail(
-            request,
-            block_ids,
-            [(1, owned[2].block_id, 28)],
-        )
-
-    if tail_first:
-        finish_tail()
     connector.request_finished_all_groups(request, block_ids)
-    if not tail_first:
-        finish_tail()
     pool.free_blocks(owned)
-    assert [b.ref_cnt for b in owned] == [1, 2, 1]
+    # The store job pins the attention blocks it saves; Mamba state is stored
+    # only through boundary hand-offs.
+    assert [b.ref_cnt for b in owned] == [1, 1, 0]
 
     out = SchedulerOutput.make_empty()
     out.finished_req_ids = {request.request_id}
     final = connector.build_connector_meta(out)
-    assert sorted(m.token_len_chunk for m in final.requests) == [0, 32]
-    assert len({m.store_job_id for m in final.requests}) == 2
-    tail_job = next(m for m in final.requests if m.token_len_chunk == 0)
-    full_job = next(m for m in final.requests if m.token_len_chunk == 32)
-    first_job, second_job = (
-        (tail_job, full_job) if tail_completes_first else (full_job, tail_job)
-    )
+    (full_job,) = final.requests
+    assert full_job.token_len_chunk == 32
     connector.update_connector_output(
         KVConnectorOutput(
             kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
-                completed_saves={first_job.store_job_id: 1},
-            ),
-        )
-    )
-    assert [b.ref_cnt for b in owned] == (
-        [1, 1, 0] if tail_completes_first else [0, 1, 1]
-    )
-    connector.update_connector_output(
-        KVConnectorOutput(
-            kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
-                completed_saves={second_job.store_job_id: 1},
+                completed_saves={full_job.store_job_id: 1},
             ),
         )
     )

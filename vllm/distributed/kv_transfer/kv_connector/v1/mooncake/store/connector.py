@@ -302,17 +302,6 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_scheduler.register_finished_lookahead_save(request, block_ids)
         return False, None
 
-    def register_finished_partial_tail(
-        self,
-        request: Request,
-        block_ids: tuple[list[int], ...],
-        partial_tail_offloads: list[tuple[int, int, int]],
-    ) -> bool:
-        assert self.connector_scheduler is not None
-        return self.connector_scheduler.register_finished_partial_tail(
-            request, block_ids, partial_tail_offloads
-        )
-
     def reset_cache(self) -> bool | None:
         """Reset the external Mooncake store on prefix-cache reset.
 
