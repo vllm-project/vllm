@@ -9,15 +9,19 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until, take_while};
 
 use super::parameters::ToolSchemas;
-use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
+use super::utils::{
+    MarkerScanState, parse_buffered_event, safe_text_len, safe_text_len_mul, take_until_marker,
+};
 use super::{Result, ToolCallDelta, ToolParserError, ToolParserOutput};
 use crate::tool::Tool;
 
 mod glm45_moe;
 mod glm47_moe;
+mod poolside_v1;
 
 pub use glm45_moe::Glm45MoeToolParser;
 pub use glm47_moe::Glm47MoeToolParser;
+pub use poolside_v1::PoolsideV1ToolParser;
 
 const TOOL_CALL_START: &str = "<tool_call>";
 const FRAMED_TOOL_CALL_START: &str = "\n<tool_call>";
@@ -32,8 +36,23 @@ type GlmInput<'i> = Partial<&'i str>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GlmMode {
     Text,
-    ToolCall { tool_call_end_scan: MarkerScanState },
+    ToolCall {
+        tool_call_end_scan: MarkerScanState,
+    },
+    FunctionName,
+    Parameter,
+    StringValue,
+    BufferedValue {
+        key: String,
+        value_end_scan: MarkerScanState,
+    },
     AfterToolCall,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallEmission {
+    Complete,
+    IncrementalStrings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +75,17 @@ enum GlmEvent {
         name: String,
         raw_params: Vec<(String, String)>,
     },
+    FunctionName(String),
+    ParameterStart(String),
+    StringFragment {
+        len: usize,
+    },
+    StringEnd,
+    ParameterValue {
+        key: String,
+        value: String,
+    },
+    ToolCallEnd,
     IgnoredRest,
 }
 
@@ -66,6 +96,9 @@ struct GlmXmlToolParser {
     emitted_tool_count: usize,
     tool_parameters: ToolSchemas,
     separator: Separator,
+    call_emission: CallEmission,
+    current_tool_name: String,
+    has_arguments: bool,
 }
 
 impl GlmXmlToolParser {
@@ -77,7 +110,16 @@ impl GlmXmlToolParser {
             emitted_tool_count: 0,
             tool_parameters: ToolSchemas::from_tools(tools),
             separator,
+            call_emission: CallEmission::Complete,
+            current_tool_name: String::new(),
+            has_arguments: false,
         }
+    }
+
+    /// Emit string arguments before their closing tags, as Poolside does.
+    fn with_incremental_strings(mut self) -> Self {
+        self.call_emission = CallEmission::IncrementalStrings;
+        self
     }
 
     /// Apply one parsed GLM event to parser state and output.
@@ -87,8 +129,12 @@ impl GlmXmlToolParser {
                 output.push_text(&self.buffer[..consumed_len]);
             }
             GlmEvent::ToolCallStart => {
-                self.mode = GlmMode::ToolCall {
-                    tool_call_end_scan: MarkerScanState::default(),
+                self.has_arguments = false;
+                self.mode = match self.call_emission {
+                    CallEmission::Complete => GlmMode::ToolCall {
+                        tool_call_end_scan: MarkerScanState::default(),
+                    },
+                    CallEmission::IncrementalStrings => GlmMode::FunctionName,
                 };
             }
             GlmEvent::ToolCall { name, raw_params } => {
@@ -104,14 +150,76 @@ impl GlmXmlToolParser {
                 });
                 self.emitted_tool_count += 1;
             }
+            GlmEvent::FunctionName(name) => {
+                self.current_tool_name = name.clone();
+                self.mode = GlmMode::Parameter;
+                output.push_call(ToolCallDelta {
+                    tool_index: self.emitted_tool_count,
+                    name: Some(name),
+                    arguments: "{".to_string(),
+                });
+            }
+            GlmEvent::ParameterStart(key) => {
+                let mut arguments = if self.has_arguments {
+                    ",".to_string()
+                } else {
+                    String::new()
+                };
+                arguments.push_str(&serde_json::Value::String(key.clone()).to_string());
+                arguments.push(':');
+                self.mode = if self.tool_parameters.is_string_param(&self.current_tool_name, &key) {
+                    arguments.push('"');
+                    GlmMode::StringValue
+                } else {
+                    GlmMode::BufferedValue {
+                        key,
+                        value_end_scan: MarkerScanState::default(),
+                    }
+                };
+                self.has_arguments = true;
+                self.push_arguments(arguments, output);
+            }
+            GlmEvent::StringFragment { len } => {
+                let escaped = serde_json::to_string(&self.buffer[..len])
+                    .map_err(|error| parsing_failed!("failed to serialize argument: {}", error))?;
+                self.push_arguments(escaped[1..escaped.len() - 1].to_string(), output);
+            }
+            GlmEvent::StringEnd => {
+                self.mode = GlmMode::Parameter;
+                self.push_arguments("\"".to_string(), output);
+            }
+            GlmEvent::ParameterValue { key, value } => {
+                let value = self.tool_parameters.convert_param_with_schema(
+                    &self.current_tool_name,
+                    &key,
+                    value,
+                );
+                self.mode = GlmMode::Parameter;
+                self.push_arguments(value.to_string(), output);
+            }
+            GlmEvent::ToolCallEnd => {
+                self.push_arguments("}".to_string(), output);
+                self.emitted_tool_count += 1;
+                self.mode = GlmMode::AfterToolCall;
+            }
             GlmEvent::IgnoredRest => {}
         }
         Ok(())
     }
 
+    fn push_arguments(&self, arguments: String, output: &mut ToolParserOutput) {
+        output.push_call(ToolCallDelta {
+            tool_index: self.emitted_tool_count,
+            name: None,
+            arguments,
+        });
+    }
+
     fn reset(&mut self) -> String {
         self.mode = GlmMode::Text;
         self.emitted_tool_count = 0;
+        self.current_tool_name.clear();
+        self.has_arguments = false;
         std::mem::take(&mut self.buffer)
     }
 
@@ -130,14 +238,18 @@ impl GlmXmlToolParser {
 
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
-        if !self.buffer.is_empty() {
-            match self.mode {
-                GlmMode::Text => output.push_text(&self.buffer),
-                GlmMode::ToolCall { .. } => {
-                    return Err(ToolParserError::IncompleteToolCall { parser: "GLM MoE" });
-                }
-                GlmMode::AfterToolCall => {}
+        match self.mode {
+            GlmMode::Text => output.push_text(&self.buffer),
+            GlmMode::ToolCall { .. } if !self.buffer.is_empty() => {
+                return Err(ToolParserError::IncompleteToolCall { parser: "GLM MoE" });
             }
+            GlmMode::FunctionName
+            | GlmMode::Parameter
+            | GlmMode::StringValue
+            | GlmMode::BufferedValue { .. } => {
+                return Err(ToolParserError::IncompleteToolCall { parser: "XML" });
+            }
+            GlmMode::ToolCall { .. } | GlmMode::AfterToolCall => {}
         }
         let _ = self.reset();
         Ok(output)
@@ -155,6 +267,46 @@ fn parse_next_glm_event(
         GlmMode::ToolCall { tool_call_end_scan } => {
             tool_call_event(input, separator, tool_call_end_scan)
         }
+        GlmMode::FunctionName => seq!(
+            _: ws0,
+            take_while(1.., |ch: char| !ch.is_whitespace() && ch != '<'),
+        )
+        .map(|(name,): (&str,)| GlmEvent::FunctionName(name.to_string()))
+        .parse_next(input),
+        GlmMode::Parameter => {
+            ws0.void().parse_next(input)?;
+            alt((
+                literal(TOOL_CALL_END).value(GlmEvent::ToolCallEnd),
+                seq!(
+                    _: literal(ARG_KEY_START),
+                    take_until(1.., ARG_KEY_END),
+                    _: literal(ARG_KEY_END),
+                    _: ws0,
+                    _: literal(ARG_VALUE_START),
+                )
+                .map(|(key,): (&str,)| GlmEvent::ParameterStart(key.trim().to_string())),
+            ))
+            .parse_next(input)
+        }
+        GlmMode::StringValue => alt((
+            literal(ARG_VALUE_END).value(GlmEvent::StringEnd),
+            |input: &mut GlmInput<'_>| {
+                safe_text_len(input, ARG_VALUE_END).map(|len| GlmEvent::StringFragment { len })
+            },
+        ))
+        .parse_next(input),
+        GlmMode::BufferedValue {
+            key,
+            value_end_scan,
+        } => seq!(
+            take_until_marker(ARG_VALUE_END, value_end_scan),
+            _: literal(ARG_VALUE_END),
+        )
+        .map(|(value,): (&str,)| GlmEvent::ParameterValue {
+            key: key.clone(),
+            value: value.to_string(),
+        })
+        .parse_next(input),
         GlmMode::AfterToolCall => after_tool_call_event(input),
     }
 }

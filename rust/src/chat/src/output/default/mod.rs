@@ -486,6 +486,7 @@ mod tests {
         assert!(build("glm47", Some(ToolStrictLevel::Auto)).is_none());
         // Other parsers default to `auto`.
         assert!(build("qwen3_coder", None).is_none());
+        assert!(build("poolside_v1", None).is_none());
     }
 
     #[test]
