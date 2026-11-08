@@ -443,10 +443,7 @@ class HFConfigParser(ConfigParserBase):
                 **kwargs,
             )
         else:
-            # Only the original checkpoints need the vendored config
-            audio_model_type = config_dict.get("audio_config", {}).get("model_type")
-            is_hf_moss = audio_model_type == "moss_transcribe_diarize_audio"
-            if model_type in _CONFIG_REGISTRY and not is_hf_moss:
+            if model_type in _CONFIG_REGISTRY:
                 # Register the config class to AutoConfig to ensure it's used
                 # in future calls to `from_pretrained` (e.g. from
                 # AutoTokenizer or AutoProcessor).
