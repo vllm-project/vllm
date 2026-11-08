@@ -233,6 +233,11 @@ class Worker(WorkerBase):
         )
         self._external_weight_charges = ExternalWeightCharges()
 
+        if vllm_config.compilation_config.graph_extension_config_path:
+            from vllm.compilation.foundry_adapter import install_hooks
+
+            install_hooks(vllm_config.compilation_config)
+
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
         torch.set_float32_matmul_precision(precision)

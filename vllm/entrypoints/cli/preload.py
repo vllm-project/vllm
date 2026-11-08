@@ -27,6 +27,7 @@ import threading
 import time
 import typing
 from collections.abc import Sequence
+from copy import deepcopy
 from itertools import product
 from multiprocessing.connection import wait
 from multiprocessing.process import BaseProcess
@@ -51,6 +52,30 @@ else:
     FlexibleArgumentParser = argparse.ArgumentParser
 
 logger = init_logger(__name__)
+
+
+def _prepare_cudagraphs(engine_args: EngineArgs, socket_dir: str | None) -> None:
+    """Run one disposable SAVE engine against the already-serving daemon."""
+    from vllm.compilation.foundry_adapter import install_hooks
+    from vllm.v1.engine.llm_engine import LLMEngine
+
+    engine_args = deepcopy(engine_args)
+    engine_args.load_format = "ipc_cache"
+    engine_args.model_loader_extra_config = {
+        "mode": "zero_copy",
+        "fallback": False,
+        **({"socket_dir": socket_dir} if socket_dir is not None else {}),
+    }
+    install_hooks(engine_args.compilation_config)
+    engine = LLMEngine.from_engine_args(
+        engine_args,
+        usage_context=UsageContext.OPENAI_API_SERVER,
+        enable_multiprocessing=True,
+    )
+    try:
+        logger.info("Foundry preparation engine completed SAVE")
+    finally:
+        engine.engine_core.shutdown()
 
 
 class _HealthState:
@@ -140,6 +165,13 @@ class PreloadSubcommand(CLISubcommand):
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> None:
+        parser.add_argument(
+            "--prepare-cudagraphs",
+            action="store_true",
+            help="Prepare persisted CUDA graphs using one temporary IPC engine "
+            "before reporting ready. Requires a Foundry SAVE compilation "
+            "configuration and a single-GPU engine.",
+        )
         EngineArgs.add_cli_args(parser)
         parser.add_argument(
             "--weight-cache-socket-dir",
@@ -242,11 +274,38 @@ class PreloadSubcommand(CLISubcommand):
             else None
         )
         vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+        if vllm_config.compilation_config.graph_extension_config_path:
+            from vllm.compilation.foundry_adapter.config import (
+                CUDAGraphExtensionMode,
+                get_graph_extension_mode,
+            )
+            from vllm.compilation.foundry_adapter.runtime import setup_ld_preload_env
+
+            if get_graph_extension_mode() != CUDAGraphExtensionMode.SAVE:
+                raise ValueError("vllm preload requires Foundry SAVE mode")
+            setup_ld_preload_env()
         if vllm_config.load_config.load_format == "ipc_cache":
             raise ValueError(
                 "The weight cache daemon itself must load from disk; use the "
                 "default --load-format"
             )
+        if args.prepare_cudagraphs:
+            parallel = vllm_config.parallel_config
+            compilation = vllm_config.compilation_config
+            if (
+                not compilation.graph_extension_config_path
+                or vllm_config.model_config.enforce_eager
+                or not compilation.cudagraph_mode.has_full_cudagraphs()
+                or parallel.world_size != 1
+                or parallel.data_parallel_size != 1
+                or parallel.nnodes != 1
+                or vllm_config.speculative_config is not None
+            ):
+                raise ValueError(
+                    "--prepare-cudagraphs requires a single-GPU engine with "
+                    "FULL CUDA graphs, a Foundry SAVE configuration, and no "
+                    "speculative decoding or --enforce-eager"
+                )
         # Config-only so it can fail before any model loading; the quant
         # method check needs the created model and runs in
         # WeightCacheDaemon.get_model.
@@ -401,6 +460,8 @@ class PreloadSubcommand(CLISubcommand):
         signal.signal(signal.SIGTERM, _shutdown)
 
         started: list[BaseProcess] = []
+        preparation: BaseProcess | None = None
+        preparation_start = 0.0
         try:
             for proc in procs:
                 if shutdown_requested:
@@ -423,27 +484,59 @@ class PreloadSubcommand(CLISubcommand):
                     failure = next((code for p in dead if (code := p.exitcode)), 1)
                     exit_code = 128 - failure if failure < 0 else failure
                     break
-                if ready == expected_ready:
+                if health_state.is_ready:
                     wait([p.sentinel for p in procs], timeout=1.0)
                     continue
-                try:
-                    ready.add(ready_queue.get(timeout=1.0))
-                except queue.Empty:
-                    continue
-                if ready == expected_ready:
-                    health_state.mark_ready()
-                    socket_dir_msg = (
-                        args.weight_cache_socket_dir or "the default socket dir"
+                if ready != expected_ready:
+                    try:
+                        ready.add(ready_queue.get(timeout=1.0))
+                    except queue.Empty:
+                        continue
+                    if ready != expected_ready:
+                        continue
+                if args.prepare_cudagraphs:
+                    if preparation is None:
+                        preparation_start = time.perf_counter()
+                        preparation = ctx.Process(
+                            target=_prepare_cudagraphs,
+                            args=(engine_args, args.weight_cache_socket_dir),
+                            name="vllm-cudagraph-save",
+                        )
+                        logger.info("Preparing CUDA graphs with one SAVE engine")
+                        preparation.start()
+                        started.append(preparation)
+                    if preparation.exitcode is None:
+                        wait(
+                            [p.sentinel for p in procs] + [preparation.sentinel],
+                            timeout=1.0,
+                        )
+                        continue
+                    preparation.join()
+                    if preparation.exitcode != 0:
+                        logger.error(
+                            "CUDA graph preparation failed: exitcode=%s",
+                            preparation.exitcode,
+                        )
+                        code = preparation.exitcode
+                        exit_code = 128 - code if code < 0 else code
+                        break
+                    logger.info(
+                        "CUDA graph preparation completed in %.3f s",
+                        time.perf_counter() - preparation_start,
                     )
-                    logger.info_once(
-                        "===== Weight cache daemon READY: node %d/%d serving %d "
-                        "local rank(s) x %d role(s) in %s =====",
-                        node_rank,
-                        nnodes,
-                        local_world_size,
-                        len(groups),
-                        socket_dir_msg,
-                    )
+                health_state.mark_ready()
+                socket_dir_msg = (
+                    args.weight_cache_socket_dir or "the default socket dir"
+                )
+                logger.info_once(
+                    "===== Weight cache daemon READY: node %d/%d serving %d "
+                    "local rank(s) x %d role(s) in %s =====",
+                    node_rank,
+                    nnodes,
+                    local_world_size,
+                    len(groups),
+                    socket_dir_msg,
+                )
         finally:
             if health_server is not None:
                 health_server.should_exit = True

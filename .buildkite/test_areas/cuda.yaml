@@ -32,6 +32,34 @@ steps:
       - vllm/
       - tests/cuda
 
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Foundry graph persistence"
+  key: foundry-graph-persistence
+  device: h200_35gb
+  optional: true
+  timeout_in_minutes: 35
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - .buildkite/test_areas/cuda.yaml
+  - tests/v1/cudagraph/test_foundry_persistence.py
+  - tests/model_executor/model_loader/test_weight_cache.py
+  - tests/model_executor/model_loader/test_weight_cache_cudagraph.py
+  - tests/v1/cudagraph/foundry_utils.py
+  - vllm/entrypoints/cli/preload.py
+  - vllm/model_executor/model_loader/weight_cache/
+  - vllm/compilation/
+  - vllm/config/
+  - vllm/v1/worker/
+  - vllm/v1/engine/core.py
+  commands:
+  # The main CUDA image uses Torch 2.14/cu130. Install the matching Foundry
+  # wheel without replacing the image's Torch or vLLM dependencies.
+  - uv pip install --system --no-deps "foundry-core==0.1.0rc3" --extra-index-url https://foundry-org.github.io/foundry/whl/cu130/torch2.14/
+  - python -c 'from foundry import ops'
+  - >-
+    VLLM_FOUNDRY_LOG_DIR=/tmp/foundry-persistence pytest --optional -v -s
+    tests/v1/cudagraph/test_foundry_persistence.py
+    tests/model_executor/model_loader/test_weight_cache_cudagraph.py
+
 - label: ":nvidia: (H200 MIG 18GB) CUDAGraph"
   device: h200_18gb
   key: cudagraph

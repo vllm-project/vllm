@@ -3201,6 +3201,11 @@ class VllmConfig:
                 "it sizes the KV cache from measured memory, which "
                 "num_gpu_blocks_override overrides"
             )
+        elif self.compilation_config.graph_extension_config_path:
+            unsupported = (
+                "Foundry graph persistence requires a fixed KV allocation "
+                "layout across SAVE and LOAD"
+            )
         elif self.parallel_config.enable_elastic_ep:
             unsupported = (
                 "elastic EP scale-up skips warmup and reuses the profiled KV "

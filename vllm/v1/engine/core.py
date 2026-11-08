@@ -149,6 +149,10 @@ class EngineCore:
         load_general_plugins()
 
         self.vllm_config = vllm_config
+        if vllm_config.compilation_config.graph_extension_config_path:
+            from vllm.compilation.foundry_adapter import install_hooks
+
+            install_hooks(vllm_config.compilation_config)
         if not vllm_config.parallel_config.data_parallel_rank_local:
             logger.info(
                 "Initializing a V1 LLM engine (v%s) with config: %s",

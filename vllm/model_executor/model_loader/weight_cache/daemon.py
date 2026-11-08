@@ -295,6 +295,16 @@ class WeightCacheDaemon:
 
     def load_model(self) -> None:
         torch.accelerator.set_device_index(self.local_rank)
+        weight_pool = None
+        if self.vllm_config.compilation_config.graph_extension_config_path:
+            from vllm.compilation.foundry_adapter.runtime import (
+                prepare_weight_cache_daemon,
+            )
+
+            weight_pool = prepare_weight_cache_daemon(
+                self.vllm_config.compilation_config.graph_extension_config_path,
+                self.local_rank,
+            )
         # Outside the config context so the daemon keeps its own rendezvous
         # instead of the engine's; model parallel groups (TP/DP/EP) are then
         # carved out of this world group like in the engine.
@@ -308,6 +318,22 @@ class WeightCacheDaemon:
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(self.tp_size, self.pp_size)
             self.model = self.get_model()
+        if weight_pool is not None:
+            start, end = weight_pool
+            tensors = [*self.model.parameters(), *self.model.buffers()]
+            for tensor in tensors:
+                if tensor.is_cuda:
+                    storage = tensor.untyped_storage()
+                    if (
+                        not start
+                        <= storage.data_ptr()
+                        <= (storage.data_ptr() + storage.nbytes())
+                        <= end
+                    ):
+                        raise RuntimeError(
+                            "Daemon weights exceed the Foundry weight pool; "
+                            "increase weight_cache_size and rerun preload"
+                        )
         # In-place reloads use configs already normalized by model construction.
         self.loaded_rope_parameters_hash = hash_rope_parameters(self.model_config)
         # Loading and post-processing leave freed transients in the caching

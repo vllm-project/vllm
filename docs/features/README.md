@@ -1,5 +1,9 @@
 # Features
 
+## Fast Start
+
+- [CUDA graph persistence with Foundry](cuda_graph_persistence.md)
+
 ## KV Cache Offloading
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)

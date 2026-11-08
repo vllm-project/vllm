@@ -58,6 +58,7 @@ class WeightCacheDaemon:
         extra_args: list[str] | None = None,
         env_extra: dict[str, str] | None = None,
         log_file: str | None = None,
+        enforce_eager: bool = True,
     ):
         # Short base path: Unix socket paths are limited to ~107 characters.
         self.socket_dir = tempfile.mkdtemp(prefix="vllm_ipc_")
@@ -73,7 +74,7 @@ class WeightCacheDaemon:
             str(tp_size),
             "--weight-cache-socket-dir",
             self.socket_dir,
-            "--enforce-eager",
+            *(["--enforce-eager"] if enforce_eager else []),
             "--weight-cache-health-host",
             "127.0.0.1",
             "--weight-cache-health-port",

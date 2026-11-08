@@ -7,7 +7,7 @@ from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from itertools import groupby, product
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, TypeAlias, cast
 
 import torch
 import torch.nn as nn
@@ -71,6 +71,11 @@ class AttentionState(NamedTuple):
     slot_mappings: dict[str, torch.Tensor]
 
 
+CaptureOutput: TypeAlias = (
+    torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors | None
+)
+
+
 @dataclass(frozen=True)
 class BatchExecutionDescriptor:
     """Describes the shape of the batch and CG mode to run; this is used to make shape
@@ -109,7 +114,7 @@ class CreateForwardFn(Protocol):
         self,
         desc: BatchExecutionDescriptor,
         warmup: bool,
-    ) -> Callable[[CUDAGraphMode], None]: ...
+    ) -> Callable[[CUDAGraphMode], CaptureOutput]: ...
 
 
 def _is_compatible(
@@ -201,6 +206,8 @@ class CudaGraphManager:
         self._lora_dispatch_map, self._max_lora_case = self._build_lora_dispatch_map()
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
+        # Keep restored output buffers alive for the lifetime of each graph.
+        self._graph_outputs: dict[BatchExecutionDescriptor, CaptureOutput] = {}
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
         # The stream of the last capture; graphs replayed inside these ones (in
         # their eager breaks) can capture on it to share the pool's free blocks.
@@ -521,25 +528,66 @@ class CudaGraphManager:
                         assert desc not in self.graphs, (
                             f"Graph already captured for {desc}"
                         )
-                        graph = torch.cuda.CUDAGraph()
-                        # Sync offloader's copy stream before capture.
-                        # Ensure any pre-capture prefetches from offloader are complete.
-                        get_offloader().sync_prev_onload()
-                        if self._capture_mem_samples is not None:
-                            torch.accelerator.synchronize()
-                            free_before = torch.accelerator.get_memory_info()[0]
-                        with (
-                            capture_pool(self.pool, self.vllm_config) as pool,
-                            torch.cuda.graph(
-                                graph, pool, stream=self._capture_stream(desc)
-                            ),
-                        ):
-                            forward_fn(CUDAGraphMode.NONE)
-                            # Join offloader's copy stream after forward to avoid
-                            # unjoined stream error. The last layer's start_prefetch
-                            # forks copy_stream, but wait_prefetch only happens in
-                            # the next forward pass.
-                            get_offloader().join_after_forward()
+                        from vllm.compilation.foundry_adapter import (
+                            CUDAGraphExtensionMode,
+                            get_graph_extension_mode,
+                        )
+
+                        extension_mode = get_graph_extension_mode()
+                        if extension_mode == CUDAGraphExtensionMode.NONE:
+                            graph = torch.cuda.CUDAGraph()
+                            # Sync offloader's copy stream before capture.
+                            # Ensure any pre-capture prefetches from offloader
+                            # are complete.
+                            get_offloader().sync_prev_onload()
+                            if self._capture_mem_samples is not None:
+                                torch.accelerator.synchronize()
+                                free_before = torch.accelerator.get_memory_info()[0]
+                            with (
+                                capture_pool(self.pool, self.vllm_config) as pool,
+                                torch.cuda.graph(
+                                    graph, pool, stream=self._capture_stream(desc)
+                                ),
+                            ):
+                                forward_fn(CUDAGraphMode.NONE)
+                                # Join offloader's copy stream after forward to avoid
+                                # unjoined stream error. The last layer's start_prefetch
+                                # forks copy_stream, but wait_prefetch only happens in
+                                # the next forward pass.
+                                get_offloader().join_after_forward()
+                        else:
+                            from vllm.compilation.foundry_adapter.graph_ops import (
+                                capture_or_load_graph,
+                            )
+
+                            if self._capture_mem_samples is not None:
+                                torch.accelerator.synchronize()
+                                free_before = torch.accelerator.get_memory_info()[0]
+
+                            graph, loaded_output = capture_or_load_graph(
+                                batch_descriptor=BatchDescriptor(
+                                    num_tokens=desc.num_tokens,
+                                    num_reqs=desc.num_reqs,
+                                    uniform=desc.uniform_token_count is not None,
+                                    num_active_loras=desc.num_active_loras,
+                                ),
+                                runnable=lambda forward_fn=forward_fn: forward_fn(
+                                    CUDAGraphMode.NONE
+                                ),
+                                weak_ref_output=False,
+                                runtime_mode=desc.cg_mode,
+                                graph_pool=self.pool,
+                            )
+                            # LOAD returns the output buffer restored from the
+                            # archive; SAVE returns the buffer populated by the
+                            # captured forward closure.
+                            self._graph_outputs[desc] = cast(
+                                CaptureOutput, loaded_output
+                            )
+                            if extension_mode == CUDAGraphExtensionMode.LOAD:
+                                logger.info(
+                                    "[foundry] restored graph descriptor=%s", desc
+                                )
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
                             free_after = torch.accelerator.get_memory_info()[0]
@@ -658,6 +706,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         self.aux_hidden_states: list[torch.Tensor] = []
         self.use_aux_hidden_state_outputs = False
         self.intermediate_tensors: IntermediateTensors | None = None
+        # Each restored graph has its own output address.
 
     def capture(
         self,
@@ -698,8 +747,36 @@ class ModelCudaGraphManager(CudaGraphManager):
         def persistent_like(x: torch.Tensor) -> torch.Tensor:
             return x.new_empty((max(max_tokens, x.shape[0]), *x.shape[1:]))
 
-        def store_capture_output(num_tokens: int, model_output: Any) -> None:
+        def store_capture_output(num_tokens: int, model_output: Any) -> CaptureOutput:
             """Copy outputs to persistent buffers, allocating on first use."""
+            # Foundry LOAD reconstructs output tensors from their recorded
+            # addresses.  Do not allocate the runner output during the
+            # eager warmup before capture; that would place it in the regular
+            # CUDA allocator instead of the deterministic VMM region.
+            extension_path = (
+                self.vllm_config.compilation_config.graph_extension_config_path
+            )
+            if extension_path:
+                from vllm.compilation.foundry_adapter import (
+                    CUDAGraphExtensionMode,
+                    get_graph_extension_mode,
+                )
+
+            if (
+                extension_path
+                and get_graph_extension_mode() != CUDAGraphExtensionMode.NONE
+            ):
+                output_buffer = (
+                    self.hidden_states
+                    if self.is_last_pp_rank
+                    else self.intermediate_tensors
+                )
+                from vllm.compilation.foundry_adapter.runtime import (
+                    is_capture_active,
+                )
+
+                if output_buffer is None and not is_capture_active():
+                    return None
             if self.is_last_pp_rank:
                 # Last PP rank (common case).
                 if self.use_aux_hidden_state_outputs:
@@ -716,6 +793,9 @@ class ModelCudaGraphManager(CudaGraphManager):
                     ]
                 for i, aux in enumerate(aux_hidden_states):
                     self.aux_hidden_states[i][:num_tokens] = aux
+                if self.use_aux_hidden_state_outputs:
+                    return self.hidden_states, self.aux_hidden_states
+                return self.hidden_states
             else:
                 # Non-last PP rank.
                 assert isinstance(model_output, IntermediateTensors)
@@ -729,10 +809,11 @@ class ModelCudaGraphManager(CudaGraphManager):
                     )
                 for k, v in intermediate_tensors.tensors.items():
                     self.intermediate_tensors[k][:num_tokens] = v
+                return self.intermediate_tensors
 
         def create_forward_fn(
             desc: BatchExecutionDescriptor, warmup: bool
-        ) -> Callable[[CUDAGraphMode], None]:
+        ) -> Callable[[CUDAGraphMode], CaptureOutput]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
 
@@ -785,11 +866,11 @@ class ModelCudaGraphManager(CudaGraphManager):
                     model, model_inputs, ubatch_state, for_capture=True
                 )
 
-                def ubatch_forward_fn(cg_mode: CUDAGraphMode) -> None:
+                def ubatch_forward_fn(cg_mode: CUDAGraphMode) -> CaptureOutput:
                     assert cg_mode != CUDAGraphMode.PIECEWISE, (
                         "DBO does not support PIECEWISE cudagraphs"
                     )
-                    store_capture_output(num_tokens, finish())
+                    return store_capture_output(num_tokens, finish())
 
                 return ubatch_forward_fn
 
@@ -812,7 +893,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             if pcp_manager is not None:
                 is_padding = pcp_manager.moe_is_padding(is_padding)
 
-            def forward_fn(cg_mode: CUDAGraphMode) -> None:
+            def forward_fn(cg_mode: CUDAGraphMode) -> CaptureOutput:
                 batch_descriptor = None
                 if cg_mode == CUDAGraphMode.PIECEWISE:
                     batch_descriptor = BatchDescriptor(
@@ -841,7 +922,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     # model outputs. No need to keep track of the hidden states.
                     return None
 
-                store_capture_output(num_tokens, model_output)
+                return store_capture_output(num_tokens, model_output)
 
             return forward_fn
 
@@ -852,6 +933,19 @@ class ModelCudaGraphManager(CudaGraphManager):
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors:
         """Replay a captured FULL cudagraph and return hidden states."""
         super().run_fullgraph(desc)
+        graph_output = self._graph_outputs.get(desc)
+        if graph_output is not None:
+            if not self.is_last_pp_rank:
+                assert isinstance(graph_output, IntermediateTensors)
+                return graph_output[: desc.num_tokens]
+            if not self.use_aux_hidden_state_outputs:
+                assert isinstance(graph_output, torch.Tensor)
+                return graph_output[: desc.num_tokens]
+            assert isinstance(graph_output, tuple)
+            hidden_states, aux_hidden_states = graph_output
+            return hidden_states[: desc.num_tokens], [
+                x[: desc.num_tokens] for x in aux_hidden_states
+            ]
         if not self.is_last_pp_rank:
             assert self.intermediate_tensors is not None
             return self.intermediate_tensors[: desc.num_tokens]
