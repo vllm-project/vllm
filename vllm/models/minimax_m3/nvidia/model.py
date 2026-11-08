@@ -328,39 +328,29 @@ def _mega_moe_expert_weight(
     if suffix == "weight_global_scale":
         return f"{prefix}.weight_scale_2", 1.0 / weight.float()
     if suffix == "input_global_scale":
-        if not prefix.endswith(".w2"):
+        if not prefix.endswith((".w2", ".down_proj")):
             return None
         scale = torch.full_like(weight, MEGA_MOE_FC2_INPUT_SCALE, dtype=torch.float32)
         return f"{prefix}.input_scale", scale
     return name, weight
 
 
-class MiniMaxM3MegaMoEExperts(DeepGemmMegaMoEExperts):
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[str]:
-        for name, weight in weights:
-            if name.startswith("shared_experts."):
-                param_name = self.load_shared_expert_weight(name, weight)
-                yield param_name.removeprefix("experts.")
-                continue
+def _convert_mega_moe_experts(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Apply `_mega_moe_expert_weight` to the routed experts."""
+    for name, weight in weights:
+        if ".experts." in name and ".shared_experts." not in name:
             if (converted := _mega_moe_expert_weight(name, weight)) is None:
                 continue
             name, weight = converted
-            expert_id, shard_id, suffix = name.split(".", 2)
-            param_name = f"{'w2' if shard_id == 'w2' else 'w13'}_{suffix}"
-            if (param := getattr(self, param_name, None)) is None:
-                continue
-            param.weight_loader(
-                param, weight, param_name, shard_id=shard_id, expert_id=int(expert_id)
-            )
-            yield param_name
+        yield name, weight
 
 
 def _redirect_fused_shared_experts(
     weights: Iterable[tuple[str, torch.Tensor]], model: nn.Module
 ) -> Iterable[tuple[str, torch.Tensor]]:
-    """Send shared experts that MegaMoE fuses to `MiniMaxM3MegaMoEExperts`."""
+    """Send shared experts that MegaMoE fuses to `DeepGemmMegaMoEExperts`."""
     for name, weight in weights:
         if ".shared_experts." in name:
             layer = model.layers[extract_layer_index(name)]
@@ -673,7 +663,7 @@ class MiniMaxM3MoE(nn.Module):
                 f"by the EP size {ep_group.world_size}."
             )
         num_local_experts = num_experts // ep_group.world_size
-        self.experts = MiniMaxM3MegaMoEExperts(
+        self.experts = DeepGemmMegaMoEExperts(
             get_current_vllm_config(),
             num_experts=num_experts,
             num_local_experts=num_local_experts,
@@ -1769,7 +1759,9 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
             self.lm_head = PPMissingLayer()
         if self.model.use_mega_moe:
             redirect = partial(_redirect_fused_shared_experts, model=self.model)
-            transforms = WeightsMapper(weights_transforms=[redirect])
+            transforms = WeightsMapper(
+                weights_transforms=[redirect, _convert_mega_moe_experts]
+            )
             self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | transforms
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]

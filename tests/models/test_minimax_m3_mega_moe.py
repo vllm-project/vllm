@@ -14,8 +14,9 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
 )
 from vllm.models.minimax_m3.nvidia.model import (
     MEGA_MOE_FC2_INPUT_SCALE,
-    _mega_moe_expert_params_mapping,
+    _convert_mega_moe_experts,
     _mega_moe_expert_weight,
+    _redirect_fused_shared_experts,
     _use_mega_moe,
 )
 from vllm.platforms import current_platform
@@ -87,24 +88,45 @@ def test_mega_moe_expert_weight_follows_the_qat_recipe():
 
 
 def _load_checkpoint(moe, tensors: dict[str, torch.Tensor]) -> None:
-    """``MiniMaxM3Model.load_weights`` for one MegaMoE block's tensors."""
-    experts = moe.experts
-    mapping = _mega_moe_expert_params_mapping(experts.num_experts)
-    for name, tensor in tensors.items():
-        if ".shared_experts." in name:
-            name = name.replace(".gate_proj.", ".w1.").replace(".up_proj.", ".w3.")
-            experts.load_shared_expert_weight(name, tensor)
-            continue
-        converted = _mega_moe_expert_weight(name, tensor)
-        if converted is None:
-            continue
-        name, tensor = converted
-        param_name, weight_name, expert_id, shard_id = next(
-            entry for entry in mapping if entry[1] in name
-        )
-        name = name.replace(weight_name, param_name)
-        param = getattr(experts, name.rpartition(".")[2])
-        param.weight_loader(param, tensor, name, shard_id=shard_id, expert_id=expert_id)
+    """Load one MegaMoE block's tensors as ``MiniMaxM3SparseForCausalLM`` does."""
+    model = SimpleNamespace(layers=[SimpleNamespace(block_sparse_moe=moe)])
+    weights = _redirect_fused_shared_experts(tensors.items(), model)
+    prefix = "layers.0.block_sparse_moe.experts."
+    weights = (
+        (name.removeprefix(prefix), tensor)
+        for name, tensor in _convert_mega_moe_experts(weights)
+    )
+    loaded = set(moe.experts.load_weights(weights))
+    assert loaded == {name for name, _ in moe.experts.named_parameters()}
+
+
+def _fuse_experts(
+    checkpoint: dict[str, torch.Tensor], prefix: str, num_experts: int
+) -> dict[str, torch.Tensor]:
+    """The Transformers v5 layout: ``[E, ...]`` experts, gate rows before up.
+
+    Gate and up share one global scale per expert."""
+
+    def stack(name: str, *shard_ids: str) -> torch.Tensor:
+        def expert(e: int) -> torch.Tensor:
+            shards = [checkpoint[f"{prefix}.experts.{e}.{s}.{name}"] for s in shard_ids]
+            return torch.cat([torch.atleast_1d(shard) for shard in shards])
+
+        return torch.stack([expert(e) for e in range(num_experts)])
+
+    fused = {k: v for k, v in checkpoint.items() if ".experts." not in k}
+    gate_up, down = f"{prefix}.experts.gate_up_proj", f"{prefix}.experts.down_proj"
+    for name in ("weight_packed", "weight_scale"):
+        fused[f"{gate_up}.{name}"] = stack(name, "w1", "w3")
+        fused[f"{down}.{name}"] = stack(name, "w2")
+    for name in ("weight_global_scale", "input_global_scale"):
+        fused[f"{gate_up}.{name}"] = stack(name, "w1")
+        fused[f"{down}.{name}"] = stack(name, "w2")
+    shared = f"{prefix}.shared_experts"
+    for name in ("weight", "weight_scale"):
+        gate, up = (fused.pop(f"{shared}.{p}.{name}") for p in ("gate_proj", "up_proj"))
+        fused[f"{shared}.gate_up_proj.{name}"] = torch.cat([gate, up])
+    return fused
 
 
 def _mega_moe_block(num_experts=8, top_k=2, hidden_size=512, intermediate_size=256):
@@ -177,12 +199,16 @@ def test_mega_moe_allocates_the_shared_expert_once(dist_init, monkeypatch, fused
     assert all(param.is_cuda for param in moe.parameters())
 
 
+@pytest.mark.parametrize("fused_checkpoint", [False, True])
 @pytest.mark.parametrize("num_tokens", [1, 45, 200])
-def test_mega_moe_block_matches_the_qat_reference(dist_init, num_tokens):
+def test_mega_moe_block_matches_the_qat_reference(
+    dist_init, num_tokens, fused_checkpoint
+):
     """A MiniMax-M3.1 MoE block on MegaMoE fuses its MXFP8 shared expert and,
     loaded from a compressed-tensors checkpoint, reproduces the QAT recipe:
     per-token FC1 input scales and the fixed FC2 input scale on the unweighted
-    SwiGLU output. Routing weights scale the BF16 expert outputs in combine."""
+    SwiGLU output. Routing weights scale the BF16 expert outputs in combine.
+    Per-expert and Transformers v5 fused (RL weight sync) experts load alike."""
     from vllm.third_party.deep_gemm.utils import (
         cast_back_from_fp8,
         per_token_cast_to_fp8,
@@ -245,6 +271,8 @@ def test_mega_moe_block_matches_the_qat_reference(dist_init, num_tokens):
         fp8, ue8m0, shared_ref[proj] = mxfp8(n, k)
         checkpoint[f"{prefix}.shared_experts.{proj}.weight"] = fp8
         checkpoint[f"{prefix}.shared_experts.{proj}.weight_scale"] = ue8m0
+    if fused_checkpoint:
+        checkpoint = _fuse_experts(checkpoint, prefix, num_experts)
     _load_checkpoint(moe, checkpoint)
 
     # Rows span six decades, which one tensor-wide input scale cannot cover.
