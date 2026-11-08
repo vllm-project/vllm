@@ -1133,7 +1133,6 @@ def test_prefix_cache_replays_the_swa_window(
     from vllm.models.deepseek_v41 import attention as attn
     from vllm.platforms import current_platform
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setattr(attn, "MergedColumnParallelLinear", _StubLinear)
     monkeypatch.setattr(attn, "ColumnParallelLinear", _StubLinear)
     monkeypatch.setattr(attn, "DeepseekV4GroupedWoA", _StubLinear)
