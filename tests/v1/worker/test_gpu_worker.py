@@ -775,6 +775,7 @@ def _weight_update_worker(
 ):
     """A Worker over an extensible KV cache with free_bytes of free memory
     and a model whose largest layer reloads layer_bytes."""
+    from vllm.platforms.interface import Platform
     from vllm.v1.worker import extensible_kv_cache
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -784,6 +785,11 @@ def _weight_update_worker(
     monkeypatch.setattr(extensible_kv_cache, "has_kv_transfer_group", lambda: False)
     monkeypatch.setattr(
         torch.accelerator, "get_memory_info", lambda *args: (free_bytes, 100 * GiB)
+    )
+    monkeypatch.setattr(
+        extensible_kv_cache.current_platform,
+        "free_device_memory",
+        Platform.free_device_memory,
     )
     monkeypatch.setattr(torch.accelerator, "memory_reserved", lambda *args: 0)
     monkeypatch.setattr(torch.accelerator, "memory_allocated", lambda *args: 0)
