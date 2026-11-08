@@ -11,7 +11,7 @@ For Kimi-K3 speculative decoding, ``--use-replayssm`` selects the simplified
 RecoverSSM path implemented here instead of the Mamba2 ReplaySSM kernel.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import TYPE_CHECKING
 
@@ -179,6 +179,11 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
     recoverssm_context: "KDARecoverSSMCommitContext | None" = field(
         default=None, repr=False, compare=False
     )
+    # Batch-level inputs of _update_state_indices, so that update_block_table
+    # can derive another KV cache group's fields from this metadata.
+    active_non_spec_mask_cpu: torch.Tensor | None = None
+    spec_request_indices: torch.Tensor | None = None
+    num_computed_tokens: torch.Tensor | None = None
 
     def commit_recoverssm_state(
         self, num_accepted_tokens: torch.Tensor
@@ -328,6 +333,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 spec_sequence_masks_cpu = None
 
         spec_request_indices = None
+        num_computed_tokens = None
         spec_token_start = None
         non_spec_token_start = None
         if num_spec_decodes == 0:
@@ -361,8 +367,6 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             num_spec_decode_tokens = 0
             spec_token_indx = None
             non_spec_token_indx = None
-            spec_state_indices_tensor = None
-            non_spec_state_indices_tensor = block_table_tensor[:, 0]
             spec_query_start_loc = None
             non_spec_query_start_loc = query_start_loc
             non_spec_query_start_loc_cpu = query_start_loc_cpu
@@ -415,11 +419,6 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             if num_prefills == 0 and num_decodes == 0:
                 spec_token_indx = None
                 non_spec_token_indx = None
-                # Real requests precede trailing cudagraph padding.
-                spec_state_indices_tensor = block_table_tensor[
-                    :num_spec_decodes, : self.spec_state_slots
-                ]
-                non_spec_state_indices_tensor = None
                 # Padding trails real requests, so this prefix already contains
                 # the correct cumulative token counts.
                 spec_query_start_loc = query_start_loc[: num_spec_decodes + 1]
@@ -455,15 +454,6 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     spec_first = active_spec_mask[0].item()
                     spec_token_start = 0 if spec_first else num_non_spec_tokens
                     non_spec_token_start = num_spec_decode_tokens if spec_first else 0
-
-                # Native spec uses one state slot per step. RecoverSSM keeps
-                # only the current checkpoint slot.
-                spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks_cpu, : self.spec_state_slots
-                ]
-                non_spec_state_indices_tensor = block_table_tensor[
-                    active_non_spec_mask_cpu, 0
-                ]
 
                 spec_query_lens = query_lens[spec_sequence_masks_cpu]
                 spec_query_start_loc = torch.zeros(
@@ -510,6 +500,8 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 num_accepted_tokens = self.recoverssm_num_accepted_tokens[
                     :num_spec_decodes
                 ]
+                if self.kv_cache_spec.mamba_cache_mode == "align":
+                    num_computed_tokens = m.compute_num_computed_tokens()
 
         # Unlike the shared GDN layer, Kimi-K3's prefill KDA wrapper prepares
         # its own chunk indices. Only causal-convolution metadata is needed here.
@@ -528,17 +520,103 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         else:
             has_initial_state = None
 
+        flashinfer_prefill_query_start_loc = None
+        flashinfer_prefill_seq_order = None
+        if self.use_flashinfer_prefill and num_prefills > 0:
+            assert non_spec_query_start_loc is not None
+            flashinfer_prefill_query_start_loc = non_spec_query_start_loc.to(
+                torch.int64
+            )
+            num_non_spec_requests = non_spec_query_start_loc.shape[0] - 1
+            num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
+            if num_non_spec_tokens > num_non_spec_requests:
+                flashinfer_prefill_seq_order = torch.argsort(
+                    flashinfer_prefill_query_start_loc.diff(), descending=True
+                ).to(torch.int32)
+
+        checkpoint = None
+        if num_prefills > 0:
+            request_rows = list(range(m.num_reqs))
+            if active_non_spec_mask_cpu is not None:
+                request_rows = active_non_spec_mask_cpu.nonzero().flatten().tolist()
+            checkpoint = self.checkpoint_builder.build(m, request_rows)
+
+        metadata = KimiK3KDAMetadata(
+            num_prefills=num_prefills,
+            num_prefill_tokens=num_prefill_tokens,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            num_spec_decodes=num_spec_decodes,
+            num_spec_decode_tokens=num_spec_decode_tokens,
+            num_actual_tokens=m.num_actual_tokens,
+            has_initial_state=has_initial_state,
+            spec_query_start_loc=spec_query_start_loc,
+            non_spec_query_start_loc=non_spec_query_start_loc,
+            spec_sequence_masks=None,
+            spec_sequence_masks_cpu=spec_sequence_masks_cpu,
+            spec_token_indx=spec_token_indx,
+            non_spec_token_indx=non_spec_token_indx,
+            num_accepted_tokens=num_accepted_tokens,
+            spec_token_start=spec_token_start,
+            non_spec_token_start=non_spec_token_start,
+            flashinfer_prefill_query_start_loc=flashinfer_prefill_query_start_loc,
+            flashinfer_prefill_seq_order=flashinfer_prefill_seq_order,
+            nums_dict=nums_dict,
+            batch_ptr=batch_ptr,
+            token_chunk_offset_ptr=token_chunk_offset_ptr,
+            checkpoint=checkpoint,
+            active_non_spec_mask_cpu=active_non_spec_mask_cpu,
+            spec_request_indices=spec_request_indices,
+            num_computed_tokens=num_computed_tokens,
+        )
+        return self._update_state_indices(
+            metadata, m.block_table_tensor, block_table_tensor
+        )
+
+    def _update_state_indices(  # type: ignore[override]
+        self,
+        metadata: KimiK3KDAMetadata,
+        block_table: torch.Tensor,
+        state_indices: torch.Tensor,
+    ) -> KimiK3KDAMetadata:
+        """Add this group's state indices, FULL graph staging, RecoverSSM commit
+        and checkpoint to the batch-level ``metadata`` that groups with the same
+        spec and builder share. Group-specific fields go here."""
+        spec_sequence_masks_cpu = metadata.spec_sequence_masks_cpu
+        active_non_spec_mask_cpu = metadata.active_non_spec_mask_cpu
+        num_prefills = metadata.num_prefills
+        num_decodes = metadata.num_decodes
+        num_spec_decodes = metadata.num_spec_decodes
+        spec_query_start_loc = metadata.spec_query_start_loc
+        num_accepted_tokens = metadata.num_accepted_tokens
+        spec_state_indices_tensor = None
+        non_spec_state_indices_tensor = None
+        if num_spec_decodes == 0:
+            non_spec_state_indices_tensor = state_indices[:, 0]
+        elif num_prefills == 0 and num_decodes == 0:
+            # Real requests precede trailing cudagraph padding.
+            spec_state_indices_tensor = state_indices[
+                :num_spec_decodes, : self.spec_state_slots
+            ]
+        else:
+            # Native spec uses one state slot per step. RecoverSSM keeps
+            # only the current checkpoint slot.
+            spec_state_indices_tensor = state_indices[
+                spec_sequence_masks_cpu, : self.spec_state_slots
+            ]
+            non_spec_state_indices_tensor = state_indices[active_non_spec_mask_cpu, 0]
+
         # Prepare per-request tensors for cudagraph replay. num_actual_tokens
         # may be token-padded, while state/query/acceptance metadata is indexed
         # by request.
-        batch_size = m.num_reqs
+        batch_size = state_indices.shape[0]
         if (
             self.use_full_cuda_graph
             and num_spec_decodes > 0
             and num_prefills == 0
             and num_decodes == 0
             and batch_size <= self.spec_state_indices_tensor.shape[0]
-            and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
+            and metadata.num_spec_decode_tokens <= self.decode_cudagraph_max_bs
         ):
             # Equivalent PyTorch staging:
             #   state[:N].copy_(state_src); state[N:].fill_(NULL_BLOCK_ID)
@@ -579,70 +657,37 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
             align = None
-            if self.kv_cache_spec.mamba_cache_mode == "align":
+            if metadata.num_computed_tokens is not None:
                 align = KDARecoverSSMAlignMetadata(
-                    block_table=m.block_table_tensor,
-                    num_computed_tokens=m.compute_num_computed_tokens(),
+                    block_table=block_table,
+                    num_computed_tokens=metadata.num_computed_tokens,
                     block_size=self.kv_cache_spec.block_size,
                 )
             recoverssm_commit = KDARecoverSSMCommitMetadata(
                 state_indices=spec_state_indices_tensor,
                 query_start_loc=spec_query_start_loc,
-                request_indices=spec_request_indices,
+                request_indices=metadata.spec_request_indices,
                 align=align,
             )
 
-        flashinfer_prefill_query_start_loc = None
-        flashinfer_prefill_seq_order = None
-        if self.use_flashinfer_prefill and num_prefills > 0:
-            assert non_spec_query_start_loc is not None
-            flashinfer_prefill_query_start_loc = non_spec_query_start_loc.to(
-                torch.int64
-            )
-            num_non_spec_requests = non_spec_query_start_loc.shape[0] - 1
-            num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
-            if num_non_spec_tokens > num_non_spec_requests:
-                flashinfer_prefill_seq_order = torch.argsort(
-                    flashinfer_prefill_query_start_loc.diff(), descending=True
-                ).to(torch.int32)
+        checkpoint = (
+            metadata.checkpoint.regather_state_indices(block_table)
+            if metadata.checkpoint is not None
+            else None
+        )
 
-        checkpoint = None
-        if num_prefills > 0:
-            request_rows = list(range(m.num_reqs))
-            if active_non_spec_mask_cpu is not None:
-                request_rows = active_non_spec_mask_cpu.nonzero().flatten().tolist()
-            checkpoint = self.checkpoint_builder.build(m, request_rows)
-
-        return KimiK3KDAMetadata(
-            num_prefills=num_prefills,
-            num_prefill_tokens=num_prefill_tokens,
-            num_decodes=num_decodes,
-            num_decode_tokens=num_decode_tokens,
-            num_spec_decodes=num_spec_decodes,
-            num_spec_decode_tokens=num_spec_decode_tokens,
-            num_actual_tokens=m.num_actual_tokens,
-            has_initial_state=has_initial_state,
+        return replace(
+            metadata,
             spec_query_start_loc=spec_query_start_loc,
-            non_spec_query_start_loc=non_spec_query_start_loc,
             spec_state_indices_tensor=spec_state_indices_tensor,
             non_spec_state_indices_tensor=non_spec_state_indices_tensor,
-            spec_sequence_masks=None,
-            spec_token_indx=spec_token_indx,
-            non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
-            spec_token_start=spec_token_start,
-            non_spec_token_start=non_spec_token_start,
-            flashinfer_prefill_query_start_loc=flashinfer_prefill_query_start_loc,
-            flashinfer_prefill_seq_order=flashinfer_prefill_seq_order,
             recoverssm_commit=recoverssm_commit,
             recoverssm_context=(
                 self._get_recoverssm_context()
                 if recoverssm_commit is not None
                 else None
             ),
-            nums_dict=nums_dict,
-            batch_ptr=batch_ptr,
-            token_chunk_offset_ptr=token_chunk_offset_ptr,
             checkpoint=checkpoint,
         )
 

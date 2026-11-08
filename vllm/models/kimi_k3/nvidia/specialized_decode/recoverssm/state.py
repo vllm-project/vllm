@@ -140,6 +140,8 @@ def install_builder(builder: KimiK3KDAMetadataBuilder, pending: torch.Tensor) ->
     ``recoverssm_deferred`` (None: not deferred) to the metadata."""
     builder.recoverssm_pending = pending
     builder.recoverssm_request_slots = None
+    # The build below adds per-group fields that update_block_table() lacks.
+    builder.supports_update_block_table = False
     if getattr(builder, "recoverssm_record_rows", None) is not None:
         return  # rebound to new pending counts
     stale = builder.recoverssm_context
