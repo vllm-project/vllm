@@ -30,10 +30,7 @@ class MambaBase(AttentionLayerBase):
     verifies_drafts: bool = True
 
     def tree_decline_reason(self) -> str | None:
-        """Why forward() cannot verify a tree plan (None: it runs each verify
-        row on the recurrent state its parent row left, the parents being
-        ``KernelContext.tree_parents``). No in-tree layer does; an out-of-tree
-        replacement (``PluggableLayer.register_oot``) may override this."""
+        """Why forward() cannot verify a tree plan; None if it can."""
         return "verifies chains"
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:

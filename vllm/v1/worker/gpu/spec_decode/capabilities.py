@@ -130,11 +130,8 @@ def layer_spec_limits(
 
 
 def causal_full_attention(layer: Any, spec: Any) -> bool:
-    """Whether an attention layer attends to its whole context, causally (no
-    window or chunk): a helper for backends' ``tree_decline_reason``."""
-    from vllm.v1.kv_cache_interface import get_kv_cache_spec_kind
-
-    return get_kv_cache_spec_kind(spec).value == "full_attention" and not any(
+    """Whether an attention layer attends to its whole context (no window or chunk)."""
+    return attn_layer_kind(spec).variant == "full_attention" and not any(
         getattr(spec, name, None) or getattr(layer, name, None)
         for name in ("sliding_window", "attention_chunk_size", "rswa_window")
     )

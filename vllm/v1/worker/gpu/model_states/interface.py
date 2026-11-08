@@ -146,8 +146,7 @@ class ModelState(ABC):
         return None
 
     def tree_decline_reason(self) -> str | None:
-        """Why this model state cannot resume requests from a tree's accepted
-        path (``postprocess_state(accepted_row=)``). None: it can."""
+        """Why this cannot resume requests from a tree's path; None if it can."""
         return None
 
     def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
@@ -179,15 +178,8 @@ class ModelState(ABC):
         *,
         accepted_row: torch.Tensor | None = None,
     ) -> None:
-        """Commit the step's per-request state.
-
-        ``num_sampled[b]`` tokens were committed for batch row ``b``.
-        ``accepted_row[b]``, when given, is the verify row whose state the request
-        resumes from (the last row of the accepted path of a plan that is not a
-        chain); None means a chain, whose accepted rows are the first
-        ``num_sampled`` rows. The runner passes ``accepted_row`` only when it is
-        not None, so an override without it keeps working on chain steps.
-        """
+        """Commit the step's per-request state. ``accepted_row[b]``: the verify
+        row batch row ``b`` resumes from, passed on tree steps only."""
         return None
 
     @abstractmethod

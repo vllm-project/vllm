@@ -74,10 +74,7 @@ class AttentionBackend(ABC):
 
     @classmethod
     def tree_decline_reason(cls, layer: Any, kv_cache_spec: Any) -> str | None:
-        """Why forward() cannot verify a tree plan on ``layer`` (None: it
-        attends each plan row to its context and its ancestors along
-        ``CommonAttentionMetadata.tree_parents``, for this layer's window,
-        soft cap and sinks). Without an override the layer verifies chains."""
+        """Why forward() cannot verify a tree plan on ``layer``; None if it can."""
         return f"backend {cls.get_name()} verifies chains"
 
     @staticmethod
@@ -450,10 +447,7 @@ class CommonAttentionMetadata:
     positions: torch.Tensor | None = None
     """(num_actual_tokens,) token positions.  Optional; set when the caller
     has positions available so that builders can pre-compute position-dependent
-    sparse metadata for DeepSeek V4 C128A layers. On a batch laid out as a plan
-    (``tree_parents`` set) a plan row's position is ``num_computed_tokens`` plus
-    its depth, not its KV slot index: a backend that verifies trees measures
-    position terms (a sliding window, ALiBi, a chunk) on these."""
+    sparse metadata for DeepSeek V4 C128A layers."""
 
     is_prefilling: torch.Tensor | None = None
     """(batch_size,) bool tensor: True if request is still in prefill phase
@@ -490,14 +484,9 @@ class CommonAttentionMetadata:
     here, so a preemption-resumed request re-anchors past the prompt boundary."""
 
     tree_parents: torch.Tensor | None = None
-    """(num_tokens,) int32 for a tree verify: each token's parent as a row
-    index within its request, -1 for the request's first row, every other
-    row's parent an earlier row (``i - 1`` in a chain). A row attends to the
-    request's context, itself and its ancestors along these parents; a backend
-    that verifies trees (``tree_decline_reason``) derives its mask from them in
-    its metadata builder.
-    ``positions`` holds each row's plan position. None means every request is a
-    chain."""
+    """(num_tokens,) int32 for a tree verify: each row's parent row within its
+    request (-1 for the first), ``positions`` holding its plan position (see
+    ``round_contract.md``). None means every request is a chain."""
 
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None

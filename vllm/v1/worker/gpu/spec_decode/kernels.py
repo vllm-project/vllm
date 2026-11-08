@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The kernels speculative decoding adds to verify and commit, by key, and the
+"""The kernels speculative decoding adds to commit, by key, and the
 registry that binds them (see ``docs/features/speculative_decoding/round_contract.md``).
 
 ``SpeculatorConfig.spec_kernels`` names the speculator's kernels; a layer missing a
@@ -135,10 +135,8 @@ class KernelContext:
     kv_layouts: tuple[PagedKVLayout, ...] = ()
     """``layout:paged_token`` commit kernels only."""
     tree_parents: torch.Tensor | None = None
-    """``[max_num_tokens]`` int32, static: during each forward, every batch
-    token's parent row within its request's query (-1 for the first; chains
-    and prefill tokens ``i - 1``), as ``CommonAttentionMetadata.tree_parents``.
-    None when the plan kind is chain. For layers that verify trees themselves."""
+    """``[max_num_tokens]`` int32, static: each forward's
+    ``CommonAttentionMetadata.tree_parents``. None when the plan kind is chain."""
 
 
 @dataclass(frozen=True)
