@@ -256,12 +256,10 @@ steps:
   - export NCCL_CUMEM_HOST_ENABLE=0
   # test with torchrun tp=2 and external_dp=2
   - torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
-  # test with torchrun tp=2 and pp=2
-  - PP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
+  # torchrun tp=2 and pp=2: no longer supported with MRV2
   # test with torchrun tp=4 and dp=1
   - TP_SIZE=4 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
-  # test with torchrun tp=2, pp=2 and dp=1
-  - PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+  # torchrun tp=2, pp=2 and dp=1: no longer supported with MRV2
   # test with torchrun tp=1 and dp=4 with ep
   - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
   # test with torchrun tp=2 and dp=2 with ep
@@ -305,9 +303,9 @@ steps:
       - uv pip install --system --no-deps 'ray==2.56.1'
       - export NCCL_CUMEM_HOST_ENABLE=0
       - torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
-      - PP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
+      # tp=2 and pp=2 with torchrun: no longer supported with MRV2
       - TP_SIZE=4 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
-      - PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+      # tp=2, pp=2 and dp=1 with torchrun: no longer supported with MRV2
       - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
       - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
       # Loading weights from the shared HF cache can exceed the default 300s --timeout.
@@ -566,6 +564,7 @@ steps:
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_dcp_direct_a2a_lse_reduce.py -k direct_a2a_matches_reference
     - pytest -v -s tests/v1/attention/test_shardq.py
+    - pytest -v -s tests/distributed/test_dcp_a2a.py -k v_up_proj
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer_m2n.py
@@ -608,9 +607,12 @@ steps:
       - tests/distributed/test_packed_tensor.py
       - tests/v1/attention/test_rocm_mla_dcp_context.py
       - vllm/v1/attention/ops/rocm_aiter_mla_prefill.py
+      - vllm/v1/attention/ops/dcp.py
+      - tests/distributed/test_dcp_a2a.py
       commands:
       - pytest -v -s tests/distributed/test_context_parallel.py
       - pytest -v -s tests/v1/attention/test_rocm_mla_dcp_context.py
+      - pytest -v -s tests/distributed/test_dcp_a2a.py -k v_up_proj
       - pytest -v -s tests/v1/distributed/test_dbo.py
       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
       - pytest -v -s tests/distributed/test_packed_tensor.py

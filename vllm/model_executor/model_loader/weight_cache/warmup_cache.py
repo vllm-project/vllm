@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.weight_cache.seed import (
         SeedTransport,
     )
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -101,8 +101,8 @@ class FlashInferWarmupCache(WarmupCache):
             # Shared stores come before D2D: they are built for read fan-out.
             if not self._adopt_from_stores(runner):
                 transport.adopt(self, runner)
-            # The V2 runner requires skip_attn when no KV cache exists
-            flashinfer_autotune(runner, skip_attn=vllm_config.use_v2_model_runner)
+            # The runner requires skip_attn when no KV cache exists
+            flashinfer_autotune(runner, skip_attn=True)
             logger.info(
                 "Weight cache %s daemon rank %d tuned FlashInfer; the tuned "
                 "configs are in the on-disk autotune cache",
