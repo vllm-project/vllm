@@ -136,8 +136,12 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
         # Computed on the main stream: the copy stream only carries copies
-        # (see new_d2h_stream).
-        has_fault = get_ep_all2all_manager().query_fault() if check_ep_fault else None
+        # (see new_d2h_stream). Retained like the tensors above: the copy
+        # stream reads it after this method returns, and a freed block would
+        # be handed back to the main stream and overwritten meanwhile.
+        self._has_fault_gpu: torch.Tensor | None = (
+            get_ep_all2all_manager().query_fault() if check_ep_fault else None
+        )
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
@@ -170,8 +174,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
                     num_sampled=self.num_sampled_tokens_np,
                     num_rejected=async_copy_to_np(sampler_output.num_rejected),
                 )
-            if has_fault is not None:
-                self._has_fault = has_fault.to("cpu", non_blocking=True)
+            if self._has_fault_gpu is not None:
+                self._has_fault = self._has_fault_gpu.to("cpu", non_blocking=True)
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:

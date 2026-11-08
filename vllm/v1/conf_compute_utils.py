@@ -51,13 +51,16 @@ _orig_copy_ = torch.Tensor.copy_
 _orig_to = torch.Tensor.to
 _orig_cuda = torch.Tensor.cuda
 _orig_event_cls = torch.Event
-_orig_cuda_event_record = torch.cuda.Event.record
-_orig_cuda_event_synchronize = torch.cuda.Event.synchronize
-_orig_stream_synchronize = torch.cuda.Stream.synchronize
-_orig_stream_wait_stream = torch.cuda.Stream.wait_stream
-_orig_stream_query = torch.cuda.Stream.query
-_orig_cuda_synchronize = torch.cuda.synchronize
-_orig_accel_synchronize = torch.accelerator.synchronize
+# The torch.cuda originals are captured by install(): CPU-only torch builds
+# ship a placeholder torch.cuda.Event/Stream without these methods, and this
+# module is imported by the GPU model runner on every platform.
+_orig_cuda_event_record: Any = None
+_orig_cuda_event_synchronize: Any = None
+_orig_stream_synchronize: Any = None
+_orig_stream_wait_stream: Any = None
+_orig_stream_query: Any = None
+_orig_cuda_synchronize: Any = None
+_orig_accel_synchronize: Any = None
 
 # Single worker keeps D2H copies in submission order; created by install().
 _d2h_executor: ThreadPoolExecutor | None = None
@@ -346,6 +349,22 @@ def _accel_synchronize(device_index=None):
     return _orig_accel_synchronize(device_index)
 
 
+def _capture_originals() -> None:
+    """Save the torch.cuda methods the patches wrap, once."""
+    global _orig_cuda_event_record, _orig_cuda_event_synchronize
+    global _orig_stream_synchronize, _orig_stream_wait_stream, _orig_stream_query
+    global _orig_cuda_synchronize, _orig_accel_synchronize
+    if _orig_cuda_event_record is not None:
+        return
+    _orig_cuda_event_record = torch.cuda.Event.record
+    _orig_cuda_event_synchronize = torch.cuda.Event.synchronize
+    _orig_stream_synchronize = torch.cuda.Stream.synchronize
+    _orig_stream_wait_stream = torch.cuda.Stream.wait_stream
+    _orig_stream_query = torch.cuda.Stream.query
+    _orig_cuda_synchronize = torch.cuda.synchronize
+    _orig_accel_synchronize = torch.accelerator.synchronize
+
+
 def install() -> None:
     """Install the patches. Call once per worker process, only under CC.
 
@@ -359,6 +378,7 @@ def install() -> None:
     global _d2h_executor
     if _d2h_executor is not None:
         return
+    _capture_originals()
     _d2h_executor = ThreadPoolExecutor(1, thread_name_prefix="vllm-cc-d2h")
     logger.info(
         "NVIDIA Confidential Computing: issuing non-blocking H2D copies on a "
