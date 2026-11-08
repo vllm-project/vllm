@@ -35,7 +35,9 @@ steps:
   - tests/entrypoints/unit_tests
   - tests/entrypoints/launchers
   - tests/entrypoints/common
+  - setup.py
   commands:
+  - uv pip install --system 'prompt-toolkit>=3.0.52,<4'
   - pytest -v -s entrypoints/unit_tests
   - pytest -v -s entrypoints/launchers
   - pytest -v -s entrypoints/common
