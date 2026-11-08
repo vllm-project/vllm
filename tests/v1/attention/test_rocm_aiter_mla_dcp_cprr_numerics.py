@@ -299,7 +299,8 @@ def _make_vllm_config(heads_per_rank: int):
     # never reached. _init_reorder_batch_threshold reads exactly these two
     # fields, so a stand-in is enough and avoids pulling in a draft model.
     vllm_config.speculative_config = SimpleNamespace(
-        num_speculative_tokens=QLEN - 1, parallel_drafting=False
+        num_speculative_tokens=QLEN - 1,
+        max_num_new_slots_for_drafting=0,
     )
     vllm_config.cache_config.cache_dtype = "fp8"
     vllm_config.parallel_config.decode_context_parallel_size = DCP
