@@ -104,7 +104,7 @@ def test_humming_fp8_matches_checkpoint_forward(
 
         layer = create("humming.oracle")
         reference = create("humming.checkpoint")
-        for name, parameter in layer.named_parameters():
+        for parameter in layer.parameters():
             parameter.data.fill_(1.0)
         scale_name = "weight_scale_inv" if block_quant else "weight_scale"
         scale = getattr(layer, f"w13_{scale_name}")

@@ -95,7 +95,6 @@ def _model_state(worker) -> dict[str, list]:
     ],
 )
 def test_deep_sleep(model, monkeypatch, gpu_memory_cleared):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     # Needed for collective_rpc to run a function on the worker.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     free, total = torch.accelerator.get_memory_info()
@@ -290,7 +289,6 @@ def test_sleep_cudagraph_pool(monkeypatch, mode, breakable, tp, offload):
     """Each capture site uses the pool, exact across sleeps; TP=2 needs
     unregistered custom AR; off changes nothing."""
     for name, value in [
-        ("VLLM_USE_V2_MODEL_RUNNER", "1"),
         ("VLLM_USE_BREAKABLE_CUDAGRAPH", "1" if breakable else "0"),
         ("VLLM_ALLOW_INSECURE_SERIALIZATION", "1"),
         ("VLLM_ALLREDUCE_USE_FLASHINFER", "0"),
@@ -335,7 +333,6 @@ def test_sleep_cudagraph_pool_aiter_fused_ar_group_quant(monkeypatch):
     """The fused AITER AR + RMSNorm + per-group FP8 quant captures into the
     cuMem pool without IPC-registering its input, across sleeps."""
     for name, value in [
-        ("VLLM_USE_V2_MODEL_RUNNER", "1"),
         ("VLLM_ROCM_USE_AITER", "1"),
         ("VLLM_ALLOW_INSECURE_SERIALIZATION", "1"),
     ]:
@@ -379,7 +376,7 @@ def test_deep_sleep_async(gpu_memory_cleared):
         prompt = "How are you?"
         sampling_params = SamplingParams(temperature=0, max_tokens=10)
         outputs = llm.generate(prompt, sampling_params, request_id="test_request_id1")
-        async for output in outputs:
+        async for output in outputs:  # noqa: B007
             pass
 
         # Put the engine to deep sleep
@@ -394,7 +391,7 @@ def test_deep_sleep_async(gpu_memory_cleared):
         # now allocate kv cache and cuda graph memory
         await llm.wake_up(tags=["kv_cache"])
         outputs2 = llm.generate(prompt, sampling_params, request_id="test_request_id2")
-        async for output2 in outputs2:
+        async for output2 in outputs2:  # noqa: B007
             pass
 
         # cmp output

@@ -4,7 +4,6 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import numpy as np
 import pytest
 import torch
 
@@ -26,7 +25,6 @@ PREFILL_KWARGS = {
 
 def _autotune_runner(
     *,
-    use_v2_model_runner: bool = False,
     query_len: int = 6,
     max_num_seqs: int = 32,
     num_blocks: int = 17,
@@ -46,7 +44,6 @@ def _autotune_runner(
             use_flashinfer_replayssm=(
                 use_replayssm and backend == MambaBackendEnum.FLASHINFER
             ),
-            use_v2_model_runner=use_v2_model_runner,
         ),
         uniform_decode_query_len=query_len,
         decode_query_len=query_len,
@@ -62,14 +59,13 @@ def _autotune_runner(
     ("runner_kwargs", "expected_num_reqs"),
     [
         # max_num_seqs (32) vs max_num_tokens // query_len (16) vs blocks-1 (16).
-        (dict(query_len=6, use_v2_model_runner=False), 16),
-        (dict(query_len=6, use_v2_model_runner=True), 16),
+        (dict(query_len=6), 16),
         # num_blocks - 1 is the binding constraint.
         (dict(query_len=1, max_num_tokens=128, max_num_seqs=64, num_blocks=5), 4),
         # An extensible cache bounds by what warmup may commit, not capacity.
         (dict(query_len=1, max_num_tokens=128, num_blocks=64, committable_blocks=4), 3),
     ],
-    ids=["v1", "v2", "clamped_to_state_capacity", "clamped_to_committable"],
+    ids=["default", "clamped_to_state_capacity", "clamped_to_committable"],
 )
 def test_replayssm_autotune_decode_kwargs(runner_kwargs, expected_num_reqs):
     query_len = runner_kwargs["query_len"]
@@ -87,15 +83,8 @@ def test_replayssm_autotune_decode_kwargs(runner_kwargs, expected_num_reqs):
         **PREFILL_KWARGS,
         "num_tokens": expected_num_reqs * query_len,
         "uniform_decode": True,
+        "valid_dummy_state_slots": True,
     }
-    if runner_kwargs.get("use_v2_model_runner"):
-        expected_kwargs["valid_dummy_state_slots"] = True
-    else:
-        expected_kwargs.update(
-            allow_microbatching=False,
-            force_attention=True,
-            profile_seq_lens=query_len + 1,
-        )
     assert decode_kwargs == expected_kwargs
 
 
@@ -145,12 +134,8 @@ def test_replayssm_autotune_warmup_commits_dummy_slots_first():
     assert events == ["commit 4", "dummy_run"]
 
 
-@pytest.mark.parametrize(
-    ("use_v2", "layout"),
-    [(False, KVCacheLayout.LBNHC), (True, KVCacheLayout.BLHNC)],
-    ids=["v1", "v2"],
-)
-def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, layout):
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLHNC])
+def test_replayssm_autotune_slots_restore_state_and_trackers(layout):
     spec = MambaSpec(
         block_size=16,
         shapes=((2,), (2,), (2, 11), (2, 11), (2, 11)),
@@ -194,15 +179,7 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, layout):
         )
         mixers.append(mixer)
     assert mixers[0].kv_cache[0].data_ptr() == mixers[2].kv_cache[0].data_ptr()
-    block_ids = np.arange(10, 14, dtype=np.int32).reshape(4, 1)
-    original_block_ids = block_ids.copy()
-    block_table = SimpleNamespace(block_table=SimpleNamespace(np=block_ids))
-    multi_group_block_table = SimpleNamespace(
-        block_tables=[block_table], commit_block_table=Mock()
-    )
     runner = SimpleNamespace(
-        vllm_config=SimpleNamespace(use_v2_model_runner=use_v2),
-        input_batch=SimpleNamespace(block_table=multi_group_block_table),
         block_tables=SimpleNamespace(get_dummy_block_tables=Mock()),
         get_model=lambda: SimpleNamespace(modules=lambda: mixers),
     )
@@ -211,20 +188,11 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, layout):
         pytest.raises(RuntimeError, match="warmup failed"),
         warmup._temporary_replayssm_autotune_state(runner, 2),
     ):
-        if not use_v2:
-            assert block_ids[:2, 0].tolist() == [1, 2]
         for tensor in (*states, *trackers):
             tensor[1:3].fill_(9)
         raise RuntimeError("warmup failed")
 
-    assert np.array_equal(block_ids, original_block_ids)
-    if use_v2:
-        runner.block_tables.get_dummy_block_tables.assert_called_once_with(2)
-    else:
-        assert multi_group_block_table.commit_block_table.call_args_list == [
-            ((2,), {}),
-            ((2,), {}),
-        ]
+    runner.block_tables.get_dummy_block_tables.assert_called_once_with(2)
     for tensor in states:
         assert torch.count_nonzero(tensor[1:3]) == 0
         assert torch.all(tensor[0] == 3)
