@@ -84,7 +84,7 @@ def inkling_fa4_num_splits(
 
     The Triton implementation performs online softmax in one program and
     does not consume the result.  Keeping this function unchanged avoids
-    platform-specific scheduling branches in :mod:`inkling.common.attention`.
+    platform-specific scheduling branches in `inkling.common.attention`.
     """
     if is_local:
         return 1

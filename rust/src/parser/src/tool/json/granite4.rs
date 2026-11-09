@@ -16,7 +16,7 @@ use crate::tool::utils::{
     JsonObjectScanState, JsonStringScanState, decode_json_str, parse_buffered_event, safe_text_len,
     take_json_object, take_json_string,
 };
-use crate::tool::{Result, Tool, ToolCallDelta, ToolParser, ToolParserOutput};
+use crate::tool::{Result, Tool, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput};
 
 const TOOL_CALL_START: &str = "<tool_call>";
 const TOOL_CALL_END: &str = "</tool_call>";
@@ -178,7 +178,7 @@ impl ToolParser for Granite4ToolParser {
         match &self.mode {
             Granite4Mode::Text => output.push_text(&self.buffer),
             Granite4Mode::Header | Granite4Mode::Args { .. } | Granite4Mode::Close => {
-                return Err(parsing_failed!("incomplete Granite4 tool call"));
+                return Err(ToolParserError::IncompleteToolCall { parser: "Granite4" });
             }
         }
         let _ = self.reset();
@@ -534,8 +534,7 @@ mod tests {
 
         let error = parser.finish().unwrap_err();
 
-        expect!["tool parser parsing failed: incomplete Granite4 tool call"]
-            .assert_eq(&error.to_report_string());
+        expect!["incomplete Granite4 tool call"].assert_eq(&error.to_report_string());
     }
 
     #[test]

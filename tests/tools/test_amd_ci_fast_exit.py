@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The AMD CI pytest plugin skips native teardown without changing pytest's result."""
+"""The AMD CI pytest plugin skips native teardown without changing pytest's result,
+and reports native faults."""
 
 import os
+import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -11,6 +14,7 @@ from pathlib import Path
 import pytest
 
 PLUGIN_DIR = Path(__file__).resolve().parents[2] / ".buildkite/scripts/hardware_ci"
+IMAGE_LIB = Path("/usr/local/lib/libamd_ci_fault_trap.so")
 
 # An object that segfaults when the interpreter tears its module down, after the
 # summary, as native library destructors did in vllm/ci #96786.
@@ -102,3 +106,42 @@ def test_a_nested_in_process_session_does_not_end_the_outer_one(tmp_path):
     result = _run(tmp_path, body)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "2 passed" in result.stdout
+
+
+@pytest.fixture(scope="module")
+def reporter(tmp_path_factory):
+    """The image's fault reporter library, else one built from source."""
+    if IMAGE_LIB.exists():
+        return {"VLLM_CI_FAULT_TRAP_LIB": str(IMAGE_LIB)}
+    cc = os.environ.get("CC") or shutil.which("cc") or shutil.which("gcc")
+    if not cc:
+        pytest.skip("no fault reporter library and no compiler to build one")
+    lib = tmp_path_factory.mktemp("reporter") / "libamd_ci_fault_trap.so"
+    source = PLUGIN_DIR / "amd_ci_fault_trap.c"
+    subprocess.run(
+        [*shlex.split(cc), "-O2", "-shared", "-fPIC", "-o", str(lib), str(source)],
+        check=True,
+    )
+    return {"VLLM_CI_FAULT_TRAP_LIB": str(lib)}
+
+
+@pytest.mark.parametrize(
+    "fault, sig",
+    [
+        ("__import__('ctypes').string_at(0)", signal.SIGSEGV),
+        ("__import__('os').abort()", signal.SIGABRT),
+    ],
+)
+def test_a_native_fault_is_reported_and_still_fails(tmp_path, reporter, fault, sig):
+    result = _run(tmp_path, f"\ndef test_fault():\n    {fault}\n", env=reporter)
+    assert result.returncode == -sig
+    # Python's traceback first, then the native one, which names the library.
+    python_tb = result.stderr.index("Fatal Python error")
+    assert result.stderr.index(f"native fault: {sig.name}") > python_tb
+    assert ".so" in result.stderr.split("native fault")[1]
+
+
+def test_without_the_library_the_tests_run_as_before(tmp_path):
+    result = _run(tmp_path, PASSING, env={"VLLM_CI_FAULT_TRAP_LIB": "/nonexistent.so"})
+    assert result.returncode == 0, result.stderr
+    assert "no native fault reporter" in result.stderr
