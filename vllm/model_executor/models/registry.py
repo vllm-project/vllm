@@ -810,7 +810,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     ),
     "VibeVoiceAsrForConditionalGeneration": (
         "transformers",
-        "TransformersMultiModalForCausalLM",
+        "TransformersMultiModalForTranscription",
     ),
 }
 
@@ -825,6 +825,10 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersMultiModalForCausalLM": (
         "transformers",
         "TransformersMultiModalForCausalLM",
+    ),
+    "TransformersMultiModalForTranscription": (
+        "transformers",
+        "TransformersMultiModalForTranscription",
     ),
     "TransformersMultiModalMoEForCausalLM": (
         "transformers",
