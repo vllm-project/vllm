@@ -999,11 +999,16 @@ def test_b12x_nvfp4_w4a16_does_not_prepare_after_first_call(
         return prepare_default(request)
 
     monkeypatch.setattr(session, "prepare_default", record_prepare)
-    for m in (8, 4, 2, 1, 3, 40, capacity + 5):
+    for m in (8, 4, 2, 1, 3, 40, capacity):
         x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
         expected = (x.double() @ decoded.double().T).bfloat16()
         actual = kernel.apply_weights(layer, x)
         torch.testing.assert_close(actual, expected, atol=0.005, rtol=0.01)
+    # A call above the planned capacity fails instead of preparing a new plan.
+    with pytest.raises(ValueError, match="capacity"):
+        kernel.apply_weights(
+            layer, torch.zeros(capacity + 1, k, device="cuda", dtype=torch.bfloat16)
+        )
     assert not prepared
 
 

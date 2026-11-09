@@ -216,29 +216,14 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
             raise ValueError(f"b12x NVFP4 W4A16 requires BF16 input, got {x.dtype}")
         blockscaled = _import_b12x_blockscaled()
         assert blockscaled is not None
-        x_2d = x.reshape(-1, x.shape[-1]).contiguous()
-        # Rows beyond the planned capacity (e.g. an encoder batch) run in
-        # capacity-sized chunks; an unplanned call would prepare on first use.
-        capacity = layer.b12x_nvfp4_plan_query.num_tokens
-        if x_2d.shape[0] <= capacity:
-            output = blockscaled.mm(
-                x_2d,
-                layer.b12x_nvfp4_packed_weight,
-                plan=layer.b12x_nvfp4_plan,
-                required_mode="a16",
-            )
-        else:
-            output = torch.cat(
-                [
-                    blockscaled.mm(
-                        chunk,
-                        layer.b12x_nvfp4_packed_weight,
-                        plan=layer.b12x_nvfp4_plan,
-                        required_mode="a16",
-                    )
-                    for chunk in x_2d.split(capacity)
-                ]
-            )
+        # The plan covers every row count the scheduler can send; b12x rejects
+        # a larger call instead of preparing a new plan on first use.
+        output = blockscaled.mm(
+            x.reshape(-1, x.shape[-1]).contiguous(),
+            layer.b12x_nvfp4_packed_weight,
+            plan=layer.b12x_nvfp4_plan,
+            required_mode="a16",
+        )
         if bias is not None:
             output = output + bias
         return output.view(*x.shape[:-1], layer.weight.shape[0])
