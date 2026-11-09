@@ -9,7 +9,8 @@ A stage reads the kernel context ``c``: ``S``, ``TP``, ``KT`` (picks a token),
 the thread ids, ``rank``, the mailbox (``put``, ``put_bf``, ``put_words``,
 ``poll``), LDS (``red``, ``xl``, ``il``, ``contrib``, ``rt``), the scratch
 regions ``sgate`` / ``route`` / ``inter``, the peer regions ``ar`` / ``final``,
-``args`` and the variant flags ``oq`` / ``og`` / ``u1``. Where the
+``args`` and the variant flags ``oq`` / ``og`` / ``u1``, and, where the
+model sets it, ``up`` (a union slot for each pick). Where the
 router logits are is the model's: ``rlog_at(t, lane, i)`` is token t's logit
 of expert lane + 64 i as a poll spec, ``rlog_last`` (n, spec of i) the n
 logits that land last, and CTA ``route_cta`` also puts ROUTE (for the tests).
@@ -679,6 +680,37 @@ def load_route(c):
             fx.ptr_store(fx.Int32(TOPK), rt["kof"] + TOPK * kf)
         gpu.barrier()
         return fx.Int32(kt)
+    if const_expr(c.get("up", False) and s > 1):
+        # Slot j is pick j % TOPK of token j // TOPK, and the fused shared
+        # expert is the last slot, as ps expects. A slot's kof entry is its
+        # pick index for its own token and -1 for the others. These entries
+        # do not depend on the route, so they go first, and the barrier
+        # after them also orders local_route's stores of the other waves
+        # before the expert loads below. An expert that two tokens pick
+        # gets two slots. Each token's contributions are still summed in
+        # top-k order, so the outputs are those of the union in expert
+        # order.
+        n = (s * TOPK + 1) * kf
+        for i in range_constexpr((n + THREADS - 1) // THREADS):
+            j = tid + THREADS * i
+            if j < n:
+                slot = j // kf
+                tt = j % kf
+                mine = (slot < s * TOPK) & (tt == slot // TOPK)
+                v = mine.select(slot % TOPK, fx.Int32(-1))
+                shared = (slot == s * TOPK) & (tt < s)
+                v = shared.select(fx.Int32(TOPK), v)
+                fx.ptr_store(v, rt["kof"] + j)
+        gpu.barrier()
+        if tid < s * TOPK:
+            t = tid // TOPK
+            k = tid % TOPK
+            e = fx.max(fx.min(fx.ptr_load(rt["route"] + (t * 2 * kt + k)), E - 1), 0)
+            fx.ptr_store(e, rt["expert"] + tid)
+        if tid == 0:
+            fx.ptr_store(fx.Int32(E), rt["expert"] + s * TOPK)
+        gpu.barrier()
+        return fx.Int32(s * TOPK + 1)
     for i in range_constexpr((E + THREADS - 1) // THREADS):
         e = tid + THREADS * i
         if e < E:
@@ -986,14 +1018,25 @@ def load_inter(c, cut=None, early=True):
     gpu.barrier()
 
 
-def down_loads(c, rgd, nu, b0, hi=None):
+def down_loads(c, rgd, nu, b0, hi=None, live=None):
     """The w2 tiles and scale words of a wave's batch from slot b0 (slots b0,
-    b0 + 8, ...; past ``hi``, |U| by default, the last slot's)."""
+    b0 + 8, ...; past ``hi``, |U| by default, the last slot's). Where
+    ``live`` is false the loads read no memory and return zeros, as the ug
+    loads past the last task do."""
     hi = nu if hi is None else hi
     lane, d = c["lane"], c["moe"]
     a, rt = c["args"], c["rt"]
-    r_w = rsrc(a["w2"])
-    r_s = rsrc(a["w2s"])
+    if live is None:
+        r_w = rsrc(a["w2"])
+        r_s = rsrc(a["w2s"])
+    else:
+        # The buffers hold E + 1 experts, with the fused shared expert. An
+        # expert is w2_base's stride, and its scales are its rows times
+        # scale_cols bytes.
+        n_w = (E + 1) * (d.hidden * d.rip // 2)
+        n_s = (E + 1) * (d.hidden * L.scale_cols(d.rip))
+        r_w = rsrc(a["w2"], live.select(fx.Int32(n_w), fx.Int32(0)))
+        r_s = rsrc(a["w2s"], live.select(fx.Int32(n_s), fx.Int32(0)))
     row = rgd * ROWS + lane % ROWS
     w2_steps = d.rip // L.FP4_STEP
     tiles, words = [], []
@@ -1029,12 +1072,14 @@ def contrib_floats(s, kt):
 
 
 @traced
-def down_slots(c, rgd, nu, ops0, lo, hi, nxt=None, part=0):
+def down_slots(c, rgd, nu, ops0, lo, hi, nxt=None, part=0, prefetch=True):
     """Hidden rows 16 rgd .. of slots lo .. hi: each slot's w2 against its
     picks' INTER (wave w the slots lo + w, lo + w + 8, ...; a batch in flight
     under the last one's MFMAs) -> fp32 (t, k) contributions times the route
     weight in LDS (row group ``part`` of them). The last batch's prefetch is
-    ``nxt`` = (row group, first slot, end slot)'s first batch, returned."""
+    ``nxt`` = (row group, first slot, end slot)'s first batch, returned.
+    Without ``prefetch`` (one batch covers the slots) nothing is
+    prefetched."""
     s, lane, wave = c["S"], c["lane"], c["wave"]
     rt, kt, d = c["rt"], c["KT"], c["moe"]
     cb = c["contrib"] + part * contrib_floats(s, kt)
@@ -1046,8 +1091,17 @@ def down_slots(c, rgd, nu, ops0, lo, hi, nxt=None, part=0):
     ops = ops0
     while b0 < hi:
         nb = b0 + WAVES * DB
-        if const_expr(nxt is None):
-            ops_n = down_loads(c, rgd, nu, fx.min(nb, hi - 1), hi)
+        if const_expr(not prefetch):
+            # One batch covers the slots, so there is nothing to prefetch.
+            # The loop then carries no tiles, and its end has no copy that
+            # waits for every load and store of the wave.
+            ops_n = ops
+        elif const_expr(nxt is None):
+            # Past the last batch the prefetch reads no memory. The loop end
+            # copies the prefetched tiles to other registers and waits for
+            # their loads first, so real loads of the last slot's w2 would
+            # hold this row group's FINAL puts for a full memory latency.
+            ops_n = down_loads(c, rgd, nu, fx.min(nb, hi - 1), hi, live=nb < hi)
         else:
             rn, ln, hn = nxt
             more = nb < hi
@@ -1134,12 +1188,22 @@ def down_put(c, rgd, part=0):
     gpu.barrier()
 
 
-def stage_down(c, rgd, nu, ops0, rgd_next=None):
+def stage_down(c, rgd, nu, ops0, rgd_next=None, prefetch=True, drain=False):
     """Hidden rows 16 rgd .. over every slot (``down_slots``) -> every rank's
     FINAL (``down_put``); the last batch's prefetch is row group ``rgd_next``'s
-    first batch, returned (the loop runs: |U| >= TOPK > WAVES)."""
+    first batch, returned (the loop runs: |U| >= TOPK > WAVES). Without
+    ``prefetch`` (one batch covers the union) nothing is prefetched.
+    ``drain`` waits for every load of the wave before the FINAL puts."""
     down_zero(c)
     nxt = None if rgd_next is None else (rgd_next, 0, nu)
-    ops = down_slots(c, rgd, nu, ops0, 0, nu, nxt)
+    ops = down_slots(c, rgd, nu, ops0, 0, nu, nxt, prefetch=prefetch)
+    if const_expr(drain):
+        # Wait here for the next row group's tiles, which the caller issued
+        # after the INTER polls. A wave's wait for a load also waits for
+        # every load and store that it issued before, and this round's FINAL
+        # puts come next. Without this wait the next round's first MFMA
+        # would wait for its tiles and with them for the acks of these puts
+        # from all 8 GPUs.
+        rocdl.s_waitcnt(vmcnt=0)
     down_put(c, rgd)
     return ops

@@ -148,8 +148,15 @@ class LayerBuild:
         return self.tokens == 1
 
     @property
+    def up(self) -> bool:
+        """2 or 3 rows: a union slot for each pick (no union pass)."""
+        return 2 <= self.tokens <= 3
+
+    @property
     def ps(self) -> bool:
-        return self.tokens >= PS_MIN
+        """The fused shared expert's ug tasks run before the route, at the
+        widths where the layer stage benchmark found that faster."""
+        return self.tokens >= PS_MIN or self.tokens == 2
 
     @property
     def xq(self) -> bool:
@@ -836,6 +843,7 @@ def build_layer(key: LayerBuild):
             "og": key.og,
             "shuffled": key.shuffled,
             "u1": key.u1,
+            "up": key.up,
             "KT": KT,
             "kof_t": s,
             "max_u": max_u,
@@ -881,14 +889,19 @@ def build_layer(key: LayerBuild):
         is_r = (bid >= R0) & (bid < RT0)
         is_g = (bid >= RT0) & (bid < RT0 + s)
         ck = L.CORE
-        # ---- o_proj (both tasks' weights in flight first; a router CTA's
-        # router weights behind them), then the AR + residual add + norm sums,
-        # the router and the shared gate
+        # ---- o_proj (both tasks' weights in flight first), then the AR +
+        # residual add + norm sums, the router and the shared gate
         if is_r:
             oops = [moe.o_loads(c, bid + BLOCKS * j, ck) for j in range(2)]
             ri = bid - R0
-            rops = router_loads(c, ri // R_PARTS, ri % R_PARTS)
             moe.run_oproj(c, oops, ck)
+            # A router CTA loads its router weights only now. run_oproj
+            # loads the core rows, and a wave's wait for a load also waits
+            # for every load that it issued before, so router weights issued
+            # before run_oproj would delay this CTA's o_proj, and every norm
+            # task waits for the o_proj of every CTA. The weights still land
+            # before x does.
+            rops = router_loads(c, ri // R_PARTS, ri % R_PARTS)
             N.load_rstd(c)
             stage_router(c, ri // R_PARTS, ri % R_PARTS, rops, src)
         if ~is_r:
@@ -919,6 +932,15 @@ def build_layer(key: LayerBuild):
             moe.down_slots(c, b2, nu, dops, cut, nu, None, 1)
             moe.down_put(c, bid)
             moe.down_put(c, b2, 1)
+        elif const_expr(s * TOPK + 1 <= WAVES * moe.DB):
+            # Up to 3 rows one batch of a wave covers the union in each row
+            # group. Then the down rounds run without a prefetch, and the
+            # second row group's tiles go out here, behind the INTER polls,
+            # so the polls do not wait for them.
+            moe.load_inter(c)
+            dops2 = moe.down_loads(c, bid + BLOCKS, nu, fx.min(c["wave"], nu - 1))
+            moe.stage_down(c, bid, nu, dops, prefetch=False, drain=True)
+            moe.stage_down(c, bid + BLOCKS, nu, dops2, prefetch=False)
         else:
             moe.load_inter(c)
             dops2 = moe.stage_down(c, bid, nu, dops, bid + BLOCKS)
