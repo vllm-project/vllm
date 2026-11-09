@@ -190,8 +190,8 @@ def _rope_weight_perm(head_dim: int, rope_head_dim: int) -> torch.Tensor:
     The K2Horizon checkpoint stores each head's channels in a GPT-J-interleaved
     convention with rope/nope channels interleaved. Applying this fixed
     (position-independent) permutation to the q/k weight rows lets the runtime
-    use vLLM's *native* NeoX partial-RoPE path (``head_size = head_dim``,
-    ``rotary_dim = rope_head_dim``) with no per-forward permutes/all-gather.
+    use vLLM's *native* NeoX partial-RoPE path (`head_size = head_dim`,
+    `rotary_dim = rope_head_dim`) with no per-forward permutes/all-gather.
     """
     D, R = head_dim, rope_head_dim
     assert R % 2 == 0 and R <= D, (

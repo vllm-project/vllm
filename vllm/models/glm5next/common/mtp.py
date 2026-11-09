@@ -17,9 +17,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -150,7 +147,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
             mla_attn.skip_topk = skip
 
     def compact_topk_indices(self, slot_ids: torch.Tensor):
-        """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
+        """Gather the top-k index rows at `slot_ids` to the front of the buffer."""
         num_slots = slot_ids.numel()
         for mla_attn in self._mtp_mla_attns:
             topk_indices_buffer = mla_attn.topk_indices_buffer
@@ -442,21 +439,6 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                     )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
-
-        loaded_layers: set[int] = set()
-        for param_name in loaded_params:
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, param_name)
-            if spec_layer is not None:
-                loaded_layers.add(spec_layer)
-        for layer_idx in range(
-            self.model.mtp_start_layer_idx,
-            self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
-        ):
-            if layer_idx not in loaded_layers and is_mtp_completeness_check_enabled():
-                raise ValueError(
-                    f"MTP speculative decoding layer {layer_idx} weights "
-                    f"missing from checkpoint."
-                )
         return loaded_params
 
     def process_weights_after_loading(self) -> None:

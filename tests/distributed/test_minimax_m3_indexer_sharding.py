@@ -58,12 +58,9 @@ def _indexer_sharding(
             max_num_seqs=4,
             max_num_batched_tokens=8400,
             hf_config_override={
-                "sparse_attention_config": {
-                    "sparse_num_index_heads": 4,
-                    "sparse_index_dim": 128,
-                    "sparse_init_block": 1,
-                    "sparse_local_block": 1,
-                }
+                "index_n_heads": 4,
+                "index_head_dim": 128,
+                "index_local_blocks": 1,
             },
         )
         config.speculative_config = SpeculativeConfig(
@@ -248,7 +245,7 @@ def _check_indexer_forwards(config, device, rank, comm, num_layers, scenario):
                     sparse_block_size=128,
                     num_index_heads=local_heads,
                     index_head_dim=128,
-                    init_blocks=1,
+                    init_blocks=0,
                     local_blocks=1,
                     prefix=f"indexer_{sharded}_{layer}",
                     cache_config=config.cache_config,
@@ -524,28 +521,21 @@ def _indexer_shards(model):
 @pytest.fixture
 def tiny_m3_checkpoint(tmp_path):
     from safetensors.torch import save_file
+    from transformers import MiniMaxM3VLConfig
 
-    from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3Config
-
-    config = MiniMaxM3Config(
+    config = MiniMaxM3VLConfig(
         architectures=["MiniMaxM3SparseForCausalLM"],
         text_config={
             "num_hidden_layers": 2,
             "hidden_size": 256,
             "vocab_size": 256,
             "dense_intermediate_size": 512,
-            "moe_layer_freq": [0, 0],
-            "sparse_attention_config": {
-                "use_sparse_attention": True,
-                "sparse_index_dim": 128,
-                "sparse_num_index_heads": 4,
-                "sparse_topk_blocks": 16,
-                "sparse_block_size": 128,
-                "sparse_disable_index_value": [1, 1],
-                "sparse_score_type": "max",
-                "sparse_init_block": 0,
-                "sparse_local_block": 1,
-                "sparse_attention_freq": [1, 1],
+            "mlp_layer_types": ["dense", "dense"],
+            "layer_types": ["minimax_m3_sparse", "minimax_m3_sparse"],
+            "rope_parameters": {
+                "rope_type": "default",
+                "rope_theta": 5000000.0,
+                "partial_rotary_factor": 0.5,
             },
         },
     )
@@ -699,13 +689,17 @@ def test_dummy_batch_preserves_index_cache(
 def _check_sharding_policy(config, original_comm):
     from vllm.models.minimax_m3.nvidia import indexer_msa as msa
 
-    sparse_config = config.model_config.hf_text_config.sparse_attention_config
+    text_config = config.model_config.hf_text_config
     policy = create_vllm_config(
         tensor_parallel_size=original_comm.world,
         block_size=128,
         max_model_len=4096,
         max_num_seqs=32,
-        hf_config_override={"sparse_attention_config": sparse_config},
+        hf_config_override={
+            "index_n_heads": text_config.index_n_heads,
+            "index_head_dim": text_config.index_head_dim,
+            "index_local_blocks": text_config.index_local_blocks,
+        },
     )
     model = copy(policy.model_config)
     for mode, length, cap, active_cap, q, eager, graph_mode, expected in [

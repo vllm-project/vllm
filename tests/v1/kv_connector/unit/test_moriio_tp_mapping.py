@@ -158,7 +158,7 @@ def test_every_consumer_head_and_state_slice_is_written_exactly_once(
 
 
 def _view(buffer: torch.Tensor, spec, num_blocks, layout) -> torch.Tensor:
-    """A byte view [B, H, N, C] of ``buffer`` laid out as ``layout``."""
+    """A byte view [B, H, N, C] of `buffer` laid out as `layout`."""
     strides = compute_layout_strides(spec, num_blocks, 1, layout)[1:]
     shape = (num_blocks, spec.num_heads, spec.num_states, spec.state_content_size_bytes)
     return torch.as_strided(buffer, shape, strides)

@@ -3,15 +3,15 @@
 """MSA (SM100/Blackwell) indexer impl for MiniMax M3.
 
 Both sides write block scores into one unified token-major buffer
-``[total_q, H, max_k_tiles]``, then a single ``fmha_sm100.sparse_topk_select``
-selects the top-k blocks for the whole batch (decode ``[:nd]`` + prefill
-``[nd:]``) into the shared ``topk_indices_buffer``. It bounds each row by its
+`[total_q, H, max_k_tiles]`, then a single `fmha_sm100.sparse_topk_select`
+selects the top-k blocks for the whole batch (decode `[:nd]` + prefill
+`[nd:]`) into the shared `topk_indices_buffer`. It bounds each row by its
 causal page count and force-includes the init/local blocks, so the unwritten
-tail of the buffer is pre-filled with ``-inf``.
+tail of the buffer is pre-filled with `-inf`.
 
-Prefill scores with ``fmha_sm100``'s score-only (``OnlyScore``) path (much faster
+Prefill scores with `fmha_sm100`'s score-only (`OnlyScore`) path (much faster
 than Triton for the wide prefill score, benchmarked ~3-5x), writing its
-``max_score`` straight into the buffer's prefill region (stride-aware, no copy).
+`max_score` straight into the buffer's prefill region (stride-aware, no copy).
 
 Decode scores with CuteDSL when the flattened query tile is supported and fall
 back to Triton otherwise, writing into the decode region. Only the top-k is
@@ -19,7 +19,7 @@ shared with prefill.
 
 Sharded scoring selects local candidates and merges them at each head owner.
 
-``fmha_sm100`` imports are function-local so this module is import-safe on
+`fmha_sm100` imports are function-local so this module is import-safe on
 AMD / non-SM100.
 """
 
@@ -126,9 +126,9 @@ class MiniMaxM3IndexerMSAPrefillMetadata:
 
 @dataclass
 class MiniMaxM3IndexerMSAMetadata(MiniMaxM3IndexerMetadata):
-    """Decode reuses the inherited base ``decode`` field (the Triton decode
-    metadata); ``prefill_msa`` carries the fmha score plan for the prefill side
-    (the base ``prefill`` field is unused on this path)."""
+    """Decode reuses the inherited base `decode` field (the Triton decode
+    metadata); `prefill_msa` carries the fmha score plan for the prefill side
+    (the base `prefill` field is unused on this path)."""
 
     prefill_msa: MiniMaxM3IndexerMSAPrefillMetadata | None = None
     # Per-forward view (``[:num_tokens]``) of the builder's persistent unified
@@ -192,14 +192,14 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
 
             heads = self.num_index_heads * self.index_k_tp
             scheduler = vllm_config.scheduler_config
-            sparse = vllm_config.model_config.hf_text_config.sparse_attention_config
+            text_config = vllm_config.model_config.hf_text_config
             plan = MSAIcpIndexerPlan(
                 world_size=self.index_k_tp,
                 rank=get_tensor_model_parallel_rank(),
                 num_index_heads=heads,
                 page_size=PAGE_SIZE,
-                init_blocks=sparse.get("sparse_init_block", 0),
-                local_blocks=sparse.get("sparse_local_block", 0),
+                init_blocks=0,
+                local_blocks=text_config.index_local_blocks,
                 max_decode_tokens=scheduler.max_num_seqs * self.max_decode_query_len,
                 max_decode_query_len=self.max_decode_query_len,
                 max_num_batched_tokens=scheduler.max_num_batched_tokens,
@@ -776,11 +776,7 @@ def get_comm(
         vllm_config.cache_config.block_size,
         vllm_config.scheduler_config.max_num_seqs,
         max_decode_query_len(vllm_config),
-        int(
-            vllm_config.model_config.hf_text_config.sparse_attention_config[
-                "sparse_index_dim"
-            ]
-        ),
+        vllm_config.model_config.hf_text_config.index_head_dim,
     )
     if (
         _COMM_OWNER is None
