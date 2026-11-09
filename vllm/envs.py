@@ -127,6 +127,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_FASTSAFETENSORS_QUEUE_SIZE: int = 0
     VLLM_TRITON_FORCE_FIRST_CONFIG: bool = False
+    VLLM_TRITON_SYNC_AUTOTUNE_TP: bool = False
     VLLM_TRITON_JIT_WARMUP_NUM_THREADS: int = 4
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = True
@@ -1254,6 +1255,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # performance and applied before running any kernel.
     "VLLM_TRITON_FORCE_FIRST_CONFIG": lambda: (
         os.environ.get("VLLM_TRITON_FORCE_FIRST_CONFIG", "0").strip().lower()
+        in ("1", "true")
+    ),
+    # If set, Triton autotune uses tensor-parallel rank 0's benchmark timings on
+    # every rank (inside model forward passes), so all TP ranks pick the same
+    # config. Needed when ranks compute the same tensors without an all-reduce
+    # after them; plain TP does not need it.
+    "VLLM_TRITON_SYNC_AUTOTUNE_TP": lambda: (
+        os.environ.get("VLLM_TRITON_SYNC_AUTOTUNE_TP", "0").strip().lower()
         in ("1", "true")
     ),
     # Maximum compiler threads per worker for registered CUDA Triton JIT warmup.

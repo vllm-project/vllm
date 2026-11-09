@@ -36,6 +36,13 @@ if envs.VLLM_TRITON_FORCE_FIRST_CONFIG:
     )
 
     _install_force_first_config()
+elif envs.VLLM_TRITON_SYNC_AUTOTUNE_TP:
+    # Every TP rank takes rank 0's autotune timings (see tp_synced_autotune).
+    from vllm.triton_utils.tp_synced_autotune import (
+        install as _install_tp_synced_autotune,
+    )
+
+    _install_tp_synced_autotune()
 
 LOG2E = 1.4426950408889634
 LOGE2 = 0.6931471805599453

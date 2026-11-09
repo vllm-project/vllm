@@ -722,6 +722,7 @@ steps:
 #   - tests/test_sampling_params.py
 #   - tests/test_scalartype.py
 #   - tests/test_tensorizer_revision_pin.py
+#   - tests/test_tp_synced_autotune.py
 #   - tests/test_triton_utils.py
 #   - tests/test_version.py
 #   - tests/test_zen_cpu_platform_detection.py
@@ -770,6 +771,7 @@ steps:
 #   - pytest -v -s test_sampling_params.py
 #   - pytest -v -s test_scalartype.py
 #   - pytest -v -s test_tensorizer_revision_pin.py
+#   - pytest -v -s test_tp_synced_autotune.py
 #   - pytest -v -s test_triton_utils.py
 #   - pytest -v -s test_version.py
 #   - pytest -v -s test_zen_cpu_platform_detection.py
@@ -842,6 +844,7 @@ steps:
   - tests/test_sampling_params.py
   - tests/test_scalartype.py
   - tests/test_tensorizer_revision_pin.py
+  - tests/test_tp_synced_autotune.py
   - tests/test_triton_utils.py
   - tests/test_version.py
   - tests/test_zen_cpu_platform_detection.py
