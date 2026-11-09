@@ -57,13 +57,22 @@ def test_views_alias_cache_and_are_reused(monkeypatch, shuffle):
     assert k is views[0] and v is views[1]
 
 
-def test_new_tensor_rebuilds_views(monkeypatch):
+def test_new_tensor_or_storage_rebuilds_views(monkeypatch):
     impl = _make_impl(monkeypatch)
     first, second = _make_kv_cache(), _make_kv_cache()
     k_first, _ = impl._split_kv_cache(first)
     k_second, _ = impl._split_kv_cache(second)
     assert k_second is not k_first
     assert k_second.data_ptr() == second.data_ptr()
+
+    other = _make_kv_cache()
+    second.set_(other.untyped_storage(), 0, second.shape, second.stride())
+    k_moved, _ = impl._split_kv_cache(second)
+    assert k_moved.data_ptr() == other.data_ptr()
+
+    fewer = second[: NUM_BLOCKS // 2]
+    k_fewer, _ = impl._split_kv_cache(fewer)
+    assert k_fewer.shape[0] == NUM_BLOCKS // 2
 
 
 def test_clear_layer_kv_caches_drops_view_cache(monkeypatch):

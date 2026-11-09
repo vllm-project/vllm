@@ -959,7 +959,7 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
 
 class AiterFlashAttentionImpl(AttentionImpl):
-    _kv_view_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+    _kv_view_cache: tuple[torch.Tensor, int, torch.Tensor, torch.Tensor] | None = None
 
     def __init__(
         self,
@@ -1620,8 +1620,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
         self, kv_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         cache = self._kv_view_cache
-        if cache is not None and cache[0] is kv_cache:
-            return cache[1], cache[2]
+        if (
+            cache is not None
+            and cache[0] is kv_cache
+            and cache[1] == kv_cache.data_ptr()
+        ):
+            return cache[2], cache[3]
         if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
             # (B, 2, N, H*hs) -> one (B, N, H, hs) per side, which is what the
             # shuffle read/write kernels reinterpret in place. The heads are
@@ -1634,7 +1638,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             key_cache, value_cache = kv_cache.transpose(1, 2).split(
                 self.head_size, dim=-1
             )
-        self._kv_view_cache = (kv_cache, key_cache, value_cache)
+        self._kv_view_cache = (kv_cache, kv_cache.data_ptr(), key_cache, value_cache)
         return key_cache, value_cache
 
     def do_kv_cache_update(
