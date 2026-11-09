@@ -583,8 +583,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         Performs two normalizations in a single pass:
         - Converts tool_calls generators/iterators to lists so one-shot
           generators are not consumed during union type matching.
-        - Renames the deprecated ``reasoning_content`` field to
-          ``reasoning`` so downstream code only needs to check one field.
+        - Renames the deprecated `reasoning_content` field to
+          `reasoning` so downstream code only needs to check one field.
         """
         if not isinstance(data, dict):
             return data
@@ -741,7 +741,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
-        """Normalize request constraints into ``StructuredOutputsParams``."""
+        """Normalize request constraints into `StructuredOutputsParams`."""
         return structured_outputs_from_response_format(
             self.structured_outputs,
             self.response_format,
@@ -979,13 +979,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if not isinstance(data, dict):
             return data
 
-        # Reject empty tools array, matching OpenAI API behavior
-        if data.get("tools") == []:
-            raise VLLMValidationError(
-                "`tools` must not be an empty array. "
-                "Either provide at least one tool or omit the field entirely.",
-                parameter="tools",
-            )
+        # OpenAI treats an empty tools array like an omitted one: "auto" and
+        # "required" have nothing to call and fall back to "none". A named
+        # tool keeps the empty list so the lookup below reports the mismatch.
+        if data.get("tools") == [] and not isinstance(data.get("tool_choice"), dict):
+            data["tools"] = None
+            if data.get("tool_choice") in ("auto", "required"):
+                data["tool_choice"] = "none"
 
         # if "tool_choice" is not specified but tools are provided,
         # default to "auto" tool_choice
@@ -1051,8 +1051,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         break
                 if not valid_tool:
                     raise VLLMValidationError(
-                        "The tool specified in `tool_choice` does not match any"
-                        " of the specified `tools`",
+                        f"The tool `{function_name}` specified in `tool_choice`"
+                        " does not match any of the specified `tools`",
                         parameter="tool_choice",
                     )
         return data
@@ -1142,17 +1142,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
 class BatchChatCompletionRequest(OpenAIBaseModel):
     """Request model for the /v1/chat/completions/batch endpoint.
 
-    Accepts the same fields as ChatCompletionRequest except that ``messages``
+    Accepts the same fields as ChatCompletionRequest except that `messages`
     is a list of conversations (each conversation is a
-    ``list[ChatCompletionMessageParam]``).  Each conversation is processed
+    `list[ChatCompletionMessageParam]`).  Each conversation is processed
     independently and the response contains one choice per conversation,
     indexed 0, 1, ..., N-1.
 
     Current limitations compared to the single-conversation endpoint:
-    - Streaming is not supported (``stream`` must be False or omitted).
-    - Tool use is not supported (``tools`` must be omitted).
-    - Beam search is not supported (``use_beam_search`` must be False or omitted).
-    - The ``n`` parameter must be 1 (or omitted).
+    - Streaming is not supported (`stream` must be False or omitted).
+    - Tool use is not supported (`tools` must be omitted).
+    - Beam search is not supported (`use_beam_search` must be False or omitted).
+    - The `n` parameter must be 1 (or omitted).
     """
 
     messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (

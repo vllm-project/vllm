@@ -98,7 +98,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     """Secondary tier that offloads KV cache blocks to an S3-compatible store.
 
     Handles CPU DRAM <-> S3 transfers only. GPU <-> CPU is managed by the
-    primary tier. Object keys are formed as ``{prefix}/{hash_shard}/{hash}.bin``.
+    primary tier. Object keys are formed as `{prefix}/{hash_shard}/{hash}.bin`.
     """
 
     medium: ClassVar[Medium] = Medium.STORAGE
@@ -149,6 +149,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                     "emit events.",
                     tier_type,
                 )
+        # Track in-flight store jobs for lookup invalidation and KV events.
         self._store_jobs: dict[JobId, TransferJob] = {}
         # Keys of in-flight load (promotion) jobs, so a failed download can
         # mark its own cached lookup verdicts False (see get_finished_jobs).
@@ -293,8 +294,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         return LookupResult.HIT if result else LookupResult.MISS
 
     def submit_store(self, job_metadata: TransferJob) -> None:
-        if self.events is not None:
-            self._store_jobs[job_metadata.job_id] = job_metadata
+        self._store_jobs[job_metadata.job_id] = job_metadata
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
             job_metadata.job_id, job_metadata.chunk_ids, obj_keys, NIXL_WRITE
@@ -318,7 +318,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def _poll_active_transfers(self) -> None:
         """Poll all in-flight transfers once; move newly-completed (success or
-        failure) into ``_pending_results`` and release their NIXL handles."""
+        failure) into `_pending_results` and release their NIXL handles."""
         for job_id, entry in list(self._transfers.items()):
             try:
                 state = self._agent.check_xfer_state(entry.xfer_handle)
@@ -388,9 +388,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         results = self._pending_results
         self._pending_results = []
         for result in results:
-            if self.events is not None:
-                job = self._store_jobs.pop(result.job_id, None)
-                if result.success and job is not None and job.keys:
+            job = self._store_jobs.pop(result.job_id, None)
+            if result.success and job is not None:
+                self._lookup_manager.mark_present(job.keys)
+                if self.events is not None and job.keys:
                     self.events.append(
                         OffloadingEvent(
                             keys=list(job.keys),
@@ -421,10 +422,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def drain_jobs(self) -> None:
         """Block until every submitted transfer has completed or failed.
 
-        nixl exposes only ``check_xfer_state`` (poll-based), so this loops
-        until ``_transfers`` is empty. Results accumulate in
-        ``_pending_results`` and are surfaced by the next
-        ``get_finished_jobs()`` call.
+        nixl exposes only `check_xfer_state` (poll-based), so this loops
+        until `_transfers` is empty. Results accumulate in
+        `_pending_results` and are surfaced by the next
+        `get_finished_jobs()` call.
         """
         start = time.monotonic()
         warned = False
