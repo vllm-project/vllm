@@ -600,8 +600,8 @@ class AiterPreshuffledFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     def _reads_weight_directly(layer: torch.nn.Module) -> bool:
         """True when something other than apply_weights consumes layer.weight.
 
-        Such a weight must stay in the plain layout: ``is_bmm`` marks a stack
-        of matrices (wo_a), ``skip_weight_relayout`` marks MLA's kv_b_proj and
+        Such a weight must stay in the plain layout: `is_bmm` marks a stack
+        of matrices (wo_a), `skip_weight_relayout` marks MLA's kv_b_proj and
         shared experts whose weights a fused MoE kernel copies. Both are
         stamped after construction, so can_implement cannot see them.
         """
@@ -693,7 +693,7 @@ class AiterPreshuffledFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     ) -> torch.Tensor:
         """Block-scaled GEMM for callers that pre-quantize their activations.
 
-        ``As`` must be column-major; a row-major one will not raise, it just
+        `As` must be column-major; a row-major one will not raise, it just
         returns wrong numbers for M > 1.
         """
         return rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(

@@ -173,7 +173,7 @@ class DeepseekV4MLP(nn.Module):
             return
         if ws.dtype == torch.float8_e8m0fnu:
             ws = _upcast_e8m0_to_fp32(ws).contiguous()
-        # Skip if the linear's kernel already shuffled it.
+        # Skip if the weight is already shuffled.
         if not weight_already_preshuffled(self.gate_up_proj):
             replace_parameter(
                 self.gate_up_proj,
