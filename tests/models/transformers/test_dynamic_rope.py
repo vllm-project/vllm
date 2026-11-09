@@ -33,6 +33,15 @@ def make_vllm_config(hf_config, max_model_len: int) -> SimpleNamespace:
     return SimpleNamespace(model_config=model_config)
 
 
+def forbid_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail if `@dynamic_rope_update` still runs, since it syncs on `torch.max`."""
+
+    def fail(*args, **kwargs):
+        raise AssertionError("rope update still runs")
+
+    monkeypatch.setattr(torch, "max", fail)
+
+
 @pytest.mark.parametrize(
     "rope_parameters,max_model_len,compilable",
     [
@@ -78,17 +87,13 @@ def test_disable_noop_dynamic_rope(monkeypatch, config, rotary_cls):
 
     vllm_config = make_vllm_config(config, MAX_POSITION_EMBEDDINGS)
     maybe_disable_dynamic_rope_update(rotary_emb, vllm_config)
-
-    def no_sync(*args, **kwargs):
-        raise AssertionError("dynamic rope update still runs")
-
-    monkeypatch.setattr(torch, "max", no_sync)
+    forbid_sync(monkeypatch)
     actual = rotary_emb(*inputs)
     assert all(torch.equal(e, a) for e, a in zip(expected, actual))
 
 
 @pytest.mark.parametrize("use_long", [False, True])
-def test_freeze_longrope(use_long):
+def test_freeze_longrope(monkeypatch, use_long):
     """Short positions get the long factors iff `max_model_len` needs them."""
     original = MAX_POSITION_EMBEDDINGS // 2
     config = Phi3Config(
@@ -110,6 +115,6 @@ def test_freeze_longrope(use_long):
     vllm_config = make_vllm_config(config, original + int(use_long))
     maybe_disable_dynamic_rope_update(rotary_emb, vllm_config)
 
-    assert rotary_emb.rope_type == "default"
+    forbid_sync(monkeypatch)
     actual = rotary_emb(x, short)
     assert all(torch.equal(e, a) for e, a in zip(expected, actual))
