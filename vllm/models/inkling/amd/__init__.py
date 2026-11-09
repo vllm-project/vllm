@@ -1,3 +1,3 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ROCm-only Inkling kernels used by ``inkling.common``."""
+"""ROCm-only Inkling kernels used by `inkling.common`."""
