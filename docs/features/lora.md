@@ -451,6 +451,14 @@ Classification heads support LoRA A/B weights (matching the base head's output s
 
 ## Using Tips
 
+### MoE LoRA with data and expert parallelism
+
+With data and expert parallelism, MoE tokens are dispatched between ranks along
+with their adapter IDs, and each rank maps the IDs to its own LoRA slots, so an
+adapter may occupy different slots on different ranks. A rank that has not
+loaded the adapter computes those tokens' expert outputs without the LoRA delta,
+so load the adapters on all ranks and keep `max_loras` large enough to hold them.
+
 ### Configuring `max_lora_rank`
 
 The `--max-lora-rank` parameter controls the maximum rank allowed for LoRA adapters. This setting affects memory allocation and performance:

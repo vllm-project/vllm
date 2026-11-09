@@ -193,19 +193,14 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             a1, quant_config, defer_input_quant
         )
 
-        # When LoRA is active, dispatch the per-token LoRA id along with
-        # hidden_states so every rank receives the correct mapping for the
-        # tokens it ends up processing. The punica_wrapper stores indices as
-        # int64 but the moe_lora_align_block_size kernel expects int32, so
-        # pull the pre-cast view from token_mapping_meta.
+        # Dispatch adapter identities, not source-rank slots: load order can
+        # differ between workers even when every adapter is resident.
         lora_ctx = self._lora_context
         local_token_lora_mapping = None
         if lora_ctx is not None:
-            local_token_lora_mapping = (
-                lora_ctx.punica_wrapper.token_mapping_meta.token_lora_mapping[
-                    : a1.shape[0]
-                ]
-            )
+            local_token_lora_mapping = lora_ctx.punica_wrapper.token_lora_ids[
+                : a1.shape[0]
+            ]
 
         extra_tensors: list[torch.Tensor] | None = None
         if scales is not None:
@@ -235,7 +230,13 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             if local_token_lora_mapping is not None:
                 dispatched_lora_mapping = gathered_extras.pop()
                 assert lora_ctx is not None
-                lora_ctx.local_token_lora_mapping = dispatched_lora_mapping
+                from vllm.lora.ops.triton_ops.lora_kernel_metadata import remap_lora_ids
+
+                assert lora_ctx.punica_wrapper.slot_lora_ids is not None
+                lora_ctx.local_token_lora_mapping = remap_lora_ids(
+                    dispatched_lora_mapping,
+                    lora_ctx.punica_wrapper.slot_lora_ids,
+                )
             if scales is not None:
                 a1q_scale = _unwrap_scale_and_prepare_for_moe(
                     gathered_extras, quant_config
