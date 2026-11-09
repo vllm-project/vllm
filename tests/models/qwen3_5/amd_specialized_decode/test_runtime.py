@@ -250,3 +250,74 @@ def test_mxfp6_projections_config(supported_platform):
         runtime.specialized_decode_config(config)
     for why in ("TP 4 (TP8 only)", "monokernel_projections 'fp6'"):
         assert why in str(e.value), (why, str(e.value))
+
+
+def _fake_layer(i: int, kind: str, fp6: bool) -> SimpleNamespace:
+    """A decoder layer with what ``Launcher``'s build keys read."""
+    norm = SimpleNamespace(variance_epsilon=1e-6, eps=1e-6)
+
+    def lin():
+        return SimpleNamespace(
+            quant_method=None,
+            bias=None,
+            specialized_decode_fp6=(None, None) if fp6 else None,
+        )
+
+    mlp = SimpleNamespace(specialized_decode_rm=object() if fp6 else None)
+    layer = SimpleNamespace(
+        layer_idx=i,
+        layer_type=kind,
+        input_layernorm=norm,
+        post_attention_layernorm=norm,
+        mlp=mlp,
+    )
+    if kind == "linear_attention":
+        layer.linear_attn = SimpleNamespace(
+            in_proj_qkvz=lin(), out_proj=lin(), norm=norm
+        )
+    else:
+        rope = SimpleNamespace(
+            rotary_dim=64, cos_sin_cache=torch.empty(0, dtype=torch.bfloat16)
+        )
+        layer.self_attn = SimpleNamespace(
+            qkv_proj=lin(), o_proj=lin(), q_norm=norm, rotary_emb=rope
+        )
+    return layer
+
+
+@pytest.mark.parametrize("fp6", [False, True])
+def test_builds(fp6: bool, monkeypatch):
+    """The builds the executor compiles: with the MXFP6 projections, q6 / qp
+    GDN builds, o6 layer builds with rm up to RM_MAX rows, and both attention
+    front builds (with and without the KV cache write) of every width but
+    the first layer's."""
+    from vllm.models.qwen3_5.amd.specialized_decode.mono import afront, blocks
+    from vllm.models.qwen3_5.amd.specialized_decode.runtime import decode, layers
+
+    # Without the MXFP6 copies the fake linears are online MXFP4 on the ASM
+    # FP4 GEMM, as the stock flags serve them.
+    monkeypatch.setattr(layers, "mxfp4_shuffled", lambda lin: None if fp6 else True)
+    kinds = ["linear_attention"] * 3 + ["full_attention"]
+    model = SimpleNamespace(
+        layers=[_fake_layer(i, k, fp6) for i, k in enumerate(kinds)]
+    )
+    sd = decode.SpecializedDecode.__new__(decode.SpecializedDecode)
+    sd.model = model
+    width = L.Q6_MAX if fp6 else L.MAX_TOKENS
+    sd.config = runtime.DecodeConfig(max_tokens=width, fp6=fp6)
+    sd.launch = layers.Launcher.__new__(layers.Launcher)
+    keys = [k for _, k in sd._builds()]
+    gdn = [k for k in keys if isinstance(k, blocks.GdnBuild)]
+    lay = [k for k in keys if isinstance(k, blocks.LayerBuild)]
+    af = [k for k in keys if isinstance(k, afront.AFBuild)]
+    assert {k.tokens for k in gdn} == set(range(1, width + 1))
+    assert all(k.q6 == fp6 and k.qp == fp6 for k in gdn)
+    assert all(k.o6 == fp6 and k.oq != fp6 for k in lay)
+    assert {(k.tokens, k.og) for k in lay if k.rm} == (
+        {(s, og) for s in range(1, blocks.RM_MAX + 1) for og in (False, True)}
+        if fp6
+        else set()
+    )
+    assert {(k.tokens, k.kv) for k in af} == (
+        {(s, kv) for s in range(1, width + 1) for kv in (False, True)} if fp6 else set()
+    )

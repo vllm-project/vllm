@@ -34,6 +34,31 @@ Supported:
   recurrent state with `--no-enable-prefix-caching`. Any KV cache dtype vLLM's
   attention takes.
 
+## MXFP6 projections
+
+`--additional-config '{"monokernel_projections": "mxfp6"}'` with
+`--monokernel` runs the GDN in_proj_qkvz, every out_proj and o_proj and the
+attention qkv_proj in MXFP6 E2M3 (`runtime/mxfp6.py`). They must be served
+in bf16, for example with
+`--quantization-config.targets '{"*shared_expert*": "mxfp4"}'`. After the
+weights load, they are rounded to MXFP6 in place, so prefill multiplies the
+same values, and MXFP6 copies are packed for the kernels (W6A16, the bf16
+rows times the MXFP6 weights). The builds then serve 1-8 rows, because they
+hold the bf16 x rows in LDS. The options that follow:
+
+- `q6` (GDN block): in_proj_qkvz in MXFP6, with `qp`, which places the
+  in_proj tasks by what waits for them;
+- `o6` (layer block): out_proj / o_proj in MXFP6;
+- `rm` (layer block, up to 5 rows): the router logits through o_proj, from
+  a bf16 weight that folds the router rows, the norm's (1 + w) and this
+  rank's o_proj rows, so every CTA routes as soon as its rstd is in;
+- the attention front (`mono/afront.py`): one launch for a full-attention
+  layer's residual add, input_layernorm, MXFP6 qkv_proj, q / k norms, RoPE
+  and, with `ROCM_AITER_FA` and an FP8 KV cache, the KV cache write.
+
+At 2 and 3 rows the layer block gives every expert pick its own union slot
+(`up`), with any projection format.
+
 ## Refusals
 
 Default-deny, in three stages, each reporting every reason in one error:
