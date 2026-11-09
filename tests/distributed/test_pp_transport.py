@@ -41,7 +41,6 @@ def chain_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
             for k in KEYS
         }
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         parallel_config=SimpleNamespace(
             tensor_parallel_size=1, prefill_context_parallel_size=1
         ),

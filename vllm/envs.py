@@ -1273,8 +1273,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
     "VLLM_SKIP_P2P_CHECK": lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
     # How a PP stage sends its intermediate tensors to the next stage.
-    # "copy_engine" uses CUDA copy engines instead of NCCL kernels; it needs the
-    # V2 model runner, TP=1 and NVLink-connected PP GPUs on one node.
+    # "copy_engine" uses CUDA copy engines instead of NCCL kernels; it needs
+    # TP=1 and NVLink-connected PP GPUs on one node.
     "VLLM_PP_TRANSPORT": env_with_choices(
         "VLLM_PP_TRANSPORT", "nccl", ["nccl", "copy_engine"]
     ),

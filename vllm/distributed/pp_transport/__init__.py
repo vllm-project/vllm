@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Opt-in alternatives to NCCL for sending a PP stage's intermediate tensors to
-the next stage, selected by ``VLLM_PP_TRANSPORT``."""
+the next stage, selected by `VLLM_PP_TRANSPORT`."""
 
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
@@ -23,7 +23,7 @@ class PPTransport(ABC):
     @abstractmethod
     def send(self, tensors: dict, pp_group: "GroupCoordinator") -> None:
         """Send this step's outputs to the next stage. The caller may
-        overwrite ``tensors`` once this returns."""
+        overwrite `tensors` once this returns."""
 
     @abstractmethod
     def recv(self, pp_group: "GroupCoordinator") -> "IntermediateTensors":

@@ -6,10 +6,10 @@ Each rank shares one CUDA IPC buffer holding its flags and a receive region
 laid out like its persistent intermediate tensors. Per stage boundary, step N:
 
 - sender: once the previous peer copy is done, pack the outputs into a local
-  send buffer; on a side stream, wait ``empty >= N - 1``, peer-copy into the
-  receiver's region and write ``full = N``.
-- receiver: wait ``full >= N``, copy the region into the persistent tensors
-  and write ``empty = N``.
+  send buffer; on a side stream, wait `empty >= N - 1`, peer-copy into the
+  receiver's region and write `full = N`.
+- receiver: wait `full >= N`, copy the region into the persistent tensors
+  and write `empty = N`.
 
 Each flag lives on the GPU that waits on it and the peer writes it with stream
 memory ops, so neither SMs nor the CPU wait on the transfer. Metadata goes over
@@ -74,7 +74,7 @@ def _nbytes(layout: dict[str, _Region]) -> int:
 def _views(
     buf: torch.Tensor, layout: dict[str, _Region], rows: dict[str, int]
 ) -> dict[str, torch.Tensor]:
-    """The first ``rows[key]`` rows of each key's region of ``buf``."""
+    """The first `rows[key]` rows of each key's region of `buf`."""
     out = {}
     for key, n in rows.items():
         r = layout[key]
@@ -133,8 +133,6 @@ class CopyEngineTransport(PPTransport):
         parallel_config = vllm_config.parallel_config
         if not current_platform.is_cuda():
             raise RuntimeError("PP copy engines need CUDA")
-        if not vllm_config.use_v2_model_runner:
-            raise RuntimeError("PP copy engines need the V2 model runner")
         if (
             parallel_config.tensor_parallel_size != 1
             or parallel_config.prefill_context_parallel_size != 1
