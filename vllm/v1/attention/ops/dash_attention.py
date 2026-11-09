@@ -12,7 +12,7 @@ from vllm.model_executor.layers.dash_attention import (
     page_rope,
     route_blocks,
 )
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import tl, tldevice, triton
 
 
 @cache
@@ -50,8 +50,8 @@ def _rope(
     coord = tl.where(pair < NTOK, tok, page.to(tl.float32))
     angle = coord * tl.load(Inv + pair)
     dtype = X.dtype.element_ty
-    cos = tl.extra.cuda.libdevice.cos(angle).to(dtype).to(tl.float32)
-    sin = tl.extra.cuda.libdevice.sin(angle).to(dtype).to(tl.float32)
+    cos = tldevice.cos(angle).to(dtype).to(tl.float32)
+    sin = tldevice.sin(angle).to(dtype).to(tl.float32)
     x = tl.load(X + row * XS + head * XH + d).to(tl.float32)
     other = tl.load(X + row * XS + head * XH + (d + D // 2) % D)
     other = tl.where(d < D // 2, -other.to(tl.float32), other.to(tl.float32))
@@ -833,13 +833,15 @@ def flash_dash_attention(q, k, v, used, bias, backend, bs, local):
     _, _, cuq, cuk = _indptr(device, n, topk, bs, local)
     queries = q[:, None].expand(n, groups, heads, dim).reshape(-1, heads, dim)
     if backend == "FLASH_ATTN":
-        from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
-        from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
+        from vllm.v1.attention.backends.fa_utils import (
+            flash_attn_varlen_func,
+            get_flash_attn_version,
+        )
 
         version = get_flash_attn_version(head_size=dim)
         if version is None:
             raise RuntimeError(
-                "DASH FLASH_ATTN requires a supported CUDA FlashAttention"
+                "DASH FLASH_ATTN requires a supported FlashAttention"
             )
         block_table = None
         if version != 4:
