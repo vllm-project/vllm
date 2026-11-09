@@ -843,8 +843,7 @@ class Base(
                 }
             )
 
-        aux_hidden_states = remote_aux + aux_hidden_states
-        if aux_hidden_states:
+        if aux_hidden_states := remote_aux + aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
 
