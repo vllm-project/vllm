@@ -1008,8 +1008,12 @@ class Worker(WorkerBase):
 
     def extend_kv_cache(self, num_blocks: int) -> None:
         """Commit the final size of an extensible KV cache."""
-        extend_kv_cache(self.model_runner, self._kv_cache_config, num_blocks)
+        # Settled before the extension so that `ModelState.rebind_kv_cache`,
+        # which runs inside it, reads the committed count. Under
+        # multiprocessing this is the worker's only writer: the engine core
+        # updates its own config in `finalize_extensible_kv_cache`.
         self.cache_config.num_gpu_blocks = num_blocks
+        extend_kv_cache(self.model_runner, self._kv_cache_config, num_blocks)
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:

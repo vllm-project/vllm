@@ -136,7 +136,11 @@ class ModelState(ABC):
     def rebind_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """Hook run after an extensible KV cache commits its final size and the
         runner re-binds every view at the same addresses with the final block
-        count. CUDA graphs captured before stay valid."""
+        count. CUDA graphs captured before stay valid.
+
+        Only `kv_cache_config.num_blocks` is settled: `kv_cache_tensors` still
+        carries the placements of the whole reservation, so read the geometry
+        off the bound views (`static_forward_context`), not off them."""
         return None
 
     def capture_inner_cudagraphs(
