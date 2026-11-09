@@ -1,27 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The specialized decode's DSpark drafter (``decode_backend=latency_specialized``).
+"""The specialized decode's DSpark drafter (`decode_backend=latency_specialized`).
 
-What changes against the stock ``K3DSparkForCausalLM`` (all exact):
-- ``context_proj`` (5 x 7168 -> 7168, 514 MB BF16) is replicated on every TP rank
+What changes against the stock `K3DSparkForCausalLM` (all exact):
+- `context_proj` (5 x 7168 -> 7168, 514 MB BF16) is replicated on every TP rank
   in the stock model, so each TP8 / DCP8 rank streams all of it every draft step.
   Here it is column-parallel with its output all-gathered: each rank streams 1/TP
   of the weight (same dot products, full K per output column) and one
   [R * (k + 1), 7168 / TP] BF16 all-gather rebuilds the rows.
-- every drafter linear and the lm_head shard run on ``linears.DraftGemm``.
-- the ``k`` sequential Markov steps run as one launch each (``markov.py``).
-- the draft block's attention folds its tokens into heads (``attention.py``).
-- at TP > 1 (``comm.py``, Lamport mailboxes on multicast symmetric memory): the
+- every drafter linear and the lm_head shard run on `linears.DraftGemm`.
+- the `k` sequential Markov steps run as one launch each (`markov.py`).
+- the draft block's attention folds its tokens into heads (`attention.py`).
+- at TP > 1 (`comm.py`, Lamport mailboxes on multicast symmetric memory): the
   context projection's and the lm_head's all-gathers, and the embedding's
   all-reduce fused with the first RMSNorm; under DCP (= TP) the draft attention's
   query gather and LSE combine + W_UV on the specialized decode's DCP mailboxes
-  (``attention.DraftDcp``). ``forward`` replaces ``K3DSparkModel.forward`` for the
+  (`attention.DraftDcp`). `forward` replaces `K3DSparkModel.forward` for the
   batches these serve (the stock forward otherwise). The draft layers' all-reduce
-  + RMSNorm sites stay on flashinfer's fused one-shot (``LAYER_AR_ROWS``).
+  + RMSNorm sites stay on flashinfer's fused one-shot (`LAYER_AR_ROWS`).
 
-All of it lives here: ``register`` makes vLLM build ``SpecializedK3DSparkForCausalLM``
+All of it lives here: `register` makes vLLM build `SpecializedK3DSparkForCausalLM`
 (a subclass of the stock drafter) for the DSpark draft architecture, and the stock
-``dspark_mla.py`` / ``mla.py`` stay unchanged. The column-parallel context projection
+`dspark_mla.py` / `mla.py` stay unchanged. The column-parallel context projection
 replaces the stock replicated one at construction, before the weights load (the
 replicated one is allocated and freed once, at load).
 """
@@ -39,13 +39,13 @@ DRAFT_ARCH = "K3DSparkModel"
 
 
 def register() -> None:
-    """Serve the DSpark draft with ``SpecializedK3DSparkForCausalLM`` in this
-    process (``ModelRegistry.register_model``, vLLM's model-class extension point).
+    """Serve the DSpark draft with `SpecializedK3DSparkForCausalLM` in this
+    process (`ModelRegistry.register_model`, vLLM's model-class extension point).
 
-    ``specialized_decode_config`` calls it when the deployment selects the
+    `specialized_decode_config` calls it when the deployment selects the
     specialized decode: the target model is built (and calls it) before the
     speculator loads the drafter. A draft class resolved earlier in this process
-    (cached by ``get_model_architecture``) is dropped so the load resolves again."""
+    (cached by `get_model_architecture`) is dropped so the load resolves again."""
     from vllm.model_executor.model_loader import utils as loader_utils
     from vllm.model_executor.models.registry import ModelRegistry
 
@@ -57,8 +57,8 @@ def register() -> None:
 
 
 class SpecializedK3DSparkModel(K3DSparkModel):
-    """``K3DSparkModel`` whose forward runs ``specialized_forward`` (the drafter's
-    collectives, set at load by ``install_collectives``) first; its None (a batch
+    """`K3DSparkModel` whose forward runs `specialized_forward` (the drafter's
+    collectives, set at load by `install_collectives`) first; its None (a batch
     it does not serve) or no hook runs the stock forward."""
 
     specialized_forward = None
@@ -78,7 +78,7 @@ class SpecializedK3DSparkModel(K3DSparkModel):
 
 class SpecializedK3DSparkForCausalLM(K3DSparkForCausalLM):
     """The stock DSpark drafter with the changes listed above, built in place of
-    ``K3DSparkForCausalLM`` (``register``). Same weights, same checkpoint names."""
+    `K3DSparkForCausalLM` (`register`). Same weights, same checkpoint names."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -111,7 +111,7 @@ class SpecializedK3DSparkForCausalLM(K3DSparkForCausalLM):
 def context_proj(backbone, prefix: str):
     """The draft's context projection column-parallel with a gathered output when
     TP > 1 divides it, replacing the stock replicated one before the weights load
-    (the checkpoint's ``context_proj.weight`` is sharded by its loader); None keeps
+    (the checkpoint's `context_proj.weight` is sharded by its loader); None keeps
     the stock one."""
     from vllm.distributed import get_tensor_model_parallel_world_size
 
@@ -134,8 +134,8 @@ def context_proj(backbone, prefix: str):
 
 def install_draft_fold(attn) -> None:
     """Fold the draft block's tokens into heads in the layer's MLA decode
-    (``attention.draft_forward_mqa``: one decode row per request instead of one per
-    token; the stock ``forward_mqa`` for a batch it does not fold)."""
+    (`attention.draft_forward_mqa`: one decode row per request instead of one per
+    token; the stock `forward_mqa` for a batch it does not fold)."""
     from .attention import draft_forward_mqa
 
     if not attn.non_causal_multi_token_decode:
@@ -146,7 +146,7 @@ def install_draft_fold(attn) -> None:
 
 @cache
 def _folded_impl(base):
-    """``base`` (the layer's MLA impl class) whose ``forward_mqa`` runs the folded
+    """`base` (the layer's MLA impl class) whose `forward_mqa` runs the folded
     draft decode first. Keeps the class name (logs, backend checks)."""
     from .attention import draft_forward_mqa
 
@@ -164,8 +164,8 @@ def _folded_impl(base):
 
 @cache
 def _gathered_linear():
-    """``ColumnParallelLinear(gather_output=True)`` whose all-gather is the drafter's
-    (``comm.DrafterComm.gather_context``, attached at load), NCCL's otherwise."""
+    """`ColumnParallelLinear(gather_output=True)` whose all-gather is the drafter's
+    (`comm.DrafterComm.gather_context`, attached at load), NCCL's otherwise."""
     from vllm.distributed import tensor_model_parallel_all_gather
     from vllm.model_executor.layers.linear import ColumnParallelLinear
 
@@ -182,7 +182,7 @@ def _gathered_linear():
 
 def draft_shape(vllm_config: VllmConfig) -> dict | None:
     """What the drafter's load-time reservations are sized by: the largest draft
-    batch (requests), the block length ``k``, the local attention heads and the
+    batch (requests), the block length `k`, the local attention heads and the
     plan length of captured graphs; None when the draft attention cannot run CAKE
     (DCP returns an LSE: the cute-dsl kernel)."""
     from vllm.distributed import get_tensor_model_parallel_world_size
@@ -203,8 +203,8 @@ def draft_shape(vllm_config: VllmConfig) -> dict | None:
 
 def after_loading(model) -> None:
     """Route the drafter's linears through DraftGemm and reserve the folded draft
-    attention's CAKE workspace for the largest draft batch (``model`` is a
-    specialized ``K3DSparkForCausalLM``)."""
+    attention's CAKE workspace for the largest draft batch (`model` is a
+    specialized `K3DSparkForCausalLM`)."""
     from vllm.logger import init_logger
 
     from . import linears
@@ -295,8 +295,8 @@ def _build_dcp(backbone):
 
 
 def _prepared_embedding(backbone, tp):
-    """The vocab-parallel embedding's local lookup (``cutedsl.common.embedding``,
-    zero rows for ids another rank owns) whose all-reduce ``forward`` fuses with
+    """The vocab-parallel embedding's local lookup (`cutedsl.common.embedding`,
+    zero rows for ids another rank owns) whose all-reduce `forward` fuses with
     the first draft layer's RMSNorm; None keeps the stock embedding."""
     from ..cutedsl.common.embedding import PreparedEmbedding
 
@@ -322,8 +322,8 @@ LAYER_AR_ROWS = 0
 
 
 def forward(backbone, comm, dcp, embed, input_ids, positions, inputs_embeds):
-    """``K3DSparkModel.forward`` with the embedding's all-reduce fused into the
-    first RMSNorm (ArNorm) and the draft attention on ``dcp``, or None (the stock
+    """`K3DSparkModel.forward` with the embedding's all-reduce fused into the
+    first RMSNorm (ArNorm) and the draft attention on `dcp`, or None (the stock
     forward) for a batch these do not serve. Same layers, same order."""
     from vllm.models.common.ops.fused_allreduce_rms_norm import (
         fused_allreduce_rms_norm,

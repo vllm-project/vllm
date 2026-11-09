@@ -172,7 +172,7 @@ class UMBPStoreConnectorScheduler:
     """Own vLLM prefix matching while the runtime owns lookup transport.
 
     Without a runtime and codec the scheduler neither looks up nor stores
-    until ``bind_namespace`` supplies them.
+    until `bind_namespace` supplies them.
     """
 
     def __init__(
@@ -687,7 +687,6 @@ class UMBPStoreConnectorScheduler:
 
         block_state = getattr(scheduler_output, "kv_connector_block_state", None)
         cached_reqs = scheduler_output.scheduled_cached_reqs
-        resumed_ids: set[str] = set(getattr(cached_reqs, "resumed_req_ids", ()))
         for request_id in cached_reqs.req_ids:
             load_plans = self._pending_loads.pop(request_id, [])
             self._load_specs.pop(request_id, None)
@@ -712,10 +711,7 @@ class UMBPStoreConnectorScheduler:
                                 self.kv_cache_config.prefix_cacheable_group_ids
                             )
                         )
-                        if request_id in resumed_ids:
-                            cached_tracker.replace_blocks(selected)
-                        else:
-                            cached_tracker.update_blocks(selected)
+                        cached_tracker.update_blocks(selected)
                     # The appended table keeps blocks core has since freed, such
                     # as sliding-window blocks out of the window, which a store
                     # would read; core's current table does not.

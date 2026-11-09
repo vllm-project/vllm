@@ -6,8 +6,6 @@ startup_max_wait_seconds: 1200
 # Require draft steps and report natural acceptance without a performance bound.
 min_acceptance_length: 1.0
 expect_prefix_cache_hits: true
-env:
-  VLLM_USE_V2_MODEL_RUNNER: "1"
 # 327 divides each 5232-token page and preserves the shared 654-token boundary.
 server_args: >-
   --enforce-eager

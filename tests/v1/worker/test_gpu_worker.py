@@ -20,11 +20,13 @@ from vllm.v1.worker.startup_plan import (
 )
 
 
-def test_v2_gpu_worker_requires_triton(monkeypatch):
+def test_gpu_worker_requires_triton(monkeypatch):
     monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
-    monkeypatch.setattr(gpu_worker.current_platform, "is_cpu", lambda: False)
-    config = SimpleNamespace(use_v2_model_runner=True)
-    with pytest.raises(ValueError, match="Model Runner V2 requires Triton"):
+    monkeypatch.setattr(
+        gpu_worker.current_platform, "uses_standalone_cpu_model_runner", lambda: False
+    )
+    config = SimpleNamespace()
+    with pytest.raises(ValueError, match="model runner requires Triton"):
         gpu_worker.Worker(
             config,
             local_rank=0,
@@ -279,24 +281,21 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
 
 
 @pytest.mark.parametrize(
-    "use_v2,extensible,cudagraphs,estimate_enabled,estimate,warns",
+    "extensible,cudagraphs,estimate_enabled,estimate,warns",
     [
-        # MRV1: the flag decides whether the estimate runs and is applied.
-        (False, False, True, True, 3, False),
-        (False, False, True, False, 3, True),
-        # MRV2 with the extensible cache: the estimate is 0 by design, and
-        # neither flag value warns about unaccounted graph memory.
-        (True, True, True, True, 0, False),
-        (True, True, True, False, 0, False),
-        # MRV2 fallback (extensible cache off).
-        (True, False, True, True, 3, False),
-        (True, False, True, False, 3, True),
-        # MRV2 with no graphs to capture and the flag at 1.
-        (True, False, False, True, 0, False),
+        # With the extensible cache: the estimate is 0 by design, and neither
+        # flag value warns about unaccounted graph memory.
+        (True, True, True, 0, False),
+        (True, True, False, 0, False),
+        # Fallback (extensible cache off).
+        (False, True, True, 3, False),
+        (False, True, False, 3, True),
+        # No graphs to capture and the flag at 1.
+        (False, False, True, 0, False),
     ],
 )
 def test_cudagraph_memory_profile_runs_only_when_applied(
-    monkeypatch, use_v2, extensible, cudagraphs, estimate_enabled, estimate, warns
+    monkeypatch, extensible, cudagraphs, estimate_enabled, estimate, warns
 ):
     """The graph memory estimate is a throwaway capture pass; with the
     estimate disabled it is neither run nor subtracted from the KV cache
@@ -319,7 +318,6 @@ def test_cudagraph_memory_profile_runs_only_when_applied(
             )
         ),
         randomize_dummy_inputs=False,
-        use_v2_model_runner=use_v2,
         cache_config=SimpleNamespace(
             kv_cache_memory_bytes=None,
             gpu_memory_utilization=0.9,
@@ -577,7 +575,6 @@ def test_execute_model_waits_previous_pp_send_before_forward(
                 pipeline_parallel_size=2, distributed_executor_backend="mp"
             ),
         ),
-        use_v2_model_runner=True,
         model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
         annotate_profile=lambda scheduler_output: nullcontext(),
         _pp_send_work=[previous_tensor_send],
@@ -590,6 +587,62 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     assert log == ["wait:prev-tensor", "forward", "isend"]
     assert worker._pp_send_work == [tensor_handle]
+
+
+@pytest.mark.parametrize("is_last_rank", [False, True])
+def test_every_pp_rank_runs_a_forward_before_the_sync_check(
+    monkeypatch: pytest.MonkeyPatch, is_last_rank: bool
+):
+    """Eager, no JIT or extensible-cache warmup: every PP rank still runs an
+    attention-bearing dummy forward before `enable_gpu_sync_check()`, so state
+    built on the first forward is not built in a checked step. Only the last
+    rank warms up the sampler."""
+    log: list[str] = []
+    monkeypatch.setattr(
+        gpu_worker, "get_pp_group", lambda: SimpleNamespace(is_last_rank=is_last_rank)
+    )
+    monkeypatch.setattr(gpu_worker, "kernel_warmup", lambda worker: None)
+    monkeypatch.setattr(gpu_worker, "freeze_gc_heap", lambda: None)
+    monkeypatch.setattr(gpu_worker, "set_random_seed", lambda *args: None)
+    monkeypatch.setattr(
+        gpu_worker, "enable_gpu_sync_check", lambda: log.append("sync_check")
+    )
+
+    def dummy_run(num_tokens, skip_eplb):
+        log.append("forward")
+        return (None, torch.zeros(num_tokens)) if is_last_rank else (None, None)
+
+    compilation_config = SimpleNamespace(
+        mode=gpu_worker.CompilationMode.NONE,
+        compilation_time=0.0,
+        encoder_compilation_time=0.0,
+    )
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            compilation_config=compilation_config,
+            kernel_config=SimpleNamespace(enable_jit_warmup=False),
+        ),
+        cache_config=SimpleNamespace(
+            enable_extensible_kv_cache=False, kv_cache_memory_bytes=None
+        ),
+        model_config=SimpleNamespace(enforce_eager=True, seed=0),
+        parallel_config=SimpleNamespace(data_parallel_index=0),
+        scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=64),
+        compilation_config=compilation_config,
+        model_runner=SimpleNamespace(
+            is_pooling_model=False,
+            maybe_remove_all_loras=lambda lora_config: None,
+            lora_config=None,
+            _dummy_run=dummy_run,
+            _dummy_sampler_run=lambda hidden_states: log.append("sampler"),
+        ),
+        _maybe_activate_jit_monitor=lambda: None,
+    )
+
+    gpu_worker.Worker._compile_or_warm_up_model(worker)
+
+    sampler = ["sampler"] if is_last_rank else []
+    assert log == ["forward", *sampler, "sync_check"]
 
 
 def test_jit_monitor_activation_follows_enable_jit_warmup(
@@ -657,7 +710,6 @@ def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
         vllm_config=SimpleNamespace(kv_transfer_config=None),
         model_runner=runner,
         _maybe_get_memory_pool_context=lambda tag: nullcontext(),
-        _v2_model_runner=lambda: runner,
     )
     # Warmup commits what every rank can: another can commit two fewer.
     monkeypatch.setattr(gpu_worker, "_min_across_ranks", lambda value: value - 2)
@@ -779,6 +831,7 @@ def _weight_update_worker(
 ):
     """A Worker over an extensible KV cache with free_bytes of free memory
     and a model whose largest layer reloads layer_bytes."""
+    from vllm.platforms.interface import Platform
     from vllm.v1.worker import extensible_kv_cache
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -788,6 +841,11 @@ def _weight_update_worker(
     monkeypatch.setattr(extensible_kv_cache, "has_kv_transfer_group", lambda: False)
     monkeypatch.setattr(
         torch.accelerator, "get_memory_info", lambda *args: (free_bytes, 100 * GiB)
+    )
+    monkeypatch.setattr(
+        extensible_kv_cache.current_platform,
+        "free_device_memory",
+        Platform.free_device_memory,
     )
     monkeypatch.setattr(torch.accelerator, "memory_reserved", lambda *args: 0)
     monkeypatch.setattr(torch.accelerator, "memory_allocated", lambda *args: 0)

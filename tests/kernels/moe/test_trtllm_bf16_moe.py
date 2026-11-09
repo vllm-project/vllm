@@ -204,7 +204,7 @@ def test_trtllm_bf16_lora_accepts_checkpoint_shaped_weights(has_lora_delta):
 def _run_bf16_padded(experts, a, trtllm_w1, trtllm_w2, topk_weights, topk_ids, e):
     """Drive TrtLlmBf16ExpertsModular.apply directly on a padded layout.
 
-    ``a`` / ``topk_ids`` already carry the padding tail (rows whose topk_ids
+    `a` / `topk_ids` already carry the padding tail (rows whose topk_ids
     are -1). Workspaces are FlashInfer-managed, so we pass the (0,)-shaped
     stand-ins that workspace_shapes advertises.
     """

@@ -38,7 +38,7 @@ logger = init_logger(__name__)
 
 
 def _sum_or_none(counts: list[int | None]) -> int | None:
-    """Sum per-prompt counts; ``None`` unless every prompt reported one."""
+    """Sum per-prompt counts; `None` unless every prompt reported one."""
     return None if None in counts else sum(count or 0 for count in counts)
 
 
@@ -69,8 +69,8 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         Returns:
             A tuple of (single_requests, all_conversations, engine_prompts) on
             success — one entry per conversation — or an ErrorResponse on
-            failure. The renderer adjusts ``single_requests`` in place, so
-            sampling must read them rather than rebuilding from ``request``.
+            failure. The renderer adjusts `single_requests` in place, so
+            sampling must read them rather than rebuilding from `request`.
 
         """
         error_check_ret = await self._check_model(request)
@@ -236,10 +236,10 @@ class OpenAIServingChatBatch(OpenAIServingChat):
 
         Fans out N generators (one per conversation in the batch), collects
         the final output for each, and assembles a single
-        ``ChatCompletionResponse`` whose ``choices`` are indexed 0,...,N-1.
+        `ChatCompletionResponse` whose `choices` are indexed 0,...,N-1.
 
         Tool-use and streaming are rejected upstream by the
-        ``check_batch_mode`` validator, so neither needs to be handled here.
+        `check_batch_mode` validator, so neither needs to be handled here.
         """
         created_time = int(time.time())
         final_results: dict[int, RequestOutput] = {}

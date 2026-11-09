@@ -197,9 +197,9 @@ def test_modelopt_mxfp8_routes_nvfp4_experts_to_compressed_tensors(monkeypatch):
 
 
 def test_per_token_nvfp4_moe_backends_match_the_experts_that_implement_it():
-    """``make_nvfp4_moe_kernel`` dispatches unquantized inputs for a per-token
-    scheme and only forwards ``per_token_activation`` to this set, so it has to
-    be exactly the experts that take that argument. ``_supports_quant_scheme``
+    """`make_nvfp4_moe_kernel` dispatches unquantized inputs for a per-token
+    scheme and only forwards `per_token_activation` to this set, so it has to
+    be exactly the experts that take that argument. `_supports_quant_scheme`
     cannot be used for the check: several NVFP4 backends match on the weight
     key alone and accept any activation key."""
     import inspect
@@ -810,7 +810,6 @@ def test_modelopt_mixed_dspark_checkpoint(tmp_path, monkeypatch, vllm_runner):
     from vllm import SamplingParams
 
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     target, draft = tmp_path / "target", tmp_path / "draft"
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
@@ -1029,9 +1028,9 @@ def test_modelopt_fp8_pb_wo_checkpoint_setup(monkeypatch, dist_init, workspace_i
 
 
 def test_modelopt_nvfp4_config_dispatches_w4a4_method():
-    """``quant_method="NVFP4"`` (W4A4) resolves to a
-    ``(kNvfp4Static, kNvfp4Dynamic)`` QuantSpec under the generic
-    ``ModelOptLinearMethod``."""
+    """`quant_method="NVFP4"` (W4A4) resolves to a
+    `(kNvfp4Static, kNvfp4Dynamic)` QuantSpec under the generic
+    `ModelOptLinearMethod`."""
     from vllm.model_executor.layers.linear import LinearBase
 
     config = ModelOptNvFp4Config(
@@ -1051,11 +1050,11 @@ def test_modelopt_nvfp4_config_dispatches_w4a4_method():
 
 
 def test_modelopt_nvfp4_config_dispatches_w4a16_method():
-    """``quant_method="W4A16_NVFP4"`` resolves to a weight-only QuantSpec
-    (``activation=None``) — distinct from the W4A4 sibling.
+    """`quant_method="W4A16_NVFP4"` resolves to a weight-only QuantSpec
+    (`activation=None`) — distinct from the W4A4 sibling.
 
     A regression here would mean a W4A16 NVFP4 checkpoint silently loaded
-    with a dynamic fp4 activation key, registering an ``input_scale`` and
+    with a dynamic fp4 activation key, registering an `input_scale` and
     routing to the cutlass W4A4 NVFP4 GEMM instead of FP4 Marlin.
     """
     from vllm.model_executor.layers.linear import LinearBase
@@ -1078,9 +1077,9 @@ def test_modelopt_nvfp4_config_dispatches_w4a16_method():
 
 def test_modelopt_linear_method_builder_registry_override(monkeypatch):
     """The bespoke-method escape hatch: a format registered in
-    ``LINEAR_METHOD_BUILDERS`` routes that algo to its own method instead of the
-    generic ``ModelOptLinearMethod``. This is how a format that cannot be a
-    ``(weight, activation)`` key pair plugs into dispatch."""
+    `LINEAR_METHOD_BUILDERS` routes that algo to its own method instead of the
+    generic `ModelOptLinearMethod`. This is how a format that cannot be a
+    `(weight, activation)` key pair plugs into dispatch."""
     from vllm.model_executor.layers.linear import LinearBase
     from vllm.model_executor.layers.quantization import modelopt as m
 
@@ -1110,9 +1109,9 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
 )
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
-    """W4A16 (`activation=None`) kernel selection honors ``--linear-backend``:
-    ``use_a16=True`` follows platform priorities, but an explicit backend wins. The
-    generic method routes this through ``select_linear_kernel``."""
+    """W4A16 (`activation=None`) kernel selection honors `--linear-backend`:
+    `use_a16=True` follows platform priorities, but an explicit backend wins. The
+    generic method routes this through `select_linear_kernel`."""
     from vllm.config.quantization import QuantSpec
     from vllm.model_executor.layers.quantization.modelopt import (
         RuntimeDtypes,
@@ -1156,12 +1155,12 @@ def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
 def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
     quant_method, expected_use_a16, act_key_is_none
 ):
-    """``ModelOptNvFp4FusedMoE``: when the ckpt's ``quant_method`` is
-    ``W4A16_NVFP4``, the MoE class must pass ``activation_key=None`` to
-    ``select_nvfp4_moe_backend``. That filters out every W4A4 backend
-    (their ``_supports_quant_scheme`` requires
-    ``(kNvfp4Static, kNvfp4Dynamic)`` exactly); Marlin survives because
-    it only checks ``weight_key``. A regression here would mean a W4A16
+    """`ModelOptNvFp4FusedMoE`: when the ckpt's `quant_method` is
+    `W4A16_NVFP4`, the MoE class must pass `activation_key=None` to
+    `select_nvfp4_moe_backend`. That filters out every W4A4 backend
+    (their `_supports_quant_scheme` requires
+    `(kNvfp4Static, kNvfp4Dynamic)` exactly); Marlin survives because
+    it only checks `weight_key`. A regression here would mean a W4A16
     ckpt silently went to the cutlass W4A4 path.
     """
     from vllm.model_executor.layers.quantization.modelopt import (
@@ -1284,11 +1283,11 @@ def test_modelopt_nvfp4_moe_validates_activation_override(
 def test_modelopt_mixed_precision_dispatches_linear_layer(
     per_layer_algo, expected_weight, expected_activation
 ):
-    """``ModelOptMixedPrecisionConfig.get_quant_method`` routes a Linear layer
-    to the generic ``ModelOptLinearMethod`` with the ``QuantSpec`` resolved
-    from its per-layer ``quant_algo`` entry in ``quantized_layers``. A
-    regression here would mean a layer got the wrong ``(weight, activation)``
-    key pair or fell through to ``UnquantizedLinearMethod`` — e.g. a W4A16
+    """`ModelOptMixedPrecisionConfig.get_quant_method` routes a Linear layer
+    to the generic `ModelOptLinearMethod` with the `QuantSpec` resolved
+    from its per-layer `quant_algo` entry in `quantized_layers`. A
+    regression here would mean a layer got the wrong `(weight, activation)`
+    key pair or fell through to `UnquantizedLinearMethod` — e.g. a W4A16
     layer picking up a dynamic fp4 activation key (cutlass W4A4 path) instead
     of the weight-only Marlin path.
     """
@@ -1317,9 +1316,9 @@ def test_modelopt_mixed_precision_dispatches_linear_layer(
 
 
 def test_modelopt_mixed_precision_builds_w4a16_sibling_config():
-    """Sanity: ``ModelOptMixedPrecisionConfig._from_config`` builds **two**
+    """Sanity: `ModelOptMixedPrecisionConfig._from_config` builds **two**
     NVFP4 sub-configs — one for W4A4 (default) and one tagged
-    ``quant_method='W4A16_NVFP4'`` — so per-layer dispatch can hand
+    `quant_method='W4A16_NVFP4'` — so per-layer dispatch can hand
     Marlin-bound layers the right config without re-instantiating it on
     every call.
     """

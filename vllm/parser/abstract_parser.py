@@ -66,7 +66,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class StreamState:
-    """Mutable state for ``Parser.parse_delta()``. One per stream."""
+    """Mutable state for `Parser.parse_delta()`. One per stream."""
 
     reasoning_ended: bool = False
     tool_call_text_started: bool = False
@@ -112,10 +112,10 @@ class StreamState:
 class Parser:
     """Parse model output into reasoning, content and tool calls.
 
-    The serving layer holds one ``Parser`` per request and calls only the
-    members defined here. ``ParserEngine`` implements them over a single
-    declarative engine; ``DelegatingParser`` composes a legacy
-    ``ReasoningParser`` / ``ToolParser`` pair.
+    The serving layer holds one `Parser` per request and calls only the
+    members defined here. `ParserEngine` implements them over a single
+    declarative engine; `DelegatingParser` composes a legacy
+    `ReasoningParser` / `ToolParser` pair.
     """
 
     # Class-level parser classes for compatibility with existing patterns

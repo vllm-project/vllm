@@ -215,8 +215,8 @@ def deferred_supported(backend, state, lower_bound):
     """Whether the KDA metadata of the specialized decode defers a layer's RecoverSSM
     commit: the layer's RecoverSSM kernels are Triton (the stock FP32-state path) and
     the specialized FP32 commit can fold its checkpoints (FP32 [slot, H, 128, 128] on
-    SM10x, a bounded gate). ``recoverssm.context.KDADeferredCommitContext`` takes
-    the same decision (its commit backend ``fp32_deferred``)."""
+    SM10x, a bounded gate). `recoverssm.context.KDADeferredCommitContext` takes
+    the same decision (its commit backend `fp32_deferred`)."""
     from .commit import supported
 
     return backend == "triton" and supported(state, lower_bound)
@@ -305,9 +305,9 @@ class PreparedKda:
         return self
 
     def run(self, projected, out, *, caches, slots, accepted=None, q=1, deferred=None):
-        """``accepted`` [>= B] (verify steps of ``q`` tokens): ``slots`` is [>= B, q]
-        contiguous, or [>= B, 1] (the checkpoints) under RecoverSSM. ``deferred``
-        (the KDA metadata's ``recoverssm_deferred``): the record rows [>= B] and
+        """`accepted` [>= B] (verify steps of `q` tokens): `slots` is [>= B, q]
+        contiguous, or [>= B, 1] (the checkpoints) under RecoverSSM. `deferred`
+        (the KDA metadata's `recoverssm_deferred`): the record rows [>= B] and
         pending counts of a deferred RecoverSSM step."""
         batch = projected.shape[0]
         key, rows = batch, batch

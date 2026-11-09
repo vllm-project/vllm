@@ -150,8 +150,8 @@ def shard_sequence_parallel_mlp(
 ) -> bool:
     """Whether to TP-shard a sequence-parallel MLP instead of replicating it.
 
-    Opt-in via ``VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT``; see :class:`KimiMLP` for
-    the trade-off and :mod:`vllm.envs` for when it is worth enabling.
+    Opt-in via `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT`; see `KimiMLP` for
+    the trade-off and `vllm.envs` for when it is worth enabling.
     """
     enabled = envs.VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT
     if not (use_sequence_parallel and eligible and enabled):
@@ -166,7 +166,7 @@ def can_shard_sequence_parallel_shared_expert(vllm_config: VllmConfig) -> bool:
     """Whether the active MoE backend preserves the SP shared-expert contract.
 
     MegaMoE invokes the shared expert directly. DeepEP v2 invokes it through
-    ``MoERunner``, but its EP combine returns the routed output in the local
+    `MoERunner`, but its EP combine returns the routed output in the local
     sequence-sharded layout, so the shared expert can use the same
     all-gather/partial-GEMM/reduce-scatter implementation.
     """
@@ -205,13 +205,13 @@ class KimiMLP(nn.Module):
     """Dense / shared-expert MLP, optionally TP-sharded under sequence parallel.
 
     Under sequence parallelism each rank owns a distinct slice of the tokens, so
-    by default both projections are replicated (``disable_tp``) and the block
+    by default both projections are replicated (`disable_tp`) and the block
     needs no collective. That makes every rank stream the entire weight to serve
     its own token shard.
 
-    With ``VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT`` the weights are TP-sharded
+    With `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT` the weights are TP-sharded
     instead. A rank then holds only a slice of the intermediate dim, so it
-    cannot finish its own tokens alone: ``forward`` all-gathers the full token
+    cannot finish its own tokens alone: `forward` all-gathers the full token
     set, computes this rank's partial, and reduce-scatters. The reduce-scatter
     sums across TP and restores the sequence sharding in one collective, so the
     block still ends with one collective per direction.
@@ -597,19 +597,19 @@ class KimiMoE(nn.Module):
         """Compute the routed-expert down projection alongside the router,
         overlapping them on separate CUDA streams when latent MoE is enabled.
 
-        The router gate and the down projection both read ``hidden_states``, so
+        The router gate and the down projection both read `hidden_states`, so
         the gate runs on the default stream and the down projection on the aux
-        stream, joined via ``maybe_execute_in_parallel``. For MegaMoE the
+        stream, joined via `maybe_execute_in_parallel`. For MegaMoE the
         grouped top-k selection consumes only the gate logits, so it also runs
         on the default stream and overlaps the down projection.
 
         Returns:
-            ``(routed_hidden_states, router_output, topk_ids)``.
-            ``routed_hidden_states`` is the down-projected latent (or the
-            original ``hidden_states`` when latent MoE is disabled). For MegaMoE
-            ``router_output`` holds the grouped top-k weights and ``topk_ids``
-            the selected experts; otherwise ``router_output`` holds the raw gate
-            logits and ``topk_ids`` is ``None``.
+            `(routed_hidden_states, router_output, topk_ids)`.
+            `routed_hidden_states` is the down-projected latent (or the
+            original `hidden_states` when latent MoE is disabled). For MegaMoE
+            `router_output` holds the grouped top-k weights and `topk_ids`
+            the selected experts; otherwise `router_output` holds the raw gate
+            logits and `topk_ids` is `None`.
 
         """
 
@@ -1161,7 +1161,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         pending_mlp_out: torch.Tensor | None,
         block_residual: torch.Tensor,
     ) -> torch.Tensor:
-        """Return the AttnRes stream after ``layer_idx``."""
+        """Return the AttnRes stream after `layer_idx`."""
         prefix = prefix_sum if pending_mlp_out is None else prefix_sum + pending_mlp_out
         if not (self._aux_attn_res_stream and self.use_attn_res):
             return prefix
@@ -1223,8 +1223,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 )
             hidden_states = sp_shard(hidden_states)
             assert residual is None, "Currently, SP is not supported with PP"
-
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
         # sharded aux hidden states when sp is enabled
         aux_hidden_states: list[torch.Tensor] = []
@@ -1323,7 +1321,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
-        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states

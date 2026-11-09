@@ -2,29 +2,29 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DSpark's sequential Markov sampling, one launch per draft step.
 
-``DSparkSpeculator._sample_sequential`` runs, for each of the ``k`` draft steps,
+`DSparkSpeculator._sample_sequential` runs, for each of the `k` draft steps,
 the Markov embedding of the previous token, the bias GEMV over the whole
-vocabulary (``markov_w2``: 163840 x 256 BF16, 84 MB, replicated), the add to the
+vocabulary (`markov_w2`: 163840 x 256 BF16, 84 MB, replicated), the add to the
 base logits ([R, 163840] written twice), the Gumbel sample (its kernel, a torch
-argmax over the block maxima and a gather) and the copy into ``draft_tokens``:
+argmax over the block maxima and a gather) and the copy into `draft_tokens`:
 about nine launches and three full-vocabulary [R, V] tensors per step.
 
 Here each step is two launches. The step kernel's programs each own 256
 vocabulary entries and 16 request rows: they gather the rows' Markov embeddings
-(``markov_w1[prev]``), stream their ``markov_w2`` range in [64, rank] tiles and
+(`markov_w1[prev]`), stream their `markov_w2` range in [64, rank] tiles and
 multiply all rows at once on the tensor cores (FP32 accumulation), add the base
 logits, write the step's logits into the draft logits cache and keep each row's
 Gumbel-max over their range. A select launch (one program per row) takes the
 first of the largest per-program maxima, which is the step's token: it writes
-``draft_tokens`` and the next step's previous token.
+`draft_tokens` and the next step's previous token.
 
 Exactness: the same sampling as vLLM's loop. The bias is the FP32 dot product of
-the embedding and the ``markov_w2`` row rounded once to the logits dtype (the GEMV
+the embedding and the `markov_w2` row rounded once to the logits dtype (the GEMV
 output dtype), the add is one FP32 add rounded to the logits dtype (a BF16 tensor
 add), the cache holds the logits before temperature, and the Gumbel noise is
-vLLM's own draw (``murmur3`` keyed by the request seed mixed with the draft step,
+vLLM's own draw (`murmur3` keyed by the request seed mixed with the draft step,
 the position before the sampled token plus the draft salt, and the token id),
-divided by the temperature exactly as ``gumbel_noised_argmax`` does. Only the
+divided by the temperature exactly as `gumbel_noised_argmax` does. Only the
 summation order of the 256-term bias dot product differs from cuBLAS's GEMV, as
 any GEMM tiling may; ties keep the first token as vLLM's two-level argmax does.
 """
@@ -64,7 +64,7 @@ def _add_rn(a, b):
 
 @triton.jit
 def _gumbel_key(lf, temp, seed, pos, v, USE_FP64: tl.constexpr):
-    """``gumbel_noised_argmax``'s key of FP32 logits ``lf`` (temperature applied
+    """`gumbel_noised_argmax`'s key of FP32 logits `lf` (temperature applied
     in FP32, then the draft-salted noise; plain logits at temperature 0)."""
     noisy = temp != 0.0
     lf = tl.where(noisy, lf / temp, lf)
@@ -80,10 +80,10 @@ def _gumbel_key(lf, temp, seed, pos, v, USE_FP64: tl.constexpr):
 
 @triton.jit
 def _gumbel_log_arg32(seed, pos, v):
-    """The argument of the outer log of ``_gumbel_key``'s FP32 noise
-    ``-log(-log1p(-u))``: the noise is ``-log`` of it. The step kernel takes that
+    """The argument of the outer log of `_gumbel_key`'s FP32 noise
+    `-log(-log1p(-u))`: the noise is `-log` of it. The step kernel takes that
     last log itself, so its add to the logits compiles as in
-    ``gumbel_noised_argmax`` (a stored noise, added in another kernel, rounds
+    `gumbel_noised_argmax` (a stored noise, added in another kernel, rounds
     differently: 1 ulp on about a fifth of the keys)."""
     u = murmur3_uniform32(seed, pos, v)
     return -_log1p_neg_stable(u)
@@ -315,13 +315,13 @@ class FusedMarkov:
 
     def noise_rows(self, num_reqs, n_spec):
         """Whether this batch's Gumbel noise is precomputed (FP32 noise, at most
-        ``NOISE_ROWS`` sampled rows)."""
+        `NOISE_ROWS` sampled rows)."""
         return not self.use_fp64 and 1 <= num_reqs * n_spec <= NOISE_ROWS
 
     def fork_noise(self, spec, num_reqs, n_spec):
         """Launch this draft step's Gumbel noise on a side stream (it depends only
         on the seeds, the positions and the token ids, not on any logits), so it
-        runs beside the lm_head; ``join`` before the steps read it."""
+        runs beside the lm_head; `join` before the steps read it."""
         if self.noise is None:
             self.noise = torch.empty(
                 NOISE_ROWS * self.vocab, dtype=torch.float32, device=self.device
@@ -358,8 +358,8 @@ class FusedMarkov:
         torch.cuda.current_stream(self.device).wait_stream(self.stream)
 
     def run(self, spec, num_reqs, base_logits, w1, w2, noise=None):
-        """``base_logits``: [num_reqs, k, V]; writes the draft logits cache and
-        ``spec.draft_tokens[:num_reqs]``. ``noise``: ``fork_noise``'s (joined), or
+        """`base_logits`: [num_reqs, k, V]; writes the draft logits cache and
+        `spec.draft_tokens[:num_reqs]`. `noise`: `fork_noise`'s (joined), or
         None to hash the noise in the steps."""
         n_spec = base_logits.shape[1]
         use_noise = noise is not None
@@ -463,7 +463,7 @@ _FUSED: dict = {}
 
 
 def sample_sequential(spec, model, num_reqs: int, head_hidden: torch.Tensor) -> bool:
-    """``DSparkSpeculator._sample_sequential`` with the fused launches. Returns
+    """`DSparkSpeculator._sample_sequential` with the fused launches. Returns
     False, having done nothing, when this step takes vLLM's loop."""
     why = why_not(spec, model, num_reqs)
     if why is not None:
@@ -501,7 +501,7 @@ def sample_sequential(spec, model, num_reqs: int, head_hidden: torch.Tensor) -> 
 
 
 def _fused(spec, w1, w2, device):
-    """The speculator's FusedMarkov (markov_w2's vocabulary; ``sample_sequential``
+    """The speculator's FusedMarkov (markov_w2's vocabulary; `sample_sequential`
     checks it against the base logits')."""
     vocab, rank = w2.shape[0], w1.shape[1]
     key = (device, vocab, rank, bool(spec.use_fp64_gumbel))
