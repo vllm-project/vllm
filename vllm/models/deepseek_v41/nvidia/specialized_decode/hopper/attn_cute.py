@@ -14,7 +14,7 @@ can become resident and stage its weights while this one runs.
                 448..511, UE8M0 FP8 quant, V4 record insert) straight from the
                 fused_wqa_wkv output [M, 1792].
 
-Host calls: ``attn_chain``.
+Host calls: `attn_chain`.
 """
 
 import cuda.bindings.driver as cuda
@@ -174,10 +174,10 @@ class QkvNorm:
     """grid = M CTAs x 64 threads. Warp 0: qr = RMSNorm(qkv[:, :1280]) * wq -> bf16.
     Warp 1: kv = RMSNorm(qkv[:, 1280:]) * wkv rounded to bf16; then the stock V4 KV
     insert (GPT-J RoPE on 448..511, 64-dim UE8M0 FP8 blocks, bf16 RoPE). Lane L of
-    warp 1 owns dims [16L, 16L+16) (stock map). ``kvo`` is unused.
+    warp 1 owns dims [16L, 16L+16) (stock map). `kvo` is unused.
 
-    Warp 1 also writes the inserted key, dequantized as ``mla_cute.SwaImage``
-    would, into the ``mla_cute.ChainDecode`` SWA tile image ``img`` of each row
+    Warp 1 also writes the inserted key, dequantized as `mla_cute.SwaImage`
+    would, into the `mla_cute.ChainDecode` SWA tile image `img` of each row
     group of its request whose union holds the key's slot (found before the
     wait)."""
 
@@ -398,7 +398,7 @@ class QkvNorm:
 
     @cute.jit
     def _find(self, up, t, slot, lane, kidx, klen, cap, R, ngr):
-        """up[kg]: the position of ``slot`` in the SWA union of row group kg of
+        """up[kg]: the position of `slot` in the SWA union of row group kg of
         row t's request, or -1."""
         b = t // R
         for kg in cutlass.range_constexpr(2):
@@ -421,7 +421,7 @@ class QkvNorm:
 
     @cute.jit
     def _dequant(self, f, q, ex):
-        """``mla_cute._Common._store_token_any`` of this lane's 16 e4m3 values
+        """`mla_cute._Common._store_token_any` of this lane's 16 e4m3 values
         (scale 2^ex): 8 fp16x2 words."""
         k = cutlass.min(cutlass.min(cutlass.max(ex + 127, 0), 255) - 127, 15)
         s1 = cutlass.Uint32(cutlass.max(k + 15, 1) << 10)

@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CuTe DSL kernels of the Hopper small-batch sparse-MLA decode
-(``mla_small``), on the FlashMLA FP8 caches (584-byte V4 records). A row group
+(`mla_small`), on the FlashMLA FP8 caches (584-byte V4 records). A row group
 is up to 64 // H verify rows of one request, whose H heads each share one
 64-row WGMMA tile.
 
-- ``UnionBuild``: per row group, the union of its rows' SWA slots (up to
-  ``NSWB`` 64-key blocks) and a per-key row mask.
-- ``SwaImage``: the SWA union's keys dequantized into fp16 tile images.
-- ``CuPrep3``: per row group, the union of its rows' compressed top-k slots (up
-  to ``NBC`` blocks), optionally mapped from the indexer's local indices
+- `UnionBuild`: per row group, the union of its rows' SWA slots (up to
+  `NSWB` 64-key blocks) and a per-key row mask.
+- `SwaImage`: the SWA union's keys dequantized into fp16 tile images.
+- `CuPrep3`: per row group, the union of its rows' compressed top-k slots (up
+  to `NBC` blocks), optionally mapped from the indexer's local indices
   through the compressed block table, dequantized into fp16 tile images, with
   a per-key visibility byte.
-- ``ChainDecode``: one cluster per row group over the tile images, from the
-  ``wq_b`` output to the inverse-rotated ``wo_a`` input.
+- `ChainDecode`: one cluster per row group over the tile images, from the
+  `wq_b` output to the inverse-rotated `wo_a` input.
 
 They launch with programmatic dependent launch: each releases its dependents
 at entry and waits for its predecessor before reading its outputs."""
@@ -249,13 +249,13 @@ class _Common(SparseMlaDecodeSm90):
 
 
 class ChainDecode(_Common):
-    """The sparse MLA of an ``attn_chain`` step in one kernel, writing the
-    ``wo_a`` input rot[t * rot_t + (h // 8) * rot_g + (h % 8) * 512 + col].
+    """The sparse MLA of an `attn_chain` step in one kernel, writing the
+    `wo_a` input rot[t * rot_t + (h // 8) * rot_g + (h % 8) * 512 + col].
 
     Every key block is a tile image loaded with one bulk copy: the SWA
-    union's (``SwaImage``, plus the step's own keys from
-    ``attn_cute.QkvNorm``) and the compressed stage's (``CuPrep3``). The
-    query, the ``wq_b`` output [T, H, 512], is rotated (GPT-J RoPE on dims
+    union's (`SwaImage`, plus the step's own keys from
+    `attn_cute.QkvNorm`) and the compressed stage's (`CuPrep3`). The
+    query, the `wq_b` output [T, H, 512], is rotated (GPT-J RoPE on dims
     448..511, rounded to BF16) as it is staged.
 
     A cluster of C CTAs per row group; CTA c takes the group's tasks c, c + C,
@@ -264,7 +264,7 @@ class ChainDecode(_Common):
     The CTAs then exchange their per-row (max, sum) over DSMEM, stage their
     output scaled to the merged softmax (sink included) in shared memory, and
     each sums a 512 / C column slice over the cluster, rounds it to BF16 and
-    applies the inverse RoPE. With ``early`` set the compressed stage was
+    applies the inverse RoPE. With `early` set the compressed stage was
     written before this layer, so its count is read before the wait."""
 
     def __init__(self, H: int = 16, has_cu: bool = True, C: int = 8):
@@ -732,7 +732,7 @@ class ChainDecode(_Common):
     @cute.jit
     def _stage_out(self, acc_O, thr_pv: cute.ThrMma, col0: cutlass.Constexpr, f, base):
         """This warpgroup's output half scaled by the merged factor, BF16,
-        row-major [64, 512] with 16 B chunks XOR-swizzled by row, at ``base``
+        row-major [64, 512] with 16 B chunks XOR-swizzled by row, at `base`
         (the key tiles, free once the PV is done)."""
         cO = cute.make_identity_tensor((BM, DV // 2))
         tOcO = layout_utils.reshape_acc_to_mn(thr_pv.partition_C(cO))
@@ -763,7 +763,7 @@ class ChainDecode(_Common):
         R,
         ngr,
     ):
-        """Column slice ``cid`` of the group's output: the cluster's staged
+        """Column slice `cid` of the group's output: the cluster's staged
         normalized outputs weighted by their share of the merged softmax (the
         sink included), rounded to BF16, inverse-rotated on dims 448..511,
         into the wo_a input."""
@@ -933,10 +933,10 @@ class ChainDecode(_Common):
 
 
 class SwaImage(_Common):
-    """Per row group, the keys of its SWA union (``UnionBuild``) dequantized
+    """Per row group, the keys of its SWA union (`UnionBuild`) dequantized
     into fp16 tile images [G, NSWB, 64 x 512]; keys past the union's length
     are zero. The step's own keys (the
-    request's ``slot_mapping``) are left to ``attn_cute.QkvNorm``, which
+    request's `slot_mapping`) are left to `attn_cute.QkvNorm`, which
     inserts them. One CTA per (block, group), 4 threads per key."""
 
     def __init__(self, H: int = 16):

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""PTX building blocks of the Hopper low-batch MoE kernel (``moe_cute``)."""
+"""PTX building blocks of the Hopper low-batch MoE kernel (`moe_cute`)."""
 
 from cutlass import Float32, Int32, Int64, Uint32
 from cutlass._mlir.dialects import llvm
@@ -345,7 +345,7 @@ def mbar_wait(addr, phase, *, loc=None, ip=None):
 
 @dsl_user_op
 def bulk_g2s(dst, src, nbytes, mbar, policy, *, loc=None, ip=None):
-    """cp.async.bulk global->shared, completion on ``mbar``; L2 cache hint."""
+    """cp.async.bulk global->shared, completion on `mbar`; L2 cache hint."""
     _asm(
         None,
         [
@@ -394,8 +394,8 @@ def named_barrier(bar_id, nthreads, *, loc=None, ip=None):
 
 @dsl_user_op
 def dequant_e2m1x8(qb, eo, *, loc=None, ip=None):
-    """Humming fused MXFP4 -> E4M3: 8 codes of word ``qb`` (sign bits
-    interleaved, see hlayout.py) with exponent offset ``eo`` -> 2 words of
+    """Humming fused MXFP4 -> E4M3: 8 codes of word `qb` (sign bits
+    interleaved, see hlayout.py) with exponent offset `eo` -> 2 words of
     E4M3 (elements 0-3, 4-7) = e2m1 * 2^(eo - 6)."""
     r = _asm(
         _struct(2, T.i32()),
@@ -566,7 +566,7 @@ def fence_regs(vals, *, loc=None, ip=None):
 @dsl_user_op
 def wgmma_rs(n, acc, a0, a1, a2, a3, desc, scale_d, *, loc=None, ip=None):
     """Wgmma m64n{n}k32 e4m3 x e4m3 -> f32, A from registers, B by descriptor.
-    ``acc``: n/2 floats; returns the n/2 updated accumulators."""
+    `acc`: n/2 floats; returns the n/2 updated accumulators."""
     nr = n // 2
     outs = ",".join(f"${i}" for i in range(nr))
     a = ",".join(f"${nr + i}" for i in range(4))
@@ -995,7 +995,7 @@ def wgmma_rs_f16(n, acc, a0, a1, a2, a3, desc, scale_d, *, loc=None, ip=None):
 
 @dsl_user_op
 def mapa(addr, rank, *, loc=None, ip=None) -> Int32:
-    """shared::cta address -> the same offset in CTA ``rank`` of the cluster."""
+    """shared::cta address -> the same offset in CTA `rank` of the cluster."""
     return Int32(
         _asm(
             T.i32(),

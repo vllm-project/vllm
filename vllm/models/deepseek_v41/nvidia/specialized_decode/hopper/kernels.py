@@ -7,15 +7,15 @@ stock kernel of the stock layer otherwise. Every Hopper kernel reads the
 tensors the stock layer reads, in place (Humming W8A16 dense weights, Humming
 W4A8 experts, the FlashMLA KV and index caches), so every step outside the
 executor and every prefill keeps running the stock forward on a single copy of
-the weights; the small-batch MLA chain's ``wo_a``, which the stock SM90 layer
-keeps only as BF16, is the one exception (``dense.fp8_wo_a``).
+the weights; the small-batch MLA chain's `wo_a`, which the stock SM90 layer
+keeps only as BF16, is the one exception (`dense.fp8_wo_a`).
 
-Each layer's low-batch kernels are providers (``DenseProvider``), one per layer
-and seam, built with the executor: today ``dense.DenseFp8Linear`` up to
-``dense.MAX_ROWS`` rows; a weight-preloading or fused kernel replaces one by
+Each layer's low-batch kernels are providers (`DenseProvider`), one per layer
+and seam, built with the executor: today `dense.DenseFp8Linear` up to
+`dense.MAX_ROWS` rows; a weight-preloading or fused kernel replaces one by
 implementing the same interface. Every launch here is captured into a FULL CUDA
 graph of the executor only, and the Hopper kernels chain with programmatic
-dependent launch. The sparse-MLA decode is ``sparse_mla.FlashMlaDecode.run``.
+dependent launch. The sparse-MLA decode is `sparse_mla.FlashMlaDecode.run`.
 """
 
 from collections.abc import Iterator
@@ -48,7 +48,7 @@ class DenseProvider(Protocol):
     k: int
 
     def serves(self, rows: int) -> bool:
-        """Whether a call of ``rows`` rows runs here (host state only)."""
+        """Whether a call of `rows` rows runs here (host state only)."""
         ...
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
@@ -56,7 +56,7 @@ class DenseProvider(Protocol):
         ...
 
     def warm_up(self, rows: int) -> None:
-        """Compile what a ``rows``-row call launches, before graph capture."""
+        """Compile what a `rows`-row call launches, before graph capture."""
         ...
 
 
@@ -97,7 +97,7 @@ def _serves(linear: DenseProvider | None, rows: int) -> bool:
 def wqa_wkv(
     attn: DeepseekV4Attention, linears: AttentionLinears, x: torch.Tensor
 ) -> torch.Tensor:
-    """``fused_wqa_wkv`` of the BF16 layer input: replicated, N=1792, K=5120."""
+    """`fused_wqa_wkv` of the BF16 layer input: replicated, N=1792, K=5120."""
     if _serves(linears.wqa_wkv, x.shape[0]):
         assert linears.wqa_wkv is not None
         return linears.wqa_wkv(x)
@@ -107,7 +107,7 @@ def wqa_wkv(
 def wq_b(
     attn: DeepseekV4Attention, linears: AttentionLinears, qr: torch.Tensor
 ) -> torch.Tensor:
-    """``wq_b`` of the normalized query: N=8192, K=1280."""
+    """`wq_b` of the normalized query: N=8192, K=1280."""
     if _serves(linears.wq_b, qr.shape[0]):
         assert linears.wq_b is not None
         return linears.wq_b(qr)
@@ -117,7 +117,7 @@ def wq_b(
 def index_wq_b(
     indexer: DeepseekV4Indexer, linears: AttentionLinears, qr: torch.Tensor
 ) -> torch.Tensor:
-    """The indexer's ``wq_b`` of the normalized query, on aux stream 2:
+    """The indexer's `wq_b` of the normalized query, on aux stream 2:
     replicated, N=4096, K=1280."""
     if _serves(linears.index_wq_b, qr.shape[0]):
         assert linears.index_wq_b is not None
@@ -130,7 +130,7 @@ def wo_b(
     linears: AttentionLinears,
     z: torch.Tensor,
 ) -> torch.Tensor:
-    """``wo_b`` of the ``wo_a`` output: N=5120, K=2048. Its TP-partial output
+    """`wo_b` of the `wo_a` output: N=5120, K=2048. Its TP-partial output
     goes to the next boundary's fused all-reduce."""
     if _serves(linears.wo_b, z.shape[0]):
         assert linears.wo_b is not None
@@ -139,8 +139,8 @@ def wo_b(
 
 
 def _wo_b_partial(attn: DeepseekV4Attention, z: torch.Tensor) -> torch.Tensor:
-    """The stock ``wo_b``'s TP-partial output, without the all-reduce of a
-    ``wo_b`` that reduces its own output."""
+    """The stock `wo_b`'s TP-partial output, without the all-reduce of a
+    `wo_b` that reduces its own output."""
     wo_b = attn.wo_b
     if not wo_b.reduce_results:
         return attn._wo_b_proj(z)
@@ -154,8 +154,8 @@ def o_proj(
     out: torch.Tensor,
     positions: torch.Tensor,
 ) -> torch.Tensor:
-    """The stock output projection of the attention output ``out`` (padded
-    heads), with ``wo_b`` on its low-batch call."""
+    """The stock output projection of the attention output `out` (padded
+    heads), with `wo_b` on its low-batch call."""
     return dsv41_o_proj(
         attn, out, positions, wo_b_proj=lambda z: wo_b(attn, linears, z)
     )
@@ -184,13 +184,13 @@ class SharedMlp:
         return self.gate_up.serves(rows) and self.down.serves(rows)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """``DeepseekV4MLP.forward``: gate/up, clamped SiLU-and-mul, down."""
+        """`DeepseekV4MLP.forward`: gate/up, clamped SiLU-and-mul, down."""
         return self.down(self.mlp.act_fn(self.gate_up(x)))
 
     @contextmanager
     def installed(self) -> Iterator[None]:
         """Within the block, the MLP's forward (which the MoE runner calls,
-        on its shared-expert stream) runs ``forward``."""
+        on its shared-expert stream) runs `forward`."""
         self.mlp.forward = self.forward
         try:
             yield
@@ -201,7 +201,7 @@ class SharedMlp:
 def shared_installed(
     shared: SharedMlp | None, rows: int
 ) -> AbstractContextManager[None]:
-    """``shared.installed()`` where its calls serve ``rows`` rows."""
+    """`shared.installed()` where its calls serve `rows` rows."""
     if shared is None or not shared.serves(rows):
         return nullcontext()
     return shared.installed()
@@ -209,7 +209,7 @@ def shared_installed(
 
 @contextmanager
 def partial_output(ffn: "DeepseekV4MoE") -> Iterator[None]:
-    """Within the block, ``ffn`` leaves its output TP-partial for the next
+    """Within the block, `ffn` leaves its output TP-partial for the next
     boundary to reduce; the stock forward outside the executor reduces it
     itself."""
     config = ffn.experts.moe_config
@@ -231,12 +231,12 @@ def moe(
     """The MoE layer's TP-partial output, or its routed output left
     unfinalized with the shared output.
 
-    Up to ``moe.MAX_ROWS`` rows the routed experts run the low-batch kernel
-    (``routed``), from the stock router's logits (on hash-routed layers, its
+    Up to `moe.MAX_ROWS` rows the routed experts run the low-batch kernel
+    (`routed`), from the stock router's logits (on hash-routed layers, its
     top-k), and stop before the top-k reduction: the next boundary's fused
     all-reduce + mHC folds the reduction and the shared-expert add into its
-    publish (``AllReduceMHC.finalize``). The kernel also runs the shared expert
-    up to ``moe.SHARED_MAX_ROWS`` rows; above that the stock shared expert runs
+    publish (`AllReduceMHC.finalize`). The kernel also runs the shared expert
+    up to `moe.SHARED_MAX_ROWS` rows; above that the stock shared expert runs
     on its side stream, on the low-batch dense calls where they serve. Larger
     calls run the stock MoE, without its final all-reduce.
     """

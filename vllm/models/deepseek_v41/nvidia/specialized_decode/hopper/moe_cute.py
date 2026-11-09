@@ -1,39 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Low-batch MoE of DeepSeek-V4.1 at TP4 on SM90, in CuTe DSL: one persistent
-launch per MoE layer (``LowBatchMoEKernel``), reading the layer's stock Humming
-tensors in place (``moe`` builds the tensor maps and runs it).
+launch per MoE layer (`LowBatchMoEKernel`), reading the layer's stock Humming
+tensors in place (`moe` builds the tensor maps and runs it).
 
 Roles per CTA (320 threads, 2 CTAs per SM): 8 consumer warps (two wgmma
 warpgroups), a TMA producer warp, a signal warp.
 
-* Front: row CTA ``t < M`` routes token ``t`` (from the router's logits:
+* Front: row CTA `t < M` routes token `t` (from the router's logits:
   sqrt-softplus plus the correction bias, top-6, renormalized, times the routed
-  scaling factor; image sentinel tokens with ``bias_vl``; or from given top-k
+  scaling factor; image sentinel tokens with `bias_vl`; or from given top-k
   ids and weights), block-FP8 (group 128) quantizes it and publishes it with
   one counter. Every CTA builds the expert-major row-chunk table in shared
   memory.
 
-  - Dense mode (``M <= DENSE_MAX_ROWS``): one row chunk per active expert
-    covering all ``M`` tokens (a token mask marks the routed ones), on the
+  - Dense mode (`M <= DENSE_MAX_ROWS`): one row chunk per active expert
+    covering all `M` tokens (a token mask marks the routed ones), on the
     token-major quantized rows: no gather.
   - Entry mode: 8-aligned row chunks of at most 32 routed entries; row CTAs
     scatter their row into its 6 entry slots.
 
-* GEMM1 (``w13``, MXFP4 x FP8 wgmma): dynamic split-K chunks of (row chunk,
+* GEMM1 (`w13`, MXFP4 x FP8 wgmma): dynamic split-K chunks of (row chunk,
   gate/up pair) tiles. Each chunk's FP32 partial goes to global memory; the
   signal warp detects the CTA that completes a tile, whose consumers run the
   tile's clamped SwiGLU and FP8 intermediate, and publishes a row chunk ready
   after its 9 pairs.
-* GEMM2 (``w2``): the producer streams ``w2`` tiles into a second ring once its
+* GEMM2 (`w2`): the producer streams `w2` tiles into a second ring once its
   GEMM1 ring is drained; each item waits only for its own row chunk.
-* Shared expert (``shared``): the W8A16 FP8 weights read in place, as f16
+* Shared expert (`shared`): the W8A16 FP8 weights read in place, as f16
   wgmma A fragments (exact e4m3 to f16 conversion) with the per-32 UE8M0
   scale applied on each k32 partial, on f16 activations converted from x; an
   extra row chunk of weight 1 covering every token, written to its own output
   in token order. Its first weight stages are issued before the grid wait.
 * Output: unweighted BF16 rows per (token, expert) and the
-  route-to-row map in the record: an ``UnfinalizedMoEOutput``, which the next
+  route-to-row map in the record: an `UnfinalizedMoEOutput`, which the next
   boundary's fused all-reduce + mHC finalizes.
 
 Counters are epoch-stamped or reset by their last user, so repeated calls and
@@ -211,8 +211,8 @@ def _wgmma_k64(
     base: cutlass.Constexpr,
     first: Int32,
 ):
-    """Two k32 wgmmas; B k64 tile at ``bt`` (k-chunks 128 B apart, 8-entry
-    groups ``sbo`` apart). Accumulators d[base : base + N/2]."""
+    """Two k32 wgmmas; B k64 tile at `bt` (k-chunks 128 B apart, 8-entry
+    groups `sbo` apart). Accumulators d[base : base + N/2]."""
     vals = [d[base + i] for i in range(N // 2)]
     wgmma_fence()
     vals = wgmma_rs(
@@ -393,7 +393,7 @@ def _route_row2(
     halves: cutlass.Constexpr = True,
 ):
     """_route_row on the two published partial-logit halves; image sentinel
-    tokens (lo <= id < lo + 5) use ``bias_vl``."""
+    tokens (lo <= id < lo + 5) use `bias_vl`."""
     use_vl = Int32(0)
     if cutlass.const_expr(image):
         tok = ldg_cg_i32(in_ids + Int64(r) * 4)
@@ -652,7 +652,7 @@ class LowBatchMoEKernel:
         qw: cute.Tensor,
         qs: cute.Tensor,
     ):
-        """Quantized row slice of thread tid into GEMM1 B slot ``ent``."""
+        """Quantized row slice of thread tid into GEMM1 B slot `ent`."""
         k0 = tid * 32
         kt = k0 // 64
         kt4 = kt // 4  # noqa: F841
@@ -889,7 +889,7 @@ class LowBatchMoEKernel:
         d: cute.Tensor,
         base: cutlass.Constexpr,
     ):
-        """One k32 scale group = two k16 f16 wgmmas. ``wt``: the k32's first 1 KB
+        """One k32 scale group = two k16 f16 wgmmas. `wt`: the k32's first 1 KB
         W8A16 block of this warpgroup's 64 rows (the second is 2 KB further)."""
         vals = [d[base + i] for i in range(N // 2)]
         for kb in cutlass.range_constexpr(2):
@@ -926,8 +926,9 @@ class LowBatchMoEKernel:
         acc: cute.Tensor,
         d: cute.Tensor,
     ):
-        """Shared GEMM1 stages (f16): [k16 (8)][gate/up][1 KB] W8A16 e4m3 weights,
-        [kg (4)][gate/up][64 B] UE8M0 scales, B f16 [8-token group][k8 (16)][8][16 B]."""  # noqa: E501
+        """Shared GEMM1 stages (f16): `[k16 (8)][gate/up][1 KB]` W8A16 e4m3
+        weights, `[kg (4)][gate/up][64 B]` UE8M0 scales, B f16
+        `[8-token group][k8 (16)][8][16 B]`."""
         NS = self.ns1
         g = lane // 4
         for i in cutlass.range_constexpr(N // 2):
@@ -987,8 +988,8 @@ class LowBatchMoEKernel:
         acc: cute.Tensor,
         d: cute.Tensor,
     ):
-        """Shared GEMM2 stages (f16): [k16 (6)][n64 block (2)][1 KB] weights,
-        [kg (3)][128 B] scales, B f16 [8-token group][k8 (12)][8][16 B]."""
+        """Shared GEMM2 stages (f16): `[k16 (6)][n64 block (2)][1 KB]` weights,
+        `[kg (3)][128 B]` scales, B f16 `[8-token group][k8 (12)][8][16 B]`."""
         NS = self.ns2
         g = lane // 4
         for i in cutlass.range_constexpr(N // 2):
@@ -1045,7 +1046,7 @@ class LowBatchMoEKernel:
         lane: Int32,
     ):
         """Signal warp: the shared GEMM1 B tile of stage (k128 unit u) straight from
-        x: bf16 -> f16, [8-token group][k8 (16)][8][16 B]. |x| <= sqrt(5120) *
+        x: bf16 -> f16, `[8-token group][k8 (16)][8][16 B]`. |x| <= sqrt(5120) *
         max|gamma| (~190 on DSV4.1-Flash) fits f16 without a prescale."""
         G = (ncol + 7) // 8
         tl = lane // 4
@@ -1189,7 +1190,7 @@ class LowBatchMoEKernel:
         pre: Int32,
     ):
         """GEMM1 weight tiles only; the signal warp issues the B tiles of each
-        stage once its header is posted (``hb``), so waiting for the activations
+        stage once its header is posted (`hb`), so waiting for the activations
         (and the proxy fence that would also wait for these weight loads) stays
         off this thread."""
         NS = self.ns1
@@ -1533,8 +1534,8 @@ class LowBatchMoEKernel:
         isc: Int64,
         sync: Int64,
     ) -> Int32:
-        """Routed tile, k-half ``hq`` = cluster rank (N = 8 columns). Rank 1:
-        partial -> rank 0's ``slot`` (DSMEM). Rank 0: own + rank-1 partial ->
+        """Routed tile, k-half `hq` = cluster rank (N = 8 columns). Rank 1:
+        partial -> rank 0's `slot` (DSMEM). Rank 0: own + rank-1 partial ->
         SwiGLU + FP8 intermediate of the tile, then publish it (S_READY)."""
         G = (ncol + 7) // 8
         if hq == 1:

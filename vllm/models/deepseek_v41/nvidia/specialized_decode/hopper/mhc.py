@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The mHC pre of the Hopper executor's boundaries: ``mhc_pre_delayed_overlap``
-with the CuTe DSL mixes kernel (``mhc_cute``) in place of the DeepGEMM prenorm
+"""The mHC pre of the Hopper executor's boundaries: `mhc_pre_delayed_overlap`
+with the CuTe DSL mixes kernel (`mhc_cute`) in place of the DeepGEMM prenorm
 GEMM, on the executor's own side stream.
 
 The layer input (the collapse of the streams with the carried pre-mix,
 normalized) is ready on the caller's stream; the coefficients (post mix,
 residual mix, next pre-mix) on the side stream, after the caller's work.
-Both are the stock mHC epilogue's (``MHC_PRE_NORM_KERNEL``), in its "input"
+Both are the stock mHC epilogue's (`MHC_PRE_NORM_KERNEL`), in its "input"
 and "stats" modes."""
 
 from typing import TYPE_CHECKING
@@ -50,7 +50,7 @@ class SeamPre:
     @staticmethod
     def applies(layer: "DeepseekV4DecoderLayer") -> bool:
         """Whether the layer has the kernel's shapes: 4 hc streams of 5120 and
-        FP32 ``fn`` of both seams."""
+        FP32 `fn` of both seams."""
         shape = (mhc_cute.MIXES, mhc_cute.HC * mhc_cute.HIDDEN)
         return getattr(layer, "hc_mult", None) == mhc_cute.HC and all(
             isinstance(fn := getattr(layer, f"hc_{seam}_fn", None), torch.Tensor)
@@ -68,8 +68,8 @@ class SeamPre:
         layer_input: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Post mix, residual mix, layer input and next pre-mix of the streams
-        ``residual`` [M, 4, 5120]; with ``layer_input``, that input as given
-        (the fused all-reduce wrote it). ``pre_mix`` None selects stream zero
+        `residual` [M, 4, 5120]; with `layer_input`, that input as given
+        (the fused all-reduce wrote it). `pre_mix` None selects stream zero
         (the first layer)."""
         from vllm.model_executor.kernels.mhc.warmup import MHC_PRE_NORM_KERNEL
         from vllm.models.common.ops.moe_tail_fusion.primitives import (
@@ -126,7 +126,7 @@ class SeamPre:
         return post.unsqueeze(-1), comb.view(m, hc, hc), layer_input, next_pre
 
     def warm_up(self, rows: list[int], first: bool = False) -> None:
-        """Compile the kernels of calls of ``rows`` rows (``first``: the first
+        """Compile the kernels of calls of `rows` rows (`first`: the first
         layer's, without a carried pre-mix)."""
         from vllm.model_executor.kernels.mhc.warmup import MHC_PRE_NORM_KERNEL
 

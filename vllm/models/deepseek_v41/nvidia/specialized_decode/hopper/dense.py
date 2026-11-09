@@ -3,13 +3,13 @@
 """Low-batch dense FP8 linears of the Hopper executor.
 
 A stock SM90 FP8 linear is Humming W8A16: BF16 activations times FP8 weights
-with UE8M0 scales per 32 k. ``DenseFp8Linear`` runs one, for up to
-``MAX_ROWS`` rows, on the kernel ``DISPATCH`` picks for its seam and row count,
+with UE8M0 scales per 32 k. `DenseFp8Linear` runs one, for up to
+`MAX_ROWS` rows, on the kernel `DISPATCH` picks for its seam and row count,
 reading the linear's Humming weight and scales in place:
 
-- the CuTe DSL kernel (``dense_gemm_cute``) with a geometry (``Cute``);
-- Humming with a tuned tiling (``use_pdl`` set), or with its own heuristic
-  tiling (``HEURISTIC``) and ``use_pdl`` set.
+- the CuTe DSL kernel (`dense_gemm_cute`) with a geometry (`Cute`);
+- Humming with a tuned tiling (`use_pdl` set), or with its own heuristic
+  tiling (`HEURISTIC`) and `use_pdl` set.
 
 The choices up to 48 rows were measured in a PDL decode-layer chain on H200 at
 TP4, the 96-, 144- and 192-row Humming tilings in isolation; a row count between two
@@ -17,10 +17,10 @@ entries takes the larger entry's choice. The CuTe kernel stages its rows of X
 in shared memory, which bounds it to 48 rows. Every kernel here
 uses programmatic dependent launch. CuTe kernels compile, and Humming kernels
 JIT-compile, on first use: the executor warms both up before CUDA graph
-capture (``warm_up``).
+capture (`warm_up`).
 
-``wo_a`` is the exception to reading in place: the stock SM90 layer keeps it
-only as BF16, dequantized at load. ``fp8_wo_a`` rebuilds the exact FP8 weight
+`wo_a` is the exception to reading in place: the stock SM90 layer keeps it
+only as BF16, dequantized at load. `fp8_wo_a` rebuilds the exact FP8 weight
 and its scales in the Humming layout, a second copy of the weight.
 """
 
@@ -39,7 +39,7 @@ MAX_ROWS = 192
 
 
 class Cute(NamedTuple):
-    """A CuTe DSL launch geometry (``DenseFp8Gemm``)."""
+    """A CuTe DSL launch geometry (`DenseFp8Gemm`)."""
 
     tw: int
     S: int
@@ -62,7 +62,7 @@ def _humming(
     stream_k: bool = False,
     raster_group_m: int | None = None,
 ) -> dict:
-    """A Humming tuning config; ``wgmma`` ones use TMA and warp specialization."""
+    """A Humming tuning config; `wgmma` ones use TMA and warp specialization."""
     wgmma = mma_type == "wgmma"
     config = {
         "mma_type": mma_type,
@@ -206,7 +206,7 @@ for _seam in ("wq_b", "wo_b", "wo_a"):
 
 
 def choice(seam: str, rows: int) -> Cute | dict | None:
-    """The kernel of ``seam`` for ``rows`` rows, or None above its table."""
+    """The kernel of `seam` for `rows` rows, or None above its table."""
     table = DISPATCH[seam]
     above = [m for m in table if m >= rows]
     return table[min(above)] if rows > 0 and above else None
@@ -217,7 +217,7 @@ def _staged_rows(k: int, sk: int) -> int:
 
 
 def cute_fits(c: Cute, rows: int, n: int, k: int) -> bool:
-    """Whether geometry ``c`` launches ``rows`` x ``n`` x ``k`` (tiling,
+    """Whether geometry `c` launches `rows` x `n` x `k` (tiling,
     registers, at least two 16-k rows per split and shared memory)."""
     nt = (rows + 7) // 8
     if (4 * c.tw) % c.wm or c.S % (2 * c.kg) or n % (64 * c.tw * c.cn):
@@ -265,18 +265,18 @@ def _compiled(nt: int, c: Cute, xr: int):
 
 
 class DenseFp8Linear:
-    """A low-batch call of one Humming W8A16 linear (or the grouped ``wo_a``).
+    """A low-batch call of one Humming W8A16 linear (or the grouped `wo_a`).
 
     Args:
-        seam: the ``DISPATCH`` key.
-        weight: Humming int32 ``[Kp / 16, Np * 4]``.
-        weight_scale: Humming UE8M0 ``[Kp / 32, Np]``.
+        seam: the `DISPATCH` key.
+        weight: Humming int32 `[Kp / 16, Np * 4]`.
+        weight_scale: Humming UE8M0 `[Kp / 32, Np]`.
         n: output columns.
         k: input columns (per group).
-        humming: the linear's Humming kernel (``layer_config``,
-            ``compute_config``, ``locks``), or None for CuTe only.
-        n_group: grouped mode: output columns ``[g * n_group, (g + 1) *
-            n_group)`` read input columns ``[g * k, (g + 1) * k)``.
+        humming: the linear's Humming kernel (`layer_config`,
+            `compute_config`, `locks`), or None for CuTe only.
+        n_group: grouped mode: output columns `[g * n_group, (g + 1) *
+            n_group)` read input columns `[g * k, (g + 1) * k)`.
 
     """
 
@@ -300,7 +300,7 @@ class DenseFp8Linear:
 
     @classmethod
     def of(cls, seam: str, linear: nn.Module) -> "DenseFp8Linear | None":
-        """The call of a stock Humming W8A16 ``linear``, or None for another
+        """The call of a stock Humming W8A16 `linear`, or None for another
         kernel."""
         from vllm.model_executor.kernels.linear.mxfp8.humming import (
             HummingMxfp8LinearKernel,
@@ -326,11 +326,11 @@ class DenseFp8Linear:
         return c if self.humming is not None else None
 
     def serves(self, rows: int) -> bool:
-        """Whether a call of ``rows`` rows runs here."""
+        """Whether a call of `rows` rows runs here."""
         return self._choice(rows) is not None
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        """``x @ W^T`` (BF16 ``[rows, k]``, or ``[rows, groups, k]`` in grouped
+        """`x @ W^T` (BF16 `[rows, k]`, or `[rows, groups, k]` in grouped
         mode, unit column stride)."""
         rows = x.shape[0]
         c = self._choice(rows)
@@ -344,7 +344,7 @@ class DenseFp8Linear:
 
     def warm_up(self, rows: int) -> None:
         """Compile the CuTe kernel, or JIT-compile Humming by one eager call, of
-        a ``rows``-row call, before CUDA graph capture."""
+        a `rows`-row call, before CUDA graph capture."""
         c = self._choice(rows)
         if isinstance(c, Cute):
             _compiled((rows + 7) // 8, c, _staged_rows(self.k, c.sk))
@@ -408,8 +408,8 @@ class DenseFp8Linear:
 
 
 def fp8_wo_a(wo_a: nn.Module, n_groups: int) -> DenseFp8Linear | None:
-    """The grouped FP8 call of the stock SM90 BF16 ``wo_a`` (``[n_groups *
-    o_lora_rank, k]``), or None when the weight is not an exact MXFP8 dequant.
+    """The grouped FP8 call of the stock SM90 BF16 `wo_a` (`[n_groups *
+    o_lora_rank, k]`), or None when the weight is not an exact MXFP8 dequant.
 
     Each 1 x 32 group's scale is the smallest power of two that keeps it within
     the e4m3 range; any exact split gives the same products, since the kernel
@@ -442,8 +442,8 @@ def fp8_wo_a(wo_a: nn.Module, n_groups: int) -> DenseFp8Linear | None:
 def _humming_layout(
     fp8: torch.Tensor, scale: torch.Tensor, n: int, k: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``fp8`` [n, k] and UE8M0 ``scale`` [n, k / 32] in the Humming W8A16
-    layout, converted as ``HummingMxfp8LinearKernel`` converts a linear."""
+    """`fp8` [n, k] and UE8M0 `scale` [n, k / 32] in the Humming W8A16
+    layout, converted as `HummingMxfp8LinearKernel` converts a linear."""
     from vllm.model_executor.layers.quantization.utils.humming import (
         convert_linear_layer_to_humming_standard,
         prepare_humming_linear_layer_config,

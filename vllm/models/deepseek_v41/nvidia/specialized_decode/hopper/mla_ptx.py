@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """PTX building blocks of the Hopper small-batch sparse-MLA kernels
-(``mla_cute``)."""
+(`mla_cute`)."""
 
 import cutlass
 from cutlass import Float32, Int32, Int64, Uint32
@@ -363,7 +363,7 @@ def ld_nc_v4f(addr: Int64, *, loc=None, ip=None):
 
 @dsl_user_op
 def ld_dsmem_v4(addr: Int32, *, loc=None, ip=None):
-    """128-bit load from a cluster peer's shared memory (``mapa`` address)."""
+    """128-bit load from a cluster peer's shared memory (`mapa` address)."""
     v = _asm(
         llvm.StructType.get_literal([T.i32()] * 4),
         [Int32(addr).ir_value(loc=loc, ip=ip)],

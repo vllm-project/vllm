@@ -1,27 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The small-batch sparse-MLA decode of a Hopper executor step, up to
-``MAX_ROWS`` rows of uniform verify steps, on the ``attn_chain`` kernels.
+`MAX_ROWS` rows of uniform verify steps, on the `attn_chain` kernels.
 
 FlashMLA pads each row's 16 local heads to a 64-row tile. These kernels
-(``mla_cute``) pack up to four rows of one request into a tile instead, on the
+(`mla_cute`) pack up to four rows of one request into a tile instead, on the
 stock caches, SWA indices and the indexer's local top-k indices, with every
 key block a fp16 tile image:
 
-- At the start of the step, on a side stream, ``UnionBuild`` builds the union
+- At the start of the step, on a side stream, `UnionBuild` builds the union
   of each row group's SWA slots once per SWA KV-cache group.
-- A side-stream ``SwaImage`` per layer dequantizes the SWA union's earlier
+- A side-stream `SwaImage` per layer dequantizes the SWA union's earlier
   keys once the previous layer's decode is done, and the q/kv norm
-  (``attn_cute.QkvNorm``) adds the step's keys as it inserts them
-  (``chain_norm``).
-- The first layer of an index source (``sparse_index_key``) runs ``CuPrep3``:
+  (`attn_cute.QkvNorm`) adds the step's keys as it inserts them
+  (`chain_norm`).
+- The first layer of an index source (`sparse_index_key`) runs `CuPrep3`:
   the union of the group's compressed top-k slots mapped through the compressed
-  block table (``compute_global_topk_indices_and_lens`` fused), dequantized
+  block table (`compute_global_topk_indices_and_lens` fused), dequantized
   into tile images. The source layer is the first reader of its top-k, so this
   runs on the forward stream.
-- One ``ChainDecode`` cluster per row group stages the ``wq_b`` output with its
+- One `ChainDecode` cluster per row group stages the `wq_b` output with its
   RoPE, decodes its compacted tasks, merges the splits in distributed shared
-  memory and writes the inverse-rotated ``wo_a`` input (``run_chain``).
+  memory and writes the inverse-rotated `wo_a` input (`run_chain`).
 """
 
 import math
@@ -79,8 +79,8 @@ def _compiled(kind: str, compressed: bool):
 
 
 def _launch(kind: str, compressed: bool, *args: Any) -> None:
-    """``kind``'s kernel on the current stream; tensors pass their address,
-    floats and ``("i64", n)`` pass as 64-bit, other ints as Int32."""
+    """`kind`'s kernel on the current stream; tensors pass their address,
+    floats and `("i64", n)` pass as 64-bit, other ints as Int32."""
     from cutlass import Float32, Int32, Int64
 
     from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
@@ -100,7 +100,7 @@ def _launch(kind: str, compressed: bool, *args: Any) -> None:
 
 class SmallMlaDecode:
     """The unions, compressed stage and partials of a step on the small path,
-    in buffers allocated once and sized for ``MAX_ROWS`` rows."""
+    in buffers allocated once and sized for `MAX_ROWS` rows."""
 
     def __init__(
         self, attns: list[DeepseekV4FlashMLAAttention], device: torch.device
@@ -231,7 +231,7 @@ class SmallMlaDecode:
         positions: torch.Tensor,
         swa_metadata: "DeepseekSparseSWAMetadata",
     ) -> torch.Tensor:
-        """``attn_chain.norm_kv_insert`` of an ``attn_chain`` step, which also
+        """`attn_chain.norm_kv_insert` of an `attn_chain` step, which also
         writes the step's keys into the layer's SWA tile images; their earlier
         keys go in on the side stream, after the previous layer's decode has
         read the images."""
@@ -272,9 +272,9 @@ class SmallMlaDecode:
         attn_metadata: "DeepseekV4FlashMLAMetadata | None",
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        """``attn``'s sparse MLA of the ``wq_b`` output ``q`` [rows, heads,
-        512] (RoPE not yet applied) after ``chain_norm``, inverse-rotated: the
-        ``wo_a`` input [rows, groups, heads per group * 512]."""
+        """`attn`'s sparse MLA of the `wq_b` output `q` [rows, heads,
+        512] (RoPE not yet applied) after `chain_norm`, inverse-rotated: the
+        `wo_a` input [rows, groups, heads per group * 512]."""
         kidx, kmask, klen = self.unions[attn.swa_cache_layer.prefix]
         compressed = attn.compress_ratio != 0
         img = mbits = count = self.empty
@@ -328,7 +328,7 @@ class SmallMlaDecode:
         swa_metadata: "DeepseekSparseSWAMetadata",
         attn_metadata: "DeepseekV4FlashMLAMetadata",
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """The compressed stage of ``attn``'s index source, prepared by its
+        """The compressed stage of `attn`'s index source, prepared by its
         first layer: an index source's layers are consecutive."""
         key = self.keys[attn]
         if key == self._stage_key:

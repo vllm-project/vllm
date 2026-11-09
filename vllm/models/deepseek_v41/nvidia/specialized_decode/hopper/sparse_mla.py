@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The FlashMLA sparse decode of a Hopper executor step.
 
-It is the decode branch of ``DeepseekV4FlashMLAAttention.forward_mqa`` on
-per-step tables that the layers share (``FlashMlaTables``):
+It is the decode branch of `DeepseekV4FlashMLAAttention.forward_mqa` on
+per-step tables that the layers share (`FlashMlaTables`):
 
 - One FlashMLA tile-scheduler plan per layer type (compress ratio). The stock
   decode keeps one per type in each SWA KV-cache group's metadata, so every
@@ -11,15 +11,15 @@ per-step tables that the layers share (``FlashMlaTables``):
   the SWA and compressed top-k lengths, which every group derives alike from
   the batch (one window, one set of sequence lengths, one index top-k), so the
   first layer of a type plans for all of them.
-- One global top-k table per ``sparse_index_key``. Compressed layers that share
+- One global top-k table per `sparse_index_key`. Compressed layers that share
   an index source map its top-k indices through the same compressed block
   table, so the first of them builds the table and the others reuse it. The
   map also reads a SWA group's token-to-request map and token validity, which
   every group derives alike from the batch.
 
 Both are built on the forward stream and issue no collective. Steps of up to
-``mla_small.MAX_ROWS`` uniform rows on layers ``attn_chain`` serves run the
-small-batch chain kernels instead (``mla_small``), which need neither.
+`mla_small.MAX_ROWS` uniform rows on layers `attn_chain` serves run the
+small-batch chain kernels instead (`mla_small`), which need neither.
 """
 
 from typing import TYPE_CHECKING, cast
@@ -69,7 +69,7 @@ class FlashMlaTables:
             self.small.join()
 
     def plan(self, attn: DeepseekV4FlashMLAAttention) -> FlashMLASchedMeta:
-        """The step's plan of ``attn``'s layer type, planned by the first
+        """The step's plan of `attn`'s layer type, planned by the first
         decode launch that takes it."""
         plan = self._plans.get(attn.compress_ratio)
         if plan is None:
@@ -82,7 +82,7 @@ class FlashMlaTables:
         swa_metadata: "DeepseekSparseSWAMetadata",
         attn_metadata: DeepseekV4FlashMLAMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """``compute_global_topk_indices_and_lens`` of a compressed layer, on
+        """`compute_global_topk_indices_and_lens` of a compressed layer, on
         the step's shared tables."""
         key = self.keys[attn]
         table = self._tables.get(key)
@@ -104,15 +104,15 @@ class FlashMlaTables:
 
 
 class FlashMlaDecode:
-    """``forward_mqa`` of a pure-decode step on the shared tables."""
+    """`forward_mqa` of a pure-decode step on the shared tables."""
 
     def __init__(self, tables: FlashMlaTables) -> None:
         self.tables = tables
 
     def chain_step(self, rows: int) -> bool:
         """Whether this step's MLA can run the small-batch chain, which takes
-        the query before its RoPE and applies the inverse RoPE (``chain_norm``,
-        ``run_rotated``)."""
+        the query before its RoPE and applies the inverse RoPE (`chain_norm`,
+        `run_rotated`)."""
         small = self.tables.small
         return small is not None and small.query_len > 0
 
@@ -122,8 +122,8 @@ class FlashMlaDecode:
         qr_kv: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        """The q/kv norm and KV insert of a ``chain_step``
-        (``SmallMlaDecode.chain_norm``): the normalized query."""
+        """The q/kv norm and KV insert of a `chain_step`
+        (`SmallMlaDecode.chain_norm`): the normalized query."""
         by_layer = get_forward_context().attn_metadata
         assert isinstance(by_layer, dict)
         swa_metadata = cast(
@@ -139,8 +139,8 @@ class FlashMlaDecode:
         q: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        """``attn``'s sparse MLA of the ``wq_b`` output ``q`` after
-        ``chain_norm``, on the small path, inverse-rotated: the ``wo_a`` input
+        """`attn`'s sparse MLA of the `wq_b` output `q` after
+        `chain_norm`, on the small path, inverse-rotated: the `wo_a` input
         [rows, groups, heads per group * 512]."""
         by_layer = get_forward_context().attn_metadata
         assert isinstance(by_layer, dict)
@@ -160,7 +160,7 @@ class FlashMlaDecode:
     def run(
         self, attn: DeepseekV4FlashMLAAttention, q: torch.Tensor, out: torch.Tensor
     ) -> None:
-        """Write ``attn``'s sparse MLA of ``q`` (padded heads) into ``out``."""
+        """Write `attn`'s sparse MLA of `q` (padded heads) into `out`."""
         by_layer = get_forward_context().attn_metadata
         assert isinstance(by_layer, dict)
         swa_metadata = cast(

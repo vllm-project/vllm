@@ -2,36 +2,36 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Small-M dense FP8 GEMM on the Humming W8A16 layout, in CuTe DSL (SM90).
 
-``Y[M, N] = X[M, K] @ dequant(W)^T`` for at most 48 BF16 rows of ``X``, reading
+`Y[M, N] = X[M, K] @ dequant(W)^T` for at most 48 BF16 rows of `X`, reading
 the weight and scales of a stock SM90 Humming W8A16 linear in place:
 
-- ``weight`` int32 ``[Kp / 16, Np * 4]``: one 1 KiB block per (16 k, 64 n),
-  laid out as ``mma.sync`` A fragments (lane ``(n % 8) * 4 + (k % 8) // 2``,
-  word ``(n % 64) // 8``, byte ``[0, 2, 1, 3][((k % 16) // 8) * 2 + k % 2]``);
-- ``weight_scale`` UE8M0 ``[Kp / 32, Np]``, the 8 x 8 (n % 8, n // 8) index of
+- `weight` int32 `[Kp / 16, Np * 4]`: one 1 KiB block per (16 k, 64 n),
+  laid out as `mma.sync` A fragments (lane `(n % 8) * 4 + (k % 8) // 2`,
+  word `(n % 64) // 8`, byte `[0, 2, 1, 3][((k % 16) // 8) * 2 + k % 2]`);
+- `weight_scale` UE8M0 `[Kp / 32, Np]`, the 8 x 8 (n % 8, n // 8) index of
   each 64-column block transposed.
 
-Swap-AB: the weight is operand A (64 output columns per tile, ``tw`` tiles per
-CTA) and the tokens operand B, ``m16n8k16`` MMAs with FP32 accumulation. Two
+Swap-AB: the weight is operand A (64 output columns per tile, `tw` tiles per
+CTA) and the tokens operand B, `m16n8k16` MMAs with FP32 accumulation. Two
 operand precisions:
 
-- ``prec`` 0 (f16): weights convert exactly with ``cvt.rn.f16x2.e4m3x2``; each
+- `prec` 0 (f16): weights convert exactly with `cvt.rn.f16x2.e4m3x2`; each
   32-k group's partial is scaled by its UE8M0 scale in FP32. X is staged once
   per CTA and converted to f16 with a per-token power-of-two pre-scale chosen
   from its absolute maximum over the slice, undone exactly on the FP32 sums.
-- ``prec`` 1 (bf16): weights are dequantized by bit surgery and multiplied by
+- `prec` 1 (bf16): weights are dequantized by bit surgery and multiplied by
   the scale in BF16 (exact for an e4m3 value times a power of two).
 
-Pipeline: two DMA warps stream ``S``-row (16 k each) W/S stages through ``NS``
-shared-memory buffers with ``cp.async`` and mbarriers, the weights with an
+Pipeline: two DMA warps stream `S`-row (16 k each) W/S stages through `NS`
+shared-memory buffers with `cp.async` and mbarriers, the weights with an
 evict-first L2 policy (each is read once a step); they start before the
 programmatic grid wait (the weights do not depend on the previous kernel).
-The consumer warps (``4 * tw / wm`` column groups x ``kg`` k groups) wait, load
+The consumer warps (`4 * tw / wm` column groups x `kg` k groups) wait, load
 X with bulk copies, then consume the stages; the k groups reduce through shared
-memory in a fixed order. K is split ``sk`` ways over a ``(sk, 1, 1)`` cluster,
+memory in a fixed order. K is split `sk` ways over a `(sk, 1, 1)` cluster,
 whose partials rank 0 sums through distributed shared memory in a fixed order,
-so the result is deterministic. Grouped mode (``wo_a``): output columns
-``[g * n_group, (g + 1) * n_group)`` read ``X[:, g * x_gstride : ...]``.
+so the result is deterministic. Grouped mode (`wo_a`): output columns
+`[g * n_group, (g + 1) * n_group)` read `X[:, g * x_gstride : ...]`.
 
 Every launch uses programmatic dependent launch and triggers its dependents
 right after its prologue.
@@ -50,7 +50,7 @@ class DenseFp8Gemm:
     """One compiled shape class of the kernel (see the module docstring).
 
     Args:
-        nt: 8-token MMA column tiles (``ceil(M / 8)``).
+        nt: 8-token MMA column tiles (`ceil(M / 8)`).
         tw: 64-column weight tiles per CTA.
         S: 16-k rows per pipeline stage.
         NS: pipeline stages.
@@ -140,8 +140,8 @@ class DenseFp8Gemm:
 
     @cute.jit
     def issue_stage(self, dt, st, t, r, rows, wg, sg, Np, pol):
-        """DMA thread ``dt``'s copies of stage rows ``[r, r + rows)``, the
-        weights with L2 policy ``pol`` (evict-first: they are read once a
+        """DMA thread `dt`'s copies of stage rows `[r, r + rows)`, the
+        weights with L2 policy `pol` (evict-first: they are read once a
         step)."""
         tw = self.tw
         ndt = DMA_WARPS * 32
@@ -178,7 +178,7 @@ class DenseFp8Gemm:
 
     @cute.jit
     def pair_mma(self, acc, st, pr, xrow0, lane, ngi, sx, lm_tok, lm_half):
-        """The MMAs of stage row pair ``pr`` (one 32-k scale group)."""
+        """The MMAs of stage row pair `pr` (one 32-k scale group)."""
         tw, nt, wm = self.tw, self.nt, self.wm
         g = lane // 4
         mig0 = ngi * wm
@@ -292,7 +292,7 @@ class DenseFp8Gemm:
 
     @cute.jit
     def sum_slots(self, a):
-        """The k groups' partials at ``a``, summed in k-group order."""
+        """The k groups' partials at `a`, summed in k-group order."""
         v0, v1, v2, v3 = lds_f32x4(a)
         for kk in cutlass.range_constexpr(1, self.kg):
             u0, u1, u2, u3 = lds_f32x4(a + kk * self.red_one)
@@ -634,7 +634,7 @@ def bulk_g2s(dst_smem: Int32, src_gmem: Int64, nbytes: Int32, mbar: Int32):
 def bulk_g2s_mc(
     dst_smem: Int32, src_gmem: Int64, nbytes: Int32, mbar: Int32, mask: Int32
 ):
-    """``bulk_g2s`` into the same offset of every cluster CTA in ``mask``."""
+    """`bulk_g2s` into the same offset of every cluster CTA in `mask`."""
     inline_ptx(
         "{ .reg .b16 m; cvt.u16.u32 m, {$r4};\n"
         "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes"
@@ -816,8 +816,8 @@ def mma_f16_z(a0, a1, a2, a3, b0, b1):
 
 
 def scale2_bf16x2(ev: Int32):
-    """Two UE8M0 bytes (u16) -> BF16x2 ``2^(b - 7)`` each (the e4m3 -> bf16
-    exponent bias folded in); needs ``b <= 134``."""
+    """Two UE8M0 bytes (u16) -> BF16x2 `2^(b - 7)` each (the e4m3 -> bf16
+    exponent bias folded in); needs `b <= 134`."""
     return inline_ptx(
         "{ .reg .b32 t, u, z; mov.b32 z, 0;\n"
         "add.u32 t, {$r0}, 0x7878;\n"
@@ -831,8 +831,8 @@ def scale2_bf16x2(ev: Int32):
 
 
 def deq_word(w: Int32, s: Int32):
-    """Humming FP8 word ``[k0, k8, k1, k9]`` -> (BF16x2 ``{k0, k1}``, BF16x2
-    ``{k8, k9}``), times the BF16x2 scale ``s``."""
+    """Humming FP8 word `[k0, k8, k1, k9]` -> (BF16x2 `{k0, k1}`, BF16x2
+    `{k8, k9}`), times the BF16x2 scale `s`."""
     return inline_ptx(
         "{ .reg .b32 t0, t1, t2, z; mov.b32 z, 0;\n"
         "prmt.b32 t0, {$r0}, z, 0x2404;\n"
@@ -852,8 +852,8 @@ def deq_word(w: Int32, s: Int32):
 
 
 def cvt_e4m3_word(w: Int32):
-    """Humming FP8 word ``[k0, k8, k1, k9]`` -> (f16x2 ``{k0, k1}``, f16x2
-    ``{k8, k9}``), exactly."""
+    """Humming FP8 word `[k0, k8, k1, k9]` -> (f16x2 `{k0, k1}`, f16x2
+    `{k8, k9}`), exactly."""
     return inline_ptx(
         "{ .reg .b32 p; .reg .b16 l, h;\n"
         "prmt.b32 p, {$r0}, {$r0}, 0x3120;\n"

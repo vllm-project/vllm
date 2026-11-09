@@ -2,23 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Low-batch MoE of the Hopper executor.
 
-``HopperLowBatchMoE`` runs one DeepSeek-V4.1 MoE layer's routed experts, and up
-to ``SHARED_MAX_ROWS`` rows its shared expert, as one persistent CuTe DSL launch
-(``moe_cute.LowBatchMoEKernel``) for up to ``MAX_ROWS`` rows. It reads the
+`HopperLowBatchMoE` runs one DeepSeek-V4.1 MoE layer's routed experts, and up
+to `SHARED_MAX_ROWS` rows its shared expert, as one persistent CuTe DSL launch
+(`moe_cute.LowBatchMoEKernel`) for up to `MAX_ROWS` rows. It reads the
 layer's stock Humming tensors in place: the routed experts' SM90 W4A8 weights
 (MXFP4 x block-FP8 group-128 activations) and the shared expert's W8A16 linears.
 
 The kernel routes the step itself from the stock router's FP32 logits
 (sqrt-softplus plus the correction bias, top-k, renormalized, times the routed
-scaling factor; image sentinel tokens with ``bias_vl``), or takes the stock
+scaling factor; image sentinel tokens with `bias_vl`), or takes the stock
 router's top-k ids and weights on hash-routed layers. It stops before the top-k
-reduction: its output is an ``UnfinalizedMoEOutput`` (unweighted BF16 rows per
+reduction: its output is an `UnfinalizedMoEOutput` (unweighted BF16 rows per
 (token, expert), FP32 routing weights, int32 route-to-row map) that the next
-boundary's fused all-reduce + mHC finalizes (``AllReduceMHC.finalize``), with
+boundary's fused all-reduce + mHC finalizes (`AllReduceMHC.finalize`), with
 the shared expert's BF16 output (fused, or from the stock shared expert).
 
 The expert count and top-k are the layer's (up to 384 and 6). Every layer
-shares one ``MoEWorkspace``: calls are ordered on the forward stream, and each
+shares one `MoEWorkspace`: calls are ordered on the forward stream, and each
 boundary consumes its MoE output before the next MoE layer runs. The kernel's
 counters are epoch-stamped or reset by their last user, so CUDA graph replays
 need no reset.
@@ -87,7 +87,7 @@ def _layer_maps(
     """The kernel's [9, 16] int64 layer blob: TMA tensor maps of the routed
     w13 / s13 / w2 / s2 and shared gate-up / its scales / down / its scales;
     row 8: (address, bytes) of the four shared tensors, then the gate weight
-    (unused), ``bias_vl`` addresses and the image sentinel."""
+    (unused), `bias_vl` addresses and the image sentinel."""
     import cuda.bindings.driver as cuda
 
     u64 = cuda.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_UINT64
@@ -165,7 +165,7 @@ class MoEWorkspace:
         self._rec_pos = REC_POS
 
     def route_to_row(self, rows: int, top_k: int) -> torch.Tensor:
-        """``expanded_idx_to_permuted_idx`` [rows, top_k] (a view of the
+        """`expanded_idx_to_permuted_idx` [rows, top_k] (a view of the
         record)."""
         start = self._rec_pos
         return self.rec[start : start + rows * top_k].view(rows, top_k)
@@ -241,7 +241,7 @@ def _compiled(config: LaunchConfig):
 
 
 class HopperLowBatchMoE:
-    """The low-batch MoE call of one ``DeepseekV4MoE`` layer."""
+    """The low-batch MoE call of one `DeepseekV4MoE` layer."""
 
     def __init__(
         self,
@@ -276,7 +276,7 @@ class HopperLowBatchMoE:
 
     @classmethod
     def of(cls, ffn: nn.Module) -> "HopperLowBatchMoE | None":
-        """The call of a stock ``DeepseekV4MoE`` on Humming W4A8 experts at TP4
+        """The call of a stock `DeepseekV4MoE` on Humming W4A8 experts at TP4
         (a multiple of 32 experts up to 384, top-k up to 6, sqrt-softplus,
         renormalized, routed scaling 1.5, SwiGLU limit 10), or None for any
         other layer."""
@@ -340,7 +340,7 @@ class HopperLowBatchMoE:
         return self.has_shared and rows <= SHARED_MAX_ROWS
 
     def warm_up(self, rows: list[int]) -> None:
-        """Compile the variants calls of ``rows`` rows launch."""
+        """Compile the variants calls of `rows` rows launch."""
         for m in rows:
             if self.serves(m):
                 _compiled(self._config(m, self.hash_routed, self.image))
@@ -363,12 +363,12 @@ class HopperLowBatchMoE:
         topk_weights: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
     ) -> tuple[UnfinalizedMoEOutput, torch.Tensor | None]:
-        """The unfinalized routed output of the BF16 MoE input ``x`` [rows,
-        5120], routed from FP32 ``router_logits`` [rows, experts] or by given
-        ``topk_ids`` (int32 [rows, top_k]) and ``topk_weights`` (FP32 [rows,
+        """The unfinalized routed output of the BF16 MoE input `x` [rows,
+        5120], routed from FP32 `router_logits` [rows, experts] or by given
+        `topk_ids` (int32 [rows, top_k]) and `topk_weights` (FP32 [rows,
         top_k], renormalized and times the routed scaling factor), as on a
         hash-routed layer; and the fused shared expert's
-        output, or None above ``SHARED_MAX_ROWS`` rows. Both are views of the
+        output, or None above `SHARED_MAX_ROWS` rows. Both are views of the
         workspace."""
         from cutlass import Int32, Int64
 

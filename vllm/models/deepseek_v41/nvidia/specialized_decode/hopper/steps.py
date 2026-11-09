@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The steps of a Hopper executor layer: attention, MoE and boundaries with
-the Hopper kernel choices (``kernels``)."""
+the Hopper kernel choices (`kernels`)."""
 
 from typing import TYPE_CHECKING, Any
 
@@ -31,17 +31,17 @@ if TYPE_CHECKING:
 
 
 class HopperAttentionStep:
-    """One ``DeepseekV4FlashMLAAttention`` layer of the step, in the GB300
-    executor's schedule (``attention.step.AttentionStep``): the side
+    """One `DeepseekV4FlashMLAAttention` layer of the step, in the GB300
+    executor's schedule (`attention.step.AttentionStep`): the side
     projections join their side streams at their first reader, the indexer
-    query is built on aux stream 2 once ``qr`` is ready and the compressor
-    and index key on aux stream 0; on the Hopper projections (``linears``).
+    query is built on aux stream 2 once `qr` is ready and the compressor
+    and index key on aux stream 0; on the Hopper projections (`linears`).
     The layer input is BF16 (the dense linears are weight-only W8A16).
 
-    Steps on the small-batch MLA (``mla_small``) run the early-trigger chain
-    (``attn_chain``): the q/kv RMSNorm with the KV insert, then the cluster
-    decode taking ``wq_b``'s output before its RoPE and writing the
-    inverse-rotated ``wo_a`` input; other steps run FlashMLA."""
+    Steps on the small-batch MLA (`mla_small`) run the early-trigger chain
+    (`attn_chain`): the q/kv RMSNorm with the KV insert, then the cluster
+    decode taking `wq_b`'s output before its RoPE and writing the
+    inverse-rotated `wo_a` input; other steps run FlashMLA."""
 
     def __init__(
         self,
@@ -60,7 +60,7 @@ class HopperAttentionStep:
     def run(
         self, x: torch.Tensor, positions: torch.Tensor, step: "DecodeStep"
     ) -> torch.Tensor:
-        """The layer's TP-partial output for input ``x``."""
+        """The layer's TP-partial output for input `x`."""
         attn, mla = self.attn, self.mla
         rows = x.shape[0]
         wo_a = self.linears.wo_a
@@ -95,8 +95,8 @@ class HopperAttentionStep:
     def _input_projections(
         self, x: torch.Tensor, step: "DecodeStep"
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        """``fused_wqa_wkv``, and the side projections (``kv_score``, the
-        indexer weights) left unjoined on aux streams 0 and 1; ``_prepare``
+        """`fused_wqa_wkv`, and the side projections (`kv_score`, the
+        indexer weights) left unjoined on aux streams 0 and 1; `_prepare`
         joins each at its first reader."""
         attn = self.attn
         side: list[Any] = [None, None]
@@ -199,7 +199,7 @@ class HopperAttentionStep:
 
 
 class HopperMoEStep(MoEStep):
-    """``MoEStep`` on the Hopper MoE (``kernels.moe``)."""
+    """`MoEStep` on the Hopper MoE (`kernels.moe`)."""
 
     def __init__(self, ffn: "DeepseekV4MoE", max_rows: int) -> None:
         super().__init__(ffn, None, max_rows)
@@ -215,8 +215,8 @@ class HopperMoEStep(MoEStep):
 
 
 class HopperBoundaries(Boundaries):
-    """``Boundaries`` with the executor's own mHC pre (``mhc.SeamPre``) on its
-    own side stream (``stream``): the fused all-reduce + mHC up to its
+    """`Boundaries` with the executor's own mHC pre (`mhc.SeamPre`) on its
+    own side stream (`stream`): the fused all-reduce + mHC up to its
     capacity; above it the TP all-reduce and the mHC post, after which the mHC
     pre also computes the layer input. No DeepGEMM kernel runs."""
 

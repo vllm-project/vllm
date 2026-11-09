@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The split-K mHC mixes of the Hopper executor, in CuTe DSL (``MixesKernel``):
-``residual @ fn.T`` and the sums of squares of the streams, the prenorm GEMM of
+"""The split-K mHC mixes of the Hopper executor, in CuTe DSL (`MixesKernel`):
+`residual @ fn.T` and the sums of squares of the streams, the prenorm GEMM of
 the mHC pre that the stock path runs on DeepGEMM.
 
-``residual`` is BF16 [M, 4 x 5120] (exact in TF32), ``fn`` FP32 [24, 20480]
+`residual` is BF16 [M, 4 x 5120] (exact in TF32), `fn` FP32 [24, 20480]
 rounded to TF32 as the TF32 prenorm GEMMs round it; the products run on TF32
-``mma.sync``. Each CTA takes 256 of K with its 24 KB slice of ``fn``, loaded
-before the grid wait (``fn`` does not depend on the previous kernel), and a
+`mma.sync`. Each CTA takes 256 of K with its 24 KB slice of `fn`, loaded
+before the grid wait (`fn` does not depend on the previous kernel), and a
 chunk of up to 64 rows. The CTAs of one chunk come in clusters of eight along
 K, whose partials are summed in a fixed order through distributed shared
 memory into ten splits, which the mHC epilogue
-(``mhc_pre_big_fuse_with_norm_tilelang``) reduces. The kernel triggers its
+(`mhc_pre_big_fuse_with_norm_tilelang`) reduces. The kernel triggers its
 dependent launch at the end.
 """
 
@@ -66,7 +66,7 @@ CHUNK_ROWS = 8 * MAX_TILES
 
 class MixesKernel:
     """The mix splits [MIX_SPLITS, M, 24] and sum-of-squares splits
-    [MIX_SPLITS, M] of ``M`` rows, in chunks of up to ``8 * tiles`` rows."""
+    [MIX_SPLITS, M] of `M` rows, in chunks of up to `8 * tiles` rows."""
 
     def __init__(self, tiles: int) -> None:
         assert 0 < tiles <= MAX_TILES
@@ -93,7 +93,7 @@ class MixesKernel:
 
     @cute.jit
     def _stage_rows(self, dst: Int32, src: Int64, m: Int32, tid: Int32):
-        """cp.async ``m`` rows of this CTA's K into the staged rows."""
+        """cp.async `m` rows of this CTA's K into the staged rows."""
         chunks = MIX_K // 8
         for q in cutlass.range(tid, m * chunks, THREADS, unroll=1):
             r = q // chunks
@@ -247,7 +247,7 @@ class MixesKernel:
 
 @functools.cache
 def compiled(tiles: int):
-    """The kernel of chunks of up to ``8 * tiles`` rows."""
+    """The kernel of chunks of up to `8 * tiles` rows."""
     from cutlass.cute.runtime import make_fake_stream
 
     zero = Int64(0)

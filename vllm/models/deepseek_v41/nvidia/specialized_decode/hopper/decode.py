@@ -2,25 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The specialized decode executor on Hopper (SM90).
 
-``HopperSpecializedDecode`` is ``SpecializedDecode`` (the same ``DecodeStep``
+`HopperSpecializedDecode` is `SpecializedDecode` (the same `DecodeStep`
 and final collapse) with its own plan, layer loop and steps over the Hopper
 stock layers:
 
-- It runs FULL-graph pure-decode steps of up to ``MAX_ROWS`` rows (192, 32
+- It runs FULL-graph pure-decode steps of up to `MAX_ROWS` rows (192, 32
   DSpark requests); larger steps run the stock layers.
 - Every sublayer boundary runs the fused all-reduce + mHC kernel up to
-  ``FUSED_MAX_ROWS`` rows (144), and above that the TP all-reduce and mHC
-  post; the next coefficients come from the executor's mHC pre (``mhc``) on
-  its own side stream (``HopperBoundaries``). No DeepGEMM kernel runs.
-- ``DeepseekV4FlashMLAAttention`` layers run ``HopperAttentionStep``, whose
+  `FUSED_MAX_ROWS` rows (144), and above that the TP all-reduce and mHC
+  post; the next coefficients come from the executor's mHC pre (`mhc`) on
+  its own side stream (`HopperBoundaries`). No DeepGEMM kernel runs.
+- `DeepseekV4FlashMLAAttention` layers run `HopperAttentionStep`, whose
   sparse MLA shares one FlashMLA plan per layer type and one global top-k
-  table per index source (``sparse_mla``), or up to ``mla_small.MAX_ROWS``
-  uniform rows runs the small-batch chain (``mla_small``, ``attn_chain``).
-- The dense FP8 linears (``fused_wqa_wkv``, ``wq_b``, the indexer's ``wq_b``,
-  ``wo_b`` and the shared expert's, and on the chain ``wo_a`` on an FP8 copy)
+  table per index source (`sparse_mla`), or up to `mla_small.MAX_ROWS`
+  uniform rows runs the small-batch chain (`mla_small`, `attn_chain`).
+- The dense FP8 linears (`fused_wqa_wkv`, `wq_b`, the indexer's `wq_b`,
+  `wo_b` and the shared expert's, and on the chain `wo_a` on an FP8 copy)
   run on the low-batch CuTe DSL or tuned Humming calls up to
-  ``dense.MAX_ROWS`` rows (``dense``, ``kernels``).
-- The MoE runs the low-batch kernel (``moe``) up to ``moe.MAX_ROWS`` rows,
+  `dense.MAX_ROWS` rows (`dense`, `kernels`).
+- The MoE runs the low-batch kernel (`moe`) up to `moe.MAX_ROWS` rows,
   whose top-k reduction the next boundary's fused all-reduce finalizes.
 """
 
@@ -140,7 +140,7 @@ class HopperSpecializedDecode(SpecializedDecode):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
     ) -> DecodeStep | None:
-        """As ``SpecializedDecode.plan``, up to ``max_rows`` rows."""
+        """As `SpecializedDecode.plan`, up to `max_rows` rows."""
         rows = positions.shape[0]
         if (
             intermediate_tensors is not None
@@ -168,7 +168,7 @@ class HopperSpecializedDecode(SpecializedDecode):
         engram_mask: torch.Tensor | None,
         streams: torch.Tensor | None = None,
     ) -> DecodeOutput:
-        """``SpecializedDecode.run`` on the Hopper steps and boundaries."""
+        """`SpecializedDecode.run` on the Hopper steps and boundaries."""
         backbone = self.backbone
         aux_layers = backbone.aux_hidden_state_layers
         aux: dict[int, torch.Tensor] = {}

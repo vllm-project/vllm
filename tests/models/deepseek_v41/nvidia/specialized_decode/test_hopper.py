@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The Hopper executor's sparse-MLA decode
-(``specialized_decode/hopper/sparse_mla.py``) against the stock FlashMLA decode
+(`specialized_decode/hopper/sparse_mla.py`) against the stock FlashMLA decode
 it replaces, on the FlashMLA SM90 kernel, eagerly and replayed from a CUDA
 graph. Needs one SM90 GPU; under a minute.
 
@@ -72,7 +72,7 @@ def _v4_cache(blocks: int, block_size: int, generator) -> torch.Tensor:
 
 
 class Step:
-    """One pure-decode step of ``LAYOUT``'s layers on random caches."""
+    """One pure-decode step of `LAYOUT`'s layers on random caches."""
 
     def __init__(self, seed: int):
         g = torch.Generator(device=DEVICE).manual_seed(seed)
@@ -172,7 +172,7 @@ class Step:
             group.tile_sched_c2a = sparse_mla.get_mla_metadata()[0]
 
     def forward(self, decode: "sparse_mla.FlashMlaDecode | None") -> torch.Tensor:
-        """Every layer's attention output in model order, on ``decode`` (None:
+        """Every layer's attention output in model order, on `decode` (None:
         the stock decode); each index source first writes its top-k."""
         self.fresh_plans()
         out = torch.zeros_like(self.q)
@@ -205,7 +205,7 @@ class Step:
 
 
 def _count_plans(monkeypatch, module) -> list:
-    """The plans ``module``'s decode launches pass, in launch order."""
+    """The plans `module`'s decode launches pass, in launch order."""
     plans: list = []
     launch = module.flash_mla_with_kvcache
 
@@ -278,7 +278,7 @@ def _rope_cache(positions: int = 4096) -> torch.Tensor:
 
 
 class ChainStep:
-    """One uniform verify step of ``requests`` 6-row requests at ``context``
+    """One uniform verify step of `requests` 6-row requests at `context`
     tokens on one compressed (ratio 2) layer, with SWA windows and slots as
     the stock metadata derives them (a per-request ring of 256 slots)."""
 
@@ -372,12 +372,12 @@ class ChainStep:
 @pytest.mark.parametrize("context", [8192, 32768])
 @pytest.mark.parametrize("requests", [1, 2, 4, 8])
 def test_chain_decode_matches_flashmla(requests, context):
-    """The ``attn_chain`` steps' MLA (6 to 48 rows): the q/kv norm writing the
+    """The `attn_chain` steps' MLA (6 to 48 rows): the q/kv norm writing the
     step's keys into the SWA tile images and the cluster decode on the tile
-    images (query RoPE as it stages the ``wq_b`` output, splits merged in the
-    cluster, inverse RoPE) against ``fused_q_kv_rmsnorm``, the stock q RoPE
-    and KV insert, FlashMLA and ``fused_inv_rope_fp8_quant``: the normalized
-    query and the whole SWA cache bit for bit, the ``wo_a`` input within one
+    images (query RoPE as it stages the `wq_b` output, splits merged in the
+    cluster, inverse RoPE) against `fused_q_kv_rmsnorm`, the stock q RoPE
+    and KV insert, FlashMLA and `fused_inv_rope_fp8_quant`: the normalized
+    query and the whole SWA cache bit for bit, the `wo_a` input within one
     BF16 ulp of FlashMLA's; a CUDA graph replay equals the eager step bit for
     bit."""
     import vllm._custom_ops  # noqa: F401
@@ -494,7 +494,7 @@ def _dequant(w: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
 def _humming_linear(
     w: torch.Tensor, scales: torch.Tensor, parts: list[int] | None = None
 ):
-    """``w`` (output ``parts``) as the stock SM90 Humming W8A16 linear holds
+    """`w` (output `parts`) as the stock SM90 Humming W8A16 linear holds
     it: the weight and scales and the Humming kernel's config and locks."""
     from torch import nn
 
@@ -583,7 +583,7 @@ def test_dense_calls_match_the_stock_linear(seam):
 
 
 def test_fp8_wo_a_matches_the_stock_bmm():
-    """The FP8 copy of the stock BF16 ``wo_a`` (dequantized at load) is exact,
+    """The FP8 copy of the stock BF16 `wo_a` (dequantized at load) is exact,
     and its grouped call on the inverse RoPE's group-major output matches the
     stock BF16 bmm at every row count; a weight that is not an MXFP8 dequant
     keeps the bmm."""
@@ -700,13 +700,13 @@ def _routing(logits: torch.Tensor, bias: torch.Tensor, top_k: int):
 
 
 def _finalize(routed) -> torch.Tensor:
-    """``AllReduceMHC.finalize``'s top-k sum on one rank."""
+    """`AllReduceMHC.finalize`'s top-k sum on one rank."""
     rows = routed.gemm2_permuted[routed.expanded_idx_to_permuted_idx.long()]
     return (rows.float() * routed.expert_weights.unsqueeze(-1)).sum(1)
 
 
 def _moe_ffn(num_experts: int, top_k: int, bias: torch.Tensor):
-    """A ``DeepseekV4MoE`` stand-in on a stock Humming W4A8 MoE and a W8A16
+    """A `DeepseekV4MoE` stand-in on a stock Humming W4A8 MoE and a W8A16
     shared expert, with the routed experts' FP32 reference weights and the
     shared expert's Humming linears."""
     layer, reference = _stock_moe(num_experts, top_k)
@@ -956,7 +956,7 @@ MHC_ROWS = (1, 6, 12, 24, 48, 96, 144, 192)
 
 
 def _mhc_layer(seed: int) -> SimpleNamespace:
-    """The decoder-layer attributes the mHC pre reads: both seams' FP32 ``fn``
+    """The decoder-layer attributes the mHC pre reads: both seams' FP32 `fn`
     / scale / base and norms, random."""
     g = torch.Generator(device=DEVICE).manual_seed(seed)
 
@@ -986,10 +986,10 @@ def _mhc_layer(seed: int) -> SimpleNamespace:
 @pytest.mark.parametrize("first", [False, True], ids=["carried", "first"])
 def test_mhc_pre_matches_torch(first):
     """The executor's mHC pre (the CuTe DSL mixes in place of the DeepGEMM
-    prenorm GEMM, the stock epilogue) against ``mhc_pre_delayed_torch`` at
+    prenorm GEMM, the stock epilogue) against `mhc_pre_delayed_torch` at
     every step size the executor serves, in chunks of 64 rows: the
     coefficients on the side stream and the normalized layer input on the
-    caller's, with the carried pre-mix or (``first``) stream zero."""
+    caller's, with the carried pre-mix or (`first`) stream zero."""
     from vllm.model_executor.kernels.mhc.torch import mhc_pre_delayed_torch
     from vllm.models.deepseek_v41.nvidia.specialized_decode.hopper import mhc
 

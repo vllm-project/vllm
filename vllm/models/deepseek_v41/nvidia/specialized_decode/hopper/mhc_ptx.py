@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Inline PTX of the Hopper mHC mixes kernel (``mhc_cute``): cp.async, shared
-and distributed shared memory, tf32 ``mma.sync``."""
+"""Inline PTX of the Hopper mHC mixes kernel (`mhc_cute`): cp.async, shared
+and distributed shared memory, tf32 `mma.sync`."""
 
 from cutlass import Float32, Int32, Int64, Uint32
 from cutlass._mlir.dialects import llvm
@@ -130,7 +130,7 @@ def cluster_wait(*, loc=None, ip=None):
 @dsl_user_op
 def tf32_rna(v, *, loc=None, ip=None) -> Uint32:
     """FP32 bits rounded to TF32 (nearest), as the TF32 GEMMs that round their
-    FP32 operands (DeepGEMM's prenorm GEMM) see them; ``mma.sync`` itself
+    FP32 operands (DeepGEMM's prenorm GEMM) see them; `mma.sync` itself
     ignores the low mantissa bits."""
     return Uint32(
         _asm(

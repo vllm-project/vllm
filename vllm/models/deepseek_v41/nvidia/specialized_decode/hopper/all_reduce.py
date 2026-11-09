@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The Hopper executor's fused all-reduce + mHC: ``BoundaryAllReduce`` with
+"""The Hopper executor's fused all-reduce + mHC: `BoundaryAllReduce` with
 BF16 layer input, built after a TP barrier."""
 
 from transformers import PreTrainedConfig
@@ -11,7 +11,7 @@ from ..boundary.all_reduce import BoundaryAllReduce
 
 
 class HopperBoundaryAllReduce(BoundaryAllReduce):
-    """``BoundaryAllReduce`` with BF16 layer input."""
+    """`BoundaryAllReduce` with BF16 layer input."""
 
     def __init__(self, config: PreTrainedConfig, max_num_tokens: int) -> None:
         # Align the ranks first: the mailbox's symmetric-memory rendezvous
