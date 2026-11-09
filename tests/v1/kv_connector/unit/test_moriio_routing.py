@@ -4,7 +4,7 @@
 
 These lock in the redesign that addresses the PR #45043 review feedback
 (njhill): the connector must NOT self-derive a DP rank, and the prefill leg
-must *return* the rank it actually ran on via ``request_finished`` so the
+must *return* the rank it actually ran on via `request_finished` so the
 decode->prefill notify is routed by pure propagation (READ / serial WRITE),
 not by an independent hash on each side.
 
@@ -40,6 +40,7 @@ def _producer(global_dp_rank: int, dp_size: int, dp_size_local: int):
                 data_parallel_size=dp_size,
                 data_parallel_size_local=dp_size_local,
                 tensor_parallel_size=1,
+                pipeline_parallel_size=1,
             )
         ),
     )

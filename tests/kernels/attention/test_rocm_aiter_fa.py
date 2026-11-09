@@ -3,7 +3,7 @@
 """ROCm-specific tests for the AITER Flash Attention backend.
 
 This file owns the ROCm backend contract and the ROCm-specific execution paths
-wired through ``vllm.v1.attention.backends.rocm_aiter_fa``:
+wired through `vllm.v1.attention.backends.rocm_aiter_fa`:
 - backend contract and env gating
 - representative prefill, multi-batch, decode, and FP8-KV execution
 - direct kernel stress for large block tables and sliding-window masking
@@ -42,9 +42,14 @@ DIRECT_NUM_HEADS = (8, 2)
 DIRECT_HEAD_SIZE = 128
 DIRECT_DTYPE = torch.bfloat16
 HEAD_SIZE_TEST_NUM_HEADS_PAIRS = [(16, 16), (16, 4)]
-# Prefill seq lens: (query_len, kv_len).
-# Single-token decode is covered separately in test_aiter_mha_decode_single_token.
-SEQ_LENS = [(8, 512), (32, 1024)]
+# Prefill seq lens: (query_len, kv_len). q=1 is not a production shape for this
+# kernel: sort_batch_req_ids orders requests by scheduled token count, so a
+# 1-token request leads the batch and is split off as a decode, and the decode
+# path takes no min_seqlen_q. It is kept as a regression guard -- CK returns
+# early for seqlen_q <= min_seqlen_q and leaves `out` unwritten, so this entry
+# fails loudly if min_seqlen_q ever goes back to 1. See
+# test_aiter_mha_decode_single_token for the decode path itself.
+SEQ_LENS = [(1, 512), (8, 512), (32, 1024)]
 DIRECT_SEQ_LENS = [(10, 1328), (5, 18), (129, 463)]
 
 
@@ -259,7 +264,7 @@ def _run_direct_flash_attn_case(
         cu_seqlens_k=cu_seq_lens,
         max_seqlen_q=max_query_len,
         max_seqlen_k=max_kv_len,
-        min_seqlen_q=1,
+        min_seqlen_q=0,
         dropout_p=0.0,
         softmax_scale=scale,
         causal=True,
@@ -447,7 +452,7 @@ def _run_single_seq_flash_attn_case(
         cu_seqlens_k=cu_seq_lens,
         max_seqlen_q=query_len,
         max_seqlen_k=kv_len,
-        min_seqlen_q=1,
+        min_seqlen_q=0,
         dropout_p=0.0,
         softmax_scale=scale,
         causal=True,
@@ -611,7 +616,7 @@ def test_aiter_mha_multi_batch(num_heads, head_size, dtype):
         cu_seqlens_k=cu_seq_lens,
         max_seqlen_q=max(query_lens),
         max_seqlen_k=max_kv_len,
-        min_seqlen_q=1,
+        min_seqlen_q=0,
         dropout_p=0.0,
         softmax_scale=scale,
         causal=True,
@@ -1114,7 +1119,7 @@ def test_aiter_mha_varlen_fp8_kv(dtype):
         cu_seqlens_k=cu_seq_lens,
         max_seqlen_q=query_len,
         max_seqlen_k=kv_len,
-        min_seqlen_q=1,
+        min_seqlen_q=0,
         dropout_p=0.0,
         softmax_scale=scale,
         causal=True,

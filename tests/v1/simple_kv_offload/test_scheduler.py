@@ -154,7 +154,7 @@ def _make_scratch_kv_cache_config(
     """FullAttention group plus a non-prefix-cacheable scratch group.
 
     Mirrors GLM-5.3-Flash, whose kpool-tail group holds one per-request
-    scratch block of ``index_kpool`` tokens: it is excluded from prefix
+    scratch block of `index_kpool` tokens: it is excluded from prefix
     caching, so its block size neither divides nor is divided by the
     hash block size in general.
     """
@@ -353,7 +353,6 @@ def test_lookahead_mamba_partial_tail_survives_finish(
             step,
             ModelRunnerOutput(
                 req_ids=[req.request_id],
-                req_id_to_index={req.request_id: 0},
                 sampled_token_ids=[[99] if is_final else []],
             ),
         )
@@ -553,10 +552,10 @@ def make_scheduler_output(
 
     Args:
         new_reqs: For first-time requests, maps req_id -> block_ids tuple.
-            These are placed into ``scheduled_new_reqs`` as ``NewRequestData``.
+            These are placed into `scheduled_new_reqs` as `NewRequestData`.
         cached_req_new_blocks: For returning (cached) requests, maps
             req_id -> new_block_ids (incremental) or None.
-            These are placed into ``scheduled_cached_reqs``.
+            These are placed into `scheduled_cached_reqs`.
 
     """
     scheduled_new_reqs: list[NewRequestData] = []
@@ -572,6 +571,7 @@ def make_scheduler_output(
                     block_ids=block_ids,
                     num_computed_tokens=0,
                     lora_request=None,
+                    prefill_token_ids=[],
                 )
             )
 
@@ -580,9 +580,7 @@ def make_scheduler_output(
         cached_new_block_ids = [cached_req_new_blocks[rid] for rid in cached_req_ids]
         cached_reqs = CachedRequestData(
             req_ids=cached_req_ids,
-            resumed_req_ids=set(),
             new_token_ids=[[] for _ in cached_req_ids],
-            all_token_ids={},
             new_block_ids=cached_new_block_ids,
             num_computed_tokens=[0] * len(cached_req_ids),
             num_output_tokens=[0] * len(cached_req_ids),
@@ -671,11 +669,11 @@ def _alloc_and_register(
     """Allocate GPU blocks and return KVCacheBlocks.
 
     Block IDs are no longer registered in a mock KVCacheManager; instead
-    tests pass them through ``make_scheduler_output`` so that
-    ``yield_req_data`` can pick them up.
+    tests pass them through `make_scheduler_output` so that
+    `yield_req_data` can pick them up.
 
-    If ``confirmed`` is True, advance ``request.num_computed_tokens`` to simulate
-    the scheduler's ``_update_after_schedule`` from a prior step.
+    If `confirmed` is True, advance `request.num_computed_tokens` to simulate
+    the scheduler's `_update_after_schedule` from a prior step.
     """
     gpu_blocks = _allocate_gpu_blocks(
         fix.gpu_block_pool, request, num_blocks, group_id=group_id
@@ -1024,8 +1022,8 @@ def test_reset_releases_unsubmitted_finished_stores() -> None:
 # ---------------------------------------------------------------------------
 def test_max_hit_len_cap_drops_last_full_block() -> None:
     """When num_tokens is an exact multiple of BLOCK_SIZE, the manager's
-    ``max_hit_len = num_tokens - 1`` cap forces ``find_longest_cache_hit`` to
-    drop the final block (since ``max_length // block_size`` rounds down).
+    `max_hit_len = num_tokens - 1` cap forces `find_longest_cache_hit` to
+    drop the final block (since `max_length // block_size` rounds down).
     """
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
     sched = fix.scheduler
@@ -1969,12 +1967,8 @@ def test_chunked_prefill_reads_live_block_ids() -> None:
     assert len(meta2.store_gpu_blocks) == 2
 
 
-@pytest.mark.parametrize("use_v2_model_runner", [False, True])
 @pytest.mark.parametrize("same_output", [False, True])
-def test_eager_store_resets_block_cursor_after_preemption(
-    use_v2_model_runner: bool,
-    same_output: bool,
-) -> None:
+def test_eager_store_resets_block_cursor_after_preemption(same_output: bool) -> None:
     """A resumed request stores its confirmed tail after preemption."""
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=8, lazy=False)
     sched = fix.scheduler
@@ -1998,17 +1992,10 @@ def test_eager_store_resets_block_cursor_after_preemption(
 
     resumed_blocks = _alloc_and_register(fix, req, num_blocks=3)
     sched.update_state_after_alloc(req, resumed_blocks, num_external_tokens=0)
-    if use_v2_model_runner:
-        resumed_output = make_scheduler_output(
-            {req.request_id: 3 * BLOCK_SIZE},
-            new_reqs={req.request_id: resumed_blocks.get_block_ids()},
-        )
-    else:
-        resumed_output = make_scheduler_output(
-            {req.request_id: 3 * BLOCK_SIZE},
-            cached_req_new_blocks={req.request_id: resumed_blocks.get_block_ids()},
-        )
-        resumed_output.scheduled_cached_reqs.resumed_req_ids.add(req.request_id)
+    resumed_output = make_scheduler_output(
+        {req.request_id: 3 * BLOCK_SIZE},
+        new_reqs={req.request_id: resumed_blocks.get_block_ids()},
+    )
     if same_output:
         resumed_output.preempted_req_ids = {req.request_id}
 
@@ -2197,14 +2184,14 @@ def test_chunked_local_cpu_lookup_requires_chunk_aligned_prefix(
 def test_toctou_cpu_hit_evicted_between_phases_no_crash() -> None:
     """Regression for vllm-project/vllm#39702.
 
-    When ``get_num_new_matched_tokens`` (Phase A) reports a CPU cache hit
-    of ``N`` tokens but ``update_state_after_alloc`` (Phase B) runs after
+    When `get_num_new_matched_tokens` (Phase A) reports a CPU cache hit
+    of `N` tokens but `update_state_after_alloc` (Phase B) runs after
     other requests have caused LRU eviction of those exact blocks, the
-    second ``find_longest_cache_hit`` call returns 0 while
-    ``num_external_tokens`` is still ``N``, triggering
-    ``AssertionError: Expected N hit tokens, got 0``.
+    second `find_longest_cache_hit` call returns 0 while
+    `num_external_tokens` is still `N`, triggering
+    `AssertionError: Expected N hit tokens, got 0`.
 
-    Setup: ``num_cpu_blocks=5`` (4 usable; null_block takes 1).
+    Setup: `num_cpu_blocks=5` (4 usable; null_block takes 1).
         1. Store req_a's 2 blocks to CPU. CPU: [a0, a1, _, _].
         2. Phase A on req_b (same prompt as req_a) reports a 2-block hit.
            Without the fix this does NOT pin a0/a1 — they remain at LRU front.
@@ -2215,8 +2202,8 @@ def test_toctou_cpu_hit_evicted_between_phases_no_crash() -> None:
            cached hashes, asserts.
 
     After the fix, Phase A pins the hit blocks so step 3 evicts req_c's
-    blocks instead, and Phase B reads the cached ``(cpu_hit_blocks,
-    hit_length)`` tuple without re-searching.
+    blocks instead, and Phase B reads the cached `(cpu_hit_blocks,
+    hit_length)` tuple without re-searching.
     """
     # 5 total = 4 usable (null_block takes 1)
     fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
@@ -2923,9 +2910,9 @@ def _make_two_group_scheduler(
 def test_hybrid_store_uses_resolved_group_block_sizes() -> None:
     """Replicated groups must not be scaled by the DCP world size.
 
-    The spec's ``dcp_sharded`` flag controls its effective block size.
+    The spec's `dcp_sharded` flag controls its effective block size.
     Reconstructing a group's geometry as
-    ``spec.block_size * cp_world_size`` over-scales the replicated groups, so
+    `spec.block_size * cp_world_size` over-scales the replicated groups, so
     the eager store scan believes far fewer of their blocks are ready and
     silently offloads only a fraction of them.
     """
@@ -3463,7 +3450,7 @@ def test_boundary_handoff_dropped_for_departing_request(gone_via: str) -> None:
 def test_boundary_handoff_keeps_block_meta_index_parallel() -> None:
     """Boundary stores must extend block_meta alongside the block ids.
 
-    ``_process_store_completion`` indexes ``block_meta`` by position, so a
+    `_process_store_completion` indexes `block_meta` by position, so a
     boundary handoff that appends only block ids shortens the list, trips its
     length assertion and shifts every following entry's metadata.
     """

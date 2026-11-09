@@ -89,6 +89,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import cdiv
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -871,14 +872,14 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     ) -> dict[str, object]:
         """Complete missing Qwen-VL size aliases.
 
-        Qwen-VL accepts ``size.shortest_edge`` / ``min_pixels`` and
-        ``size.longest_edge`` / ``max_pixels`` as equivalent controls. When
-        only one representation is provided with a non-``None`` value, add the
+        Qwen-VL accepts `size.shortest_edge` / `min_pixels` and
+        `size.longest_edge` / `max_pixels` as equivalent controls. When
+        only one representation is provided with a non-`None` value, add the
         missing equivalent representation. If both are already present, leave
         them unchanged even when their values conflict.
 
         Apply this independently to the flat kwargs and to each existing
-        ``images_kwargs`` / ``videos_kwargs`` mapping. Values are not propagated
+        `images_kwargs` / `videos_kwargs` mapping. Values are not propagated
         between these mappings.
         """
 
@@ -935,10 +936,10 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         self,
         mm_kwargs: Mapping[str, object],
     ) -> dict[str, Any]:
-        """Merge configured and request Qwen-VL ``mm_processor_kwargs``.
+        """Merge configured and request Qwen-VL `mm_processor_kwargs`.
 
-        Request-side ``size.shortest_edge`` / ``min_pixels`` and
-        ``size.longest_edge`` / ``max_pixels`` aliases are completed before the
+        Request-side `size.shortest_edge` / `min_pixels` and
+        `size.longest_edge` / `max_pixels` aliases are completed before the
         merge so request precedence is preserved across equivalent
         representations.
         """
@@ -955,8 +956,8 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     ) -> dict[str, int]:
         """Resolve Qwen-VL vision size kwargs with optional processor defaults.
 
-        ``size`` overrides any processor defaults, then ``min_pixels`` and
-        ``max_pixels`` override the corresponding size edges.
+        `size` overrides any processor defaults, then `min_pixels` and
+        `max_pixels` override the corresponding size edges.
         """
         size = dict(default_size) if default_size is not None else {}
 
@@ -1176,19 +1177,72 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
 
         return max(max_frames_per_video, 1)
 
+    def get_video_size_and_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> tuple[ImageSize, int]:
+        vision_config = self.get_hf_config().vision_config
+        unit = vision_config.patch_size * vision_config.spatial_merge_size
+        temporal_patch_size = vision_config.temporal_patch_size
+        image_processor = self.get_image_processor()
+
+        def num_tokens(size: ImageSize, num_frames: int) -> int:
+            return self.get_num_video_tokens(
+                image_width=size.width,
+                image_height=size.height,
+                num_frames=num_frames,
+                image_processor=image_processor,
+                mm_kwargs={},
+            )
+
+        max_size = self.get_image_size_with_most_features()
+        max_size_frames = self.get_num_frames_with_most_features(seq_len, mm_counts)
+
+        max_frames = _MAX_FRAMES_PER_VIDEO
+        mm_config = self.ctx.get_mm_config()
+        video_options = mm_config.limit_per_prompt.get("video")
+        if mm_config.is_multimodal_pruning_enabled() or (
+            video_options and (video_options.width or video_options.height)
+        ):
+            return max_size, max_size_frames
+        if video_options and video_options.num_frames:
+            max_frames = min(max_frames, video_options.num_frames)
+
+        max_step_tokens = num_tokens(max_size, temporal_patch_size)
+        min_step_tokens = num_tokens(ImageSize(unit, unit), temporal_patch_size)
+
+        video_tokens = seq_len // max(mm_counts.get("video", 0), 1)
+        num_steps = min(
+            cdiv(video_tokens, max_step_tokens),
+            cdiv(max_frames, temporal_patch_size),
+            video_tokens // min_step_tokens,
+        )
+        if num_steps > 1:
+            step_tokens = min(video_tokens // num_steps, max_step_tokens)
+            size = self.get_image_size_with_most_features(
+                max_pixels=step_tokens * unit * unit
+            )
+            num_frames = num_steps * temporal_patch_size
+            tokens = num_tokens(size, num_frames)
+            if num_tokens(max_size, max_size_frames) < tokens <= video_tokens:
+                return size, num_frames
+
+        return max_size, max_size_frames
+
     def get_max_video_tokens(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> int:
-        image_processor = self.get_image_processor()
-        target_width, target_height = self.get_image_size_with_most_features()
-
+        size, num_frames = self.get_video_size_and_frames_with_most_features(
+            seq_len, mm_counts
+        )
         return self.get_num_video_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
-            image_processor=image_processor,
+            image_width=size.width,
+            image_height=size.height,
+            num_frames=num_frames,
+            image_processor=self.get_image_processor(),
             mm_kwargs={},
         )
 
@@ -1211,8 +1265,8 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
         mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
-        target_num_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
+        video_size, target_num_frames = (
+            self.info.get_video_size_and_frames_with_most_features(seq_len, mm_counts)
         )
 
         return {
@@ -1223,8 +1277,8 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
                 overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
+                width=video_size.width,
+                height=video_size.height,
                 num_frames=target_num_frames,
                 num_videos=mm_counts.get("video", 0),
                 overrides=mm_options.get("video"),

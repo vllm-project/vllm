@@ -68,11 +68,11 @@ class RocmPagedMxfp4CacheLayout(NamedTuple):
     """The byte order of an indexer K page, as the kernel reads it, and the
     shuffle pattern aiter's K cache op writes it with.
 
-    A page is cut into runs of ``n_per_tile`` tokens. Inside a run, each token's
-    packed values are split into ``d_per_tile``-byte chunks along the head
+    A page is cut into runs of `n_per_tile` tokens. Inside a run, each token's
+    packed values are split into `d_per_tile`-byte chunks along the head
     dimension, and the run stores chunk 0 of every token, then chunk 1, and so
-    on: ``[chunk, token, byte]``. Its e8m0 scales are stored as
-    ``[scale % scale_lanes, token, scale // scale_lanes]``.
+    on: `[chunk, token, byte]`. Its e8m0 scales are stored as
+    `[scale % scale_lanes, token, scale // scale_lanes]`.
     """
 
     n_per_tile: int
@@ -90,7 +90,7 @@ _WAVE_SIZE = 64
 def rocm_paged_mxfp4_cache_layout(
     num_heads: int, head_dim: int, page_entries: int
 ) -> RocmPagedMxfp4CacheLayout:
-    """The K page layout from aiter's ``cache_format``, the only place vLLM
+    """The K page layout from aiter's `cache_format`, the only place vLLM
     reads it, so a change there cannot reach the writer unchecked.
 
     Raises:
@@ -146,7 +146,7 @@ def rocm_mxfp4_indexer_k_store(
     num_heads: int,
 ) -> None:
     """`indexer_k_norm_rope_store` for the ROCm MXFP4 cache: aiter's cache op
-    writes the key in the order its MQA-logits kernel reads with ``num_heads``
+    writes the key in the order its MQA-logits kernel reads with `num_heads`
     query heads."""
     assert use_fp4_cache, "the ROCm indexer cache op writes MXFP4 only"
     layout = rocm_paged_mxfp4_cache_layout(num_heads, k_pre.shape[1], k_cache.shape[1])
@@ -397,7 +397,7 @@ class _Layer:
         return self.q.shape[2] * 2
 
     def rows(self, lo: int, hi: int, seqs: int = 1) -> tuple[torch.Tensor, ...]:
-        """Q, its scales and the weights of token rows [lo, hi), as ``seqs``
+        """Q, its scales and the weights of token rows [lo, hi), as `seqs`
         sequences of next_n rows each."""
         return (
             self.q[lo:hi].view(seqs, -1, *self.q.shape[1:]),
@@ -670,14 +670,14 @@ def rocm_mxfp4_sparse_attn_indexer(
     candidate_write: bool = False,
 ) -> torch.Tensor:
     """Dense indexer: every layer that scores the whole context, the
-    candidate source included. With ``candidate_blocks`` and not
-    ``candidate_write`` the scores are masked to the pool first, as the
+    candidate source included. With `candidate_blocks` and not
+    `candidate_write` the scores are masked to the pool first, as the
     shared path does.
 
-    The model supplies ``q_values`` [T, H, D // 2] packed e2m1, ``q_scale``
+    The model supplies `q_values` [T, H, D // 2] packed e2m1, `q_scale`
     holding each head's D // 32 ue8m0 bytes (one int32 per head at D = 128),
-    fp32 ``weights`` with the softmax and head scales folded in, and
-    ``kv_cache`` pages in `rocm_paged_mxfp4_cache_layout` order for H heads.
+    fp32 `weights` with the softmax and head scales folded in, and
+    `kv_cache` pages in `rocm_paged_mxfp4_cache_layout` order for H heads.
     """
     if not isinstance(get_forward_context().attn_metadata, dict):
         reserve_rocm_mxfp4_indexer_workspace(

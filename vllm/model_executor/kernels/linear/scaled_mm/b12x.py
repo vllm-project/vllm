@@ -84,8 +84,10 @@ class B12xFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if act_group_shape != GroupShape(1, 128):
             return (
                 False,
-                "Supports only dynamic per-token group activation quantization "
-                "with group_shape=(1,128)",
+                (
+                    "Supports only dynamic per-token group activation quantization "
+                    "with group_shape=(1,128)"
+                ),
             )
         weight_group_shape = config.weight_quant_key.scale.group_shape
         if weight_group_shape != GroupShape(128, 128):

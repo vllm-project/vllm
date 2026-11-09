@@ -123,15 +123,9 @@ def _is_masked_mha_available(
         (64, 512, 256, 0, 256),
     ):
         return False
-    qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-    if qk_head_dim == 256 and v_head_dim == 256:
-        # This path uses contiguous K/V, so it does not need the paged-KV
-        # features that keep head-dim 256 disabled in the general FA selector.
-        fa_version = get_flash_attn_version()
-    else:
-        fa_version = get_flash_attn_version(
-            head_size=qk_head_dim, head_size_v=v_head_dim
-        )
+    fa_version = get_flash_attn_version(
+        head_size=qk_nope_head_dim + qk_rope_head_dim, head_size_v=v_head_dim
+    )
     return fa_version == 4 and not is_quantized_kv_cache(kv_cache_dtype)
 
 
@@ -180,7 +174,7 @@ def build_shardq_metadata(
     metadata: SparseMLACommonMetadata,
     device: torch.device,
 ) -> ShardQMetadata | None:
-    """This step's ShardQ, with ``metadata`` narrowed to this rank's tokens,
+    """This step's ShardQ, with `metadata` narrowed to this rank's tokens,
     or None."""
     split = build_shardq_split(common_attn_metadata, vllm_config)
     if split is None:

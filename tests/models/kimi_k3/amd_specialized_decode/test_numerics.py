@@ -404,7 +404,7 @@ def _fp8_f(t):
 def test_m1a_single_gpu_matches_vllm_ops(S: int, qbf16: bool) -> None:
     """M1a at DCP1 (ranks = 1: no gather, no peer memory) against attn_res ->
     qkv_a -> q / kv RMSNorm -> q_b -> aiter's fp4 W_UK -> the fp8 query (bf16
-    with ``qbf16``, M1c's), the fp8 cache rows and the gate."""
+    with `qbf16`, M1c's), the fp8 cache rows and the gate."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import (
         ENTRY,
         GROWS,
@@ -487,7 +487,7 @@ def test_m1a_single_gpu_matches_vllm_ops(S: int, qbf16: bool) -> None:
 
 
 def _a2a_combine(o, lse, seq_lens, qsl, q: int):
-    """``_dcp_a2a_pack_send`` + ``_dcp_a2a_unpack_combine`` for one rank's heads,
+    """`dcp_a2a_lse_reduce`'s pack + unpack-combine for one rank's heads,
     every rank's partials stacked: o [R, S, 12, 512], lse [R, S, 12], each
     sender's local KV lengths seq_lens [R, requests]."""
     S = o.size(1)
@@ -539,7 +539,7 @@ def _mla_back_inputs(S: int, q: int, R: int, rank: int = 0):
 
 
 def _uv_gate(lat, w):
-    """The gate times vLLM's ``_v_up_proj`` (aiter's fp4 W_UV)."""
+    """The gate times vLLM's `_v_up_proj` (aiter's fp4 W_UV)."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import NH
 
@@ -558,7 +558,7 @@ def _uv_gate(lat, w):
 
 
 def _mla_back_reference(w):
-    """DCP1: AITER's output is the latent (vLLM's ``_v_up_proj`` input)."""
+    """DCP1: AITER's output is the latent (vLLM's `_v_up_proj` input)."""
     return _uv_gate(w["o"], w)
 
 
@@ -628,8 +628,8 @@ def _mla_attn_reference(qb, kv8, idx, lens, q, scale):
     [(8, [8704]), (8, [3000, 0]), (4, [5000, 17, 9000, 64]), (8, [9]), (8, [40000])],
 )
 def test_m1c_m1b_splits_single_gpu(q: int, lens: list) -> None:
-    """M1c (``mla_attn``: bf16 query, fp8 KV, the splits' partials) against
-    fp32 attention, and M1b's ``splits`` combine -> W_UV -> the gate against
+    """M1c (`mla_attn`: bf16 query, fp8 KV, the splits' partials) against
+    fp32 attention, and M1b's `splits` combine -> W_UV -> the gate against
     the partials merged in torch."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import mla_attn as m
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import (
@@ -714,7 +714,7 @@ def _all_reduce_fp32(t: torch.Tensor) -> torch.Tensor:
 
 
 def _moe_reference(x, mw, rank: int):
-    """KimiMoE's decode path on ``x``: sigmoid router + bias top-16, the latent
+    """KimiMoE's decode path on `x`: sigmoid router + bias top-16, the latent
     down, aiter's MXFP4 experts, the latent all-reduce + RMSNorm, this rank's
     up_proj rows into the shared experts' output, the final all-reduce."""
     from aiter import ActivationType, QuantType
@@ -854,9 +854,9 @@ def _k2_launch(
     m1c_in=None,
     opt: int | None = None,
 ):
-    """``m1b``: (``mla_post``'s inputs, qlen, ranks) to run M1b in K2's launch;
-    ``splits`` its M1c splits, ``m1c_in`` (``mla_attn.host_args``'s) to run M1c
-    in the launch too. ``opt``: ``K2Build.opt`` (None: the default)."""
+    """`m1b`: (`mla_post`'s inputs, qlen, ranks) to run M1b in K2's launch;
+    `splits` its M1c splits, `m1c_in` (`mla_attn.host_args`'s) to run M1c
+    in the launch too. `opt`: `K2Build.opt` (None: the default)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
 
     m1b_in, fused = None, {}
@@ -1044,14 +1044,14 @@ def _k2_opt_worker(
 @needs_gfx950
 @multi_gpu_test(num_gpus=8)
 def test_k2_tp8_opt_bits_are_bit_exact(monkeypatch: pytest.MonkeyPatch) -> None:
-    """K2's critical-path options (``layer.K2_OPT``, the default) give the
-    plain K2's (``opt=0``) bits at every width, block-write layer or not, on
+    """K2's critical-path options (`layer.K2_OPT`, the default) give the
+    plain K2's (`opt=0`) bits at every width, block-write layer or not, on
     both layer parities, and again after their regions were re-armed."""
     multi_process_parallel(monkeypatch, 8, 1, _k2_opt_worker)
 
 
 def _gather(t: torch.Tensor) -> torch.Tensor:
-    """Every rank's ``t`` stacked [ranks, ...]."""
+    """Every rank's `t` stacked [ranks, ...]."""
     out = [torch.empty_like(t) for _ in range(dist.get_world_size())]
     dist.all_gather(out, t.contiguous())
     return torch.stack(out)
@@ -1370,9 +1370,6 @@ def test_m1a_pad_through_aiter_cprr(monkeypatch: pytest.MonkeyPatch, qlen: int) 
     ):
         monkeypatch.setattr(mod, name, getattr(mod, name))
     monkeypatch.setattr(cp, "QLEN", qlen)
-    # cp's autouse fixture does not reach this module; max_decode_query_len
-    # reads use_v2_model_runner, which would inspect cp's stand-in spec config.
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
 
     device = torch.device("cuda", 0)
     torch.accelerator.set_device_index(device.index)
