@@ -236,7 +236,7 @@ class DepMoe:
     """One MegaMoE layer of a DEP step: the EpMoeLayer schedule over the stock
     module's weights (its batches up to FRONT_MAX; wider: the stock module)."""
 
-    def __init__(self, module, batches, side_stream):
+    def __init__(self, module, batches, side_stream, *, front_gemm=False):
         from ..cutedsl.moe.ep.layer import EpMoeLayer, pack_front
 
         norm = module.routed_expert_norm
@@ -257,7 +257,14 @@ class DepMoe:
             return experts(latent, topk_weights, topk_ids)
 
         act = module.shared_experts.act_fn
-        self.layer = EpMoeLayer(weights, act, routed, batches, side_stream=side_stream)
+        self.layer = EpMoeLayer(
+            weights,
+            act,
+            routed,
+            batches,
+            side_stream=side_stream,
+            front_gemm=front_gemm,
+        )
 
     def serves(self, batch):
         return batch in self.layer.batches
