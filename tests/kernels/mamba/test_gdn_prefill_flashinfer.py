@@ -80,7 +80,7 @@ def test_flashinfer_checkpoints_export_the_state_at_each_offset(use_cp, ssm_dtyp
     prefills put FlashInfer's stride (their offsets' gcd) below both offsets,
     so the exporter must pick each state out of the shared emitted buffer;
     the third prefill takes no checkpoint. Both FlashInfer routes are covered
-    because ``use_cp="auto"`` may take either. The conv cache has MTP's spec
+    because `use_cp="auto"` may take either. The conv cache has MTP's spec
     slots after the window, which the conv kernels leave alone.
     """
     torch.manual_seed(0)

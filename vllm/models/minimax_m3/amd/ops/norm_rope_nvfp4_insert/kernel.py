@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Gemma norm + RoPE of q / k / index-q / index-k and the NVFP4 K/V + index-K
 page inserts in one launch (FlyDSL, gfx950), bit for bit the ROCm
-``fused_minimax_m3_qknorm_rope_kv_insert`` followed by the NVFP4 page insert.
+`fused_minimax_m3_qknorm_rope_kv_insert` followed by the NVFP4 page insert.
 
 Waves of 2 * tp tokens: [q heads | k heads | index-k | index-q heads | v heads x tp];
 a norm wave holds 4 dims of a token per lane (the HIP kernel's lane map).
@@ -73,7 +73,7 @@ def _minnum(a, b):
 
 
 def _dpp(src, ctrl, old=None, bank_mask=0xF):
-    """v_mov_b32_dpp; an undef ``old`` lets the move fold into its consumer."""
+    """v_mov_b32_dpp; an undef `old` lets the move fold into its consumer."""
     o = _llvm.mlir_undef(T.i32) if old is None else fx.as_ir_value(old)
     full = old is None and bank_mask == 0xF
     return fx.Int32(
@@ -87,7 +87,7 @@ def _swap16(v):
 
 
 def _xor_lane(v, m, hi16):
-    """Lane l ^ m of the 32-lane half; ``hi16`` is this lane's bit 4."""
+    """Lane l ^ m of the 32-lane half; `hi16` is this lane's bit 4."""
     if m == 1:
         return _dpp(v, 0xB1)  # quad_perm [1, 0, 3, 2]
     if m == 2:
@@ -102,7 +102,7 @@ def _xor_lane(v, m, hi16):
 
 
 def _xsum(x, m):
-    """Adds lane l ^ m's value to ``x``."""
+    """Adds lane l ^ m's value to `x`."""
     if m == 16:
         a, b = _swap16(bits(x))
         return a.bitcast(fx.Float32) + b.bitcast(fx.Float32)
@@ -119,7 +119,7 @@ def _rsq(x):
 
 
 def _e4m3_byte(x):
-    """RNE e4m3 byte of ``x``."""
+    """RNE e4m3 byte of `x`."""
     pk = fx.rocdl.cvt_scalef32_pk_fp8_f32(
         T.vec(2, T.i16),
         fx.as_ir_value(Vec.filled(2, 0, fx.Int16)),
@@ -142,7 +142,7 @@ def _e4m3_value(byte):
 
 
 def _iq_fp8(a, b, old, hi):
-    """Two fp32 -> e4m3 bytes in the low (``hi``: high) half of ``old``."""
+    """Two fp32 -> e4m3 bytes in the low (`hi`: high) half of `old`."""
     return fx.Int32(
         fx.rocdl.cvt_pk_fp8_f32(
             T.i32,
@@ -155,7 +155,7 @@ def _iq_fp8(a, b, old, hi):
 
 
 def _e2m1x2(a, b, old, sel):
-    """E2M1 codes of ``a``, ``b`` into byte ``sel`` of ``old``, ``a`` low."""
+    """E2M1 codes of `a`, `b` into byte `sel` of `old`, `a` low."""
     return fx.Int32(
         fx.rocdl.cvt_scalef32_pk_fp4_f32(
             T.i32,
@@ -183,7 +183,7 @@ def _quant4(xs, gs, inv_gs):
 
 
 def _v_row(state, row, r, n_run, p0, vs, inv_vs):
-    """Adds row ``r`` of a V run at octet positions p0.. to ``state``: new
+    """Adds row `r` of a V run at octet positions p0.. to `state`: new
     nibbles and scale bytes, with their masks."""
     words, written = state[0:4], state[4]
     sc, sc_mask = state[5:7], state[7:9]
@@ -219,7 +219,7 @@ def _k_scale_off(tok, grp):
 
 
 def compile_norm_rope_insert(nq: int, nkv: int, niq: int, rotary_dim: int, tp: int):
-    """Build the kernel; ``tp`` token pairs per norm / RoPE wave, one per V wave."""
+    """Build the kernel; `tp` token pairs per norm / RoPE wave, one per V wave."""
     assert rotary_dim in (8, 16, 32, 64, 128)
     NR = nq + nkv + 1 + niq  # norm + RoPE waves
     S = NR + nkv * tp  # waves per 2 * tp tokens

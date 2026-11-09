@@ -40,8 +40,8 @@ def _make_renderer_mock(mm_limits: dict[str, int]) -> MagicMock:
     render_chat is mocked to raise ChatTemplateResolutionError so the chat
     warmup block is skipped cleanly, keeping the test focused on MM warmup.
 
-    The processor is a mock at its I/O boundaries (``dummy_inputs`` and
-    ``apply``) but keeps the real ``get_dummy_mm_inputs``, since that is where
+    The processor is a mock at its I/O boundaries (`dummy_inputs` and
+    `apply`) but keeps the real `get_dummy_mm_inputs`, since that is where
     the warmup's seq_len capping and cache plumbing actually live.
     """
     renderer = MagicMock()
