@@ -139,8 +139,7 @@ def _is_masked_mha_available(
 def _use_dense_mha_prefill(
     vllm_config: "VllmConfig", prefill_max_seq_len: int, topk_tokens: int
 ) -> bool:
-    # Batch invariance: the dense route must never depend on the batch's
-    # longest prefill, so every prefill row runs the sparse MQA kernel.
+    # Keep the prefill route independent of the longest request.
     if envs.VLLM_BATCH_INVARIANT:
         return False
     attention_config = vllm_config.attention_config

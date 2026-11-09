@@ -202,9 +202,7 @@ class FlashMLASparseBackend(AttentionBackend):
 
     @classmethod
     def supports_batch_invariance(cls) -> bool:
-        # Validated on SM100 with a bf16 cache only; SM90 picks a bf16 kernel
-        # variant by batch size, which is not invariant. Quantized-cache
-        # restrictions live in supports_combination.
+        # SM90 selects a bf16 kernel variant by batch size.
         return current_platform.is_device_capability_family(100)
 
     @classmethod

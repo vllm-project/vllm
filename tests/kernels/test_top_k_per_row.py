@@ -2982,104 +2982,53 @@ def test_decode_chunk_budget_disabled_fitting_and_invalid():
         _decode_chunk_ranges(32, 1024, 1024, 2)
 
 
-# ---------------------------------------------------------------------------
-# Batch-invariant per-row top-k (VLLM_BATCH_INVARIANT=1)
-# ---------------------------------------------------------------------------
-
-
-def _bi_reference_topk(logits: torch.Tensor, row_end: int, topk: int):
-    """Stable-sort ground truth: value-descending (ties keep ascending index
-    order, NaN above +inf), selected indices sorted ascending."""
-    kk = min(topk, row_end)
-    order = torch.argsort(logits[:row_end], descending=True, stable=True)[:kk]
-    return torch.sort(order).values.to(torch.int32)
-
-
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_top_k_per_row_batch_invariant(device: str) -> None:
-    """Selection set (ties -> smaller index), ascending order and -1 padding
-    match the reference, and a row's output never depends on how many other
-    rows share the launch (64 is the cooperative/persistent chain boundary).
-    """
-    from vllm.model_executor.layers.indexer_topk import top_k_per_row_batch_invariant
-
-    torch.manual_seed(1234)
-    num_rows, width, topk = 16, 300, 64
-    logits = torch.randn(num_rows, width, device=device)
-    logits[:, :50] = 1.5  # heavy ties
-    row_ends = torch.tensor(
-        [300, 200, 64, 10, 1, 0, 64, 300, 130, 101, 50, 65, 299, 2, 128, 63],
-        dtype=torch.int32,
-        device=device,
-    )
-    out = torch.full((num_rows, topk), -7, dtype=torch.int32, device=device)
-    top_k_per_row_batch_invariant(logits, row_ends, out, topk)
-    for i in range(num_rows):
-        end = int(row_ends[i])
-        kk = min(topk, end)
-        assert torch.equal(out[i, :kk], _bi_reference_topk(logits[i], end, topk))
-        assert (out[i, kk:] == -1).all()
-
-    # NaN ranks above +inf deterministically; empty rows stay all -1.
-    nan_row = torch.tensor(
-        [[1.0, float("nan"), float("inf"), 2.0, 0.0, -1.0, 3.0, -2.0]],
-        device=device,
-    )
-    out1 = torch.full((1, 4), -1, dtype=torch.int32, device=device)
-    top_k_per_row_batch_invariant(
-        nan_row, torch.tensor([8] * 1, dtype=torch.int32, device=device), out1, 4
-    )
-    assert torch.equal(
-        out1[0], torch.tensor([1, 2, 3, 6], dtype=torch.int32, device=device)
-    )
-
-    # Same row alone vs at the head of 1/64/65/100-row launches.
-    target = torch.randn(1, width, device=device)
-    target[0, ::3] = 0.75  # ties inside the row
-    ends = torch.tensor([width], dtype=torch.int32, device=device)
-    alone = torch.full((1, topk), -1, dtype=torch.int32, device=device)
-    top_k_per_row_batch_invariant(target, ends, alone, topk)
-    for num_rows2 in (1, 64, 65, 100):
-        batch = torch.randn(num_rows2, width, device=device)
-        batch[0] = target[0]
-        outn = torch.full((num_rows2, topk), -1, dtype=torch.int32, device=device)
-        top_k_per_row_batch_invariant(
-            batch,
-            torch.full((num_rows2,), width, dtype=torch.int32, device=device),
-            outn,
-            topk,
-        )
-        assert torch.equal(outn[0], alone[0])
-
-
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize(
     "values,topk",
     [
+        (None, 64),
         ([-0.0, 0.0], 1),
         ([-float("nan"), float("nan"), float("inf")], 1),
+        ([1.0, float("nan"), float("inf"), 2.0, 0.0, -1.0, 3.0, -2.0], 4),
         ([4.0, 1.0], 4),
         ([], 4),
+        ([4.0, 1.0], 0),
     ],
 )
-def test_bi_topk_numeric_ties_and_output_padding(device, values, topk):
-    """Numerical ties select the first column; every unused output is -1."""
-    from vllm.model_executor.layers.indexer_topk import top_k_per_row_batch_invariant
+def test_top_k_per_row_batch_invariant(device, values, topk, monkeypatch):
+    """Stable selection and padding must survive batch and memory-chunk boundaries."""
+    from vllm.model_executor.layers import indexer_topk
 
-    logits = torch.tensor([values], device=device, dtype=torch.float32)
-    ends = torch.tensor([len(values)], device=device, dtype=torch.int32)
-    output = torch.full((1, topk), -7, device=device, dtype=torch.int32)
-    top_k_per_row_batch_invariant(logits, ends, output, topk)
-    expected = torch.full_like(output, -1)
-    count = min(topk, len(values))
-    expected[0, :count] = _bi_reference_topk(logits[0], len(values), topk)
-    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+    torch.manual_seed(1234)
+    if values is None:
+        logits = torch.randn(100, 300, device=device)
+        logits[:, :50] = 1.5
+    else:
+        logits = torch.tensor([values], device=device, dtype=torch.float32).repeat(
+            100, 1
+        )
+    ends = torch.tensor(
+        [300, 200, 64, 10, 1, 0, 64, 300, 130, 101, 50, 65, 299, 2, 128, 63] * 7,
+        device=device,
+        dtype=torch.int32,
+    )[:100].clamp_max(logits.shape[1])
+    monkeypatch.setattr(
+        indexer_topk, "_BI_TOPK_MAX_KEY_ELEMS", max(1, 17 * logits.shape[1])
+    )
+    expected = torch.full((100, topk), -1, device=device, dtype=torch.int32)
+    for i, end in enumerate(ends.tolist()):
+        cols = torch.argsort(logits[i, :end], descending=True, stable=True)[:topk]
+        expected[i, : cols.numel()] = cols.sort().values.to(torch.int32)
+    for rows in (1, 64, 65, 100):
+        output = torch.full((rows, topk), -7, device=device, dtype=torch.int32)
+        indexer_topk.top_k_per_row_batch_invariant(
+            logits[:rows], ends[:rows], output, topk
+        )
+        torch.testing.assert_close(output, expected[:rows], rtol=0, atol=0)
 
 
 def test_sparse_indexer_topk_bi_selection(monkeypatch) -> None:
-    """Under VLLM_BATCH_INVARIANT the decode chain pins one backend and takes
-    the FP32 logits copy; FLASHMLA_SPARSE opts in on SM100 with an
-    unquantized cache only."""
+    """BI pins FP32 per-row selection and rejects quantized sparse MLA caches."""
     if not current_platform.is_cuda():
         pytest.skip("requires CUDA")
 

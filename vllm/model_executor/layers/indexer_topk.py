@@ -134,8 +134,6 @@ def deep_select_topk(
 # ---------------------------------------------------------------------------
 
 
-# Bounded int64 key chunk for the BI selector, so its temporaries stay
-# capped whatever the logits width or row count is.
 _BI_TOPK_MAX_KEY_ELEMS = 64 * 1024 * 1024  # 512 MiB
 
 
@@ -145,19 +143,16 @@ def top_k_per_row_batch_invariant(
     topk_indices: torch.Tensor,
     topk_tokens: int,
 ) -> None:
-    """Batch-invariant per-row top-k for the indexer (VLLM_BATCH_INVARIANT=1).
+    """Select by score then smaller column; write ascending indices and -1 padding.
 
-    Selects the largest valid logits, breaking numerical ties by the smaller
-    column index. NaNs rank above +inf. Writes ascending indices with -1
-    padding. Unique int64 keys combine float order and the column tiebreak;
-    chunks bound the key memory independently of the batch size.
+    NaNs rank above +inf. Unique int64 keys provide deterministic selection;
+    chunks bound temporary memory independently of the batch size.
 
     Args:
-        logits: (num_rows, width) float32; columns past a row's end hold
-            garbage and are excluded via `row_ends`.
-        row_ends: (num_rows,) exclusive per-row selection bound.
-        topk_indices: (num_rows, topk_tokens) int32 output slice.
-        topk_tokens: Number of indices to select per row.
+        logits: `[num_rows, width]` float32, contiguous within each row.
+        row_ends: `[num_rows]` exclusive bounds, excluding garbage columns.
+        topk_indices: `[num_rows, topk_tokens]` int32 output.
+        topk_tokens: Number of indices per row.
 
     """
     assert logits.dtype == torch.float32 and logits.dim() == 2
@@ -202,7 +197,6 @@ def _bi_topk_chunk(logits, row_ends, topk_indices, topk_tokens) -> None:
     )
     cols = torch.topk(key, k, dim=-1).indices
     del key
-    # Ascending valid indices; invalid slots (and rows shorter than k) to -1.
     keyed = torch.sort(
         torch.where(cols < row_ends.to(torch.int64).unsqueeze(1), cols, width), dim=-1
     ).values
@@ -315,8 +309,7 @@ class SparseIndexerTopk(torch.nn.Module):
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
     ) -> bool:
         """Whether this decode call can consume BF16 without a full FP32 copy."""
-        # Batch invariance scores decode rows exactly like prefill rows: the
-        # FP32 copy feeds the deterministic top-k in both stages.
+        # Match prefill's FP32 selection.
         if envs.VLLM_BATCH_INVARIANT:
             return False
         if logits.dtype != torch.bfloat16 or logits.stride(1) != 1:
@@ -356,8 +349,7 @@ class SparseIndexerTopk(torch.nn.Module):
         hence we delegate to the caller to decide when to use it.
         """
         if envs.VLLM_BATCH_INVARIANT:
-            # The chain's algorithms differ in output order and tie-breaking
-            # across the row-count boundaries; pin one backend.
+            # Avoid batch-dependent algorithms and tie-breaking.
             return "per_row"
         if not self._cooperative_constraints(logits, topk_tokens, num_rows):
             return "cooperative"

@@ -218,9 +218,7 @@ class PrepareUniformDecodeKernel(
 class DeepseekV32IndexerBackend(AttentionBackend):
     @classmethod
     def supports_batch_invariance(cls) -> bool:
-        # The BI per-row top-k (indexer_topk) is deterministic per row;
-        # validated on SM100. Lanes without BI-gated indexer calls override
-        # this to False.
+        # Only the SM100 DSA path has BI-gated selection.
         return current_platform.is_device_capability_family(100)
 
     @classmethod
@@ -254,7 +252,6 @@ class DeepseekV32IndexerBackend(AttentionBackend):
 
 
 class Glm5NextIndexerBackend(DeepseekV32IndexerBackend):
-    # The kpool indexer path has no BI gating.
     @classmethod
     def supports_batch_invariance(cls) -> bool:
         return False

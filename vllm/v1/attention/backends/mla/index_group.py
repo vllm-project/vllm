@@ -121,10 +121,7 @@ class SparseMLAIndexGroup:
         num_tokens = logical_topk_indices.shape[0]
         if (
             num_tokens > self.physical_topk_indices.shape[0]
-            # Batch invariance: the side-stream conversion into the shared
-            # persistent buffer lets a later batch's attention kernels race
-            # the conversion writes (observed as partially-updated rows on
-            # SM100), so convert synchronously on the compute stream.
+            # Avoid side-stream writes racing a later batch's attention.
             or envs.VLLM_BATCH_INVARIANT
         ):
             return triton_convert_req_index_to_global_index(

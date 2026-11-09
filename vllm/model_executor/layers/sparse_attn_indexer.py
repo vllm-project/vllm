@@ -539,8 +539,6 @@ def sparse_attn_indexer(
         )
         assert candidate_block_size > 0
 
-    # The fused top-k writes indices in its own launch-dependent order; the
-    # BI top-k replaces it below.
     fused_mqa_topk = (
         use_fused_mqa_topk(
             query_shape=q_quant.shape[1:],
@@ -553,8 +551,7 @@ def sparse_attn_indexer(
     )
 
     # DeepSelect ranks BF16 decode logits directly; other top-k backends and
-    # the DCP merge read an FP32 copy. Batch invariance scores decode rows
-    # exactly like prefill rows, which starts from the FP32 copy.
+    # the DCP merge read an FP32 copy.
     fp32_decode_logits = topk_backend != "deep_select" or dcp_world_size != 1 or bi
 
     decode_budget = envs.VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB * 1024 * 1024
@@ -630,8 +627,7 @@ def sparse_attn_indexer(
             * (logits_dtype.itemsize + decode_copy_bytes),
         )
         if bi:
-            # The int32 key and its int64 copy overlap during conversion;
-            # sorting also keeps temporary values and indices alive.
+            # Reserve overlapping int32/int64 keys and sort temporaries.
             max_logits_bytes += _BI_TOPK_MAX_KEY_ELEMS * (
                 torch.int32.itemsize + torch.int64.itemsize
             ) + 4 * topk_tokens * torch.int64.itemsize * max(
@@ -1169,14 +1165,12 @@ def sparse_attn_indexer(
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
         if bi:
-            # Same deterministic per-row top-k as prefill.
             row_ends = SparseIndexerTopk._row_ends(
                 seq_lens, next_n, logits.shape[0]
             ).contiguous()
             top_k_per_row_batch_invariant(logits, row_ends, topk_indices, topk_tokens)
         else:
-            # The backend comes from the layer (config is only readable at
-            # model construction); dispatchers are cached per backend.
+            # Dispatch the layer's chosen backend.
             get_indexer_topk(topk_backend)(
                 logits,
                 seq_lens,
@@ -1318,7 +1312,6 @@ class SparseAttnIndexer(CustomOp):
             and current_platform.is_cuda()
             and self.dcp_world_size > 1
         ):
-            # Fail at model construction, not on the first decode batch.
             raise NotImplementedError(
                 "VLLM_BATCH_INVARIANT does not support the DSA indexer with "
                 "decode context parallelism."

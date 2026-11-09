@@ -1327,9 +1327,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if self.hisparse_cache is not None:
             return False
         if envs.VLLM_BATCH_INVARIANT:
-            # Batch invariance: the dense and masked-MHA prefill routes are
-            # both chosen per batch (longest prefill / workspace fit), so
-            # every prefill row runs the per-request sparse MQA kernel.
+            # Use sparse MQA regardless of the surrounding prefills.
             return False
         # ShardQ steps' top-k are compact per rank and run through forward_mqa.
         if getattr(attn_metadata, "shardq", None) is not None:
