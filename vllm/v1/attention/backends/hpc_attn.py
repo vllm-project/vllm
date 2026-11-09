@@ -401,6 +401,26 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
         else:
             self._quant_type = None
 
+        self._kv_view_cache: (
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
+        ) = None
+
+    def _get_kv_views(
+        self, kv_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        cache = self._kv_view_cache
+        if cache is None or cache[0] is not kv_cache:
+            # Logical (B, H, N, 2*head_size) -> (B, N, H, head_size) K/V views.
+            key_cache, value_cache = kv_cache.transpose(1, 2).split(
+                self.head_size, dim=-1
+            )
+            if self.use_fp8:
+                torch_dtype = _get_fp8_dtype_for_kv_cache(self.kv_cache_dtype)
+                key_cache = key_cache.view(torch_dtype)
+                value_cache = value_cache.view(torch_dtype)
+            cache = self._kv_view_cache = (kv_cache, key_cache, value_cache)
+        return cache[1], cache[2]
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -439,8 +459,7 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
         num_decode_reqs = attn_metadata.num_decodes
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        # Logical (B, H, N, 2*head_size) -> (B, N, H, head_size) K/V views.
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        key_cache, value_cache = self._get_kv_views(kv_cache)
 
         # Standard-path KV write: when no upstream fused op wrote KV cache
         # (i.e. the model didn't wire HpcRopeNorm), fall back to the generic
@@ -474,9 +493,6 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
                     "to --kv-cache-dtype auto / bfloat16."
                     f" (layer={getattr(layer, 'layer_name', '?')})"
                 )
-            torch_dtype = _get_fp8_dtype_for_kv_cache(self.kv_cache_dtype)
-            key_cache = key_cache.view(torch_dtype)
-            value_cache = value_cache.view(torch_dtype)
             k_scale = layer._k_scale.reshape(1)
             v_scale = layer._v_scale.reshape(1)
 
