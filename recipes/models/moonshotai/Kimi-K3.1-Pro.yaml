@@ -65,9 +65,13 @@ features:
       # an FP8 target KV. The AgentX TP8 presets set their own token count:
       # 3 at concurrency 48 and 7 at concurrency 1.
       mi355x:
+        # Draft packs the KDA row to 908, not a multiple of 16, so ROCm KV init
+        # fails. 1024 is above that minimum. AgentX presets drop this flag.
         args:
           - "--kv-cache-dtype"
           - "fp8"
+          - "--block-size"
+          - "1024"
           - "--speculative-config"
           - '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":5,"method":"dspark","attention_backend":"ROCM_AITER_MLA","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic"}'
     # TPU: #2775 validated DSpark with 7 draft tokens, but DSpark plus
@@ -324,6 +328,9 @@ presets:
       "--speculative-config": { num_speculative_tokens: 3, rejection_sample_method: block }
       "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 224875000000 } }
       "--additional-config": { kda_prefill_backend: fused }
+    # Packed row here is 1152. Drop the plain-TP8 --block-size 1024.
+    remove_args:
+      - "--block-size"
     runbook: |
       The single-node MI355X TP8 AgentX configuration at concurrency 48. It follows the concurrency-48 point of InferenceX's MI355X vLLM AgentX lane (SemiAnalysisAI/InferenceX#4887), measured on the image digest named in the [concurrency-1 preset](#preset-mi355x_agentx_c1). It keeps linear layers, MoE combine and all-reduce in BF16 and serves text with tool-call and reasoning parsers, using DCP8/A2A.
 
@@ -399,6 +406,9 @@ presets:
     json_args:
       "--speculative-config": { num_speculative_tokens: 7, rejection_sample_method: block }
       "--additional-config": { kda_prefill_backend: fused }
+    # Packed row here is 1152. Drop the plain-TP8 --block-size 1024.
+    remove_args:
+      - "--block-size"
     env:
       # Only decode sizes are captured, so breakable graphs buy nothing; this
       # overrides the AMD profile's "1".
