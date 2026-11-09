@@ -99,6 +99,7 @@ def _xpu_qwen3_5_moe(
     *,
     linear_backend="auto",
     initialize_decode=True,
+    decode_backend=None,
 ):
     """Construct and quantize the model's real MoE block and shared linears."""
     from transformers import Qwen3_5MoeConfig, Qwen3_5MoeTextConfig
@@ -133,7 +134,12 @@ def _xpu_qwen3_5_moe(
     )
     model_path = tmp_path / str(rank)
     Qwen3_5MoeConfig(text_config=text_config).save_pretrained(model_path)
+    if decode_backend is None:
+        decode_backend = (
+            "latency_specialized" if quantized and linear_backend == "auto" else "auto"
+        )
     config = VllmConfig(
+        additional_config={"decode_backend": decode_backend},
         model_config=ModelConfig(
             model=str(model_path),
             skip_tokenizer_init=True,
@@ -179,6 +185,8 @@ def _xpu_qwen3_5_moe(
                         method.process_weights_after_loading(layer)
                 if initialize_decode:
                     initialize_specialized_decode(block)
+                    if decode_backend != "auto" and block._decode is not None:
+                        block._decode.runtime.prepare_capture(1, 1)
             yield block, config, quantized
     finally:
         reset_workspace_manager()
@@ -196,6 +204,8 @@ def _check_xpu_qwen3_5_decode(state, num_tokens, should_fuse):
     from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
 
     block, config, _ = state
+    if block._decode is not None:
+        block._decode.runtime.prepare_capture(num_tokens, num_tokens)
     torch.manual_seed(17)
     x = torch.randn(
         num_tokens,
@@ -228,11 +238,94 @@ def _check_xpu_qwen3_5_decode(state, num_tokens, should_fuse):
     [(torch.float16, True), (torch.bfloat16, True)],
     indirect=True,
 )
-@pytest.mark.parametrize("num_tokens", [1, 2, 4, 8])
+@pytest.mark.parametrize("num_tokens", list(range(1, 9)))
 def test_xpu_qwen3_5_native_shared_expert_decode(xpu_qwen3_5_moe, num_tokens):
     """Missing kernels must fail native coverage rather than test fallback."""
     assert hasattr(torch.ops._xpu_C, "moe_shared_fused_decode_interface")
     _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, num_tokens, should_fuse=True)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+def test_xpu_qwen3_5_default_has_no_specialized_resources(tmp_path):
+    """Disabling fusion preserves exact stock outputs without an executor."""
+    with _xpu_qwen3_5_moe(
+        tmp_path, torch.float16, True, decode_backend="auto"
+    ) as state:
+        assert state[0]._decode is None
+        assert not hasattr(state[0], "_xpu_moe_decode_runtime")
+        _check_xpu_qwen3_5_decode(state, 1, should_fuse=False)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+def test_xpu_qwen3_5_explicit_deployment_reports_all_reasons(tmp_path):
+    """An opt-in deployment reports independent failures together across TP."""
+    from vllm.models.qwen3_5.xpu.specialized_decode.config import validate_deployment
+
+    with _xpu_qwen3_5_moe(
+        tmp_path,
+        torch.bfloat16,
+        False,
+        decode_backend="latency_specialized",
+        initialize_decode=False,
+    ) as state:
+        config = state[1]
+        with pytest.raises(ValueError) as error:
+            validate_deployment(config)
+        for reason in (
+            "TP rank 0",
+            "MoE dimensions",
+            "40-layer",
+            "requires TP2",
+            "FP16 activations",
+            "fp8_per_tensor",
+            "decode_backend=auto",
+        ):
+            assert reason in str(error.value)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+@pytest.mark.parametrize(
+    "actual,padded,prefill",
+    [(3, 4, False), (8, 8, False), (9, 9, False), (1, 1, True), (3, 4, True)],
+)
+@pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
+def test_xpu_qwen3_5_batch_semantics(xpu_qwen3_5_moe, actual, padded, prefill):
+    """Native dispatch honors prompt semantics and padding, not just row count."""
+    from dataclasses import replace
+
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
+    from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+
+    block, config, _ = xpu_qwen3_5_moe
+    runtime = block._decode.runtime
+    assert runtime.snapshot()["bindings_shared"]
+    assert runtime.snapshot()["specialized_weight_bytes"] == 0
+    scratch = tuple(block._decode.plan.workspace(n) for n in range(1, 9))
+    batch = InputBatch.make_dummy(
+        actual, actual, InputBuffers(padded, padded, torch.device(DEVICE_TYPE))
+    )
+    batch = replace(batch, has_prefill=prefill, num_tokens_after_padding=padded)
+    runtime.prepare_step(batch)
+    x = torch.ones(
+        padded, block.gate.input_size, dtype=torch.float16, device=DEVICE_TYPE
+    )
+    with set_forward_context(None, config), torch.inference_mode():
+        expected = Qwen3NextSparseMoeBlock.forward(block, x)
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as p:
+            actual_output = block(x)
+    fused = not prefill and padded <= 8
+    assert sum(
+        e.count
+        for e in p.key_averages()
+        if e.key == "_xpu_C::moe_shared_fused_decode_interface"
+    ) == int(fused)
+    torch.testing.assert_close(
+        actual_output, expected, rtol=1e-2 if fused else 0, atol=1e-2 if fused else 0
+    )
+    assert all(block._decode.plan.workspace(n) is t for n, t in enumerate(scratch, 1))
 
 
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
@@ -314,9 +407,8 @@ def test_xpu_qwen3_5_a8_shared_expert_fallback(tmp_path, dtype, num_tokens):
 
 
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-@pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
-def test_xpu_qwen3_5_missing_provider_fallback(xpu_qwen3_5_moe, monkeypatch):
-    """Missing provider falls back even when native operators are installed."""
+def test_xpu_qwen3_5_missing_provider_fallback(tmp_path, monkeypatch):
+    """Explicit initialization fails when the optional provider is unavailable."""
     from vllm.models.qwen3_5.xpu.specialized_decode.hooks import (
         initialize_specialized_decode,
     )
@@ -324,31 +416,34 @@ def test_xpu_qwen3_5_missing_provider_fallback(xpu_qwen3_5_moe, monkeypatch):
     monkeypatch.setitem(
         sys.modules, "vllm_xpu_kernels.moe_shared_fused_interface", None
     )
-    initialize_specialized_decode(xpu_qwen3_5_moe[0])
-    _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, 2, should_fuse=False)
+    with _xpu_qwen3_5_moe(
+        tmp_path, torch.float16, True, initialize_decode=False
+    ) as state:
+        with pytest.raises(ValueError, match="provider unavailable"):
+            initialize_specialized_decode(state[0])
+        _check_xpu_qwen3_5_decode(state, 2, should_fuse=False)
 
 
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-@pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
-def test_xpu_qwen3_5_unsupported_device_fallback(xpu_qwen3_5_moe, monkeypatch):
-    """An installed fused provider must fall back on unsupported architectures."""
+def test_xpu_qwen3_5_unsupported_device_fallback(tmp_path, monkeypatch):
+    """Explicit initialization fails on unsupported native architectures."""
     from vllm.models.qwen3_5.xpu.specialized_decode.hooks import (
         initialize_specialized_decode,
     )
 
-    monkeypatch.setattr(torch.ops._xpu_C, "is_xe2_arch", lambda _: False)
-    monkeypatch.setattr(torch.ops._xpu_C, "is_xe3_arch", lambda _: False)
-    initialize_specialized_decode(xpu_qwen3_5_moe[0])
-    _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, 1, should_fuse=False)
+    with _xpu_qwen3_5_moe(
+        tmp_path, torch.float16, True, initialize_decode=False
+    ) as state:
+        monkeypatch.setattr(torch.ops._xpu_C, "is_xe2_arch", lambda *_: False)
+        monkeypatch.setattr(torch.ops._xpu_C, "is_xe3_arch", lambda *_: False)
+        with pytest.raises(ValueError, match="native provider does not support"):
+            initialize_specialized_decode(state[0])
+        _check_xpu_qwen3_5_decode(state, 1, should_fuse=False)
 
 
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-@pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
-def test_xpu_qwen3_5_provider_import_failure_cached(xpu_qwen3_5_moe, monkeypatch):
-    """Repeated eligible decode falls back without repeated import failures."""
-    from vllm.models.qwen3_5.xpu.specialized_decode.hooks import (
-        initialize_specialized_decode,
-    )
+def test_xpu_qwen3_5_provider_import_failure_cached(tmp_path, monkeypatch):
+    """Default decode never imports or initializes the optional provider."""
     from vllm.models.qwen3_5.xpu.specialized_decode.moe import FusedMoeDecode
 
     monkeypatch.setitem(
@@ -367,12 +462,15 @@ def test_xpu_qwen3_5_provider_import_failure_cached(xpu_qwen3_5_moe, monkeypatch
     previous = sys.gettrace()
     try:
         sys.settrace(trace)
-        initialize_specialized_decode(xpu_qwen3_5_moe[0])
-        _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, 1, should_fuse=False)
-        _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, 2, should_fuse=False)
+        with _xpu_qwen3_5_moe(
+            tmp_path, torch.float16, True, decode_backend="auto"
+        ) as state:
+            _check_xpu_qwen3_5_decode(state, 1, should_fuse=False)
+            _check_xpu_qwen3_5_decode(state, 2, should_fuse=False)
+            assert state[0]._decode is None
     finally:
         sys.settrace(previous)
-    assert failures == 1
+    assert failures == 0
 
 
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")

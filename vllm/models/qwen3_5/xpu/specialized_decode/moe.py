@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING, cast
 import torch
 
 from vllm.distributed import tensor_model_parallel_all_reduce
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 from . import MAX_DECODE_ROWS, MAX_ROUTED_ROWS
+from .planning import DecodeRuntime
 from .weights import get_weights, prepare_weights
 
 if TYPE_CHECKING:
@@ -19,21 +19,23 @@ if TYPE_CHECKING:
     from ..model import Qwen3_5SparseMoeBlock
 
 
-logger = init_logger(__name__)
-
-
 class FusedMoeDecode:
     """A native MoE executor bound to one block's loaded parameters."""
 
-    def __init__(self, block: "Qwen3_5SparseMoeBlock"):
+    def __init__(self, block: "Qwen3_5SparseMoeBlock", runtime: DecodeRuntime):
         self.block = block
+        self.runtime = runtime
+        self.reason: str | None = None
+        self.native_launches = 0
+        self._scratch: tuple[torch.Tensor, ...] = ()
+        self._bindings: tuple = ()
         self.plan: XpuFusedMoeWithSharedExpert | None = None
         self._weights: tuple[torch.Tensor, ...] | None = None
         self.dtype: torch.dtype | None = None
         self.hidden_dim = self.top_k = 0
         weights = get_weights(block)
         if isinstance(weights, str):
-            logger.info_once("Qwen3.5 XPU fused MoE disabled: %s", weights)
+            self.reason = weights
             return
         self._weights = weights
         config = cast(MoERunner, block.experts).moe_config
@@ -48,7 +50,7 @@ class FusedMoeDecode:
                 supports,
             )
         except ImportError:
-            logger.info_once("Qwen3.5 XPU fused MoE disabled: provider unavailable")
+            self.reason = "optional shared-expert provider unavailable"
             self._weights = None
             return
         if not supports(
@@ -59,14 +61,11 @@ class FusedMoeDecode:
             self._weights[3].shape[0],
             device=self._weights[0].device,
         ):
-            logger.info_once(
-                "Qwen3.5 XPU fused MoE disabled: native provider does not support "
-                "the weight device, dtype or dimensions"
-            )
+            self.reason = "native provider does not support device, dtype or dimensions"
             return
         weights = prepare_weights(self.block)
         if isinstance(weights, str):
-            logger.info_once("Qwen3.5 XPU fused MoE disabled: %s", weights)
+            self.reason = weights
             return
         self._weights = weights
         w13, w2, shared_w13, shared_w2, s13, s2, shared_s13, shared_s2, gate = (
@@ -85,11 +84,55 @@ class FusedMoeDecode:
             top_k=self.top_k,
         )
 
+        self._scratch = tuple(
+            self.plan.workspace(rows) for rows in range(1, MAX_DECODE_ROWS + 1)
+        )
+        self._bindings = tuple(self._binding(t) for t in self._weights)
+
+    @staticmethod
+    def _binding(tensor: torch.Tensor) -> tuple:
+        return (
+            id(tensor),
+            tensor.data_ptr(),
+            tensor.shape,
+            tensor.stride(),
+            tensor.dtype,
+            tensor.device,
+        )
+
+    def bindings_match(self) -> bool:
+        """Verify current canonical parameters still match captured addresses."""
+        weights = get_weights(self.block)
+        if isinstance(weights, str) or self.plan is None:
+            return False
+        provider_weights = (
+            self.plan.w13,
+            self.plan.w2,
+            self.plan.shared_w13,
+            self.plan.shared_w2,
+            self.plan.w13_scales,
+            self.plan.w2_scales,
+            self.plan.shared_w13_scale,
+            self.plan.shared_w2_scale,
+            self.plan.shared_gate,
+        )
+        return tuple(self._binding(t) for t in weights) == self._bindings and all(
+            a is b for a, b in zip(weights, provider_weights)
+        )
+
+    @property
+    def scratch_bytes(self) -> int:
+        return sum(t.numel() * t.element_size() for t in self._scratch)
+
     def get_plan(self, x: torch.Tensor) -> "XpuFusedMoeWithSharedExpert | None":
+        step = self.runtime.step
         if (
-            self.plan is None
+            step is None
+            or step.reason is not None
+            or self.plan is None
             or x.device != self.plan.device
             or x.ndim != 2
+            or step.padded_rows != x.shape[0]
             or not 1 <= x.shape[0] <= MAX_DECODE_ROWS
             or x.shape[0] * self.top_k > MAX_ROUTED_ROWS
             or x.shape[1] != self.hidden_dim
@@ -113,6 +156,7 @@ class FusedMoeDecode:
             topk_indices_dtype=runner.routed_experts.quant_method.topk_indices_dtype,
             input_ids=None,
         )
+        self.native_launches += 1
         output = plan.forward(
             torch.empty_like(hidden_states),
             hidden_states,

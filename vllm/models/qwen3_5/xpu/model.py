@@ -108,16 +108,17 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 from .specialized_decode.hooks import initialize_specialized_decode
-from .specialized_decode.moe import FusedMoeDecode
 
 if TYPE_CHECKING:
     from vllm_xpu_kernels.moe_shared_fused_interface import XpuFusedMoeWithSharedExpert
+
+    from .specialized_decode.moe import FusedMoeDecode
 
 logger = init_logger(__name__)
 
 
 class Qwen3_5SparseMoeBlock(Qwen3NextSparseMoeBlock):
-    _decode: FusedMoeDecode | None = None
+    _decode: "FusedMoeDecode | None" = None
 
     @property
     def _xpu_moe_shared_fused_plan(self) -> "XpuFusedMoeWithSharedExpert | None":
@@ -399,6 +400,17 @@ class Qwen3_5ForCausalLMBase(
     def process_weights_after_loading(self) -> None:
         initialize_specialized_decode(self)
 
+    def get_model_state_cls(self) -> type:
+        from .specialized_decode import is_requested
+
+        if is_requested(self.vllm_config):
+            from .specialized_decode.model_state import Qwen3_5XPUModelState
+
+            return Qwen3_5XPUModelState
+        from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+
+        return MambaHybridModelState
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -424,6 +436,9 @@ class Qwen3_5ForCausalLMBase(
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        from .specialized_decode.config import validate_deployment
+
+        validate_deployment(vllm_config)
         config = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -567,6 +582,9 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
+    def get_model_state_cls(self) -> type:
+        return self.language_model.get_model_state_cls()
+
     def process_weights_after_loading(self) -> None:
         initialize_specialized_decode(self.language_model)
 
@@ -665,7 +683,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for Qwen3.5.
 
-        With mrope enabled (default for Qwen3VL-class models), ``positions``
+        With mrope enabled (default for Qwen3VL-class models), `positions`
         has shape `(3, seq_len)`, otherwise `(seq_len,)`.
         """
         if intermediate_tensors is not None:

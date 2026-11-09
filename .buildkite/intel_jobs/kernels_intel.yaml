@@ -26,16 +26,13 @@ steps:
       pytest -v -s ir &&
       pytest -v -s kernels/ir'
 
-- label: ":intel: Qwen3.5 Native Shared Expert Decode / TP2 Reload"
+- label: ":intel: (B70) Qwen3.5 Shared Expert Decode / Transitions / Reload"
   key: qwen35-shared-expert-decode
   timeout_in_minutes: 120
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 2+
-    mem: 64+
-  no_plugin: true
-  working_dir: "."
+  device: intel_gpu_k8s
+  num_devices: 4
+  resource_claim_template: b70-4
+  working_dir: "/workspace/vllm/"
   env:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
     REPO: "vllm-ci-test-repo"
@@ -48,6 +45,7 @@ steps:
     - vllm/model_executor/layers/quantization/online/fp8.py
     - vllm/model_executor/models/qwen3_next.py
     - vllm/v1/worker/xpu_worker.py
+    - vllm/v1/worker/xpu_model_runner.py
     - tests/kernels/moe/test_moe.py
     - tests/models/test_qwen3_5.py
     - tests/models/qwen3_5/xpu_specialized_decode/
@@ -56,7 +54,7 @@ steps:
   commands:
     # Build the pinned companion in this disposable test container only.
     - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      bash -lc
       'curl -fsSL
       https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
       | gpg --dearmor -o /usr/share/keyrings/oneapi-archive-keyring.gpg &&

@@ -7,7 +7,8 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.utils.torch_utils import supports_xpu_graph
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
 
@@ -21,6 +22,23 @@ class XPUModelRunner(GPUModelRunner):
     ):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+
+    def gather_batch_req_state(
+        self, scheduler_output: SchedulerOutput, dummy_run: bool
+    ) -> tuple[BatchReqState | None, int | None]:
+        batch_state, uniform_token_count = super().gather_batch_req_state(
+            scheduler_output, dummy_run
+        )
+        if batch_state is not None:
+            supports_decode_graph = getattr(
+                self.model_state, "supports_decode_cudagraph_batch", None
+            )
+            if supports_decode_graph is not None and not supports_decode_graph(
+                has_prefill=batch_state.has_prefill
+            ):
+                batch_state = batch_state._replace(decode_graph_eligible=False)
+                uniform_token_count = None
+        return batch_state, uniform_token_count
 
 
 class XPUMMEncoderModelRunner(MMEncoderModelRunner):
