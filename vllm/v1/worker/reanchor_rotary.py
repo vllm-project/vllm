@@ -66,7 +66,7 @@ def collect_rotary_specs(
     """Map each attention layer to the RoPE that rotated its cached keys.
 
     Follows the usual vLLM layout, where the module holding an attention layer
-    (any child with a ``layer_name``) also holds its ``rotary_emb``. Raises if a
+    (any child with a `layer_name`) also holds its `rotary_emb`. Raises if a
     layer has no RoPE, or one whose angle is not p * inv_freq (M-RoPE, Fourier,
     long RoPE, ...), or one built for another head size.
     """
@@ -193,7 +193,7 @@ def rerotate_cached_keys(
 ) -> None:
     """Apply R(-d) to one request's cached keys in every KV cache group.
 
-    ``group_block_ids[g]`` holds the request's blocks in group ``g``. The blocks
+    `group_block_ids[g]` holds the request's blocks in group `g`. The blocks
     allocated for this step hold no live keys yet, so rotating them is fine.
     """
     for group, block_ids in zip(kv_cache_groups, group_block_ids, strict=True):
@@ -207,7 +207,7 @@ def rerotate_cached_keys(
 
 
 def apply_inverse_rotary(key: torch.Tensor, d: int, spec: RotarySpec) -> torch.Tensor:
-    """Apply R(-d) to ``key`` ([..., head_size], rotary dims first)."""
+    """Apply R(-d) to `key` ([..., head_size], rotary dims first)."""
     angle = d * spec.inv_freq
     # In fp32: cos and sin rounded to bf16 would give every key the same error, in
     # angle and in scale, at each frequency.

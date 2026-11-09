@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for vllm/v1/worker/reanchor_rotary.py.
 
-A key rotated at position ``p`` and then by ``R(-d)`` equals the key rotated at
-``p - d``. Query and keys shift together, so attention scores do not change.
+A key rotated at position `p` and then by `R(-d)` equals the key rotated at
+`p - d`. Query and keys shift together, so attention scores do not change.
 """
 
 from fractions import Fraction
@@ -44,7 +44,7 @@ def _spec(rotary_dim: int, base: float, is_neox: bool, scale: int = 1):
 
 
 def _forward_rotary(x: torch.Tensor, pos: int, spec: RotarySpec) -> torch.Tensor:
-    """Rotate ``x`` by +pos, as the forward pass does."""
+    """Rotate `x` by +pos, as the forward pass does."""
     angle = pos * spec.inv_freq
     rotated = ApplyRotaryEmb.forward_static(
         x[..., : spec.rotary_dim], angle.cos(), angle.sin(), spec.is_neox

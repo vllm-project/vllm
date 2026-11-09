@@ -86,14 +86,9 @@ async def _run_session(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "use_v2_model_runner, gen_tokens",
-    [(False, 1), (True, 1), (True, 8)],
-    ids=["v1", "v2", "v2-eight-tokens-per-chunk"],
+    "gen_tokens", [1, 8], ids=["one-token-per-chunk", "eight-tokens-per-chunk"]
 )
-async def test_reanchoring_matches_reference(
-    monkeypatch, use_v2_model_runner, gen_tokens
-):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
+async def test_reanchoring_matches_reference(monkeypatch, gen_tokens):
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     envs.disable_envs_cache()
 

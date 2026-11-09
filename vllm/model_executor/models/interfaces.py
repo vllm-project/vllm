@@ -1316,7 +1316,7 @@ class SupportsRealtime(Protocol):
         model_config: "ModelConfig",
         unbounded: bool = False,
     ) -> AsyncGenerator["PromptType", None]:
-        """With ``unbounded``, the stream does not end at max_model_len: the
+        """With `unbounded`, the stream does not end at max_model_len: the
         scheduler keeps the session under it."""
         ...
 

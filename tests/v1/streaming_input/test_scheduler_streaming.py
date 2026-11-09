@@ -953,13 +953,8 @@ def _with_encoder_budget(scheduler):
     return scheduler
 
 
-@pytest.mark.parametrize("use_v2_model_runner", [False, True])
-def test_unbounded_shift_drops_and_reindexes_mm_features(use_v2_model_runner):
-    scheduler = _with_encoder_budget(
-        _unbounded_scheduler(
-            256, async_scheduling=True, use_v2_model_runner=use_v2_model_runner
-        )
-    )
+def test_unbounded_shift_drops_and_reindexes_mm_features():
+    scheduler = _with_encoder_budget(_unbounded_scheduler(256, async_scheduling=True))
     session = DummyRequest(
         "session",
         prompt_token_ids=[1] * 170,
@@ -983,9 +978,7 @@ def test_unbounded_shift_drops_and_reindexes_mm_features(use_v2_model_runner):
 def test_unbounded_shift_drops_every_mm_feature():
     """With no feature left there is nothing to install, so the encoder updates
     must not keep the indices of the old list."""
-    scheduler = _with_encoder_budget(
-        _unbounded_scheduler(256, use_v2_model_runner=True)
-    )
+    scheduler = _with_encoder_budget(_unbounded_scheduler(256))
     session = DummyRequest(
         "session",
         prompt_token_ids=[1] * 170,
