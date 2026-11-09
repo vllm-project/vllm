@@ -234,11 +234,9 @@ class TestResolveClassifierActFn:
 
 
 @pytest.mark.parametrize("num_labels", [1, 3])
-@pytest.mark.parametrize("dim", [0, -1])
-def test_wrapped_softmax_preserves_dim(num_labels, dim):
-    activation = nn.Softmax(dim=dim)
+def test_wrapped_softmax_preserves_classification_fallback(num_labels):
+    activation = nn.Softmax(dim=-1)
     logits = torch.arange(2 * num_labels, dtype=torch.float32).reshape(2, -1)
 
-    torch.testing.assert_close(
-        PoolerActivation.wraps(activation)(logits), activation(logits)
-    )
+    expected = logits.sigmoid() if num_labels == 1 else logits.softmax(dim=-1)
+    torch.testing.assert_close(PoolerActivation.wraps(activation)(logits), expected)

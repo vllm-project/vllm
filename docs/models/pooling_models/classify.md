@@ -260,9 +260,10 @@ More examples can be found here: [examples/pooling/classify](../../../examples/p
 
 You can enable or disable activation via `use_activation`.
 
-When no `problem_type` selects an activation, vLLM uses the explicit Sentence
-Transformers activation configuration. For example, an explicit `Sigmoid` applies
-independently to every label, including when the model has multiple labels.
+When no `problem_type` selects an activation, an explicitly configured Sentence
+Transformers `Sigmoid` applies independently to every label, including when the
+model has multiple labels. The existing `Softmax` handling is unchanged: it uses
+`Sigmoid` for a single output and `Softmax` for multiple outputs.
 
 ### Problem type (e.g. `multi_label_classification`)
 

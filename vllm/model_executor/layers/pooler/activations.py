@@ -81,6 +81,8 @@ class PoolerActivation(nn.Module, ABC):
     def wraps(module: nn.Module) -> "PoolerActivation":
         if isinstance(module, nn.Identity):
             return PoolerIdentity()
+        if isinstance(module, nn.Softmax):
+            return PoolerClassify()
 
         return LambdaPoolerActivation(module)
 
