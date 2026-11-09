@@ -143,6 +143,12 @@ Every plugin has three parts:
     - triton ops
       Custom way doesn't work for triton ops now.
 
+    Fused MoE routers, routed experts, and runners use `PluggableLayer` for whole-class replacement. Register a compatible subclass with, for example, `FusedTopKRouter.register_oot(MyFusedTopKRouter)` before model construction.
+
+    Registration matches the concrete class name. A registration for `MoERunner` or `RoutedExperts` does not replace model-specific subclasses or `SubstitutedRoutedExperts`; register those classes separately when supported. Without a matching registration, the selected class is used unchanged. A router instance explicitly supplied to `FusedMoEFactory` is used directly.
+
+    Replacements must subclass the class they replace and preserve its constructor arguments, routing semantics, model-specific weight loading, and EPLB state. Routers are PyTorch modules, so a shared correction-bias `Parameter` also appears under the router in `state_dict()`. Preserve the shared parameter object and the model's canonical checkpoint names; models that load the bias through the gate should register the gate before constructing the MoE layer.
+
 7. (optional) Implement other pluggable modules, such as lora, graph backend, quantization, mamba attention backend, etc.
 
 ## Compatibility Guarantee

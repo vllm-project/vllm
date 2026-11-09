@@ -8,7 +8,7 @@ from vllm.model_executor.hw_agnostic.custom_op import CustomOp
 
 @CustomOp.register("silu_and_mul")
 class SiluAndMul(CustomOp):
-    """SwiGLU: ``x -> silu(x[:d]) * x[d:]`` where ``d = x.shape[-1] // 2``."""
+    """SwiGLU: `x -> silu(x[:d]) * x[d:]` where `d = x.shape[-1] // 2`."""
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2

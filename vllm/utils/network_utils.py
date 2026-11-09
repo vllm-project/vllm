@@ -156,8 +156,8 @@ def get_file_store_init_method() -> str:
 
 def aiter_requires_tcp_store() -> bool:
     """AITER custom all-reduce requires a pure-TCP default store (its IPC
-    metadata exchange asserts on ``TCPStore``); the file:// rendezvous yields a
-    ``FileStore`` and trips that assertion. Prefer the TCP rendezvous
+    metadata exchange asserts on `TCPStore`); the file:// rendezvous yields a
+    `FileStore` and trips that assertion. Prefer the TCP rendezvous
     (pre-#50999) for ROCm + AITER custom AR until AITER accepts FileStore.
     """
     from vllm._aiter_ops import rocm_aiter_ops
@@ -324,7 +324,7 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
     return f"{scheme}://{host}:{port}"
 
 
-# Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
+# Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783
 # Apply the existing make_zmq_socket memory policy to every socket owner.
 _ZMQ_LARGE_BUFFER_SIZE = 512 * 1024**2
 _ZMQ_LARGE_BUFFER_MIN_TOTAL_MEMORY = 32 * 1024**3
@@ -358,7 +358,7 @@ def make_zmq_socket(
 ) -> zmq.Socket | zmq.asyncio.Socket:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics.
 
-    When supplied, ``listener`` is detached and its fd moves to libzmq.
+    When supplied, `listener` is detached and its fd moves to libzmq.
     """
     socket = ctx.socket(socket_type)
     buf_size = _get_zmq_socket_buffer_size()

@@ -138,9 +138,7 @@ steps:
       'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       cd tests &&
       pytest -v -s
-      v1/logits_processors
-      --ignore=v1/logits_processors/test_custom_online.py
-      --ignore=v1/logits_processors/test_custom_offline.py &&
+      v1/logits_processors &&
       pytest -v -s
       v1/test_oracle.py
       v1/test_request.py
@@ -221,7 +219,6 @@ steps:
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/
-    - vllm/v1/worker/kv_connector_model_runner_mixin.py
     - tests/v1/kv_connector/nixl_integration/
     - vllm/platforms/xpu.py
   commands:
@@ -245,7 +242,6 @@ steps:
   source_file_dependencies:
     - vllm/distributed/ec_transfer/
     - vllm/distributed/kv_transfer/
-    - vllm/v1/worker/ec_connector_model_runner_mixin.py
     - vllm/platforms/xpu.py
     - examples/disaggregated/disaggregated_encoder/
     - tests/v1/ec_connector/integration/

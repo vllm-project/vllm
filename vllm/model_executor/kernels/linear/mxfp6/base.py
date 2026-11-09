@@ -33,7 +33,7 @@ class MxFp6LinearKernel(ABC):
 
     Each subclass implements a specific GEMM backend (CUTLASS, Marlin, etc).
     The kernel selection mechanism iterates over registered subclasses in
-    priority order,calling ``is_supported`` and ``can_implement`` to find the best
+    priority order,calling `is_supported` and `can_implement` to find the best
     match for the current hardware.
     """
 
