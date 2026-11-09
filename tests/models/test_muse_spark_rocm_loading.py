@@ -9,6 +9,7 @@ import pytest
 import torch
 
 import vllm.models.muse_spark.amd.model as amd_model
+from vllm.config import EPLBConfig
 from vllm.models.muse_spark.amd.model import (
     MuseSparkForCausalLM,
     MuseSparkModel,
@@ -308,3 +309,26 @@ def test_aiter_kv_workspace_only_for_cache_readers(
         spec, ["attn"], default_vllm_config, torch.device("cpu")
     )
     assert (builder.kv_sharing_workspace is not None) == (sharing or bypass)
+
+
+@pytest.mark.parametrize(
+    "use_async,communicator,warns",
+    [
+        (False, "pynccl", False),
+        (False, "torch_nccl", False),
+        (False, "nixl", True),
+        (True, "nixl", True),
+        (True, "torch_gloo", True),
+    ],
+)
+def test_eplb_warns_on_async_or_nixl(
+    monkeypatch, use_async: bool, communicator: str, warns: bool
+) -> None:
+    messages: list[str] = []
+    monkeypatch.setattr(amd_model.logger, "warning_once", messages.append)
+    amd_model.warn_on_async_eplb(
+        EPLBConfig(use_async=use_async, communicator=communicator)
+    )
+    assert bool(messages) == warns
+    if warns:
+        assert "pynccl" in messages[0]

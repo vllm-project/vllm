@@ -571,7 +571,7 @@ class MuseSparkQuarkW8A8Fp8FusedMoE(QuarkW8A8Fp8MoEMethod):
 
     @property
     def supports_eplb(self) -> bool:
-        # The Triton path keeps the expert dim outermost in every weight and scale.
+        # Per-expert weights and scales are moved; shared scales are left alone.
         return True
 
     def get_fused_moe_quant_config(
