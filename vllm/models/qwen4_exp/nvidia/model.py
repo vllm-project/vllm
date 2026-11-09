@@ -215,6 +215,11 @@ class Qwen4ExpDecoderLayer(nn.Module):
             vllm_config.parallel_config.use_sequence_parallel_moe
         )
         replicate = envs.VLLM_QWEN4EXP_REPLICATE_MIXER
+        if replicate:
+            # Nothing re-syncs ranks after a replicated block: autotune must agree.
+            from vllm.triton_utils.tp_synced_autotune import install
+
+            install()
         if replicate and self.use_hc_sequence_parallel:
             raise NotImplementedError(
                 "VLLM_QWEN4EXP_REPLICATE_MIXER is not supported with "
