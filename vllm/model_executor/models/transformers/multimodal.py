@@ -1083,6 +1083,9 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         bases = [b for b in bases if b is not MultiModalMixin]
 
         class LanguageModel(*bases):  # type: ignore[misc]
+            # `reserve_aux_intermediate_tensor_slots` needs `config.hidden_size`
+            supports_aux_hidden_states_over_pp = False
+
             def __init__(self, multimodal_model):
                 # Don't call super().__init__() to avoid re-initialization
                 self.__dict__.update(multimodal_model.__dict__)
