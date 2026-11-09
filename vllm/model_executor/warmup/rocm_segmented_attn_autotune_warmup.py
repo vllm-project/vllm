@@ -842,7 +842,7 @@ def _workload_weight(workload, max_tokens, heads, kv_heads, dim, fp8):
 
 
 def _shard_workloads(workloads, world_size, max_tokens, heads, kv_heads, dim, fp8):
-    """Balance compile-affine ``(batch, query)`` groups across TP ranks."""
+    """Balance compile-affine `(batch, query)` groups across TP ranks."""
     assignments: list[list[tuple[int, tuple]]] = [[] for _ in range(world_size)]
     loads = [0] * world_size
     groups: dict[tuple, dict] = {}

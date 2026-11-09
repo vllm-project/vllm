@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Low-level CUDA/HIP memory helpers: pinning and batch DMA transfers."""
+"""Low-level CUDA/HIP batch DMA transfers."""
 
 import ctypes
 from typing import Any, NamedTuple
@@ -19,18 +19,6 @@ logger = init_logger(__name__)
 # be read early, only safe for a stable source (e.g. pinned host memory).
 CU_MEMCPY_SRC_ACCESS_ORDER_STREAM = 1
 CU_MEMCPY_SRC_ACCESS_ORDER_ANY = 3
-
-
-def pin_tensor(tensor: torch.Tensor) -> None:
-    """Pin a CPU tensor via cudaHostRegister.
-
-    This bypasses PyTorch's CUDACachingHostAllocator which rounds
-    every ``pin_memory=True`` allocation up to the next power of 2
-    (e.g. 100 GB becomes 128 GB).
-    """
-    err = torch.cuda.cudart().cudaHostRegister(tensor.data_ptr(), tensor.nbytes, 0)
-    if err.value != 0:
-        raise RuntimeError(f"cudaHostRegister failed: {err}")
 
 
 class _CUmemLocation(ctypes.Structure):
@@ -62,6 +50,13 @@ _BATCH_MEMCPY_FUNC_TYPE = ctypes.CFUNCTYPE(
 # Resolved lazily on first use: (entry point, numAttrs to pass).
 _batch_memcpy: tuple[Any, int] | None = None
 
+# hipMemcpyAttributes.flags for the batch copies, resolved with _batch_memcpy.
+_batch_copy_flags = 0
+
+# hipMemcpyFlagExtPreferCE: run host <-> device batches on the SDMA engines
+# rather than as a blit kernel on the CUs (HIP 7.16+).
+_HIP_MEMCPY_FLAG_EXT_PREFER_CE = 0x100
+
 # Max copy descriptors per batch call, resolved lazily on first use.
 _max_batch_descriptors: int | None = None
 
@@ -73,10 +68,10 @@ _ROCM_DEFAULT_MAX_BATCH_DESCRIPTORS = 8192
 def _resolve_max_batch_descriptors() -> int:
     """Max copy descriptors to pass to one batch-memcpy call (0 = unlimited).
 
-    ROCm's ``hipMemcpyBatchAsync`` faults above 8192 descriptors per call, so
-    on ROCm we cap and chunk larger transfers. CUDA's ``cuMemcpyBatchAsync``
+    ROCm's `hipMemcpyBatchAsync` faults above 8192 descriptors per call, so
+    on ROCm we cap and chunk larger transfers. CUDA's `cuMemcpyBatchAsync`
     handles arbitrary counts and is left uncapped. Set
-    ``VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS`` (>0) to override on any platform.
+    `VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS` (>0) to override on any platform.
     """
     global _max_batch_descriptors
     if _max_batch_descriptors is None:
@@ -91,10 +86,10 @@ def _resolve_max_batch_descriptors() -> int:
 
 
 def _resolve_batch_memcpy() -> tuple[Any, int]:
-    """Resolve the batch-memcpy entry point and its ``numAttrs`` (one-time).
+    """Resolve the batch-memcpy entry point and its `numAttrs` (one-time).
 
-    CUDA uses ``cuMemcpyBatchAsync``; ROCm uses ``hipMemcpyBatchAsync``.
-    Raises ``RuntimeError`` if the symbol is unavailable (old CUDA driver,
+    CUDA uses `cuMemcpyBatchAsync`; ROCm uses `hipMemcpyBatchAsync`.
+    Raises `RuntimeError` if the symbol is unavailable (old CUDA driver,
     ROCm < 7.1, unusual install).
     """
     if current_platform.is_rocm():
@@ -118,7 +113,10 @@ def _resolve_batch_memcpy() -> tuple[Any, int]:
             ctypes.c_void_p,  # failIdx
             ctypes.c_void_p,  # stream
         ]
-        return fn, _rocm_num_attrs(lib)
+        global _batch_copy_flags
+        version = _hip_runtime_version(lib)
+        _batch_copy_flags = _copy_flags_for_hip_version(version)
+        return fn, _num_attrs_for_hip_version(version)
 
     from cuda.bindings import driver as drv
 
@@ -129,11 +127,11 @@ def _resolve_batch_memcpy() -> tuple[Any, int]:
 
 
 def _load_hip_runtime() -> ctypes.CDLL:
-    """Load ``libamdhip64``, tolerating installs without the devel symlink.
+    """Load `libamdhip64`, tolerating installs without the devel symlink.
 
-    The unversioned ``libamdhip64.so`` only ships with the ROCm devel package;
+    The unversioned `libamdhip64.so` only ships with the ROCm devel package;
     runtime-only and wheel-packaged ROCm installs provide just the versioned
-    soname. ``dlopen`` returns the already-mapped library when asked for a
+    soname. `dlopen` returns the already-mapped library when asked for a
     soname the process has loaded — torch loads HIP at import — so the
     versioned names resolve even when they are not on the loader search path.
     """
@@ -146,27 +144,39 @@ def _load_hip_runtime() -> ctypes.CDLL:
     raise OSError("could not load the HIP runtime: " + "; ".join(errors))
 
 
-def _rocm_num_attrs(lib: ctypes.CDLL) -> int:
-    """``numAttrs`` for ``hipMemcpyBatchAsync`` on the running HIP runtime."""
+def _hip_runtime_version(lib: ctypes.CDLL) -> int:
+    """`hipRuntimeGetVersion` of the running HIP runtime, 0 if unknown."""
     ver = ctypes.c_int(0)
     try:
         if lib.hipRuntimeGetVersion(ctypes.byref(ver)) != 0:
             ver.value = 0
     except (OSError, AttributeError):
         ver.value = 0
-    return _num_attrs_for_hip_version(ver.value)
+    return ver.value
 
 
 def _num_attrs_for_hip_version(version: int) -> int:
-    """``numAttrs`` for ``hipMemcpyBatchAsync`` given a HIP runtime version int.
+    """`numAttrs` for `hipMemcpyBatchAsync` given a HIP runtime version int.
 
-    ROCm 7.2.1-7.2.3 reject ``numAttrs > 0`` (ROCm/clr @ rocm-7.2.1
-    hipamd/src/hip_memory.cpp:2819-2822); 7.13+ accept it. ``version`` 0
+    ROCm 7.2.1-7.2.3 reject `numAttrs > 0` (ROCm/clr @ rocm-7.2.1
+    hipamd/src/hip_memory.cpp:2819-2822); 7.13+ accept it. `version` 0
     (unknown) yields the conservative 0.
     """
     # HIP encodes version as major*10_000_000 + minor*100_000 + patch.
     major, minor = version // 10_000_000, (version // 100_000) % 100
     return 1 if (major, minor) >= (7, 13) else 0
+
+
+def _copy_flags_for_hip_version(version: int) -> int:
+    """`hipMemcpyAttributes.flags` for the batch copies on HIP `version`.
+
+    Without `hipMemcpyFlagExtPreferCE`, HIP 7.16 runs the batch as a blit
+    kernel (`__amd_rocclr_copyBufferBatch`) on the CUs, which slows decode
+    running next to it; with the flag the batch stays on SDMA at the same
+    bandwidth. Older runtimes keep flags 0.
+    """
+    major, minor = version // 10_000_000, (version // 100_000) % 100
+    return _HIP_MEMCPY_FLAG_EXT_PREFER_CE if (major, minor) >= (7, 16) else 0
 
 
 class BatchMemcpyParams(NamedTuple):
@@ -209,7 +219,9 @@ def build_params(
         dst_bases.append(d.data_ptr())
         bpb.append(s_bpb)
 
-    attrs = _CUmemcpyAttributes(srcAccessOrder=src_access_order)
+    attrs = _CUmemcpyAttributes(
+        srcAccessOrder=src_access_order, flags=_batch_copy_flags
+    )
 
     return BatchMemcpyParams(
         src_bases=np.array(src_bases, dtype=np.uint64),

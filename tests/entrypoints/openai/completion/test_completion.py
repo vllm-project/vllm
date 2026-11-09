@@ -265,7 +265,7 @@ async def test_too_many_completion_logprobs(
             logprobs=30,
             stream=True,
         )
-        async for chunk in stream:
+        async for _ in stream:
             ...
 
     # the server should still work afterwards

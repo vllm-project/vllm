@@ -192,7 +192,7 @@ class _StatsKey:
 class OffloadingConnectorStats(KVConnectorStats):
     """Offloading connector stats use flat metric names as keys.
 
-    The ``data`` dict is structured using ``_StatsKey`` / ``_MetricType``::
+    The `data` dict is structured using `_StatsKey` / `_MetricType`::
 
         {
             _StatsKey.TYPES: {name: _MetricType.*, ...},
@@ -201,19 +201,19 @@ class OffloadingConnectorStats(KVConnectorStats):
         }
 
     This structure is self-describing: it survives IPC serialization
-    without needing the full ``OffloadingMetricMetadata`` objects on the
+    without needing the full `OffloadingMetricMetadata` objects on the
     receiving side.
 
     Counter values are aggregated by summing per-label-tuple, gauge values
     use the latest snapshot per-label-tuple, and histogram values are lists of
-    observed samples per-label-tuple. Unlabeled metrics use ``()`` as their
+    observed samples per-label-tuple. Unlabeled metrics use `()` as their
     labelvalues tuple.
 
-    ``INFO`` holds the static config facts of one series each, which the
-    scheduler sends once per process. It stays out of ``DATA``, because its
+    `INFO` holds the static config facts of one series each, which the
+    scheduler sends once per process. It stays out of `DATA`, because its
     label names are known only when the payload arrives. It holds label names,
     not metric names, so a manager that accesses its own metrics walks
-    ``metric_sections()``.
+    `metric_sections()`.
     """
 
     def __post_init__(self):
