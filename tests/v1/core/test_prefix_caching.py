@@ -2871,12 +2871,16 @@ def test_prefill_hybrid_model_combinations_eagle(
     assert not computed_blocks.blocks[0]  # No cache hit initially
     assert num_computed_tokens == 0
 
-    # Two chunks, the first ending at the EAGLE replay boundary (48 tokens =
-    # ``replay_boundaries(71, 16, use_eagle=True)``), where the mamba-align
-    # scheduler stops so that MambaManager can export reusable state.
+    # Three chunks ending at 32, 48 and 71. The last boundary is the EAGLE
+    # replay boundary, where the mamba-align scheduler stops so that
+    # MambaManager exports reusable state. Stopping once more at 32 gives the
+    # mamba cases two checkpoints to choose from: a drop that removes exactly
+    # the newest one lands on the older boundary (32 tokens) instead of
+    # falling back to the same no-hit value a drop of many would produce.
+    chunk_sizes = (2 * block_size, block_size)
     for num_new_tokens in (
-        expect_hit_length * block_size,
-        len(all_token_ids) - expect_hit_length * block_size,
+        *chunk_sizes,
+        len(all_token_ids) - sum(chunk_sizes),
     ):
         blocks = manager.allocate_slots(req0, num_new_tokens, 0, computed_blocks)
         assert blocks is not None
@@ -3051,8 +3055,10 @@ def test_prefill_hybrid_model_eagle_mamba_fine_grained():
     assert not computed_blocks.blocks[0]  # No cache hit initially
     assert num_computed_tokens == 0
 
-    # Two chunks; the first ends at the 48-token EAGLE replay boundary.
-    for num_new_tokens in (48, len(all_token_ids) - 48):
+    # Three chunks ending at 32, 48 and 71, as in the table test above: the
+    # mamba group keeps a checkpoint at both 32 and 48 so that dropping the
+    # newest one is distinguishable from hitting nothing.
+    for num_new_tokens in (32, 16, len(all_token_ids) - 48):
         blocks = manager.allocate_slots(req0, num_new_tokens, 0, computed_blocks)
         assert blocks is not None
         assert len(blocks.get_block_ids()) == num_groups
