@@ -417,7 +417,7 @@ class OnlineDerenderer:
             if self._include_reasoning_tokens_details
             else None
         )
-        
+
         if chat_request is not None and chat_request.echo:
             echo = self._echo_content(chat_request, role)
             for chat_choice in choices:
@@ -594,7 +594,7 @@ class OnlineDerenderer:
             enable_auto_tools=self.enable_auto_tools,
             parser_cls=self.parser,
         )
-        return ChatMessage(
+        message = ChatMessage(
             role=role,
             reasoning=fields.reasoning,
             content=fields.content,
