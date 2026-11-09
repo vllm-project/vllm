@@ -73,7 +73,8 @@ Rows are labelled with the version of the forward that computed them, stamped wh
 
 | Event | Option | Assessment |
 |---|---|---|
-| Pool full | drop rows / fail the request / **block** | **Block** (backpressure) and keep the in-flight cap so it is rare |
+| Memory full | drop rows / fail the request / block / **offload to SSD** | **Offload** on eviction (never at put, which loses objects); without SSD, **block** with an in-flight cap |
+| Holder dies or disk fails | restart and continue / **abort the step** | A dead holder's objects are listed but unreadable, and a failing disk makes every put fail: **abort** on holder death or when puts stop landing |
 | A block write fails | **report missing** / substitute a later recompute | A recompute can be of another version and its label would be wrong: **report missing** |
 | A manifest or tail write fails | wait for a timeout / **error marker per request** | **Error marker**: the reader fails that request at once; a session-wide marker would fail every sibling |
 | Preemption | finish the request / **stash and resume** | Finishing loses rows computed before the preemption: **stash** |
@@ -82,7 +83,8 @@ Rows are labelled with the version of the forward that computed them, stamped wh
 ## Data path and tiers
 
 - GPU → host → background put: the current path. With R3 as a KV layer, rows are already on the host when a block fills. GPU staging → RDMA put is the candidate for the indexer.
-- Host DRAM pool (Mooncake segments) for R3, top-k, mask, compressed indexer and fp8 hidden; NVMe/SSD as the overflow tier for indexer and hidden; a shared-filesystem copy-out once a trajectory finishes shrinks the pool and survives checkpoint restore.
+- **Store: local SSD under a memory cache (adopted).** Each Mooncake holder's segment is a memory cache over its own NVMe directory, with offload on eviction, for every output. Pinned host memory alone was the earlier design; it caps in-flight sessions at a fraction of host memory and cannot hold the indexer at frontier scale (scenarios §4). Offload at put time, the other offload mode, evicts objects before their disk write completes and was rejected (experiments: aux objects on SSD).
+- A shared-filesystem copy-out once a trajectory finishes would survive checkpoint restore; it is not needed for delivery and is not built.
 
 ## Encodings
 
@@ -100,7 +102,7 @@ Rows are labelled with the version of the forward that computed them, stamped wh
 
 ## The five designs compared
 
-All five share the delivery segment (W1/W3, K2, backpressure, in-flight cap, session release) and differ in the cache segment.
+All five share the delivery segment (W1/W3, K2, backpressure, admission cap, session release) and differ in the cache segment.
 
 | Design | Cache segment | Result |
 |---|---|---|
@@ -112,7 +114,7 @@ All five share the delivery segment (W1/W3, K2, backpressure, in-flight cap, ses
 
 | Failure | c1 / c0 / P-S / P-B | P-A |
 |---|---|---|
-| Delivery pool full | backpressure, nothing dropped | cache and delivery are one copy: neither evictable nor deletable |
+| Delivery memory full | offload to SSD (backpressure without SSD), nothing dropped | cache and delivery are one copy: neither evictable nor deletable |
 | Writer process dies | only that process's undelivered rows; the trajectory is regenerated | every engine sharing the prefix loses them |
 | Trainer done | delete the session | shared blocks need reference counting |
 

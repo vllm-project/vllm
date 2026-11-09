@@ -44,17 +44,19 @@ Only outputs recorded at every position need a cache segment (R3, indexer); top-
 
 At frontier scale each replica has ≈51 × 200K ≈ 10.4M live tokens, 81% of its 12.8M capacity. R3's cache segment is cheap; an uncompressed indexer cache segment exceeds host memory.
 
-## 4. Delivery pool
+## 4. Delivery store
 
-Pool size = per-node in-flight bytes ÷ 0.75 (in-flight cap at 75%).
+The store holds every session in flight until release. With objects on each holder's local SSD (protocol §9), that space is disk, and memory is a cache sized for puts in flight (8 GB was enough at 512 sessions × 14.6K context). Without SSD, it is pinned memory, and the pool has to be the in-flight bytes ÷ 0.75. The columns below give the in-flight bytes and that ÷ 0.75 store size; with SSD, read the store columns as disk per node.
 
-| Output | Single node: in flight | Single node: pool | Frontier: per node in flight | Frontier: cluster in flight | Frontier: per-node pool (512K start / 1M bound) |
+| Output | Single node: in flight | Single node: store | Frontier: per node in flight | Frontier: cluster in flight | Frontier: per-node store (512K start / 1M bound) |
 |---|---|---|---|---|---|
 | R3 | 1.6 GB | 4.3 GB | 4.1 GB | 8.8 TB | 14 / 28 GB |
 | top-k 256 | 4.3 GB | 11.5 GB | 2.1 GB | 4.6 TB | 7 / 15 GB |
 | top-p mask | 2.1 GB | 5.6 GB | 1.1 GB | 2.3 TB | 3.6 / 7.3 GB |
 | indexer, 12 layers | 206 GB | 1.1 TB | 1.0 TB | 2.2 PB | 3.5 / 7.0 TB |
 | indexer, 61 layers | 1.0 TB | 5.6 TB | 5.2 TB | 11.3 PB | 18 / 36 TB |
+
+R3, top-k and the mask fit in host memory even at frontier scale. The indexer does not: at terabytes per node it only fits on disk, which is what makes the SSD store the default rather than an option.
 
 Deduplication across turns is mandatory at frontier scale. Rewriting the full context every turn would write ~2 GB of R3 for a 200K, 50-turn trajectory, 25× the deduplicated 80 MB.
 
@@ -95,8 +97,8 @@ That is ≈7.4% of each 807 s interval (MLP only; attention adds more). Frontier
 
 ## 8. Constraints on the design
 
-- **R3 and top-k share one protocol.** Both are 2–4 GB in flight per node with 7–28 GB pools. Top-k needs no cache segment.
-- **The indexer needs compression or a tier.** Uncompressed it is 5–100× R3; compressed (20-bit + zstd) it is 5–7× R3 and fits the same pool. A cache segment for it in host memory is unaffordable, which favors using the delivery pool as the session's cache.
+- **R3 and top-k share one protocol.** Both are 2–4 GB in flight per node with 7–28 GB stores. Top-k needs no cache segment.
+- **The indexer needs compression or a tier.** Uncompressed it is 5–100× R3; compressed (20-bit + zstd) it is 5–7× R3 and fits the same store. A cache segment for it in host memory is unaffordable, which favors using the delivery pool as the session's cache.
 - **Deduplication is mandatory and must be scoped to the session.** Rewriting the full context every turn would write ~25× more R3. Sharing across sessions would need reference counting for little gain.
 - **Release is per session, not per generation.** A trajectory lives ~2,660 s and spans ~3 weight updates (and up to ~107 versions of staleness), so prefix hits on blocks computed by an older version are normal. Rows must therefore carry their weight version, and a computation at another version is never interchangeable with the stored one.
 - **Weight updates happen with requests in flight.** Recomputing in-flight work at every update costs ~7% of each interval (section 7), so the engine pauses, resets its prefix cache and resumes. The delivery path must survive that reset without losing or replacing rows.
@@ -136,5 +138,5 @@ Setup: TP4 + EP4, BI on. The frontier column keeps the workload from section 1 a
 - **KV capacity, measured.** A TP4 engine at 0.65 GPU memory utilization holds 3.39M tokens.
   - R3 as a block-row cache (or KV layer): ≈1.6 GB per engine, ~1% of the KV.
   - Indexer: ≈54 GB raw, ≈10 GB compressed.
-- **Indexer compression.** Selections are bitwise reproducible under BI. Compressed, the indexer is 5–7× R3, and fits in the same delivery pool.
+- **Indexer compression.** Selections are bitwise reproducible under BI. Compressed, the indexer is 5–7× R3, and fits in the same delivery store.
 - **Hidden states.** fp8 hidden times the teacher's `lm_head` is within full-vocabulary KL < 1e-3 of vLLM's distribution. The behavior logprob must still come from the inline per-token logprob, because recomputed logits are not bitwise equal.
