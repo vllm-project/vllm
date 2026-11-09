@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 from .rocm_block32_gemm import (
@@ -349,6 +350,12 @@ def _select_m31_cfg(M, N, K):
     return None
 
 
+# CU waves of BLOCK_N=16 tiles (one tile row at M <= 16) past which more tiles add
+# no weight bandwidth and only re-read the activation, so BLOCK_N=32 is faster
+# (gfx950 crossover: ~2.6 waves).
+_DECODE_WIDE_N_MIN_WAVES = 2.75
+
+
 def _select_cfg(M, N, K):
     """(BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages) — graph-tuned on gfx950.
 
@@ -368,11 +375,19 @@ def _select_cfg(M, N, K):
         # decode (M in {1,32,64}): tiny-M GEMV is weight-BW + GPU-OCCUPANCY bound. The
         # lever is NARROW BLOCK_N=16 (maximize N-tiles so more CUs stream the weight in
         # parallel) + LARGE BLOCK_K (fewer K-iters, bigger coalesced weight loads).
-        # Tuned by CUDA-graph replay latency. Optimal at both TP=4 and TP=8.
-        if K % 1024 == 0:  # K=2048, 6144 -> graph-best 16x16x1024 (all M)
-            return 16, 16, 1024, 2, 2
+        # Tuned by CUDA-graph replay latency. Optimal at both TP=4 and TP=8; the
+        # wider local N at TP<=2 already fills the CUs at BLOCK_N=32.
+        block_n = 16
+        if (
+            _ON_GFX950
+            and M <= 16
+            and triton.cdiv(N, 16) >= _DECODE_WIDE_N_MIN_WAVES * num_compute_units()
+        ):
+            block_n = 32
+        if K % 1024 == 0:  # K=2048, 6144 -> graph-best 16x16x1024
+            return 16, block_n, 1024, 2, 2
         if K % 512 == 0:
-            return 16, 16, 512, 2, 3
+            return 16, block_n, 512, 2, 3
         if K % 256 == 0:  # K=768 (shared_down) -> graph-best 16x32x256
             return 16, 32, 256, 4, 3
         return 16, 32, 128, 4, 3

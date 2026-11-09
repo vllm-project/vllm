@@ -206,6 +206,44 @@ def test_rocm_mxfp8_linear_preserves_non_cdna4_tiles(monkeypatch, n, k, fallback
 
 
 @pytest.mark.parametrize(
+    "num_cus,n,k,num_tokens,tile",
+    [
+        # 256 CUs: BLOCK_N=32 from 2.75 waves of 16-wide N-tiles, i.e. N >= 11264.
+        (256, 24576, 6144, 1, (16, 32, 1024, 2, 2)),  # TP1 dense gate_up
+        (256, 24576, 6144, 16, (16, 32, 1024, 2, 2)),
+        (256, 12288, 6144, 8, (16, 32, 1024, 2, 2)),  # TP2 dense gate_up
+        (256, 11264, 6144, 1, (16, 32, 1024, 2, 2)),
+        (256, 11248, 6144, 1, (16, 16, 1024, 2, 2)),
+        (256, 9856, 6144, 1, (16, 16, 1024, 2, 2)),  # TP1 fused qkv
+        (256, 12288, 1536, 4, (16, 32, 512, 2, 3)),
+        # Past one tile row (M > 16) the grid is no longer just the N-tiles.
+        (256, 24576, 6144, 17, (16, 16, 1024, 2, 2)),
+        (256, 24576, 6144, 64, (16, 16, 1024, 2, 2)),
+        # The threshold follows the CU count.
+        (304, 13360, 6144, 1, (16, 16, 1024, 2, 2)),
+        (304, 13376, 6144, 1, (16, 32, 1024, 2, 2)),
+        (80, 4096, 6144, 1, (16, 32, 1024, 2, 2)),
+    ],
+)
+def test_rocm_mxfp8_linear_widens_decode_n_tile_on_wide_grids(
+    monkeypatch, num_cus, n, k, num_tokens, tile
+):
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+
+    monkeypatch.setattr(rocm_native, "_ON_GFX950", True)
+    monkeypatch.setattr(rocm_native, "num_compute_units", lambda: num_cus)
+    assert rocm_native._select_cfg(num_tokens, n, k) == tile
+
+
+def test_rocm_mxfp8_linear_wide_decode_n_tile_is_gfx950_only(monkeypatch):
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+
+    monkeypatch.setattr(rocm_native, "_ON_GFX950", False)
+    monkeypatch.setattr(rocm_native, "num_compute_units", lambda: 256)
+    assert rocm_native._select_cfg(1, 24576, 6144) == (16, 16, 1024, 2, 2)
+
+
+@pytest.mark.parametrize(
     "name,n,k",
     V41_ATTN_SHAPES + M31_TP4_SHAPES + M31_TP2_SHAPES,
     ids=lambda v: str(v),
