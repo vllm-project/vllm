@@ -97,8 +97,7 @@ def describe_memory_contributors(kv_cache_groups: Iterable[KVCacheGroupSpec]) ->
     if not names:
         return ""
     return (
-        "The model reports that these options also use device memory; "
-        "reducing their memory use may leave more for persistent-state pages: "
+        "The model reports that these options also use device memory: "
         + ", ".join(f"`{name}`" for name in names)
         + "."
     )

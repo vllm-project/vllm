@@ -133,7 +133,9 @@ part of the layout, the `schema_id` or spec equality, and core does not measure
 what each one consumed. Specs merged across layers must still declare the same
 names. When the state pages do not fit, core names them
 alongside its usual advice, so the user learns which model settings compete
-with the state pages.
+with the state pages. Reducing these allocations can increase a profiled KV
+cache budget. With a fixed budget, it can ease device memory pressure but does
+not increase the planned page count.
 
 The spec carries the names because it is the one model-supplied record that
 reaches both the engine core's KV cache planning and the worker's KV cache
@@ -410,7 +412,8 @@ following is configured:
 - HiSparse
 
 The extensible KV cache, on by default with the V2 model runner, is turned
-off with a warning; the KV cache is then sized from profiling estimates.
+off with a warning; the KV cache is then sized from profiling estimates or
+the configured fixed budget.
 
 ## Observability
 
