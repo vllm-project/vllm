@@ -12,7 +12,7 @@ The practical effect is that one configuration holds up across the whole load ra
 
 ## Support
 
-Adaptive verification is supported for model-based drafters (EAGLE, MTP, DFlash, DSpark, etc.) and for [suffix decoding](suffix.md#model-runner-v2) on Model Runner V2. The per-position acceptance estimates come from one of three sources:
+Adaptive verification is supported for model-based drafters (EAGLE, MTP, DFlash, DSpark, etc.) and for [suffix decoding](suffix.md#adaptive-verification). The per-position acceptance estimates come from one of three sources:
 
 - **Confidence head**: DSpark checkpoints that ship a trained confidence head use its predictions directly.
 - **Online acceptance estimator**: every other model-based drafter predicts acceptance from its draft logits with a small logistic model, recalibrated during serving against the target's verification results.
