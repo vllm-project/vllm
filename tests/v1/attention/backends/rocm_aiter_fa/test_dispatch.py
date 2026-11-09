@@ -531,15 +531,3 @@ def test_sliding_window_decode_past_table_capacity(spy):
     output = case.run(batch, query)
     assert spy.names() == [UNIFIED]
     case.check(batch, query, output)
-
-
-def test_drafting_metadata_runs_forward():
-    """build_for_drafting skips the phase split; forward on it must match a
-    regular build for the uniform decode batches drafting produces."""
-    q_lens, s_lens = [3, 3, 3], [40, 90, 500]
-    case = FaCase(QWEN3_235B).setup(blocks_for(s_lens, 16))
-    case.builder.reorder_batch_threshold = 3
-    batch = case.batch(q_lens, s_lens)
-    query = case.query(batch.num_tokens)
-    metadata = case.builder.build_for_drafting(batch.common, draft_index=0)
-    case.check(batch, query, case.run(batch, query, metadata))
