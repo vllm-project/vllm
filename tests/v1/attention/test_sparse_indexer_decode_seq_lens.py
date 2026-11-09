@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU tests for the decode top-k row->token mapping (no GPU required).
 
-On non-uniform decode batches (``requires_padding`` -- mixed plain-decode and
+On non-uniform decode batches (`requires_padding` -- mixed plain-decode and
 spec-verify requests, or variable MTP verify lens; taken on Hopper where the
 varlen/flatten logits path is unavailable), the pool-topk rows follow the
-PADDED ``[batch_size, next_n]`` grid: row ``(b, t)`` is flat decode token
-``offset_b + t``. The former inline ``dec_seq = positions[:n] + 1``
-(``n = batch_size * next_n``) indexes the flat per-token layout with padded
+PADDED `[batch_size, next_n]` grid: row `(b, t)` is flat decode token
+`offset_b + t`. The former inline `dec_seq = positions[:n] + 1`
+(`n = batch_size * next_n`) indexes the flat per-token layout with padded
 coordinates, so rows after the first non-uniform request read another
 request's positions and rows past the decode region read prefill tokens --
-``expand_pools_and_append_tail`` then anchors the tail at a foreign length.
+`expand_pools_and_append_tail` then anchors the tail at a foreign length.
 
 These tests pin the defect with the exact production arithmetic and verify
-the layout-aware replacement (``_decode_topk_seq_lens``), including the tail
+the layout-aware replacement (`_decode_topk_seq_lens`), including the tail
 expansion consequences via the pure-torch expand/append pair that the fused
 kernel is documented to replicate.
 """
@@ -159,7 +159,7 @@ def make_non_uniform_batch():
       req1: [100..103]     (verify at context len 100)
       req2: [7, 8, 9]      (verify at context len 7)
     Followed by 4 prefill tokens at positions 555..558 so the flat tensor is
-    at least ``n = 3 * 4`` long, as it is in a real mixed batch.
+    at least `n = 3 * 4` long, as it is in a real mixed batch.
     """
     decode_lens = torch.tensor([1, 4, 3], dtype=torch.int64)
     per_req_positions = [[30], [100, 101, 102, 103], [7, 8, 9]]
@@ -178,7 +178,7 @@ def expected_row_seq_lens(per_req_positions, batch_size, next_n):
 
 
 def test_legacy_flat_layout_misaligns_and_bleeds():
-    """The bug: ``positions[:n] + 1`` with padded-row coordinates reads other
+    """The bug: `positions[:n] + 1` with padded-row coordinates reads other
     requests' positions and prefill positions."""
     decode_lens, per_req, positions = make_non_uniform_batch()
     batch_size = decode_lens.shape[0]

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""MuseSpark1x text config normalization and the DSpark draft config."""
+"""Muse Spark DSpark draft config normalization."""
 
 import json
 from typing import Any
@@ -23,7 +23,6 @@ from vllm.transformers_utils.configs.muse_spark import (
     GatedDeltaNetArgs,
     MetapArgs,
     MoEArgs,
-    MuseSpark1xTextConfig,
     MuseSparkDSparkConfig,
 )
 
@@ -41,12 +40,12 @@ TEXT: dict[str, Any] = {
 
 
 def test_text_config_eos_default():
-    assert MuseSpark1xTextConfig().eos_token_id == [200001, 200008]
-    assert MuseSpark1xTextConfig(eos_token_id=200001).eos_token_id == 200001
+    assert MuseSparkDSparkConfig().eos_token_id == [200001, 200008]
+    assert MuseSparkDSparkConfig(eos_token_id=200001).eos_token_id == 200001
 
 
 def test_nested_subconfig_dicts_promoted():
-    c = MuseSpark1xTextConfig(**TEXT)
+    c = MuseSparkDSparkConfig(**TEXT)
     assert isinstance(c.moe, MoEArgs) and c.moe.topk == 8
     assert isinstance(c.metap, MetapArgs) and c.metap.use_metap
     assert isinstance(c.gated_delta_net, GatedDeltaNetArgs)
@@ -56,7 +55,7 @@ def test_nested_subconfig_dicts_promoted():
 
 
 def test_derived_intermediate_sizes():
-    c = MuseSpark1xTextConfig(**TEXT)
+    c = MuseSparkDSparkConfig(**TEXT)
     assert c.intermediate_size_mlp == int(1.5 * 5120)
     assert c.intermediate_size_shared_experts == int(1.5 * 5120)
     assert c.intermediate_size_routed_experts == 1408
@@ -64,7 +63,7 @@ def test_derived_intermediate_sizes():
 
 def test_metap_rejects_unknown_mode():
     with pytest.raises(AssertionError):
-        MuseSpark1xTextConfig(metap={"use_metap": True, "metap_mode": "bogus"})
+        MuseSparkDSparkConfig(metap={"use_metap": True, "metap_mode": "bogus"})
 
 
 def _dspark_config() -> dict:
@@ -122,7 +121,7 @@ def _dspark_speculative_config(tmp_path, **draft) -> SpeculativeConfig:
 
 def test_dspark_speculative_config_preserves_architecture(tmp_path):
     config = _dspark_speculative_config(tmp_path)
-    assert config.parallel_drafting
+    assert config.speculator_config.parallel_drafting
     assert config.draft_model_config.architectures == ["MuseSparkDSparkModel"]
     assert isinstance(config.draft_model_config.hf_config, MuseSparkDSparkConfig)
 

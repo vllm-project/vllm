@@ -18,9 +18,9 @@ from vllm.v1.attention.ops.dcp import CPTritonContext, correct_attn_out
 
 DEVICE_TYPE = current_platform.device_type
 
-requires_cuda_or_xpu = pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_xpu()),
-    reason="This test requires CUDA or XPU",
+requires_accelerator = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="This test requires CUDA, ROCm or XPU",
 )
 
 
@@ -127,11 +127,11 @@ def _dcp_lse_merge(
 
 
 class _FakeDCPGroup(GroupCoordinator):
-    """Single-process stand-in: ``all_gather`` returns the pre-built dim-0
-    concatenation of every rank's packed ``(score, global_id)`` candidates,
+    """Single-process stand-in: `all_gather` returns the pre-built dim-0
+    concatenation of every rank's packed `(score, global_id)` candidates,
     mirroring the one packed all-gather the merge issues.
 
-    ``GroupCoordinator.__init__`` is never run, so no process group exists."""
+    `GroupCoordinator.__init__` is never run, so no process group exists."""
 
     def __init__(self, gathered_packed: torch.Tensor) -> None:
         self.gathered_packed = gathered_packed
@@ -214,10 +214,10 @@ def _merge_local_topks_global_with_fake_dcp(
     interleave: int,
     row_starts: list[torch.Tensor | None] | None = None,
 ) -> list[torch.Tensor]:
-    """Run ``_merge_dcp_topk_global`` for every rank against a faked
+    """Run `_merge_dcp_topk_global` for every rank against a faked
     all-gather and return each rank's global-index result (all ranks should
     agree). The fake pre-builds the packed candidate concatenation the merge's
-    single ``all_gather`` would return."""
+    single `all_gather` would return."""
     # The merge is now CuteDSL-only (no PyTorch fallback), so it runs the real
     # Triton pack + CuteDSL selector kernels even behind the faked all-gather.
     if not current_platform.is_cuda() or not has_cutedsl():
@@ -608,7 +608,7 @@ def test_cutedsl_gathered_select_compact_keys_match_reference(
 ):
     """Scores at the logits dtype (upcast BF16 SM100 MQA logits tie at the
     top-k boundary) keyed only by their high score bits and the id bits below
-    ``num_positions`` must select the same set as the full 64-bit key."""
+    `num_positions` must select the same set as the full 64-bit key."""
     from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
         dcp_topk_id_bits,
         dcp_topk_score_bits,
@@ -664,7 +664,7 @@ def test_cutedsl_gathered_select_compact_keys_match_reference(
         assert sorted(compact[row].tolist()) == want
 
 
-@requires_cuda_or_xpu
+@requires_accelerator
 def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
     device = torch.device(DEVICE_TYPE)
     seq_len = 8
@@ -739,7 +739,7 @@ def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
     )
 
 
-@requires_cuda_or_xpu
+@requires_accelerator
 @pytest.mark.parametrize("block_stride_rows", [None, 12])
 def test_dcp_filter_compacts_valid_slots_for_sparse_kernel(
     block_stride_rows: int | None,
@@ -777,7 +777,7 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel(
     )
 
 
-@requires_cuda_or_xpu
+@requires_accelerator
 @pytest.mark.parametrize("interleave", [1, 2])
 @pytest.mark.parametrize("dcp_rank", [0, 1])
 # Include padded single-tile compaction and the multi-tile atomic fallback.
@@ -842,7 +842,7 @@ def test_dcp_filter_compaction_matches_reference(
         assert set(out[r, :n].cpu().tolist()) == set(expected.cpu().tolist())
 
 
-@requires_cuda_or_xpu
+@requires_accelerator
 @pytest.mark.parametrize("interleave", [1, 2, 4])
 def test_dcp_global_topk_physical_attention_matches_non_dcp(interleave: int):
     torch.manual_seed(2)
@@ -915,7 +915,7 @@ def test_dcp_global_topk_physical_attention_matches_non_dcp(interleave: int):
     torch.testing.assert_close(dcp_lse, ref_lse, atol=1e-5, rtol=1e-5)
 
 
-@requires_cuda_or_xpu
+@requires_accelerator
 @pytest.mark.parametrize("is_lse_base_on_e", [True, False])
 def test_correct_attn_out_zeroes_empty_nan_partial(is_lse_base_on_e: bool):
     out = torch.full((1, 1, 4), float("nan"), device=DEVICE_TYPE)
@@ -938,7 +938,7 @@ def test_correct_attn_out_zeroes_empty_nan_partial(is_lse_base_on_e: bool):
     torch.testing.assert_close(final_lse, torch.zeros_like(final_lse))
 
 
-@requires_cuda_or_xpu
+@requires_accelerator
 def test_decode_topk_pads_surplus_with_negative_one():
     """When a row's valid length < topk the top-k kernel must pad the surplus
     slots with -1: the DCP merge (`topk_indices >= 0`) and

@@ -38,8 +38,8 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
+    get_block_table_width,
 )
-from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.utils import select_common_block_size
 
 DEVICE_TYPE = current_platform.device_type
