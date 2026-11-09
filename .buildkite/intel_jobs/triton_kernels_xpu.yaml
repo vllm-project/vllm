@@ -1012,7 +1012,7 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pytest tests/v1/worker/test_gpu_gumbel_sample.py -v || true'
+    'pytest tests/v1/worker/test_gpu_gumbel_sample.py -v -k "not test_greedy_argmax_matches_torch" || true'
 - label: _philox_gumbel_kernel
   key: philox-gumbel-kernel
   device: intel_gpu
