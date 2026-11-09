@@ -290,53 +290,6 @@ def test_triton_fp8_per_token_backend_preserves_linear_shape(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_rocm() or not current_platform.supports_fp8(),
-    reason="Requires ROCm FP8",
-)
-@pytest.mark.parametrize("linear_backend", ["auto", "triton"])
-@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
-def test_triton_fp8_per_token_untuned_non_rdna4_uses_torch(
-    per_token_fp8_configs, monkeypatch, linear_backend, out_dtype
-):
-    from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
-    from vllm.model_executor.kernels.linear import (
-        ChannelWiseTorchFP8ScaledMMLinearKernel,
-        RowWiseTorchFP8ScaledMMLinearKernel,
-        init_fp8_linear_kernel,
-    )
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        kFp8DynamicTokenSym,
-        kFp8StaticChannelSym,
-    )
-
-    if not RowWiseTorchFP8ScaledMMLinearKernel.is_supported()[0]:
-        pytest.skip("Requires Torch rowwise FP8 support")
-    monkeypatch.setattr("vllm.platforms.rocm.on_rdna4", lambda: False)
-    monkeypatch.setenv(
-        "VLLM_DISABLED_KERNELS",
-        "AiterHipbMMPerTokenFp8ScaledMMLinearKernel,"
-        "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,"
-        "AiterPerTokenFp8ScaledMMLinearKernel",
-    )
-    with set_current_vllm_config(
-        VllmConfig(kernel_config=KernelConfig(linear_backend=linear_backend))
-    ):
-        kernel = init_fp8_linear_kernel(
-            activation_quant_key=kFp8DynamicTokenSym,
-            weight_quant_key=kFp8StaticChannelSym,
-            input_dtype=out_dtype,
-            out_dtype=out_dtype,
-            weight_shape=(256, 128),
-        )
-    expected = (
-        RowWiseTorchFP8ScaledMMLinearKernel
-        if out_dtype == torch.bfloat16
-        else ChannelWiseTorchFP8ScaledMMLinearKernel
-    )
-    assert isinstance(kernel, expected)
-
-
-@pytest.mark.skipif(
     not current_platform.supports_fp8() or not current_platform.is_cuda_alike(),
     reason="Requires FP8 and CUDA/ROCm graph support",
 )

@@ -30,21 +30,22 @@ The FP8 types typically supported in hardware have two distinct representations,
     `--linear-backend` only affects quantized linear layers; MoE experts
     use the separate `--moe-backend`. An explicit backend that is not
     supported on your hardware raises an error. See the ROCm per-token FP8
-    section below for layer-specific fallback behavior.
+    section below for tuning requirements.
     The full list is documented under
     [`KernelConfig`](../../../cli/serve.md#kernelconfig) in the CLI
     reference and shown by `vllm serve --help=KernelConfig`.
 
 ## Native Triton per-token FP8 on ROCm
 
-On ROCm GPUs with FP8 support, `--linear-backend triton` prefers the native
+On ROCm GPUs with FP8 support, `--linear-backend triton` selects the native
 Triton backend for dynamic per-token activation scales and per-channel weight
 scales. It supports BF16 and FP16 output. RDNA4 can select Triton for any
 supported layer. Other ROCm GPUs require a tuning table that matches the GPU,
-weight shape, and dtypes. For an untuned layer, the explicit Triton setting
-falls back to Torch RowWise for BF16 when supported, then to Torch ChannelWise.
-With the default `--linear-backend auto`, higher-priority compatible ROCm
-backends are considered before Triton.
+weight shape, and dtypes. For an untuned layer outside RDNA4, the explicit
+Triton setting raises an error. With the default `--linear-backend auto`,
+higher-priority compatible ROCm backends are considered before Triton, and
+untuned layers outside RDNA4 fall back to Torch RowWise for BF16 when supported,
+then to Torch ChannelWise.
 
 ```bash
 vllm serve RedHatAI/gemma-4-12B-it-FP8-Dynamic \

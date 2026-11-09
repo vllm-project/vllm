@@ -724,25 +724,6 @@ def choose_scaled_mm_linear_kernel(
         quantization=quantization,
         compute_capability=compute_capability,
     )
-    triton_per_token = TritonFp8PerTokenScaledMMKernel
-    if platform_kernels == [triton_per_token]:
-        kernel = platform_kernels[0]
-        can_implement, reason = is_supported_and_can_implement_kernel(
-            kernel, config, compute_capability
-        )
-        if can_implement:
-            return kernel
-        failure_reason_list.append(f"{kernel.__name__} {reason}")
-        platform_kernels = []
-        if reason == triton_per_token.MISSING_TUNING_REASON:
-            torch_fallbacks = (
-                RowWiseTorchFP8ScaledMMLinearKernel,
-                ChannelWiseTorchFP8ScaledMMLinearKernel,
-            )
-            platform_kernels = [
-                candidate for candidate in candidates if candidate in torch_fallbacks
-            ]
-
     for kernel in platform_kernels:
         is_supported_and_can_implement, failure_reason = (
             is_supported_and_can_implement_kernel(kernel, config, compute_capability)

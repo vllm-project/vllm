@@ -35,8 +35,6 @@ from .ScaledMMLinearKernel import (
 class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
     """Triton FP8 GEMM with per-token activations and per-channel weights."""
 
-    MISSING_TUNING_REASON = "requires a tuned config for this layer outside RDNA4."
-
     def __init__(
         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
@@ -104,7 +102,7 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
         if c.out_dtype not in (torch.bfloat16, torch.float16):
             return False, "requires BF16 or FP16 output."
         if not cls._has_rdna4_config_selector() and not cls._has_tuned_configs(c):
-            return False, cls.MISSING_TUNING_REASON
+            return False, "requires a tuned config for this layer outside RDNA4."
         return True, None
 
     def input_quant_key(self) -> QuantKey | None:
