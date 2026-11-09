@@ -142,6 +142,7 @@ def _make_builder():
     # SparseMLACommonMetadataBuilder state consumed by its build() method.
     builder.cp_kv_cache_interleave_size = 1
     builder.use_pcp = False
+    builder.use_shardq = False
     builder._prefill_backend = None
 
     def cpu_token_to_req(metadata):
@@ -219,7 +220,7 @@ def _make_mixed_common_metadata():
 
 
 def _patch_build_deps(monkeypatch, events=None):
-    """Stub the aiter kernel, triton helper and CUDA sync so ``build()`` runs
+    """Stub the aiter kernel, triton helper and CUDA sync so `build()` runs
     on CPU."""
 
     def fake_generate_sparse_seqlen_triton(
@@ -361,7 +362,7 @@ def test_dense_prefill_builds_sparse_metadata_for_decode_subset(monkeypatch):
     A mixed batch is routed as sparse MQA for its leading decode requests and
     dense MHA for its trailing short prefill requests.  The AITER metadata
     buffers therefore must describe only the decode subset; including prefill
-    tokens would mismatch the query passed to ``forward_mqa``.
+    tokens would mismatch the query passed to `forward_mqa`.
     """
     builder = _make_builder()
     builder.vllm_config = SimpleNamespace(
@@ -533,7 +534,7 @@ def test_long_prefill_shares_full_sparse_metadata_with_decode(monkeypatch):
 def test_forward_mqa_slices_full_batch_metadata_to_query_tokens(monkeypatch):
     """The sparse kernel inputs must have the same token extent as its query.
 
-    In a mixed dense-prefill batch, ``forward_mqa`` receives only decode query
+    In a mixed dense-prefill batch, `forward_mqa` receives only decode query
     tokens while some metadata buffers may represent the full batch.  This
     guards the slicing that prevents the index conversion from writing beyond
     the decode-sized output.

@@ -21,7 +21,7 @@ def _ctx(req_id: str = "r1") -> ReqContext:
 
 
 class _SignalingQueue(queue.SimpleQueue):
-    """Sets ``ready`` once a posted batch is visible to drain_results()."""
+    """Sets `ready` once a posted batch is visible to drain_results()."""
 
     ready: threading.Event
 
@@ -121,6 +121,95 @@ class TestAsyncLookupManager:
         assert mgr.lookup(_key(3), ctx) is True
         assert mgr.lookup(_key(4), ctx) is False
         mgr.shutdown()
+
+    def test_publishes_completed_group_before_next_group_finishes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A completed group is drainable while a later group is blocked."""
+        key_a = _key(1)
+        key_b = _key(2)
+        ctx_a = _ctx("req_a")
+        ctx_b = _ctx("req_b")
+        mgr = InMemoryLookupManager(existing_keys={key_a})
+        groups_started = []
+        group_b_started = threading.Event()
+        release_group_b = threading.Event()
+        batch_lookup = mgr.batch_lookup
+
+        def blocking_lookup(keys, req_context):
+            groups_started.append(req_context.req_id)
+            if req_context.req_id == ctx_b.req_id:
+                group_b_started.set()
+                if not release_group_b.wait(timeout=5):
+                    raise TimeoutError("Test did not release the blocked group")
+            return batch_lookup(keys, req_context)
+
+        monkeypatch.setattr(mgr, "batch_lookup", blocking_lookup)
+        try:
+            assert mgr.lookup(key_a, ctx_a) is None
+            assert mgr.lookup(key_b, ctx_b) is None
+            mgr.flush()
+            assert group_b_started.wait(timeout=5)
+            assert groups_started == [ctx_a.req_id, ctx_b.req_id]
+
+            assert mgr.lookup(key_a, ctx_a) is True
+            assert mgr.lookup(key_b, ctx_b) is None
+            assert mgr._lookup_state[key_b].phase is LookupPhase.IN_FLIGHT
+            assert mgr._pending_results.empty()
+
+            release_group_b.set()
+            group_b_results = mgr._pending_results.get(timeout=5)
+            mgr._pending_results.put(group_b_results)
+            mgr.flush()
+            assert mgr.lookup(key_b, ctx_b) is False
+        finally:
+            release_group_b.set()
+            mgr.shutdown()
+
+        assert mgr.batch_lookup_calls == 2
+
+    def test_lazy_results_publish_only_after_group_is_consumed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A lazy backend result is published only after full consumption."""
+        key_a = _key(1)
+        key_b = _key(2)
+        ctx = _ctx()
+        mgr = InMemoryLookupManager(existing_keys={key_a})
+        iterator_started = threading.Event()
+        release_iterator = threading.Event()
+
+        def lazy_lookup(keys, req_context):
+            def results():
+                iterator_started.set()
+                yield keys[0] in mgr._existing
+                if not release_iterator.wait(timeout=5):
+                    raise TimeoutError("Test did not release the lazy result")
+                yield keys[1] in mgr._existing
+
+            return results()
+
+        monkeypatch.setattr(mgr, "batch_lookup", lazy_lookup)
+        try:
+            assert mgr.lookup(key_a, ctx) is None
+            assert mgr.lookup(key_b, ctx) is None
+            mgr.flush()
+            assert iterator_started.wait(timeout=5)
+            assert mgr._pending_results.empty()
+
+            release_iterator.set()
+            group_results = mgr._pending_results.get(timeout=5)
+            assert group_results == [
+                (key_a, mgr._lookup_state[key_a].generation, True),
+                (key_b, mgr._lookup_state[key_b].generation, False),
+            ]
+            mgr._pending_results.put(group_results)
+            mgr.drain_results()
+            assert mgr.lookup(key_a, ctx) is True
+            assert mgr.lookup(key_b, ctx) is False
+        finally:
+            release_iterator.set()
+            mgr.shutdown()
 
     def test_cleanup_removes_entries(self):
         mgr = InMemoryLookupManager(existing_keys={_key(1)})

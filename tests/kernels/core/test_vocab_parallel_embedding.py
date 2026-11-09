@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the fused vocab-parallel embedding kernel
-(``vllm._custom_ops.vocab_parallel_embedding``).
+(`vllm._custom_ops.vocab_parallel_embedding`).
 
 The guarantee: the kernel is a drop-in for the TP > 1 embedding path, i.e. it
-returns bit-exactly what mask + shift + gather + ``masked_fill_`` returns on
+returns bit-exactly what mask + shift + gather + `masked_fill_` returns on
 each rank, and summing the per-rank outputs (what the all-reduce does)
 reconstructs a full-table lookup.
 """
@@ -24,8 +24,8 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 requires_cuda = pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="the fused vocab-parallel embedding kernel is CUDA-only",
+    not current_platform.is_cuda_alike(),
+    reason="the fused vocab-parallel embedding kernel requires CUDA or ROCm",
 )
 
 

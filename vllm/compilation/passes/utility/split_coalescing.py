@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Canonicalize tensor partitions to a single ``split_with_sizes`` node.
+"""Canonicalize tensor partitions to a single `split_with_sizes` node.
 
 Functionalization may replay the individual outputs of a multi-output split as
-contiguous ``slice`` nodes. This pass converts complete slice partitions back
-to ``split_with_sizes`` and coalesces equivalent split nodes so downstream
+contiguous `slice` nodes. This pass converts complete slice partitions back
+to `split_with_sizes` and coalesces equivalent split nodes so downstream
 pattern-matching passes see one canonical split with all users attached.
 
 See Also:
@@ -40,7 +40,7 @@ class _SliceInfo:
 
 
 class SplitCoalescingPass(VllmInductorPass):
-    """Canonicalize tensor partitions to one shared ``split_with_sizes``.
+    """Canonicalize tensor partitions to one shared `split_with_sizes`.
 
     A complete contiguous slice partition is rewritten from::
 

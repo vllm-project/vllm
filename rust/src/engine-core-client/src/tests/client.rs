@@ -45,9 +45,9 @@ use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats
 use crate::protocol::tensor::{WireArrayData, WireTensor};
 use crate::protocol::utility::{PauseMode, SleepLevel, UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
-    IpcNamespace, setup_bootstrapped_mock_engine, setup_hybrid_mock_engine_sockets,
-    setup_mock_engine_sockets, setup_mock_engine_with_init, spawn_mock_engine_task,
-    spawn_mock_engine_task_with_ready,
+    IpcNamespace, decode_prompt_token_ids, setup_bootstrapped_mock_engine,
+    setup_hybrid_mock_engine_sockets, setup_mock_engine_sockets, setup_mock_engine_with_init,
+    spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
 };
 use crate::transport::ConnectedEngine;
 use crate::{
@@ -160,7 +160,7 @@ fn sample_request() -> EngineCoreRequest {
 fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
     EngineCoreRequest {
         request_id: request_id.to_string(),
-        prompt_token_ids: Some(vec![11, 22]),
+        prompt_token_ids: Some(vec![11, 22].into()),
         sampling_params: Some(EngineCoreSamplingParams {
             temperature: 0.8,
             watermarking: false,
@@ -195,7 +195,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
 fn sample_multimodal_request() -> EngineCoreRequest {
     EngineCoreRequest {
         request_id: "req-mm".to_string(),
-        prompt_token_ids: Some(vec![101, 102, 103, 104]),
+        prompt_token_ids: Some(vec![101, 102, 103, 104].into()),
         mm_features: Some(vec![MmFeatureSpec {
             data: Some(BTreeMap::from([(
                 "pixel_values".to_string(),
@@ -2449,7 +2449,7 @@ async fn client_sends_prompt_block_hashes_for_engine_prefix_hash_config() {
     };
     let edge_tokens = [0, 1, 23, 24, 255, 256, 65535, 65536, 151_645, 0x7fff_ffff];
     let request = EngineCoreRequest {
-        prompt_token_ids: Some([edge_tokens.repeat(3), vec![7, 8]].concat()),
+        prompt_token_ids: Some([edge_tokens.repeat(3), vec![7, 8]].concat().into()),
         block_hashes: None,
         ..sample_request()
     };
@@ -3335,16 +3335,19 @@ async fn sleep_and_wake_calls_record_engine_sleep_state() {
     .await;
 
     let mut series = vec![("connected", engine_sleep_state_series(MODEL))];
-    client.sleep(SleepLevel::OffloadWeights, PauseMode::default()).await.unwrap();
+    client
+        .sleep(SleepLevel::OffloadWeights, PauseMode::default(), true)
+        .await
+        .unwrap();
     series.push(("sleep level 1", engine_sleep_state_series(MODEL)));
     assert!(!client.wake_up(Some(vec!["weights".to_owned()])).await.unwrap());
     series.push(("partial wake", engine_sleep_state_series(MODEL)));
     assert!(client.wake_up(None).await.unwrap());
     series.push(("full wake", engine_sleep_state_series(MODEL)));
-    client.release_kv_cache_memory().await.unwrap();
+    client.release_kv_cache_memory(true).await.unwrap();
     series.push(("release kv cache", engine_sleep_state_series(MODEL)));
     assert!(client.wake_up(None).await.unwrap());
-    client.sleep(SleepLevel::DiscardAll, PauseMode::default()).await.unwrap();
+    client.sleep(SleepLevel::DiscardAll, PauseMode::default(), true).await.unwrap();
     series.push(("sleep level 2", engine_sleep_state_series(MODEL)));
 
     expect_test::expect![[r#"
@@ -3394,6 +3397,69 @@ async fn sleep_and_wake_calls_record_engine_sleep_state() {
         ]
     "#]]
     .assert_debug_eq(&series);
+
+    for (shutdown_tx, engine_task) in engines {
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+    }
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cache_config_info_exports_each_engine_cache_config() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let mut engines = Vec::new();
+    for engine_index in 0..2_u16 {
+        let ready_response = EngineCoreReadyResponse {
+            cache_config_info: Some(BTreeMap::from([
+                ("block_size".to_string(), "16".to_string()),
+                (
+                    "num_gpu_blocks".to_string(),
+                    (1000 + engine_index).to_string(),
+                ),
+                // Keeps other tests' engines off these series.
+                ("test".to_string(), "cache-config-info".to_string()),
+            ])),
+            ..crate::mock_engine::default_ready_response()
+        };
+        engines.push(spawn_mock_engine_task_with_ready(
+            handshake_address.clone(),
+            EngineId::from_engine_index(engine_index).into_frame().to_vec(),
+            ready_response,
+            |_dealer, _push| Box::pin(async {}),
+        ));
+    }
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "cache-config-info-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    let rendered = vllm_metrics::METRICS.render().unwrap();
+    let mut series = rendered
+        .lines()
+        .filter(|line| {
+            line.starts_with("vllm:cache_config_info{")
+                && line.contains("test=\"cache-config-info\"")
+        })
+        .collect::<Vec<_>>();
+    // Family series render in hash order.
+    series.sort();
+    expect_test::expect![[r#"
+        [
+            "vllm:cache_config_info{block_size=\"16\",engine=\"0\",num_gpu_blocks=\"1000\",test=\"cache-config-info\"} 1.0",
+            "vllm:cache_config_info{block_size=\"16\",engine=\"1\",num_gpu_blocks=\"1001\",test=\"cache-config-info\"} 1.0",
+        ]
+    "#]].assert_debug_eq(&series);
 
     for (shutdown_tx, engine_task) in engines {
         let _ = shutdown_tx.send(());
@@ -3779,8 +3845,14 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     let outputs_bytes = hex::decode(outputs_hex).unwrap();
     let sampling_mask_outputs_bytes = hex::decode(sampling_mask_outputs_hex).unwrap();
 
-    let decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
+    // Python sends prompt token ids as int32, the Rust frontend as uint32.
+    let mut decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
     let expected_request = sample_request();
+    assert_eq!(
+        decode_prompt_token_ids(&decoded_request),
+        Some(vec![11, 22])
+    );
+    decoded_request.prompt_token_ids = expected_request.prompt_token_ids.clone();
     assert_eq!(decoded_request, expected_request);
 
     // All-default sampling params -> empty map; must decode to Python defaults.
@@ -3826,8 +3898,13 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         },
     );
 
-    let decoded_multimodal_request: EngineCoreRequest =
+    let mut decoded_multimodal_request: EngineCoreRequest =
         rmp_serde::from_slice(&multimodal_request_bytes).unwrap();
+    assert_eq!(
+        decode_prompt_token_ids(&decoded_multimodal_request),
+        Some(vec![101, 102, 103, 104])
+    );
+    decoded_multimodal_request.prompt_token_ids = sample_multimodal_request().prompt_token_ids;
     assert_eq!(decoded_multimodal_request, sample_multimodal_request());
 
     // The decode assertion above proves Python wire -> Rust struct. Also compare
@@ -3915,6 +3992,9 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
                                 message: "Generation is paused.",
                                 retryable: true,
                             },
+                        ),
+                        watermarking: Some(
+                            true,
                         ),
                     },
                 ],
@@ -4093,6 +4173,15 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert!(ready_response.enable_sleep_mode);
     assert!(ready_response.supports_draft_weight_updates);
     assert_eq!(ready_response.effective_attention_block_size, Some(64));
+    assert_eq!(ready_response.config_hash.as_deref(), Some("0123456789"));
+    assert!(ready_response.enable_expert_parallel);
+    assert_eq!(
+        ready_response.cache_config_info,
+        Some(BTreeMap::from([
+            ("block_size".to_string(), "16".to_string()),
+            ("mamba_block_size".to_string(), "None".to_string()),
+        ]))
+    );
     assert_eq!(
         ready_response.vllm_config,
         Some(serde_json::json!({

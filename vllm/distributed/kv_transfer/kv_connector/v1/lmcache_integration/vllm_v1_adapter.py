@@ -52,7 +52,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils impo
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank, get_tp_group
 from vllm.sampling_params import SamplingParams
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import get_kv_cache_torch_dtype
+from vllm.utils.torch_utils import get_kv_cache_torch_dtype, token_ids_to_tensor
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.version import __version__ as VLLM_VERSION
@@ -202,7 +202,7 @@ class RequestTracker:
         return RequestTracker(
             req_id=new_request.req_id,
             prompt_len=len(new_request.prompt_token_ids),
-            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
+            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute],
             allocated_block_ids=unfolded_block_ids,
             num_saved_tokens=lmcache_cached_tokens,
             disagg_spec=disagg_spec,
@@ -986,7 +986,7 @@ class LMCacheConnectorV1Impl:
 
             is_first = True
 
-            for idx, request in enumerate(connector_metadata.requests):
+            for request in connector_metadata.requests:
                 save_spec = request.save_spec
                 if save_spec is None or not save_spec.can_save:
                     continue
@@ -1184,7 +1184,7 @@ class LMCacheConnectorV1Impl:
         mm_hashes, mm_positions = extract_mm_features(request)
         if mm_hashes and mm_positions:
             # TODO(Jiayi): Optimize this
-            token_ids_tensor = torch.tensor(request.prompt_token_ids)
+            token_ids_tensor = token_ids_to_tensor(request.prompt_token_ids or [])
             apply_mm_hashes_to_token_ids(token_ids_tensor, mm_hashes, mm_positions)
             token_ids = token_ids_tensor.tolist()
 
@@ -1375,7 +1375,7 @@ class LMCacheConnectorV1Impl:
         # In the latest vllm version, the type of scheduled_cached_reqs has
         # changed from list to object `CachedRequestData`
         if isinstance(cached_reqs, list):
-            for i, req in enumerate(cached_reqs):
+            for req in cached_reqs:
                 request_tracker = self._request_trackers[req.req_id]
                 request_tracker.update(req.new_token_ids, req.new_block_ids)
 
