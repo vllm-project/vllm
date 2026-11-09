@@ -452,31 +452,20 @@ def _align_transfer_regions(
     return aligned_local, aligned_remote, None
 
 
-def _validate_group_layout(
+def _groups_match(
     local_regions: list[TransferRegion],
     remote_regions: list[TransferRegion],
-) -> str | None:
-    """Check that paired regions can use the ordinary group-indexed planner."""
-    for local_region, remote_region in zip(local_regions, remote_regions):
-        if local_region.group_index != remote_region.group_index:
-            return (
-                "Mooncake registered group index mismatch for "
-                f"{local_region.layer_name}: producer="
-                f"{local_region.group_index}, consumer="
-                f"{remote_region.group_index}."
-            )
-        if (
-            local_region.shared_group_ids
-            and remote_region.shared_group_ids
-            and local_region.shared_group_ids != remote_region.shared_group_ids
-        ):
-            return (
-                "Mooncake shared-group set mismatch for "
-                f"{local_region.layer_name}: producer="
-                f"{local_region.shared_group_ids}, consumer="
-                f"{remote_region.shared_group_ids}."
-            )
-    return None
+) -> bool:
+    """Whether paired regions can use the ordinary group-indexed planner."""
+    return all(
+        local.group_index == remote.group_index
+        and (
+            not local.shared_group_ids
+            or not remote.shared_group_ids
+            or local.shared_group_ids == remote.shared_group_ids
+        )
+        for local, remote in zip(local_regions, remote_regions)
+    )
 
 
 def _coalesce_contiguous_transfer_regions(
@@ -652,7 +641,7 @@ class MooncakeXferMetadata(
     # Random per register_kv_caches, so ids never repeat across restarts.
     # 0 means the peer sends the layout on every pull.
     layout_id: int = 0
-    # Token block sizes for independently indexed groups with suffix pairing.
+    # Tokens per page in each destination transfer group.
     group_block_sizes: list[int] = msgspec.field(default_factory=list)
 
 
@@ -2045,6 +2034,7 @@ class MooncakeConnectorWorker:
         err_reqs: list[ReqId] = []
         err_msg: str | None = None
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
+        groups_match = _groups_match(local_regions, remote_regions)
 
         for d_req_id, send_meta in ready_reqs:
             request_sources: list[int] = []
@@ -2062,7 +2052,7 @@ class MooncakeConnectorWorker:
                     local_regions, remote_regions, region_runs
                 ):
                     local_ids, remote_ids, run_starts, run_lens = runs
-                    if agent_meta.group_block_sizes and (
+                    if not groups_match and (
                         local_region.kv_block_len != remote_region.kv_block_len
                     ):
                         raise ValueError(
@@ -2151,7 +2141,8 @@ class MooncakeConnectorWorker:
     ) -> list[tuple[np.ndarray, ...]]:
         """Pair pages once per endpoint group pair, retaining region order."""
         remote_block_ids_per_group = agent_meta.req_blocks[d_req_id][1]
-        if agent_meta.group_block_sizes:
+        groups_match = _groups_match(local_regions, remote_regions)
+        if not groups_match:
             local_block_ids_by_group = send_meta.local_block_ids
             remote_block_ids_by_group = remote_block_ids_per_group
         else:
@@ -2235,7 +2226,7 @@ class MooncakeConnectorWorker:
                 remote_region.shared_group_ids,
             )
             if group_key not in block_runs:
-                if agent_meta.group_block_sizes:
+                if not groups_match:
                     source_group = local_region.group_index
                     destination_group = remote_region.group_index
                     if source_group < 0 or destination_group < 0:
@@ -3232,14 +3223,13 @@ class MooncakeConnectorWorker:
         )
         if align_err is not None:
             return finish([], [], align_err)
-        if meta.group_block_sizes:
+        groups_match = _groups_match(local_regions, remote_regions)
+        if not groups_match:
             layout_err = self._validate_region_mapped_layout(
                 meta, pre_align_local, pre_align_remote
             )
-        else:
-            layout_err = _validate_group_layout(local_regions, remote_regions)
-        if layout_err is not None:
-            return finish([], [], layout_err)
+            if layout_err is not None:
+                return finish([], [], layout_err)
         # Head checks must see every layer name. Coalesce keeps only the first.
         head_err = self._validate_head_resharding_layout(
             meta.remote_tp_size, local_regions
@@ -3252,7 +3242,7 @@ class MooncakeConnectorWorker:
         # gating on use_mla alone would promote and then fail the length check
         # for a non-replicated MLA rank with tp_ratio != 1.
         tp_ratio = _get_tp_ratio(self.tp_size, meta.remote_tp_size)
-        if not meta.group_block_sizes and (
+        if groups_match and (
             tp_ratio == 1 or self._producer_cache_is_replicated()
         ):
             covered_both_sides = len(local_regions) == len(pre_align_local) and len(

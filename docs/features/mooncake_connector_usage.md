@@ -48,9 +48,9 @@ Configure the decoder with `MultiConnector` (`kv_consumer`) combining
 `HiSparseConnector` (`kv_both`) and `MooncakeConnector` (`kv_consumer`); keep
 `MooncakeConnector` (`kv_producer`) on the prefiller.
 See the [HiSparse architecture](../design/hisparse.md) for host
-pool ownership and residency. Ordinary Mooncake deployments retain their
-existing transfer path; the import path is selected when the decoder has a
-HiSparse host pool.
+pool ownership and residency. Matching group layouts retain the ordinary
+Mooncake transfer path. Different group layouts use per-region pairing,
+validated against the decoder's per-group token block sizes.
 
 This experimental path requires matching tensor-parallel sizes, pipeline
 parallelism of one, and sparse MLA with unsplit physical pages. Layer names,
