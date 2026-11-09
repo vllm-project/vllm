@@ -17,7 +17,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.llama import (
+from vllm.model_executor.models.llama_layers import (
     LlamaAttention,
     LlamaDecoderLayer,
     LlamaForCausalLM,

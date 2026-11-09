@@ -83,7 +83,7 @@ def forward(
     Currently, vLLM supports the basic multi-head attention mechanism and its variant with rotary positional embeddings.
     If your model employs a different attention mechanism, you will need to implement a new attention layer in vLLM.
 
-For reference, check out our [Llama implementation](../../../vllm/model_executor/models/llama.py). vLLM already supports a large number of models. It is recommended to find a model similar to yours and adapt it to your model's architecture. Check out [vllm/model_executor/models](../../../vllm/model_executor/models) for more examples.
+For reference, check out our [Llama implementation](../../../vllm/model_executor/models/llama_layers.py). vLLM already supports a large number of models. It is recommended to find a model similar to yours and adapt it to your model's architecture. Check out [vllm/model_executor/models](../../../vllm/model_executor/models) for more examples.
 
 Adapting model-specific structure or boilerplate can keep architectures independent. Reuse shared layer implementations, such as Attention and MoE, where their contracts fit the model.
 

@@ -37,7 +37,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.llama import LlamaMLP as JambaMLP
+from vllm.model_executor.models.llama_layers import LlamaMLP as JambaMLP
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import (

@@ -55,7 +55,7 @@ from vllm.model_executor.layers.resampler import (
     Resampler2,
     get_2d_sincos_pos_embed,
 )
-from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.models.llama_layers import LlamaForCausalLM
 from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM

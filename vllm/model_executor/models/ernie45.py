@@ -25,7 +25,7 @@
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.models.llama_layers import LlamaForCausalLM
 
 from .utils import PPMissingLayer
 

@@ -37,7 +37,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .llama import LlamaDecoderLayer
+from .llama_layers import LlamaDecoderLayer
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 

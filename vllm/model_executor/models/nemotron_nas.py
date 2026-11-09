@@ -42,7 +42,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.llama import LlamaAttention, LlamaMLP
+from vllm.model_executor.models.llama_layers import LlamaAttention, LlamaMLP
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 

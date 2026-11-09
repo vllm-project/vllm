@@ -32,7 +32,11 @@ from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsLoRA
-from vllm.model_executor.models.llama import LlamaForCausalLM, LlamaMLP, LlamaModel
+from vllm.model_executor.models.llama_layers import (
+    LlamaForCausalLM,
+    LlamaMLP,
+    LlamaModel,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,

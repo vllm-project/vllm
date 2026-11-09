@@ -28,7 +28,7 @@ from ..layers.pooler.tokwise import (
 )
 from .interfaces import SupportsLateInteraction
 from .interfaces_base import VllmModelForPooling
-from .llama import LlamaForCausalLM
+from .llama_layers import LlamaForCausalLM
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
 from .utils import (
     AutoWeightsLoader,

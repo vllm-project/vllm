@@ -43,8 +43,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .llama import LlamaMLP as Glm4MLP
-from .llama import LlamaModel
+from .llama_layers import LlamaMLP as Glm4MLP
+from .llama_layers import LlamaModel
 from .utils import AutoWeightsLoader, PPMissingLayer, WeightsMapper, maybe_prefix
 
 

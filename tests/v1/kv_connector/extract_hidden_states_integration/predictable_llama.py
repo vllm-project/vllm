@@ -14,7 +14,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.models.interfaces import EagleModelMixin
-from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.models.llama_layers import LlamaForCausalLM
 from vllm.sequence import IntermediateTensors
 
 

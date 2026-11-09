@@ -19,7 +19,7 @@ from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModalEmbeddings,
 )
-from vllm.model_executor.models.llama import LlamaConfig
+from vllm.model_executor.models.llama_layers import LlamaConfig
 from vllm.model_executor.models.mistral import (
     MistralDecoderLayer,
     MistralForCausalLM,

@@ -19,12 +19,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.llama import (
+from vllm.model_executor.models.llama_layers import (
     LlamaAttention,
     LlamaForCausalLM,
     LlamaMLP,
 )
-from vllm.model_executor.models.llama import (
+from vllm.model_executor.models.llama_layers import (
     LlamaDecoderLayer as BaseLlamaDecoderLayer,
 )
 from vllm.multimodal.inputs import NestedTensors

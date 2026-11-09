@@ -66,7 +66,7 @@ from .interfaces import (
     SupportsLoRA,
     SupportsMultiModal,
 )
-from .llama import LlamaModel
+from .llama_layers import LlamaModel
 from .utils import AutoWeightsLoader, maybe_prefix
 
 

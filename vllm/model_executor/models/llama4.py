@@ -58,7 +58,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
+from .llama_layers import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
