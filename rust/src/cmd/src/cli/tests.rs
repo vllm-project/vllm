@@ -264,7 +264,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_force_include_usage: false,
                         enable_request_id_headers: false,
                         log_error_stack: None,
-                        enable_scale_out: false,
+                        enable_scale_out: None,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
@@ -934,6 +934,45 @@ fn log_error_stack_defaults_to_server_dev_mode() {
     };
     let model_only = r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#;
     let disabled = r#"{"model_tag":"Qwen/Qwen3-0.6B","log_error_stack":false}"#;
+    assert!(!json(model_only, &[]));
+    assert!(json(model_only, &[("VLLM_SERVER_DEV_MODE", "1")]));
+    assert!(!json(disabled, &[("VLLM_SERVER_DEV_MODE", "1")]));
+}
+
+/// `--enable-scale-out` falls back to `VLLM_SERVER_DEV_MODE`, like
+/// `--log-error-stack`.
+#[test]
+fn enable_scale_out_defaults_to_server_dev_mode() {
+    let serve = |extra_args: &[&str]| {
+        let cli =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra_args))
+                .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+            .api_server_options
+            .enable_scale_out
+    };
+    assert!(!serve(&[]));
+    assert!(serve(&["--enable-scale-out"]));
+    assert!(serve(&["--server-dev-mode", "1"]));
+    assert!(!serve(&[
+        "--server-dev-mode",
+        "1",
+        "--enable-scale-out",
+        "false"
+    ]));
+
+    let json = |args_json: &str, vars: &[(&str, &str)]| {
+        let vars: HashMap<_, _> = vars.iter().copied().collect();
+        let mut args: SharedRuntimeArgs = serde_json::from_str(args_json).unwrap();
+        args.apply_env_fallbacks(|name| vars.get(name).map(|value| value.to_string()))
+            .unwrap();
+        args.api_server_options().enable_scale_out
+    };
+    let model_only = r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#;
+    let disabled = r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_scale_out":false}"#;
     assert!(!json(model_only, &[]));
     assert!(json(model_only, &[("VLLM_SERVER_DEV_MODE", "1")]));
     assert!(!json(disabled, &[("VLLM_SERVER_DEV_MODE", "1")]));
@@ -1973,7 +2012,7 @@ fn frontend_args_accept_json() {
                         enable_force_include_usage: false,
                         enable_request_id_headers: false,
                         log_error_stack: None,
-                        enable_scale_out: false,
+                        enable_scale_out: None,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
@@ -2929,7 +2968,7 @@ fn serve_args_accept_handshake_aliases() {
                         enable_force_include_usage: false,
                         enable_request_id_headers: false,
                         log_error_stack: None,
-                        enable_scale_out: false,
+                        enable_scale_out: None,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
