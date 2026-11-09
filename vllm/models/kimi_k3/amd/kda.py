@@ -366,6 +366,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if self.decode_norm_weight is not None:
             self.decode_norm_weight.copy_(self.o_norm.weight)
 
+    def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
+        """`[n, h * d] -> [1, n, h, d]` view, without einops' per-call host cost."""
+        return x.unflatten(-1, (-1, self.head_dim)).unsqueeze(0)
+
     def rearrange_mixed_qkv(
         self, mixed_qkv: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -507,7 +511,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
             q, k, v = (
-                rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
+                self._split_heads(x)
                 for x in mixed_qkv.split(self.local_projection_size, dim=-1)
             )
             n_spec = q.shape[1]
@@ -563,12 +567,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
-        q_conv_weight, k_conv_weight, v_conv_weight = conv_weights.split(
-            self.local_projection_size, dim=0
-        )
-        q_conv_state, k_conv_state, v_conv_state = conv_state.split(
-            self.local_projection_size, dim=-2
-        )
 
         # Split tokens into the multi-query spec-decode part and the remaining
         # (prefill / plain decode) part.
@@ -617,7 +615,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 out=spec_conv_out,
             )
             q_spec, k_spec, v_spec = (
-                rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
+                self._split_heads(x)
                 for x in mixed_qkv_spec.split(self.local_projection_size, dim=-1)
             )
             spec_cu_seqlens = spec_query_start_loc[: m.num_spec_decodes + 1]
@@ -696,13 +694,16 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                             metadata=m,
                         ).transpose(0, 1)
 
+                    q_conv_weight, k_conv_weight, v_conv_weight = conv_weights.split(
+                        self.local_projection_size, dim=0
+                    )
+                    q_conv_state, k_conv_state, v_conv_state = conv_state.split(
+                        self.local_projection_size, dim=-2
+                    )
                     q_ns = _prefill_conv(q_ns, q_conv_state, q_conv_weight)
                     k_ns = _prefill_conv(k_ns, k_conv_state, k_conv_weight)
                     v_ns = _prefill_conv(v_ns, v_conv_state, v_conv_weight)
-                q_ns, k_ns, v_ns = (
-                    rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
-                    for x in (q_ns, k_ns, v_ns)
-                )
+                q_ns, k_ns, v_ns = (self._split_heads(x) for x in (q_ns, k_ns, v_ns))
 
                 assert non_spec_state_indices_tensor is not None
                 assert has_initial_state is not None
