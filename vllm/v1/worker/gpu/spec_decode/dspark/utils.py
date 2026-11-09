@@ -78,11 +78,6 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     from vllm.model_executor.model_loader import get_model
     from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
     from vllm.model_executor.models.utils import get_draft_quant_config
-    from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
-        get_target_lm_head,
-        maybe_share_target_embed,
-        share_target_lm_head,
-    )
 
     draft_attention_backend = _resolve_dspark_attention_backend(
         draft_model_config,
@@ -126,22 +121,84 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         if hasattr(target_model, "get_language_model")
         else target_model
     )
+    _share_dspark_target_modules(
+        draft_model=draft_model,
+        draft_model_config=draft_model_config,
+        target_model=target_model,
+        target_language_model=target_language_model,
+        target_vocab_size=vllm_config.model_config.get_vocab_size(),
+        draft_lm_head_quantization=speculative_config.draft_lm_head_quantization,
+    )
+
+    return draft_model
+
+
+def _share_dspark_target_modules(
+    *,
+    draft_model: nn.Module,
+    draft_model_config: ModelConfig,
+    target_model: nn.Module,
+    target_language_model: nn.Module,
+    target_vocab_size: int,
+    draft_lm_head_quantization: str | None,
+) -> None:
+    from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
+        get_target_lm_head,
+        maybe_share_target_embed,
+        share_target_lm_head,
+    )
+
     target_inner = target_language_model.model
     draft_inner = draft_model.model
-    target_vocab_size = vllm_config.model_config.get_vocab_size()
+    draft_input_vocab_size = draft_model_config.get_vocab_size()
 
-    if draft_model_config.get_vocab_size() <= target_vocab_size:
+    if draft_input_vocab_size <= target_vocab_size:
         maybe_share_target_embed(draft_model, draft_inner, target_inner)
 
     draft_output_vocab_size = (
         getattr(draft_model_config.hf_config, "draft_vocab_size", None)
-        or draft_model_config.get_vocab_size()
+        or draft_input_vocab_size
     )
     share_target_lm_head(
         draft_model,
         get_target_lm_head(target_model, target_language_model),
-        speculative_config.draft_lm_head_quantization,
+        draft_lm_head_quantization,
         can_share=draft_output_vocab_size == target_vocab_size,
     )
+    _validate_required_dspark_shared_modules(
+        draft_model,
+        draft_inner,
+        draft_input_vocab_size,
+        draft_output_vocab_size,
+        target_vocab_size,
+    )
 
-    return draft_model
+
+def _validate_required_dspark_shared_modules(
+    draft_model: nn.Module,
+    draft_inner: nn.Module,
+    draft_input_vocab_size: int,
+    draft_output_vocab_size: int,
+    target_vocab_size: int,
+) -> None:
+    if (
+        not getattr(draft_model, "has_own_embed_tokens", False)
+        and getattr(draft_inner, "embed_tokens", None) is None
+    ):
+        raise ValueError(
+            "DSpark draft requires a shared embedding, but no compatible target "
+            "embedding was installed. "
+            f"draft vocab_size={draft_input_vocab_size}, "
+            f"target vocab_size={target_vocab_size}."
+        )
+
+    if (
+        not getattr(draft_model, "has_own_lm_head", False)
+        and getattr(draft_model, "lm_head", None) is None
+    ):
+        raise ValueError(
+            "DSpark draft requires a shared LM head, but no compatible target "
+            "LM head was installed. "
+            f"draft output vocab_size={draft_output_vocab_size}, "
+            f"target vocab_size={target_vocab_size}."
+        )
