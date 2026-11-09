@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import torch
 
 import vllm
 from vllm.lora.request import LoRARequest
@@ -114,3 +115,37 @@ def test_ilama_lora_tp4_fully_sharded_loras(ilama_lora_files):
     output2 = do_sample(llm, ilama_lora_files, lora_id=2)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         assert output2[i] == EXPECTED_LORA_OUTPUT[i]
+
+
+@create_new_process_for_each_test()
+def test_lora_on_input_embeddings_not_named_embed_tokens(tmp_path):
+    """GPT-NeoX's input embedding is `embed_in`, not `embed_tokens`."""
+    from peft import LoraConfig, get_peft_model
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    model_path = "EleutherAI/pythia-70m"
+    prompts = ["The capital of France is", "def fibonacci(n):"]
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    hf_model = AutoModelForCausalLM.from_pretrained(model_path, dtype=torch.float32)
+    lora_config = LoraConfig(r=8, target_modules=["embed_in"], init_lora_weights=False)
+    hf_model = get_peft_model(hf_model, lora_config)
+    hf_model.save_pretrained(tmp_path)
+    expected = []
+    for prompt in prompts:
+        input_ids = tokenizer(prompt, return_tensors="pt").input_ids
+        output = hf_model.generate(input_ids, max_new_tokens=16, do_sample=False)
+        expected.append(output[0, input_ids.shape[1] :].tolist())
+    del hf_model
+
+    llm = vllm.LLM(
+        model_path,
+        dtype="float32",
+        enable_lora=True,
+        max_lora_rank=8,
+        max_model_len=256,
+        gpu_memory_utilization=0.3,
+    )
+    sampling_params = vllm.SamplingParams(temperature=0, max_tokens=16)
+    lora_request = LoRARequest("embed_in", 1, str(tmp_path))
+    outputs = llm.generate(prompts, sampling_params, lora_request=lora_request)
+    assert [list(output.outputs[0].token_ids) for output in outputs] == expected
