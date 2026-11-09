@@ -18,6 +18,7 @@
 use sha2::{Digest, Sha256};
 
 use crate::protocol::handshake::PrefixHashConfig;
+use crate::protocol::multimodal::MmFeatureSpec;
 use crate::protocol::request::{BlockHash, EngineCoreRequest};
 
 /// Python's C pickler starts a new frame once one reaches 64 KiB, which this
@@ -39,7 +40,7 @@ enum KeyEncoding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ExtraKey<'a> {
     None,
-    Int(u32),
+    Int(i64),
     Str(&'a str),
     Tuple(Vec<ExtraKey<'a>>),
 }
@@ -49,19 +50,36 @@ enum ExtraKey<'a> {
 struct RequestExtraKeys<'a> {
     /// `("lora", lora_name, lora_path)`, on every block.
     lora: Option<ExtraKey<'a>>,
+    /// Sorted, non-overlapping items that may cover subsequent blocks.
+    mm_features: &'a [MmFeatureSpec],
     /// A non-empty cache salt, keyed on the first block only.
     cache_salt: Option<&'a str>,
 }
 
 impl<'a> RequestExtraKeys<'a> {
-    /// The extra keys of the block starting at `start`: a tuple of the LoRA
-    /// and cache-salt keys, or `None` without either.
-    fn for_block(&self, start: usize) -> ExtraKey<'a> {
+    /// The LoRA, multimodal and cache-salt keys of `[start, end)`.
+    fn for_block(&mut self, start: usize, end: usize) -> ExtraKey<'a> {
+        while let Some(feature) = self.mm_features.first()
+            && feature.mm_position.offset + feature.mm_position.length <= start
+        {
+            self.mm_features = &self.mm_features[1..];
+        }
+        let mm_keys = self
+            .mm_features
+            .iter()
+            .take_while(|feature| feature.mm_position.offset < end)
+            .map(|feature| {
+                ExtraKey::Tuple(vec![
+                    ExtraKey::Str("mm"),
+                    ExtraKey::Str(&feature.identifier),
+                    ExtraKey::Int(feature.mm_position.offset as i64 - start as i64),
+                ])
+            });
         let cache_salt = self
             .cache_salt
             .filter(|_| start == 0)
             .map(|salt| ExtraKey::Tuple(vec![ExtraKey::Str("cache_salt"), ExtraKey::Str(salt)]));
-        let keys: Vec<_> = self.lora.iter().cloned().chain(cache_salt).collect();
+        let keys: Vec<_> = self.lora.iter().cloned().chain(mm_keys).chain(cache_salt).collect();
         if keys.is_empty() {
             ExtraKey::None
         } else {
@@ -106,14 +124,27 @@ impl PromptBlockHasher {
     /// Return the request's prompt block hashes, or `None` if the engine has to
     /// compute them because they need inputs this frontend doesn't encode.
     pub(crate) fn hash_request(&self, request: &EngineCoreRequest) -> Option<Vec<BlockHash>> {
-        // TODO: encode multimodal extra keys, `("mm", identifier, offset)` per
-        // item overlapping the block, and the prompt-embeds keys of mixed-mode
-        // requests once this frontend supports prompt embeds.
-        let unsupported = request.mm_features.as_ref().is_some_and(|features| !features.is_empty())
-            || request.prompt_embeds.is_some()
-            || request.prompt_is_token_ids.is_some();
+        // TODO: encode prompt-embeds keys once this frontend supports them.
+        let unsupported = request.prompt_embeds.is_some() || request.prompt_is_token_ids.is_some();
         if unsupported {
             return None;
+        }
+        let mm_features = request.mm_features.as_deref().unwrap_or_default();
+        if !mm_features.is_empty() {
+            // TODO: encode pickle's memoized MM keys and overlapping ranges.
+            if self.encoding != KeyEncoding::Cbor {
+                return None;
+            }
+            let mut previous_end = 0;
+            for feature in mm_features {
+                let position = &feature.mm_position;
+                let end = position.offset.checked_add(position.length)?;
+                if position.length == 0 || position.offset < previous_end || end > i64::MAX as usize
+                {
+                    return None;
+                }
+                previous_end = end;
+            }
         }
         let lora = request.lora_request.as_ref();
         // Python adds no cache-salt key for an empty salt.
@@ -132,10 +163,11 @@ impl PromptBlockHasher {
                     ExtraKey::Str(&lora.lora_path),
                 ])
             }),
+            mm_features,
             cache_salt,
         };
         let token_ids = request.prompt_token_ids.as_ref()?.to_u32_vec()?;
-        self.hash_prompt(&token_ids, &keys)
+        self.hash_prompt(&token_ids, keys)
     }
 
     /// Hash each full block of `token_ids` whose lookahead tokens are also in
@@ -144,7 +176,7 @@ impl PromptBlockHasher {
     fn hash_prompt(
         &self,
         token_ids: &[u32],
-        keys: &RequestExtraKeys<'_>,
+        mut keys: RequestExtraKeys<'_>,
     ) -> Option<Vec<BlockHash>> {
         let lookahead = self.num_lookahead_tokens;
         let num_blocks = token_ids.len().saturating_sub(lookahead) / self.block_size;
@@ -154,11 +186,12 @@ impl PromptBlockHasher {
             .map(|index| {
                 let start = index * self.block_size;
                 let end = start + self.block_size;
-                let mut extra_keys = keys.for_block(start);
+                let mut extra_keys = keys.for_block(start, end + lookahead);
                 // With lookahead, a block's extra keys become `(E, *tokens)`
                 // with the lookahead tokens after it.
                 if lookahead > 0 {
-                    let tokens = token_ids[end..end + lookahead].iter().map(|&t| ExtraKey::Int(t));
+                    let tokens =
+                        token_ids[end..end + lookahead].iter().map(|&t| ExtraKey::Int(t.into()));
                     extra_keys = ExtraKey::Tuple([extra_keys].into_iter().chain(tokens).collect());
                 }
                 key.clear();
@@ -277,7 +310,7 @@ fn write_pickle_int(out: &mut Vec<u8>, value: u32) -> Option<()> {
 fn write_pickle_value(out: &mut Vec<u8>, value: &ExtraKey<'_>) -> Option<()> {
     match value {
         ExtraKey::None => out.push(b'N'),
-        ExtraKey::Int(value) => write_pickle_int(out, *value)?,
+        ExtraKey::Int(value) => write_pickle_int(out, u32::try_from(*value).ok()?)?,
         ExtraKey::Str(s) => {
             // SHORT_BINUNICODE or BINUNICODE, of the UTF-8 bytes.
             match u8::try_from(s.len()) {
@@ -317,7 +350,13 @@ fn encode_cbor_key(out: &mut Vec<u8>, parent: &[u8], block: &[u32], extra_keys: 
 fn write_cbor_value(out: &mut Vec<u8>, value: &ExtraKey<'_>) {
     match value {
         ExtraKey::None => out.push(CBOR_NULL),
-        ExtraKey::Int(value) => write_cbor_head(out, 0x00, (*value).into()),
+        ExtraKey::Int(value) => {
+            if *value >= 0 {
+                write_cbor_head(out, 0x00, *value as u64);
+            } else {
+                write_cbor_head(out, 0x20, (-1 - *value) as u64);
+            }
+        }
         ExtraKey::Str(s) => {
             write_cbor_head(out, CBOR_TEXT, s.len() as u64);
             out.extend_from_slice(s.as_bytes());
@@ -357,6 +396,7 @@ mod tests {
 
     use super::*;
     use crate::protocol::lora::LoraRequest;
+    use crate::protocol::multimodal::{MmModality, PlaceholderRange};
 
     const SHA256_NONE_HASH: &str =
         "066b1e8987e027138e98701c46128929378935f9b6cd1549105ae6b4f0d71198";
@@ -416,6 +456,7 @@ mod tests {
         cache_salt: Option<String>,
         prompt_token_ids: Vec<u32>,
         block_hashes: Vec<String>,
+        mm_features: Option<Vec<MmFeatureSpec>>,
     }
 
     #[derive(Deserialize)]
@@ -424,7 +465,7 @@ mod tests {
         path: String,
     }
 
-    /// Plain, LoRA, cache-salt and lookahead requests at several block sizes,
+    /// Plain, LoRA, multimodal, cache-salt and lookahead requests at several block sizes,
     /// against `Request.block_hashes` from the real `get_request_block_hasher`
     /// with `sha256` and `sha256_cbor`.
     #[test]
@@ -438,6 +479,7 @@ mod tests {
             let request = EngineCoreRequest {
                 lora_request: case.lora.map(|lora| lora_request(&lora.name, &lora.path)),
                 cache_salt: case.cache_salt,
+                mm_features: case.mm_features,
                 ..request(case.prompt_token_ids)
             };
             let hashes = hasher(&case.hash_algo, case.block_size, case.num_lookahead_tokens)
@@ -535,5 +577,34 @@ mod tests {
         // CBOR has no memo.
         let cbor = hasher("sha256_cbor", 2, 0);
         assert!(cbor.hash_request(&lora("a", "a", None)).is_some());
+    }
+
+    #[test]
+    fn unsupported_multimodal_hashes_are_left_to_the_engine() {
+        let feature = |offset, length| MmFeatureSpec {
+            data: None,
+            modality: MmModality::Image,
+            identifier: "image-a".to_string(),
+            mm_position: PlaceholderRange {
+                offset,
+                length,
+                is_embed: None,
+            },
+            mm_hash: None,
+        };
+        let mut request = request(vec![1; 32]);
+        request.mm_features = Some(vec![feature(3, 18)]);
+        assert!(hasher("sha256_cbor", 8, 0).hash_request(&request).is_some());
+        assert!(hasher("sha256", 8, 0).hash_request(&request).is_none());
+
+        for features in [
+            vec![feature(3, 18), feature(3, 18)],
+            vec![feature(12, 2), feature(3, 2)],
+            vec![feature(3, 0)],
+            vec![feature(usize::MAX, 1)],
+        ] {
+            request.mm_features = Some(features);
+            assert!(hasher("sha256_cbor", 8, 0).hash_request(&request).is_none());
+        }
     }
 }

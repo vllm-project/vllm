@@ -2514,25 +2514,48 @@ async fn client_decodes_multipart_logprob_outputs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_sends_prompt_block_hashes_for_engine_prefix_hash_config() {
     init_tracing();
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("prompt_block_hash_vectors.json")).unwrap();
+    let algorithm = "sha256_cbor";
+    let name = "spanning_image_lookahead_3";
+    let case = vectors["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["hash_algo"] == algorithm && case["name"] == name)
+        .unwrap();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    // The engine's NONE_HASH for `sha256` with the default seed, and the
-    // hashes the Python engine computes for this prompt.
     let ready_response = EngineCoreReadyResponse {
         prefix_hash_config: Some(PrefixHashConfig {
-            hash_algo: "sha256".to_string(),
-            hash_block_size: 16,
+            hash_algo: algorithm.to_string(),
+            hash_block_size: case["block_size"].as_u64().unwrap(),
             none_hash: BlockHash(
-                hex::decode("066b1e8987e027138e98701c46128929378935f9b6cd1549105ae6b4f0d71198")
-                    .unwrap(),
+                hex::decode(vectors["none_hashes"][algorithm].as_str().unwrap()).unwrap(),
             ),
-            num_lookahead_tokens: 0,
+            num_lookahead_tokens: case["num_lookahead_tokens"].as_u64().unwrap(),
         }),
         ..default_ready_response()
     };
-    let edge_tokens = [0, 1, 23, 24, 255, 256, 65535, 65536, 151_645, 0x7fff_ffff];
+    let token_ids: Vec<u32> = serde_json::from_value(case["prompt_token_ids"].clone()).unwrap();
+    let expected_hashes: Vec<String> =
+        serde_json::from_value(case["block_hashes"].clone()).unwrap();
     let request = EngineCoreRequest {
-        prompt_token_ids: Some([edge_tokens.repeat(3), vec![7, 8]].concat().into()),
+        prompt_token_ids: Some(token_ids.into()),
+        mm_features: serde_json::from_value(case["mm_features"].clone()).unwrap(),
+        cache_salt: serde_json::from_value(case["cache_salt"].clone()).unwrap(),
+        lora_request: if case["lora"].is_null() {
+            None
+        } else {
+            Some(LoraRequest {
+                lora_name: case["lora"]["name"].as_str().unwrap().to_string(),
+                lora_path: case["lora"]["path"].as_str().unwrap().to_string(),
+                lora_int_id: 1,
+                base_model_name: None,
+                load_inplace: false,
+                is_3d_lora_weight: false,
+            })
+        },
         block_hashes: None,
         ..sample_request()
     };
@@ -2547,13 +2570,7 @@ async fn client_sends_prompt_block_hashes_for_engine_prefix_hash_config() {
                 let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
                 let hashes = request.block_hashes.expect("prompt block hashes");
                 let hashes = hashes.iter().map(|hash| hex::encode(&hash.0)).collect::<Vec<_>>();
-                assert_eq!(
-                    hashes,
-                    [
-                        "00e88e4087ec88315eb29afe9c001411b274ead7ffbc56e35b824d2c8817b280",
-                        "70de07ec6eed1e78ee32aa5f2c17e7eddda8068507c29e9562b43e0f0a872fe0",
-                    ]
-                );
+                assert_eq!(hashes, expected_hashes);
 
                 send_outputs(
                     push,
