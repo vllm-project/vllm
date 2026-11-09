@@ -1613,7 +1613,15 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen4ExpForCausalLM": Qwen4ExpForCausalLMConfig,
     "Qwen4ExpForConditionalGeneration": (Qwen4ExpForConditionalGenerationConfig),
     "Qwen4ExpMTP": Qwen4ExpMTPConfig,
-    "TransformersForSequenceClassification": TransformersForSequenceClassificationConfig,  # noqa: E501
+    "TransformersForSequenceClassification": (
+        TransformersForSequenceClassificationConfig
+    ),
+    "TransformersMoEForSequenceClassification": (
+        TransformersForSequenceClassificationConfig
+    ),
+    "TransformersMultiModalForSequenceClassification": (
+        TransformersForSequenceClassificationConfig
+    ),
     "UnlimitedOCRForCausalLM": UnlimitedOCRForCausalLMConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
