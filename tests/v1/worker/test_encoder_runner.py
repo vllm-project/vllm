@@ -316,6 +316,10 @@ def test_execute_mm_encoder_caches_outputs_without_gathering():
         [("image", MagicMock())],
     )
     state.encoder_runner.execute_mm_encoder.return_value = [embedding]
+    state.encoder_runner.cache_encoder_outputs.side_effect = (
+        lambda mm_hashes, outputs: cache.encoder_outputs.update(
+            zip(mm_hashes, outputs))
+    )
 
     ModelState.execute_mm_encoder(state, {"req0": [0]})
 
@@ -426,6 +430,84 @@ def test_encoder_timing_stats_registry():
     assert stats["r1"]["num_encoder_calls"] == 2
     assert stats["r1"]["encoder_forward_secs"] >= 0
     assert runner.get_encoder_timing_stats() == {}
+
+
+def test_cache_hooks_default_behavior():
+    runner = _make_runner([], [])
+    out_a = torch.ones(2, HIDDEN)
+    out_b = torch.full((3, HIDDEN), 2.0)
+
+    runner.cache_encoder_outputs(["hash_a", "hash_b"], [out_a, out_b])
+
+    assert runner._has_cached_encoder_output("hash_a")
+    assert runner._has_cached_encoder_output("hash_b")
+    assert not runner._has_cached_encoder_output("hash_c")
+    assert runner._get_encoder_output_from_cache("hash_a") is out_a
+    assert runner._get_encoder_output_from_cache("hash_c") is None
+
+    out_c = torch.zeros(1, HIDDEN)
+    runner._cache_encoder_output("hash_c", out_c)
+    assert runner._get_encoder_output_from_cache("hash_c") is out_c
+    assert runner.encoder_cache.encoder_outputs["hash_c"] is out_c
+
+
+def test_cache_hooks_overridable():
+    calls: list[str] = []
+
+    class RecordingRunner(EncoderRunner):
+        def _cache_encoder_output(self, mm_hash, output):
+            calls.append(f"put:{mm_hash}")
+            super()._cache_encoder_output(mm_hash, output)
+
+        def _has_cached_encoder_output(self, mm_hash):
+            calls.append(f"has:{mm_hash}")
+            return super()._has_cached_encoder_output(mm_hash)
+
+        def _get_encoder_output_from_cache(self, mm_hash):
+            calls.append(f"get:{mm_hash}")
+            return super()._get_encoder_output_from_cache(mm_hash)
+
+    image_feature = MultiModalFeatureSpec(
+        data=MagicMock(),
+        modality="image",
+        identifier="hash_img",
+        mm_position=PlaceholderRange(offset=0, length=2),
+    )
+    pe_feature = _pe_feature("hash_pe", torch.ones(2, HIDDEN))
+    cached_feature = MultiModalFeatureSpec(
+        data=MagicMock(),
+        modality="image",
+        identifier="hash_cached",
+        mm_position=PlaceholderRange(offset=4, length=2),
+    )
+
+    cache = EncoderCache()
+    cache.mm_features["req0"] = [image_feature, pe_feature, cached_feature]
+    cache.encoder_outputs["hash_cached"] = torch.arange(
+        2 * HIDDEN, dtype=torch.float32
+    ).reshape(2, HIDDEN)
+    runner = RecordingRunner(
+        model=None,
+        max_num_tokens=64,
+        hidden_size=HIDDEN,
+        encoder_cache=cache,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+
+    mm_hashes, mm_kwargs = runner.prepare_mm_inputs({"req0": [0, 1, 2]})
+
+    assert mm_hashes == ["hash_img"]
+    assert "has:hash_cached" in calls
+    assert "has:hash_pe" in calls
+    assert "put:hash_pe" in calls
+    assert torch.equal(cache.encoder_outputs["hash_pe"], torch.ones(2, HIDDEN))
+
+    cache.encoder_outputs["hash_img"] = torch.arange(
+        2 * HIDDEN, dtype=torch.float32
+    ).reshape(2, HIDDEN)
+    _gather(runner, num_scheduled=6, draft_lookahead=0)
+    assert "get:hash_img" in calls
 
 
 def test_consumed_cpu_input_updates_are_request_local_and_replayable():

@@ -1240,6 +1240,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.pp_handler.on_req_idx_freed(req_idx)
         if self.encoder_cache is not None:
             self.encoder_cache.remove_request(req_id)
+            self._on_request_state_removed(req_id)
         if self.prompt_logprobs_worker is not None:
             self.prompt_logprobs_worker.remove_request(req_id)
         self.lora_state.remove_request(req_id)
@@ -1263,8 +1264,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def free_states(self, scheduler_output: SchedulerOutput) -> None:
         if self.encoder_cache is not None:
-            for mm_hash in scheduler_output.free_encoder_mm_hashes:
-                self.encoder_cache.free_encoder_cache(mm_hash)
+            self._process_encoder_cache_scheduler_output(scheduler_output)
+    
+    def _on_request_state_removed(self, req_id: str) -> None:
+        del req_id
+
+    def _process_encoder_cache_scheduler_output(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> None:
+        for mm_hash in scheduler_output.free_encoder_mm_hashes:
+            self.encoder_cache.free_encoder_cache(mm_hash)
 
     def update_pp_decode_requests(self):
         # For non-last PP ranks, update decode requests with sampler output from
