@@ -270,34 +270,14 @@ def reset_eplb_async_state(model_runner: GPUModelRunner) -> None:
     if eplb_state is None:
         return
 
-    # Stop first, so a cycle that starts after the epoch change transfers
-    # nothing.
+    if eplb_state.async_runner is not None:
+        # An in-flight layer result is discarded, not applied.
+        eplb_state.async_runner.reset(
+            eplb_state.parallel_config.cpu_distributed_timeout_seconds
+        )
     for ms in eplb_state.model_states.values():
-        ms.rebalanced = False
-    # Increment the epoch before the sweep, so an async worker that publishes
-    # a result after this point sees the change and discards it.
-    eplb_state.ft_reset_epoch += 1
-    for ms in eplb_state.model_states.values():
-        result = ms.pending_result
-        ms.pending_result = None
-        if result is not None:
-            # Wake an async worker waiting on consumed_event; the in-flight
-            # layer result is discarded, not applied.
-            result.consumed_event.record()
         ms.expert_load_pass.zero_()
         ms.expert_load_window.zero_()
-
-    # A cycle blocked on a peer ends within the cpu group timeout. The caller
-    # must not rebuild the groups under it, and its error is stale.
-    timeout = eplb_state.parallel_config.cpu_distributed_timeout_seconds
-    with eplb_state.async_cycle_done:
-        if not eplb_state.async_cycle_done.wait_for(
-            lambda: eplb_state.async_cycles_pending == 0, timeout
-        ):
-            raise RuntimeError(
-                f"Async EPLB worker still in a transfer cycle after {timeout}s."
-            )
-    eplb_state.async_worker_error = None
 
     eplb_state.expert_rearrangement_step = 0
     eplb_state.expert_load_window_step = 0

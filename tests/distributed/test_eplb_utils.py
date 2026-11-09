@@ -1,26 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import queue
 import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 
-from vllm.config import ParallelConfig
-from vllm.distributed.eplb import async_worker
-from vllm.distributed.eplb import eplb_state as eplb_state_module
+from vllm.distributed.eplb.async_worker import AsyncEplbExecutor
 from vllm.distributed.eplb.eplb_state import (
-    EplbState,
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
 )
-from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
-from vllm.distributed.parallel_state import get_ep_group
 from vllm.platforms import current_platform
 from vllm.v1.worker.sentinel.eplb_redistribute import reset_eplb_async_state
+
+from .eplb_utils import (
+    ASYNC_JOB_TIMEOUT_S,
+    async_cycle_running,
+    finish_async_cycle,
+    make_async_eplb_state,
+    start_async_rearrangement,
+)
 
 
 def _make_model_state(
@@ -202,172 +204,128 @@ def dist_init_backend() -> str:
     return current_platform.dist_backend
 
 
-class _WorkerProbe:
-    """Reports each point where the async worker blocks, so a test can advance
-    in lockstep with it instead of sleeping or polling. The tests then do not
-    depend on thread timing, which keeps them from being flaky.
-
-    The worker reports "idle" before waiting for a rearrange signal and
-    "published" before waiting for the main thread to consume a layer result.
-    Everything the worker did before a report happens-before the test reads it.
-    """
-
-    # Only turns a deadlock into a failure; a healthy run never waits this long.
-    HANG_TIMEOUT_S = 60
-
-    def __init__(self) -> None:
-        self._reports: queue.Queue[str] = queue.Queue()
-
-    def event(self, report: str) -> CpuGpuEvent:
-        probe = self
-
-        class _ReportingEvent(CpuGpuEvent):
-            def wait(self, stream: torch.Stream | None = None) -> None:
-                probe._reports.put(report)
-                super().wait(stream)
-
-        return _ReportingEvent()
-
-    def expect(self, report: str) -> None:
-        assert self._reports.get(timeout=self.HANG_TIMEOUT_S) == report
-        assert self._reports.empty()
-
-
-def _start_ft_async_eplb(monkeypatch):
-    """Start single-rank async EPLB under fault tolerance whose first layer
-    transfer raises. On one rank the EP group stands in
-    for the EPLB group. Returns once the worker is waiting for a signal.
-    """
-    num_layers, num_experts, window = 2, 4, 2
-    device = torch.device(current_platform.device_type)
-    probe = _WorkerProbe()
-    monkeypatch.setattr(async_worker, "get_eplb_group", get_ep_group)
-    monkeypatch.setattr(
-        async_worker,
-        "run_rebalance_experts",
-        lambda model_state, eplb_state, phy2log_cpu, stream: phy2log_cpu.clone(),
-    )
-    monkeypatch.setattr(async_worker, "CpuGpuEvent", lambda: probe.event("published"))
-    failure = RuntimeError("injected transfer failure")
-    monkeypatch.setattr(
-        async_worker,
-        "transfer_layer",
-        Mock(side_effect=[failure] + [None] * num_layers),
-    )
-    applied: list[int] = []
-    monkeypatch.setattr(
-        eplb_state_module,
-        "move_from_buffer",
-        lambda *, expert_weights, **kwargs: applied.append(expert_weights),
-    )
-
-    phy2log = torch.arange(num_experts, device=device).repeat(num_layers, 1)
-    model_state = _make_model_state(
-        phy2log=phy2log,
-        log2phy=phy2log.unsqueeze(-1),
-        logcnt=torch.ones(num_layers, num_experts, dtype=torch.long, device=device),
-    )
-    model_state.model.num_moe_layers = num_layers
-    model_state.model.num_logical_experts = num_experts
-    model_state.model.expert_weights = list(range(num_layers))
-    model_state.rebalanced = False
-    model_state.pending_result = None
-    model_state.expert_load_pass = torch.zeros(
-        num_layers, num_experts, dtype=torch.int32, device=device
-    )
-    model_state.expert_load_window = torch.zeros(
-        window, num_layers, num_experts, dtype=torch.int32, device=device
-    )
-
-    parallel_config = ParallelConfig()
-    parallel_config.enable_fault_tolerance = True
-    state = EplbState(parallel_config, device)
-    if state.device_index is None:
-        pytest.skip("async EPLB needs a CUDA or XPU device")
-    state.is_async = True
-    state.expert_load_window_size = window
-    # Large enough that consuming layer results never triggers another
-    # rearrangement; tests trigger one explicitly with _signal_rearrangement.
-    state.expert_rearrangement_step_interval = 1000
-    state.model_states = {"m": model_state}
-    state.rearrange_event = probe.event("idle")
-    state.start_async_loop()
-    probe.expect("idle")
-    return SimpleNamespace(
-        state=state,
-        model_state=model_state,
-        probe=probe,
-        failure=failure,
-        applied=applied,
+@pytest.fixture
+def async_eplb(dist_init, monkeypatch):
+    return make_async_eplb_state(
+        monkeypatch, torch.device(current_platform.device_type), num_models=2
     )
 
 
-def _signal_rearrangement(state: EplbState) -> None:
-    """Run the step that starts a rearrangement and signals the worker."""
-    state.expert_rearrangement_step = state.expert_rearrangement_step_interval - 1
-    state.step()
-    assert state.model_states["m"].rebalanced
+def test_async_executor_runs_jobs_on_a_daemon_thread():
+    """The worker thread must not block interpreter exit when a job hangs."""
+    if not torch.accelerator.is_available():
+        pytest.skip("Async EPLB needs an accelerator")
+    executor = AsyncEplbExecutor(torch.accelerator.current_device_index(), rank=0)
+    assert executor.thread.daemon
+
+    stream = executor.submit(lambda stream: stream).result(ASYNC_JOB_TIMEOUT_S)
+    assert isinstance(stream, torch.Stream)
+
+    error = RuntimeError("job failed")
+
+    def failing_job(stream):
+        raise error
+
+    assert executor.submit(failing_job).exception(ASYNC_JOB_TIMEOUT_S) is error
 
 
-def test_fault_tolerance_recovers_async_eplb_after_worker_failure(
-    dist_init, monkeypatch
-):
-    """Under fault tolerance a worker failure must reach step(), or EPLB stalls
-    silently with every rank waiting for the failed layer. The worker thread
-    survives, so after the FT reset the next rearrangement runs to completion.
-    """
-    run = _start_ft_async_eplb(monkeypatch)
-    _signal_rearrangement(run.state)
-    run.probe.expect("idle")
+def test_async_eplb_applies_every_layer_of_every_model_in_order(async_eplb):
+    run = async_eplb
+    start_async_rearrangement(run.state)
+    finish_async_cycle(run.state)
+
+    expected = [(m, layer) for m in range(2) for layer in range(2)]
+    assert run.transfers == expected
+    assert [meta[1] for meta in run.applied] == expected
+    for model_state in run.model_states:
+        expected_map = torch.arange(4).roll(1).repeat(2, 1)
+        assert torch.equal(model_state.physical_to_logical_map.cpu(), expected_map)
+
+
+def test_async_eplb_failure_raises_until_reset(async_eplb):
+    """A failed job reaches step() so fault tolerance can react. No new job is
+    scheduled until the reset, after which EPLB resumes."""
+    run = async_eplb
+    run.fail.add((0, 1))
+    start_async_rearrangement(run.state)
     with pytest.raises(RuntimeError) as exc_info:
+        finish_async_cycle(run.state)
+    assert "injected transfer failure" in str(exc_info.value.__cause__)
+
+    with pytest.raises(RuntimeError) as again:
         run.state.step()
-    assert exc_info.value.__cause__ is run.failure
-    assert run.state.async_worker.is_alive()
+    assert again.value is exc_info.value
+    assert run.transfers == [(0, 0)]
+    # Elastic EP must not drain a cycle on a failed runner either.
+    with pytest.raises(RuntimeError) as on_drain:
+        run.state.drain_async()
+    assert on_drain.value is exc_info.value
 
     reset_eplb_async_state(SimpleNamespace(eplb_state=run.state))
-    assert run.state.async_worker_error is None
-    assert not run.model_state.rebalanced
-
-    _signal_rearrangement(run.state)
-    num_layers = run.model_state.model.num_moe_layers
-    for _ in range(num_layers):
-        run.probe.expect("published")
-        run.state.step()
-    run.probe.expect("idle")
-
-    assert run.applied == list(range(num_layers))
-    assert not run.model_state.rebalanced
-    assert run.state.async_worker_error is None
+    start_async_rearrangement(run.state)
+    finish_async_cycle(run.state)
+    assert run.transfers[-4:] == [(m, layer) for m in range(2) for layer in range(2)]
 
 
-def test_fault_tolerance_reset_refuses_a_running_async_eplb_cycle(
-    dist_init, monkeypatch
-):
-    """FT recovery must not reset EPLB state while a transfer cycle still runs.
+def test_reset_waits_for_the_in_flight_job(async_eplb):
+    """Fault recovery must not rebuild the groups under a running job, so the
+    reset returns only after the job ended. Its result is never applied."""
+    run = async_eplb
+    gate = threading.Event()
+    run.gates[(0, 0)] = gate
+    start_async_rearrangement(run.state)  # Submits the gated transfer.
 
-    A cycle blocked on a failed peer ends late with an error. If the reset had
+    release = threading.Timer(0.2, gate.set)
+    release.start()
+    reset_eplb_async_state(SimpleNamespace(eplb_state=run.state))
+    assert gate.is_set()
+    assert run.transfers == [(0, 0)]
+    assert not async_cycle_running(run.state)
+
+    del run.gates[(0, 0)]
+    start_async_rearrangement(run.state)
+    finish_async_cycle(run.state)
+
+    dropped_transfer = 1
+    assert run.applied[0][2] != dropped_transfer
+    assert [meta[1] for meta in run.applied] == [
+        (m, layer) for m in range(2) for layer in range(2)
+    ]
+
+
+def test_reset_refuses_a_running_job(async_eplb):
+    """FT recovery must not reset EPLB state while a transfer still runs.
+
+    A job blocked on a failed peer ends late with an error. If the reset had
     already cleared the error by then, the recovered engine would fault again.
     """
-    run = _start_ft_async_eplb(monkeypatch)
+    run = async_eplb
     run.state.parallel_config.cpu_distributed_timeout_seconds = 0
-    blocked, release = threading.Event(), threading.Event()
-    failing_transfer = async_worker.transfer_layer
-
-    def blocked_transfer(**kwargs) -> None:
-        blocked.set()
-        release.wait()
-        failing_transfer(**kwargs)
-
-    monkeypatch.setattr(async_worker, "transfer_layer", blocked_transfer)
-    _signal_rearrangement(run.state)
-    assert blocked.wait(_WorkerProbe.HANG_TIMEOUT_S)
+    gate = threading.Event()
+    run.gates[(0, 0)] = gate
+    run.fail.add((0, 0))
+    start_async_rearrangement(run.state)
 
     runner = SimpleNamespace(eplb_state=run.state)
-    with pytest.raises(RuntimeError, match="still in a transfer cycle"):
+    with pytest.raises(RuntimeError, match="still in a transfer job"):
         reset_eplb_async_state(runner)
 
-    release.set()
-    run.probe.expect("idle")
-    assert run.state.async_worker_error is run.failure
+    del run.gates[(0, 0)]
+    gate.set()
+    run.state.parallel_config.cpu_distributed_timeout_seconds = ASYNC_JOB_TIMEOUT_S
     reset_eplb_async_state(runner)
-    assert run.state.async_worker_error is None
+    start_async_rearrangement(run.state)
+    finish_async_cycle(run.state)
+    assert run.transfers == [(m, layer) for m in range(2) for layer in range(2)]
+
+
+def test_drain_runs_the_remaining_transfers_and_applies_none(async_eplb):
+    """Elastic EP follows a drain with a full rearrange, so the drained layers
+    are transferred to keep the ranks in lockstep but not applied."""
+    run = async_eplb
+    start_async_rearrangement(run.state)
+
+    run.state.drain_async()
+    assert not async_cycle_running(run.state)
+    assert run.transfers == [(m, layer) for m in range(2) for layer in range(2)]
+    assert run.applied == []

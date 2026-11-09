@@ -4,13 +4,19 @@
 import atexit
 import os
 import random
+import time
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 import torch.multiprocessing as mp
 
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.distributed.eplb import async_worker
+from vllm.distributed.eplb import eplb_state as eplb_state_module
 from vllm.distributed.parallel_state import (
+    get_ep_group,
     init_distributed_environment,
 )
 from vllm.platforms import current_platform
@@ -93,3 +99,118 @@ def set_env_vars_and_device(env: dict[str, str]) -> None:
 def _destroy_process_group_if_initialized() -> None:
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
+
+
+# Only turns a deadlock into a failure; a healthy job finishes in milliseconds.
+ASYNC_JOB_TIMEOUT_S = 60
+
+
+class _RollPolicy:
+    """Moves every physical expert one slot to the right."""
+
+    calls = 0
+
+    @classmethod
+    def rebalance_experts(cls, load, replicas, groups, nodes, gpus, old_map):
+        cls.calls += 1
+        return torch.roll(old_map, 1, dims=1)
+
+
+def make_async_eplb_state(
+    monkeypatch: pytest.MonkeyPatch,
+    device: torch.device,
+    num_models: int = 1,
+    num_layers: int = 2,
+    num_experts: int = 4,
+) -> SimpleNamespace:
+    """Build async EPLB over the current EP group with fake models whose layer
+    transfers and buffer copies are recorded instead of run.
+
+    `run.fail` holds layers whose next transfer raises, and `run.gates` maps a
+    layer to a `threading.Event` its transfer waits for.
+    """
+    run = SimpleNamespace(
+        transfers=[], applied=[], fail=set(), gates={}, policy=_RollPolicy
+    )
+    layer_of: dict[int, tuple[int, int]] = {}
+
+    def transfer_layer(*, expert_weights, **kwargs):
+        layer = layer_of[id(expert_weights)]
+        gate = run.gates.get(layer)
+        if gate is not None:
+            assert gate.wait(ASYNC_JOB_TIMEOUT_S)
+        if layer in run.fail:
+            run.fail.discard(layer)
+            raise RuntimeError(f"injected transfer failure at {layer}")
+        run.transfers.append(layer)
+        return ("metadata", layer, len(run.transfers))
+
+    monkeypatch.setattr(async_worker, "transfer_layer", transfer_layer)
+    monkeypatch.setattr(async_worker, "get_eplb_group", get_ep_group)
+    monkeypatch.setattr(
+        eplb_state_module,
+        "move_from_buffer",
+        lambda *, transfer_metadata, **kwargs: run.applied.append(transfer_metadata),
+    )
+
+    window = 2
+    model_states = {}
+    for m in range(num_models):
+        expert_weights = []
+        for layer in range(num_layers):
+            weights = [torch.zeros(num_experts, 1, device=device)]
+            layer_of[id(weights)] = (m, layer)
+            expert_weights.append(weights)
+        phy2log = torch.arange(num_experts, device=device).repeat(num_layers, 1)
+        model_state = MagicMock()
+        model_state.model_name = f"model{m}"
+        model_state.model.num_moe_layers = num_layers
+        model_state.model.num_logical_experts = num_experts
+        model_state.model.expert_weights = expert_weights
+        model_state.physical_to_logical_map = phy2log
+        model_state.logical_to_physical_map = phy2log.unsqueeze(-1).clone()
+        model_state.logical_replica_count = torch.ones_like(phy2log)
+        model_state.expert_load_pass = torch.zeros(
+            num_layers, num_experts, dtype=torch.int32, device=device
+        )
+        model_state.expert_load_window = torch.zeros(
+            window, num_layers, num_experts, dtype=torch.int32, device=device
+        )
+        model_states[f"model{m}"] = model_state
+
+    parallel_config = ParallelConfig()
+    parallel_config.eplb_config.use_async = True
+    state = eplb_state_module.EplbState(parallel_config, device)
+    if state.device_index is None:
+        pytest.skip("Async EPLB needs a CUDA or XPU device")
+    state.is_async = True
+    state.policy = _RollPolicy
+    state.expert_load_window_size = window
+    # Large enough that finishing a cycle never triggers another one; tests
+    # start each rearrangement with start_async_rearrangement().
+    state.expert_rearrangement_step_interval = 1000
+    state.model_states = model_states
+    state.start_async_loop()
+    run.state = state
+    run.model_states = list(model_states.values())
+    _RollPolicy.calls = 0
+    return run
+
+
+def start_async_rearrangement(state) -> None:
+    """Run the step that reaches the rearrangement interval."""
+    state.expert_rearrangement_step = state.expert_rearrangement_step_interval - 1
+    state.step()
+
+
+def async_cycle_running(state) -> bool:
+    return state.async_runner.cycle_running
+
+
+def finish_async_cycle(state) -> None:
+    """Step until the running async cycle has applied every layer."""
+    deadline = time.monotonic() + ASYNC_JOB_TIMEOUT_S
+    while async_cycle_running(state):
+        assert time.monotonic() < deadline, "async EPLB job hung"
+        state.step()
+        time.sleep(0.001)

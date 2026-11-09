@@ -25,8 +25,6 @@ MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
 
-import threading
-import time
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -51,12 +49,11 @@ from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import PIN_MEMORY
 
-from .async_worker import start_async_worker
+from .async_worker import AsyncEplbRunner
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
-from .eplb_utils import CpuGpuEvent
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
-    AsyncEplbLayerResult,
+    TransferMetadata,
     copy_rows,
     move_from_buffer,
     rearrange_expert_weights_inplace,
@@ -193,16 +190,6 @@ class EplbModelState:
     """
     The buffer to store the expert weights during transfer.
     """
-    rebalanced: bool
-    """
-    This flag is only used when running Async EPLB. It is set to True by the main thread
-    after the new expert maps have been computed. This indicates that the async worker
-    should start transferring weights. move_to_workspace sets this flag to False when
-    all weights have been transferred and the new map has been successfully committed.
-
-    rebalanced relies on the GIL to synchronize access between the main thread and
-    the async worker.
-    """
     eplb_stats: EplbStats | None
     """
     EPLB stats for the model.
@@ -214,15 +201,6 @@ class EplbModelState:
     communicator: EplbCommunicator
     """
     The communicator for expert weight transfers.
-    """
-    pending_result: AsyncEplbLayerResult | None = None
-    """
-    Set by the async worker after all writes to expert_buffer are done. Consumed
-    and reset to None by the main thread in move_to_workspace() after the contents of
-    expert_buffer have been transferred out. At most one result is pending at a time.
-
-    pending_result relies on the GIL to synchronize access between the main thread and
-    the async worker.
     """
     num_unpadded_tokens_tensors: list[torch.Tensor] | None = None
     """
@@ -289,32 +267,10 @@ class EplbState:
         """
         The flag indicates whether the EPLB is running in async mode.
         """
-        self.rearrange_event: CpuGpuEvent = CpuGpuEvent()
+        self.async_runner: AsyncEplbRunner | None = None
         """
-        Event to signal when a new rearrangement is needed for the async thread.
+        Drives async EPLB transfers on a background thread.
         """
-        self.ft_reset_epoch: int = 0
-        """
-        Incremented by FT recovery (reset_eplb_async_state). The async worker
-        snapshots it when a transfer cycle starts; a change in the value means
-        a recovery happened, so the cycle is abandoned.
-        """
-        self.async_worker: threading.Thread | None = None
-        """
-        Background thread handling async transfers.
-        """
-        self.async_worker_error: Exception | None = None
-        """
-        Exception raised by the async worker, if any. Under fault tolerance
-        the thread keeps running and FT recovery clears it.
-        """
-        self.async_cycles_pending = 0
-        """
-        Transfer cycles signalled to the async worker and not yet finished.
-        FT recovery waits for zero before it resets this state and rebuilds
-        the groups. Guarded by `async_cycle_done`.
-        """
-        self.async_cycle_done = threading.Condition()
         self.device_index: int | None = None
         """
         Device index for the async EPLB worker thread.
@@ -547,7 +503,6 @@ class EplbState:
             model_name=model_name or model_config.model,
             model=model,
             expert_buffer=expert_buffer,
-            rebalanced=False,
             eplb_stats=None,
             device_index=self.device_index,
             communicator=communicator,
@@ -695,25 +650,13 @@ class EplbState:
         # performing collective communication.
         self.expert_rearrangement_step += 1
 
-        if self.is_async:
+        if self.async_runner is not None:
             # Run _move_to_workspace if all ranks have finished transferring the
             # new weights to the intermediate buffer
-            for eplb_model_state in self.model_states.values():
-                # rebalanced must remain consistent amongst all ranks otherwise the
-                # all_reduce in _all_ranks_result_ready will hang
-                if eplb_model_state.rebalanced and self._all_ranks_result_ready(
-                    eplb_model_state
-                ):
-                    _move_to_workspace(
-                        model_state=eplb_model_state,
-                        ep_rank=ep_group.rank(),
-                    )
+            self.async_runner.poll()
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
-            if self.is_async and any(
-                eplb_model_state.rebalanced
-                for eplb_model_state in self.model_states.values()
-            ):
+            if self.is_async and self._ensure_async_runner().cycle_running:
                 # Still performing asynchronous rearrangement; update
                 # should_record (step > step_interval, so always True) and
                 # bail out before the step counter is reset.
@@ -1028,12 +971,9 @@ class EplbState:
                     num_nodes=num_nodes,
                     num_gpus=num_gpus,
                 )
-                eplb_model_state.rebalanced = True
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
-            with self.async_cycle_done:
-                self.async_cycles_pending += 1
-            self.rearrange_event.record()
+            self._ensure_async_runner().start(list(self.model_states.values()))
         return None
 
     def start_async_loop(
@@ -1041,70 +981,32 @@ class EplbState:
         rank_mapping: dict[int, int] | None = None,
         is_profile: bool = False,
     ):
-        if not self.is_async:
-            return
-        if self.async_worker is None:
-            self.async_worker = start_async_worker(
-                self,
-                is_profile=is_profile,
+        if self.is_async:
+            self._ensure_async_runner()
+
+    def _ensure_async_runner(self) -> AsyncEplbRunner:
+        if self.async_runner is None:
+            assert self.device_index is not None
+            self.async_runner = AsyncEplbRunner(
+                self.device_index,
+                _move_to_workspace,
+                self.policy,
+                self.parallel_config.eplb_config.migration_batching_enabled,
             )
+        return self.async_runner
 
     def drain_async(self) -> None:
-        """Drain in-flight async EPLB by consuming all remaining layer results.
+        """Drain in-flight async EPLB by running all remaining layer transfers.
 
-        Each pending result is acknowledged (consumed_event recorded) so the
-        async worker can proceed, but the transferred weights are intentionally
-        NOT applied — a full rearrange is expected to follow.
+        The transferred weights are intentionally NOT applied — a full
+        rearrange is expected to follow.
 
-        Ranks are kept in lockstep via _all_ranks_result_ready (all_reduce
-        on the EP CPU group).  The async worker's coordinated-stop collectives
-        use the separate EPLB group, so the two sets of collectives do not
-        interfere.
+        Ranks are kept in lockstep by an all_reduce on the EP CPU group.
 
-        No-op when no async cycle is in progress (rebalanced=False).
+        No-op when no async cycle is in progress.
         """
-        if not self.is_async:
-            return
-        for model_key, ms in self.model_states.items():
-            needs_drain = ms.rebalanced
-            if needs_drain:
-                logger.info(
-                    "Draining async EPLB worker for model %s",
-                    model_key,
-                )
-            while ms.rebalanced:
-                if self._all_ranks_result_ready(ms):
-                    result = ms.pending_result
-                    assert result is not None
-                    if result.layer_idx == ms.model.num_moe_layers - 1:
-                        ms.rebalanced = False
-                    ms.pending_result = None
-                    result.consumed_event.record()
-                else:
-                    time.sleep(0.001)
-            if needs_drain:
-                logger.info(
-                    "Async EPLB worker drained for model %s",
-                    model_key,
-                )
-
-    def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
-        flags = torch.tensor(
-            (
-                int(self.async_worker_error is not None),
-                int(model_state.pending_result is None),
-            ),
-            dtype=torch.int32,
-            device="cpu",
-        )
-        # cpu_all_reduce_ only sums, so count failed and pending ranks.
-        get_ep_group().cpu_all_reduce_(flags)
-        num_failed, num_pending = flags.tolist()
-        if num_failed:
-            raise RuntimeError(
-                "Async EPLB worker failed on at least one rank; see the worker logs."
-            ) from self.async_worker_error
-        return num_pending == 0
+        if self.async_runner is not None:
+            self.async_runner.drain()
 
     def _allreduce_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:
         """All-reduce a list of tensors."""
@@ -1476,27 +1378,20 @@ def _commit_eplb_maps(
 
 def _move_to_workspace(
     model_state: EplbModelState,
-    ep_rank: int,
+    layer_idx: int,
+    new_physical_to_logical_map: torch.Tensor,
+    transfer_metadata: TransferMetadata,
 ) -> None:
-    result = model_state.pending_result
-    assert result is not None
     move_from_buffer(
-        expert_weights=model_state.model.expert_weights[result.layer_idx],
+        expert_weights=model_state.model.expert_weights[layer_idx],
         expert_weights_buffers=model_state.expert_buffer,
-        transfer_metadata=result.transfer_metadata,
-        new_indices=result.new_physical_to_logical_map.numpy(),
-        ep_rank=ep_rank,
+        transfer_metadata=transfer_metadata,
+        new_indices=new_physical_to_logical_map.numpy(),
+        ep_rank=get_ep_group().device_group.rank(),
     )
 
     _commit_eplb_maps_for_layer(
         model_state,
-        new_physical_to_logical_map=result.new_physical_to_logical_map,
-        layer=result.layer_idx,
+        new_physical_to_logical_map=new_physical_to_logical_map,
+        layer=layer_idx,
     )
-
-    if result.layer_idx == model_state.model.num_moe_layers - 1:
-        model_state.rebalanced = False
-
-    # Reset pending_result before unblocking the async worker
-    model_state.pending_result = None
-    result.consumed_event.record()
