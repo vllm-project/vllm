@@ -205,9 +205,12 @@ steps:
 # KV sharing on a 2-GPU pod. TP>1 configs share GPUs between prefill and
 # decode (gpu-memory-utilization 0.35 per engine); TP1/TP1 architecture
 # configs keep one dedicated GPU per side.
-- label: ":nvidia: (L4) NixlConnector PD accuracy core"
+- label: ":nvidia: (L4) NixlConnector PD accuracy core %N"
   key: nixlconnector-pd-accuracy-core-2-gpus
-  timeout_in_minutes: 90
+  # Each config is ~5-9 min of GSM8K bound by L4 KV transfer; 3 shards
+  # keep each job around 20-25 min.
+  parallelism: 3
+  timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   device: l4
   num_devices: 2
