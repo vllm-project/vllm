@@ -11,6 +11,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.host_memory import (
     host_registration_ranges,
+    host_tensor_offsets,
     pin_tensor,
     unpin_tensor,
 )
@@ -264,15 +265,17 @@ class SimpleCPUOffloadWorker:
         layer_bytes = [
             self.num_cpu_blocks * t[0].nbytes for t in unique_gpu_caches.values()
         ]
-        buf = alloc_host_buffer(sum(layer_bytes), self.cpu_hugepage_size)
+        page_size = self.cpu_hugepage_size or mmap.PAGESIZE
+        offsets = host_tensor_offsets(layer_bytes, page_size=page_size)
+        buf = alloc_host_buffer(offsets[-1] + layer_bytes[-1], self.cpu_hugepage_size)
 
         cpu_kv_caches = {}
-        offset = 0
-        for size, (name, gpu_tensor) in zip(layer_bytes, unique_gpu_caches.items()):
+        for offset, size, (name, gpu_tensor) in zip(
+            offsets, layer_bytes, unique_gpu_caches.items()
+        ):
             cpu_shape = (self.num_cpu_blocks,) + gpu_tensor.shape[1:]
             view = buf[offset : offset + size].view(gpu_tensor.dtype)
             cpu_kv_caches[name] = view.view(cpu_shape)
-            offset += size
         if pin_memory:
             registered = []
             try:
@@ -280,7 +283,8 @@ class SimpleCPUOffloadWorker:
                     layer_bytes,
                     self.num_cpu_blocks,
                     buf.nbytes,
-                    page_size=self.cpu_hugepage_size or mmap.PAGESIZE,
+                    page_size=page_size,
+                    tensor_offsets=offsets,
                 ):
                     tensor = buf[start:end]
                     pin_tensor(tensor)
