@@ -2026,9 +2026,9 @@ class MooncakeConnectorWorker:
         local_regions: list[TransferRegion],
         remote_regions: list[TransferRegion],
     ) -> tuple[list[int], list[int], list[int], list[ReqId], str | None]:
-        src_ptrs: list[int] = []
-        dst_ptrs: list[int] = []
-        lengths: list[int] = []
+        src_ptrs = []
+        dst_ptrs = []
+        lengths = []
         err_reqs: list[ReqId] = []
         err_msg: str | None = None
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
