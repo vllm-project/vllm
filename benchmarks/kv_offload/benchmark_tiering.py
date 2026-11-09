@@ -116,7 +116,7 @@ class VLLMServer:
         self.proc: subprocess.Popen | None = None
 
     def start(self) -> None:
-        env = dict(os.environ, PYTHON_HASH_SEED="0")
+        env = dict(os.environ, PYTHONHASHSEED="0")
         cmd = [
             "vllm",
             "serve",
@@ -308,7 +308,6 @@ class BenchmarkRun:
                         "root_dir": str(self.fs_dir) + "/",
                     }
                 ],
-                "enable_cross_layers_blocks": "True",
                 "block_size": FILE_SIZES[self.spec.files],
             },
         }
