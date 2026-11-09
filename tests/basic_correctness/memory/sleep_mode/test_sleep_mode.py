@@ -508,14 +508,18 @@ def test_deep_sleep_fp8_kvcache_with_undefined_remap(
     llm.wake_up(tags=["weights"])
     llm.collective_rpc("reload_weights")
 
-    original_create_and_map = cumem.create_and_map
+    original_create_and_map = cumem.CuMemAllocator.create_and_map
 
     def create_and_map_with_poison(handle) -> None:
         original_create_and_map(handle)
         _, size, ptr, _ = handle
         cumem.libcudart.cudaMemset(ptr, 0xA5, size)
 
-    monkeypatch.setattr(cumem, "create_and_map", create_and_map_with_poison)
+    monkeypatch.setattr(
+        cumem.CuMemAllocator,
+        "create_and_map",
+        staticmethod(create_and_map_with_poison),
+    )
 
     # New requests must overwrite undefined remapped KV bytes before reading them.
     llm.wake_up(tags=["kv_cache"])
