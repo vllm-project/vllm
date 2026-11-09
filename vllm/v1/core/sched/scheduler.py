@@ -352,12 +352,8 @@ class Scheduler(SchedulerInterface):
             # to the model's layers, else the declared ones. KV slots stay
             # declared.
             self.spec_resources = spec_resources or resources
-            from vllm.v1.worker.gpu.spec_decode import speculator_config
-
             self.candidate_budget_varies = (
-                type(self.speculator_config).candidate_budget
-                is not speculator_config.SpeculatorConfig.candidate_budget
-                or speculative_config.uses_dynamic_speculative_decoding()
+                not self.speculator_config.candidate_budget_is_fixed()
                 or self.spec_resources.max_rows <= self.num_spec_tokens
             )
             # As on main, not under a Dynamic SD schedule.

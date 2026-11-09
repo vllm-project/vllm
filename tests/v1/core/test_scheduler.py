@@ -9088,6 +9088,18 @@ def test_scheduler_keeps_static_spec_blocks(case):
             )
 
 
+def test_overridden_candidate_budget_is_asked(monkeypatch):
+    """A config class that overrides candidate_budget is asked every step."""
+    config_cls = type(create_scheduler(num_speculative_tokens=3).speculator_config)
+    monkeypatch.setattr(config_cls, "candidate_budget", lambda self, view: 2)
+    scheduler = create_scheduler(num_speculative_tokens=3, max_num_batched_tokens=64)
+    assert scheduler.candidate_budget_varies
+    for request in create_requests(2, num_tokens=8, max_tokens=8):
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert output.num_spec_tokens_to_schedule == 1
+
+
 def test_scheduler_rejects_spec_resources_beyond_k(monkeypatch):
     """Declared resources may not run more rows than num_speculative_tokens + 1:
     KV slots and buffers are sized from K."""

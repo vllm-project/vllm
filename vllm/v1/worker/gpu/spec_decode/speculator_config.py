@@ -189,6 +189,15 @@ class SpeculatorConfig:
             return k + 1
         return self._dynamic_sd_schedule(view.max_num_seqs)[view.num_scheduled_reqs] + 1
 
+    @final
+    def candidate_budget_is_fixed(self) -> bool:
+        """Whether `candidate_budget` is always K + 1: not overridden, and no
+        Dynamic SD schedule."""
+        return (
+            type(self).candidate_budget is SpeculatorConfig.candidate_budget
+            and not self.spec_config.uses_dynamic_speculative_decoding()
+        )
+
     def _dynamic_sd_schedule(self, max_num_seqs: int) -> list[int]:
         if (
             self._dynamic_sd_lookup is None
