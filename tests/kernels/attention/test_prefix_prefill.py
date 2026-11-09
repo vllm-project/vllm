@@ -994,7 +994,7 @@ def test_contexted_kv_attention_alibi(
 
     query_start = 0
     key_start = 0
-    for i, (query_len, seq_len) in enumerate(zip(query_lens, seq_lens)):
+    for query_len, seq_len in zip(query_lens, seq_lens):
         query_end = query_start + query_len
         key_end = key_start + seq_len
 
@@ -1130,6 +1130,9 @@ NONSTANDARD_BLOCK_SIZE_SHAPES = [
     (64, 1, 128, 544),
     (8, 4, 256, 1040),
     (8, 4, 256, 1056),
+    # gfx12, KV cache < 2 GiB: GPU memory fault with the default
+    # 4-warp / 2-stage decode launch (#62697).
+    (32, 4, 128, 528),
 ]
 
 

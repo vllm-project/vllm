@@ -70,7 +70,6 @@ pub struct ChatCompletionRequest {
     pub max_completion_tokens: Option<u32>,
 
     /// How many chat completion choices to generate for each input message
-    #[validate(range(min = 1, max = 10))]
     pub n: Option<u32>,
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based
@@ -163,7 +162,9 @@ pub struct ChatCompletionRequest {
     #[serde(default = "default_true")]
     pub skip_special_tokens: bool,
 
-    /// Add spaces between special tokens during detokenization
+    /// Add spaces between special tokens during detokenization. Accepted as a
+    /// no-op: the detokenizers of the served tokenizers already emit adjacent
+    /// added tokens without a separator, which is what `false` asks for.
     #[serde(default = "default_true")]
     pub spaces_between_special_tokens: bool,
 
@@ -256,8 +257,11 @@ pub struct ChatCompletionRequest {
     pub return_prompt_text: Option<bool>,
 
     /// Include the weight-version spans that sampled each choice's output
-    /// tokens. Not supported yet.
+    /// tokens.
     pub return_weight_versions: Option<bool>,
+
+    /// Skip the first N prompt tokens from the returned routed-expert rows.
+    pub routed_experts_prompt_start: Option<u32>,
 
     /// Salt for prefix cache isolation in multi-user environments
     #[validate(length(min = 1))]
@@ -346,6 +350,7 @@ impl Default for ChatCompletionRequest {
             return_token_ids: None,
             return_prompt_text: None,
             return_weight_versions: None,
+            routed_experts_prompt_start: None,
             cache_salt: None,
             kv_transfer_params: None,
             ec_transfer_params: None,
@@ -386,7 +391,7 @@ pub(super) struct ChatCompletionResponse {
     pub system_fingerprint: Option<String>,
     pub prompt_logprobs: Option<PromptLogprobs>,
     pub prompt_token_ids: Option<Vec<u32>>,
-    /// Always `None` until `return_prompt_text` is supported.
+    /// The rendered prompt text when the request sets `return_prompt_text`.
     pub prompt_text: Option<String>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
@@ -401,10 +406,10 @@ pub(super) struct ChatCompletionChoice {
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
-    /// Always `None`.
-    /// TODO: return routed experts when `--enable-return-routed-experts` is set.
+    /// The request's routed-expert rows as a base64 NumPy `.npy`, when
+    /// `--enable-return-routed-experts` is set.
     pub routed_experts: Option<String>,
-    /// Always `None` until `return_weight_versions` is supported.
+    /// Contiguous weight-version spans over output-token indexes.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
@@ -426,6 +431,9 @@ pub(super) struct ChatCompletionMessage {
     pub content: Option<String>,
     // OpenAI fields the Rust frontend never produces; always `None`.
     pub refusal: Option<String>,
+    /// Omitted rather than `null`, like Python: the OpenAI spec types it as an
+    /// array, not nullable.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Value>,
     pub audio: Option<Value>,
     pub function_call: Option<FunctionCallResponse>,
@@ -443,7 +451,13 @@ pub(super) struct ChatCompletionStreamResponse {
     pub choices: Vec<ChatCompletionStreamChoice>,
     pub usage: Option<Usage>,
     pub metrics: Option<StreamPerRequestMetrics>,
-    pub prompt_token_ids: Option<Vec<u32>>,
+    /// Set only on the last chunk.
+    pub system_fingerprint: Option<String>,
+    /// Set only on the first chunk.
+    #[serde(flatten)]
+    pub prompt: Option<ChatCompletionStreamPrompt>,
+    /// Set only on the chunk carrying the finish reason.
+    pub kv_transfer_params: Option<Value>,
 }
 
 impl ChatCompletionStreamResponse {
@@ -454,9 +468,21 @@ impl ChatCompletionStreamResponse {
             choices: Vec::new(),
             usage: None,
             metrics: None,
-            prompt_token_ids: None,
+            system_fingerprint: None,
+            prompt: None,
+            kv_transfer_params: None,
         }
     }
+}
+
+/// Prompt fields of the first stream chunk. Python sets both explicitly on
+/// that chunk, so unset values serialize as `null` there and are omitted from
+/// every later chunk.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ChatCompletionStreamPrompt {
+    pub prompt_token_ids: Option<Vec<u32>>,
+    /// The rendered prompt text when the request sets `return_prompt_text`.
+    pub prompt_text: Option<String>,
 }
 
 /// Mirrors the Python vLLM `ChatCompletionResponseStreamChoice` class.
@@ -469,6 +495,8 @@ pub(super) struct ChatCompletionStreamChoice {
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
+    /// Set on the final chunk only; covers the whole output.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 /// Mirrors the Python vLLM `DeltaMessage` class.

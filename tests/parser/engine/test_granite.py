@@ -3,10 +3,10 @@
 """Tests for the engine-based Granite parser.
 
 Granite emits tool calls as a JSON array following a marker
-(``<|tool_call|>`` for 3.0, ``<tool_call>`` for 3.1) with no closing
-terminal; the ``]`` ends the region and surrounding prose is content. The
-engine's ``tool_call_body_array`` mode splits the array into one call per
-element and ``_granite_arg_converter`` carves each element's ``arguments``.
+(`<|tool_call|>` for 3.0, `<tool_call>` for 3.1) with no closing
+terminal; the `]` ends the region and surrounding prose is content. The
+engine's JSON-array collection mode splits the array into one call per
+element and `_granite_arg_converter` carves each element's `arguments`.
 """
 
 import json
@@ -34,7 +34,7 @@ def parser(mock_tokenizer):
 
 
 def _tokenize(text: str) -> list[tuple[int, str]]:
-    """Tokenize like the real stream: ``<|tool_call|>`` is one special token,
+    """Tokenize like the real stream: `<|tool_call|>` is one special token,
     plain text becomes one token per character."""
     tokens: list[tuple[int, str]] = []
     i = 0

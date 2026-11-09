@@ -37,6 +37,8 @@ from vllm.utils.flashinfer import has_flashinfer
 class TrtLlmMxfp4ExpertsBase:
     """MXFP4 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic."""
 
+    kept_constants: tuple[str, ...] = ("gemm1_alpha", "gemm1_beta", "gemm1_clamp_limit")
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -130,17 +132,6 @@ class TrtLlmMxfp4ExpertsBase:
         return False
 
     @staticmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        SUPPORTED_W_A = [
-            (kMxfp4Static, None),
-            (kMxfp4Static, kMxfp8Dynamic),
-        ]
-        return (weight_key, activation_key) in SUPPORTED_W_A
-
-    @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         if activation == MoEActivation.SITU:
             return has_flashinfer_situ_activation()
@@ -171,6 +162,17 @@ class TrtLlmMxfp4ExpertsMonolithic(
 
     def supports_routing_replay_capture(self) -> bool:
         return True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kMxfp4Static, None),
+            (kMxfp4Static, kMxfp8Dynamic),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
     def _supports_parallel_config(
@@ -282,11 +284,17 @@ class TrtLlmMxfp4ExpertsMonolithic(
         return routed_output
 
 
-class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModular):
-    """Modular version of the MXFP4 TRTLLM kernel (just the experts).
+class TrtLlmMxfp4ExpertsModularBase(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModular):
+    """Modular base version of the MXFP4 TRTLLM kernel (just the experts).
     Wraps flashinfer.trtllm_fp4_block_scale_routed_moe().
-    Moved from trtllm_moe.py.
+
+    The TRTLLM-Gen kernel skips padding rows (topk_ids == -1), so every
+    subclass consumes the padded contiguous layout DeepEP v2 produces.
     """
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.PaddedStandard
 
     def __init__(
         self,
@@ -340,8 +348,8 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         """Max tokens per kernel call before the batched-GEMM grid overflows.
 
         The TRTLLM-Gen batched GEMM launches a static grid whose batch (Y)
-        dimension is ``getMaxNumCtasInBatchDim(num_tokens, top_k, num_experts,
-        tileTokensDim)`` and must stay <= 65535. Solving that for num_tokens
+        dimension is `getMaxNumCtasInBatchDim(num_tokens, top_k, num_experts,
+        tileTokensDim)` and must stay <= 65535. Solving that for num_tokens
         with the smallest tile the kernel may pick (tileTokensDim=8, the runner
         default) gives a bound that is safe regardless of the tactic selected.
         Without it, large batches (e.g. Kimi-K3 top_k=16, EP16 profiling with
@@ -367,7 +375,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         local_expert_offset: int,
         topk: int,
     ) -> UnfinalizedMoEOutput | None:
-        """Finalize into ``output``, or stop after GEMM2 when it is None."""
+        """Finalize into `output`, or stop after GEMM2 when it is None."""
         from flashinfer import trtllm_fp4_block_scale_routed_moe
 
         flashinfer_output = trtllm_fp4_block_scale_routed_moe(
@@ -475,3 +483,31 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             )
 
         return unfinalized
+
+
+class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsModularBase):
+    """Modular MXFP4 TRTLLM experts with unquantized activations."""
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kMxfp4Static, None),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class TrtLlmMxfp4Mxfp8ExpertsModular(TrtLlmMxfp4ExpertsModularBase):
+    """Modular MXFP4 TRTLLM experts with dynamic MXFP8 activations."""
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kMxfp4Static, kMxfp8Dynamic),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
