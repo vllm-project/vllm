@@ -67,7 +67,8 @@ allocation. Async requests wait for every selected source, including after
 cancellation or a transfer failure.
 
 In both default and range-aware loading, with
-`kv_load_failure_policy="recompute"`, a request-level receive failure
+`kv_load_failure_policy="recompute"`, a request-level receive failure or a
+block-level KV load failure
 disables further external KV lookups for that request. After all selected
 sources finish, it resumes local computation instead of repeatedly loading a
 source whose lookup still reports a hit. Other requests may still load remote

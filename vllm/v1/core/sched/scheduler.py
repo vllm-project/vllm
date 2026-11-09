@@ -255,7 +255,7 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
-        # Request-level failures cannot identify a safe external source to retry.
+        # Load failures cannot identify a safe external source to retry.
         self.requests_with_failed_kv_loads: set[str] = set()
 
         # Grammar compilation failures to finish as per-request errors in
@@ -3795,5 +3795,8 @@ class Scheduler(SchedulerInterface):
 
         # Mark async requests with KV load failures for retry once loading completes
         self.failed_recving_kv_req_ids |= async_failed_req_ids
+        self.requests_with_failed_kv_loads.update(
+            async_failed_req_ids | sync_failed_req_ids
+        )
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids

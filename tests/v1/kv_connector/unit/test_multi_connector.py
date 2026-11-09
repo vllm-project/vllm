@@ -358,6 +358,7 @@ KVConnectorFactory.register_connector("RangeTransport", __name__, "RangeTranspor
 @dataclass
 class FailedLoadMetadata(KVConnectorMetadata):
     request_ids: set[str]
+    invalid_block_ids: set[int]
 
 
 class FailingLoadTransport(RangeTransport):
@@ -368,6 +369,8 @@ class FailingLoadTransport(RangeTransport):
         self.pending_loads = set()
         self.failed_loads = set()
         self.completed_loads = set()
+        self.pending_invalid_blocks: set[int] = set()
+        self.invalid_blocks: set[int] = set()
 
     def get_num_new_matched_tokens(self, request, num_computed_tokens):
         with Path(self.options["lookup_log"]).open("a") as log:
@@ -376,23 +379,45 @@ class FailingLoadTransport(RangeTransport):
 
     def update_state_after_alloc(self, request, blocks, num_external_tokens):
         if num_external_tokens:
-            self.pending_loads.add(request.request_id)
+            self.update_state_after_alloc_for_range(
+                request, blocks, KVLoadRange(0, num_external_tokens)
+            )
 
     def update_state_after_alloc_for_range(self, request, blocks, load_range):
-        self.update_state_after_alloc(request, blocks, load_range.num_tokens)
+        if load_range.num_tokens:
+            self.pending_loads.add(request.request_id)
+            if self.options.get("failure_signal") == "block":
+                (block_ids,) = blocks.get_block_ids()
+                block_size = self._kv_cache_config.kv_cache_groups[
+                    0
+                ].kv_cache_spec.block_size
+                self.pending_invalid_blocks.add(
+                    block_ids[load_range.start_token // block_size]
+                )
 
     def build_connector_meta(self, scheduler_output):
-        metadata = FailedLoadMetadata(self.pending_loads)
+        metadata = FailedLoadMetadata(self.pending_loads, self.pending_invalid_blocks)
         self.pending_loads = set()
+        self.pending_invalid_blocks = set()
         return metadata
 
     def start_load_kv(self, forward_context, **kwargs):
         self.failed_loads.update(self._get_connector_metadata().request_ids)
+        self.invalid_blocks.update(self._get_connector_metadata().invalid_block_ids)
+
+    def get_block_ids_with_load_errors(self):
+        invalid_blocks = self.invalid_blocks
+        self.invalid_blocks = set()
+        return invalid_blocks
 
     def get_transfer_results(self, finished_req_ids):
         result = KVConnectorTransferResults(
             finished_recving=self.completed_loads,
-            failed_recving=self.failed_loads,
+            failed_recving=(
+                set()
+                if self.options.get("failure_signal") == "block"
+                else self.failed_loads
+            ),
         )
         self.completed_loads = self.failed_loads
         self.failed_loads = set()
@@ -897,10 +922,12 @@ def test_range_failure_before_completion_is_sticky(abort, failed_source):
 
 @pytest.mark.parametrize("load_policy", [None, "range_aware"])
 @pytest.mark.parametrize("failure_policy", ["fail", "recompute"])
-@pytest.mark.parametrize("kind", ["full", "bounded"])
+@pytest.mark.parametrize(
+    "kind,failed_block", [("full", None), ("bounded", None), ("full", 0), ("full", 1)]
+)
 @pytest.mark.cpu_test
 def test_failed_load_with_persistent_hit_makes_progress(
-    load_policy, failure_policy, kind
+    load_policy, failure_policy, kind, failed_block
 ):
     """Lookup stays a hit after GET failure; recompute must not load it again."""
     config = _range_config([{"endpoint": 64}, {"endpoint": 96}], load_policy)
@@ -911,12 +938,23 @@ def test_failed_load_with_persistent_hit_makes_progress(
     scheduler.add_request(request)
     output = scheduler.schedule()
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    if failed_block is not None:
+        (block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+        scheduler.update_from_output(
+            output,
+            create_model_runner_output([], invalid_block_ids={block_ids[failed_block]}),
+        )
+        if failure_policy == "recompute":
+            assert request.num_computed_tokens == failed_block * 16
+            output = scheduler.schedule()
+            assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+            assert request.request_id not in output.num_scheduled_tokens
     scheduler.update_from_output(
         output,
         create_model_runner_output(
             [],
             finished_recving={request.request_id},
-            failed_recving={request.request_id},
+            failed_recving={request.request_id} if failed_block is None else None,
         ),
     )
     if failure_policy == "fail":
@@ -925,7 +963,8 @@ def test_failed_load_with_persistent_hit_makes_progress(
         return
     output = scheduler.schedule()
     assert request.status == RequestStatus.RUNNING
-    assert output.num_scheduled_tokens[request.request_id] == 160
+    retained_tokens = 0 if failed_block is None else failed_block * 16
+    assert output.num_scheduled_tokens[request.request_id] == 160 - retained_tokens
     assert [c.lookups for c in scheduler.connector.sub_connectors] == [[0], [0]]
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
     # Reuse the ID but not the prompt: local APC must not hide a stale failure flag.
@@ -936,8 +975,11 @@ def test_failed_load_with_persistent_hit_makes_progress(
 
 
 @pytest.mark.parametrize("load_policy", ["first_hit", "range_aware"])
+@pytest.mark.parametrize("failure_signal", ["request", "block"])
 @pytest.mark.timeout(240)
-def test_failed_load_model_recomputes(vllm_runner, tmp_path, monkeypatch, load_policy):
+def test_failed_load_model_recomputes(
+    vllm_runner, tmp_path, monkeypatch, load_policy, failure_signal
+):
     """Actual model outputs survive a persistent hit and split failure/completion."""
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     kwargs = dict(
@@ -959,6 +1001,7 @@ def test_failed_load_model_recomputes(vllm_runner, tmp_path, monkeypatch, load_p
                 "kv_connector_extra_config": {
                     "endpoint": endpoint,
                     "lookup_log": str(log),
+                    "failure_signal": failure_signal,
                 },
             }
             for endpoint, log in zip((64, 96), logs)
