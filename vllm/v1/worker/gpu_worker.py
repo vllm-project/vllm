@@ -391,8 +391,8 @@ class Worker(WorkerBase):
     def _require_resident_weights(self, action: str) -> None:
         """Refuse to touch model weights whose GPU memory is unmapped.
 
-        After ``sleep()`` (level 1 or 2) the weight allocations stay unmapped
-        until ``wake_up(tags=["weights"])``. Copying into them would crash the
+        After `sleep()` (level 1 or 2) the weight allocations stay unmapped
+        until `wake_up(tags=["weights"])`. Copying into them would crash the
         worker process (a segfault in the device copy), so fail the request
         instead.
         """
@@ -408,7 +408,7 @@ class Worker(WorkerBase):
         The engine gets to put back whatever it moved aside while it still
         points at the session's target model; a failure there is logged, so the
         error that ended the update stays the one the caller sees. The trainer
-        has to start again from ``start_weight_update``: chunks already received
+        has to start again from `start_weight_update`: chunks already received
         are not replayed.
 
         Args:
