@@ -332,7 +332,7 @@ class KernelConfig:
     - "flashinfer_moe_ep_cutedsl": Use FlashInfer's CuTeDSL MoE-EP
       mega-kernel with NVFP4 weights; requires expert parallelism, NVSHMEM,
       and SM100/SM103 (MXFP4 checkpoints are requantized at load) or SM107
-      (NVFP4 checkpoints only, FlashInfer >= 0.7.3)
+      (NVFP4 checkpoints only)
     - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
     - "b12x": Use b12x FP4 MoE kernels on SM12x

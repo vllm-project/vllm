@@ -138,11 +138,11 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
         The oracle has already put the weights in kernel format; the per-expert
         weight global scales arrive through the quant config and become the
         epilogue alphas. On SM107 the checkpoint's activation input scales also
-        set the activation and FC1-output quantization (``sm107_nvfp4_epilogue``).
+        set the activation and FC1-output quantization (`sm107_nvfp4_epilogue`).
         """
         validate_flashinfer_moe_ep_layer(layer)  # type: ignore[arg-type]
         epilogue = epilogue_from_quant_config(self.quant_config)
-        if epilogue.fc1_alpha is not None and is_sm107_device():
+        if is_sm107_device():
             # Every rank refuses a reload here, before the epilogue's collective.
             if getattr(layer, "_experts_sm107_loaded", False):
                 raise NotImplementedError(

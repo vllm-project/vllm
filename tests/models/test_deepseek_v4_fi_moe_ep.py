@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import dataclasses
-import sys
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -244,7 +242,6 @@ def test_megakernel_reports_its_own_constraints(megakernel_host):
 def test_sm107_admits_only_nvfp4_cutedsl(monkeypatch, megakernel_host):
     """SM107 runs the CuTeDSL megakernel for NVFP4 checkpoints only."""
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 7))
-    monkeypatch.setattr(fi_ep, "flashinfer_sm107_nvfp4_gap", lambda: None)
 
     cutedsl = _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL)
     assert _is_supported(cutedsl, kNvfp4Static, kNvfp4Dynamic) == (True, "")
@@ -253,84 +250,8 @@ def test_sm107_admits_only_nvfp4_cutedsl(monkeypatch, megakernel_host):
         assert not supported and "MXFP4 weights on this GPU" in reason
 
 
-def test_sm107_appends_flashinfer_gap_verbatim(monkeypatch, megakernel_host):
-    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 7))
-    monkeypatch.setattr(
-        fi_ep, "flashinfer_sm107_nvfp4_gap", lambda: "SM107 with FlashInfer X"
-    )
-    moe = _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL)
-    supported, reason = _is_supported(moe, kNvfp4Static, kNvfp4Dynamic)
-    assert not supported and reason.endswith("SM107 with FlashInfer X")
-
-    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
-    monkeypatch.setattr(
-        fi_ep,
-        "flashinfer_sm107_nvfp4_gap",
-        lambda: pytest.fail("SM100 must not probe FlashInfer for SM107"),
-    )
-    assert _is_supported(moe, kNvfp4Static, kNvfp4Dynamic) == (True, "")
-    assert _is_supported(moe, kMxfp4Static, None) == (True, "")
-
-
-def _fake_flashinfer(config_cls, version: str) -> SimpleNamespace:
-    moe_ep = SimpleNamespace(Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig=config_cls)
-    return SimpleNamespace(__version__=version, moe_ep=moe_ep)
-
-
-@dataclasses.dataclass
-class _Sm107ConfigV073:
-    apply_routing_weights_before_fc2: bool = True
-
-
-@dataclasses.dataclass
-class _Sm107ConfigV072:
-    apply_topk_in_fc1: bool = True
-
-
-@pytest.mark.parametrize(
-    "flashinfer, expected, unexpected",
-    [
-        (_fake_flashinfer(_Sm107ConfigV073, "0.7.3rc1"), None, None),
-        (
-            _fake_flashinfer(_Sm107ConfigV072, "0.7.2.post1"),
-            (
-                "SM107 with FlashInfer 0.7.2.post1",
-                "flashinfer-python>=0.7.3",
-                "vllm download-kernels",
-            ),
-            None,
-        ),
-        (
-            _fake_flashinfer(_Sm107ConfigV072, "0.7.3"),
-            ("SM107 with FlashInfer 0.7.3", "flashinfer-python>=0.7.3"),
-            None,
-        ),
-        (None, ("ModuleNotFoundError", "flashinfer.moe_ep"), ">=0.7.3"),
-    ],
-    ids=["v0.7.3rc1", "v0.7.2", "v0.7.3-old-field", "import-error"],
-)
-def test_sm107_flashinfer_probe(monkeypatch, flashinfer, expected, unexpected):
-    """The probe admits FlashInfer by the 0.7.3 config field, not its version."""
-    monkeypatch.setitem(sys.modules, "flashinfer", flashinfer)
-    monkeypatch.setitem(
-        sys.modules, "flashinfer.moe_ep", getattr(flashinfer, "moe_ep", None)
-    )
-    fi_ep.flashinfer_sm107_nvfp4_gap.cache_clear()
-    try:
-        gap = fi_ep.flashinfer_sm107_nvfp4_gap()
-    finally:
-        fi_ep.flashinfer_sm107_nvfp4_gap.cache_clear()
-    if expected is None:
-        assert gap is None
-    else:
-        assert gap is not None
-        assert all(part in gap for part in expected), gap
-        assert unexpected is None or unexpected not in gap
-
-
 def test_sm107_refuses_eplb(monkeypatch, megakernel_host):
     megakernel_host.parallel_config.enable_eplb = True
-    monkeypatch.setattr(fi_ep, "flashinfer_sm107_nvfp4_gap", lambda: None)
     moe = _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL)
 
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 7))

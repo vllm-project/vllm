@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import contextlib
-import functools
-import inspect
 import os
 import sys
 from dataclasses import dataclass
@@ -50,11 +48,6 @@ _FORMAT_CAPABILITIES: dict[FlashInferMoeEpWeightFormat, frozenset[tuple[int, int
     "mxfp4": _BLACKWELL_CAPABILITIES,
 }
 _SUPPORTED_CAPABILITIES = frozenset().union(*_FORMAT_CAPABILITIES.values())
-
-_SM107_NVFP4_CONFIG = "Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig"
-# FlashInfer 0.7.3 renamed apply_topk_in_fc1 to this field; its presence marks 0.7.3,
-# which also brings fused staging and switchable route checks to the SM107 config.
-_ROUTING_WEIGHTS_FIELD = "apply_routing_weights_before_fc2"
 _SM107_ROUTE_CHECK_ENV = "FLASHINFER_SM107_MEGA_CHECK_ROUTES"
 
 
@@ -71,27 +64,6 @@ def supports_current_device() -> bool:
 
 def is_sm107_device() -> bool:
     return _current_capability() == _SM107_CAPABILITY
-
-
-@functools.cache
-def flashinfer_sm107_nvfp4_gap() -> str | None:
-    """Why the installed FlashInfer cannot run the SM107 NVFP4 MegaMoE of
-    FlashInfer 0.7.3 or newer, or None if it can."""
-    try:
-        import flashinfer
-        from flashinfer import moe_ep
-    except (ImportError, RuntimeError) as err:
-        return f"SM107 without a usable flashinfer.moe_ep ({type(err).__name__}: {err})"
-    config_cls = getattr(moe_ep, _SM107_NVFP4_CONFIG, None)
-    if (
-        config_cls is not None
-        and _ROUTING_WEIGHTS_FIELD in inspect.signature(config_cls).parameters
-    ):
-        return None
-    return (
-        f"SM107 with FlashInfer {getattr(flashinfer, '__version__', 'unknown')} "
-        "(requires flashinfer-python>=0.7.3, then `vllm download-kernels`)"
-    )
 
 
 _E2M1_LUT = (
@@ -185,8 +157,6 @@ def flashinfer_moe_ep_unsupported_reasons(
         unsupported.append(f"{weight_format.upper()} weights")
     elif _current_capability() not in _FORMAT_CAPABILITIES[weight_format]:
         unsupported.append(f"{weight_format.upper()} weights on this GPU")
-    elif is_sm107_device() and (gap := flashinfer_sm107_nvfp4_gap()):
-        unsupported.append(gap)
     if weight_key == kNvfp4Static and activation_key is None:
         unsupported.append("A16 activations with NVFP4 weights")
     if moe.skip_final_all_reduce:
@@ -295,8 +265,6 @@ def mxfp4_moe_ep_weights(
 class _FlashInferMoeEpApi:
     def __init__(self) -> None:
         try:
-            import flashinfer
-            import flashinfer.moe_ep as moe_ep
             from flashinfer.moe_ep import (
                 BootstrapConfig,
                 DeepGemmMegaMoeConfig,
@@ -306,11 +274,12 @@ class _FlashInferMoeEpApi:
                 MoEEpTensors,
                 MoEWeightPack,
                 Nvfp4CutedslMegaMoeConfig,
+                Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig,
             )
         except ImportError as err:
             raise RuntimeError(
                 "FlashInfer MoE-EP requires the public API shipped with "
-                "FlashInfer 0.7.0 or newer"
+                "FlashInfer 0.7.3 or newer"
             ) from err
 
         self.BootstrapConfig = BootstrapConfig
@@ -321,8 +290,7 @@ class _FlashInferMoeEpApi:
         self.MoEEpTensors = MoEEpTensors
         self.MoEWeightPack = MoEWeightPack
         self.Nvfp4CutedslMegaMoeConfig = Nvfp4CutedslMegaMoeConfig
-        self.version: str = getattr(flashinfer, "__version__", "unknown")
-        self.Sm107Nvfp4MegaMoeConfig: Any = getattr(moe_ep, _SM107_NVFP4_CONFIG, None)
+        self.Sm107Nvfp4MegaMoeConfig = Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig
 
 
 def _load_flashinfer_moe_ep_api() -> _FlashInferMoeEpApi:
@@ -371,36 +339,21 @@ class FlashInferMoeEp:
             w13_scale=weights.w13_scale,
             w2_scale=weights.w2_scale,
         )
-        on_sm107 = spec.kernel == "cutedsl" and is_sm107_device()
-        if on_sm107:
-            config_cls = api.Sm107Nvfp4MegaMoeConfig
-            if config_cls is None:
-                raise RuntimeError(
-                    f"{moe.moe_backend} on SM107 requires flashinfer.moe_ep."
-                    f"{_SM107_NVFP4_CONFIG} (flashinfer-python>=0.7.3)"
-                )
-            # FlashInfer 0.7.3 asserts on an invalid SM107 route, killing the worker;
-            # default the checks off unless set.
-            route_checks = os.environ.setdefault(_SM107_ROUTE_CHECK_ENV, "0")
+        sm107 = is_sm107_device()
+        if sm107:
+            # FlashInfer 0.7.3 asserts on an invalid SM107 route, killing the worker.
+            os.environ.setdefault(_SM107_ROUTE_CHECK_ENV, "0")
+        if spec.kernel == "cutedsl":
+            config_cls = (
+                api.Sm107Nvfp4MegaMoeConfig if sm107 else api.Nvfp4CutedslMegaMoeConfig
+            )
+            # In-kernel fc2 reduce keeps its default (off).
             megakernel = config_cls(
                 intermediate_size=moe.intermediate_size,
                 top_k=moe.experts_per_token,
                 gate_up_clamp=moe.swiglu_limit,
                 fast_math=True,
-                apply_topk_in_fc1=apply_topk_in_fc1,
-                combine_dtype="bf16",
-                input_norm_const=epilogue.input_norm_const,
-                knobs=None,
-            )
-        elif spec.kernel == "cutedsl":
-            # In-kernel fc2 reduce keeps its default (off); FlashInfer 0.7.1rc1
-            # renamed in_kernel_fc2_reduce to enable_in_kernel_fc2_reduce.
-            megakernel = api.Nvfp4CutedslMegaMoeConfig(
-                intermediate_size=moe.intermediate_size,
-                top_k=moe.experts_per_token,
-                gate_up_clamp=moe.swiglu_limit,
-                fast_math=True,
-                apply_topk_in_fc1=apply_topk_in_fc1,
+                apply_routing_weights_before_fc2=apply_topk_in_fc1,
                 combine_dtype="bf16",
                 input_norm_const=epilogue.input_norm_const,
                 fc1_alpha=None,
@@ -428,30 +381,17 @@ class FlashInferMoeEp:
             weight_pack,
             backend,
         )
-        if on_sm107:
-            logger.info_once(
-                "FlashInfer MoE-EP megakernel %s from FlashInfer %s: knobs=%s, "
-                "kernel_variant=%s, max_tokens_per_rank=%d, epilogue from "
-                "checkpoint input scales=%s, %s=%s",
-                type(megakernel).__name__,
-                api.version,
-                megakernel.knobs,
-                getattr(megakernel, "kernel_variant", "inference"),
-                moe.max_num_tokens,
-                epilogue.fc1_norm_const is not None,
-                _SM107_ROUTE_CHECK_ENV,
-                route_checks,
-                scope="process",
-            )
         self._device = weights.w13.device
         self._hidden_size = moe.hidden_dim
         self._max_num_tokens = moe.max_num_tokens
         self._num_experts = moe.num_experts
         self._top_k = moe.experts_per_token
         self._epilogue: FlashInferMoeEpEpilogue | None = epilogue
+        # SM107 uses FlashInfer's owned output, which reduces only the live rows.
         self._return_workspace_view = (
-            moe.routing_method is RoutingMethodType.DeepseekV4 and not on_sm107
+            moe.routing_method is RoutingMethodType.DeepseekV4 and not sm107
         )
+        logger.info_once("FlashInfer MoE-EP megakernel: %s", type(megakernel).__name__)
 
     @property
     def can_overlap_shared_experts(self) -> bool:

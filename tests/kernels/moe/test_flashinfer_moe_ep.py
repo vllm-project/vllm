@@ -537,9 +537,6 @@ def test_sm107_nvfp4_init_warmup_forward_is_exact_on_grid_inputs(
     FlashInfer's owned-output forward.
     """
     pytest.importorskip("flashinfer.moe_ep")
-    gap = fi_ep.flashinfer_sm107_nvfp4_gap()
-    if gap is not None:
-        pytest.skip(f"kernel does not support {gap}")
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs")
     # Spawned workers inherit it before CuTe DSL picks a target.
@@ -573,7 +570,7 @@ def test_adapter_kwargs_match_installed_flashinfer(
     SM107 the routing flag must reach the config.
     """
     moe_ep = pytest.importorskip("flashinfer.moe_ep")
-    on_sm107 = capability == (10, 7)
+    sm107 = capability == (10, 7)
     layer_args: list[tuple] = []
 
     class FakeMegaLayer:
@@ -616,12 +613,14 @@ def test_adapter_kwargs_match_installed_flashinfer(
 
     ((_, _, _, mega_config),) = layer_args
     megakernel = mega_config.megakernel
-    if on_sm107:
+    if sm107:
         assert isinstance(
             megakernel, moe_ep.Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig
         )
         assert megakernel.knobs is None
-        assert megakernel.apply_topk_in_fc1 is (routing is RoutingMethodType.DeepseekV4)
+        assert megakernel.apply_routing_weights_before_fc2 is (
+            routing is RoutingMethodType.DeepseekV4
+        )
         assert adapter._return_workspace_view is False
         assert os.environ[SM107_ROUTE_CHECK_ENV] == "0"
     else:

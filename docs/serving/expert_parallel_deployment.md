@@ -142,19 +142,9 @@ EPv2 limitations:
 
 Requirements:
 
-- `flashinfer-python>=0.7.3`, followed by `vllm download-kernels`. With an older FlashInfer, startup fails with an error that names the installed version. This is newer than the FlashInfer version vLLM pins; with it installed, the `flashinfer_nvlink_one_sided` and `flashinfer_nvlink_two_sided` all2all backends fail at startup.
-- The `nvshmem4py-cu13` package.
+- The `nvshmem4py-cu13` package (`uv pip install nvshmem4py-cu13`).
 - `CUTE_DSL_ARCH=sm_107a` exported before vLLM starts.
 - `NVSHMEM_SYMMETRIC_SIZE`: `(2 * top_k + 1) * hidden_size * max_num_batched_tokens` bytes is enough; set it only if that exceeds NVSHMEM's default heap size.
-
-To install them:
-
-```bash
-uv pip install flashinfer-python==0.7.3 nvshmem4py-cu13
-vllm download-kernels
-```
-
-pip or uv may warn about a dependency conflict, because vLLM pins an older `flashinfer-python`.
 
 Behavior:
 
