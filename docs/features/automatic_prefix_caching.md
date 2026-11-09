@@ -87,6 +87,8 @@ Remove `--speculative-config` for standard decoding. The Gated DeltaNet ReplaySS
 
 Qwen3.8-Flash-Next uses the Qwen4Exp architecture. Its PLE convolution cache keeps its canonical state and speculative input window. Only the GDN layers use replay rings. The Qwen4Exp MTP draft uses attention layers and keeps ReplaySSM disabled.
 
+For `Qwen/Qwen3.8-Flash-Next-FP8`, add `--tensor-parallel-size 4 --block-size 192` to the example. With seven MTP drafts, the explicit block size satisfies the QSA raw-key ring alignment.
+
 `--gdn-prefill-backend` selects the prefill kernel independently. Triton prefill can run with FlashInfer ReplaySSM decode.
 
 With prefix caching, vLLM sets `GDN_UCACHE_STATE_DTYPE=fp16` before starting its workers, because FlashInfer reads it when first imported. If your own code imports FlashInfer before creating the engine, set this variable before that import.
