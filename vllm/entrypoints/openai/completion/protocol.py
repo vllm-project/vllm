@@ -320,6 +320,20 @@ class CompletionRequest(OpenAIBaseModel):
         "min_p": 0.0,
     }
 
+    def _build_extra_args(self) -> dict[str, Any]:
+        """Assemble `extra_args` for both the sampling and beam-search paths.
+
+        Shared so beam search sees the same `vllm_xargs`, `kv_transfer_params`
+        and `ec_transfer_params` that ordinary sampling does; forwarding only
+        `vllm_xargs` would still drop the transfer params.
+        """
+        extra_args: dict[str, Any] = dict(self.vllm_xargs) if self.vllm_xargs else {}
+        if self.kv_transfer_params:
+            extra_args["kv_transfer_params"] = self.kv_transfer_params
+        if self.ec_transfer_params:
+            extra_args["ec_transfer_params"] = self.ec_transfer_params
+        return extra_args
+
     def to_beam_search_params(
         self,
         max_tokens: int,
@@ -347,6 +361,7 @@ class CompletionRequest(OpenAIBaseModel):
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
             skip_special_tokens=skip_special_tokens,
+            extra_args=self._build_extra_args(),
         )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
@@ -397,13 +412,7 @@ class CompletionRequest(OpenAIBaseModel):
                 "skip_special_tokens", True
             )
 
-        extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
-        if self.kv_transfer_params:
-            # Pass in kv_transfer_params via extra_args
-            extra_args["kv_transfer_params"] = self.kv_transfer_params
-        if self.ec_transfer_params:
-            # Pass in ec_transfer_params via extra_args
-            extra_args["ec_transfer_params"] = self.ec_transfer_params
+        extra_args = self._build_extra_args()
         return SamplingParams.from_optional(
             n=self.n,
             **sampling_params,
