@@ -13,9 +13,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.gpu import model_runner
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark import utils as dspark_utils
-from vllm.v1.worker.gpu.spec_decode.dspark.utils import (
-    _get_dspark_parallel_config,
-)
+from vllm.v1.worker.gpu.spec_decode.dspark.utils import _get_dspark_parallel_config
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
