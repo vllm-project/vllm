@@ -3,7 +3,8 @@
 """NVIDIA implementation of the Dots3Note language model."""
 
 import copy
-from collections.abc import Iterable, Iterator
+import typing
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import replace
 
 import torch
@@ -20,6 +21,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.fused_embed_norm import has_full_vocab_on_rank
+from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -34,14 +36,23 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
 from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV2MLAAttention,
     DeepseekV2MLP,
     DeepseekV2MoE,
+    _try_load_fp8_indexer_wk,
+    get_spec_layer_idx_from_weight_name,
 )
 from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
     PPMissingLayer,
+    get_pp_missing_layer_names,
+    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     pp_topk_buffers,
@@ -677,8 +688,113 @@ class Dots3NoteModel(DeepseekV32Model):
             yield name, _pad_dense_mlp_weight(name, weight, self._weight_block_size)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        return super().load_weights(self._adapt_weights(weights))
+        weights = self._adapt_weights(weights)
+        stacked_params_mapping = [
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+            ("fused_qkv_a_proj", "q_a_proj", 0),
+            ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
+            ("wk_weights_proj", "wk", 0),
+            ("wk_weights_proj", "weights_proj", 1),
+        ]
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.n_routed_experts,
+            num_redundant_experts=self.num_redundant_experts,
+        )
+
+        pp_missing_layer_names = get_pp_missing_layer_names(self)
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        # Reordering loaders (e.g. runai_streamer) can split an FP8 indexer wk
+        # weight/scale pair across load_weights() calls; keep the pending
+        # buffer on the model so pairs survive the call boundary.
+        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
+        if _pending_wk_fp8 is None:
+            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
+        for name, loaded_weight in weights:
+            if "rotary_emb.inv_freq" in name:
+                continue
+            # MTP / nextn layers are loaded by the MTP model, not here.
+            if get_spec_layer_idx_from_weight_name(self.config, name) is not None:
+                continue
+            if _try_load_fp8_indexer_wk(
+                name,
+                loaded_weight,
+                _pending_wk_fp8,
+                params_dict,
+                loaded_params,
+                pp_missing_layer_names,
+            ):
+                continue
+
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                # Experts are handled below; skip here before the name rewrite.
+                if ("mlp.experts." in name) and name not in params_dict:
+                    continue
+                name_mapped = name.replace(weight_name, param_name)
+                if (
+                    param_name == "fused_qkv_a_proj"
+                ) and name_mapped not in params_dict:
+                    continue
+                name = name_mapped
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                param.weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                is_expert_weight = False
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping  # type: ignore[assignment]
+                    if weight_name not in name:
+                        continue
+                    is_expert_weight = True
+                    name_mapped = name.replace(weight_name, param_name)
+                    if is_pp_missing_parameter(name_mapped, self):
+                        continue
+                    param = params_dict[name_mapped]
+                    weight_loader = typing.cast(
+                        Callable[..., bool], param.weight_loader
+                    )
+                    success = weight_loader(
+                        param,
+                        loaded_weight,
+                        name_mapped,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        return_success=True,
+                    )
+                    if success:
+                        name = name_mapped
+                        break
+                else:
+                    if is_expert_weight:
+                        continue
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    name = maybe_remap_kv_scale_name(name, params_dict)  # type: ignore[assignment]
+                    if name is None:
+                        continue
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    param = params_dict[name]
+                    loader = getattr(param, "weight_loader", default_weight_loader)
+                    loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 class Dots3NoteLanguageModelForCausalLM(DeepseekV32ForCausalLM):
     model_cls = Dots3NoteModel
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # `Dots3NoteModel.load_weights` maps the checkpoint names itself.
+        return AutoWeightsLoader(self).load_weights(weights)

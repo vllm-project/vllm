@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
+from functools import partial
 from itertools import islice
 
 import torch
@@ -15,29 +15,21 @@ from vllm.model_executor.layers.fused_embed_norm import (
     has_full_vocab_on_rank,
     make_input_embedding,
 )
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
-)
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2ForCausalLM,
     DeepseekV2MLP,
     DeepseekV2MoE,
-    _try_load_fp8_indexer_wk,
-    get_spec_layer_idx_from_weight_name,
 )
 from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     copy_pp_buffers,
-    get_pp_missing_layer_names,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     pp_topk_buffers,
+    skip_spec_layers,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.common.ops.sequence_parallel import (
@@ -47,6 +39,10 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
+from vllm.models.deepseek_v32.common.weights import (
+    DSA_WEIGHTS_MAPPER,
+    dequantize_fp8_indexer_wk_pairs,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import (
     SparseMLAIndexGroupBuilder,
@@ -333,111 +329,6 @@ class DeepseekV32Model(torch.nn.Module):
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # DSA-only: MLA (fused_qkv_a_proj) + the fused indexer wk/weights_proj +
-        # routed experts. No MHA (qkv_proj) or ROCm shared-expert-fusion paths.
-        stacked_params_mapping = [
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-            ("fused_qkv_a_proj", "q_a_proj", 0),
-            ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
-            ("wk_weights_proj", "wk", 0),
-            ("wk_weights_proj", "weights_proj", 1),
-        ]
-        expert_params_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
-            num_redundant_experts=self.num_redundant_experts,
-        )
-
-        pp_missing_layer_names = get_pp_missing_layer_names(self)
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        # Reordering loaders (e.g. runai_streamer) can split an FP8 indexer wk
-        # weight/scale pair across load_weights() calls; keep the pending
-        # buffer on the model so pairs survive the call boundary.
-        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
-        if _pending_wk_fp8 is None:
-            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            # MTP / nextn layers are loaded by the MTP model, not here.
-            if get_spec_layer_idx_from_weight_name(self.config, name) is not None:
-                continue
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                _pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                pp_missing_layer_names,
-            ):
-                continue
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                # Experts are handled below; skip here before the name rewrite.
-                if ("mlp.experts." in name) and name not in params_dict:
-                    continue
-                name_mapped = name.replace(weight_name, param_name)
-                if (
-                    param_name == "fused_qkv_a_proj"
-                ) and name_mapped not in params_dict:
-                    continue
-                name = name_mapped
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                param.weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                is_expert_weight = False
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping  # type: ignore[assignment]
-                    if weight_name not in name:
-                        continue
-                    is_expert_weight = True
-                    name_mapped = name.replace(weight_name, param_name)
-                    if is_pp_missing_parameter(name_mapped, self):
-                        continue
-                    param = params_dict[name_mapped]
-                    weight_loader = typing.cast(
-                        Callable[..., bool], param.weight_loader
-                    )
-                    success = weight_loader(
-                        param,
-                        loaded_weight,
-                        name_mapped,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                        return_success=True,
-                    )
-                    if success:
-                        name = name_mapped
-                        break
-                else:
-                    if is_expert_weight:
-                        continue
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    name = maybe_remap_kv_scale_name(name, params_dict)  # type: ignore[assignment]
-                    if name is None:
-                        continue
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    param = params_dict[name]
-                    loader = getattr(param, "weight_loader", default_weight_loader)
-                    loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
-
 
 class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     """DSA causal LM — DeepSeek V2/V3 orchestration with the DSA backbone.
@@ -447,10 +338,24 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
 
     model_cls = DeepseekV32Model
 
+    hf_to_vllm_mapper = DSA_WEIGHTS_MAPPER
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         if self.config.model_type == "glm_moe_dsa":
             enable_glm52_low_latency_gemm(self, vllm_config.model_config.dtype)
+        self._pending_indexer_wk_fp8: dict[str, dict[str, torch.Tensor]] = {}
+        transforms = WeightsMapper(
+            weights_transforms=[
+                partial(skip_spec_layers, config=self.config),
+                partial(dequantize_fp8_indexer_wk_pairs, model=self),
+            ]
+        )
+        self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | transforms
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def set_moe_parameters(self):
         # Same as the base, but keyed on the MoE block type rather than the

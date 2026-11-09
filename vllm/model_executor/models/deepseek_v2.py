@@ -882,9 +882,21 @@ def _try_load_fp8_indexer_wk(
     if "weight" not in entry or "scale" not in entry:
         return True  # still waiting for the other param
 
-    # We have both weight and scale: dequantize FP8 to BF16.
-    weight_fp8, scale_inv = entry["weight"], entry["scale"]
     del buf[layer_prefix]
+    weight_bf16 = _dequantize_fp8_indexer_wk(entry["weight"], entry["scale"])
+
+    # Load the dequantized weight into shard 0 of the fused buffer.
+    param = params_dict[fused_name]
+    param.weight_loader(param, weight_bf16, 0)
+    loaded_params.add(fused_name)
+    return True
+
+
+def _dequantize_fp8_indexer_wk(
+    weight_fp8: torch.Tensor, scale_inv: torch.Tensor
+) -> torch.Tensor:
+    """Dequantize an FP8 indexer WK weight to BF16 for the fused
+    `wk_weights_proj`."""
     if scale_inv.dtype in (torch.uint8, torch.float8_e8m0fnu):
         # MXFP8 checkpoints store power-of-two E8M0 scales, decode them to float.
         scale_inv = scale_inv.view(torch.float8_e8m0fnu).to(torch.float32)
@@ -899,18 +911,12 @@ def _try_load_fp8_indexer_wk(
             weight_fp8.shape[0] // scale_inv.shape[0],
             weight_fp8.shape[1] // scale_inv.shape[1],
         )
-    weight_bf16 = scaled_dequantize(
+    return scaled_dequantize(
         weight_fp8,
         scale_inv,
         group_shape=group_shape,
         out_dtype=torch.bfloat16,
     )
-
-    # Load the dequantized weight into shard 0 of the fused buffer.
-    param = params_dict[fused_name]
-    param.weight_loader(param, weight_bf16, 0)
-    loaded_params.add(fused_name)
-    return True
 
 
 def _min_latency_fused_qkv_a_proj_impl(
