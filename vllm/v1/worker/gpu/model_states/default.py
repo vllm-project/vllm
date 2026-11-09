@@ -146,13 +146,18 @@ class DefaultModelState(ModelState):
         if self.rope_state is None:
             return {}  # Common case (1D positions).
 
-        self.rope_state.prepare_positions(
-            input_batch.idx_mapping,
-            input_batch.query_start_loc,
-            req_states.prefill_len.gpu,
-            req_states.num_computed_tokens.gpu,
-        )
-        positions = self.rope_state.get_positions(input_batch.num_tokens_after_padding)
+        if self.vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            positions = self.rope_state.prepare_positions_pcp(input_batch)
+        else:
+            self.rope_state.prepare_positions(
+                input_batch.idx_mapping,
+                input_batch.query_start_loc,
+                req_states.prefill_len.gpu,
+                req_states.num_computed_tokens.gpu,
+            )
+            positions = self.rope_state.get_positions(
+                input_batch.num_tokens_after_padding
+            )
         return {"positions": positions}
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
