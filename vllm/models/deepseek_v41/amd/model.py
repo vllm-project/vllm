@@ -613,6 +613,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
+        engram = next(
+            (
+                layer.engram
+                for layer in islice(self.layers, self.start_layer, self.end_layer)
+                if getattr(layer, "engram", None) is not None
+            ),
+            None,
+        )
+        if engram is not None:
+            # Shared host tables and GPU peer reads look up only local tokens.
+            self.engram_dp_shared_memory = engram.embed_tokens.dp_size == 1
 
         # Config flag is the switch. On ROCm, attention forces
         # swa_cache_layer.bounded_replay off unless the CDNA version
