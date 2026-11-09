@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Reloading the same weights must not change what a served MoE model
-generates: post-load processing reruns, and the tensors it derives for the
-kernels must stay where the captured CUDA graphs read them."""
+"""Reloading the same weights reruns post-load processing; the tensors it
+derives for the MoE kernels must stay where the captured CUDA graphs read
+them."""
 
 import pytest
 import torch
 
-from tests.models.utils import check_logprobs_close
 from vllm.platforms import current_platform
 
 PROMPTS = [
@@ -54,15 +53,16 @@ def _model_tensor_ptrs(worker) -> dict[str, int]:
     reason="TRT-LLM and CuteDSL MoE kernels need SM100",
 )
 @pytest.mark.parametrize(
-    "model,moe_backend,compare_outputs",
+    "model,moe_backend",
     [
-        # NVFP4 CuteDSL greedy outputs differ between two generations on one
-        # server, reload or not, so only the addresses are checked
-        ("RedHatAI/Qwen3-30B-A3B-NVFP4", "flashinfer_cutedsl", False),
+        # gpt-oss (TRT-LLM) is covered by test_reload_refit.py. NVFP4 CuteDSL
+        # greedy outputs differ between two generations on one server, reload
+        # or not, so only the addresses are checked
+        ("RedHatAI/Qwen3-30B-A3B-NVFP4", "flashinfer_cutedsl"),
     ],
 )
 def test_reload_keeps_moe_output(
-    model: str, moe_backend: str, compare_outputs: bool, vllm_runner, monkeypatch
+    model: str, moe_backend: str, vllm_runner, monkeypatch
 ) -> None:
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -73,23 +73,15 @@ def test_reload_keeps_moe_output(
         enable_prefix_caching=False,
         kernel_config={"enable_jit_warmup": False, "moe_backend": moe_backend},
     ) as llm:
-        before = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
         ptrs = llm.collective_rpc(_model_tensor_ptrs)
         llm.collective_rpc("reload_weights")  # the served checkpoint
         after_ptrs = llm.collective_rpc(_model_tensor_ptrs)
-        after = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
+        llm.generate_greedy(PROMPTS, max_tokens=8)  # the reloaded kernels run
     moved = [
         sorted(n for n, p in old.items() if new.get(n) != p)
         for old, new in zip(ptrs, after_ptrs)
     ]
     assert all(ptrs) and moved == [[]] * len(ptrs)
-    if compare_outputs:
-        check_logprobs_close(
-            outputs_0_lst=before,
-            outputs_1_lst=after,
-            name_0="before reload",
-            name_1="after reload",
-        )
 
 
 def test_fused_gate_weight_refilled_after_reload():
