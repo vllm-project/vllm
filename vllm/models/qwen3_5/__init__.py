@@ -4,7 +4,7 @@
 
 Only the NVIDIA variant migrates to the new eager + breakable CUDA-graph
 modelling code with explicit fused kernels. ROCm and all other platforms keep
-the previous torch.compile implementation in ``vllm/model_executor/models/``
+the previous torch.compile implementation in `vllm/model_executor/models/`
 so their behavior is unchanged.
 """
 

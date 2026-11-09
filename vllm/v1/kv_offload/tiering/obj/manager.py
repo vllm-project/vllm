@@ -125,7 +125,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     """Secondary tier that offloads KV cache blocks to an S3-compatible store.
 
     Handles CPU DRAM <-> S3 transfers only. GPU <-> CPU is managed by the
-    primary tier. Object keys are formed as ``{prefix}/{hash_shard}/{hash}.bin``.
+    primary tier. Object keys are formed as `{prefix}/{hash_shard}/{hash}.bin`.
     """
 
     medium: ClassVar[Medium] = Medium.STORAGE
@@ -346,7 +346,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def _poll_active_transfers(self) -> None:
         """Poll all in-flight transfers once; move newly-completed (success or
-        failure) into ``_pending_results`` and release their NIXL handles."""
+        failure) into `_pending_results` and release their NIXL handles."""
         for job_id, entry in list(self._transfers.items()):
             try:
                 state = self._agent.check_xfer_state(entry.xfer_handle)
@@ -450,10 +450,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def drain_jobs(self) -> None:
         """Block until every submitted transfer has completed or failed.
 
-        nixl exposes only ``check_xfer_state`` (poll-based), so this loops
-        until ``_transfers`` is empty. Results accumulate in
-        ``_pending_results`` and are surfaced by the next
-        ``get_finished_jobs()`` call.
+        nixl exposes only `check_xfer_state` (poll-based), so this loops
+        until `_transfers` is empty. Results accumulate in
+        `_pending_results` and are surfaced by the next
+        `get_finished_jobs()` call.
         """
         start = time.monotonic()
         warned = False
