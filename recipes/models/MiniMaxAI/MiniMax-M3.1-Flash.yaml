@@ -1695,6 +1695,12 @@ presets:
       in place of `round_robin`, so every turn of a conversation reaches the engines that
       cache its prefix.
 
+      Engines find the router through `proxy_ip`, not a list of endpoints: set `ROUTER_HOST`
+      to an address of the router's node that both nodes can reach; the default `localhost`
+      only reaches engines on the router's node. Each engine registers the address
+      `get_ip()` returns; on hosts with several NICs, set `VLLM_HOST_IP` to the node's
+      routable address.
+
       **Tuning rules.**
 
       - Prefill `--max-num-seqs` is twice the concurrency. Each decode engine caps its batch
