@@ -96,7 +96,7 @@ def can_use_deferred_recoverssm(
         return False, "it needs a bounded KDA gate (gate_lower_bound)"
     if (activation_dtype, conv_state_dtype, f_b_dtype) != (torch.bfloat16,) * 3:
         return False, "it needs bfloat16 activations, conv state and F_B weight"
-    from vllm.model_executor.kernels.kda.deferred_recoverssm import tensor_cores_fit
+    from vllm.models.kimi_k3.nvidia.recoverssm.deferred.verify import tensor_cores_fit
 
     if not tensor_cores_fit(
         num_heads,

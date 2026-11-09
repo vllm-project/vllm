@@ -12,11 +12,10 @@ window from it: one read and one write of the state per step.
 
 One kernel runs a layer's verify step: the short convolution, the q / k
 normalization, the F_B gate projection and decays, the replay, the chunked verify
-and the gated RMSNorm (`cute_dsl/fused_tc.py`: persistent, the dot products and
-the gate on the tensor cores; where it does not fit shared memory,
-`cute_dsl/fused_ws.py`, persistent and warp specialized, for large steps, else
-`cute_dsl/fused.py`, one item per CTA or cluster). `fused_ws` and `fused` are
-copied from the Kimi-K3 specialized decode.
+and the gated RMSNorm (`fused_tc.py`: persistent, the dot products and the gate on
+the tensor cores; where it does not fit shared memory, `fused_ws.py`, persistent
+and warp specialized, for large steps, else `fused.py`, one item per CTA or
+cluster). `fused_ws` and `fused` are copied from the Kimi-K3 specialized decode.
 """
 
 from collections.abc import Callable
@@ -29,11 +28,11 @@ from cutlass.cute.runtime import make_fake_stream
 
 from vllm.triton_utils import tl, triton
 
-from .cute_dsl import fused_tc, fused_ws
-from .cute_dsl.fused import KdaFused
-from .cute_dsl.fused_tc import KdaFusedTC
-from .cute_dsl.fused_ws import KdaFusedWS
-from .cute_dsl.host import fake, layout
+from . import fused_tc, fused_ws
+from .fused import KdaFused
+from .fused_tc import KdaFusedTC
+from .fused_ws import KdaFusedWS
+from .host import fake, layout
 
 K = 128
 # (request, head) items from which KdaFusedWS takes the step where KdaFusedTC does not

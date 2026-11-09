@@ -84,7 +84,7 @@ from vllm.v1.worker.workspace import (
 )
 
 if TYPE_CHECKING:
-    from vllm.model_executor.kernels.kda.deferred_recoverssm import KdaDeferredVerify
+    from vllm.models.kimi_k3.nvidia.recoverssm.deferred.verify import KdaDeferredVerify
 
 logger = init_logger(__name__)
 
@@ -789,7 +789,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     device=self.conv1d.weight.device,
                 )
                 if supported:
-                    from vllm.model_executor.kernels.kda import deferred_recoverssm
+                    from vllm.models.kimi_k3.nvidia.recoverssm.deferred import (
+                        verify as deferred_recoverssm,
+                    )
 
                     self.deferred_verify = deferred_recoverssm.KdaDeferredVerify(
                         self.local_num_heads, self.spec_query_len, max_num_seqs

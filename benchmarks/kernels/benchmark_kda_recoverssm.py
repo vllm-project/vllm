@@ -28,12 +28,6 @@ from types import SimpleNamespace
 
 import torch
 
-from vllm.model_executor.kernels.kda import deferred_recoverssm
-from vllm.model_executor.kernels.kda.deferred_recoverssm import (
-    KdaDeferredVerify,
-    decode_conv_weight,
-    record_pending,
-)
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
@@ -41,6 +35,12 @@ from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
     KDARecoverSSMRecords,
     _prepare_commit_plan_kernel,
     kda_recoverssm_verify,
+)
+from vllm.models.kimi_k3.nvidia.recoverssm.deferred import verify as deferred_verify
+from vllm.models.kimi_k3.nvidia.recoverssm.deferred.verify import (
+    KdaDeferredVerify,
+    decode_conv_weight,
+    record_pending,
 )
 from vllm.third_party.flash_linear_attention.ops.kda import rms_norm_gated
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -282,7 +282,7 @@ def benchmark_batch(args, heads, num_layers, window, batch) -> dict:
     out = torch.empty(batch * window, heads * K, dtype=torch.bfloat16, device="cuda")
     verify = KdaDeferredVerify(heads, window, batch)
     check(layers[0], verify, inputs, slots, starts, ones, accepted, window)
-    kernel = deferred_recoverssm._kernel(
+    kernel = deferred_verify._kernel(
         heads, batch, batch, window, conv_view(layers[0]), inputs[0]
     )
 
