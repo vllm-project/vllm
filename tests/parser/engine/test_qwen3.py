@@ -99,7 +99,7 @@ class TestUnclosedParameterFlush:
 
     @pytest.fixture
     def tools(self):
-        """A write_file schema whose ``count`` is an integer."""
+        """A write_file schema whose `count` is an integer."""
         return [
             {
                 "type": "function",
@@ -118,7 +118,7 @@ class TestUnclosedParameterFlush:
 
     @pytest.fixture
     def parser_with_tools(self, mock_tokenizer, tools):
-        """A Qwen3 parser that knows the ``tools`` schema."""
+        """A Qwen3 parser that knows the `tools` schema."""
         return ParserEngine(
             mock_tokenizer,
             tools=tools,
@@ -131,7 +131,7 @@ class TestUnclosedParameterFlush:
         """Truncation inside a schema-typed (non-string) parameter.
 
         The number cannot stream, so before the fix the prefix ended on the
-        separator, ``{"path": "README.md", "count": ``, and the flush had no
+        separator, `{"path": "README.md", "count": `, and the flush had no
         completion for it.
         """
         raw = (

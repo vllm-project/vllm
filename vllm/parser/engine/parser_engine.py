@@ -366,15 +366,15 @@ class ParserEngine(Parser):
 
         The trailing value is excluded for non-string keys because type
         coercion may change its serialised form, which would violate the
-        ``startswith(prev)`` prefix invariant.  String values for keys in
-        ``string_keys`` are prefix-stable, so their unterminated content is
+        `startswith(prev)` prefix invariant.  String values for keys in
+        `string_keys` are prefix-stable, so their unterminated content is
         streamed incrementally.
 
         Middle (comma-terminated) values for non-string keys are also excluded
         for the same coercion reason: the prefix is clipped at the start of the
-        first non-string-typed value so that ``_fix_arg_types`` at flush time
+        first non-string-typed value so that `_fix_arg_types` at flush time
         never rewrites anything already sent to the client. Pass
-        ``clip_middle=False`` when *json_str* already carries coerced values.
+        `clip_middle=False` when *json_str* already carries coerced values.
 
         Also returns whether the returned prefix stops inside that trailing
         string, so streamed text may be appended to it.  This holds even when
@@ -503,9 +503,9 @@ class ParserEngine(Parser):
 
         String values are coerced via `coerce_to_schema_type`.
         Nested objects and arrays are recursed into when the schema
-        defines ``properties`` or ``items``.  Without a schema, values
+        defines `properties` or `items`.  Without a schema, values
         stay as strings.  Only the coerced top-level values are
-        re-serialized; see :meth:`_replace_top_level_values`.
+        re-serialized; see `_replace_top_level_values`.
         """
         if not self._tools or not func_name:
             return args_json
@@ -1261,7 +1261,7 @@ class ParserEngine(Parser):
         return safe_json[len(prev) :] or None
 
     def _flush_arg_converter(self, idx: int) -> str | None:
-        """Return the argument text still owed to the client when tool ``idx`` ends."""
+        """Return the argument text still owed to the client when tool `idx` ends."""
         converter = self._arg_converter
         if converter is None:
             return None
@@ -1308,12 +1308,12 @@ class ParserEngine(Parser):
     def _close_streamed_json(self, slot: ToolCallSlot, prev: str) -> str | None:
         """Terminate an argument prefix the flush cannot extend.
 
-        ``_safe_arg_prefix`` deliberately streams unterminated string values for
+        `_safe_arg_prefix` deliberately streams unterminated string values for
         prefix-stable keys, on the understanding that the flush completes them.
         If the model never closes a parameter, the non-partial re-derivation
         drops that parameter entirely, so it is neither longer than nor a prefix
-        of what was already sent. Returning ``None`` there ends the stream with
-        ``finish_reason`` set while the client holds a half-written string, which
+        of what was already sent. Returning `None` there ends the stream with
+        `finish_reason` set while the client holds a half-written string, which
         no JSON parser accepts. Close what was already sent instead: the client
         gets the truncated value rather than an unparsable message.
         """
@@ -1325,7 +1325,7 @@ class ParserEngine(Parser):
 
     @staticmethod
     def _json_prefix_terminator(prefix: str) -> str:
-        """Return the shortest suffix that makes ``prefix`` parse, or ``""``."""
+        """Return the shortest suffix that makes `prefix` parse, or `""`."""
         in_string = False
         escape = False
         stack: list[str] = []

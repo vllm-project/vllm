@@ -1775,7 +1775,7 @@ class TestSafeArgPrefix:
     """Unit tests for ParserEngine._safe_arg_prefix.
 
     A trailing value that cannot stream (non-string, or a string for a key the
-    schema may coerce) is withheld together with its ``"key": `` separator:
+    schema may coerce) is withheld together with its `"key": ` separator:
     the flush can drop an unfinished parameter, and a prefix ending on the
     separator then has no valid completion.
     """
