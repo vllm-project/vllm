@@ -176,14 +176,14 @@ class CuMemAllocator:
     def release_pools(self) -> None:
         """Drop Python references to MemPool/pluggable allocators eagerly.
 
-        A cumem ``MemPool`` outlives the ``use_memory_pool`` context (a strong
-        reference is kept in ``allocator_and_pools`` to work around
+        A cumem `MemPool` outlives the `use_memory_pool` context (a strong
+        reference is kept in `allocator_and_pools` to work around
         pytorch/pytorch#146431), and a captured CUDA graph can keep it alive
-        longer still. ``MemPool`` only holds a non-owning pointer to the
+        longer still. `MemPool` only holds a non-owning pointer to the
         allocator, whose owning reference lives in the Python
-        ``CUDAPluggableAllocator``. If both are instead dropped during
+        `CUDAPluggableAllocator`. If both are instead dropped during
         interpreter shutdown, GC may finalize the allocator first; the eventual
-        ``~MemPool`` -> ``emptyCache`` -> ``release_block`` then makes a virtual
+        `~MemPool` -> `emptyCache` -> `release_block` then makes a virtual
         call into the freed allocator -- aborting the process with "pure virtual
         method called" (pytorch/pytorch#145168).
 
@@ -481,7 +481,7 @@ class CuMemAllocator:
     def get_current_usage(self) -> int:
         """Get the total number of bytes allocated in the memory pool."""
         sum_bytes: int = 0
-        for ptr, data in self.pointer_to_data.items():
+        for data in self.pointer_to_data.values():
             handle = data.handle
             sum_bytes += handle[1]
         return sum_bytes
