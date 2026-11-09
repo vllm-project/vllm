@@ -18,6 +18,7 @@ engine work during drain. `events` records lifecycle and owner ordering.
 """
 
 import asyncio
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 
@@ -46,19 +47,26 @@ class DummyAdminEndpointPlugin:
             return {"scheduler_config": results}
 
         @app.post("/plugins/dummy/session")
-        async def session(request: Request):
+        async def session(request: Request, real_generation: bool = False):
             state = request.app.state
             if getattr(state, "draining", False):
                 raise HTTPException(status_code=503, detail="draining")
             if self.owner is not None:
                 raise HTTPException(status_code=409, detail="owner already accepted")
 
-            async def work() -> bool:
+            async def work():
                 await self.finish.wait()
                 self.events.append("owner_final_submit")
-                if state.dummy_engine_client is not None:
+                if real_generation:
+                    result = await self._generate(state)
+                elif state.dummy_engine_client is not None:
                     await state.dummy_engine_client.collective_rpc("finish_session")
                 self.events.append("owner_done")
+                if real_generation:
+                    return {
+                        "finished_while_draining": getattr(state, "draining", False),
+                        **result,
+                    }
                 return getattr(state, "draining", False)
 
             self.owner = asyncio.create_task(work())
@@ -69,7 +77,45 @@ class DummyAdminEndpointPlugin:
             if self.owner is None:
                 raise HTTPException(status_code=404, detail="no owner")
             self.finish.set()
-            return {"finished_while_draining": await self.owner}
+            result = await self.owner
+            if isinstance(result, dict):
+                return result
+            return {"finished_while_draining": result}
+
+        @app.post("/plugins/dummy/generate")
+        async def generate(request: Request):
+            state = request.app.state
+            if getattr(state, "draining", False):
+                raise HTTPException(status_code=503, detail="draining")
+            return await self._generate(state)
+
+        @app.post("/plugins/dummy/shutdown")
+        async def shutdown(request: Request):
+            request.app.state.request_shutdown()
+            return {"shutdown_requested": True}
+
+    async def _generate(self, state):
+        from vllm.sampling_params import SamplingParams
+
+        engine_client = state.dummy_engine_client
+        if engine_client is None:
+            raise HTTPException(status_code=503, detail="generation requires an engine")
+        submitted_while_draining = getattr(state, "draining", False)
+        final_output = None
+        async for output in engine_client.generate(
+            {"prompt_token_ids": [1, 7, 42]},
+            SamplingParams(temperature=0, max_tokens=16, ignore_eos=True, seed=0),
+            request_id=f"dummy-generation-{uuid4().hex}",
+        ):
+            final_output = output
+        assert final_output is not None
+        completion = final_output.outputs[0]
+        return {
+            "submitted_while_draining": submitted_while_draining,
+            "finished": final_output.finished,
+            "token_ids": list(completion.token_ids),
+            "finish_reason": completion.finish_reason,
+        }
 
     async def init_state(self, engine_client, state, args) -> None:
         state.dummy_engine_client = engine_client

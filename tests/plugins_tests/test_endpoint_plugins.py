@@ -7,7 +7,8 @@ installed via `tests/plugins/vllm_add_dummy_endpoint_plugin`) exercising both
 `EndpointPlugin` hooks against a fake `EngineClient`, unit tests for the
 `load_endpoint_plugins` gating matrix, an e2e test that drives a real HTTP
 request through the plugin's route, and lifecycle tests that run the optional
-`start`/`stop` capabilities through `serve_http` and the server lifespan.
+`start`/`stop` capabilities through `serve_http` and the server lifespan. Live
+engine tests require an accepted owner to generate real tokens after drain begins.
 """
 
 import asyncio
@@ -1252,3 +1253,92 @@ async def test_real_render_server_drains_accepted_owner():
             assert response.status_code == 200
             assert response.json() == {"finished_while_draining": True}
         assert await asyncio.to_thread(server.proc.wait, timeout=_TIMEOUT_S) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shutdown_source", ["sigterm", "callback"])
+async def test_live_engine_drains_accepted_owner(shutdown_source: str):
+    """An accepted owner can submit real generation after host drain begins."""
+    from tests.entrypoints.launchers.test_shutdown import (
+        _assert_children_cleaned_up,
+        _get_child_pids,
+    )
+    from tests.utils import RemoteOpenAIServer
+
+    with RemoteOpenAIServer(
+        "vllm-project/tiny-random-LlamaForCausalLM",
+        [
+            "--dtype",
+            "bfloat16",
+            "--max-model-len",
+            "256",
+            "--enforce-eager",
+            "--gpu-memory-utilization",
+            "0.05",
+            "--max-num-seqs",
+            "4",
+            "--shutdown-timeout",
+            "30",
+        ],
+        env_dict={
+            "VLLM_PLUGINS": "dummy_admin_endpoint_plugin",
+            "VLLM_BATCH_INVARIANT": "1",
+        },
+        max_wait_seconds=480,
+    ) as server:
+        child_pids = _get_child_pids(server.proc.pid)
+        async with httpx.AsyncClient(
+            base_url=server.url_for(""),
+            timeout=30,
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
+        ) as client:
+            assert (await client.get("/health")).status_code == 200
+            assert (await client.get("/ready")).status_code == 200
+            control = await client.post("/plugins/dummy/generate")
+            assert control.status_code == 200
+            reference = control.json()
+            assert reference["submitted_while_draining"] is False
+            assert reference["finished"] is True
+            assert reference["finish_reason"] == "length"
+            assert len(reference["token_ids"]) == 16
+
+            accepted = await client.post(
+                "/plugins/dummy/session", params={"real_generation": True}
+            )
+            assert accepted.status_code == 200
+            assert accepted.json() == {"accepted": True}
+            connection = accepted.extensions["network_stream"]
+            if shutdown_source == "sigterm":
+                server.proc.send_signal(signal.SIGTERM)
+            else:
+                shutdown = await client.post("/plugins/dummy/shutdown")
+                assert shutdown.status_code == 200
+                assert shutdown.json() == {"shutdown_requested": True}
+
+            async with asyncio.timeout(_TIMEOUT_S):
+                while (await client.get("/ready")).status_code == 200:
+                    await asyncio.sleep(0.01)
+            assert (await client.get("/ready")).status_code == 503
+            assert (await client.get("/health")).status_code == 200
+            rejected = await client.post(
+                "/plugins/dummy/session", params={"real_generation": True}
+            )
+            assert rejected.status_code == 503
+            assert rejected.extensions["network_stream"] is connection
+            assert (await client.post("/plugins/dummy/generate")).status_code == 503
+
+            response = await client.post("/plugins/dummy/finish")
+            assert response.status_code == 200
+            assert response.json() == {
+                **reference,
+                "submitted_while_draining": True,
+                "finished_while_draining": True,
+            }
+
+        assert (
+            await asyncio.to_thread(
+                server.proc.wait, timeout=server._get_process_termination_timeout()
+            )
+            == 0
+        )
+        await _assert_children_cleaned_up(child_pids)
