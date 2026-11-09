@@ -46,7 +46,7 @@ class MHCOverlapStream:
         """Allocate AITER Mega-MHC's per-stream scratch on the side stream.
 
         The gates run there only inside FULL graph capture, which cannot
-        allocate it; sizing it for ``MHC_OVERLAP_MAX_TOKENS`` covers every
+        allocate it; sizing it for `MHC_OVERLAP_MAX_TOKENS` covers every
         batch the overlap captures.
         """
         if self._mega_mhc_ready:

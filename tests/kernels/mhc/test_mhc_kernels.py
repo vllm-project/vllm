@@ -1628,9 +1628,9 @@ def _check_mhc_seam_gates_and_input(actual, expected):
 def test_mhc_pre_delayed_rocm_aiter_mega(num_tokens, seam):
     """Mega-MHC computes every output of the fused seam at least as accurately
     as the Triton seam it replaces, against a float64 reference that rounds to
-    bf16 where the kernels do. ``num_tokens`` spans its decode, split-K and
-    single-split kernels; ``seam`` the three call shapes of
-    ``test_mhc_pre_delayed_rocm_aiter_fused_rms_norm``."""
+    bf16 where the kernels do. `num_tokens` spans its decode, split-K and
+    single-split kernels; `seam` the three call shapes of
+    `test_mhc_pre_delayed_rocm_aiter_fused_rms_norm`."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     set_random_seed(0)
@@ -1669,7 +1669,7 @@ def test_mhc_pre_delayed_rocm_aiter_mega(num_tokens, seam):
 def test_deepseek_v41_rocm_mega_mhc_refit_reaches_captured_graph():
     """Refreshing after an in-place weight refit repacks fn into the same
     tensor, so a graph captured before the refit replays with the new gates,
-    also when the refit bypassed the version counter (``param.data.copy_``)."""
+    also when the refit bypassed the version counter (`param.data.copy_`)."""
     from vllm.models.deepseek_v41.amd.model import DeepseekV4DecoderLayer
 
     set_random_seed(0)
@@ -1724,6 +1724,7 @@ def test_deepseek_v41_rocm_mega_mhc_loads_under_bf16_default_dtype():
     _, fn, *_ = _mega_mhc_inputs(1, hidden_size)
     layer = DeepseekV4DecoderLayer.__new__(DeepseekV4DecoderLayer)
     nn.Module.__init__(layer)
+    layer.mono = None
     layer.use_mega_mhc = True
     layer.hidden_size = hidden_size
     layer.hc_attn_fn = nn.Parameter(fn.clone(), requires_grad=False)

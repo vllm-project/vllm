@@ -5242,8 +5242,8 @@ class rocm_aiter_ops:
 
     @staticmethod
     def mega_mhc_pack_fn(fn: torch.Tensor) -> torch.Tensor:
-        """Pack the fp32 ``fn`` (hc_mult3, hc_mult * hidden_size) into the bf16
-        hi/lo MFMA operand layout :meth:`mhc_mega_post_pre_delayed_rms_norm`
+        """Pack the fp32 `fn` (hc_mult3, hc_mult * hidden_size) into the bf16
+        hi/lo MFMA operand layout `mhc_mega_post_pre_delayed_rms_norm`
         reads."""
         from aiter.ops.mega_mhc import mega_mhc_shuffle_fn
 
@@ -5268,11 +5268,11 @@ class rocm_aiter_ops:
         norm_eps: float,
         residual_out: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """:meth:`mhc_fused_post_pre_delayed_rms_norm` in one launch of AITER's
-        HIP Mega-MHC, reading ``fn`` packed by :meth:`mega_mhc_pack_fn`.
+        """`mhc_fused_post_pre_delayed_rms_norm` in one launch of AITER's
+        HIP Mega-MHC, reading `fn` packed by `mega_mhc_pack_fn`.
 
         Its split-K scratch is per stream and cannot be allocated under CUDA
-        graph capture; see :meth:`mega_mhc_prepare_stream`.
+        graph capture; see `mega_mhc_prepare_stream`.
         """
         from aiter.ops.mega_mhc import mega_mhc
 
@@ -5322,7 +5322,7 @@ class rocm_aiter_ops:
         num_tokens: int, hidden_size: int, device: torch.device
     ) -> None:
         """Allocate Mega-MHC's split-K scratch on the current stream for every
-        token count up to ``num_tokens``, with one eager call on zeros. It runs
+        token count up to `num_tokens`, with one eager call on zeros. It runs
         while the model loads, under the model's default dtype."""
         from aiter.ops.mega_mhc import mega_mhc, mega_mhc_shuffle_fn
 

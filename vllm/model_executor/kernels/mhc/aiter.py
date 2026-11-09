@@ -298,8 +298,8 @@ def mhc_mega_post_pre_delayed_rms_norm_aiter(
     norm_eps: float,
     residual_out: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """:func:`mhc_fused_post_pre_delayed_rms_norm_aiter` as one Mega-MHC
-    launch, with ``fn`` packed by ``rocm_aiter_ops.mega_mhc_pack_fn``."""
+    """`mhc_fused_post_pre_delayed_rms_norm_aiter` as one Mega-MHC
+    launch, with `fn` packed by `rocm_aiter_ops.mega_mhc_pack_fn`."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     return rocm_aiter_ops.mhc_mega_post_pre_delayed_rms_norm(

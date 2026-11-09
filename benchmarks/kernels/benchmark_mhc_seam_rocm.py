@@ -1,21 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Per-seam latency of DeepSeek-V4.1's fused delayed mHC seam on ROCm (gfx950).
+r"""Per-seam latency of DeepSeek-V4.1's fused delayed mHC seam on ROCm (gfx950).
 
 One seam (hc_mult 4, 20 Sinkhorn iterations) on each backend:
 
-- ``triton``: AITER's two-launch Triton seam, what vLLM main runs
-  (``rocm_aiter_ops.mhc_fused_post_pre_delayed_rms_norm``).
-- ``hip``: AITER's single-launch HIP Mega-MHC (``aiter.ops.mega_mhc``), reading
-  ``fn`` packed once by ``mega_mhc_shuffle_fn``.
-- ``flydsl``: AITER's single-launch FlyDSL Mega-mHC
-  (``aiter.ops.flydsl.mega_mhc_kernels``), which packs ``fn`` on first use.
-- ``overlap_main`` (``post`` mode only): vLLM's post-collapse kernel, all that
+- `triton`: AITER's two-launch Triton seam, what vLLM main runs
+  (`rocm_aiter_ops.mhc_fused_post_pre_delayed_rms_norm`).
+- `hip`: AITER's single-launch HIP Mega-MHC (`aiter.ops.mega_mhc`), reading
+  `fn` packed once by `mega_mhc_shuffle_fn`.
+- `flydsl`: AITER's single-launch FlyDSL Mega-mHC
+  (`aiter.ops.flydsl.mega_mhc_kernels`), which packs `fn` on first use.
+- `overlap_main` (`post` mode only): vLLM's post-collapse kernel, all that
   stays on the critical path when the gates run on the side stream (FULL
-  graphs, at most 128 tokens). The side stream then runs a ``no_post`` seam.
+  graphs, at most 128 tokens). The side stream then runs a `no_post` seam.
 
 Every backend is checked against a float64 reference before it is timed, with
-the bounds of ``test_mhc_pre_delayed_rocm_aiter_mega``: per element, and
+the bounds of `test_mhc_pre_delayed_rocm_aiter_mega`: per element, and
 relative to the Triton seam's error. Outputs outside them are printed and
 recorded in the JSON, not raised.
 
@@ -243,7 +243,7 @@ REL_ERR_FLOORS = dict(
 
 
 def bf16_ulp(a, b):
-    """The bf16 ulp at the larger magnitude of ``a`` and ``b``."""
+    """The bf16 ulp at the larger magnitude of `a` and `b`."""
     magnitude = torch.maximum(a.abs(), b.abs())
     return torch.ldexp(torch.ones_like(magnitude), torch.frexp(magnitude)[1] - 8)
 
@@ -274,7 +274,7 @@ def residual_in_bound(actual, expected, x) -> bool:
 
 
 def measure(out, ref, x) -> dict:
-    """Errors against the float64 reference, listing under ``outside_bounds``
+    """Errors against the float64 reference, listing under `outside_bounds`
     the outputs that break the unit tests' elementwise bounds."""
     report, outside = {}, []
     for i, label in enumerate(OUTPUTS):
@@ -301,7 +301,7 @@ def measure(out, ref, x) -> dict:
 
 def compare_to_triton(row, backends) -> None:
     """Add the outputs whose relative error exceeds twice the Triton seam's
-    plus a floor to each backend's ``outside_bounds``."""
+    plus a floor to each backend's `outside_bounds`."""
     triton = row.get("triton_numerics")
     if triton is None:
         return
