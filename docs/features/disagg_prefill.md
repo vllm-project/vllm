@@ -53,55 +53,25 @@ Now supports 9 types of connectors:
 
 By default, `MultiConnector` loads from the first child with a positive hit and
 saves through all children. Set `"load_policy": "range_aware"` in
-`kv_connector_extra_config`, alongside `connectors`, to let ordered children
-load adjacent ranges of one prefix. This is an opt-in connector extension:
-a suffix loader must implement `supports_load_range` and
-`update_state_after_alloc_for_range`; enabling the policy does not add range
-support to an existing connector.
+`kv_connector_extra_config` to let ordered children load adjacent ranges of one
+prefix. A suffix loader must implement `supports_load_range` and
+`update_state_after_alloc_for_range`.
 
-The loader uses scheduler-block alignment together with each child's optional
-`load_range_alignment`. If compatible ranges cannot cover the longest hit, or
-the selected sources mix synchronous and asynchronous loading, it uses the
-single child with the longest hit. The scheduler may shorten that hit before
-allocation. Async requests wait for every selected source, including after
-cancellation or a transfer failure.
+Load ranges follow the scheduler's and each child's alignment requirements.
+Multi-source loading is used when compatible ranges cover the longest hit and
+the selected sources use compatible load modes. Otherwise, the child with the
+longest hit handles the load. Async loading waits for every selected source to
+finish before execution resumes.
 
-Range-aware prefix lookup retains each child's completed result while other
-lookups are pending, including misses. Later polls query only unfinished
-children; a new lookup range or a finished request clears those saved results.
+### Hybrid cache support
 
-In both default and range-aware loading, with
-`kv_load_failure_policy="recompute"`, a request-level receive failure or a
-block-level KV load failure
-disables further external KV lookups for that request. After all selected
-sources finish, it resumes local computation instead of repeatedly loading a
-source whose lookup still reports a hit. Other requests may still load remote
-KV, and local prefix-cache reuse remains enabled. The `"fail"` policy still
-terminates the failed request.
+Full-attention KV is split by token range. Each sliding-window attention (SWA)
+cache group independently selects a source that provides its complete window.
+The scheduler finalizes the load plan and window sources using the adopted
+prefix length.
 
-### Hybrid cache and bounded replay
-
-Ranges describe full-attention token positions in the complete allocated block
-table. Each SWA group independently uses the first compatible child that reports
-its complete window through `get_loadable_window_group_ids(request, end_token)`.
-Resolve this availability during prefix lookup; a prefix hit alone does not
-prove that a window exists. A child may supply a window without supplying any
-prefix tokens. Only explicitly assigned `window_group_ids` may be written, at
-`window_end_token`; `is_terminal` does not grant window ownership.
-
-When the scheduler shortens a prefix, it finalizes the plan at that endpoint
-before allocation through `get_loaded_kv_cache_group_ids_for_prefix`. Window
-sources are selected again for the new endpoint. The default implementation of
-this hook preserves existing connectors' loaded-group declarations.
-For a shortened single-source fallback, SWA groups additionally require a
-complete window reported at the adopted endpoint; an original-endpoint group
-declaration alone must not suppress bounded replay.
-
-Missing complete windows, legacy hybrid loaders, recurrent state, or incompatible
-load modes use the existing single-source load interface instead. Single-source
-bounded replay remains the backend's responsibility; no partial windows are
-stitched together and no recurrent state is split. Children must not declare
-window groups restored unless their load actually restores them.
+Recurrent state and legacy hybrid loaders use the existing single-source load
+path, with bounded replay handled by the backend.
 
 ## Reusing prefill token ids on decode
 
