@@ -40,30 +40,33 @@ NUM_REDUNDANT_EXPERTS = 64
 SCALE_DOWN_DEADLINE_S = 20
 
 
-# Patches ``gpu.dp_utils.sync_cudagraph_and_dp_padding`` to raise on ``rank``
-# once armed (via /collective_rpc). Gated on VLLM_FT_TEST_INJECT_FAULT.
+# Installed as the servers' sitecustomize. Each fault is gated on its own env var:
+# - VLLM_FT_TEST_INJECT_FAULT=rank=N: ``sync_cudagraph_and_dp_padding`` raises
+#   once on DP rank N after the test arms it (``arm_ft_fault_injection``).
+# - VLLM_FT_TEST_INJECT_EPLB_FAULT=1: the second async EPLB rebalance raises on
+#   every rank before the worker enters any collective, so every rank fails the
+#   same cycle and no collective is left to time out. ``ft_eplb_counts`` reads
+#   the counters.
+# The Worker methods are reachable through /collective_rpc.
 _FAULT_INJECT_SITECUSTOMIZE = """\
 import builtins
+import inspect
 import os
 import sys
 
-_SPEC = os.environ.get("VLLM_FT_TEST_INJECT_FAULT")
-_MODULE = "vllm.v1.worker.gpu.dp_utils"
-_ATTR = "sync_cudagraph_and_dp_padding"
-_WORKER_MODULE = "vllm.v1.worker.gpu_worker"
+_PATCHES = []  # (module name, attribute to wait for, patch function)
+_WORKER_METHODS = {}
 
+_SPEC = os.environ.get("VLLM_FT_TEST_INJECT_FAULT")
 if _SPEC:
     _f = dict(kv.split("=", 1) for kv in _SPEC.split(","))
     _RANK = int(_f["rank"])
     _ARMED = [False]
 
-    def _arm():
-        _ARMED[0] = True
-
-    def _patch(m):
-        import inspect
-        _orig = getattr(m, _ATTR)
+    def _patch_dp_utils(m):
+        _orig = m.sync_cudagraph_and_dp_padding
         _sig = inspect.signature(_orig)
+
         def _wrapped(*args, **kwargs):
             result = _orig(*args, **kwargs)
             bound = _sig.bind(*args, **kwargs)
@@ -77,52 +80,22 @@ if _SPEC:
                 raise RuntimeError("FT test fault injection (rank=%d)" % _RANK)
             return result
 
-        setattr(m, _ATTR, _wrapped)
+        m.sync_cudagraph_and_dp_padding = _wrapped
 
-    _real_import = builtins.__import__
+    def _arm(self, *a, **k):
+        _ARMED[0] = True
 
-    def _hook(name, *a, **k):
-        module = _real_import(name, *a, **k)
-        m = sys.modules.get(_MODULE)
-        # During vLLM's circular import the module lands in sys.modules before
-        # its functions are defined; hasattr guards against patching too early.
-        if (
-            m is not None
-            and hasattr(m, _ATTR)
-            and not getattr(m, "_ft_patched", False)
-        ):
-            m._ft_patched = True
-            _patch(m)
-        # Expose arming to /collective_rpc via a Worker method.
-        w = sys.modules.get(_WORKER_MODULE)
-        if (
-            w is not None
-            and hasattr(w, "Worker")
-            and not getattr(w, "_ft_arm_patched", False)
-        ):
-            w._ft_arm_patched = True
-            w.Worker.arm_ft_fault_injection = lambda self, *a, **k: _arm()
-        return module
-
-    builtins.__import__ = _hook
-"""
-
-
-# Patches the async EPLB worker on every rank so that the second rebalance
-# raises before the worker enters any collective: every rank fails the same
-# cycle and no collective is left to time out. Exposes per-process counters to
-# /collective_rpc. Gated on VLLM_FT_TEST_INJECT_EPLB_FAULT.
-_EPLB_FAULT_INJECT_SITECUSTOMIZE = """\
-import builtins
-import os
-import sys
-
-_WORKER_MODULE = "vllm.v1.worker.gpu_worker"
-_ASYNC_WORKER_MODULE = "vllm.distributed.eplb.async_worker"
-_EPLB_STATE_MODULE = "vllm.distributed.eplb.eplb_state"
-_FAILING_REBALANCE = 2
+    _PATCHES.append(
+        (
+            "vllm.v1.worker.gpu.dp_utils",
+            "sync_cudagraph_and_dp_padding",
+            _patch_dp_utils,
+        )
+    )
+    _WORKER_METHODS["arm_ft_fault_injection"] = _arm
 
 if os.environ.get("VLLM_FT_TEST_INJECT_EPLB_FAULT"):
+    _FAILING_REBALANCE = 2
     _COUNTS = {"rebalances": 0, "injected": 0, "applied_rearrangements": 0}
 
     def _patch_async_worker(m):
@@ -148,30 +121,37 @@ if os.environ.get("VLLM_FT_TEST_INJECT_EPLB_FAULT"):
 
         m._move_to_workspace = _move_to_workspace
 
-    _PATCHES = [
-        (_ASYNC_WORKER_MODULE, "run_rebalance_experts", _patch_async_worker),
-        (_EPLB_STATE_MODULE, "_move_to_workspace", _patch_eplb_state),
+    _PATCHES += [
+        (
+            "vllm.distributed.eplb.async_worker",
+            "run_rebalance_experts",
+            _patch_async_worker,
+        ),
+        ("vllm.distributed.eplb.eplb_state", "_move_to_workspace", _patch_eplb_state),
     ]
+    _WORKER_METHODS["ft_eplb_counts"] = lambda self, *a, **k: dict(_COUNTS)
+
+if _WORKER_METHODS:
+
+    def _add_worker_methods(m):
+        for name, method in _WORKER_METHODS.items():
+            setattr(m.Worker, name, method)
+
+    _PATCHES.append(("vllm.v1.worker.gpu_worker", "Worker", _add_worker_methods))
+
+if _PATCHES:
+    _patched = set()
     _real_import = builtins.__import__
 
     def _hook(name, *a, **k):
         module = _real_import(name, *a, **k)
         for module_name, attr, patch in _PATCHES:
             m = sys.modules.get(module_name)
-            # hasattr guards against patching a partially imported module.
-            if m is not None and hasattr(m, attr) and not getattr(
-                m, "_ft_patched", False
-            ):
-                m._ft_patched = True
+            # During vLLM's circular import a module lands in sys.modules before
+            # its functions are defined; hasattr guards against patching too early.
+            if module_name not in _patched and m is not None and hasattr(m, attr):
+                _patched.add(module_name)
                 patch(m)
-        w = sys.modules.get(_WORKER_MODULE)
-        if (
-            w is not None
-            and hasattr(w, "Worker")
-            and not getattr(w, "_ft_counts_patched", False)
-        ):
-            w._ft_counts_patched = True
-            w.Worker.ft_eplb_counts = lambda self, *a, **k: dict(_COUNTS)
         return module
 
     builtins.__import__ = _hook
@@ -179,15 +159,16 @@ if os.environ.get("VLLM_FT_TEST_INJECT_EPLB_FAULT"):
 
 
 def _install_sitecustomize(
-    monkeypatch, tmp_path, source: str, env_name: str, env_value: str
+    monkeypatch, tmp_path, env_name: str, env_value: str
 ) -> None:
-    """Install `source` as sitecustomize for the servers, gated on `env_name`.
+    """Install the fault-injection sitecustomize for the servers, enabling the
+    fault gated on `env_name`.
 
     Also sets VLLM_SERVER_DEV_MODE so tests can reach /collective_rpc.
     """
     site_dir = tmp_path / "ft_inject"
     site_dir.mkdir()
-    (site_dir / "sitecustomize.py").write_text(source)
+    (site_dir / "sitecustomize.py").write_text(_FAULT_INJECT_SITECUSTOMIZE)
     existing = os.environ.get("PYTHONPATH", "")
     monkeypatch.setenv(
         "PYTHONPATH",
@@ -203,7 +184,6 @@ def _install_fault_injection(monkeypatch, tmp_path, rank: int) -> None:
     _install_sitecustomize(
         monkeypatch,
         tmp_path,
-        _FAULT_INJECT_SITECUSTOMIZE,
         "VLLM_FT_TEST_INJECT_FAULT",
         f"rank={rank}",
     )
@@ -559,7 +539,6 @@ def test_async_eplb_worker_fault_retry_resumes_rebalancing(monkeypatch, tmp_path
     _install_sitecustomize(
         monkeypatch,
         tmp_path,
-        _EPLB_FAULT_INJECT_SITECUSTOMIZE,
         "VLLM_FT_TEST_INJECT_EPLB_FAULT",
         "1",
     )

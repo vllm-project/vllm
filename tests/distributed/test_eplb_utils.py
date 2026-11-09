@@ -8,13 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from tests.utils import ensure_current_vllm_config
 from vllm.config import ParallelConfig
-from vllm.distributed import (
-    cleanup_dist_env_and_memory,
-    init_distributed_environment,
-    initialize_model_parallel,
-)
 from vllm.distributed.eplb import async_worker
 from vllm.distributed.eplb import eplb_state as eplb_state_module
 from vllm.distributed.eplb.eplb_state import (
@@ -201,23 +195,10 @@ def test_commit_eplb_maps_for_layer_does_not_sync_host():
 
 
 @pytest.fixture
-def eplb_dist_init(tmp_path):
-    """Like ``dist_init``, but with the platform's device backend (XCCL on XPU).
-
-    ``dist_init`` always requests NCCL, which falls back to gloo on XPU; it is
-    shared by many Intel CI tests, so it is left unchanged.
-    """
-    with ensure_current_vllm_config():
-        init_distributed_environment(
-            world_size=1,
-            rank=0,
-            distributed_init_method=f"file://{tmp_path / 'dist_init'}",
-            local_rank=0,
-            backend=current_platform.dist_backend,
-        )
-        initialize_model_parallel(1, 1)
-        yield
-    cleanup_dist_env_and_memory()
+def dist_init_backend() -> str:
+    # rearrange() all-reduces device tensors, which the gloo fallback that
+    # dist_init uses on XPU cannot do.
+    return current_platform.dist_backend
 
 
 class _WorkerProbe:
@@ -333,7 +314,7 @@ def _signal_rearrangement(state: EplbState) -> None:
 
 
 def test_fault_tolerance_recovers_async_eplb_after_worker_failure(
-    eplb_dist_init, monkeypatch
+    dist_init, monkeypatch
 ):
     """Under fault tolerance a worker failure must reach step(), or EPLB stalls
     silently with every rank waiting for the failed layer. The worker thread
