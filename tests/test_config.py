@@ -1352,7 +1352,11 @@ def test_batch_sharded_sampling_rejects_return_sampling_mask():
         VllmConfig._validate_batch_sharded_sampling(config)
 
 
-def test_batch_sharded_sampling_rejects_lora():
+@pytest.mark.parametrize(
+    "target_modules",
+    [None, ["lm_head"], ["language_model.lm_head"]],
+)
+def test_batch_sharded_sampling_rejects_lora(target_modules):
     """compute_logits_local() skips the TP logits gather, which cannot apply
     the lm_head LoRA delta; the combination must fail at startup instead of
     raising NotImplementedError at the first sampling step."""
@@ -1363,14 +1367,15 @@ def test_batch_sharded_sampling_rejects_lora():
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         model_config=SimpleNamespace(max_logprobs=20, return_sampling_mask=False),
         speculative_config=None,
-        lora_config=SimpleNamespace(target_modules=None),
+        lora_config=SimpleNamespace(target_modules=target_modules),
     )
 
     with pytest.raises(ValueError, match="LoRA"):
         VllmConfig._validate_batch_sharded_sampling(config)
 
 
-def test_batch_sharded_sampling_allows_lora_without_lm_head_target():
+@pytest.mark.parametrize("target_modules", [["o_proj"], ["language_model.o_proj"]])
+def test_batch_sharded_sampling_allows_lora_without_lm_head_target(target_modules):
     """LoRA restricted to modules other than lm_head never wraps the logits
     processor, so batch-sharded sampling still works and must not be
     rejected."""
@@ -1381,7 +1386,7 @@ def test_batch_sharded_sampling_allows_lora_without_lm_head_target():
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         model_config=SimpleNamespace(max_logprobs=20, return_sampling_mask=False),
         speculative_config=None,
-        lora_config=SimpleNamespace(target_modules=["o_proj"]),
+        lora_config=SimpleNamespace(target_modules=target_modules),
     )
 
     VllmConfig._validate_batch_sharded_sampling(config)
