@@ -426,6 +426,10 @@ def replicates_attention(vllm_config: VllmConfig) -> bool:
             raise NotImplementedError(
                 f"VLLM_MUSE_SPARK_REPLICATE_ATTN is not supported with {what}."
             )
+    # Nothing re-syncs ranks after a replicated block: autotune must agree.
+    from vllm.triton_utils.tp_synced_autotune import install
+
+    install()
     return True
 
 
