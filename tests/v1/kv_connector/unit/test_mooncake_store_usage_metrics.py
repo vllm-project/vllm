@@ -195,13 +195,6 @@ def test_prom_exports_allocation_and_existing_keys():
     assert _sample("vllm:mooncake_store_allocation_size_bucket", {"le": "4.0"}) == 1
 
 
-def test_reduce_reports_existing_keys():
-    stats = MooncakeStoreConnectorStats()
-    stats.record_operation("save_exists", 0.01, 4, num_existing_keys=3)
-
-    assert stats.reduce()["save_exists_existing_keys"] == 3
-
-
 def test_poll_master_metrics_reads_endpoint(master_url):
     assert poll_master_metrics(master_url) == parse_master_metrics(MASTER_METRICS_TEXT)
 

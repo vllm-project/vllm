@@ -71,14 +71,12 @@ def master_usage_fractions(
     if capacity <= 0:
         return {}
     discarded = snapshot.get("discarded_bytes", 0)
-    fractions = {
+    return {
+        "occupancy": snapshot.get("allocated_bytes", 0) / capacity,
         "read_usage": leased_bytes / capacity,
         "write_usage": writing_bytes / capacity,
         "usage": (writing_bytes + leased_bytes + discarded) / capacity,
     }
-    if "allocated_bytes" in snapshot:
-        fractions["occupancy"] = snapshot["allocated_bytes"] / capacity
-    return fractions
 
 
 def parse_master_metrics(text: str) -> dict[str, int]:
@@ -186,10 +184,6 @@ class MooncakeStoreConnectorStats(KVConnectorStats):
             reduced[f"{operation}_error_count"] = sum(
                 1 for record in records if record["status"] == "error"
             )
-            if operation == "save_exists":
-                reduced[f"{operation}_existing_keys"] = sum(
-                    int(record.get("num_existing_keys", 0)) for record in records
-                )
         return reduced
 
     def record_operation(
@@ -321,12 +315,13 @@ class MooncakeStorePromMetrics(KVConnectorPromMetrics):
         master_metrics_url = self._kv_transfer_config.kv_connector_extra_config.get(
             "mooncake_master_metrics_url"
         )
-        # Leased bytes per expiry second, from the workers' lease deltas.
+        # Leased bytes per expiry second and in-flight write bytes, from the
+        # workers' deltas; only tracked while the poller can expire and export them.
+        self._polling = bool(master_metrics_url)
         self._lease_lock = threading.Lock()
-        self._leased_bytes_by_expiry: dict[int, int] | None = None
+        self._leased_bytes_by_expiry: dict[int, int] = {}
         self._writing_bytes = 0
-        if master_metrics_url:
-            self._leased_bytes_by_expiry = {}
+        if self._polling:
             threading.Thread(
                 target=self._poll_master,
                 args=(master_metrics_url,),
@@ -335,7 +330,6 @@ class MooncakeStorePromMetrics(KVConnectorPromMetrics):
             ).start()
 
     def _leased_bytes(self) -> int:
-        assert self._leased_bytes_by_expiry is not None
         now = time.time()
         with self._lease_lock:
             buckets = self._leased_bytes_by_expiry
@@ -381,7 +375,7 @@ class MooncakeStorePromMetrics(KVConnectorPromMetrics):
         for operation, records in transfer_stats_data.items():
             assert isinstance(records, list)
             if operation == LEASES_KEY:
-                if self._leased_bytes_by_expiry is not None:
+                if self._polling:
                     with self._lease_lock:
                         buckets = self._leased_bytes_by_expiry
                         for record in records:
@@ -391,7 +385,7 @@ class MooncakeStorePromMetrics(KVConnectorPromMetrics):
                             )
                 continue
             if operation == WRITES_KEY:
-                if self._leased_bytes_by_expiry is not None:
+                if self._polling:
                     with self._lease_lock:
                         self._writing_bytes += sum(r["bytes"] for r in records)
                 continue
