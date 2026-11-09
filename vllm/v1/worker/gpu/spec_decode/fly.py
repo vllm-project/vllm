@@ -14,12 +14,12 @@ import torch
 def compute_fly_entropy(
     values: torch.Tensor, entropy_top_k: int, *, from_logits: bool = False
 ) -> torch.Tensor:
-    """Normalized top-k entropy in ``[0, 1]``.
+    """Normalized top-k entropy in `[0, 1]`.
 
-    Takes the largest ``k`` target scores, renormalizes them into a
-    distribution over those ``k`` candidates only, then divides the Shannon
-    entropy by ``log(k)`` so that ``fly_entropy_threshold`` keeps the same
-    meaning for every ``fly_entropy_top_k``.
+    Takes the largest `k` target scores, renormalizes them into a
+    distribution over those `k` candidates only, then divides the Shannon
+    entropy by `log(k)` so that `fly_entropy_threshold` keeps the same
+    meaning for every `fly_entropy_top_k`.
     """
     if values.ndim != 2:
         raise ValueError("FLy expects 2-D target probabilities or logits")
