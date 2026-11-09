@@ -365,7 +365,8 @@ def _get_fp8_fp4_mega_moe_warmup_key(
 
 
 def _get_fp8_fp4_mega_moe_m_values(
-    module: "DeepseekV4MoE | KimiMoE | MiniMaxM3MoE | Qwen4ExpMegaMoeBlock", max_tokens: int
+    module: "DeepseekV4MoE | KimiMoE | MiniMaxM3MoE | Qwen4ExpMegaMoeBlock",
+    max_tokens: int,
 ) -> list[int]:
     """Get the M values that reach every MegaMoE kernel and, where used,
     bf16_mega_gate config."""
