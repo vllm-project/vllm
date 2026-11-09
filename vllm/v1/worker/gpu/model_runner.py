@@ -2161,6 +2161,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
+                if self.pp_handler is not None:
+                    model_output = self.pp_handler.add_upstream_aux_hidden_states(
+                        model_inputs["intermediate_tensors"], model_output
+                    )
                 assert isinstance(model_output, tuple)
                 hidden_states, aux_hidden_states = model_output
             else:
