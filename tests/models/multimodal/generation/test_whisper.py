@@ -6,9 +6,12 @@ from typing import Any
 
 import pytest
 import torch
-from transformers import AutoModelForSpeechSeq2Seq
+from transformers import AutoModelForSpeechSeq2Seq, AutoTokenizer
 
+from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
+from vllm.config.speech_to_text import SpeechToTextConfig, SpeechToTextParams
+from vllm.model_executor.models.whisper import WhisperForConditionalGeneration
 from vllm.multimodal.audio import AudioResampler
 from vllm.platforms import current_platform
 
@@ -460,3 +463,39 @@ def test_encoder_cache_cleanup(
             f"but has {cache_size} entries. This indicates encoder cache "
             f"entries are not being properly freed."
         )
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
+def test_request_prompt_decoder_input(
+    vllm_runner,
+    model: str,
+    resampled_assets,
+) -> None:
+    """A transcription prompt must reach the decoder in the reference layout,
+    `get_prompt_ids(prompt)` followed by the SOT sequence, with no extra
+    decoder start token in front."""
+    check_model_available(model)
+    request_prompt = "Hello. See you on Wednesday."
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    expected = tokenizer.get_prompt_ids(request_prompt).tolist() + tokenizer.encode(
+        VLLM_PROMPT, add_special_tokens=False
+    )
+
+    with vllm_runner(
+        model, dtype="half", max_model_len=448, enforce_eager=True
+    ) as vllm_model:
+        llm = vllm_model.llm
+        prompt = WhisperForConditionalGeneration.get_generation_prompt(
+            SpeechToTextParams(
+                audio=resampled_assets[0][0],
+                stt_config=SpeechToTextConfig(),
+                model_config=llm.model_config,
+                language="en",
+                task_type="transcribe",
+                request_prompt=request_prompt,
+            )
+        )
+        [output] = llm.generate(prompt, SamplingParams(temperature=0, max_tokens=1))
+
+    assert output.prompt_token_ids == expected
