@@ -1977,8 +1977,8 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
         OnlineQuantizationConfig,
     )
     supported_quantization_description = (
-        "NVFP4 (modelopt_fp4) or online FP8 routed experts "
-        "(quantization_config={'moe': 'fp8_per_channel'})"
+        "NVFP4 (modelopt_fp4) or online quantization (routed experts: "
+        "quantization_config={'moe': 'fp8_per_channel'})"
     )
 
     packed_modules_mapping = {
@@ -2010,16 +2010,6 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
                 f"{self.supported_quantization_description} quantized checkpoints; "
                 "got quantization "
                 f"{vllm_config.quant_config.get_name()!r}."
-            )
-        if isinstance(vllm_config.quant_config, OnlineQuantizationConfig) and (
-            vllm_config.quant_config.args.linear is not None
-            or vllm_config.quant_config.args.targets is not None
-        ):
-            # Attention, dense, router and lm_head stay BF16.
-            raise NotImplementedError(
-                "Muse Spark online quantization covers the routed experts only: "
-                "pass quantization_config={'moe': 'fp8_per_channel'} without "
-                "'linear' or 'targets'."
             )
         if layer_type is None:
             layer_type = self.decoder_layer_cls
