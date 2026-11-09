@@ -2842,6 +2842,51 @@ def test_flashinfer_msa_sm90_gate(override, expected, monkeypatch):
     assert use == expected
 
 
+_SM12X_FLASHINFER_MSA_SUPPORTED = dict(
+    topk_blocks=TOPK,
+    kv_cache_dtype="auto",
+    num_heads=64,
+    num_kv_heads=4,
+    indexer_kv_dtype="bf16",
+    model_dtype=torch.bfloat16,
+)
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        ({}, True),
+        ({"num_heads": 32}, True),  # GQA group 8
+        ({"num_heads": 24}, False),  # GQA group 6: prefill tiles need 2^n
+        ({"num_heads": 48}, False),  # GQA group 12
+        ({"num_heads": 128}, False),  # GQA group 32: decode caps at 16
+        ({"kv_cache_dtype": "fp8_e5m2"}, False),
+    ],
+)
+def test_flashinfer_msa_sm12x_gate(override, expected, monkeypatch):
+    """On SM120/SM121 the FlashInfer pair engages only for GQA groups both
+    its decode and prefill kernels take; anything else keeps the Triton pair."""
+    import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod
+
+    platform = sparse_attn_mod.current_platform
+    monkeypatch.setattr(platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        platform, "is_device_capability", lambda cap, device_id=0: False
+    )
+    monkeypatch.setattr(
+        platform, "is_device_capability_family", lambda cap, device_id=0: cap == 120
+    )
+    monkeypatch.setattr(sparse_attn_mod, "has_flashinfer_msa_packed_kv", lambda: True)
+    monkeypatch.setattr(
+        sparse_attn_mod, "has_flashinfer_msa_per_token_topk", lambda: True
+    )
+
+    use = sparse_attn_mod.minimax_m3_use_flashinfer_msa(
+        **{**_SM12X_FLASHINFER_MSA_SUPPORTED, **override}
+    )
+    assert use == expected
+
+
 def test_msa_indexer_requires_the_aiter_attend(monkeypatch):
     """The top-k emits the attend's page table, so it needs that attend.
 

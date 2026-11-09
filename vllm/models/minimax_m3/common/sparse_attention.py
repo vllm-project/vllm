@@ -567,9 +567,9 @@ def minimax_m3_use_flashinfer_msa(
         current_platform.is_device_capability_family(120)
         and kv_cache_dtype != "fp8_e5m2"
         and indexer_kv_dtype in ("bf16", "fp8", "fp8_e4m3")
-        # The decode kernel takes GQA group sizes up to 16.
+        # Decode takes GQA groups up to 16; prefill tiles need a power of two.
         and num_heads % num_kv_heads == 0
-        and num_heads // num_kv_heads <= 16
+        and num_heads // num_kv_heads in (1, 2, 4, 8, 16)
         and has_flashinfer_msa_packed_kv()
         # The indexer passes num_valid_pages per token, which older flashinfer
         # builds reject at runtime.
