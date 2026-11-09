@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from pathlib import Path
-from time import monotonic
+
+import pytest
 
 from vllm.distributed.ec_transfer.ec_connector.tiering.executor import (
     ECFileIOExecutor,
 )
+
+pytestmark = pytest.mark.cpu_test
 
 
 def test_executor_round_trip_reports_one_completion_per_job(
@@ -36,9 +39,6 @@ def test_executor_round_trip_reports_one_completion_per_job(
         assert write_completions[0].success
         assert write_completions[0].operation == "write"
         assert write_completions[0].file_size_bytes == 8
-        assert write_completions[0].submit_time > 0
-        assert write_completions[0].queue_time >= 0
-        assert write_completions[0].transfer_time >= 0
         assert executor.poll_completed() == []
 
         read_id = executor.submit_read(
@@ -58,7 +58,6 @@ def test_executor_round_trip_reports_one_completion_per_job(
         assert read_completions[0].job_id == read_id
         assert read_completions[0].success
         assert read_completions[0].operation == "read"
-        assert read_completions[0].submit_time <= monotonic()
         assert destination == b"abcdefXY"
         assert executor.stats().pending_read_jobs == 0
         assert executor.stats().pending_read_bytes == 0

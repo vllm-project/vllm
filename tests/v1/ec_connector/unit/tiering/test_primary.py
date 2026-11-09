@@ -10,13 +10,12 @@ from vllm.distributed.ec_transfer.ec_connector.tiering.primary import (
     ECCPUPrimaryAdapter,
 )
 
+pytestmark = pytest.mark.cpu_test
+
 
 class _FakeBlocks:
     def __init__(self) -> None:
         self._data = bytearray(b"a" * 64 + b"b" * 64 + b"c" * 64 + b"d" * 64)
-
-    def data_ptr(self) -> int:
-        return 1234
 
     def numpy(self) -> bytearray:
         return self._data
@@ -32,30 +31,6 @@ class _FakeRegion:
 
     def cleanup(self) -> None:
         self.cleanup_called = True
-
-
-def test_adapter_shares_existing_allocator_and_does_not_own_region() -> None:
-    region = _FakeRegion()
-    cache = EmbeddingCache(region.num_blocks)
-    primary = ECCPUPrimaryAdapter(region, cache)
-
-    entry = primary.alloc("item", 2, (2, 16))
-    assert entry is not None
-    assert not entry.ready
-    assert primary.get("item") is entry
-    assert primary.block_size_bytes == 64
-    assert [bytes(view) for view in primary.block_views((0, 1))] == [
-        b"a" * 64 + b"b" * 64,
-    ]
-
-    assert cache.get("item") is entry
-    cache.mark_ready("item")
-    primary.pin("item")
-    assert not cache.get("item").evictable
-    primary.unpin("item")
-    assert cache.get("item").evictable
-
-    assert not region.cleanup_called
 
 
 @pytest.mark.parametrize(

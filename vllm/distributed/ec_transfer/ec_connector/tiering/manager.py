@@ -121,6 +121,10 @@ class ECTieringManager:
                 element_size,
                 reclaim_prefetch=False,
             )
+        entry = self._primary.get(identifier)
+        if entry is not None and entry.ready and identifier not in self._prefetch_holds:
+            self._primary.pin(identifier)
+            self._prefetch_holds.add(identifier)
         if (
             identifier in self._pending_read_identifiers
             or identifier in self._prefetch_holds
@@ -217,7 +221,7 @@ class ECTieringManager:
         shape: tuple[int, int],
         element_size: int,
     ) -> bool:
-        """Ensure an SSD hit is promoted, returning false while it is pending."""
+        """Wait for submitted reads; allow recomputation when promotion cannot start."""
         entry = self._primary.get(identifier)
         if entry is not None and entry.ready:
             return True
@@ -269,7 +273,8 @@ class ECTieringManager:
             self._prefetch_holds.clear()
             entry = self._primary.alloc(identifier, num_blocks, shape)
         if entry is None:
-            return False
+            # No read owns a destination: let has_cache_item report a miss.
+            return True
         try:
             destinations = self._primary.block_views(entry.block_ids)
             accepted = self._secondary.submit_read(cache_key, destinations)

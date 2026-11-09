@@ -20,47 +20,7 @@ from vllm.distributed.ec_transfer.ec_connector.tiering.manager import (
 )
 
 _NAMESPACE_DIGEST = "a" * 64
-
-
-class _FakePrimary:
-    block_size_bytes = 4
-
-    def __init__(self) -> None:
-        self.entries = {
-            "item": SimpleNamespace(block_ids=(0, 1), ready=True, shape=None)
-        }
-        self.blocks = [bytearray(4), bytearray(4)]
-        self.pin_count = 0
-        self.alloc_enabled = True
-
-    def get(self, key: str):
-        return self.entries.get(key)
-
-    def alloc(self, key: str, n_blocks: int, shape=None):
-        if key in self.entries:
-            return self.entries[key]
-        if not self.alloc_enabled:
-            return None
-        entry = SimpleNamespace(
-            block_ids=tuple(range(n_blocks)), ready=False, shape=shape
-        )
-        self.entries[key] = entry
-        return entry
-
-    def mark_ready(self, key: str) -> None:
-        self.entries[key].ready = True
-
-    def discard(self, key: str) -> None:
-        self.entries.pop(key, None)
-
-    def pin(self, key: str) -> None:
-        self.pin_count += 1
-
-    def unpin(self, key: str) -> None:
-        self.pin_count -= 1
-
-    def block_views(self, block_ids):
-        return tuple(memoryview(self.blocks[block_id]) for block_id in block_ids)
+pytestmark = pytest.mark.cpu_test
 
 
 class _FakeSecondary:
@@ -96,161 +56,60 @@ class _FakeSecondary:
         self.shutdown_called = True
 
 
-def test_write_through_holds_cpu_pin_until_store_completion() -> None:
-    primary = _FakePrimary()
-    secondary = _FakeSecondary()
-    manager = ECTieringManager(primary, secondary, _NAMESPACE_DIGEST)
-
+@pytest.mark.parametrize("store_state", ["accepted", "existing", "rejected"])
+def test_write_through_releases_blocks_after_completion_or_skip(store_state) -> None:
+    primary, secondary, manager = _bounded_promotion_manager()
+    primary.alloc("item", 2, (2, 1))
+    primary.mark_ready("item")
+    cache_key = build_ec_cache_key(_NAMESPACE_DIGEST, "item", "image", 2, 8)
+    if store_state == "existing":
+        secondary.entries.add(cache_key)
+    secondary.accept = store_state != "rejected"
     manager.register_cpu_save("item", "image", 2)
     manager.on_cpu_save_completed("item")
 
-    assert primary.pin_count == 1
-    assert len(secondary.write_submissions) == 1
-    cache_key, file_size_bytes = secondary.write_submissions[0]
-    assert file_size_bytes == 8
-    assert manager.has_pending()
-
-    secondary.write_completions.append(
-        ECWriteResult(cache_key=cache_key, success=True, file_size_bytes=8)
+    assert secondary.write_submissions == (
+        [] if store_state == "existing" else [(cache_key, 8)]
     )
+    if store_state == "accepted":
+        assert primary.alloc("other", 2) is None
+        secondary.write_completions.append(
+            ECWriteResult(cache_key=cache_key, success=True, file_size_bytes=8)
+        )
+        assert manager.ensure_primary_entry("item", "image", 2, (2, 1), 4)
+        assert primary.alloc("other", 2) is None
     assert not manager.has_pending()
-    assert primary.pin_count == 0
-
-
-def test_write_through_skips_existing_secondary_entry_without_pin() -> None:
-    primary = _FakePrimary()
-    secondary = _FakeSecondary()
-    manager = ECTieringManager(primary, secondary, _NAMESPACE_DIGEST)
-    manager.register_cpu_save("item", "image", 2)
-    secondary.entries.add(build_ec_cache_key(_NAMESPACE_DIGEST, "item", "image", 2, 8))
-
-    manager.on_cpu_save_completed("item")
-
-    assert primary.pin_count == 0
-    assert secondary.write_submissions == []
-
-
-def test_write_through_releases_pin_when_store_is_not_accepted() -> None:
-    primary = _FakePrimary()
-    secondary = _FakeSecondary(accept=False)
-    manager = ECTieringManager(primary, secondary, _NAMESPACE_DIGEST)
-    manager.register_cpu_save("item", "image", 2)
-
-    manager.on_cpu_save_completed("item")
-
-    assert primary.pin_count == 0
-    assert not manager.has_pending()
-
-
-def test_secondary_hit_is_promoted_once_and_published_on_completion() -> None:
-    primary = _FakePrimary()
-    secondary = _FakeSecondary()
-    manager = ECTieringManager(primary, secondary, _NAMESPACE_DIGEST)
-    cache_key = build_ec_cache_key(_NAMESPACE_DIGEST, "loaded", "image", 2, 8)
-    secondary.entries.add(cache_key)
-
-    assert not manager.ensure_primary_entry("loaded", "image", 2, (2, 1), 4)
-    assert not manager.ensure_primary_entry("loaded", "image", 2, (2, 1), 4)
-    assert secondary.read_submissions == [cache_key]
-    assert not primary.entries["loaded"].ready
-
-    secondary.read_completions.append(
-        ECReadResult(cache_key=cache_key, success=True, file_size_bytes=8)
-    )
-
-    assert manager.ensure_primary_entry("loaded", "image", 2, (2, 1), 4)
-    assert primary.entries["loaded"].ready
-    assert not manager.has_pending()
+    assert primary.alloc("other", 2) is not None
 
 
 def test_secondary_miss_allows_recomputation_without_cpu_allocation() -> None:
-    primary = _FakePrimary()
-    secondary = _FakeSecondary()
-    manager = ECTieringManager(primary, secondary, _NAMESPACE_DIGEST)
+    primary, secondary, manager = _bounded_promotion_manager()
 
     assert manager.ensure_primary_entry("missing", "image", 2, (2, 1), 4)
-    assert "missing" not in primary.entries
+    assert primary.get("missing") is None
     assert secondary.read_submissions == []
-
-
-def test_promotion_retries_when_cpu_space_becomes_available() -> None:
-    primary = _FakePrimary()
-    primary.alloc_enabled = False
-    secondary = _FakeSecondary()
-    manager = ECTieringManager(primary, secondary, _NAMESPACE_DIGEST)
-    cache_key = build_ec_cache_key(_NAMESPACE_DIGEST, "waiting", "image", 2, 8)
-    secondary.entries.add(cache_key)
-
-    assert not manager.ensure_primary_entry("waiting", "image", 2, (2, 1), 4)
-    assert secondary.read_submissions == []
-
-    primary.alloc_enabled = True
-    assert not manager.ensure_primary_entry("waiting", "image", 2, (2, 1), 4)
-    assert secondary.read_submissions == [cache_key]
-
-
-def test_failed_promotion_discards_cpu_allocation_and_allows_fallback() -> None:
-    primary = _FakePrimary()
-    secondary = _FakeSecondary()
-    manager = ECTieringManager(primary, secondary, _NAMESPACE_DIGEST)
-    cache_key = build_ec_cache_key(_NAMESPACE_DIGEST, "broken", "image", 2, 8)
-    secondary.entries.add(cache_key)
-    assert not manager.ensure_primary_entry("broken", "image", 2, (2, 1), 4)
-
-    secondary.entries.remove(cache_key)
-    secondary.read_completions.append(
-        ECReadResult(
-            cache_key=cache_key,
-            success=False,
-            file_size_bytes=8,
-            error="missing",
-        )
-    )
-
-    assert manager.ensure_primary_entry("broken", "image", 2, (2, 1), 4)
-    assert "broken" not in primary.entries
-    assert not manager.has_pending()
-
-
-def test_ready_hit_leaves_store_completion_to_lifecycle_poll() -> None:
-    primary = _FakePrimary()
-    secondary = _FakeSecondary()
-    manager = ECTieringManager(primary, secondary, _NAMESPACE_DIGEST)
-    manager.register_cpu_save("item", "image", 2)
-    manager.on_cpu_save_completed("item")
-    cache_key, _ = secondary.write_submissions[0]
-    secondary.write_completions.append(
-        ECWriteResult(cache_key=cache_key, success=True, file_size_bytes=8)
-    )
-
-    assert manager.ensure_primary_entry("item", "image", 2, (2, 1), 4)
-    assert primary.pin_count == 1
-    assert not manager.has_pending()
-    assert primary.pin_count == 0
 
 
 @pytest.mark.parametrize("raise_error", [False, True])
 def test_rejected_promotion_can_be_retried_without_stale_pending_state(
     raise_error, monkeypatch
 ) -> None:
-    primary = _FakePrimary()
-    secondary = _FakeSecondary(accept=False)
-    manager = ECTieringManager(primary, secondary, _NAMESPACE_DIGEST)
+    primary, secondary, manager = _bounded_promotion_manager()
+    secondary.accept = False
     cache_key = build_ec_cache_key(_NAMESPACE_DIGEST, "loaded", "image", 2, 8)
-    secondary.entries.add(cache_key)
-    original_views = primary.block_views
+    original_submit = secondary.submit_read
     if raise_error:
 
-        def broken_views(block_ids):
-            raise ValueError("invalid destination")
+        def failed_submit(cache_key, destinations):
+            raise OSError("read submission failed")
 
-        monkeypatch.setattr(primary, "block_views", broken_views)
+        monkeypatch.setattr(secondary, "submit_read", failed_submit)
 
     assert manager.ensure_primary_entry("loaded", "image", 2, (2, 1), 4)
-    assert "loaded" not in primary.entries
+    assert primary.get("loaded") is None
     assert not manager.has_pending()
 
-    monkeypatch.setattr(primary, "block_views", original_views)
+    monkeypatch.setattr(secondary, "submit_read", original_submit)
     secondary.accept = True
     assert not manager.ensure_primary_entry("loaded", "image", 2, (2, 1), 4)
     assert not manager.ensure_primary_entry("loaded", "image", 2, (2, 1), 4)
@@ -345,36 +204,6 @@ def test_scheduler_admission_publishes_completion_and_preserves_h2d_pin(
     assert primary.alloc("other", 2) is not None
 
 
-def test_pending_promotion_protects_blocks_until_completion():
-    primary, secondary, manager = _bounded_promotion_manager()
-    assert not manager.ensure_primary_entry("loaded", "image", 2, (2, 1), 4)
-    assert primary.alloc("other", 2) is None
-    _complete_promotion(secondary)
-    manager.poll()
-    assert primary.get("loaded").ready
-    assert primary.alloc("other", 2) is not None
-
-
-def test_failed_promotion_releases_real_allocator_blocks():
-    primary, secondary, manager = _bounded_promotion_manager()
-    assert not manager.ensure_primary_entry("loaded", "image", 2, (2, 1), 4)
-    _complete_promotion(secondary, success=False)
-    manager.poll()
-    assert primary.get("loaded") is None
-    assert primary.alloc("other", 2) is not None
-    assert not manager.has_pending()
-
-
-def test_shutdown_publishes_promotion_without_retaining_ready_blocks():
-    primary, secondary, manager = _bounded_promotion_manager()
-    assert not manager.ensure_primary_entry("loaded", "image", 2, (2, 1), 4)
-    _complete_promotion(secondary)
-    manager.shutdown()
-    assert secondary.shutdown_called
-    assert primary.get("loaded").ready
-    assert primary.alloc("other", 2) is not None
-
-
 def test_prefetch_deduplicates_waiters_and_holds_until_last_release():
     primary, secondary, manager = _bounded_promotion_manager()
     for request_id in ("r1", "r1", "r2"):
@@ -397,18 +226,6 @@ def test_cancelled_prefetch_keeps_blocks_until_io_completes():
     assert primary.alloc("other", 2) is None
     _complete_promotion(secondary)
     manager.poll()
-    assert primary.alloc("other", 2) is not None
-
-
-def test_prefetch_handoff_preserves_existing_h2d_pin():
-    primary, secondary, manager = _bounded_promotion_manager()
-    manager.prefetch_entry("r1", "loaded", "image", 2, (2, 1), 4)
-    _complete_promotion(secondary)
-    manager.poll()
-    primary.pin("loaded")  # Acquired by the existing CPU scheduler for H2D.
-    manager.release_prefetch("r1", "loaded")
-    assert primary.alloc("other", 2) is None
-    primary.unpin("loaded")  # Existing H2D completion acknowledgement.
     assert primary.alloc("other", 2) is not None
 
 
@@ -452,7 +269,7 @@ def test_shutdown_drains_prefetch_and_releases_ready_reservations():
 
 
 @pytest.fixture
-def indexed_scheduler(tmp_path):
+def indexed_scheduler(tmp_path, request):
     """Real mmap, index, executor and scheduler; only reuse the config builder."""
     from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
     from vllm.distributed.ec_transfer.ec_connector.tiering.io import store_entry
@@ -464,7 +281,9 @@ def indexed_scheduler(tmp_path):
         ECTieringScheduler,
     )
 
-    config = create_ec_vllm_config()
+    config = create_ec_vllm_config(
+        encoder_output_widths=getattr(request, "param", None)
+    )
     config.model_config.model = "test-encoder"
     config.model_config.revision = None
     config.ec_transfer_config.ec_connector_extra_config = {
@@ -480,12 +299,16 @@ def indexed_scheduler(tmp_path):
         ],
     }
     digest = ECTieringScheduler._build_namespace(config).digest()
+    file_size = 2 * config.ec_transfer_config.mm_encoder_output_widths["image"] * 2
     for identifier in ("A", "B"):
-        key = build_ec_cache_key(digest, identifier, "image", 2, 128)
+        key = build_ec_cache_key(digest, identifier, "image", 2, file_size)
         path = get_ec_entry_path(tmp_path, digest, key)
         path.parent.mkdir(parents=True, exist_ok=True)
         store_entry(
-            path, get_ec_temporary_path(path, "seed"), [memoryview(bytes(128))], 128
+            path,
+            get_ec_temporary_path(path, "seed"),
+            [memoryview(bytes(file_size))],
+            file_size,
         )
     scheduler = ECTieringScheduler(config)
     try:
@@ -516,27 +339,16 @@ def image_request(*identifiers):
     )
 
 
-def test_gpu_hit_skips_filesystem_and_eviction_reenables_demand(indexed_scheduler):
-    scheduler = indexed_scheduler
-    request = image_request("A")
-    assert scheduler.ensure_cache_available(request, 0, {"A"})
-    scheduler.on_new_request(request, local_cache_hashes={"A"})
-    assert not scheduler._tiering_manager._pending_reads
-    # A later, fresh snapshot must allow a demand load after GPU eviction.
-    assert not scheduler.ensure_cache_available(request, 0, set())
-    assert len(scheduler._tiering_manager._pending_reads) == 1
-
-
-def test_mixed_images_prefetch_only_gpu_miss_and_gpu_hit_bypasses_pending_read(
+def test_mixed_images_prefetch_both_and_gpu_hits_bypass_pending_reads(
     indexed_scheduler,
 ):
     scheduler = indexed_scheduler
     request = image_request("A", "B")
     scheduler.on_new_request(request, local_cache_hashes={"A"})
-    assert len(scheduler._tiering_manager._pending_reads) == 1
+    assert len(scheduler._tiering_manager._pending_reads) == 2
     # A concurrent request may have populated B on GPU while its prefetch runs.
     assert scheduler.ensure_cache_available(request, 0, {"A", "B"})
-    assert scheduler._primary.get("A") is None
+    assert scheduler._primary.get("A") is not None
 
 
 def test_gpu_cache_snapshot_is_read_only_and_expires_after_eviction():
@@ -595,3 +407,66 @@ def test_cpu_ready_gpu_miss_loads_without_filesystem_read(indexed_scheduler):
     assert not scheduler._tiering_manager._pending_reads
     scheduler.update_state_after_alloc(request, 0)
     assert "A" in scheduler._pending_loads
+
+
+@pytest.mark.parametrize("indexed_scheduler", [{"image": 128}], indirect=True)
+def test_deepstack_promotion_sizes_blocks_like_eccpu(indexed_scheduler):
+    scheduler = indexed_scheduler
+    scheduler.on_new_request(image_request("A"))
+    entry = scheduler._primary.get("A")
+    assert entry is not None
+    assert entry.shape == (2, 128)
+    assert len(entry.block_ids) == scheduler._num_blocks(entry.shape) == 8
+    assert len(entry.block_ids) * scheduler._primary.block_size_bytes == 512
+
+
+@pytest.mark.parametrize("copies", [1, 2])
+def test_arrival_holds_ready_cpu_copy_even_with_gpu_hit(indexed_scheduler, copies):
+    scheduler = indexed_scheduler
+    primary = scheduler._primary
+    primary.alloc("A", 2, (2, 32))
+    primary.mark_ready("A")
+    primary.alloc("busy", primary._region.num_blocks - 2)
+    request = image_request(*(["A"] * copies))
+    scheduler.on_new_request(request, local_cache_hashes={"A"})
+    scheduler.on_new_request(request, local_cache_hashes={"A"})
+    assert primary.alloc("B", 2) is None
+    assert not scheduler._tiering_manager._pending_reads
+    assert scheduler.ensure_cache_available(request, 0, {"A"})
+    assert primary.alloc("B", 2) is None
+    if copies == 2:
+        assert scheduler.ensure_cache_available(request, 2, {"A"})
+        assert primary.alloc("B", 2) is None
+    assert scheduler.ensure_cache_available(request, 2 * copies, set())
+    scheduler._tiering_manager.release_prefetch(request.request_id)
+    assert primary.alloc("B", 2) is not None
+
+
+def test_cpu_full_is_feature_miss_but_submitted_read_stays_pending(
+    indexed_scheduler, monkeypatch
+):
+    from threading import Event
+
+    from vllm.distributed.ec_transfer.ec_connector.tiering import executor
+
+    scheduler = indexed_scheduler
+    primary = scheduler._primary
+    release = Event()
+    load_entry = executor.load_entry
+
+    def blocked_load(*args, **kwargs):
+        assert release.wait(timeout=10)
+        return load_entry(*args, **kwargs)
+
+    monkeypatch.setattr(executor, "load_entry", blocked_load)
+    try:
+        scheduler.on_new_request(image_request("A"))
+        primary.alloc("busy", primary._region.num_blocks - 2)
+        assert not scheduler.ensure_cache_available(image_request("A"), 0, set())
+        assert scheduler.ensure_cache_available(image_request("B"), 0, set())
+        assert not scheduler.has_cache_item("B")
+        assert primary.get("A") is not None
+        assert primary.get("B") is None
+        assert len(scheduler._tiering_manager._pending_reads) == 1
+    finally:
+        release.set()

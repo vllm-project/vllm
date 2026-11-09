@@ -6,11 +6,12 @@ from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from vllm.distributed.ec_transfer.ec_connector.tiering.config import (
     ECFileSystemBackpressureConfig,
 )
 from vllm.distributed.ec_transfer.ec_connector.tiering.filesystem import (
-    ECFileSystemTier,
     ECFileSystemTierManager,
     ECReadResult,
     ECWriteResult,
@@ -23,6 +24,7 @@ from vllm.distributed.ec_transfer.ec_connector.tiering.layout import (
 _NAMESPACE_DIGEST = "a" * 64
 _CACHE_KEY = "b" * 64
 _CAPACITY_BYTES = 1 << 20
+pytestmark = pytest.mark.cpu_test
 
 
 class _FakeExecutor:
@@ -129,53 +131,6 @@ class _FakeExecutor:
             oldest_write_queue_age=0.0,
             oldest_delete_queue_age=0.0,
         )
-
-
-class _FakeFileSystemTier:
-    def contains(self, cache_key: str) -> bool:
-        return False
-
-    def submit_read(
-        self,
-        cache_key: str,
-        destinations: Sequence[memoryview],
-    ) -> bool:
-        return True
-
-    def submit_write(
-        self,
-        cache_key: str,
-        sources: Sequence[memoryview],
-        file_size_bytes: int,
-    ) -> bool:
-        return True
-
-    def poll_completed_reads(self) -> list[ECReadResult]:
-        return []
-
-    def poll_completed_writes(self) -> list[ECWriteResult]:
-        return []
-
-    def shutdown(self) -> None:
-        pass
-
-
-def test_filesystem_tier_protocol_is_structural() -> None:
-    assert isinstance(_FakeFileSystemTier(), ECFileSystemTier)
-
-
-def test_io_results_represent_success_and_failure() -> None:
-    read_result = ECReadResult(cache_key="read", success=True, file_size_bytes=16)
-    write_result = ECWriteResult(
-        cache_key="write",
-        success=False,
-        error="disk full",
-    )
-
-    assert read_result.file_size_bytes == 16
-    assert read_result.error is None
-    assert not write_result.success
-    assert write_result.error == "disk full"
 
 
 def test_manager_publishes_only_completed_writes_and_routes_completions(

@@ -85,8 +85,7 @@ class ECTieringScheduler(ECCPUScheduler):
         if self._tiering_manager is None or not self._is_consumer:
             return
         for feature in request.mm_features:
-            if feature.identifier in local_cache_hashes:
-                continue
+            # A GPU hit at arrival can be evicted before admission.
             num_tokens = feature.mm_position.get_num_embeds()
             shape = (
                 num_tokens,
@@ -174,18 +173,25 @@ class ECTieringScheduler(ECCPUScheduler):
         if self._tiering_manager is None or not self._is_consumer:
             return True
 
+        needed_identifiers = {
+            feature.identifier
+            for feature in request.mm_features
+            if feature.mm_position.offset + feature.mm_position.length
+            > num_computed_tokens
+        }
         all_ready = True
         for feature in request.mm_features:
+            position = feature.mm_position
+            if position.offset + position.length <= num_computed_tokens:
+                if feature.identifier not in needed_identifiers:
+                    self._tiering_manager.release_prefetch(
+                        request.request_id, feature.identifier
+                    )
+                continue
             if (
                 local_cache_hashes is not None
                 and feature.identifier in local_cache_hashes
             ):
-                self._tiering_manager.release_prefetch(
-                    request.request_id, feature.identifier
-                )
-                continue
-            position = feature.mm_position
-            if position.offset + position.length <= num_computed_tokens:
                 continue
             num_tokens = position.get_num_embeds()
             shape = (
