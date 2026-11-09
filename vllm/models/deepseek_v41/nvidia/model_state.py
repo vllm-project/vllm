@@ -193,22 +193,22 @@ class ReplayAttnMetadata(ModelSpecificAttnMetadata):
 class DeepseekV41ModelState(DefaultModelState):
     """DefaultModelState plus the engram lookback window and SWA bounded replay.
 
-    The engram n-gram hash needs the ids of the ``depth`` tokens preceding
-    each request's chunk start (see ``common/engram.py``). The runner keeps
+    The engram n-gram hash needs the ids of the `depth` tokens preceding
+    each request's chunk start (see `common/engram.py`). The runner keeps
     the full token history on device, so the window is gathered there every
     step: exact for prompt and generated tokens alike, whatever instance
     produced their KV.
 
-    SWA bounded replay (``CacheConfig.swa_bounded_replay``) keeps the
+    SWA bounded replay (`CacheConfig.swa_bounded_replay`) keeps the
     sliding-window KV out of prefix caching and rebuilds it after a prefix hit
     by recomputing the hit's last window; the scheduler tells each request the
-    position from which it holds window KV (``NewRequestData.replay_start``).
-    ``prepare_attn`` gathers those per batch, pads the replayed tokens' slots
+    position from which it holds window KV (`NewRequestData.replay_start`).
+    `prepare_attn` gathers those per batch, pads the replayed tokens' slots
     in the prefix-cacheable groups so the cached KV stays as is, and hands the
     starts to the sliding-window metadata builders, whose kernels read no
     window KV below them. With the decoder side on
-    (``model.decoder_replay_layers``) it also prepares the replay layers'
-    batch in eager steps: each prefill's last ``window`` rows as a sub-batch
+    (`model.decoder_replay_layers`) it also prepares the replay layers'
+    batch in eager steps: each prefill's last `window` rows as a sub-batch
     with metadata and a forward context of its own, like a microbatch.
     """
 
@@ -345,7 +345,7 @@ class DeepseekV41ModelState(DefaultModelState):
         return model_inputs
 
     def _fill_lookback(self, input_batch: InputBatch, req_states: RequestState) -> None:
-        """Gather the batch's lookback windows into ``lookback_token_ids``."""
+        """Gather the batch's lookback windows into `lookback_token_ids`."""
         window = self.lookback_token_ids
         assert window is not None
         all_token_ids = req_states.all_token_ids.gpu
@@ -484,7 +484,7 @@ class DeepseekV41ModelState(DefaultModelState):
         )
 
     def _build_attn_metadata(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        """The step's attention-metadata build (``DefaultModelState.prepare_attn``)."""
+        """The step's attention-metadata build (`DefaultModelState.prepare_attn`)."""
         return super().prepare_attn(*args, **kwargs)
 
     def _warm_up_replay_kernels(
@@ -808,9 +808,9 @@ class DeepseekV41ModelState(DefaultModelState):
         torch.Tensor,
         torch.Tensor,
     ]:
-        """Build the sub-``InputBatch`` of each request's last ``kept_lens``
+        """Build the sub-`InputBatch` of each request's last `kept_lens`
         rows, and its slot mappings, batch rows, rows among the previous stage's
-        (``prev_dropped``: its rows trimmed before each boundary), window KV
+        (`prev_dropped`: its rows trimmed before each boundary), window KV
         starts and rows trimmed before each boundary.
 
         The kept rows follow the device boundaries minus the rows trimmed before
@@ -937,7 +937,7 @@ class DeepseekV41ModelState(DefaultModelState):
     def _copy_attn_groups(
         self, attn_groups: list[list[AttentionGroup]], prefixes: set[str]
     ) -> list[list[AttentionGroup]]:
-        """Copies of the groups holding any of ``prefixes``, with builders of their
+        """Copies of the groups holding any of `prefixes`, with builders of their
         own like a microbatch's: a builder keeps the metadata it built."""
         own_groups = []
         for groups in attn_groups:

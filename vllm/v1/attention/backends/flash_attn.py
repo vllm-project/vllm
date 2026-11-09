@@ -594,9 +594,9 @@ def _maybe_symmetrize_window(
     window: tuple[int, int] | None,
     causal: bool | torch.Tensor,
 ) -> tuple[int, int] | None:
-    """Make a causal sliding window ``(w, 0)`` symmetric ``(w, w)`` when attention
+    """Make a causal sliding window `(w, 0)` symmetric `(w, w)` when attention
     is non-causal, so bidirectional queries attend in both directions. Leaves
-    full-attention ``(-1, -1)`` and already-symmetric windows untouched.
+    full-attention `(-1, -1)` and already-symmetric windows untouched.
     """
     non_causal = isinstance(causal, torch.Tensor) or causal is False
     if window is not None and window[0] >= 0 and window[1] == 0 and non_causal:
@@ -831,6 +831,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
+        if envs.VLLM_BATCH_INVARIANT:
+            max_seq_len = self.model_config.max_model_len
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
@@ -1751,34 +1753,34 @@ def _make_mm_prefix_mask_mod(
     sliding_window_left: int | None = None,
 ):
     """Build a CuTE-DSL mask_mod implementing
-    ``(causal AND sliding_window) OR mm_prefix``.
+    `(causal AND sliding_window) OR mm_prefix`.
 
-    Cached so identical ``(sliding_window, sliding_window_left)`` reuse the
-    same function object. FA4's ``hash_callable`` mixes ``repr()`` of closure
-    cells into the compile key; the nested ``_load_q_range`` would otherwise
+    Cached so identical `(sliding_window, sliding_window_left)` reuse the
+    same function object. FA4's `hash_callable` mixes `repr()` of closure
+    cells into the compile key; the nested `_load_q_range` would otherwise
     get a new address each call and force a full JIT recompile every forward.
 
-    The FA4 kernel passes *local* ``q_idx`` (0-based within the current
-    prefill chunk) while ``kv_idx`` is absolute (0-based over the full
+    The FA4 kernel passes *local* `q_idx` (0-based within the current
+    prefill chunk) while `kv_idx` is absolute (0-based over the full
     KV cache).  We recover the absolute Q position via
-    ``q_abs = q_idx + seqlen_k - seqlen_q`` (the context-length offset)
+    `q_abs = q_idx + seqlen_k - seqlen_q` (the context-length offset)
     so that causal, sliding-window, and mm_prefix range comparisons all
     use consistent absolute positions.  This matches the Triton
-    reference path (``compute_kv_seq_mask``).
+    reference path (`compute_kv_seq_mask`).
 
-    ``aux_tensors[0]`` holds the absolute ``[start, end]`` bounds of the
-    mm_prefix range containing each scheduled query token (``(-1, -1)`` when
-    none), and ``aux_tensors[1]`` is ``cu_seqlens_q``, used to turn the local
-    ``q_idx`` into a packed row index.  Because mm_prefix ranges never overlap,
-    ``r_start <= kv_idx <= r_end`` is exactly "query and key share a range", so
-    no key-side lookup is needed and ``kv_idx`` is never used as an index.
-    The ``(-1, -1)`` sentinel falls out for free: ``kv_idx <= -1`` is false for
+    `aux_tensors[0]` holds the absolute `[start, end]` bounds of the
+    mm_prefix range containing each scheduled query token (`(-1, -1)` when
+    none), and `aux_tensors[1]` is `cu_seqlens_q`, used to turn the local
+    `q_idx` into a packed row index.  Because mm_prefix ranges never overlap,
+    `r_start <= kv_idx <= r_end` is exactly "query and key share a range", so
+    no key-side lookup is needed and `kv_idx` is never used as an index.
+    The `(-1, -1)` sentinel falls out for free: `kv_idx <= -1` is false for
     every valid key.
 
-    ``sliding_window_left`` enforces the sliding window on the causal
-    term (None = full causal, no window).  ``sliding_window`` clamps the
+    `sliding_window_left` enforces the sliding window on the causal
+    term (None = full causal, no window).  `sliding_window` clamps the
     bidirectional block to the window (0 = unclamped; >0 = Gemma4 local
-    layers via ``mm_prefix_clamp_sliding_window``).
+    layers via `mm_prefix_clamp_sliding_window`).
     """
     import cutlass
     import cutlass.cute as cute
@@ -1794,10 +1796,10 @@ def _make_mm_prefix_mask_mod(
         """Load the mm_prefix range bounds for this query row.
 
         Both loads depend only on the query index, so they hoist out of the
-        unrolled per-element mask loop.  ``ssa_to_scalar`` reads lane 0, so one
-        call must not span query rows (hence the ``__vec_size__`` pin below).
-        Clamping keeps ``token_idx`` in bounds for partial tiles and padded
-        (``seqlen_q == 0``) rows; neither produces output.
+        unrolled per-element mask loop.  `ssa_to_scalar` reads lane 0, so one
+        call must not span query rows (hence the `__vec_size__` pin below).
+        Clamping keeps `token_idx` in bounds for partial tiles and padded
+        (`seqlen_q == 0`) rows; neither produces output.
         """
         q_ranges = aux_tensors[0]
         cu_seqlens_q = aux_tensors[1]

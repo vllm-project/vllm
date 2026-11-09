@@ -102,7 +102,7 @@ class Lfm2ToolParser(ToolParser):
 
     @staticmethod
     def _restore_reserved(tool_call):
-        """Restore parameter names renamed by ``rename_reserved_kwargs``."""
+        """Restore parameter names renamed by `rename_reserved_kwargs`."""
         arguments = json.loads(tool_call.function.arguments)
         restored = restore_reserved_kwarg_names(arguments)
         if restored != arguments:

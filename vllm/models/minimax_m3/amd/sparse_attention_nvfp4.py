@@ -177,10 +177,10 @@ class MiniMaxM3SparseRocmNvfp4Impl(MiniMaxM3SparseImpl):
         out_q: torch.Tensor,
         out_scale: torch.Tensor,
     ) -> None:
-        """``forward`` of a decode-only batch with the output emitted as MXFP8
-        (E4M3 values ``out_q`` [tokens, H * D], row-major E8M0 scales
-        ``out_scale`` [tokens, H * D / 32]) for the o_proj that follows, instead
-        of bf16. Equal to ``mxfp8_e4m3_quantize`` of the bf16 output."""
+        """`forward` of a decode-only batch with the output emitted as MXFP8
+        (E4M3 values `out_q` [tokens, H * D], row-major E8M0 scales
+        `out_scale` [tokens, H * D / 32]) for the o_proj that follows, instead
+        of bf16. Equal to `mxfp8_e4m3_quantize` of the bf16 output."""
         from vllm.models.minimax_m3.amd.ops.nvfp4_sparse_decode.host import (
             minimax_m3_nvfp4_sparse_decode_fly,
         )

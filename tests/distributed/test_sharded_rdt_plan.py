@@ -53,7 +53,7 @@ META = torch.device("meta")
 
 class _FakeLayer:
     """Stand-in for a leaf module. The planner only stores it and keys on
-    ``id()``; nothing in the plan path touches its attributes."""
+    `id()`; nothing in the plan path touches its attributes."""
 
     def __init__(self, tag: str) -> None:
         self.tag = tag
@@ -64,7 +64,7 @@ class _FakeLayer:
 
 def _module(layer, copies):
     """What the bake records for one leaf module: a scatter list whose entries
-    all carry that module as their ``layer``."""
+    all carry that module as their `layer`."""
     for c in copies:
         c.layer = layer
     return copies
@@ -107,7 +107,7 @@ def _planner(baked, *, name_meta, live=None, held_by=None, group_lens=None):
     instance without it and set exactly the state `_build_call_plan` consumes:
     the baked plan, the name metadata, the live-name set, and a bound router.
 
-    ``held_by``: name -> the ranks holding it. Names left out are held by every
+    `held_by`: name -> the ranks holding it. Names left out are held by every
     producer (the replicated class 0). Default: one producer holding everything,
     the degenerate router. Stand-in ranks 0-3 let plan tests assert chunk
     structure; owner VALUES are pinned by TestCallPlanRouting.
@@ -277,7 +277,7 @@ class TestFakeUnsupportedOps:
 
 
 class TestBakeRecording:
-    """During the dry run the fake's ``copy_`` is the data sink: it records the
+    """During the dry run the fake's `copy_` is the data sink: it records the
     source chain plus the meta destination's strided region and moves nothing."""
 
     def _recorder_and_fake(self, shape=(4, 6)):
@@ -350,7 +350,7 @@ class TestBakeRecording:
         assert recorded.shape == (4, 6)
 
     def test_the_recorded_dtype_is_the_chains_output_not_the_sources(self):
-        """``view(dtype)`` is allowlisted, so a chain can reinterpret dtype. The
+        """`view(dtype)` is allowlisted, so a chain can reinterpret dtype. The
         producer packs what the replay yields, so the record must carry the
         POST-chain dtype: taking it from the source name's metadata instead sizes
         the slice with the wrong itemsize and shifts every later slice in the
@@ -400,7 +400,7 @@ class TestConsumerIdentity:
         return eng
 
     def _ids(self, *, num_consumers, workers, replica_rank=0, num_replicas=1):
-        """Consumer ids for a DP-only engine whose workers are ``dp_index``es."""
+        """Consumer ids for a DP-only engine whose workers are `dp_index`es."""
         info = ShardedRDTWeightTransferInitInfo(
             num_consumers=num_consumers,
             replica_rank=replica_rank,
@@ -452,7 +452,7 @@ def _router(
     names=None,
     group_lens=None,
 ):
-    """A router over ``n`` single-name groups unless told otherwise, so a test
+    """A router over `n` single-name groups unless told otherwise, so a test
     can state expectations in group indices."""
     if names is None:
         n = len(name_owner_class or []) or (len(group_lens or []) or 1)
@@ -471,7 +471,7 @@ class TestRdtRouter:
     consumer pulling from a producer that never gathered the name trips its
     served-names guard. Freeing does NOT route this way — every consumer signals
     every owner of a group and the producers count to the live total — so these
-    pin PULL routing, plus ``group_owners`` for the free fan-out.
+    pin PULL routing, plus `group_owners` for the free fan-out.
     """
 
     def test_identity_when_fleets_match(self):
@@ -652,7 +652,7 @@ class TestReplicaOverlay:
         assert {r.producer_for(c, "g1") for c in range(8)} == {5}
 
     def test_a_width_that_does_not_divide_the_fleet_raises(self):
-        """A uniform fleet is asserted upstream in ``get_world_size``; if it ever
+        """A uniform fleet is asserted upstream in `get_world_size`; if it ever
         is not, the overlay would map two workers of one deployment onto the same
         block index, so refuse rather than serve the wrong bytes."""
         with pytest.raises(ValueError, match="does not divide"):
@@ -684,7 +684,7 @@ class TestReplicaOverlay:
 
 
 def _producer_pack_offsets(slices):
-    """The producer's rule, transcribed from ``rdt_produce_weights_batched``
+    """The producer's rule, transcribed from `rdt_produce_weights_batched`
     (sharded_rdt_trainer.py): 16B-aligned offsets in specs order.
 
     Kept as an independent implementation on purpose: the consumer computing the
@@ -1040,8 +1040,8 @@ class TestCallPlanRouting:
     def _routed_planner(
         self, held_by_group, num_consumers, consumer_id, *, held_by=None
     ):
-        """``held_by_group[g]`` = the ranks holding group g's names, so a test
-        can still speak in groups; ``held_by`` overrides individual names."""
+        """`held_by_group[g]` = the ranks holding group g's names, so a test
+        can still speak in groups; `held_by` overrides individual names."""
         baked, name_meta, names, group_lens = _one_module_per_layer(
             len(held_by_group) - 2
         )
@@ -1111,8 +1111,8 @@ class TestSignalCompleteness:
 
     def _moe_planner(self, worker_experts, *, ep_size=4, n_experts=8, n_layers=2):
         """Pre / n_layers MoE layers / post. Each layer: one norm (its own
-        module, stamp -1) + n_experts expert names stamped ``e // n_local``.
-        The worker's bake covers only ``worker_experts`` (its placement);
+        module, stamp -1) + n_experts expert names stamped `e // n_local`.
+        The worker's bake covers only `worker_experts` (its placement);
         foreign expert names never copied => dropped entirely, as in the real
         bake."""
         n_local = n_experts // ep_size
@@ -1398,8 +1398,8 @@ class TestDtypeFromName:
 
 
 class TestOpAllowlistAgreement:
-    """The consumer records op chains from ``SUPPORTED_OPS``; the producer
-    replays a chain only if every op is in ``ALLOWED_OPS``. The two must describe
+    """The consumer records op chains from `SUPPORTED_OPS`; the producer
+    replays a chain only if every op is in `ALLOWED_OPS`. The two must describe
     the same contract, so they are derived from one table.
 
     A divergence is silent until first pull: an op the consumer can emit but the
@@ -1418,13 +1418,13 @@ class TestOpAllowlistAgreement:
     def test_the_producer_allows_nothing_the_consumer_cannot_emit(self):
         """The allowlist is also a guard against a misbehaving or spoofed
         consumer invoking arbitrary methods on trainer tensors, so it must not be
-        wider than the ops the bake can actually produce. ``to`` in particular
+        wider than the ops the bake can actually produce. `to` in particular
         would let a replay change dtype or device."""
         assert not set(ALLOWED_OPS) - set(SUPPORTED_OPS.values())
         assert "to" not in ALLOWED_OPS
 
     def test_transpose_via_t_is_serveable(self):
-        """The specific regression: a chain recorded from ``.t()`` must pass the
+        """The specific regression: a chain recorded from `.t()` must pass the
         producer's guard."""
         fake = FakeRDTTensor(
             name="w",
