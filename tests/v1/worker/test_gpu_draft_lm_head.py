@@ -7,19 +7,33 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
+from vllm.model_executor.layers.quantization.online.fp8 import (
+    Fp8PtpcOnlineLinearMethod,
+)
 from vllm.model_executor.layers.quantization.online.lm_head import (
+    lm_head_padding_size,
     quantized_lm_head_copy,
     refresh_quantized_lm_heads,
 )
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    DEFAULT_VOCAB_PADDING_SIZE,
+    ParallelLMHead,
+    pad_vocab_size,
+)
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
+from vllm.model_executor.model_loader.utils import online_quantization_timing_context
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.spec_decode.eagle.utils import share_target_lm_head
 from vllm.v1.worker.gpu_worker import Worker
 
 # Not a multiple of the vocab padding, so the head has padded rows.
@@ -34,13 +48,17 @@ requires_nvfp4 = pytest.mark.skipif(
 NVFP4 = pytest.param("nvfp4", marks=requires_nvfp4)
 
 
-def _target_head(monkeypatch, seed: int = 0) -> ParallelLMHead:
+def _set_model_dtype(monkeypatch) -> None:
     # Online methods read the model dtype from the current config.
     model_config = SimpleNamespace(dtype=torch.bfloat16)
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.online.fp8.get_current_vllm_config",
         lambda: SimpleNamespace(model_config=model_config),
     )
+
+
+def _target_head(monkeypatch, seed: int = 0) -> ParallelLMHead:
+    _set_model_dtype(monkeypatch)
     head = ParallelLMHead(VOCAB, HIDDEN, disable_tp=True)
     gen = torch.Generator().manual_seed(seed)
     head.weight.data.copy_(torch.randn(head.weight.shape, generator=gen) * 0.02)
@@ -219,3 +237,53 @@ def test_layerwise_reload_of_drafter_keeps_copy(
     assert after.keys() == before.keys()
     for name, tensor in before.items():
         assert torch.equal(after[name], tensor), name
+
+
+class _OwnHeadDrafter(torch.nn.Module):
+    has_own_lm_head = True
+    quantizes_own_lm_head = True
+
+
+def test_drafter_quantizing_its_own_lm_head_keeps_it():
+    """A drafter that builds its own lm_head with the quantization keeps it,
+    even when it equals the target's; without quantization the equal head is
+    shared as before."""
+    target = torch.nn.Linear(HIDDEN, 64, bias=False)
+    drafter = _OwnHeadDrafter()
+    drafter.lm_head = own = torch.nn.Linear(HIDDEN, 64, bias=False)
+    own.weight.data.copy_(target.weight.data)
+
+    assert share_target_lm_head(drafter, target, "fp8") is None
+    assert drafter.lm_head is own
+    assert share_target_lm_head(drafter, target, None) is target
+    assert drafter.lm_head is target
+
+
+@pytest.mark.parametrize("has_quant_config", [False, True])
+def test_online_quantization_timing_without_quant_config(monkeypatch, has_quant_config):
+    """A head built with an online method but no quant config (a drafter's own
+    quantized lm_head) is processed without timing."""
+    _set_model_dtype(monkeypatch)
+    layer = torch.nn.Module()
+    layer.quant_config = (
+        OnlineQuantizationConfig(QuantizationConfigArgs(linear="fp8_per_channel"))
+        if has_quant_config
+        else None
+    )
+    method = Fp8PtpcOnlineLinearMethod()
+    with online_quantization_timing_context(layer, method):
+        pass
+    if has_quant_config:
+        assert layer.quant_config.online_quantization_time > 0
+
+
+# 202048: Muse Spark's draft vocabulary, 25256 rows per rank at TP8 unpadded.
+@pytest.mark.parametrize("vocab", [VOCAB, 202048])
+@pytest.mark.parametrize("tp_size", [1, 2, 4, 8, 16])
+def test_lm_head_padding_size_aligns_each_shard(vocab, tp_size):
+    """Each rank's shard of a quantized lm_head padded with
+    `lm_head_padding_size` is a multiple of 16 rows, and the padding keeps the
+    default vocabulary padding."""
+    padded = pad_vocab_size(vocab, lm_head_padding_size(tp_size))
+    assert padded % DEFAULT_VOCAB_PADDING_SIZE == 0
+    assert padded // tp_size % 16 == 0
