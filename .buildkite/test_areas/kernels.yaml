@@ -742,6 +742,7 @@ steps:
   - csrc/quantization/w8a8/cutlass/moe/
   - vllm/model_executor/layers/fusion/
   - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutedsl_batched_moe.py
   - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py
   - vllm/model_executor/layers/fused_moe/oracle/nvfp4.py
@@ -777,6 +778,7 @@ steps:
   - tests/kernels/attention/test_fused_mqa_topk.py
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
   - tests/kernels/quantization/test_block_fp8.py
+  - tests/kernels/moe/test_cutedsl_moe.py
   - tests/models/quantization/test_nvfp4.py
   - vllm/model_executor/kernels/linear/nvfp4/
   - vllm/model_executor/layers/quantization/compressed_tensors/transform/
