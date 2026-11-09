@@ -299,11 +299,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         req_id, _ChunkRequestState()
                     ).fallback = True
                 for req_id in metadata.push_chunk_cancellations:
-                    state = self._chunk_states.setdefault(req_id, _ChunkRequestState())
-                    state.cancelled = True
-                    if state.pending_jobs == 0:
-                        del self._chunk_states[req_id]
-                        self._complete_chunk_request(req_id)
+                    self._chunk_states.setdefault(
+                        req_id, _ChunkRequestState()
+                    ).cancelled = True
             self._pending_chunk_jobs.extend(metadata.push_chunk_jobs)
 
         # Batch + lease tracking (same as pull).
@@ -437,7 +435,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             try:
                 task = self._chunk_job_inbox.get_nowait()
             except queue.Empty:
-                return
+                break
             job = task.job
             with self._chunk_lock:
                 state = self._chunk_states.setdefault(
@@ -446,6 +444,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 state.pending_jobs += 1
                 state.final_seen |= job.is_final
             self._chunk_deferred.append(task)
+        # A request's jobs are all published before its cancellation, so once
+        # the inbox is drained no job of a cancelled request can still arrive.
+        with self._chunk_lock:
+            for req_id, state in list(self._chunk_states.items()):
+                if state.cancelled and state.pending_jobs == 0:
+                    del self._chunk_states[req_id]
+                    self._complete_chunk_request(req_id)
 
     def _chunk_registration(self, req_id: ReqId) -> dict[str, Any] | None:
         reg_data = self._chunk_registrations.get(req_id)

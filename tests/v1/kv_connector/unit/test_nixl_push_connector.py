@@ -416,6 +416,7 @@ class TestChunkedPushScheduler:
         assert [block.ref_cnt for block in blocks] == [1, 1, 1]
 
 
+
 # ----------------------------------------------------------------- #
 #  Worker-side tests                                                 #
 # ----------------------------------------------------------------- #
@@ -594,6 +595,52 @@ def test_chunk_path_not_used_when_decode_tp_differs():
         assert not w._chunk_path_supported(job, _registration_data("req-d"))
     mock_logger.warning_once.assert_called_once()
     assert mock_logger.warning_once.call_args.args[1:] == ("decode-engine", 2, 1)
+
+
+def test_chunk_job_queued_at_cancellation_is_not_sent():
+    # The request is cancelled while its chunk job is still in the writer's
+    # inbox, and D's registration arrives afterwards.
+    w = _StubWriterWorker.fresh()
+    w._chunked_push = True
+    w._chunk_job_inbox = queue.Queue()
+    w._pending_chunk_jobs = []
+    w._chunk_deferred, w._chunk_states = [], {}
+    w._chunk_transfers, w._chunk_transfer_tasks = {}, {}
+    w._next_chunk_transfer_id, w._completed_chunk_requests = 0, set()
+    w._chunk_lock = threading.Lock()
+    w._chunk_registrations = {}
+    w._ensure_handshake = lambda *a, **k: None
+    w._chunk_path_supported = lambda job, reg_data: True
+    w._send_heartbeats = lambda metadata: None
+    w._submit_chunk_job = MagicMock(return_value=([object()], False, False))
+    job = NixlPushChunkJob(
+        request_id="req-p",
+        local_block_ids=([1, 2],),
+        start_block=0,
+        end_block=2,
+        total_blocks=2,
+        is_final=True,
+    )
+    w._chunk_job_inbox.put(_ChunkTask(job=job, event=MagicMock()))
+    reports: list[str] = []
+
+    def take_reports():
+        reports.extend(w._completed_chunk_requests)
+        w._completed_chunk_requests = set()
+
+    meta = NixlConnectorMetadata()
+    meta.push_chunk_cancellations = {"req-p"}
+    w.start_load_kv(meta)
+    take_reports()
+    w._pending_d_registrations["req-p"] = _registration_data("req-d")
+    w._drain_chunk_job_inbox()
+    w._process_chunk_jobs()
+    for task in list(w._chunk_transfer_tasks.values()):
+        w._finish_chunk_job(task)
+    take_reports()
+
+    w._submit_chunk_job.assert_not_called()
+    assert reports == ["req-p"]
 
 
 class TestPushWriterRegSend:
