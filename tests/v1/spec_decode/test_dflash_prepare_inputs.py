@@ -31,6 +31,7 @@ def _run_prepare(
     cp_interleave: int = 1,
     draft_dcp_size: int | None = None,
     num_scheduled_tokens: int = 4,
+    attn_groups: list | None = None,
 ):
     device = torch.device(current_platform.device_type)
     max_num_reqs = 4
@@ -106,6 +107,7 @@ def _run_prepare(
         draft_kv_cache_group_id=0,
         draft_kv_cache_group_ids=[0],
         _layer_group_idx=None,
+        attn_groups=[attn_groups or []],
         block_tables=SimpleNamespace(
             slot_mappings=query_slot_mapping.unsqueeze(0),
             input_block_tables=[block_table],
@@ -204,6 +206,24 @@ def test_prepare_dflash_inputs_excludes_rejected_context_suffix_with_dcp():
     assert out.context_positions[:4].tolist() == [10, 11, 0, 0]
     assert out.context_slot_mapping[:4].tolist() == [28, 29, PAD_SLOT_ID, PAD_SLOT_ID]
     assert out.query_slot_mapping[:3].tolist() == [PAD_SLOT_ID, PAD_SLOT_ID, 30]
+
+
+def test_prepare_dflash_inputs_slots_include_packed_block_gaps():
+    """A packed cache split into kernel blocks is written at slots that step by
+    the blocks' physical spacing: 5 kernel blocks of 2 tokens here."""
+    group = SimpleNamespace(
+        kernel_block_stride=5,
+        kernel_block_size=2,
+        kv_cache_spec=SimpleNamespace(uses_slot_mapping=False),
+    )
+    out = _run_prepare(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+        attn_groups=[group],
+    )
+
+    assert out.context_slot_mapping[:2].tolist() == [72, 73]
+    assert out.query_slot_mapping[:3].tolist() == [80, 81, 82]
 
 
 def test_prepare_dflash_inputs_never_writes_the_null_block():

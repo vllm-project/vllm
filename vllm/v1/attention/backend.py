@@ -379,13 +379,6 @@ class AttentionBackend(ABC):
         return None
 
     @classmethod
-    def writes_kv_cache_from_block_table(cls) -> bool:
-        """Whether the layers write even a token (uncompressed) KV cache at
-        slots derived from their metadata's block table, as compressed caches
-        are written. A packed group can then split it into kernel blocks."""
-        return False
-
-    @classmethod
     def is_ssm(cls) -> bool:
         return False
 
