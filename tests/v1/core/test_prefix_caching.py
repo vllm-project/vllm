@@ -3092,6 +3092,77 @@ def test_prefill_hybrid_model_eagle_mamba_fine_grained():
     manager.free(req1)
 
 
+def test_prefill_hybrid_model_eagle_mamba_checkpoint_below_aligned_end():
+    """Test EAGLE prefix caching when the only reusable mamba state sits below
+    the aligned end of the cached prefix.
+
+    Allocating the first request in two chunks (32, then the remaining 39) never
+    exports state at the aligned end, so the mamba group's single checkpoint is
+    at 32 tokens. A second request sharing the 64-token prefix can therefore only
+    be served from that older boundary, and the reconciled hit is 32 rather than
+    the 48 the other EAGLE cases expect. See
+    https://github.com/vllm-project/vllm/issues/51771.
+    """
+    block_size = 16
+    spec_types = ["full", "mamba"]
+    num_groups = len(spec_types)
+
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        block_size, 128, spec_types, eagle_groups=True
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+
+    hash_fn = sha256
+
+    num_full_blocks = 4
+    common_token_ids = [i for i in range(num_full_blocks) for _ in range(block_size)]
+    all_token_ids = common_token_ids + [4] * 7
+
+    req0 = make_request("0", all_token_ids, block_size, hash_fn)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+
+    # 2 * block_size, then the rest: the mamba group ends up with a checkpoint
+    # at 32 and none at 48 or 64.
+    chunk_sizes = (2 * block_size, len(all_token_ids) - 2 * block_size)
+    for num_new_tokens in chunk_sizes:
+        blocks = manager.allocate_slots(req0, num_new_tokens, 0, computed_blocks)
+        assert blocks is not None
+        assert len(blocks.get_block_ids()) == num_groups
+        req0.num_computed_tokens += num_new_tokens
+        computed_blocks = None
+        manager.new_step_starts()
+
+    req1 = make_request("1", common_token_ids + [6] * 5, block_size, hash_fn)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+
+    assert num_computed_tokens == 2 * block_size
+    assert len(computed_blocks.blocks) == num_groups
+    for block_per_group, group in zip(
+        computed_blocks.blocks, kv_cache_config.kv_cache_groups
+    ):
+        group_block_size = group.block_size
+        assert len(block_per_group) * group_block_size == 2 * block_size
+
+    blocks = manager.allocate_slots(
+        req1,
+        len(common_token_ids) + 5 - num_computed_tokens,
+        num_computed_tokens,
+        computed_blocks,
+    )
+    assert blocks is not None
+    assert len(blocks.get_block_ids()) == num_groups
+
+    manager.free(req0)
+    manager.free(req1)
+
+
 def test_prefill_hybrid_model_mamba_align():
     """Test that MambaManager.cache_blocks() handles null blocks in align mode.
 
