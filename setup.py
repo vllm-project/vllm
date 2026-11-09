@@ -213,6 +213,9 @@ CMAKE_ENV_VARS = (
     "CMAKE_PREFIX_PATH",
     "CMAKE_GENERATOR_PLATFORM",
     "CMAKE_GENERATOR_TOOLSET",
+    "CMAKE_EXPORT_COMPILE_COMMANDS",
+    "CMAKE_OSX_ARCHITECTURES",
+    "MACOSX_DEPLOYMENT_TARGET",
     "CMAKE_C_COMPILER_LAUNCHER",
     "CMAKE_CXX_COMPILER_LAUNCHER",
     "CMAKE_CUDA_COMPILER_LAUNCHER",
@@ -236,6 +239,8 @@ CMAKE_ENV_VARS = (
 class CMakeBuildEnv(TypedDict):
     """Inputs a configured CMake build directory is tied to."""
 
+    source_dir: str
+    build_dir: str
     python: str
     torch_dir: str
     torch_version: str
@@ -410,6 +415,8 @@ class cmake_build_ext(build_ext):
             cmake_args += other_cmake_args.split()
 
         build_env = CMakeBuildEnv(
+            source_dir=os.path.realpath(ext.cmake_lists_dir),
+            build_dir=os.path.realpath(self.build_temp),
             python=os.path.realpath(sys.executable),
             torch_dir=os.path.dirname(torch.__file__),
             torch_version=torch.__version__,
