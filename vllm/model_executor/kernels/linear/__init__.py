@@ -164,6 +164,7 @@ from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
     FlashInferTrtllmNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.humming import (
+    HummingHadamardNvFp4LinearKernel,
     HummingNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.marlin import (
@@ -1016,25 +1017,30 @@ def init_mxfp8_linear_kernel(
 def _user_linear_activation_override() -> QuantKey | None:
     """User's linear activation override from quantization_config, or None."""
     from vllm.config import get_current_vllm_config_or_none
-    from vllm.config.quantization import QuantizationConfigArgs
+    from vllm.config.quantization import user_activation_override
 
-    config = get_current_vllm_config_or_none()
-    if config is None or config.model_config is None:
-        return None
-    args = config.model_config.quantization_config
-    if not isinstance(args, QuantizationConfigArgs) or args.linear is None:
-        return None
-    return args.linear.activation
+    return user_activation_override("linear", get_current_vllm_config_or_none())[0]
+
+
+def _user_linear_activation_override_is_set() -> bool:
+    """Whether the user set the linear activation, explicit `null` included."""
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.config.quantization import user_activation_override
+
+    return user_activation_override("linear", get_current_vllm_config_or_none())[1]
 
 
 def _resolve_linear_activation_key(
     model_activation_key: QuantKey | None,
 ) -> QuantKey | None:
-    """Apply ``--quantization-config.linear.activation`` to the checkpoint's
+    """Apply `--quantization-config.linear.activation` to the checkpoint's
     activation key. The override wins: it may replace a checkpoint's MXFP4
-    activations with a format a kernel computes directly (e.g. int8)."""
+    activations with a format a kernel computes directly (e.g. int8), or with
+    `null` to run the layer weight-only."""
     user_override = _user_linear_activation_override()
-    if user_override is None or user_override == model_activation_key:
+    if (
+        user_override is None and not _user_linear_activation_override_is_set()
+    ) or user_override == model_activation_key:
         return model_activation_key
     if model_activation_key is not None:
         logger.warning_once(
@@ -1202,41 +1208,34 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         HummingNvFp4LinearKernel,
     )
 
-    # VLLM_BATCH_INVARIANT forces deterministic execution. Prefer the
-    # batch-invariant CUTLASS implementation when available, otherwise fall
-    # back to emulation. It overrides --linear-backend.
+    # VLLM_BATCH_INVARIANT forces deterministic execution: Humming for W4A16,
+    # otherwise CUTLASS, or emulation where CUTLASS is unsupported. It
+    # overrides --linear-backend.
     force_kernel: type[NvFp4LinearKernel] | None = None
     quantization = "nvfp4_w4a16" if use_a16 else "nvfp4_w4a4"
     linear_backend = _get_linear_backend(quantization=quantization)
     if envs.VLLM_BATCH_INVARIANT:
-        bi_supported, reason = CutlassNvFp4LinearKernel.is_supported()
-        if bi_supported:
-            if linear_backend not in ("auto", "cutlass"):
-                logger.warning_once(
-                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
-                    "using the CUTLASS backend for deterministic execution.",
-                    linear_backend,
-                )
+        if use_a16:
+            force_kernel, bi_backend = HummingNvFp4LinearKernel, "humming"
+        else:
+            cutlass_supported, reason = CutlassNvFp4LinearKernel.is_supported()
+            if cutlass_supported:
+                force_kernel, bi_backend = CutlassNvFp4LinearKernel, "cutlass"
             else:
                 logger.info_once(
-                    "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
-                    "CUTLASS backend for deterministic execution."
+                    "VLLM_BATCH_INVARIANT is set but the batch-invariant NVFP4 "
+                    "kernel is not supported on this platform; falling back to "
+                    "emulation for deterministic execution. Reason: %s",
+                    reason,
                 )
-            force_kernel = CutlassNvFp4LinearKernel
-        else:
-            if linear_backend not in ("auto", "emulation"):
-                logger.warning_once(
-                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
-                    "using the emulation backend for deterministic execution.",
-                    linear_backend,
-                )
-            logger.info_once(
-                "VLLM_BATCH_INVARIANT is set but the batch-invariant NVFP4 "
-                "kernel is not supported on this platform; falling back to "
-                "emulation for deterministic execution. Reason: %s",
-                reason,
+                force_kernel, bi_backend = EmulationNvFp4LinearKernel, "emulation"
+        if linear_backend not in ("auto", bi_backend):
+            logger.warning_once(
+                "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; using the "
+                "%s backend for deterministic execution.",
+                linear_backend,
+                bi_backend,
             )
-            force_kernel = EmulationNvFp4LinearKernel
     elif linear_backend == "auto" and use_a16:
         _cc = current_platform.get_device_capability()
         compute_capability = _cc.to_int() if _cc is not None else None
@@ -1366,6 +1365,7 @@ def register_linear_kernel(
 
 
 __all__ = [
+    "HummingHadamardNvFp4LinearKernel",
     "fp8_scaled_mm_is_batch_invariant",
     "init_fp8_linear_kernel",
     "init_int8_linear_kernel",

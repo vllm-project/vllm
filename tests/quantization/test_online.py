@@ -26,7 +26,9 @@ from vllm.config.kernel import KernelConfig
 from vllm.config.load import LoadConfig
 from vllm.config.model import ModelConfig
 from vllm.config.quantization import (
+    QUANT_KEY_NAMES,
     QuantizationConfigArgs,
+    QuantSpec,
     resolve_quantization_config,
 )
 from vllm.config.vllm import VllmConfig
@@ -44,6 +46,10 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    Mxfp4MoeBackend,
+    _backend_activation_key,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
@@ -115,6 +121,14 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
     amax_for_tp_weight_quant,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+    kMxfp4Dynamic,
+    kMxfp4Static,
     kMxfp8Dynamic,
     kMxfp8Static,
     kNvfp4Dynamic,
@@ -164,6 +178,260 @@ NVFP4_MOE_MODEL_NAME = "RedHatAI/Qwen3-30B-A3B-NVFP4"
 MODELOPT_NVFP4_MOE_MODEL_NAME = "nvidia/Qwen3-30B-A3B-NVFP4"
 
 
+class _TestLinear(LinearBase):
+    def __init__(self):
+        torch.nn.Module.__init__(self)
+
+
+class _TestRoutedExperts(RoutedExperts):
+    def __init__(self):
+        from tests.kernels.moe.utils import make_dummy_moe_config
+
+        torch.nn.Module.__init__(self)
+        self.moe_config = make_dummy_moe_config(
+            num_experts=8, experts_per_token=2, hidden_dim=256, intermediate_size=256
+        )
+
+
+@pytest.mark.parametrize(
+    ("method_cls", "weight_key", "activation_quant_key"),
+    [
+        (
+            Fp8PerTensorOnlineLinearMethod,
+            kFp8StaticTensorSym,
+            Fp8PerTensorOnlineLinearMethod.activation_quant_key,
+        ),
+        (Fp8PerBlockOnlineLinearMethod, kFp8Static128BlockSym, kFp8Dynamic128Sym),
+        (Fp8PtpcOnlineLinearMethod, kFp8StaticChannelSym, kFp8DynamicTokenSym),
+        (Mxfp8OnlineLinearMethod, kMxfp8Static, None),
+        (Mxfp4OnlineLinearMethod, kMxfp4Static, kMxfp4Dynamic),
+    ],
+)
+def test_online_linear_methods_resolve_activation_quant_key(
+    default_vllm_config, method_cls, weight_key, activation_quant_key
+) -> None:
+    """An omitted activation resolves to the method's default key."""
+    args = QuantizationConfigArgs(linear=QuantSpec(weight=weight_key))
+    default_vllm_config.model_config = SimpleNamespace(
+        quantization_config=args,
+        dtype=torch.bfloat16,
+    )
+
+    config = OnlineQuantizationConfig(args)
+    method = config.get_quant_method(_TestLinear(), "linear")
+    assert method is not None
+    assert isinstance(method, method_cls)
+    assert method.activation_quant_key == activation_quant_key
+    # The resolver must return the resolved key, not a placeholder.
+    resolved = config.resolve_quant_method_cls(_TestLinear, "linear")
+    assert resolved is not None and resolved[3].activation == activation_quant_key
+
+
+@pytest.mark.parametrize(
+    ("layer_kind", "layer_cls", "weight_key", "raises"),
+    [
+        ("linear", _TestLinear, kFp8StaticTensorSym, True),
+        ("linear", _TestLinear, kFp8Static128BlockSym, True),
+        ("linear", _TestLinear, kFp8StaticChannelSym, True),
+        ("linear", _TestLinear, kMxfp8Static, True),
+        ("linear", _TestLinear, kMxfp4Static, False),
+        ("moe", _TestRoutedExperts, kFp8StaticTensorSym, True),
+        ("moe", _TestRoutedExperts, kFp8Static128BlockSym, True),
+        ("moe", _TestRoutedExperts, kFp8StaticChannelSym, True),
+        ("moe", _TestRoutedExperts, kMxfp8Static, True),
+        ("moe", _TestRoutedExperts, kMxfp4Static, False),
+    ],
+)
+@pytest.mark.parametrize("activation_quant_key", [None, kFp8DynamicTensorSym])
+def test_online_activation_override(
+    layer_kind, layer_cls, weight_key, activation_quant_key, raises
+) -> None:
+    """Only MXFP4 online methods honor an activation override, `null` included."""
+    args = QuantizationConfigArgs(
+        **{layer_kind: QuantSpec(weight=weight_key, activation=activation_quant_key)}
+    )
+    config = OnlineQuantizationConfig(args)
+    if raises:
+        with pytest.raises(NotImplementedError, match="activation override"):
+            config.resolve_quant_method_cls(layer_cls, layer_kind)
+        return
+
+    resolved = config.resolve_quant_method_cls(layer_cls, layer_kind)
+    assert resolved is not None and resolved[3].activation == activation_quant_key
+
+
+@pytest.mark.parametrize(
+    "activation_quant_key",
+    [None, *dict.fromkeys(QUANT_KEY_NAMES.values())],
+    ids=lambda key: "null" if key is None else str(key),
+)
+@pytest.mark.parametrize(
+    ("layer_kind", "method_cls"),
+    [("linear", Mxfp4OnlineLinearMethod), ("moe", Mxfp4OnlineMoEMethod)],
+)
+def test_online_mxfp4_activation_key_is_honoured_or_rejected(
+    default_vllm_config,
+    layer_kind: str,
+    method_cls: type,
+    activation_quant_key: quant_utils.QuantKey | None,
+) -> None:
+    """Each activation key either dispatches to a kernel that computes it, or is
+    rejected; it is never silently replaced by another format. Which keys are
+    supported depends on the platform and the installed kernels."""
+    default_vllm_config.model_config = SimpleNamespace(
+        quantization_config=None,
+        dtype=torch.bfloat16,
+    )
+    kwargs = {"moe": _TestRoutedExperts().moe_config} if layer_kind == "moe" else {}
+
+    if activation_quant_key is not None and activation_quant_key.scale.static:
+        # Online quantization has no calibrated activation scales.
+        with pytest.raises(NotImplementedError, match="static activation scales"):
+            method_cls(activation_quant_key=activation_quant_key, **kwargs)
+        return
+    try:
+        method = method_cls(activation_quant_key=activation_quant_key, **kwargs)
+    except (NotImplementedError, ValueError) as e:
+        errors = ("Failed to find a kernel", "No MXFP4 MoE backend", "cannot honour")
+        assert any(error in str(e) for error in errors), e
+        return
+
+    assert method.activation_quant_key == activation_quant_key
+    if layer_kind == "linear":
+        assert method.kernel.config.activation_quant_key == activation_quant_key
+    elif activation_quant_key != kMxfp4Dynamic:  # The default may run BF16.
+        computed_key = (
+            kMxfp4Dynamic
+            if method.mxfp4_backend == Mxfp4MoeBackend.EMULATION
+            else _backend_activation_key(method.mxfp4_backend)
+        )
+        assert computed_key == activation_quant_key
+
+
+@pytest.mark.skipif(
+    current_platform.is_xpu(),
+    reason="MXFP4 linear kernels on XPU only support dynamic activation.",
+)
+def test_online_hadamard_target_wraps_resolved_method(default_vllm_config) -> None:
+    """`hadamard_size` on a `targets` spec wraps the method built with the
+    resolved activation key in `InputHadamardLinearMethod`."""
+    from vllm.model_executor.layers.quantization.input_hadamard import (
+        InputHadamardLinearMethod,
+    )
+
+    args = QuantizationConfigArgs(
+        targets={
+            "*linear*": QuantSpec(weight="mxfp4", activation=None, hadamard_size=32)
+        }
+    )
+    default_vllm_config.model_config = SimpleNamespace(
+        quantization_config=args,
+        dtype=torch.bfloat16,
+    )
+
+    method = OnlineQuantizationConfig(args).get_quant_method(_TestLinear(), "linear")
+    assert isinstance(method, InputHadamardLinearMethod)
+    assert isinstance(method.quant_method, Mxfp4OnlineLinearMethod)
+    assert method.quant_method.activation_quant_key is None
+    assert method.size == 32
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Humming requires CUDA.")
+@pytest.mark.parametrize(
+    "scheme", ["fp8_per_block", "fp8_per_channel", "mxfp8", "mxfp4"]
+)
+@pytest.mark.parametrize("requantize", [False, True])
+def test_online_moe_stages_quantized_weights_for_humming(
+    scheme, requantize, tmp_path, dist_init, workspace_init
+) -> None:
+    """Real online conversion and reload must match a fresh Humming layer."""
+    from vllm.config import set_current_vllm_config
+
+    _write_minimal_llama_config(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
+        ),
+        kernel_config=KernelConfig(moe_backend="humming"),
+    )
+    online_config = OnlineQuantizationConfig(QuantizationConfigArgs(moe=scheme))
+    quant_config = online_config
+    if requantize:
+        quant_config = ModelOptNvFp4Config(is_checkpoint_nvfp4_serialized=True)
+        quant_config.online_quantization_config = online_config
+
+    def create(prefix):
+        return FusedMoEFactory(
+            num_experts=2,
+            top_k=1,
+            hidden_size=256,
+            intermediate_size=256,
+            params_dtype=torch.bfloat16,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
+    def load(runner, factor):
+        layer = runner.routed_experts
+        for name, parameter in list(layer.named_parameters()):
+            if "scale" in name:
+                weight = torch.full(
+                    parameter.shape,
+                    0.125 * factor,
+                    dtype=parameter.dtype,
+                    device=DEVICE,
+                )
+            elif parameter.dtype == torch.uint8:
+                weight = torch.full_like(parameter, 0x22, device=DEVICE)
+            else:
+                weight = torch.full(
+                    parameter.shape,
+                    0.125 * factor,
+                    dtype=parameter.dtype,
+                    device=DEVICE,
+                )
+            for expert in range(2):
+                if name.startswith("w13"):
+                    if weight[expert].ndim == 0:
+                        gate = up = weight[expert]
+                    else:
+                        gate, up = weight[expert].chunk(2, dim=0)
+                    for shard, tensor in (("w1", gate), ("w3", up)):
+                        parameter.weight_loader(parameter, tensor, name, shard, expert)
+                else:
+                    parameter.weight_loader(
+                        parameter, weight[expert], name, "w2", expert
+                    )
+        runner._quant_method.process_weights_after_loading(layer)
+        finalize_layerwise_reload(runner, config.model_config)
+
+    with set_current_vllm_config(config), torch.device(DEVICE):
+        runner = create("humming.loaded")
+        record_metadata_for_reloading(runner)
+        load(runner, 1.0)
+        parameters = dict(runner.named_parameters())
+        first = {name: tensor.clone() for name, tensor in parameters.items()}
+        initialize_layerwise_reload(runner)
+        load(runner, 2.0)
+        fresh = create("humming.fresh")
+        record_metadata_for_reloading(fresh)
+        load(fresh, 2.0)
+        expected = dict(fresh.named_parameters())
+        assert parameters.keys() == expected.keys()
+        for name, tensor in runner.named_parameters():
+            assert tensor is parameters[name]
+            torch.testing.assert_close(
+                tensor.view(torch.uint8),
+                expected[name].view(torch.uint8),
+                rtol=0,
+                atol=0,
+            )
+        assert any(
+            not torch.equal(tensor.view(torch.uint8), first[name].view(torch.uint8))
+            for name, tensor in runner.named_parameters()
+        )
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -191,6 +459,27 @@ def test_legacy_fp8_online_quantization_uses_per_tensor_shorthand(
     assert result.args == resolve_quantization_config("fp8_per_tensor", overrides)
     assert "--quantization fp8 is deprecated for online quantization" in caplog.text
     assert "--quantization fp8_per_tensor instead" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "quantization_config",
+    [
+        {"moe": {"activation": "mxfp8"}},
+        {"targets": {"*experts*": {"activation": "mxfp8"}}},
+    ],
+)
+def test_online_activation_only_spec_raises(tmp_path, quantization_config) -> None:
+    """Without a weight key, standalone online quantization would silently no-op."""
+    _write_minimal_llama_config(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        quantization="online",
+        quantization_config=resolve_quantization_config("online", quantization_config),
+    )
+    with pytest.raises(ValueError, match="does not set a weight quantization key"):
+        config = weight_utils.get_quant_config(model_config, LoadConfig())
+        assert isinstance(config, OnlineQuantizationConfig)
+        config.resolve_quant_method_cls(RoutedExperts, "model.layers.0.mlp.experts")
 
 
 @pytest.mark.parametrize(
@@ -279,6 +568,7 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
     kernel = SimpleNamespace(
         fused_experts=SimpleNamespace(
             process_weights_after_loading=process_weights,
+            keep_constants=lambda layer: None,
         )
     )
     make_kernel = Mock(return_value=kernel)
@@ -881,7 +1171,7 @@ def test_weight_loading_requantization_moe(
     for name, expected in tensors.items():
         # Public loading must preserve all packed weights and scale conventions.
         torch.testing.assert_close(getattr(layer, name).cpu(), expected, rtol=0, atol=0)
-    actual_w13, actual_w2 = source.dequantize_weight(layer)
+    ((_, actual_w13, actual_w2),) = source.dequantize_weight(layer)
 
     # Gate/up ordering and distinct global scales must survive source loading.
     torch.testing.assert_close(actual_w13.cpu(), expected_w13, rtol=0, atol=0)
@@ -921,9 +1211,12 @@ def test_online_requantized_moe_padding(
         w13_num_shards=num_shards, is_act_and_mul=is_act_and_mul, has_bias=has_bias
     )
     method.requantization_source = Mock()
-    method.requantization_source.dequantize_weight.return_value = (w13, w2)
+    method.requantization_source.dequantize_weight.return_value = iter(
+        [(slice(0, 2), w13, w2)]
+    )
     layer = SimpleNamespace(
         local_num_experts=2,
+        expert_map_manager=SimpleNamespace(num_fused_shared_experts=0),
         moe_config=SimpleNamespace(
             hidden_dim_unpadded=16,
             intermediate_size_per_partition_unpadded=32,
@@ -1075,6 +1368,7 @@ def test_online_requantized_moe_reload(
         layer = torch.nn.Module()
         layer.local_num_experts = 2
         layer.num_experts = 2
+        layer.expert_map_manager = SimpleNamespace(num_fused_shared_experts=0)
         layer._expert_routing_tables = lambda: None
         layer.moe_config = SimpleNamespace(
             hidden_dim_unpadded=size,
@@ -1278,15 +1572,20 @@ def test_online_requantized_moe_reload(
         torch.testing.assert_close(parameter, expected_parameters[name], rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("targets", [False, True])
 def test_activation_only_override_applies_to_checkpoint_method(
-    default_vllm_config, tmp_path
+    default_vllm_config, tmp_path, monkeypatch, targets
 ) -> None:
     """Activation-only overrides remain available to the checkpoint method."""
     _write_minimal_llama_config(tmp_path)
     model_config = ModelConfig(
         model=str(tmp_path),
         quantization="compressed-tensors",
-        quantization_config=quant_config_args(moe={"activation": "mxfp8"}),
+        quantization_config=quant_config_args(
+            **{"targets": {"*layers.0.mlp.experts": {"activation": "mxfp8"}}}
+            if targets
+            else {"moe": {"activation": "mxfp8"}}
+        ),
         hf_overrides={
             "quantization_config": {
                 "quant_method": "compressed-tensors",
@@ -1300,13 +1599,31 @@ def test_activation_only_override_applies_to_checkpoint_method(
 
     assert isinstance(result, CompressedTensorsConfig)
     assert isinstance(result.online_quantization_config, OnlineQuantizationConfig)
+    # An activation-only override quantizes no layer online, and does not raise.
+    assert (
+        result.online_quantization_config.resolve_quant_method_cls(
+            RoutedExperts, "model.layers.0.mlp.experts"
+        )
+        is None
+    )
 
     default_vllm_config.model_config = model_config
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         _resolve_activation_key,
     )
+    from vllm.model_executor.layers.quantization import resolve_quant_method
 
-    assert _resolve_activation_key(None) == kMxfp8Dynamic
+    # The activation key the checkpoint method resolves while it is built; a
+    # `targets` override only applies to the layers it matches.
+    keys = []
+    monkeypatch.setattr(
+        result,
+        "get_quant_method",
+        lambda *_: keys.append(_resolve_activation_key(None)),
+    )
+    for prefix in ("model.layers.0.mlp.experts", "model.layers.1.mlp.experts"):
+        resolve_quant_method(result, _TestRoutedExperts(), prefix)
+    assert keys == [kMxfp8Dynamic, None if targets else kMxfp8Dynamic]
 
 
 def test_online_overlay_requires_normalized_quantization_config(tmp_path) -> None:
@@ -1511,7 +1828,8 @@ def test_nvfp4_one_sided_sizes_dispatched_activations(
         raise RuntimeError("dispatch layout verified before allocation")
 
     monkeypatch.setattr(
-        nvfp4_oracle, "maybe_make_prepare_finalize", check_dispatch_layout
+        "vllm.model_executor.layers.fused_moe.oracle.base.maybe_make_prepare_finalize",
+        check_dispatch_layout,
     )
     with pytest.raises(
         RuntimeError, match="dispatch layout verified before allocation"
@@ -1720,16 +2038,32 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
             id="partially_prequantized_checkpoint",
         ),
         pytest.param(
-            PARTIALLY_PREQUANTIZED_MODEL_NAME,
-            None,
-            {"targets": {"model.layers.1.self_attn.o_proj": "mxfp8"}},
-            Mxfp8OnlineLinearMethod,
-            CompressedTensorsMoEMethod,
+            GRANITE_MODEL_NAME,
+            "mxfp4",
+            {"moe": {"weight": "mxfp4", "activation": None}},
+            Mxfp4OnlineLinearMethod,
+            Mxfp4OnlineMoEMethod,
             {},
-            id="partially_prequantized_checkpoint",
+            id="mxfp4_null_activation_override",
         ),
         pytest.param(
-            "mgoin/Qwen3-0.6B-MXFP8",
+            GRANITE_MODEL_NAME,
+            "online",
+            {
+                "targets": {
+                    "*experts*": {
+                        "weight": "mxfp4",
+                        "activation": None,
+                    },
+                },
+            },
+            UnquantizedLinearMethod,
+            Mxfp4OnlineMoEMethod,
+            {},
+            id="targets_activation_override",
+        ),
+        pytest.param(
+            "vllm-project/Qwen3-0.6B-MXFP8",
             None,
             {"linear": "fp8_per_channel"},
             Fp8PtpcOnlineLinearMethod,
@@ -1780,6 +2114,11 @@ def test_online_quantization(
     """
     # TODO: Relax this condition once there is a native MXFP4_MXFP4
     # linear/moe backend supported on cuda.
+    target_specs = (
+        online_quant_args.get("targets", {})
+        if isinstance(online_quant_args, dict)
+        else {}
+    )
     if (quant_scheme == "mxfp4" or expected_moe_cls is Mxfp4OnlineMoEMethod) and not (
         on_gfx950() or on_gfx942()
     ):
@@ -1788,6 +2127,8 @@ def test_online_quantization(
     if current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
         rocm_aiter_ops.refresh_env_variables()
+        if not use_rocm_aiter and "activation" in str(online_quant_args):
+            pytest.skip("Only AITER computes BF16 activations for MXFP4 MoE.")
 
     if current_platform.is_xpu():
         if quant_scheme in ("fp8_per_block", "fp8_per_channel"):
@@ -1841,7 +2182,7 @@ def test_online_quantization(
             assert_source_weights_released,
         )
 
-    if model_name == "mgoin/Qwen3-0.6B-MXFP8":
+    if model_name == "vllm-project/Qwen3-0.6B-MXFP8":
         original_process = Fp8PtpcOnlineLinearMethod.process_weights_after_loading
 
         def assert_source_weights_released(method, layer) -> None:
@@ -1915,7 +2256,7 @@ def test_online_quantization(
     if model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME:
         o_proj = model.model.layers[1].self_attn.o_proj
         moe = model.model.layers[0].mlp.experts
-    elif model_name == "mgoin/Qwen3-0.6B-MXFP8":
+    elif model_name == "vllm-project/Qwen3-0.6B-MXFP8":
         o_proj = model.model.layers[0].self_attn.o_proj
         moe = None
     elif model_name in (NVFP4_MOE_MODEL_NAME, MODELOPT_NVFP4_MOE_MODEL_NAME):
@@ -1930,6 +2271,14 @@ def test_online_quantization(
     if moe is not None:
         assert isinstance(moe._quant_method, expected_moe_cls)
 
+    moe_args = (
+        online_quant_args.get("moe") if isinstance(online_quant_args, dict) else None
+    )
+    if (isinstance(moe_args, dict) and "activation" in moe_args) or isinstance(
+        target_specs.get("*experts*"), dict
+    ):
+        assert moe._quant_method.activation_quant_key is None
+
     if model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME and isinstance(
         o_proj.quant_method.kernel, (MarlinMxfp8LinearKernel, HummingMxfp8LinearKernel)
     ):
@@ -1940,6 +2289,8 @@ def test_online_quantization(
         assert o_proj.weight.dtype == torch.bfloat16
     elif model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME:
         assert o_proj.weight.dtype == MXFP8_VALUE_DTYPE
+    elif expected_linear_cls is UnquantizedLinearMethod:
+        assert o_proj.weight.dtype == torch.bfloat16
     elif (
         model_name
         in (
@@ -2212,15 +2563,32 @@ def test_online_quantization_targets_reject_unsupported_layer() -> None:
         config.get_quant_method(lm_head, "lm_head")
 
 
-def test_log_online_quantization(default_vllm_config, monkeypatch) -> None:
-    config = OnlineQuantizationConfig(quant_config_args(linear="fp8_per_tensor"))
+@pytest.mark.parametrize(
+    ("target_quantization", "expected_target_summary"),
+    [
+        ("mxfp4", "mxfp4"),
+        (
+            {"weight": "mxfp4", "activation": "mxfp8"},
+            '{"weight":"mxfp4","activation":"mxfp8"}',
+        ),
+    ],
+)
+def test_log_online_quantization(
+    default_vllm_config,
+    monkeypatch,
+    target_quantization,
+    expected_target_summary,
+) -> None:
+    config = OnlineQuantizationConfig(
+        quant_config_args(targets={"*experts*": target_quantization})
+    )
     config.quantized_layers = {
         "model.layers.0.mlp.down_proj": ("linear", "fp8_per_tensor", None),
         "model.layers.1.mlp.down_proj": ("linear", "fp8_per_tensor", None),
-        "model.layers.0.self_attn.qkv_proj": (
+        "model.layers.0.block_sparse_moe.experts": (
             "targets",
-            "mxfp4",
-            r"re:.*qkv_proj.*",
+            expected_target_summary,
+            "*experts*",
         ),
     }
     default_vllm_config.quant_config = config
@@ -2236,9 +2604,11 @@ def test_log_online_quantization(default_vllm_config, monkeypatch) -> None:
     log_online_quantization(default_vllm_config)
 
     assert logged_messages == [
-        "Quantizing 3 layers of types: mlp.down_proj: 2 (from linear: "
-        "fp8_per_tensor); self_attn.qkv_proj: 1 (from targets: "
-        "re:.*qkv_proj.*, mxfp4)"
+        (
+            "Quantizing 3 layers of types: block_sparse_moe.experts: 1 (from "
+            f"targets: *experts*, {expected_target_summary}); mlp.down_proj: 2 "
+            "(from linear: fp8_per_tensor)"
+        )
     ]
 
 
@@ -2265,6 +2635,36 @@ def test_online_nvfp4_per_token_moe(vllm_runner, monkeypatch) -> None:
             assert isinstance(
                 layer.block_sparse_moe.experts._quant_method, Nvfp4OnlineMoEMethod
             )
+            assert isinstance(
+                layer.self_attn.o_proj.quant_method, UnquantizedLinearMethod
+            )
+
+        llm.apply_model(check_model)
+        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
+        print(outputs[0][1])
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="LUT-B MoE needs a CUDA-like GPU."
+)
+def test_online_lut_b_moe(vllm_runner, monkeypatch) -> None:
+    """LUT-B quantizes only the routed experts; Rubin runs it natively."""
+    from vllm.model_executor.layers.quantization.online.lut_b import (
+        LutBOnlineMoEMethod,
+    )
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    with vllm_runner(
+        "ibm-granite/granite-3.0-1b-a400m-base",
+        quantization="lut_b_moe",
+        enforce_eager=True,
+    ) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+            method = layer.block_sparse_moe.experts._quant_method
+            assert isinstance(method, LutBOnlineMoEMethod)
             assert isinstance(
                 layer.self_attn.o_proj.quant_method, UnquantizedLinearMethod
             )
@@ -2477,7 +2877,7 @@ def test_nvfp4_moe_dequantization_and_fp8_requantization_numerics(
         **checkpoint_tensors,
         params_dtype=torch.bfloat16,
     )
-    w13_dequantized, w2_dequantized = source.dequantize_weight(source_layer)
+    ((_, w13_dequantized, w2_dequantized),) = source.dequantize_weight(source_layer)
 
     w13 = torch.cat((w1, w3), dim=1)
     torch.testing.assert_close(w13_dequantized, w13_reference, rtol=0, atol=0)
