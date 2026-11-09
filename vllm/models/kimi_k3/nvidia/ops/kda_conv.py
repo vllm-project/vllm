@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KDA prefill short convolution over the packed Q|K|V projection in one launch.
 
-The stock prefill runs ``causal_conv1d_fn`` once per Q, K and V. Each call first
+The stock prefill runs `causal_conv1d_fn` once per Q, K and V. Each call first
 casts the row-strided bf16 slice of the in_proj output to a dense FP32 copy (the
 conv state dtype), convolves it into an FP32 output and casts that back to bf16:
 per layer and rank at a 16K chunk that is 3 x (76 + 52 + 19) us, of which only
@@ -10,13 +10,13 @@ the convolution reads and writes the data the layer needs.
 
 This kernel reads the bf16 Q|K|V columns of the in_proj output in place, does the
 stock arithmetic in FP32 (bf16 -> FP32 is exact; same product order, FP32 weights,
-FP32 conv state, SiLU), and stores bf16 Q, K and V as three dense ``(tokens, dim)``
+FP32 conv state, SiLU), and stores bf16 Q, K and V as three dense `(tokens, dim)`
 planes of one buffer, the layout the stock casts produce. FP32 -> bf16 rounds to
-nearest even, as the stock ``.to(bfloat16)`` does, so the outputs and the updated
+nearest even, as the stock `.to(bfloat16)` does, so the outputs and the updated
 conv state are bit-identical to the stock path.
 
 Programs map to (sequence, token chunk) on the device by a radix-32 search over
-``query_start_loc``, so no host-side chunk table is needed and the launch is CUDA
+`query_start_loc`, so no host-side chunk table is needed and the launch is CUDA
 graph safe. A program streams its tokens over one channel vector with the 3
 history rows in registers and the next 8 input rows prefetched in a register
 queue. As in the stock kernel, only a sequence's first chunk reads
@@ -301,7 +301,7 @@ def packed_causal_conv1d_supported(
     conv_states: torch.Tensor,
     part_dim: int,
 ) -> bool:
-    """Whether ``packed_causal_conv1d_fn`` reproduces the stock conv bit for bit.
+    """Whether `packed_causal_conv1d_fn` reproduces the stock conv bit for bit.
 
     The stock kernel computes in the conv state dtype; with an FP32 state that is
     FP32 for every input dtype, which this kernel does."""
@@ -335,11 +335,11 @@ def packed_causal_conv1d_fn(
     activation: str | None = "silu",
     null_block_id: int | None = NULL_BLOCK_ID,
 ) -> torch.Tensor:
-    """Varlen causal depthwise conv of ``x`` (tokens, dim), dim = parts x part_dim.
+    """Varlen causal depthwise conv of `x` (tokens, dim), dim = parts x part_dim.
 
-    Same semantics as ``causal_conv1d_fn(x.T, weight, bias, conv_states, ...).T``
-    with ``conv_states`` (cache lines, dim, 3) updated in place; width-4 taps. Returns
-    ``(dim // part_dim, tokens, part_dim)`` in ``x.dtype``: plane i is the dense
+    Same semantics as `causal_conv1d_fn(x.T, weight, bias, conv_states, ...).T`
+    with `conv_states` (cache lines, dim, 3) updated in place; width-4 taps. Returns
+    `(dim // part_dim, tokens, part_dim)` in `x.dtype`: plane i is the dense
     output of channels [i * part_dim, (i + 1) * part_dim).
     """
     num_tokens, dim = x.shape
