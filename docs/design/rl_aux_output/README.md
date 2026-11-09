@@ -40,4 +40,6 @@ The trainer replays a row to reproduce the computation that produced a sampled t
 
 ## Status
 
-The delivery path runs as an overlay on a vLLM build (commit `da8922bf0f`) with Mooncake. Related RFCs: #64380 (delivery protocol), #64383 (R3 as a KV-cache layer).
+The delivery path runs as an overlay on a vLLM build (commit `da8922bf0f`) with Mooncake `0.3.13.post1`. The code as run in the experiments, with its drivers and tests, is on the branch [`rl/aux-output-impl`](https://github.com/aoshen02/vllm/tree/rl/aux-output-impl/tools/rl_aux_output) under `tools/rl_aux_output/`: the connector and worker modules, the store writer and the trainer-side reader, the hidden-state and top-k capture hooks, the decode-end sliding-window snapshot patch, and the experiment drivers and tests. It is a snapshot, not yet split into reviewable changes.
+
+Next: capture at full depth with bounded replay off (on DeepSeek-V4.1 at 14.6K context it halves rollout time against today's bounded replay, with every row delivered) replaces partial capture; then the split into pull requests. Related RFCs: #64380 (delivery protocol), #64383 (R3 as a KV-cache layer).
