@@ -2204,6 +2204,54 @@ def test_derender_chat_role_and_echo_match_chat_completion(
     assert choice.message.content == echoed + plain.message.content
 
 
+def test_derender_chat_empty_messages_uses_response_role(tokenizer):
+    """With no message to continue, the role falls back to `--response-role`
+    instead of failing on `messages[-1]`."""
+    derenderer = _make_derenderer(tokenizer, response_role="bot")
+    request = ChatCompletionRequest(
+        model=MODEL_NAME, messages=[], add_generation_prompt=False, echo=True
+    )
+    response = GenerateTokensResponse.model_validate(
+        _make_generate_response(tokenizer.encode("Hi", add_special_tokens=False))
+    )
+
+    (choice,) = derenderer._derender_chat(response, request)
+
+    assert choice.message.role == "bot"
+
+
+def test_derender_chat_echo_includes_refusal_parts(tokenizer):
+    """`echo` takes text from every text-like part, as chat parsing does, not
+    only parts with a `text` key."""
+    derenderer = _make_derenderer(tokenizer)
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "user", "content": "Count to five."},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "refusal", "refusal": "No."},
+                    {"type": "text", "text": "1, 2,"},
+                ],
+            },
+        ],
+        add_generation_prompt=False,
+        continue_final_message=True,
+        echo=True,
+    )
+    response = GenerateTokensResponse.model_validate(
+        _make_generate_response(
+            tokenizer.encode(" 3", add_special_tokens=False),
+            finish_reason="length",
+        )
+    )
+
+    (choice,) = derenderer._derender_chat(response, request)
+
+    assert choice.message.content.startswith("No.\n1, 2,")
+
+
 def test_generate_derender_role_is_response_role(tokenizer):
     """Generate `output_mode: "derender"` returns `--response-role`."""
     derenderer = _make_derenderer(tokenizer, response_role="bot")

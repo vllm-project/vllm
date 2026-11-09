@@ -14,6 +14,7 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
 from vllm.logger import init_logger
 from vllm.parser.abstract_parser import Parser
 from vllm.renderers.chat_utils import make_tool_call_id
+from vllm.renderers.chat_utils.chat_message import MM_PARSER_MAP, TEXT_PART_TYPES
 
 logger = init_logger(__name__)
 
@@ -115,7 +116,7 @@ def get_chat_response_role(request: ChatCompletionRequest, response_role: str) -
     `--response-role`), or the last message's role when the request continues
     it (`add_generation_prompt=False`).
     """
-    if request.add_generation_prompt:
+    if request.add_generation_prompt or not request.messages:
         return response_role
     return request.messages[-1]["role"]
 
@@ -129,7 +130,8 @@ def get_echo_content(messages: Sequence[Mapping[str, Any]], role: str) -> str:
 
     Returns:
         The last message's text when its role is `role`, otherwise "". Text
-        parts of list content are joined with newlines, as chat parsing does.
+        parts of list content are extracted and joined with newlines, as chat
+        parsing does. Multimodal parts are left out.
 
     """
     if not messages or messages[-1].get("role") != role:
@@ -137,11 +139,17 @@ def get_echo_content(messages: Sequence[Mapping[str, Any]], role: str) -> str:
     content = messages[-1].get("content") or ""
     if isinstance(content, str):
         return content
-    return "\n".join(
-        part if isinstance(part, str) else part["text"]
-        for part in content
-        if isinstance(part, str) or "text" in part
-    )
+    texts = (_part_text(part) for part in content)
+    return "\n".join(text for text in texts if text is not None)
+
+
+def _part_text(part: str | Mapping[str, Any]) -> str | None:
+    if isinstance(part, str):
+        return part
+    part_type = part.get("type", "text")
+    if part_type not in TEXT_PART_TYPES:
+        return None
+    return MM_PARSER_MAP[part_type](part)  # type: ignore[arg-type]
 
 
 def _to_tool_calls(

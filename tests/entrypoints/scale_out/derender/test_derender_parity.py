@@ -232,6 +232,32 @@ async def test_parity_echo_continue_final_message(client):
 
 
 @pytest.mark.asyncio
+async def test_parity_echo_refusal_part(client):
+    """`echo` of list content with a `refusal` part which has no `text`
+    key: both paths include its text."""
+    messages = [
+        {"role": "user", "content": "Count to five."},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "refusal", "refusal": "No."},
+                {"type": "text", "text": "1, 2,"},
+            ],
+        },
+    ]
+    coupled, disagg = await _run_parity_case(
+        client,
+        messages,
+        add_generation_prompt=False,
+        continue_final_message=True,
+        echo=True,
+        max_tokens=16,
+    )
+    _assert_parity(coupled, disagg)
+    assert disagg["choices"][0]["message"]["content"].startswith("No.\n1, 2,")
+
+
+@pytest.mark.asyncio
 async def test_parity_reasoning(client):
     """Reasoning/content split parity for <think>...</think> outputs."""
     messages = [{"role": "user", "content": "What is 17 times 23? Think it through."}]
