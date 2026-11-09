@@ -397,6 +397,23 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/metrics
     - pytest -v -s watermarking
 
+# V1 Others skips vllm/distributed/kv_transfer/, so the offloading connector's
+# CPU tests need their own trigger on the connector's sources.
+- label: ":computer: (CPU) V1 Offloading Connector"
+  key: v1-offloading-connector-cpu
+  depends_on:
+    - image-build-cpu
+  timeout_in_minutes: 20
+  device: cpu-small
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+    - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/metrics.py
+    - tests/v1/kv_connector/unit/offloading_connector/
+  commands:
+    - pytest -v -s -m 'cpu_test' v1/kv_connector/unit/offloading_connector
+
 - label: ":nvidia: (H200 MIG 18GB) Extract Hidden States Integration"
   key: extract-hidden-states-integration
   automatic_shard: true
