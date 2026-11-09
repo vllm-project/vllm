@@ -66,7 +66,7 @@ Sampling-parameter constraints (when requesting `topk_logprobs`, `sampling_mask`
 
 - `status` is always present when `aux_outputs` was requested; `unavailable` only if the store is unreachable. A response without `aux` to a request that asked for it is an error.
 - `<req>` is the caller-visible request id (engine-internal ids carry a random suffix).
-- **Inline mode** (small scale): data in the response, nothing in a store.
+- **Inline mode** (small scale): data in the response, nothing in a store. Delivery needs no session or trajectory. The request sets the start of the rows it wants to `aux_start`, the end of what the framework already holds, and the response returns `[aux_start, rows)`; the framework keeps earlier turns' rows and concatenates them, so a next turn's re-prefill of the previous turn's unfinished block is not returned again. Rows for prefix-hit positions inside that range come from the engine-local block-row cache (c1), allocated and evicted with the KV and scoped to the engine's generation. That cache is per-replica engine state, lost on a restart; when a hit's block is no longer cached, the position is recomputed and the row returned is the computation this request actually used.
 
 **Manifest** (one per request, covering the whole sequence `[0, rows)`):
 
