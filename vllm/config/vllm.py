@@ -1500,6 +1500,9 @@ class VllmConfig:
         if self.performance_mode != "balanced":
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
+        # Model hooks read the schedule, so settle it first.
+        self._maybe_disable_dynamic_sd_for_data_parallel()
+        self._validate_dynamic_sd_schedule()
         # Model hooks derive values from max_model_len, so apply the draft's
         # limit first.
         self._limit_max_model_len_to_draft()
@@ -1812,9 +1815,6 @@ class VllmConfig:
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "
                 "optimization level defaults."
             )
-
-        self._maybe_disable_dynamic_sd_for_data_parallel()
-        self._validate_dynamic_sd_schedule()
 
         if (
             self.attention_config.sparse_mla_prefill_workspace_factor is None

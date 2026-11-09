@@ -182,7 +182,12 @@ def test_dynamic_sd_empty_schedule_falls_back_to_static_k(
         runner.llm.chat(
             get_test_prompts(mm_enabled=False, num_prompts=8), sampling_config
         )
-        num_draft = get_spec_decode_metric_value(
-            runner.llm.get_metrics(), "vllm:spec_decode_num_draft_tokens"
+        metrics = runner.llm.get_metrics()
+        num_drafts = get_spec_decode_metric_value(
+            metrics, "vllm:spec_decode_num_drafts"
         )
-        assert num_draft > 0
+        num_draft_tokens = get_spec_decode_metric_value(
+            metrics, "vllm:spec_decode_num_draft_tokens"
+        )
+        assert num_drafts > 0
+        assert num_draft_tokens == 3 * num_drafts

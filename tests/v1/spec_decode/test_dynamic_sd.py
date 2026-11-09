@@ -176,6 +176,24 @@ def test_empty_schedule_falls_back_to_static_k(caplog_vllm, disable_log_dedup):
     assert "num_speculative_tokens_per_batch_size is empty" in caplog_vllm.text
 
 
+def test_model_hooks_see_settled_schedule(monkeypatch):
+    """Model config hooks (e.g. GPT-OSS) read the capture query lengths, so an
+    empty schedule must fall back before they run."""
+    original = VllmConfig.try_verify_and_update_config
+    query_lens = []
+
+    def hook(self: VllmConfig) -> None:
+        query_lens.append(
+            self.get_decode_cudagraph_query_lens(self.uniform_decode_query_len)
+        )
+        original(self)
+
+    monkeypatch.setattr(VllmConfig, "try_verify_and_update_config", hook)
+    _make_engine_config([])
+
+    assert query_lens and list(query_lens[0]) == [4]
+
+
 def test_dynamic_sd_requires_schedule_config():
     with pytest.raises(
         ValueError, match="num_speculative_tokens_per_batch_size is required"

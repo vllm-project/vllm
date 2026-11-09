@@ -851,13 +851,9 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
             )
         ) and not current_platform.is_device_capability_family(100):
             # Cover every target decode query length as the legacy 1024-token cap
-            # does. Data parallelism turns dynamic speculative decoding off later.
-            query_lens = (
-                vllm_config.get_decode_cudagraph_query_lens(
-                    vllm_config.uniform_decode_query_len
-                )
-                if vllm_config.parallel_config.data_parallel_size == 1
-                else [vllm_config.uniform_decode_query_len]
+            # does.
+            query_lens = vllm_config.get_decode_cudagraph_query_lens(
+                vllm_config.uniform_decode_query_len
             )
             # The token sizes the legacy 1024-token cap captures.
             max_tokens = min(vllm_config.scheduler_config.max_num_batched_tokens, 1024)
