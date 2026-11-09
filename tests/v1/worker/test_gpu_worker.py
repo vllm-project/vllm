@@ -342,6 +342,7 @@ def test_cudagraph_memory_profile_runs_only_when_applied(
         total_consumed=20 * GiB_bytes,
         non_kv_cache_memory=20 * GiB_bytes,
         transient_peak_headroom=0,
+        process_scoped=False,
     )
     monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
     monkeypatch.setattr(
