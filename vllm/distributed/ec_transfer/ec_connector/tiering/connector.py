@@ -22,9 +22,7 @@ class ECTieringConnector(ECCPUConnector):
 
     def on_new_request(self, request: Request) -> None:
         assert self.connector_scheduler is not None
-        callback = getattr(self.connector_scheduler, "on_new_request", None)
-        if callback is not None:
-            callback(request)
+        self.connector_scheduler.on_new_request(request)
 
     def on_new_request_with_cache(
         self, request: Request, local_cache_hashes: Collection[str]
