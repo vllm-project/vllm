@@ -136,9 +136,7 @@ class TokenizeChatRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_empty_tools(cls, data):
-        # Match ChatCompletionRequest, which follows OpenAI in treating an empty
-        # tools array like an omitted one. Otherwise templates that test
-        # `tools is not none` add tool instructions the chat prompt lacks.
+        # Like ChatCompletionRequest, render an empty tools array as no tools.
         if isinstance(data, dict) and data.get("tools") == []:
             data = {**data, "tools": None}
         return data
