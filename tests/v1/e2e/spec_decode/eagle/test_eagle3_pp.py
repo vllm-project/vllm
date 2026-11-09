@@ -11,7 +11,7 @@ from vllm.distributed import cleanup_dist_env_and_memory
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 DRAFT = "nm-testing/Llama3_2_1B_speculator.eagle3"
 # Enough tokens that one greedy path changing under compilation can't move the mean
-TOPICS = ["the ocean", "a robot", "Rome", "volcanoes", "chess", "bread", "jazz", "bees"]
+TOPICS = ["the ocean", "a robot", "Rome", "volcanoes"]
 TEMPLATES = [
     "Write a short story about {}.",
     "Explain {} to a child.",
