@@ -596,9 +596,12 @@ class KimiAudioForConditionalGeneration(
 
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
+        if stt_params.task_type != "transcribe":
+            raise ValueError(
+                f'Kimi Audio only supports "transcribe", got {stt_params.task_type}'
+            )
         audio = stt_params.audio
         model_config = stt_params.model_config
-        task_type = stt_params.task_type
         request_prompt = stt_params.request_prompt
 
         tokenizer = cached_get_tokenizer(
@@ -608,12 +611,6 @@ class KimiAudioForConditionalGeneration(
             revision=model_config.tokenizer_revision,
             trust_remote_code=model_config.trust_remote_code,
         )
-
-        if task_type not in ("transcribe", "translate"):
-            raise ValueError(
-                f"Unsupported task_type '{task_type}'. "
-                "Supported task types are 'transcribe' and 'translate'."
-            )
 
         # Incorporate request_prompt as context/instruction if provided
         user_content = (

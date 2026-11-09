@@ -154,6 +154,7 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 Whisper models can translate audio from one of the 55 non-English supported languages into English.
 Please mind that the popular `openai/whisper-large-v3-turbo` model does not support translating.
 `nvidia/canary-1b-v2` translates to or from English only and needs both `language` and `to_language`.
+Models that cannot translate, such as Voxtral and GLM-ASR, return a 400 error.
 
 !!! note
     To use the Translation API, please install with extra audio dependencies using `pip install vllm[audio]`.
