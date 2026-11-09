@@ -74,9 +74,9 @@ def _bicubic_resize_and_normalize(
 
     Input must be a raw 4-D **NHWC** tensor.
 
-    *size*: target ``(H, W)``; skips interpolation when ``None``.
+    *size*: target `(H, W)`; skips interpolation when `None`.
     *norm_mean* / *norm_std*: when both provided, apply normalization.
-    When *do_cpu_normalize* is false, return the resized ``uint8`` tensor
+    When *do_cpu_normalize* is false, return the resized `uint8` tensor
     unchanged so rescaling and normalization can run on the model device.
     """
     tensor = tensor.permute(0, 3, 1, 2)

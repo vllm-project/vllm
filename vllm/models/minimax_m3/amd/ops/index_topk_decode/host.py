@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Launch wrappers of the FlyDSL index top-k: the block ids AITER's
-``pa_sparse_block_topk`` selects, in its order."""
+`pa_sparse_block_topk` selects, in its order."""
 
 import functools
 
@@ -89,7 +89,7 @@ def minimax_m3_index_topk_decode_indices(
     max_seq_len: int,
     query_len: int,
 ) -> None:
-    """Top-16 blocks of decode rows, ``query_len`` rows per request."""
+    """Top-16 blocks of decode rows, `query_len` rows per request."""
     heads, rows, _ = score.shape
     cols = _check(score, topk_idx, max_seq_len)
     assert query_len > 0 and rows % query_len == 0
