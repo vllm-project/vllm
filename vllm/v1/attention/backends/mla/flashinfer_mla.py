@@ -449,7 +449,7 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             bmm1_scale = self._bmm1_scale_device
             bmm2_scale = self._bmm2_scale_device
         else:
-            # Read at every forward: a reload can change the q/k scales.
+            # Host floats follow a reload only outside FULL CUDA graphs.
             bmm1_scale, bmm2_scale = self.host_bmm_scales(layer)
         if decode_backend:
             extra_kwargs["backend"] = decode_backend
