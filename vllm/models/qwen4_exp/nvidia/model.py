@@ -554,6 +554,9 @@ class Qwen4ExpModel(nn.Module):
             if intermediate_tensors is None:
                 raise ValueError("pipeline stage requires intermediate tensors")
             hidden_states = intermediate_tensors["hidden_states"]
+            if self.use_hc_sequence_parallel:
+                # PP carries full-token states; resume SP on this stage.
+                hidden_states = sp_shard(hidden_states)
 
         full_num_tokens = positions.shape[-1]
         block_output = None
@@ -619,6 +622,12 @@ class Qwen4ExpModel(nn.Module):
                 hidden_states = last_layer.mlp_hyper_connection.combine(
                     hidden_states, block_output, injection
                 )
+            if self.use_hc_sequence_parallel:
+                # Keep the PP payload replicated across TP ranks for the
+                # default PP send optimization.
+                hidden_states = sp_all_gather(hidden_states.contiguous())[
+                    :full_num_tokens
+                ]
             return IntermediateTensors({"hidden_states": hidden_states})
 
         # The final mixer consumes the last pending combine and returns both
