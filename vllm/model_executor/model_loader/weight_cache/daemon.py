@@ -134,6 +134,8 @@ from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
     CompileArtifactWarmupCache,
     FlashInferWarmupCache,
     WarmupCache,
+)
+from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
     _cache_roots,
 )
 from vllm.platforms import current_platform

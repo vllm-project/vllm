@@ -13,15 +13,7 @@ from vllm.model_executor.model_loader.weight_cache.artifact_store import (
 )
 from vllm.model_executor.model_loader.weight_cache.seed import Seedable
 
-from .common import (
-    BUNDLE_LIMIT,
-    CacheManifest,
-    CacheRoot,
-    _bundle,
-    _install,
-    _manifest,
-    _safe_path,
-)
+from .common import BUNDLE_LIMIT, CacheRoot, _bundle, _install, _manifest
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
@@ -41,10 +33,7 @@ class CompileArtifactWarmupCache(Seedable):
         self.roots = roots
         self._store_names = tuple(store_names)
         self._store_sources: list[ArtifactStore] | None = None
-        self._manifest: CacheManifest | None = None
-        self._bundle: bytes | None = None
-        self._digest: str | None = None
-        self._key: str | None = None
+        self._payload: dict[str, Any] | None = None
 
     @property
     def store_sources(self) -> list[ArtifactStore]:
@@ -59,99 +48,53 @@ class CompileArtifactWarmupCache(Seedable):
             self.prepare()
 
     def prepare(self) -> None:
-        self._manifest = _manifest(self.roots)
-        self._bundle = _bundle(self.roots, self._manifest)
-        self._digest = hashlib.sha256(self._bundle).hexdigest()
-        self._key = artifact_key(self.kind, self._digest, "bundle.tar")
+        self._payload = None
+        manifest = _manifest(self.roots)
+        stores = self.store_sources
+        if not manifest["entries"] or not stores:
+            return
+        bundle = _bundle(self.roots, manifest)
+        digest = hashlib.sha256(bundle).hexdigest()
+        key = artifact_key(self.kind, digest, "bundle.tar")
+        for store in stores:
+            store.put(key, bundle)
+        self._payload = {
+            "manifest": manifest,
+            "key": key,
+            "bundle_size": len(bundle),
+            "sha256": digest,
+        }
 
     def request_params(self, ctx: Any) -> dict[str, Any]:
         return {"version": 1}
 
     def resolve(self, request: dict[str, Any]) -> dict[str, Any] | None:
-        if (
-            request.get("version") != 1
-            or self._manifest is None
-            or self._bundle is None
-            or self._digest is None
-            or self._key is None
-            or not self._manifest.entries
-        ):
+        if request.get("version") != 1:
             return None
-        stores = self.store_sources
-        if not stores:
-            return None
-        for store in stores:
-            store.put(self._key, self._bundle)
-        return {
-            "manifest": self._manifest.as_dict(),
-            "key": self._key,
-            "bundle_size": len(self._bundle),
-            "sha256": self._digest,
-        }
+        return self._payload
 
     def validate_payload(self, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("compile cache payload must be an object")
-        raw_manifest = payload.get("manifest")
-        if not isinstance(raw_manifest, dict) or raw_manifest.get("version") != 1:
+        manifest = payload.get("manifest")
+        if not isinstance(manifest, dict) or manifest.get("version") != 1:
             raise ValueError("malformed compiled cache manifest")
-        raw_entries = raw_manifest.get("entries")
-        if not isinstance(raw_entries, list):
-            raise ValueError("malformed compiled cache entries")
-        entries = tuple(raw_entries)
-        if any(not isinstance(entry, dict) for entry in entries):
-            raise ValueError("malformed compiled cache entry")
-        total = raw_manifest.get("total_size")
-        if not isinstance(total, int) or total < 0:
-            raise ValueError("malformed compiled cache size")
-        manifest = CacheManifest(entries, total)
+        if manifest["total_size"] > BUNDLE_LIMIT:
+            raise ValueError("compiled cache manifest is too large")
         size = payload.get("bundle_size")
         key, digest = payload.get("key"), payload.get("sha256")
-        if (
-            not isinstance(size, int)
-            or size < 0
-            or not isinstance(key, str)
-            or not isinstance(digest, str)
-        ):
-            raise ValueError("malformed compile cache descriptor")
-        if total > BUNDLE_LIMIT:
-            raise ValueError("compiled cache manifest is too large")
-        if size > BUNDLE_LIMIT:
+        if isinstance(size, int) and size > BUNDLE_LIMIT:
             raise ValueError("compiled cache bundle is too large")
-        if manifest.entries and size == 0:
-            raise ValueError("invalid compile cache bundle size")
-        if not manifest.entries and size != 0:
-            raise ValueError("empty compile cache has a non-empty bundle")
-        if len(digest) != 64:
-            raise ValueError("malformed compiled cache bundle checksum")
-        try:
-            int(digest, 16)
-        except ValueError as error:
-            raise ValueError("malformed compiled cache bundle checksum") from error
-        if key != artifact_key(self.kind, digest, "bundle.tar"):
-            raise ValueError("compiled cache bundle key mismatch")
-        root_names = {root.name for root in self.roots}
-        for entry in entries:
-            if (
-                not isinstance(entry.get("root"), str)
-                or not isinstance(entry.get("path"), str)
-                or not isinstance(entry.get("size"), int)
-                or entry["size"] < 0
-                or not isinstance(entry.get("sha256"), str)
-                or not isinstance(entry.get("mtime_ns"), int)
-            ):
-                raise ValueError("malformed compiled cache entry")
-            if entry["root"] not in root_names:
-                raise ValueError("unknown compiled cache root")
-            _safe_path(entry["path"])
-            if len(entry["sha256"]) != 64:
-                raise ValueError("malformed compiled cache checksum")
-            try:
-                int(entry["sha256"], 16)
-            except ValueError as error:
-                raise ValueError("malformed compiled cache checksum") from error
-        if sum(entry["size"] for entry in entries) != total:
-            raise ValueError("compiled cache manifest size mismatch")
+        if (
+            not manifest["entries"]
+            or not isinstance(size, int)
+            or size <= 0
+            or not isinstance(digest, str)
+            or key != artifact_key(self.kind, digest, "bundle.tar")
+            or sum(entry["size"] for entry in manifest["entries"])
+            != manifest["total_size"]
+        ):
+            raise ValueError("invalid compile cache descriptor")
         return {
             "manifest": manifest,
             "key": key,

@@ -1686,10 +1686,10 @@ def test_compile_cache_manifest_deduplicates_nested_roots(tmp_path):
         )
     )
 
-    assert [entry["path"] for entry in manifest.entries].count(
+    assert [entry["path"] for entry in manifest["entries"]].count(
         "cubins/kernel.cubin"
     ) == 0
-    assert len(manifest.entries) == 2
+    assert len(manifest["entries"]) == 2
 
 
 def test_compile_cache_manifest_rejects_path_traversal():

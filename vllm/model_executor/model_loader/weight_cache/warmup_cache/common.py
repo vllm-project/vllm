@@ -19,19 +19,6 @@ class CacheRoot:
     path: Path
 
 
-@dataclass(frozen=True)
-class CacheManifest:
-    entries: tuple[dict[str, Any], ...]
-    total_size: int
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "version": 1,
-            "total_size": self.total_size,
-            "entries": list(self.entries),
-        }
-
-
 def _safe_path(value: str) -> PurePosixPath:
     path = PurePosixPath(value)
     if path.is_absolute() or ".." in path.parts:
@@ -59,7 +46,7 @@ def _digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _manifest(roots: tuple[CacheRoot, ...]) -> CacheManifest:
+def _manifest(roots: tuple[CacheRoot, ...]) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     total = 0
     nested_roots = {
@@ -96,14 +83,14 @@ def _manifest(roots: tuple[CacheRoot, ...]) -> CacheManifest:
                     "mtime_ns": stat.st_mtime_ns,
                 }
             )
-    return CacheManifest(tuple(entries), total)
+    return {"version": 1, "total_size": total, "entries": entries}
 
 
-def _bundle(roots: tuple[CacheRoot, ...], manifest: CacheManifest) -> bytes:
+def _bundle(roots: tuple[CacheRoot, ...], manifest: dict[str, Any]) -> bytes:
     by_name = {root.name: root for root in roots}
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:") as archive:
-        for entry in manifest.entries:
+        for entry in manifest["entries"]:
             root = by_name[entry["root"]]
             path = root.path / _safe_path(entry["path"])
             if not path.is_file() or path.stat().st_size != entry["size"]:
@@ -117,10 +104,12 @@ def _bundle(roots: tuple[CacheRoot, ...], manifest: CacheManifest) -> bytes:
 
 
 def _install(
-    bundle: bytes, manifest: CacheManifest, roots: tuple[CacheRoot, ...]
+    bundle: bytes, manifest: dict[str, Any], roots: tuple[CacheRoot, ...]
 ) -> None:
     by_name = {root.name: root for root in roots}
-    expected = {f"{entry['root']}/{entry['path']}": entry for entry in manifest.entries}
+    expected = {
+        f"{entry['root']}/{entry['path']}": entry for entry in manifest["entries"]
+    }
     staged: list[tuple[Path, Path, dict[str, Any]]] = []
     try:
         with tarfile.open(fileobj=io.BytesIO(bundle), mode="r:") as archive:
