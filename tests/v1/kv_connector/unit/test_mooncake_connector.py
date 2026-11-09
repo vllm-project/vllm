@@ -1794,7 +1794,6 @@ async def test_expired_peer_finish_settles_pending_receive(first_peer_succeeds):
 async def test_sender_listener_drops_malformed_frames(monkeypatch):
     """The sender listener must survive ZMQ envelopes with unexpected
     frame counts (e.g. from a malicious peer) without terminating."""
-
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_producer"
