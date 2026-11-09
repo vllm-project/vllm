@@ -717,6 +717,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             max_num_blocks_per_group.append(max_num_blocks)
 
+        target_attn_layer_names = None
+        if isinstance(self.speculator, DraftModelSpeculator):
+            # Adaptive verification validates target attention separately.
+            target_attn_layer_names = {
+                layer_name
+                for group in self.kv_cache_config.kv_cache_groups
+                for layer_name in group.layer_names
+            } - self.speculator.draft_attn_layer_names
         draft_attn_layer_names = None
         if isinstance(self.speculator, DraftModelSpeculator):
             draft_attn_layer_names = self.speculator.draft_attn_layer_names
@@ -732,14 +740,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.device,
                 draft_layer_names=draft_attn_layer_names,
             )
-        target_attn_layer_names = None
-        if draft_attn_layer_names is not None:
-            # Backend initialization adds layers that share target KV.
-            target_attn_layer_names = {
-                layer_name
-                for group in self.kv_cache_config.kv_cache_groups
-                for layer_name in group.layer_names
-            } - draft_attn_layer_names
         additional_attn_cg_support = self.model_state.get_additional_cg_support()
         attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
         # The speculator clears the flag at load time when the checkpoint has
