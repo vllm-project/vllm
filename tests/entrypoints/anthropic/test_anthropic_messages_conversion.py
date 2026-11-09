@@ -5,11 +5,11 @@
 Tests the image source handling and tool_result content parsing in
 AnthropicServingMessages.to_chat_completion_request().
 
-Also covers extended-thinking edge cases such as ``redacted_thinking``
+Also covers extended-thinking edge cases such as `redacted_thinking`
 blocks echoed back by Anthropic clients, and streaming conversion in
-``message_stream_converter``.
+`message_stream_converter`.
 
-Also covers cache usage computation in ``_build_anthropic_usage``.
+Also covers cache usage computation in `_build_anthropic_usage`.
 """
 
 import json
@@ -521,7 +521,7 @@ class TestAttributionHeaderStripping:
 
 class TestThinkingBlockConversion:
     """Verify that thinking blocks in assistant messages are correctly
-    moved to the ``reasoning`` field and stripped from ``content`` during
+    moved to the `reasoning` field and stripped from `content` during
     the Anthropic→OpenAI conversion.
 
     This is the Anthropic-endpoint path: the client echoes back the full
@@ -839,7 +839,7 @@ class TestBuildAnthropicUsage:
 
 
 class TestInlineSystemMessageInMessagesArray:
-    """Verify that ``role: system`` messages embedded inside the ``messages``
+    """Verify that `role: system` messages embedded inside the `messages`
     array are preserved in their original position.
 
     Unlike the previous approach that merged all system messages into a single
@@ -1280,9 +1280,9 @@ class TestMessageStreamConverterToolUseContentBuffering:
 class TestMessageStartIncludesTypeAndRole:
     """Regression test for issue #45367: the streaming message_start event is
     serialized with exclude_unset=True, which silently dropped the
-    default-valued ``type``/``role`` fields of the nested message object.
+    default-valued `type`/`role` fields of the nested message object.
     Strict Anthropic SDK clients (e.g. Claude Code) validate
-    ``message_start.message.type``/``role`` and reject the whole stream when
+    `message_start.message.type`/`role` and reject the whole stream when
     they are missing.
     """
 
@@ -1316,12 +1316,12 @@ class TestStreamingCacheUsageSemantics:
     """Locks in the documented streaming behavior of cache usage fields.
 
     vLLM's OpenAI chat completion streaming only attaches
-    ``prompt_tokens_details`` to the terminal usage chunk. The Anthropic layer
-    mirrors that contract: cache fields are omitted on ``message_start`` (key
-    absence signals "unknown") and populated on ``message_delta`` (the final
+    `prompt_tokens_details` to the terminal usage chunk. The Anthropic layer
+    mirrors that contract: cache fields are omitted on `message_start` (key
+    absence signals "unknown") and populated on `message_delta` (the final
     cumulative count). This is intentionally consistent with vLLM's OpenAI
     behavior, even though Anthropic's upstream API populates cache fields on
-    ``message_start``; closing that gap requires plumbing cache info into the
+    `message_start`; closing that gap requires plumbing cache info into the
     first chunk at the OpenAI layer, which is out of scope here.
     """
 
@@ -1490,7 +1490,7 @@ class TestDetectMergeInlineSystem:
         assert AnthropicServingMessages._detect_merge_inline_system(None) is True
 
     def test_tools_none_check_template_merges(self):
-        """OLMo 3-style ``tools | tojson`` on undefined tools falls back to merge."""
+        """OLMo 3-style `tools | tojson` on undefined tools falls back to merge."""
         template = (
             "{% if tools is none %}{% else %}{{ tools | tojson }}{% endif %}"
             "{% for m in messages %}{{ m.content }}{% endfor %}"
@@ -1498,7 +1498,7 @@ class TestDetectMergeInlineSystem:
         assert AnthropicServingMessages._detect_merge_inline_system(template) is True
 
     def test_tools_loop_template_no_merge(self):
-        """Hermes-style ``for tool in tools`` must not raise in the probe."""
+        """Hermes-style `for tool in tools` must not raise in the probe."""
         template = (
             "{% for tool in tools %}{{ tool | tojson }}{% endfor %}"
             "{% for m in messages %}{{ m.content }}{% endfor %}"
@@ -1775,11 +1775,11 @@ class TestCacheSalt:
 
 class TestStopSequenceReason:
     """When generation stops because a configured stop string matched, the
-    Anthropic Messages API must report ``stop_reason="stop_sequence"`` and echo
-    the matched string in ``stop_sequence``. vLLM surfaces the matched string in
-    the OpenAI choice's ``stop_reason`` field (a str) while ``finish_reason``
-    stays ``"stop"``. A natural EOS (stop_reason None) or a stop token id (int)
-    must still map to ``end_turn``.
+    Anthropic Messages API must report `stop_reason="stop_sequence"` and echo
+    the matched string in `stop_sequence`. vLLM surfaces the matched string in
+    the OpenAI choice's `stop_reason` field (a str) while `finish_reason`
+    stays `"stop"`. A natural EOS (stop_reason None) or a stop token id (int)
+    must still map to `end_turn`.
     """
 
     def test_non_streaming_stop_string_maps_to_stop_sequence(self):
@@ -1895,8 +1895,8 @@ class TestStopSequenceReason:
 
 
 class TestToolUseStopReason:
-    """A response carrying a tool_use block reports ``stop_reason="tool_use"``
-    even when the chat layer says ``finish_reason="stop"``, as it does for a
+    """A response carrying a tool_use block reports `stop_reason="tool_use"`
+    even when the chat layer says `finish_reason="stop"`, as it does for a
     forced (named) tool. A call cut short by max_tokens or a stop string does not.
     """
 
@@ -2381,7 +2381,7 @@ class TestThinkingConfig:
 
 
 class TestBetweenToolsEntryPoint:
-    """``thinking.type=between_tools`` must be accepted by the native Messages
+    """`thinking.type=between_tools` must be accepted by the native Messages
     routes instead of failing the request model's union with 400."""
 
     @staticmethod
@@ -2442,7 +2442,7 @@ class TestBetweenToolsEntryPoint:
 
 
 class TestProbeDisabledThinkingEffort:
-    """``auto`` falls back to ``low`` when ``none`` cannot turn thinking off."""
+    """`auto` falls back to `low` when `none` cannot turn thinking off."""
 
     @staticmethod
     async def _probe(render):
@@ -2544,7 +2544,7 @@ class TestProbeDisabledThinkingEffort:
 
     @staticmethod
     def _reject_none(effort):
-        """Harmony (gpt-oss) raises on ``none``."""
+        """Harmony (gpt-oss) raises on `none`."""
         if effort == "none":
             raise ValueError(f"unsupported {effort=}")
         return [1]
@@ -2572,7 +2572,7 @@ class TestProbeDisabledThinkingEffort:
 
 
 class TestMidConversationToolChanges:
-    """``tool_addition``/``tool_removal`` blocks decide which tools the chat
+    """`tool_addition`/`tool_removal` blocks decide which tools the chat
     template is given, since it has no other way to see them."""
 
     @staticmethod
