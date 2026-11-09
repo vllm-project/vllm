@@ -106,6 +106,7 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    pp_splits_layer_sharing,
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
@@ -196,6 +197,32 @@ def _sparse_attention_layer_ids(config: PreTrainedConfig) -> set[int]:
 def _is_moe_layer(config: PreTrainedConfig, layer_id: int) -> bool:
     """Whether this layer's MLP is a sparse MoE block (vs a dense MLP)."""
     return config.mlp_layer_types[layer_id] == "sparse"
+
+
+def _should_skip_index_topk(config: PreTrainedConfig, layer_id: int) -> bool:
+    """Cross-layer index sharing (``use_index_cache`` + ``index_topk_freq``).
+
+    Only 1 of every ``index_topk_freq`` sparse-attention layers recomputes the
+    lightning-indexer top-k block selection; the rest reuse the selection the
+    preceding compute layer wrote into the shared ``topk_indices_buffer`` this
+    same forward pass. Cuts the indexer score + top-k cost ~``freq`` x but
+    approximates the per-layer selection, so validate accuracy on long-context
+    inputs. ``index_skip_topk_offset`` shifts the cadence start in sparse-layer
+    ordinals, matching the AMD path. Gated by ``use_index_cache`` in the text
+    config; enable via
+    ``--hf-overrides '{"text_config": {"use_index_cache": true,
+    "index_topk_freq": 4}}'``.
+    """
+    if not getattr(config, "use_index_cache", False):
+        return False
+    freq = int(getattr(config, "index_topk_freq", 1) or 1)
+    if freq <= 1:
+        return False
+    sparse_ids = sorted(_sparse_attention_layer_ids(config))
+    if layer_id not in sparse_ids:
+        return False
+    offset = int(getattr(config, "index_skip_topk_offset", 0) or 0)
+    return max(sparse_ids.index(layer_id) - offset, 0) % freq != 0
 
 
 def _use_mega_moe(vllm_config: VllmConfig) -> bool:
@@ -972,6 +999,14 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # the attend impl reads them back (so nothing crosses the eager break as a
         # Python value, which would freeze at capture).
         self.topk_indices_buffer = topk_indices_buffer
+        # Cross-layer index sharing (use_index_cache + index_topk_freq): only
+        # the model-level shared buffer carries the preceding compute layer's
+        # selection. Static per layer -> cudagraph-capture-safe; MTP draft
+        # layers own a per-layer buffer (None here), so they always recompute.
+        self.skip_index_topk = (
+            topk_indices_buffer is not None
+            and _should_skip_index_topk(config, layer_id)
+        )
         # Indexer (top-k selection) and main attention are separate impls, each
         # picking Triton vs MSA off its cache dtype. impl is AttentionImplBase
         # (broader than the AttentionImpl that AttentionLayerBase annotates).
@@ -1216,7 +1251,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # Single eager break around both: their split-K kernels read per-request
         # metadata and can't be captured into a cudagraph. The indexer writes its
         # top-k into the shared ``topk_indices_buffer``; the attend reads it back.
-        self.indexer(index_query)
+        # When skip_index_topk is set (cross-layer index sharing), reuse the
+        # selection the preceding compute layer wrote into the shared buffer.
+        if not self.skip_index_topk:
+            self.indexer(index_query)
         return self.impl.forward(self, query, self.kv_cache, output)
 
 
@@ -1457,6 +1495,26 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             )
         else:
             self.topk_indices_buffer = None
+
+        # Cross-layer index sharing (use_index_cache) needs every PP stage to
+        # open on a top-k computing layer, and cannot share the buffer across
+        # interleaved ubatching/DBO microbatches.
+        sparse_layers = _sparse_attention_layer_ids(config)
+        skip_layers = {i for i in sparse_layers if _should_skip_index_topk(config, i)}
+        if skip_layers and vllm_config.parallel_config.use_ubatching:
+            raise NotImplementedError(
+                "use_index_cache is not supported with ubatching/DBO: interleaved "
+                "microbatches would overwrite the single shared top-k buffer."
+            )
+        if pp_splits_layer_sharing(
+            config.num_hidden_layers, sparse_layers, skip_layers
+        ):
+            # The top-k is sharded over TP index heads, so PP cannot send it.
+            raise NotImplementedError(
+                "use_index_cache with a PP stage that starts on a top-k sharing "
+                "layer is not supported. Set VLLM_PP_LAYER_PARTITION so every "
+                "stage starts on a top-k computing layer."
+            )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,

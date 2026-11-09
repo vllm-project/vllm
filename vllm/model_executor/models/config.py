@@ -1115,11 +1115,13 @@ class MiniMaxM3SparseForConditionalGenerationConfig(MiniMaxM3SparseConfig):
     @classmethod
     def verify_and_update_model_config(cls, model_config: "ModelConfig") -> None:
         """Reject IndexCache overrides set on the outer VL config, where the
-        ROCm text model never reads them."""
+        text model never reads them."""
         from vllm.platforms import current_platform
 
         overrides = model_config.hf_overrides
-        if not current_platform.is_rocm() or not isinstance(overrides, dict):
+        if not (
+            current_platform.is_rocm() or current_platform.is_cuda()
+        ) or not isinstance(overrides, dict):
             return
         misplaced = [key for key in cls.INDEX_CACHE_KEYS if key in overrides]
         if misplaced:
