@@ -6,19 +6,19 @@
 """Device-side building blocks shared by the mono kernels.
 
 Ported from the FlyDSL GLM-5 layer kernel (ROCm/FlyDSL branch
-``glm5-mla-moe-layer-monokernel`` @ 1e28fd8a,
-``kernels/mla_moe_layer/shared_reuse_moe_kernel.py``): wave reductions, tagged
+`glm5-mla-moe-layer-monokernel` @ 1e28fd8a,
+`kernels/mla_moe_layer/shared_reuse_moe_kernel.py`): wave reductions, tagged
 mailboxes and the MFMA GEMV loop. Only published flydsl APIs and aiter's vendored
-``buffer_ops`` / ``dpp_utils`` are used, so nothing here needs the FlyDSL repo.
+`buffer_ops` / `dpp_utils` are used, so nothing here needs the FlyDSL repo.
 
-Every function but ``kernel_symbol`` is traced inside a ``@flyc.kernel`` body.
+Every function but `kernel_symbol` is traced inside a `@flyc.kernel` body.
 
 Raw boundaries the kernels keep, for want of an equivalent on the pinned FlyDSL:
-``buffer_ops`` loads / stores (the kernels take raw Int64 addresses, no tensors
-for ``make_buffer_tensor``); raw MFMA intrinsics (hand-laid operands: permlane
-transposes, fp8 packing, MXFP4 scales); the LLVM intrinsics here (``expect``,
-``s_memrealtime``, the approximate rsq / rcp / exp2) and the struct unpacking of
-``permlane*_swap``; ``inttoptr`` for the timeline's global stores.
+`buffer_ops` loads / stores (the kernels take raw Int64 addresses, no tensors
+for `make_buffer_tensor`); raw MFMA intrinsics (hand-laid operands: permlane
+transposes, fp8 packing, MXFP4 scales); the LLVM intrinsics here (`expect`,
+`s_memrealtime`, the approximate rsq / rcp / exp2) and the struct unpacking of
+`permlane*_swap`; `inttoptr` for the timeline's global stores.
 """
 
 from __future__ import annotations
@@ -44,9 +44,9 @@ POLL_MAX = 12  # mailbox specs polled per batch (bounds live registers)
 
 
 def kernel_symbol(stem, **params):
-    """Kernel symbol that profilers demangle to ``vllm::<stem>_<params>``. The
-    amdhsa assembler rejects ``::`` in a symbol, so it is Itanium-mangled, as
-    aiter's ``_ZN5aiter...E`` kernels are."""
+    """Kernel symbol that profilers demangle to `vllm::<stem>_<params>`. The
+    amdhsa assembler rejects `::` in a symbol, so it is Itanium-mangled, as
+    aiter's `_ZN5aiter...E` kernels are."""
     name = f"{stem}_{kernel_signature(**params)}"
     return f"_ZN4vllm{len(name)}{name}E"
 
@@ -71,14 +71,14 @@ def permlane_swap(off, x, y):
 
 
 def lane_gather(v, src_lane):
-    """Lane ``src_lane``'s value of v, a source lane a lane (ds_bpermute)."""
+    """Lane `src_lane`'s value of v, a source lane a lane (ds_bpermute)."""
     return fx.Int32(
         rocdl.ds_bpermute(T.i32, fx.Int32(src_lane) * 4, fx.Int32(v).ir_value())
     )
 
 
 def readlane(v, src_lane):
-    """Lane ``src_lane``'s value of v (wave-uniform)."""
+    """Lane `src_lane`'s value of v (wave-uniform)."""
     bits = v.bitcast(fx.Int32) if isinstance(v, fx.Float32) else fx.Int32(v)
     r = fx.Int32(rocdl.readlane(T.i32, bits, fx.Int32(src_lane)))
     return r.bitcast(fx.Float32) if isinstance(v, fx.Float32) else r
@@ -90,7 +90,7 @@ def memrealtime():
 
 
 def unlikely(cond):
-    """``cond`` marked cold (llvm.expect): LLVM lays the branch out of the hot
+    """`cond` marked cold (llvm.expect): LLVM lays the branch out of the hot
     path. A rare path's code inline among the hot stages costs them even when it
     never runs (the long-context selection: S = 16, 3k context +1.4 us)."""
     return fx.Boolean(
@@ -128,15 +128,15 @@ def hw_exp2(x):
 
 
 def div_rn(x, d, r):
-    """``x / d`` rounded to nearest, bit-identical to the IEEE division, given
-    ``r = 1.0 / d`` from one true division per divisor (Markstein: a quotient
+    """`x / d` rounded to nearest, bit-identical to the IEEE division, given
+    `r = 1.0 / d` from one true division per divisor (Markstein: a quotient
     within 1 ulp plus its exact fma residual times RN(1/d) rounds correctly)."""
     q = x * r
     return fx.Float32(fmath.fma(fx.Float32(fmath.fma(-q, d, x)), r, q))
 
 
 def xshfl(v, off):
-    """Value of lane ``lane ^ off``: offsets 32 / 16 via v_permlane*_swap, in-row
+    """Value of lane `lane ^ off`: offsets 32 / 16 via v_permlane*_swap, in-row
     offsets via DPP (VALU latency, not LDS)."""
     if off >= 16:
         return v.shuffle_xor(off, 64)
@@ -186,7 +186,7 @@ def wave_sum(v):
 
 
 def traced(fn):
-    """Apply flydsl's AST rewriting to a helper, so its ``while`` / ``if`` over
+    """Apply flydsl's AST rewriting to a helper, so its `while` / `if` over
     traced values lower to scf ops. Kernels rewrite only their own body."""
     return ASTRewriter.transform(fn)
 
@@ -197,7 +197,7 @@ def wave_max(v):
 
 @traced
 def block_max(v, lane, wave, red):
-    """Max of v over the CTA's WAVES waves; ``red`` needs WAVES words."""
+    """Max of v over the CTA's WAVES waves; `red` needs WAVES words."""
     wv = wave_max(v)
     gpu.barrier()
     if lane == 0:
@@ -253,7 +253,7 @@ def fp8_pack4(a, b, c, d):
 
 @traced
 def _spin(load_all, pending):
-    """Re-issue ``load_all`` until ``pending`` clears; a side-effecting op in the
+    """Re-issue `load_all` until `pending` clears; a side-effecting op in the
     loop keeps the loads from being hoisted."""
     v = load_all()
     while pending(v):
@@ -267,8 +267,8 @@ class Mailbox:
 
     Every 32-bit value is stored next to this launch's epoch tag; a consumer
     polls the payload until all tags match, so a hand-off costs one round trip
-    (no store drain, no separate flag). The epoch is ``step * LAYER_SLOTS +
-    layer + 1`` with ``step`` a device counter, so the sequence is graph-safe.
+    (no store drain, no separate flag). The epoch is `step * LAYER_SLOTS +
+    layer + 1` with `step` a device counter, so the sequence is graph-safe.
     """
 
     def __init__(self, scratch, step_ptr, layer):
@@ -319,10 +319,10 @@ class Mailbox:
         )
 
     def poll(self, specs, scope="agent", batch=POLL_MAX):
-        """Poll ``(base_addr, pair index, npairs)`` specs in one batch.
+        """Poll `(base_addr, pair index, npairs)` specs in one batch.
 
         All pairs are re-loaded together while any tag is stale, so a batch costs
-        one round trip after its last producer lands. ``scope``: "agent" for pairs
+        one round trip after its last producer lands. `scope`: "agent" for pairs
         another CTA of this GPU wrote, "system" for pairs a peer GPU wrote. Returns
         the value words."""
         if const_expr(len(specs) == 0):
@@ -368,7 +368,7 @@ class Mailbox:
 
 def ar_pack_sumsq(vals):
     """One logical thread of the custom all-reduce epilogue: its 8 elements'
-    squares accumulated in order (hipcc contracts ``acc += v * v`` into fma)."""
+    squares accumulated in order (hipcc contracts `acc += v * v` into fma)."""
     acc = fx.Float32(0.0)
     for v in vals:
         acc = fmath.fma(v, v, acc)
@@ -381,8 +381,8 @@ def ar_block_sum(p0, p1, lane, wave, red):
     1-stage fused all-reduce + RMSNorm reduces them: 24 warps of 32, a 16..1
     butterfly per warp, then the 24 warp sums butterflied again in one warp.
 
-    Logical warp ``3 * wave + lane // 32`` holds ``p0``; logical warp
-    ``3 * wave + 2`` holds ``p1`` in lanes < 32 (``WAVES`` = 8). ``red`` needs
+    Logical warp `3 * wave + lane // 32` holds `p0`; logical warp
+    `3 * wave + 2` holds `p1` in lanes < 32 (`WAVES` = 8). `red` needs
     24 words. Matching this order keeps rstd bit-exact with the original path.
     """
     return ar_block_sums([(p0, p1)], lane, wave, red)[0]
@@ -390,8 +390,8 @@ def ar_block_sum(p0, p1, lane, wave, red):
 
 @traced
 def ar_block_sums(parts, lane, wave, red):
-    """``ar_block_sum`` of several rows ``parts = [(p0, p1), ...]`` behind one set
-    of barriers; ``red`` needs 24 words per row."""
+    """`ar_block_sum` of several rows `parts = [(p0, p1), ...]` behind one set
+    of barriers; `red` needs 24 words per row."""
     bs = [
         (butterfly(p0, (16, 8, 4, 2, 1)), butterfly(p1, (16, 8, 4, 2, 1)))
         for p0, p1 in parts

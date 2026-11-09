@@ -4,7 +4,7 @@
 
 The MiniMax-M3.1 DSpark draft model (5 layers) at TP4 on gfx950: 256 CTAs of 512
 threads, one CTA per CU. A draft step of up to 2 requests (7 query rows each) is
-one ``layer`` launch; 3..8 requests are one ``wide`` launch. Roles are fixed per
+one `layer` launch; 3..8 requests are one `wide` launch. Roles are fixed per
 CTA for the whole launch:
 
 - G, CTAs 0..191: the MXFP8 GEMVs of every layer (QKV 12 rows, o_proj 32,
@@ -14,7 +14,7 @@ CTA for the whole launch:
 
 Scratch regions are per layer and written once a launch; flag regions and the
 symmetric (IPC) regions are shared by the layers and told apart by their tags
-(``step * 8 + layer + 1``).
+(`step * 8 + layer + 1`).
 """
 
 HIDDEN = 6144
