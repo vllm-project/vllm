@@ -64,7 +64,12 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 "VLLM_MORI_EP_V2=0 for MORI EPv1, which also requires AITER fused MoE."
             )
 
-        if quant_dtype is not None and fused_experts.quant_config.is_per_tensor:
+        # OCP MX (e.g. MXFP4) reports a per-tensor group shape but scales every
+        # 1x32 block, so only FP8 / INT8 activations count as per tensor.
+        quant_config = fused_experts.quant_config
+        if quant_config.is_per_tensor and (
+            quant_config.use_fp8_w8a8 or quant_config.use_int8_w8a8
+        ):
             raise ValueError(
                 "MORI EPv2 does not support per-tensor activation quantization: "
                 "the experts would quantize the received rows, which AITER's "
@@ -207,7 +212,7 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # Experts that read only the received rows can skip clearing the rest,
         # unless a dynamic per-tensor activation scale is taken over every row.
         if not self._experts_read_recv_rows_only or (
-            quant_config.is_per_tensor and quant_config.a1_scale is None
+            quant_config.act_scale_is_tensor_wide(quant_config.a1_scale)
         ):
             dispatch_a1.masked_fill_(unused, 0)
         dispatch_weights.masked_fill_(unused, 0)

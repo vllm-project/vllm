@@ -281,6 +281,9 @@ def test_experts_write_into_combine_staging_only_when_it_fits():
         (torch.bfloat16, torch.float8_e4m3fn, True, False, True),
         # AITER cannot quantize the received rows per tensor.
         (torch.bfloat16, torch.float8_e4m3fn, True, True, False),
+        # OCP MX (MXFP4) reports a per-tensor group shape but scales each 1x32
+        # block, which AITER quantizes after the all2all.
+        (torch.bfloat16, "mxfp4", True, True, True),
         # e.g. FP8 Triton experts, which expect the dispatch to quantize.
         (torch.bfloat16, torch.float8_e4m3fn, False, False, False),
         (torch.float16, None, False, False, False),
@@ -291,7 +294,12 @@ def test_experts_it_cannot_feed_are_rejected(
 ):
     experts = SimpleNamespace(
         moe_config=SimpleNamespace(in_dtype=in_dtype),
-        quant_config=SimpleNamespace(quant_dtype=quant_dtype, is_per_tensor=per_tensor),
+        quant_config=SimpleNamespace(
+            quant_dtype=quant_dtype,
+            is_per_tensor=per_tensor,
+            use_fp8_w8a8=quant_dtype == torch.float8_e4m3fn,
+            use_int8_w8a8=quant_dtype == torch.int8,
+        ),
         expects_unquantized_inputs=quantizes_itself,
     )
     prepare_finalize = _make_pf(FakeOp(16))
