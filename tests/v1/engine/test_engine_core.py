@@ -922,6 +922,53 @@ def test_checkpoint_prepare_fails_on_drain_barrier_error(deferred: bool):
     assert core.reject_new_requests
 
 
+@pytest.mark.parametrize("entry", ["sleep", "release_kv_cache_memory"])
+@pytest.mark.parametrize(
+    "kwargs,expected", [({}, True), (dict(reset_connector=False), False)]
+)
+def test_kv_cache_discard_resets_connector_unless_kept(entry, kwargs, expected):
+    """Discarding the KV cache resets the connector unless the caller keeps it."""
+    core = _pausable_engine_core_proc()
+    core.model_executor.is_sleeping = False
+    reset_calls: list[bool] = []
+    core._reset_caches = lambda reset_connector: reset_calls.append(reset_connector)
+
+    if entry == "sleep":
+        core.sleep(level=1, mode="keep", **kwargs)
+    else:
+        core.scheduler.pause_state = PauseState.PAUSED_ALL
+        core.release_kv_cache_memory(**kwargs)
+
+    assert reset_calls == [expected]
+
+
+@pytest.mark.parametrize("reset_connector", [True, False])
+def test_inproc_sleep_drains_before_keeping_connector_cache(reset_connector):
+    """Keeping the connector's cache steps the in-process engine until its
+    pending work, such as connector stores, is done; a reset does not step."""
+    core = object.__new__(EngineCore)
+    core.model_executor = MagicMock()
+    core.model_executor.vllm_config.cache_config.enable_extensible_kv_cache = False
+    core.scheduler = MagicMock()
+    core.scheduler.has_requests.side_effect = [True, True, False]
+    core.batch_queue = None
+    core.check_for_draft_tokens = False
+    order: list[str] = []
+
+    def step():
+        order.append("step")
+        return {}, True
+
+    core.step_fn = step
+    core._reset_caches = lambda reset_connector: order.append("reset_caches")
+
+    core.sleep(level=1, reset_connector=reset_connector)
+
+    steps = [] if reset_connector else ["step", "step"]
+    assert order == steps + ["reset_caches"]
+    core.model_executor.sleep.assert_called_once_with(1)
+
+
 @pytest.mark.parametrize("deferred", [False, True])
 def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     """A resolved pause promises an idle device: the barrier must run before
@@ -930,7 +977,7 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     core.engines_running = deferred
     order: list[str] = []
     core.model_executor.collective_rpc.side_effect = lambda method: order.append(method)
-    core._reset_caches = lambda: order.append("reset_caches")
+    core._reset_caches = lambda **kwargs: order.append("reset_caches")
 
     result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=True)
     if deferred:
