@@ -234,6 +234,19 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 return False
         return True
 
+    @classmethod
+    def registers_kv_cache_memory(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        for conn_config in kv_transfer_config.kv_connector_extra_config.get(
+            "connectors", []
+        ):
+            child_config = KVTransferConfig(
+                **{"engine_id": kv_transfer_config.engine_id, **conn_config}
+            )
+            connector_cls = KVConnectorFactory.get_connector_class(child_config)
+            if connector_cls.registers_kv_cache_memory(child_config):
+                return True
+        return False
+
     @property
     def requires_kv_delivery(self) -> bool:
         return any(c.requires_kv_delivery for c in self._connectors)

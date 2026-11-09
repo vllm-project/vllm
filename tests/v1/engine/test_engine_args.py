@@ -455,6 +455,38 @@ def test_kv_transfer_registers_kv_cache_memory(
     assert transfer.registers_kv_cache_memory() is registers
 
 
+@pytest.mark.parametrize(
+    ("connector", "registers"),
+    [("RegistersKVCacheTestConnector", True), ("TestExampleConnector", False)],
+)
+@pytest.mark.parametrize("multi", [False, True])
+def test_external_connector_registers_kv_cache_memory(connector, registers, multi):
+    """External connectors (kv_connector_module_path) declare that they register
+    the device KV cache through a classmethod, also when nested in
+    MultiConnector."""
+    from vllm.config.kv_transfer import KVTransferConfig
+
+    child = {
+        "kv_connector": connector,
+        "kv_role": "kv_both",
+        "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+    }
+    if multi:
+        transfer = KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "OffloadingConnector", "kv_role": "kv_both"},
+                    child,
+                ]
+            },
+        )
+    else:
+        transfer = KVTransferConfig(**child)
+    assert transfer.registers_kv_cache_memory() is registers
+
+
 def _nixl_config_for_extensible_kv_cache(monkeypatch, *, rocm, requested, imex_channel):
     from types import SimpleNamespace
 

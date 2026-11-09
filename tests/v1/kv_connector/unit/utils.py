@@ -356,6 +356,14 @@ def create_model_runner_output(
     )
 
 
+class RegistersKVCacheTestConnector(ExampleConnector):
+    """External connector that registers the device KV cache for RDMA."""
+
+    @classmethod
+    def registers_kv_cache_memory(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        return True
+
+
 class TestExampleConnector(ExampleConnector):
     __test__ = False
 

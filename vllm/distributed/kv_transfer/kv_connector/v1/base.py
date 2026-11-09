@@ -201,6 +201,18 @@ class KVConnectorBase_V1(ABC):
         """Whether the connector supports core lookahead hashing."""
         return False
 
+    @classmethod
+    def registers_kv_cache_memory(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        """Whether the connector's workers register the device KV cache with an
+        RDMA or UCX engine. The extensible KV cache then backs each segment with
+        a single physical allocation, which memory registration requires.
+
+        Consulted for external connectors (`kv_connector_module_path`),
+        including inside MultiConnector; in-tree connectors are listed in
+        `_KV_CACHE_REGISTERING_CONNECTORS`. Defaults to False.
+        """
+        return False
+
     @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.

@@ -181,11 +181,27 @@ class KVTransferConfig:
 
     def registers_kv_cache_memory(self) -> bool:
         """Whether a connector registers the device KV cache itself with UCX or
-        RDMA (NIXL, Mooncake, MoRIIO, UMBP), directly or in MultiConnector."""
-        return self.uses_nixl_on_device_memory() or any(
-            child.get("kv_connector") in _KV_CACHE_REGISTERING_CONNECTORS
-            for child in self._connector_children()
+        RDMA (NIXL, Mooncake, MoRIIO, UMBP, or an external connector whose
+        `registers_kv_cache_memory` classmethod says so), directly or in
+        MultiConnector."""
+        return (
+            self.uses_nixl_on_device_memory()
+            or any(
+                child.get("kv_connector") in _KV_CACHE_REGISTERING_CONNECTORS
+                for child in self._connector_children()
+            )
+            or self._connector_class_registers_kv_cache_memory()
         )
+
+    def _connector_class_registers_kv_cache_memory(self) -> bool:
+        if self.kv_connector != "MultiConnector" and not self.kv_connector_module_path:
+            return False
+        from vllm.distributed.kv_transfer.kv_connector.factory import (
+            KVConnectorFactory,
+        )
+
+        connector_cls = KVConnectorFactory.get_connector_class(self)
+        return connector_cls.registers_kv_cache_memory(self)
 
     def has_connector(self, connector_name: str) -> bool:
         """Whether `connector_name` is configured, directly or in MultiConnector."""
