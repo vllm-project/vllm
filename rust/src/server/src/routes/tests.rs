@@ -8629,7 +8629,13 @@ async fn sleep_route_rejects_invalid_query_before_engine_dispatch() {
     let before = METRICS.render().expect("render metrics");
     let (app, engine_task) =
         test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
-    for query in ["level=invalid", "level=-1", "level=3", "mode=invalid"] {
+    for query in [
+        "level=invalid",
+        "level=-1",
+        "level=3",
+        "mode=invalid",
+        "reset_connector=maybe",
+    ] {
         let response = app
             .clone()
             .call(
@@ -8652,7 +8658,7 @@ async fn sleep_route_rejects_invalid_query_before_engine_dispatch() {
             "http_requests_total",
             Some("method=\"POST\",status=\"4xx\",handler=\"/sleep\""),
         ),
-        4.0
+        5.0
     );
     for metric in [
         "vllm:sleep_mode_operation_duration_seconds_count",
@@ -8705,7 +8711,7 @@ async fn assert_route_sends_utility_args(
 #[serial]
 async fn sleep_route_forwards_reset_connector_opt_out() {
     assert_route_sends_utility_args(
-        "/sleep?reset_connector=false",
+        "/sleep?reset_connector=False",
         "sleep",
         vec![Value::from(1_u64), Value::from("abort"), Value::from(false)],
     )
@@ -8716,7 +8722,7 @@ async fn sleep_route_forwards_reset_connector_opt_out() {
 #[serial]
 async fn release_kv_cache_memory_route_forwards_reset_connector_opt_out() {
     assert_route_sends_utility_args(
-        "/release_kv_cache_memory?reset_connector=false",
+        "/release_kv_cache_memory?reset_connector=0",
         "release_kv_cache_memory",
         vec![Value::from(false)],
     )
