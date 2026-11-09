@@ -16,6 +16,7 @@ use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_metrics::METRICS;
 
+mod aux_output;
 mod error;
 mod inflight;
 mod log_stats;
@@ -23,6 +24,7 @@ mod output;
 mod request;
 mod request_metrics;
 
+pub use aux_output::AuxOutputRows;
 pub use error::{Error, Result};
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
