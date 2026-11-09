@@ -258,6 +258,8 @@ def xpress_latent_pass(
             f"rc must be R={R}, or without the MLP a power of two >= 16 dividing R"
             f", got {rc}"
         )
+    if not do_mlp and wgu_t is None:
+        raise ValueError("the GEMM MLP needs wgu_t, [R, 2 * H]")
     _xpress_latent_kernel[(N, R // rc)](
         blk,
         tok_am1,
@@ -286,7 +288,6 @@ def xpress_latent_pass(
         num_stages=num_stages or (1 if rocm else 3),
     )
     if not do_mlp:
-        assert wgu_t is not None, "the GEMM MLP needs wgu_t"
         u = lat_out.view(-1, R)
         m = u.new_empty(u.shape[0], H)
         torch.ops._C.silu_and_mul(m, u @ wgu_t)
