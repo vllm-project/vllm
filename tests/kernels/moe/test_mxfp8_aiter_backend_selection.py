@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MXFP8 MoE backend selection for the AITER FlyDSL kernel (gfx950).
+"""MXFP8 MoE backend selection for the AITER kernels: FlyDSL (gfx950) and
+moe_gemm_a8w8 (gfx942).
 
 GPU-free: mocks the platform (gfx950) and the aiter fused-MoE enable flag, then
 exercises the oracle so the FlyDSL backend is auto-picked when usable (including
@@ -22,6 +23,12 @@ if not current_platform.is_rocm():
 from tests.kernels.moe.utils import make_dummy_moe_config  # noqa: E402
 from vllm.model_executor.layers.fused_moe.activation import (  # noqa: E402
     MoEActivation,
+)
+from vllm.model_executor.layers.fused_moe.config import (  # noqa: E402
+    RoutingMethodType,
+)
+from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_a8w8_moe import (  # noqa: E402
+    AiterMxfp8A8W8ExpertsMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (  # noqa: E402
     _AITER_SWIGLU_ALPHA,
@@ -167,10 +174,110 @@ def test_gfx950_picks_aiter():
     assert experts_cls is AiterMxfp8Experts
 
 
-def test_gfx942_picks_emulation():
-    """Flydsl unusable (e.g. gfx942, no FlyDSL support) -> native Triton
-    dot_scaled backend wins instead."""
-    with patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=False):
+def test_no_aiter_picks_emulation():
+    """Neither AITER kernel usable (no MX hardware, not gfx942) -> EMULATION."""
+    with (
+        patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=False),
+        _gfx942(False),
+    ):
         backend, experts_cls = select_mxfp8_moe_backend(_config())
     assert backend is Fp8MoeBackend.EMULATION
     assert experts_cls is Mxfp8EmulationTritonExperts
+
+
+# --- gfx942: AITER moe_gemm_a8w8 ---------------------------------------------
+
+_A8W8_ROCM = "vllm.platforms.rocm"
+
+
+def _gfx942(on: bool):
+    return patch(f"{_A8W8_ROCM}.on_gfx942", return_value=on)
+
+
+def _a8w8_config(**overrides):
+    cfg = make_dummy_moe_config(
+        num_experts=128,
+        experts_per_token=8,
+        hidden_dim=6144,
+        activation=MoEActivation.SILU,
+    )
+    fse = overrides.pop("is_fused_shared_expert_requested", False)
+    overrides.setdefault("routing_method", RoutingMethodType.DeepSeekV3)
+    cfg = dataclasses.replace(cfg, **overrides)
+    # __post_init__ derives this from the env, so set it afterwards.
+    cfg.is_fused_shared_expert_requested = fse
+    return cfg
+
+
+def _a8w8_supported(cfg):
+    return AiterMxfp8A8W8ExpertsMonolithic.is_supported_config(
+        AiterMxfp8A8W8ExpertsMonolithic,
+        cfg,
+        kMxfp8Static,
+        kMxfp8Dynamic,
+        FusedMoEActivationFormat.Standard,
+    )
+
+
+def test_a8w8_registered():
+    assert Fp8MoeBackend.AITER_MXFP8_A8W8 in _SUPPORTED_BACKENDS
+    order = list(_SUPPORTED_BACKENDS)
+    assert order.index(Fp8MoeBackend.AITER_MXFP8_A8W8) < order.index(
+        Fp8MoeBackend.EMULATION
+    )
+    assert _BACKEND_NAME_MAP["aiter_mxfp8_a8w8"] is Fp8MoeBackend.AITER_MXFP8_A8W8
+    assert _mxfp8_backend_to_kernel_cls(Fp8MoeBackend.AITER_MXFP8_A8W8) == [
+        AiterMxfp8A8W8ExpertsMonolithic
+    ]
+
+
+def test_gfx942_picks_a8w8():
+    with (
+        patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=False),
+        _gfx942(True),
+        _aiter_moe_enabled(True),
+    ):
+        backend, experts_cls = select_mxfp8_moe_backend(_a8w8_config())
+    assert backend is Fp8MoeBackend.AITER_MXFP8_A8W8
+    assert experts_cls is AiterMxfp8A8W8ExpertsMonolithic
+
+
+@pytest.mark.parametrize(
+    "gfx942,aiter_moe,overrides,reason",
+    [
+        (True, True, {}, None),
+        (False, True, {}, "current device"),  # e.g. gfx950
+        (True, False, {}, "current device"),  # VLLM_ROCM_USE_AITER_MOE=0
+        (True, True, {"has_bias": True}, "bias"),
+        (True, True, {"is_fused_shared_expert_requested": True}, "shared experts"),
+        (True, True, {"routing_method": RoutingMethodType.Llama4}, "routing method"),
+    ],
+)
+def test_a8w8_is_supported_config(gfx942, aiter_moe, overrides, reason):
+    with _gfx942(gfx942), _aiter_moe_enabled(aiter_moe):
+        ok, why = _a8w8_supported(_a8w8_config(**overrides))
+    assert ok is (reason is None)
+    if reason is not None:
+        assert reason in why
+
+
+def test_a8w8_rejects_ep():
+    cfg = _a8w8_config()
+    cfg = dataclasses.replace(
+        cfg,
+        moe_parallel_config=dataclasses.replace(
+            cfg.moe_parallel_config, ep_size=2, use_ep=True
+        ),
+    )
+    with _gfx942(True), _aiter_moe_enabled(True):
+        ok, why = _a8w8_supported(cfg)
+    assert not ok and "parallel config" in why
+
+
+def test_explicit_moe_backend_a8w8_raises_when_unsupported():
+    with (
+        _gfx942(False),
+        _aiter_moe_enabled(True),
+        pytest.raises(ValueError, match="does not support current device"),
+    ):
+        _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8_A8W8, _a8w8_config())
