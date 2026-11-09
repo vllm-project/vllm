@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""``decode_topk`` (``decode_topk_cute.py``) against ``torch.topk``.
+"""`decode_topk` (`decode_topk_cute.py`) against `torch.topk`.
 
 Token mode: each row's output must be an exact top-k of its BF16 logits in
 the kernel's key order (every index whose key exceeds the k-th largest key,
-then indices whose key equals it), or ``0 .. n-1`` and -1 for rows of at most
+then indices whose key equals it), or `0 .. n-1` and -1 for rows of at most
 k values. Rows cover the sampled path, short rows (the direct path), crowded
 and constant values, values rising toward the row's end (survivors in the last
 CTA), NaN and infinities, the forced direct path, and a sample that misses the
 row's top values. Block mode must
 select an exact top-k of the 8-token block maxima, as the stock
-``select_candidate_blocks`` on the upcast logits does, with the newest block
+`select_candidate_blocks` on the upcast logits does, with the newest block
 pinned and -inf blocks written as -1.
 """
 
@@ -233,7 +233,7 @@ def selected_keys(ids: torch.Tensor, keys: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize("fallback", [False, True])
 def test_candidate_blocks_match_stock(workspace_init, rows, fallback):
     """Block mode selects an exact top-k of the block maxima, as the stock
-    ``select_candidate_blocks`` on the upcast logits does: the same multiset
+    `select_candidate_blocks` on the upcast logits does: the same multiset
     of block keys (BF16 maxima tie often, so the block sets may differ only
     among equal maxima), the pinned newest block, -inf blocks as -1."""
     from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
