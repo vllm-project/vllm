@@ -234,6 +234,16 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
 
 
+def _tool_field(tool: Any, field: str) -> Any:
+    return tool.get(field) if isinstance(tool, dict) else getattr(tool, field, None)
+
+
+def _get_tool_name(tool: Any) -> str | None:
+    fn = _tool_field(tool, "function")
+    name = _tool_field(fn, "name")
+    return name if isinstance(name, str) else None
+
+
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
@@ -982,7 +992,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
         # OpenAI treats an empty tools array like an omitted one: "auto" and
         # "required" have nothing to call and fall back to "none". A named
         # tool keeps the empty list so the lookup below reports the mismatch.
-        if data.get("tools") == [] and not isinstance(data.get("tool_choice"), dict):
+        if data.get("tools") == [] and not isinstance(
+            data.get("tool_choice"), (dict, ChatCompletionNamedToolChoiceParam)
+        ):
             data["tools"] = None
             if data.get("tool_choice") in ("auto", "required"):
                 data["tool_choice"] = "none"
@@ -1008,7 +1020,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             # make sure that tool choice is either a named tool
             # OR that it's set to "auto" or "required"
             if data["tool_choice"] not in ["auto", "required"] and not isinstance(
-                data["tool_choice"], dict
+                data["tool_choice"], (dict, ChatCompletionNamedToolChoiceParam)
             ):
                 raise VLLMValidationError(
                     f"Invalid value for `tool_choice`: {data['tool_choice']}! "
@@ -1023,30 +1035,35 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 'Correct usage: `{"type": "function",'
                 ' "function": {"name": "my_function"}}`'
             )
-            if isinstance(data["tool_choice"], dict):
+            if isinstance(
+                data["tool_choice"], (dict, ChatCompletionNamedToolChoiceParam)
+            ):
+                if isinstance(data["tool_choice"], ChatCompletionNamedToolChoiceParam):
+                    function_name = data["tool_choice"].function.name
+                else:
+                    function = data["tool_choice"].get("function")
+                    if not isinstance(function, dict):
+                        raise VLLMValidationError(
+                            f"Invalid value for `function`: `{function}` in "
+                            f"`tool_choice`! {correct_usage_message}",
+                            parameter="tool_choice.function",
+                        )
+                    if "name" not in function:
+                        raise VLLMValidationError(
+                            f"Expected field `name` in `function` in "
+                            f"`tool_choice`! {correct_usage_message}",
+                            parameter="tool_choice.function.name",
+                        )
+                    function_name = function["name"]
+                    if not isinstance(function_name, str) or len(function_name) == 0:
+                        raise VLLMValidationError(
+                            f"Invalid `name` in `function`: `{function_name}`"
+                            f" in `tool_choice`! {correct_usage_message}",
+                            parameter="tool_choice.function.name",
+                        )
                 valid_tool = False
-                function = data["tool_choice"].get("function")
-                if not isinstance(function, dict):
-                    raise VLLMValidationError(
-                        f"Invalid value for `function`: `{function}` in "
-                        f"`tool_choice`! {correct_usage_message}",
-                        parameter="tool_choice.function",
-                    )
-                if "name" not in function:
-                    raise VLLMValidationError(
-                        f"Expected field `name` in `function` in "
-                        f"`tool_choice`! {correct_usage_message}",
-                        parameter="tool_choice.function.name",
-                    )
-                function_name = function["name"]
-                if not isinstance(function_name, str) or len(function_name) == 0:
-                    raise VLLMValidationError(
-                        f"Invalid `name` in `function`: `{function_name}`"
-                        f" in `tool_choice`! {correct_usage_message}",
-                        parameter="tool_choice.function.name",
-                    )
                 for tool in data["tools"]:
-                    if tool["function"]["name"] == function_name:
+                    if _get_tool_name(tool) == function_name:
                         valid_tool = True
                         break
                 if not valid_tool:
