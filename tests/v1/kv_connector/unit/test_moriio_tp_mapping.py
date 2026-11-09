@@ -158,7 +158,7 @@ def test_every_consumer_head_and_state_slice_is_written_exactly_once(
 
 
 def _view(buffer: torch.Tensor, spec, num_blocks, layout) -> torch.Tensor:
-    """A byte view [B, H, N, C] of ``buffer`` laid out as ``layout``."""
+    """A byte view [B, H, N, C] of `buffer` laid out as `layout`."""
     strides = compute_layout_strides(spec, num_blocks, 1, layout)[1:]
     shape = (num_blocks, spec.num_heads, spec.num_states, spec.state_content_size_bytes)
     return torch.as_strided(buffer, shape, strides)
@@ -345,7 +345,7 @@ def _consumer_wrapper() -> MoRIIOWrapper:
     wrapper.lock = threading.Lock()
     wrapper.done_write_cache_req_ids = []
     wrapper.failed_write_cache_req_ids = []
-    wrapper._write_done_counts = {}
+    wrapper._write_done_senders = {}
     wrapper._terminal_transfer_ids = OrderedDict()
     return wrapper
 
@@ -360,7 +360,7 @@ def test_consumer_completes_after_every_writer_reported(monkeypatch):
 
     wrapper._handle_structured_message(message)
     assert wrapper.pop_finished_write_req_ids() == {"t"}
-    assert wrapper._write_done_counts == {}
+    assert wrapper._write_done_senders == {}
 
     # A peer that does not send num_writers is a single writer.
     wrapper._handle_structured_message({"type": "write_done", "transfer_id": "u"})
@@ -374,5 +374,5 @@ def test_consumer_write_failure_drops_partial_write_count(monkeypatch):
         {"type": "write_done", "transfer_id": "t", "num_writers": 2}
     )
     wrapper._handle_structured_message({"type": "write_failed", "transfer_id": "t"})
-    assert wrapper._write_done_counts == {}
+    assert wrapper._write_done_senders == {}
     assert wrapper.pop_failed_write_req_ids() == {"t"}

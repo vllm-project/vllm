@@ -188,7 +188,7 @@ class GPUDraftStepExecutor(DraftStepExecutor):
             set_random_seed,
             set_torch_threads_for_runtime,
         )
-        from vllm.v1.worker.block_table import get_block_table_width
+        from vllm.v1.kv_cache_interface import get_block_table_width
         from vllm.v1.worker.gpu.attn_utils import (
             init_attn_backend,
             init_kv_cache,
