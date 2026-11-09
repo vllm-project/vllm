@@ -130,7 +130,7 @@ enabling the corresponding APIs.
 | Classification Usages       | `LLM.classify(...)` | `classify`                        | `cross-encoder` (see note) | linear classifier        |
 | Embedding Usages            | `LLM.embed(...)`    | `embed`                           | `bi-encoder`               | cosine similarity        |
 | Token Classification Usages | N/A                 | `token_classify`                  | N/A                        | N/A                      |
-| Token Embedding Usages      | N/A                 | `token_embed`                     | `late-interaction`         | late interaction(MaxSim) |
+| Token Embedding Usages      | `LLM.embed(...)`    | `token_embed`                     | `late-interaction`         | late interaction(MaxSim) |
 | Reward Usages               | N/A                 | `classify` & `token_classify`     | N/A                        | N/A                      |
 | Scoring Usages              | `LLM.score(...)`    | N/A                               | N/A                        | N/A                      |
 | Plugins Usages              | N/A                 | `plugin`                          | N/A                        | N/A                      |
@@ -146,9 +146,9 @@ For more information about `LLM.classify`, see [this page](classify.md#offline-i
 
 ### `LLM.embed`
 
-The [embed][vllm.LLM.embed] method outputs an embedding vector for each prompt.
+The [embed][vllm.LLM.embed] method outputs one embedding vector per prompt with the `embed` task, or a matrix of token vectors with the `token_embed` task. Eligible token embedding models also support [late chunking](token_embed.md#fixed-length-late-chunking) through this method.
 It is primarily designed for [embedding models](embed.md).
-For more information about `LLM.embed`, see [this page](embed.md#offline-inference).
+For more information about `LLM.embed`, see the [sequence embedding](embed.md#offline-inference) and [token embedding](token_embed.md#offline-inference) guides.
 
 ### `LLM.score`
 
@@ -178,8 +178,9 @@ print(f"Data: {data!r}")
 Our online Server provides endpoints that correspond to the offline APIs:
 
 - Corresponding to `LLM.embed`:
-    - [Cohere Embed API](embed.md#cohere-embed-api) (`/v2/embed`)
+    - [Cohere Embed API](embed.md#cohere-embed-api) (`/v2/embed`) for the `embed` task
     - [OpenAI-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
+    - [Token Embeddings API](token_embed.md#online-serving) (`/v1/embeddings`) for the `token_embed` task, returning token or chunk vectors as a vLLM extension
 - Corresponding to `LLM.classify`:
     - [Classification API](classify.md#online-serving)(`/classify`)
 - Corresponding to `LLM.score`:

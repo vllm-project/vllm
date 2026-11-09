@@ -22,7 +22,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
     async_tensor_h2d,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -46,7 +45,7 @@ from vllm.v1.attention.backends.mla.triton_mla import (
     TritonMLAImpl,
     TritonMLAMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import KVCacheLayout
+from vllm.v1.kv_cache_interface import KVCacheLayout, is_quantized_kv_cache
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
@@ -353,9 +352,10 @@ class Dots3NoteMLAMetadataBuilder(TritonMLAMetadataBuilder):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        max_query_len: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> Dots3NoteDecodeMetadata:
-        del max_seq_len, query_start_loc_device, num_decode_tokens
+        del max_seq_len, query_start_loc_device, num_decode_tokens, max_query_len
         query_len = int(query_start_loc_cpu[1] - query_start_loc_cpu[0])
         return Dots3NoteDecodeMetadata(
             block_table=block_table_tensor,
@@ -723,6 +723,7 @@ class Dots3NotePaddedSparseImpl(FlashAttnMLASparseImpl):
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
+        skip_scale: bool = False,
     ) -> None:
         super().do_kv_cache_update(
             kv_c_normed,
@@ -731,6 +732,7 @@ class Dots3NotePaddedSparseImpl(FlashAttnMLASparseImpl):
             slot_mapping,
             kv_cache_dtype,
             k_scale,
+            skip_scale=skip_scale,
         )
 
     def forward_mha(  # type: ignore[override]

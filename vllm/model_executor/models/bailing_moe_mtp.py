@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -19,9 +19,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
-)
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -36,7 +33,7 @@ from vllm.sequence import IntermediateTensors
 from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
 
 
-def _get_draft_hf_config(vllm_config: VllmConfig) -> PretrainedConfig:
+def _get_draft_hf_config(vllm_config: VllmConfig) -> PreTrainedConfig:
     speculative_config = vllm_config.speculative_config
     if speculative_config is not None:
         draft_model_config = speculative_config.draft_model_config
@@ -48,7 +45,7 @@ def _get_draft_hf_config(vllm_config: VllmConfig) -> PretrainedConfig:
 class BailingMTPSharedHead(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         vllm_config: VllmConfig,
     ) -> None:
@@ -261,7 +258,6 @@ class BailingMoeV25MTPModel(nn.Module):
         expert_params_mapping = list(self.get_expert_mapping())
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
-        loaded_mtp_layers: set[int] = set()
 
         def load_param(
             name: str,
@@ -349,7 +345,6 @@ class BailingMoeV25MTPModel(nn.Module):
                     loaded = True
                     break
             if loaded:
-                loaded_mtp_layers.add(spec_layer)
                 continue
 
             if "mlp.experts" in name:
@@ -363,27 +358,9 @@ class BailingMoeV25MTPModel(nn.Module):
                         loaded_weight,
                         (expert_id, expert_shard_id),
                     ):
-                        loaded = True
                         break
-                if loaded:
-                    loaded_mtp_layers.add(spec_layer)
                 continue
 
-            if load_param(name, loaded_weight):
-                loaded_mtp_layers.add(spec_layer)
+            load_param(name, loaded_weight)
 
-        for layer_idx in range(
-            self.model.mtp_start_layer_idx,
-            self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
-        ):
-            if (
-                layer_idx not in loaded_mtp_layers
-                and is_mtp_completeness_check_enabled()
-            ):
-                raise ValueError(
-                    f"Bailing MTP speculative decoding layer {layer_idx} "
-                    "weights are missing from checkpoint. Use a checkpoint "
-                    "that includes MTP layer weights, or disable speculative "
-                    "decoding."
-                )
         return loaded_params

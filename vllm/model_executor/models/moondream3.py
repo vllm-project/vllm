@@ -28,12 +28,15 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )
-from vllm.model_executor.layers.fused_moe import MoEActivation, fused_experts
+from vllm.model_executor.layers.fused_moe import (
+    GateLinear,
+    MoEActivation,
+    fused_experts,
+)
 from vllm.model_executor.layers.fused_moe.config import biased_moe_quant_config
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -453,11 +456,10 @@ class Moondream3TextMoE(nn.Module):
         self.num_local_experts = self.experts_per_rank
 
         # Router (gate) - use ReplicatedLinear for compatibility
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             hidden_size,
             num_experts,
             bias=True,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
@@ -869,9 +871,7 @@ class Moondream3TextModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
-        for i, layer in enumerate(
-            islice(self.blocks, self.start_layer, self.end_layer)
-        ):
+        for layer in islice(self.blocks, self.start_layer, self.end_layer):
             hidden_states = layer(positions, hidden_states)
 
         if not pp_group.is_last_rank:

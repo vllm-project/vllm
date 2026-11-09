@@ -187,7 +187,7 @@ def test_varlen_with_paged_kv(
         max_seqlen_k=max_kv_len,
         softmax_scale=scale,
         causal=True,
-        window_size=window_size,
+        window_size=list(window_size),
         block_table=block_tables,
         softcap=soft_cap if soft_cap is not None else 0,
         fa_version=fa_version,
@@ -232,7 +232,7 @@ def test_fa4_hd256_paged_call_shape(
     num_heads: tuple[int, int],
     sliding_window: int | None,
 ) -> None:
-    """Handles excess block-table columns with page-aligned ``max_seqlen_k``."""
+    """Handles excess block-table columns with page-aligned `max_seqlen_k`."""
     from vllm.v1.attention.backends.fa_utils import FA4_HD256_PAGE_SIZE
 
     if not is_fa_version_supported(4):
@@ -274,7 +274,7 @@ def test_fa4_hd256_paged_call_shape(
         max_seqlen_k=num_pages * block_size,
         softmax_scale=scale,
         causal=True,
-        window_size=window_size,
+        window_size=list(window_size),
         block_table=block_tables[:, :num_pages],
         num_splits=1,
         fa_version=4,

@@ -3,6 +3,7 @@
 """Tests for mllama's multimodal preprocessing and profiling."""
 
 import pytest
+import torch
 from torch import prod
 from transformers import Llama4Config
 
@@ -36,11 +37,13 @@ def test_profiling(model_id: str, max_model_len: int):
     tokens_per_patch = ((image_size // patch_size) ** 2) // downsample_ratio
 
     mm_data = mm_inputs["mm_kwargs"].get_data()
-    chunks_per_image = prod(mm_data["patches_per_image"])
+    patches_per_image = mm_data["patches_per_image"]
+    aspect_ratios = mm_data["aspect_ratios"]
+    assert isinstance(patches_per_image, torch.Tensor)
+    assert isinstance(aspect_ratios, torch.Tensor)
+    chunks_per_image = prod(patches_per_image)
     total_num_patches = chunks_per_image * tokens_per_patch
-    num_tiles = (
-        mm_data["aspect_ratios"][0][0] * mm_data["aspect_ratios"][0][1]
-    )  # x-y separator tokens
+    num_tiles = aspect_ratios[0][0] * aspect_ratios[0][1]  # x-y separator tokens
     total_tokens = (
         total_num_patches.item() + num_tiles.item() + 3
     )  # image start, image, image end

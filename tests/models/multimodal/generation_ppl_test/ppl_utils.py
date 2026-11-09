@@ -17,7 +17,7 @@ from vllm.logprobs import Logprob
 PPL_TOL = 0.01
 
 
-@torch.inference_mode
+@torch.inference_mode()
 def vqa_ppl_test(
     hf_runner,
     vllm_runner,
@@ -34,11 +34,12 @@ def vqa_ppl_test(
         mm_processor_kwargs = {}
 
     processor = AutoProcessor.from_pretrained(model_info.name)
+    image_token_id = model_info.image_token_id or processor.image_token_id
 
     images = []
     prompts = []
     for row in dataset:
-        image = row["image"]
+        image = _ensure_rgb(row["image"])
         images.append(image)
 
         question = row["question"]
@@ -99,8 +100,11 @@ def vqa_ppl_test(
             for token_data in token_datas[1:]:
                 assert token_data is not None
                 assert len(token_data) == 1
-                token_log_prob = list(token_data.values())[0].logprob
-                token_log_probs.append(token_log_prob)
+                token_id, token_log_prob = next(iter(token_data.items()))
+
+                if token_id == image_token_id:
+                    continue
+                token_log_probs.append(token_log_prob.logprob)
 
             neg_log_likelihood = -torch.tensor(
                 token_log_probs, dtype=torch.float32, device="cpu"
@@ -111,7 +115,8 @@ def vqa_ppl_test(
         vllm_dtype = model_config.dtype
         head_dtype = model_config.head_dtype
 
-    # Accelerate ppl test by setting Transformers ppl score to a constant
+    # Accelerate the PPL test by setting the Transformers PPL score to a
+    # constant, if provided in model_info.
     if model_info.hf_ppl is None:
         with hf_runner(
             model_info.name,
@@ -129,14 +134,16 @@ def vqa_ppl_test(
                     return_tensors="pt",
                     **mm_processor_kwargs,
                 )
+                inputs.pop("labels", None)
                 inputs = inputs.to("cuda")
                 input_ids = inputs["input_ids"]
 
-                outputs = hf_model.model(**inputs, labels=input_ids)
+                labels = input_ids.masked_fill(input_ids == image_token_id, -100)
+                outputs = hf_model.model(**inputs, labels=labels)
                 neg_log_likelihood = outputs.loss
                 neg_log_likelihood = neg_log_likelihood.to(torch.float32).cpu()
 
-                num_loss_tokens = input_ids.shape[1] - 1
+                num_loss_tokens = int((labels[:, 1:] != -100).sum())
                 nll_sum += neg_log_likelihood * num_loss_tokens
                 n_tokens += num_loss_tokens
 
@@ -155,3 +162,9 @@ def vqa_ppl_test(
 
     assert abs(differ) < tol
     return vllm_ppl
+
+
+def _ensure_rgb(image):
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    return image

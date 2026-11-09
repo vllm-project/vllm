@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CuteDSL MiniMax M3 index decode score kernel.
 
-The kernel computes decode-time index block scores with TMA + ``mma.sync``.
-We use ``mma.sync`` instead of tcgen05 because this score GEMM has a very small
+The kernel computes decode-time index block scores with TMA + `mma.sync`.
+We use `mma.sync` instead of tcgen05 because this score GEMM has a very small
 N dimension and benefits more from higher CTA occupancy than from a deeper
 single-CTA tcgen05 pipeline.
 
@@ -287,6 +287,8 @@ class IndexDecodeScoreKernel:
                 cute.arch.barrier(barrier_id=self.BAR_MMA, number_of_threads=128)
                 for q in cutlass.range_constexpr(Q_TILES):
                     cute.copy(ldsm_atom, sQ_ldsm[None, (q, None)], rQ[None, None, q])
+                # Order ldmatrix reads before the producer refills this stage with TMA.
+                cute.arch.fence_proxy("async.shared", space="cta")
                 cute.arch.mbarrier_arrive(tma_empty_mbar)
 
                 tma_stage = 1 % self.num_stages
@@ -342,6 +344,7 @@ class IndexDecodeScoreKernel:
                                         rC[None, m, n],
                                     )
 
+                    cute.arch.fence_proxy("async.shared", space="cta")
                     cute.arch.mbarrier_arrive(tma_empty_mbar + tma_stage)
 
                     k_start = block_id * BLOCK_K + warp_id * 32

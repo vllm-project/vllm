@@ -3,14 +3,12 @@
 
 from collections.abc import Callable
 from dataclasses import InitVar
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self, cast
 
 from pydantic import Field, field_validator
-from typing_extensions import Self
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
-from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 if TYPE_CHECKING:
@@ -53,7 +51,7 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
-    max_num_scheduled_tokens: int | None = Field(default=None, ge=0)
+    max_num_scheduled_tokens: int | None = Field(default=None, ge=1)
     """Maximum number of tokens that the scheduler may issue in a single iteration.
     
     This is usually equal to max_num_batched_tokens, but can be smaller in cases
@@ -70,19 +68,38 @@ class SchedulerConfig:
     max_num_active_seqs: int | None = Field(default=None, ge=1)
     """Maximum number of requests the scheduler admits into RUNNING.
 
-    ``max_num_seqs`` sizes the model runner (per-request buffers and CUDA
+    `max_num_seqs` sizes the model runner (per-request buffers and CUDA
     graph capture) and is also the default admission limit. Setting this
     lowers only the number of requests that may occupy RUNNING, so decode
     batches stay smaller without shrinking runner or graph capacity. Must
-    be ``<= max_num_seqs``. ``None`` (default) keeps current behavior.
+    be `<= max_num_seqs`. `None` (default) keeps current behavior.
+    """
+
+    max_num_inflight_kv_loads: int | None = Field(default=None, ge=1)
+    """Maximum number of requests holding KV blocks for an async KV connector
+    load (e.g. a P/D NIXL pull) before they run: loads in progress, or finished
+    and waiting for a running slot.
+
+    Setting it also lets requests the connector may load asynchronously
+    (`KVConnectorBase_V1.may_load_async`, by default P/D remote-prefill
+    requests) start their loads while the running batch is full, so they are
+    ready when a slot frees. `None` (default) keeps current behavior: no cap,
+    and loads start only when a running slot is free.
     """
 
     long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens. 0 disables the cap (default).
+    Ignored when chunked prefill is disabled.
 
     The cap is not applied when the request is the only one in the batch,
     since there is no other request for it to starve."""
+
+    long_prefill_token_threshold_adaptive: bool = Field(default=False)
+    """Floor the effective long prefill token threshold at a fair share of
+    the token budget: max_num_batched_tokens divided by the number of
+    queued and running requests. Only applies when
+    long_prefill_token_threshold is nonzero."""
 
     max_num_queued_reqs: int | None = Field(default=None, ge=0)
     """Maximum number of requests that can be in-flight (waiting or running)
@@ -91,10 +108,10 @@ class SchedulerConfig:
     instance. This bounds vLLM's otherwise unbounded request queue and is
     primarily a coarse capacity valve.
 
-    Unlike ``max_num_seqs``, which applies per data-parallel rank, this
+    Unlike `max_num_seqs`, which applies per data-parallel rank, this
     limit is enforced in the API server process and counts in-flight
     requests across all DP ranks it routes to. Size it as roughly
-    ``data_parallel_size * max_num_seqs`` plus the desired queue depth if
+    `data_parallel_size * max_num_seqs` plus the desired queue depth if
     it should not bind before per-rank admission does."""
 
     max_num_queued_tokens: int | None = Field(default=None, ge=0)
@@ -103,23 +120,23 @@ class SchedulerConfig:
     are rejected with HTTP 503.
 
     This is a TTFT QoS mechanism: by setting it to
-    ``target_TTFT * prefill_throughput`` you reject requests when the
+    `target_TTFT * prefill_throughput` you reject requests when the
     prefill backlog would exceed the latency target.  In a disaggregated
     prefill-decode setup this maps directly to the prefill pool's
     capacity.
 
-    Like ``max_num_queued_reqs``, this limit is enforced in the API
+    Like `max_num_queued_reqs`, this limit is enforced in the API
     server process and covers the prefill backlog across all DP ranks it
-    routes to, so ``prefill_throughput`` in the formula above is the
+    routes to, so `prefill_throughput` in the formula above is the
     aggregate throughput of the deployment.
 
     Note: the count is conservative.  A partially prefilled request
-    still contributes its full ``prompt_len`` until it transitions out
+    still contributes its full `prompt_len` until it transitions out
     of the prefill phase, because the scheduler's per-iteration
-    ``num_computed_tokens`` progress is not propagated to the API
-    server process during prefill (``EngineCoreOutput`` is only
+    `num_computed_tokens` progress is not propagated to the API
+    server process during prefill (`EngineCoreOutput` is only
     emitted once the request starts producing tokens).  Similarly,
-    prefix-cache hits (``num_cached_tokens``) are only known to the
+    prefix-cache hits (`num_cached_tokens`) are only known to the
     OutputProcessor after prefill completes.  This overestimates the
     real backlog, causing earlier rejection than strictly necessary
     — the safe direction for QoS.  The impact is limited to long
@@ -196,9 +213,35 @@ class SchedulerConfig:
     (the default) disables the watermark."""
 
     prefill_schedule_interval: int = Field(default=1, ge=1)
-    """For data-parallel deployments, only admit new prefill requests
-    once every N engine steps, aligned across DP ranks, to better balance
-    per-step forward-pass times."""
+    """Only admit prefill once every N engine steps, leaving the steps in
+    between to decode alone. 1 (the default) admits prefill on every step.
+
+    A deferred step carries no prefill at all, including chunks of an
+    already-admitted prompt, so a long prompt can take up to N times as many
+    steps to finish prefilling."""
+
+    cache_aware_admission_window: int = Field(default=0, ge=0)
+    """Look-ahead window for cache-aware admission. Within the first N waiting
+    requests, those whose prefix is already in the KV cache are admitted ahead
+    of requests that would have to compute theirs, so a cold request does not
+    evict blocks a resident one still needs. 0 (the default) admits strictly in
+    arrival order.
+
+    Reordering is confined to the window and to requests that are merely
+    waiting, so a request that is blocked or already partially computed keeps
+    its position and nothing is moved past it. Requires prefix caching and the
+    "fcfs" policy; it is ignored otherwise. Costs one prefix-cache lookup per
+    request in the window per step, so prefer the smallest window that spans
+    the usual queue depth."""
+
+    cache_aware_admission_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    """KV cache usage below which `cache_aware_admission_window` is not applied.
+
+    Defaults to 0.5, so the window engages only once the cache is at least half
+    used. Below that there is room for both prompts and reordering would change
+    admission order without an eviction to avoid, which is a fairness cost for
+    no benefit. It also means the per-request cache probe is skipped entirely
+    while the cache is roomy. Set to 0.0 to reorder on every step."""
 
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
@@ -232,30 +275,25 @@ class SchedulerConfig:
 
         # The first half of this warning can be removed once the Scheduler interface is
         # finalized and we can maintain support for scheduler classes that implement it
-        logger.warning_once(
-            "Using custom scheduler class %s. This scheduler interface is not public "
-            "and compatibility may not be maintained. If you have subclassed Scheduler "
-            "instead of AsyncScheduler, you will see degraded performance due to async "
-            "scheduling being disabled.",
-            self.scheduler_cls,  # type: ignore[arg-type]
-        )
+        if not (
+            isinstance(self.scheduler_cls, str)
+            and self.scheduler_cls.startswith("vllm.")
+        ):
+            logger.warning_once(
+                "Using custom scheduler class %s. This scheduler interface is not "
+                "public and compatibility may not be maintained. If you have "
+                "subclassed Scheduler instead of AsyncScheduler, you will see "
+                "degraded performance due to async scheduling being disabled.",
+                self.scheduler_cls,  # type: ignore[arg-type]
+            )
         if not isinstance(self.scheduler_cls, str):
             return cast(type["SchedulerInterface"], self.scheduler_cls)
         return resolve_obj_by_qualname(self.scheduler_cls)
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+    def compile_factors(self) -> CompileFactors:
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
         """
-        factors: list[Any] = []
-
         # max_num_batched_tokens need to be included in the hash due
         # to two reasons:
         # 1. LoRA creates static buffers based on max_num_batched_tokens.
@@ -265,14 +303,32 @@ class SchedulerConfig:
         #   based on the data sizes. `max_num_batched_tokens` has an
         #   impact on that. For more details, please check
         #   https://github.com/vllm-project/vllm/issues/29585
-        factors.append(self.max_num_batched_tokens)
-
         # PLE and other model components allocate static per-request buffers.
         # Their shapes are captured in compiled graphs.
-        factors.append(self.max_num_seqs)
-
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        ignored_factors = {
+            "runner_type",
+            "max_num_scheduled_tokens",
+            "max_num_active_seqs",
+            "max_num_inflight_kv_loads",
+            "long_prefill_token_threshold",
+            "long_prefill_token_threshold_adaptive",
+            "max_num_queued_reqs",
+            "max_num_queued_tokens",
+            "enable_chunked_prefill",
+            "is_multimodal_model",
+            "max_num_encoder_input_tokens",
+            "encoder_cache_size",
+            "policy",
+            "disable_chunked_mm_input",
+            "scheduler_cls",
+            "disable_hybrid_kv_cache_manager",
+            "scheduler_reserve_full_isl",
+            "watermark",
+            "prefill_schedule_interval",
+            "async_scheduling",
+            "stream_interval",
+        }
+        return get_compile_factors(self, ignored_factors)
 
     @field_validator("scheduler_cls", "async_scheduling", mode="wrap")
     @classmethod

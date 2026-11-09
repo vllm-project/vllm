@@ -1,16 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
 
+from vllm import PoolingParams
 from vllm.entrypoints.pooling import factories
 from vllm.entrypoints.pooling.factories import init_pooling_io_processors
 from vllm.entrypoints.pooling.pooling.io_processor import (
     PluginWithIOProcessorPlugins,
     UnsupportedCombinedTaskIOProcessor,
 )
+from vllm.entrypoints.pooling.token_embed.serving import ServingTokenEmbedding
+from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
+from vllm.exceptions import VLLMValidationError
+from vllm.pooling_params import LateChunkingParams
 
 
 def _bge_m3_config(io_processor_plugin=None):
@@ -92,3 +101,93 @@ def test_combined_task_plain_pooling_request_has_actionable_error(monkeypatch):
     io_processor = serving.get_io_processor(request)
     with pytest.raises(ValueError, match="plugin request with a 'data' field"):
         io_processor.create_pooling_params(request)
+
+
+@pytest.mark.parametrize("task", ["embed", "token_embed"])
+def test_embedding_route_validates_the_configured_task(task):
+    """Invalid chunk requests must never fall back to the ordinary schema."""
+    app = FastAPI()
+    app.state.args = SimpleNamespace(log_error_stack=False)
+    init_exception_handler(app)
+    model_config = MagicMock()
+    model_config.get_pooling_task.return_value = task
+    model_config.is_cross_encoder = False
+    factories.register_pooling_api_routers(app, ("embed", "token_embed"), model_config)
+    received = []
+
+    async def handle(request, raw_request):
+        received.append(request)
+        return JSONResponse({"task": task})
+
+    if task == "token_embed":
+        app.state.serving_token_embedding = handle
+    else:
+        app.state.serving_embedding = handle
+
+    with TestClient(app) as client:
+        if task == "embed":
+            assert client.post("/v1/embeddings", json={"input": "text"}).json() == {
+                "task": "embed"
+            }
+            assert client.post("/v2/embed", json={"texts": ["text"]}).status_code == 200
+            return
+
+        assert client.post("/v2/embed", json={"texts": ["text"]}).status_code == 404
+        bad_requests: list[dict[str, object]] = [
+            {"late_chunking_params": {}},
+            {"late_chunking_params": {"chunk_size": 2, "metadata": {}}},
+            {"encoding_format": "base64"},
+            {"dimensions": 128},
+        ]
+        bad_requests.extend(
+            {"late_chunking_params": {"chunk_size": value}}
+            for value in (0, -1, True, 1.5, "2", 2**63, 2**64)
+        )
+        for overrides in bad_requests:
+            body: dict[str, object] = {"input": "text", **overrides}
+            if "late_chunking_params" not in overrides and overrides:
+                body["late_chunking_params"] = {"chunk_size": 2}
+            response = client.post("/v1/embeddings", json=body)
+            assert response.status_code == 400, response.text
+        assert not received
+
+        for body in (
+            {"input": "text"},
+            {"input": ["text", "another text"], "late_chunking_params": None},
+            {"input": [1, 2]},
+        ):
+            response = client.post("/v1/embeddings", json=body)
+            assert response.json() == {"task": "token_embed"}
+            params = received[-1].to_pooling_params()
+            assert params.task == "token_embed"
+            assert params.late_chunking_params is None
+
+        for chunk_size in (1, 1024, 2**63 - 1):
+            response = client.post(
+                "/v1/embeddings",
+                json={
+                    "input": "text",
+                    "late_chunking_params": {"chunk_size": chunk_size},
+                },
+            )
+            assert response.json() == {"task": "token_embed"}
+            params = received[-1].to_pooling_params()
+            assert params.task == "token_embed"
+            assert params.late_chunking_params.chunk_size == chunk_size
+
+
+def test_token_embedding_keeps_model_specific_chunking_rejection():
+    vllm_config, renderer, chat_template_config = _bge_m3_config()
+    vllm_config.model_config.get_pooling_task.return_value = "token_embed"
+    vllm_config.model_config.architecture = "JinaForRanking"
+    serving = object.__new__(ServingTokenEmbedding)
+    processor = serving.init_io_processor(
+        vllm_config=vllm_config,
+        renderer=renderer,
+        chat_template_config=chat_template_config,
+    )
+    with pytest.raises(VLLMValidationError, match="JinaForRanking.*late chunking"):
+        processor.render(
+            {"params": PoolingParams(late_chunking_params=LateChunkingParams(2))}
+        )
+    renderer.render_cmpl.assert_not_called()

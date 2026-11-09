@@ -42,9 +42,9 @@ _C128A_TOPK_ALIGNMENT = 128
 class DeepseekV4SparseMLABackend(AttentionBackend):
     """DeepSeek-V4 sparse-MLA backend base.
 
-    Subclasses ``AttentionBackend`` directly (not the V3.2
-    ``FlashMLASparseBackend``): DeepSeek-V4 runs its own attention layer
-    (``DeepseekV4Attention``), so it does not reuse the V3.2 builder or impl, and
+    Subclasses `AttentionBackend` directly (not the V3.2
+    `FlashMLASparseBackend`): DeepSeek-V4 runs its own attention layer
+    (`DeepseekV4Attention`), so it does not reuse the V3.2 builder or impl, and
     only needs to declare its own metadata builder, KV-cache layout, and the
     sparse-MLA capability flags.
     """
@@ -57,7 +57,7 @@ class DeepseekV4SparseMLABackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [256]
 
     @staticmethod

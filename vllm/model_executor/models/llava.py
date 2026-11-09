@@ -12,7 +12,7 @@ from transformers import (
     CLIPVisionConfig,
     LlavaConfig,
     PixtralVisionConfig,
-    PretrainedConfig,
+    PreTrainedConfig,
     SiglipVisionConfig,
 )
 from transformers.models.llava import LlavaProcessor
@@ -156,7 +156,7 @@ class LlavaMultiModalProjector(nn.Module):
 
 
 class LlavaLikeConfig(Protocol):
-    vision_config: PretrainedConfig
+    vision_config: PreTrainedConfig
     image_token_index: int
     vision_feature_select_strategy: str
     vision_feature_layer: int | list[int]
@@ -537,7 +537,7 @@ class LlavaForConditionalGeneration(
         )
 
         # NOTE: These are special cases for Pixtral-12B in the HF-format
-        # https://huggingface.co/mistral-community/pixtral-12b/blob/main/config.json  # noqa
+        # https://huggingface.co/mistral-community/pixtral-12b/blob/main/config.json
         if (
             config.text_config.architectures is None
             and config.text_config.model_type == "mistral"

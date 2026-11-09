@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from typing import cast
 
@@ -169,7 +169,7 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
             if mm_data is None
             else mm_data
         )
-        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
         dummy_audios = (
             [] if "audio" not in dummy_mm_data else dummy_mm_items["audio"].get_all()
         )
@@ -197,6 +197,7 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
             # whixtral tokenizer adds padding to the audio
             # so we need to update the audio arrays
             {**dummy_mm_data, "audio": [a.audio_array for a in res.audios]},
+            validate=False,
         )
 
         return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_items)
@@ -317,7 +318,7 @@ class VoxtralForConditionalGeneration(
 
         # update quant config to so that ignored module and target module names
         # match the vLLM model names
-        if hasattr(vllm_config, "quant_config"):
+        if vllm_config.quant_config is not None:
             vllm_config.quant_config = self.maybe_update_quant_config(
                 vllm_config.quant_config
             )
@@ -447,6 +448,10 @@ class VoxtralForConditionalGeneration(
         cls,
         stt_params: SpeechToTextParams,
     ) -> PromptType:
+        if stt_params.task_type != "transcribe":
+            raise ValueError(
+                f'Voxtral only supports "transcribe", got {stt_params.task_type}'
+            )
         audio = stt_params.audio
         model_config = stt_params.model_config
         stt_config = stt_params.stt_config
@@ -724,6 +729,7 @@ class VoxtralEncoderModel(nn.Module):
         self.config = cast(WhisperConfig, vllm_config.model_config.hf_config)
         self.dtype: torch.dtype = vllm_config.model_config.dtype
         self.is_causal = getattr(self.config, "is_causal", False)
+        WhisperEncoderCls: Callable[..., WhisperEncoder | WhisperCausalEncoder]
         if self.is_causal:
             WhisperEncoderCls = WhisperCausalEncoder
         else:
@@ -830,7 +836,7 @@ class VoxtralEncoderModel(nn.Module):
         return results
 
     def load_weight(self, weight: tuple[str, torch.Tensor]) -> str:
-        stacked_params_mapping = [
+        stacked_params_mapping: list[tuple[str, str, str | int]] = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),

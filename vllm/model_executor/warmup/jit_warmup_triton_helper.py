@@ -4,11 +4,14 @@ import ast
 import inspect
 from abc import abstractmethod
 from collections.abc import Callable, Hashable, Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext, suppress
+from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, field
 from functools import cache, cached_property, update_wrapper
 from typing import Any, Generic, ParamSpec, Protocol, TypeVar, cast, overload
 
+from vllm import envs
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
     get_ast_full_name,
@@ -133,19 +136,19 @@ def triton_scalar_specialization_rep(value: int) -> int:
     """Return an integer with the same default Triton JIT specialization.
 
     For an ordinary integer argument, Triton's cache key contains its inferred
-    type (``i32``, ``i64``, or ``u64``) and one of three value classes:
+    type (`i32`, `i64`, or `u64`) and one of three value classes:
 
-    * ``1`` is specialized as the exact constant ``1``.
-    * Multiples of 16 receive a ``tt.divisibility = 16`` attribute.
+    * `1` is specialized as the exact constant `1`.
+    * Multiples of 16 receive a `tt.divisibility = 16` attribute.
     * All other values have no value specialization.
 
     Warmup only needs one concrete value for each cache-key class. This helper
-    returns ``1`` for the exact-one class and otherwise returns a divisible or
+    returns `1` for the exact-one class and otherwise returns a divisible or
     generic representative while preserving the inferred integer type.
 
-    This applies only to non-``constexpr`` integer arguments using Triton's
+    This applies only to non-`constexpr` integer arguments using Triton's
     default specialization. Do not use it for arguments listed in
-    ``do_not_specialize`` or ``do_not_specialize_on_alignment``.
+    `do_not_specialize` or `do_not_specialize_on_alignment`.
     """
     if value == 1:
         return 1
@@ -165,12 +168,32 @@ def triton_scalar_specialization_rep(value: int) -> int:
     return divisible_rep if value % 16 == 0 else generic_rep
 
 
+def triton_ptr_range(tensor: Any) -> int:
+    """Pointer range Triton's backend would read off `tensor`.
+
+    Mirrors `HIPBackend.is_within_2gb`.
+    """
+    ptr_range = getattr(tensor, "ptr_range", None)
+    if ptr_range is not None:
+        return ptr_range()
+    return tensor.untyped_storage().size()
+
+
 @dataclass(frozen=True)
 class TritonWarmupTensor:
     """Compile-only tensor metadata used by Triton warmup.
 
-    ``strides=None`` represents compact row-major storage. Pass explicit strides
+    `strides=None` represents compact row-major storage. Pass explicit strides
     whenever the runtime tensor can be padded, transposed, or otherwise strided.
+
+    `ptr_range_bytes` is the byte size of the storage behind the runtime
+    tensor (its `untyped_storage()`, not the view), most easily derived with
+    `triton_ptr_range`. With buffer ops enabled, Triton's ROCm backend gives
+    pointers into storage of at most 2 GB a `tt.pointer_range = 32`
+    specialization (32-bit buffer offsets), which is part of the compile key.
+    The default 0 assumes such a small storage; set it above 2 GB for tensors
+    that view a larger pool, such as a KV cache layer, or warmup compiles a
+    variant the runtime never uses. CUDA ignores it.
     """
 
     dtype: Any
@@ -178,12 +201,14 @@ class TritonWarmupTensor:
     shape: tuple[int, ...] = (1,)
     strides: tuple[int, ...] | None = None
     init: Any = 0
+    ptr_range_bytes: int = 0
 
     def data_ptr(self) -> int:
         return 0 if self.aligned else 1
 
     def ptr_range(self) -> int:
-        return 0
+        # Read by Triton's ROCm backend in place of untyped_storage().size().
+        return self.ptr_range_bytes
 
     @property
     def device(self) -> Any:
@@ -202,6 +227,31 @@ class TritonWarmupTensor:
         else:
             result = self.strides
         return result if dim is None else result[dim]
+
+
+_shared_compile_pool: ContextVar[bool] = ContextVar(
+    "shared_triton_warmup_compile_pool", default=False
+)
+
+
+def compile_triton_warmup(compile_all: Callable[[], None], num_keys: int) -> None:
+    """Share one compiler pool across all eligible warmup kernels."""
+    num_threads = min(envs.VLLM_TRITON_JIT_WARMUP_NUM_THREADS, num_keys)
+    if num_threads <= 1:
+        compile_all()
+        return
+
+    def compile_in_context() -> None:
+        _shared_compile_pool.set(True)
+        with (
+            ThreadPoolExecutor(max_workers=num_threads) as executor,
+            triton.AsyncCompileMode(executor),
+        ):
+            # Dispatch mutates owner state and must stay on this thread.
+            compile_all()
+
+    # Older Triton versions leave async mode active on compilation failure.
+    copy_context().run(compile_in_context)
 
 
 class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
@@ -226,6 +276,26 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         finally:
             self._warming = False
             self._warming_compile_key = None
+
+    @property
+    def supports_parallel_compile(self) -> bool:
+        # AMD LLVM code generation can abort under concurrent compilation.
+        return (
+            current_platform.is_cuda()
+            and not self._run_autotune
+            and getattr(triton, "AsyncCompileMode", None) is not None
+            and envs.VLLM_TRITON_JIT_WARMUP_NUM_THREADS > 1
+        )
+
+    def compile_many(self, compile_keys: Iterable[CompileKeyT]) -> None:
+        """Compile CUDA startup warmup variants in parallel, then wait."""
+        keys = list(compile_keys)
+        if not self.supports_parallel_compile or _shared_compile_pool.get():
+            return super().compile_many(keys)
+
+        compile_triton_warmup(
+            lambda: super(VllmTritonJitKernel, self).compile_many(keys), len(keys)
+        )
 
     @cached_property
     def _kernel_arg_names(self) -> tuple[str, ...]:
@@ -449,6 +519,7 @@ def _triton_metadata_arg(value: Any) -> Any:
         aligned=getattr(value, "_vllm_warmup_aligned", True),
         shape=tuple(value.shape),
         strides=tuple(value.stride()),
+        ptr_range_bytes=getattr(value, "_vllm_warmup_ptr_range_bytes", 0),
     )
 
 
@@ -488,6 +559,7 @@ def _materialize_warmup_case(
                 tensor.fill_(value.init)
         else:
             tensor._vllm_warmup_aligned = value.aligned
+            tensor._vllm_warmup_ptr_range_bytes = value.ptr_range_bytes
             with suppress(TypeError):
                 cache[value] = tensor
         return tensor
@@ -624,9 +696,17 @@ class _DecoratedTritonJitKernel(_AutomaticTritonJitKernel):
 class TritonKernelDispatcher(Protocol[P]):
     """Callable Triton launcher with compile-time warmup support."""
 
+    __name__: str
+
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> Any: ...
 
     def register_warmup(self, *args: Any, **kwargs: Any) -> None: ...
+
+    def get_warmup_keys(
+        self, *, vllm_config: Any | None = None, **kwargs: Any
+    ) -> list[TritonCompileKey]: ...
+
+    def compile(self, compile_key: TritonCompileKey) -> None: ...
 
 
 @overload
@@ -688,84 +768,6 @@ class TritonPointerInputVariant:
         return TritonWarmupTensor(dtype, aligned=self.is_aligned(name), shape=shape)
 
 
-def _literal_str_refs(node: ast.AST) -> tuple[str | int, ...]:
-    if isinstance(node, ast.Constant) and isinstance(node.value, str | int):
-        return (node.value,)
-    if isinstance(node, ast.List | ast.Tuple):
-        refs: list[str | int] = []
-        for elt in node.elts:
-            if isinstance(elt, ast.Constant) and isinstance(elt.value, str | int):
-                refs.append(elt.value)
-            else:
-                raise ValueError(
-                    f"Unsupported Triton specialization ref: {ast.dump(elt)}"
-                )
-        return tuple(refs)
-    raise ValueError(f"Unsupported Triton specialization refs: {ast.dump(node)}")
-
-
-def _normalize_arg_refs(
-    refs: tuple[str | int, ...],
-    arg_names: tuple[str, ...],
-) -> frozenset[str]:
-    names: set[str] = set()
-    for ref in refs:
-        if isinstance(ref, int):
-            names.add(arg_names[ref])
-        else:
-            names.add(ref)
-    return frozenset(names)
-
-
-def _decorator_keyword_refs(
-    function_def: ast.FunctionDef,
-    keyword_name: str,
-) -> tuple[str | int, ...]:
-    for decorator in function_def.decorator_list:
-        if not isinstance(decorator, ast.Call):
-            continue
-        decorator_name = get_ast_full_name(decorator.func)
-        if decorator_name not in ("triton.jit", "jit"):
-            continue
-        for keyword in decorator.keywords:
-            if keyword.arg == keyword_name:
-                return _literal_str_refs(keyword.value)
-    return ()
-
-
-def _triton_do_not_specialize_args(
-    kernel: Callable[..., Any],
-    function_def: ast.FunctionDef,
-    arg_names: tuple[str, ...],
-) -> frozenset[str]:
-    refs = getattr(kernel, "do_not_specialize", None)
-    if refs is not None:
-        return _normalize_arg_refs(tuple(refs), arg_names)
-    return _normalize_arg_refs(
-        _decorator_keyword_refs(function_def, "do_not_specialize"),
-        arg_names,
-    )
-
-
-def _triton_constexpr_arg_names(
-    kernel: Callable[..., Any],
-    function_def: ast.FunctionDef,
-    arg_names: tuple[str, ...],
-) -> frozenset[str]:
-    constexprs = getattr(kernel, "constexprs", None)
-    if constexprs is not None:
-        return frozenset(arg_names[index] for index in constexprs)
-
-    names: set[str] = set()
-    for arg in function_def.args.args + function_def.args.kwonlyargs:
-        if arg.annotation is None:
-            continue
-        annotation = get_ast_full_name(arg.annotation)
-        if annotation in ("tl.constexpr", "triton.language.constexpr", "constexpr"):
-            names.add(arg.arg)
-    return frozenset(names)
-
-
 def _leftmost_name(node: ast.AST) -> str | None:
     if isinstance(node, ast.Name):
         return node.id
@@ -791,25 +793,3 @@ def _pointer_arg_names(
         if name in candidate_names:
             pointer_names.add(name)
     return frozenset(pointer_names)
-
-
-def trace_triton_kernel_specialization_args(
-    kernel: Callable[..., Any],
-) -> tuple[str, ...]:
-    function_def = get_function_source_node(kernel)
-    if not isinstance(function_def, ast.FunctionDef):
-        raise ValueError("Expected Triton kernel to be defined as a function")
-    source_fn = getattr(kernel, "fn", kernel)
-    arg_names = tuple(inspect.signature(source_fn).parameters)
-    constexpr_args = _triton_constexpr_arg_names(kernel, function_def, arg_names)
-    do_not_specialize_args = _triton_do_not_specialize_args(
-        kernel, function_def, arg_names
-    )
-    pointer_args = _pointer_arg_names(function_def, arg_names)
-
-    return tuple(
-        name
-        for name in arg_names
-        if name in constexpr_args
-        or (name not in pointer_args and name not in do_not_specialize_args)
-    )

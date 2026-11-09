@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+from contextlib import nullcontext
 from multiprocessing import connection
 from threading import Event
 from types import SimpleNamespace
 
+import msgspec
 import pytest
+import torch
 import zmq
 
 import vllm.platforms as platforms
+from vllm.config import ParallelConfig, WatchdogConfig
+from vllm.config.utils import hash_config
+from vllm.utils import torch_utils
 from vllm.v1.engine import core as core_module
 from vllm.v1.engine import utils as engine_utils
 from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
@@ -16,30 +23,163 @@ from vllm.v1.engine.utils import (
     CoreEngine,
     CoreEngineLaunch,
     CoreEngineProcManager,
+    CoreEngineState,
     EngineZmqAddresses,
     wait_for_engine_startup,
 )
+from vllm.v1.executor import UniProcExecutor, multiproc_executor
 
 pytestmark = pytest.mark.skip_global_cleanup
 
 
 @pytest.mark.parametrize(
-    ("is_rocm", "request_timeout", "manager_timeout", "process_timeout"),
+    (
+        "executor_class",
+        "local_engine_count",
+        "initial_threads",
+        "user_threads",
+        "fail_start",
+        "expected",
+    ),
     [
-        (True, 0, 0, 15.0),
-        (True, 0, 7, 7),
-        (True, 0, None, None),
-        (False, 0, 0, 0),
-        (True, 7, 0, 0),
+        (UniProcExecutor, 1, 192, None, False, (12, "12", "1")),
+        (UniProcExecutor, 2, 192, None, False, (6, "6", "1")),
+        (UniProcExecutor, 2, 192, None, True, (6, "6", "1")),
+        (UniProcExecutor, 2, 5, None, False, (5, "5", "1")),
+        (UniProcExecutor, 2, 1, None, False, (1, "1", "1")),
+        (UniProcExecutor, 2, 5, "5", False, (5, "5", None)),
+        (
+            multiproc_executor.MultiprocExecutor,
+            2,
+            192,
+            None,
+            False,
+            (192, None, None),
+        ),
+    ],
+)
+def test_engine_core_startup_threads_are_scoped_to_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    executor_class,
+    local_engine_count: int,
+    initial_threads: int,
+    user_threads: str | None,
+    fail_start: bool,
+    expected: tuple[int, str | None, str | None],
+):
+    """UniProc workers inherit their CPU share and restore the parent."""
+    marker = torch_utils.OMP_NUM_THREADS_SET_BY_VLLM
+    monkeypatch.delenv(marker, raising=False)
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    if user_threads is not None:
+        monkeypatch.setenv("OMP_NUM_THREADS", user_threads)
+    monkeypatch.setattr(torch_utils, "available_cpu_count", lambda: 12)
+    platform = SimpleNamespace(
+        is_cpu=lambda: False, is_cuda_alike=lambda: True, is_xpu=lambda: False
+    )
+    monkeypatch.setattr(engine_utils, "current_platform", platform)
+    threads = SimpleNamespace(count=initial_threads)
+    setter_calls = []
+
+    def set_threads(count):
+        setter_calls.append(count)
+        threads.count = count
+
+    monkeypatch.setattr(torch, "get_num_threads", lambda: threads.count)
+    monkeypatch.setattr(torch, "set_num_threads", set_threads)
+    start_states = []
+
+    def thread_state():
+        return (
+            threads.count,
+            os.environ.get("OMP_NUM_THREADS"),
+            os.environ.get(marker),
+        )
+
+    def start_process():
+        start_states.append(thread_state())
+        if fail_start:
+            raise RuntimeError("start failed")
+
+    def get_context():
+        assert thread_state() == (initial_threads, user_threads, None)
+        return SimpleNamespace(
+            Process=lambda **kwargs: SimpleNamespace(
+                name=kwargs["name"],
+                exitcode=1 if fail_start else None,
+                start=start_process,
+            )
+        )
+
+    monkeypatch.setattr(engine_utils, "get_mp_context", get_context)
+    monkeypatch.setattr(engine_utils, "shutdown", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        engine_utils.numa_utils,
+        "configure_subprocess",
+        lambda *args, **kwargs: nullcontext(),
+    )
+    with (
+        pytest.raises(RuntimeError, match="start failed")
+        if fail_start
+        else nullcontext()
+    ):
+        manager = CoreEngineProcManager(
+            local_engine_count=local_engine_count,
+            start_index=0,
+            local_start_index=0,
+            vllm_config=SimpleNamespace(
+                shutdown_timeout=0,
+                parallel_config=SimpleNamespace(
+                    data_parallel_size=local_engine_count,
+                    assigned_physical_gpu_ids=None,
+                    use_ray=False,
+                ),
+            ),
+            local_client=True,
+            handshake_address="unused",
+            executor_class=executor_class,
+            log_stats=False,
+        )
+        manager._finalizer.detach()
+    assert start_states == [expected] * (1 if fail_start else local_engine_count)
+    assert thread_state() == (initial_threads, user_threads, None)
+    assert setter_calls == (
+        [expected[0], initial_threads]
+        if executor_class is UniProcExecutor and expected[0] < initial_threads
+        else []
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "is_rocm",
+        "worker_timeout",
+        "request_timeout",
+        "manager_timeout",
+        "process_timeout",
+    ),
+    [
+        (True, None, 0, 0, 15.0),
+        (True, None, 0, 7, 7),
+        (True, None, 0, None, None),
+        (False, None, 0, 0, 0),
+        (True, None, 7, 0, 0),
+        (False, "30", 0, 0, 30.0),
+        (False, "30", 7, 0, 0),
     ],
 )
 def test_engine_core_process_shutdown_timeout(
     monkeypatch: pytest.MonkeyPatch,
     is_rocm: bool,
+    worker_timeout: str | None,
     request_timeout: float | None,
     manager_timeout: float | None,
     process_timeout: float | None,
 ):
+    if worker_timeout is None:
+        monkeypatch.delenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", worker_timeout)
     manager = object.__new__(CoreEngineProcManager)
     manager._request_shutdown_timeout = request_timeout
     manager.manager_stopped = Event()
@@ -101,11 +241,19 @@ def test_freeze_gc_after_clean_rocm_engine_core_shutdown(
     expected_calls: list[str],
 ):
     calls: list[str] = []
-    vllm_config = SimpleNamespace(shutdown_timeout=shutdown_timeout)
+    vllm_config = SimpleNamespace(
+        shutdown_timeout=shutdown_timeout,
+        # run_engine_core starts the watchdog from this field. The default
+        # config has no dump_dir, so start_watch_dog returns immediately.
+        watchdog_config=WatchdogConfig(),
+    )
     proc = SimpleNamespace(
         shutdown_state=EngineShutdownState.RUNNING,
         has_work=lambda: has_work,
         vllm_config=vllm_config,
+        # Mirrors EngineCore._send_engine_dead, which run_engine_core calls
+        # from its fatal-error handler.
+        _send_engine_dead=lambda: None,
     )
 
     def run_busy_loop():
@@ -158,6 +306,7 @@ class _FinishedProcess:
 
 
 def test_wait_for_engine_startup_reports_watched_process_exit():
+    """Update the startup test argument so it reaches frontend failure handling."""
     ctx = zmq.Context()
     handshake_socket = ctx.socket(zmq.ROUTER)
     recv, send = connection.Pipe(duplex=False)
@@ -181,9 +330,9 @@ def test_wait_for_engine_startup_reports_watched_process_exit():
             wait_for_engine_startup(
                 handshake_socket,
                 [CoreEngine()],
-                parallel_config,  # type: ignore[arg-type]
+                parallel_config,
                 coordinated_dp=False,
-                cache_config=None,  # type: ignore[arg-type]
+                cache_config=None,
                 launch=launch,
             )
     finally:
@@ -195,3 +344,82 @@ def test_wait_for_engine_startup_reports_watched_process_exit():
         exc_info.value
     )
     assert "Failed frontend proc(s): {'RustFrontend': 1}" in str(exc_info.value)
+
+
+def _engine_config_hash(**overrides) -> str:
+    """Hash of an engine's ParallelConfig after engine initialization."""
+    config = ParallelConfig(data_parallel_size=2, data_parallel_size_local=2)
+    for name, value in overrides.items():
+        setattr(config, name, value)
+    return hash_config(config)
+
+
+def _run_dp_startup_handshake(engine_hashes: list[str]) -> list[CoreEngine]:
+    """Drive wait_for_engine_startup with HELLO and READY from each engine."""
+    parallel_config = ParallelConfig(
+        data_parallel_size=len(engine_hashes),
+        data_parallel_size_local=len(engine_hashes),
+    )
+    core_engines = [CoreEngine(index=i) for i in range(len(engine_hashes))]
+    launch = CoreEngineLaunch(
+        engine_manager=None,
+        coordinator=None,
+        addresses=EngineZmqAddresses(inputs=[], outputs=[]),
+        tensor_queue=None,
+    )
+    ctx = zmq.Context()
+    handshake_socket = ctx.socket(zmq.ROUTER)
+    handshake_socket.bind("inproc://dp-startup-handshake")
+    engine_sockets = []
+    try:
+        for engine, config_hash in zip(core_engines, engine_hashes):
+            engine_socket = ctx.socket(zmq.DEALER)
+            engine_socket.setsockopt(zmq.IDENTITY, engine.identity)
+            engine_socket.connect("inproc://dp-startup-handshake")
+            engine_sockets.append(engine_socket)
+            for msg in (
+                {"status": "HELLO", "local": True, "headless": False},
+                {
+                    "status": "READY",
+                    "local": True,
+                    "headless": False,
+                    "parallel_config_hash": config_hash,
+                },
+            ):
+                engine_socket.send(msgspec.msgpack.encode(msg))
+        wait_for_engine_startup(
+            handshake_socket,
+            core_engines,
+            parallel_config,
+            coordinated_dp=True,
+            cache_config=None,
+            launch=launch,
+        )
+    finally:
+        for engine_socket in engine_sockets:
+            engine_socket.close(linger=0)
+        handshake_socket.close(linger=0)
+        ctx.term()
+    return core_engines
+
+
+def test_wait_for_engine_startup_accepts_engine_resolved_config():
+    """Engines that agree with each other start even when their hash differs
+    from the front-end's, as when NIXL with DCP resolves the interleave size
+    during engine initialization."""
+    engine_hash = _engine_config_hash(cp_kv_cache_interleave_size=64)
+    assert engine_hash != _engine_config_hash()
+
+    core_engines = _run_dp_startup_handshake([engine_hash, engine_hash])
+
+    assert all(engine.state == CoreEngineState.READY for engine in core_engines)
+
+
+def test_wait_for_engine_startup_rejects_mismatched_engine_config():
+    engine_hashes = [
+        _engine_config_hash(),
+        _engine_config_hash(enable_expert_parallel=True),
+    ]
+
+    with pytest.raises(RuntimeError, match="Configuration mismatch detected"):
+        _run_dp_startup_handshake(engine_hashes)

@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from transformers import Siglip2VisionConfig
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -47,7 +47,7 @@ class VisionRotaryEmbedding(nn.Module):
 
 
 class Siglip2VisionEmbeddings(nn.Module):
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PreTrainedConfig):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -364,7 +364,7 @@ class Siglip2Encoder(nn.Module):
     self attention layers. Each layer is a [`Siglip2EncoderLayer`].
 
     Args:
-        config: PretrainedConfig
+        config: PreTrainedConfig
 
     """
 
