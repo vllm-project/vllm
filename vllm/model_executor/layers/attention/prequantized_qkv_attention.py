@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer for models that hand the AITER FA backend FP8 Q/K/V.
 
-The generic ``Attention`` layer and ``AttentionImpl`` interface only know about
+The generic `Attention` layer and `AttentionImpl` interface only know about
 floating-point Q/K/V. A model whose fused producer already emits FP8 Q/K/V with
-per-(sequence, KV head) descales uses ``PrequantizedQKVAttention`` instead. It
-overrides ``Attention._dispatch_attention`` to call one model-owned custom op,
-which calls ``forward_with_prequantized_qkv`` on the backend implementation.
-That method exists only on the ROCm AITER FA impl. ``AttentionImpl``, the
-``unified_attention_with_output`` schema and ``Attention.forward``'s arguments
-do not change; the PrequantizedQKV bundle travels through ``forward``'s
-``**dispatch_kwargs``.
+per-(sequence, KV head) descales uses `PrequantizedQKVAttention` instead. It
+overrides `Attention._dispatch_attention` to call one model-owned custom op,
+which calls `forward_with_prequantized_qkv` on the backend implementation.
+That method exists only on the ROCm AITER FA impl. `AttentionImpl`, the
+`unified_attention_with_output` schema and `Attention.forward`'s arguments
+do not change; the PrequantizedQKV bundle travels through `forward`'s
+`**dispatch_kwargs`.
 """
 
 from typing import Any, NamedTuple
@@ -37,7 +37,7 @@ class PrequantizedQKV(NamedTuple):
     """Prequantized Q/K/V tensors and their per-sequence/per-head descales.
 
     The tensors have the same logical token/head layout as the corresponding
-    floating-point Q/K/V inputs. Descales are ``[max_num_seqs, num_kv_heads]``.
+    floating-point Q/K/V inputs. Descales are `[max_num_seqs, num_kv_heads]`.
 
     A producer may leave entries for decode-only tokens undefined when the
     backend explicitly uses the floating-point Q/K/V inputs for decode.
@@ -53,12 +53,12 @@ class PrequantizedQKV(NamedTuple):
 
 
 class PrequantizedQKVAttention(Attention):
-    """``Attention`` that can also consume ``PrequantizedQKV``.
+    """`Attention` that can also consume `PrequantizedQKV`.
 
-    Behaves exactly like ``Attention`` unless the backend implementation
-    advertises ``supports_prequantized_qkv_input`` (only the ROCm AITER FA impl
+    Behaves exactly like `Attention` unless the backend implementation
+    advertises `supports_prequantized_qkv_input` (only the ROCm AITER FA impl
     does, on gfx950 with an FP8 KV cache) and the caller passes
-    ``prequantized_qkv``.
+    `prequantized_qkv`.
     """
 
     # Set by the model when it passes ``prequantized_qkv`` on every forward.

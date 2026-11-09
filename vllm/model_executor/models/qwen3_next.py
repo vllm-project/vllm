@@ -452,7 +452,7 @@ class Qwen3NextAttention(nn.Module):
         torch.Tensor,
         PrequantizedQKV,
     ]:
-        """Like ``_project_qkv_gate``, plus FP8 Q/K/V and their descales."""
+        """Like `_project_qkv_gate`, plus FP8 Q/K/V and their descales."""
         q_gate, k, v = qkv.split([self.q_size * 2, self.kv_size, self.kv_size], dim=-1)
         pos = positions[0] if positions.ndim == 2 else positions
         (
@@ -503,7 +503,7 @@ class Qwen3NextAttention(nn.Module):
         """Return post-norm, post-RoPE (q, k, v) and the pre-sigmoid gate.
 
         Dispatches between the fused Triton kernel and the eager
-        split + QK-RMSNorm + RoPE path. ``gate`` is ``None`` when output
+        split + QK-RMSNorm + RoPE path. `gate` is `None` when output
         gating is disabled.
         """
         if self.use_fused_qk_norm_rope_gate:

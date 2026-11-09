@@ -124,15 +124,15 @@ def _grouped_fp8_varlen_attention(
 ):
     """FP8 varlen attention with one call per (sequence, KV head).
 
-    The AITER FP8 hd256 varlen kernel reads only ``descale[0, 0]`` whatever the
+    The AITER FP8 hd256 varlen kernel reads only `descale[0, 0]` whatever the
     descale shape, so Q/K/V quantized per (sequence, KV head) are scaled
     correctly only when a call holds a single sequence and a single KV head.
     A batch with one of each is the ordinary call.
 
-    ``q_starts`` and ``k_starts`` are the host-side cumulative token offsets of
-    the sequences in ``q`` and ``k``. A sequence without keys (an extend with
-    no context in this chunk) gets zero output and a ``-inf`` log-sum-exp,
-    which ``merge_attn_states`` gives no weight.
+    `q_starts` and `k_starts` are the host-side cumulative token offsets of
+    the sequences in `q` and `k`. A sequence without keys (an extend with
+    no context in this chunk) gets zero output and a `-inf` log-sum-exp,
+    which `merge_attn_states` gives no weight.
     """
     num_sequences = len(q_starts) - 1
     num_heads, num_kv_heads = q.shape[1], k.shape[1]
@@ -1152,8 +1152,8 @@ class AiterFlashAttentionBackend(AttentionBackend):
         """Validate the block size the ROCm gather kernels require, and under
         the shuffle layout publish K and V as two head slots.
 
-        The shuffle read/write kernels rearrange a whole ``head_size x
-        block_size`` tile per side, so each side needs its own contiguous run
+        The shuffle read/write kernels rearrange a whole `head_size x
+        block_size` tile per side, so each side needs its own contiguous run
         in the page. Packed into the content dim they interleave per token
         instead, which no layout can undo.
         """

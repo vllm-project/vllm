@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import re
 from types import SimpleNamespace
 
 import pytest
+import regex as re
 import torch
 
 from vllm.model_executor.layers.attention import attention as attention_module
