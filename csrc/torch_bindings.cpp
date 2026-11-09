@@ -654,6 +654,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor workspace, int k, int max_seq_len) -> ()");
 #endif
 
+#ifdef VLLM_ENABLE_TOPK_TOPP_FILTER
+  // In-place top-k/top-p masking of FP32 logits with per-row device k and p.
+  ops.def(
+      "top_k_top_p_filter(Tensor! logits, Tensor? k, Tensor? p, "
+      "Tensor! workspace) -> ()");
+  ops.def("top_k_top_p_filter_workspace_size(int sm_count) -> int");
+#endif
+
   // Activation ops
   ops.def(
       "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, Tensor! "
@@ -939,6 +947,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 #ifdef VLLM_ENABLE_COOPERATIVE_TOPK
   ops.impl("cooperative_topk", TORCH_BOX(&cooperative_topk));
 #endif
+#ifdef VLLM_ENABLE_TOPK_TOPP_FILTER
+  ops.impl("top_k_top_p_filter", TORCH_BOX(&top_k_top_p_filter));
+#endif
 
   // Activation kernels (shared CUDA/ROCm)
   ops.impl("persistent_masked_m_silu_mul_quant",
@@ -1012,6 +1023,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, ops) {
            TORCH_BOX(&cutlass_scaled_mm_supports_block_fp8));
   ops.impl("cutlass_scaled_mm_supports_fp4",
            TORCH_BOX(&cutlass_scaled_mm_supports_fp4));
+#endif
+#ifdef VLLM_ENABLE_TOPK_TOPP_FILTER
+  ops.impl("top_k_top_p_filter_workspace_size",
+           TORCH_BOX(&top_k_top_p_filter_workspace_size));
 #endif
 }
 

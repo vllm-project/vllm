@@ -2589,6 +2589,9 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
             from vllm.v1.sample.ops.topk_topp_triton import reset_buffer_cache
 
             reset_buffer_cache()
+        from vllm.v1.sample.ops.topk_topp_cuda import reset_workspace_cache
+
+        reset_workspace_cache()
         torch.accelerator.empty_cache()
         try:
             torch.accelerator.empty_host_cache()

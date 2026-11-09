@@ -86,6 +86,7 @@ from vllm.v1.outputs import (
     ECConnectorOutput,
     ModelRunnerOutput,
 )
+from vllm.v1.sample.ops.topk_topp_cuda import reserve_topk_topp_cuda_workspace
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.spec_decode import (
@@ -1042,6 +1043,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode()
     def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
         assert self.sampler is not None
+        reserve_topk_topp_cuda_workspace(hidden_states.device, self.vocab_size)
         if self.model_state.dummy_sampler_run(self.sampler, hidden_states):
             return
         num_reqs = hidden_states.shape[0]

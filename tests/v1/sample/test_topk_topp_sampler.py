@@ -8,7 +8,12 @@ from tests.utils import large_gpu_mark
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.sample.ops.topk_topp_cuda import (
+    apply_top_k_top_p_cuda,
+    topk_topp_cuda_available,
+)
 from vllm.v1.sample.ops.topk_topp_sampler import (
+    apply_top_k_top_p,
     apply_top_k_top_p_pytorch,
     random_sample,
 )
@@ -948,6 +953,159 @@ class TestTritonTopkTopp:
         kept_ties = kept[:, tie_idx]
         num_kept_ties = kept_ties.sum(dim=-1, keepdim=True)
         assert torch.equal(kept_ties, torch.arange(num_ties) < num_kept_ties)
+
+
+# =============================================================================
+# CUDA top-k/top-p filter tests
+# =============================================================================
+
+
+@pytest.mark.skipif(
+    not topk_topp_cuda_available(),
+    reason="CUDA top-k/top-p filter requires SM90 or SM100",
+)
+class TestCudaTopkTopp(TestTritonTopkTopp):
+    """Runs the Triton kernel's regression suite against the CUDA filter."""
+
+    @pytest.fixture(autouse=True)
+    def use_cuda_filter(self, monkeypatch: pytest.MonkeyPatch):
+        import vllm.v1.sample.ops.topk_topp_triton as tt
+
+        monkeypatch.setattr(
+            tt,
+            "apply_top_k_top_p_triton",
+            lambda logits, k, p, **kwargs: apply_top_k_top_p_cuda(logits, k, p),
+        )
+
+    def test_skip_split_without_topp_only_rows(self, *args, **kwargs):
+        pytest.skip("Triton split-pipeline dispatch only")
+
+
+def _assert_exact_filter(
+    source: torch.Tensor,
+    actual: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+):
+    """Kept tokens are exactly the prefix of the (logit desc, index asc) order
+    that top-k, then top-p on the renormalized top-k mass, selects."""
+    vocab = source.shape[1]
+    order = source.argsort(dim=-1, descending=True, stable=True)
+    kept = actual.isfinite().gather(-1, order)
+    count = kept.sum(-1)
+    ranks = torch.arange(vocab, device=source.device)
+    assert torch.equal(kept, ranks < count[:, None]), "kept set is not a prefix"
+    assert torch.equal(actual[actual.isfinite()], source[actual.isfinite()])
+    finite = source.isfinite().sum(-1)
+    budget = finite if k is None else torch.minimum(k.long(), finite)
+    assert ((count <= budget) & ((count >= 1) | (finite == 0))).all()
+    if p is None:
+        assert torch.equal(count, budget)
+        return
+    values = source.gather(-1, order).double()
+    prefix = values.masked_fill(ranks >= budget[:, None], -float("inf"))
+    prefix = prefix.softmax(-1).cumsum(-1)
+    mass = prefix.gather(-1, (count - 1).clamp_min(0)[:, None]).squeeze(-1)
+    previous = prefix.gather(-1, (count - 2).clamp_min(0)[:, None]).squeeze(-1)
+    previous = torch.where(count <= 1, 0, previous)
+    target = p.double()
+    ok = torch.where(
+        p >= 1, count == budget, (mass >= target - 1e-7) & (previous <= target + 1e-7)
+    )
+    assert (ok | (finite == 0)).all(), "top-p cutoff outside the FP64 mass bounds"
+
+
+def _make_logits(kind: str, batch: int, vocab: int, gen: Generator) -> torch.Tensor:
+    if kind == "zipf":
+        base = -1.1 * torch.arange(1, vocab + 1, dtype=torch.float32).log()
+        return base[torch.rand(batch, vocab, generator=gen).argsort(dim=-1)]
+    if kind == "zeros":
+        return torch.zeros(batch, vocab)
+    logits = torch.randn(batch, vocab, generator=gen)
+    return logits.bfloat16().float() if kind == "bf16" else logits
+
+
+def _make_param(kind, batch: int, vocab: int, gen: Generator, dtype: torch.dtype):
+    if kind is None:
+        return None
+    if kind != "mixed":
+        return torch.full((batch,), kind, dtype=dtype)
+    if dtype == torch.int32:
+        value = torch.randint(1, 200, (batch,), generator=gen, dtype=dtype)
+        value[::3] = vocab
+    else:
+        value = torch.rand(batch, generator=gen) * 0.9 + 0.1
+        value[1::3] = 1.0
+    return value
+
+
+@pytest.mark.skipif(
+    not topk_topp_cuda_available(),
+    reason="CUDA top-k/top-p filter requires SM90 or SM100",
+)
+class TestCudaTopkToppExact:
+    """Exact selection on every kernel path: row clusters (small batches),
+    candidates, a second gather and a value window for large nuclei, and the
+    full-row radix fallback (large k, heavy ties)."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        torch.set_default_device(DEVICE_TYPE)
+        self.generator = Generator(device=DEVICE_TYPE).manual_seed(7)
+
+    @pytest.mark.parametrize(
+        "kind,batch,vocab,k,p",
+        [
+            ("zipf", 1, 248320, None, 0.95),
+            ("zipf", 4, 131072, 20, 0.8),
+            ("normal", 4, 65536, None, 0.9),
+            ("zipf", 200, 131072, None, 0.9),
+            ("normal", 256, 32768, None, 0.9),
+            ("bf16", 64, 65536, "mixed", "mixed"),
+            ("normal", 8, 65536, 30000, None),
+            ("zeros", 8, 65536, 20, 0.5),
+            ("normal", 3, 65537, "mixed", "mixed"),
+        ],
+    )
+    def test_exact_selection(self, kind, batch, vocab, k, p):
+        source = _make_logits(kind, batch, vocab, self.generator)
+        k = _make_param(k, batch, vocab, self.generator, torch.int32)
+        p = _make_param(p, batch, vocab, self.generator, torch.float32)
+        actual = apply_top_k_top_p_cuda(source.clone(), k, p)
+        _assert_exact_filter(source, actual, k, p)
+
+    def test_cuda_graph_replay(self):
+        """Device k/p are read at replay time, and the workspace is reused."""
+        batch, vocab = 4, 65536
+        source = torch.randn(batch, vocab, generator=self.generator)
+        k = torch.tensor([1, 20, 256, vocab], dtype=torch.int32)
+        p = torch.tensor([0.1, 0.5, 0.8, 1.0])
+        logits = source.clone()
+        apply_top_k_top_p_cuda(logits, k, p)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            apply_top_k_top_p_cuda(logits, k, p)
+        for _ in range(4):
+            k.copy_(k.roll(1))
+            p.copy_(p.roll(-1))
+            logits.copy_(source)
+            graph.replay()
+            _assert_exact_filter(source, logits, k, p)
+
+    def test_sampler_dispatches_to_cuda_filter(self, monkeypatch: pytest.MonkeyPatch):
+        import vllm.v1.sample.ops.topk_topp_sampler as sampler_ops
+
+        calls = []
+
+        def spy(logits, k, p):
+            calls.append(logits.shape)
+            return apply_top_k_top_p_cuda(logits, k, p)
+
+        monkeypatch.setattr(sampler_ops, "apply_top_k_top_p_cuda", spy)
+        logits = torch.randn(8, 32000, generator=self.generator)
+        k = torch.full((8,), 50, dtype=torch.int32)
+        apply_top_k_top_p(logits, k, None)
+        assert calls == [logits.shape]
 
 
 # =============================================================================

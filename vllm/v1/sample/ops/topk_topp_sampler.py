@@ -14,6 +14,10 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.v1.sample.ops.topk_topp_cuda import (
+    apply_top_k_top_p_cuda,
+    can_use_topk_topp_cuda,
+)
 
 if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import (
@@ -514,6 +518,9 @@ def apply_top_k_top_p(
     """
     if p is None and k is None:
         return logits
+
+    if can_use_topk_topp_cuda(logits):
+        return apply_top_k_top_p_cuda(logits, k, p)
 
     if HAS_TRITON:
         return apply_top_k_top_p_triton(

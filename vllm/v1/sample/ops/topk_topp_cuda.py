@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Top-k/top-p masking with the CUDA filter kernel (csrc/topk_topp_filter.cu).
+
+The kernel reads each row once from HBM and selects the cutoff exactly among
+candidates gathered on chip, with ties broken by the lowest index. It runs on
+SM90 and SM100 with FP32 logits and per-row device k and p.
+"""
+
+import functools
+
+import torch
+
+from vllm.platforms import current_platform
+from vllm.utils.platform_utils import num_compute_units
+
+# Indices and fixed-point masses are sized for vocabularies below 2^20.
+_MAX_VOCAB_SIZE = 1 << 20
+_WORKSPACE_CACHE: dict[torch.device, torch.Tensor] = {}
+
+
+@functools.cache
+def topk_topp_cuda_available() -> bool:
+    """Whether the kernel is built for, and supports, the current GPU."""
+    if not current_platform.is_cuda():
+        return False
+    capability = current_platform.get_device_capability()
+    if capability is None or not (
+        capability.major == 9 or (capability.major == 10 and capability.minor in (0, 3))
+    ):
+        return False
+    import vllm._custom_ops  # noqa: F401  (loads torch.ops._C)
+
+    return hasattr(torch.ops._C, "top_k_top_p_filter")
+
+
+def can_use_topk_topp_cuda(logits: torch.Tensor) -> bool:
+    return (
+        logits.dtype == torch.float32
+        and logits.ndim == 2
+        and _supports(logits.device, logits.shape[-1])
+    )
+
+
+def _supports(device: torch.device, vocab_size: int) -> bool:
+    return (
+        device.type == "cuda"
+        and vocab_size < _MAX_VOCAB_SIZE
+        and topk_topp_cuda_available()
+    )
+
+
+def apply_top_k_top_p_cuda(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+) -> torch.Tensor:
+    """Mask logits outside the per-row top-k, then outside the top-p nucleus.
+
+    Args:
+        logits: [batch_size, vocab_size] float32 CUDA tensor.
+        k: [batch_size] top-k per row, or None. k >= vocab_size disables it.
+        p: [batch_size] top-p per row, or None. p >= 1 disables it.
+
+    Returns:
+        The masked logits. They alias the input unless its rows were not
+        contiguous.
+
+    """
+    if k is None and p is None:
+        return logits
+    if logits.stride(1) != 1:
+        logits = logits.contiguous()
+    if k is not None:
+        k = k.to(torch.int32).contiguous()
+    if p is not None:
+        p = p.to(torch.float32).contiguous()
+    torch.ops._C.top_k_top_p_filter(logits, k, p, _workspace(logits.device))
+    return logits
+
+
+def reserve_topk_topp_cuda_workspace(device: torch.device, vocab_size: int) -> None:
+    """Allocate the workspace during memory profiling when the sampler can use
+    the kernel, since profiling may not call it (e.g. with a fused FlashInfer
+    sampler) and the KV cache must leave room for it."""
+    if _supports(device, vocab_size):
+        _workspace(device)
+
+
+def _workspace(device: torch.device) -> torch.Tensor:
+    """Overflow candidate store for rows whose nucleus exceeds shared memory."""
+    workspace = _WORKSPACE_CACHE.get(device)
+    if workspace is None:
+        size = torch.ops._C.top_k_top_p_filter_workspace_size(
+            num_compute_units(device.index)
+        )
+        workspace = torch.empty(size, dtype=torch.uint8, device=device)
+        _WORKSPACE_CACHE[device] = workspace
+    return workspace
+
+
+def reset_workspace_cache() -> None:
+    _WORKSPACE_CACHE.clear()

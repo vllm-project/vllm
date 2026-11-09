@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark top-k/top-p filtering with Triton, FlashInfer, and optional PyTorch.
+"""Benchmark top-k/top-p filtering: Triton, CUDA, FlashInfer and optional PyTorch.
 
 All implementations return masked logits. Timings include a fresh-input copy.
 FlashInfer timings include softmax and mask reconstruction when its APIs require them.
@@ -25,6 +25,10 @@ import pandas as pd
 import torch
 from flashinfer.testing import bench_gpu_time_with_cupti
 
+from vllm.v1.sample.ops.topk_topp_cuda import (
+    apply_top_k_top_p_cuda,
+    topk_topp_cuda_available,
+)
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 from vllm.v1.sample.ops.topk_topp_triton import (
     apply_top_k_top_p_triton,
@@ -117,6 +121,7 @@ def apply_top_k_top_p_flashinfer_mask(logits, k, p):
 
 IMPLEMENTATIONS = {
     "triton": apply_top_k_top_p_triton,
+    "cuda": apply_top_k_top_p_cuda,
     "flashinfer-mask": apply_top_k_top_p_flashinfer_mask,
     "pytorch": apply_top_k_top_p_pytorch,
 }
@@ -411,7 +416,9 @@ def main():
         "--implementations",
         nargs="+",
         choices=list(IMPLEMENTATIONS),
-        default=["triton", "flashinfer-mask"],
+        default=["triton", "cuda", "flashinfer-mask"]
+        if topk_topp_cuda_available()
+        else ["triton", "flashinfer-mask"],
         help="Implementations to compare (PyTorch is an optional reference)",
     )
 
