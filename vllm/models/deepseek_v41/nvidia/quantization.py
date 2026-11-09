@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import copy
 import functools
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -191,6 +191,10 @@ def bf16_mxfp8_linear_method_cls() -> type[ModelOptLinearMethod]:
 
     class BF16Mxfp8LinearMethod(ModelOptLinearMethod):
         """The MXFP8 linear layer as a BF16 GEMM on dequantized weights."""
+
+        # As declared by `ModelOptLinearMethod`, which holds any selected
+        # kernel; mypy would otherwise type it from the assignment below.
+        kernel: Any
 
         def create_weights(self, layer, *args, **kwargs) -> None:
             super().create_weights(layer, *args, **kwargs)
