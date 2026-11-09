@@ -124,19 +124,28 @@ class Probe(D.MonoProbe):
     def capture_router(self) -> None:
         """Records PROBE_LAYER's MoE input at every decode step: off at its
         FFN, on from the mono scratch once the step is done (the last layer's,
-        so FULL graph replays leave it there too)."""
+        so FULL graph replays leave it there too). With it, each row's position
+        and input token, which identify its request."""
         from vllm.models.deepseek_v41.amd import mono_decode
         from vllm.models.deepseek_v41.amd.mono.layer import scratch_layout
 
         layer = self._decoder_layers()[PROBE_LAYER]
         self._router_in: list[torch.Tensor] = []
+        self._rows: list[torch.Tensor] = []
+        buf = self.model_runner.input_buffers  # type: ignore[attr-defined]
+
+        def record(x: torch.Tensor) -> None:
+            self._router_in.append(x.float().cpu())
+            ids = buf.input_ids[:REQUESTS].long()
+            self._rows.append(torch.stack([buf.positions[:REQUESTS], ids]).cpu())
+
         r = mono_decode._runner
         epoch: list[int | None] = [None if r is None else int(r.epoch[0])]
 
         def ffn(module, args, kwargs):
             x = args[0] if args else kwargs["hidden_states"]
             if x.shape[0] == REQUESTS:
-                self._router_in.append(x.float().cpu())
+                record(x)
 
         def logits(module, args):
             assert r is not None  # registered only when the layer runs mono
@@ -147,8 +156,7 @@ class Probe(D.MonoProbe):
             lay = scratch_layout(REQUESTS, r.tp, r.experts, r.topk, r.ug_groups, tuned)
             off = lay["normed"][0]
             x = r.scratch(REQUESTS, tuned)[off : off + REQUESTS * D.HIDDEN * 2]
-            x = x.view(torch.bfloat16).view(REQUESTS, D.HIDDEN)
-            self._router_in.append(x.float().cpu())
+            record(x.view(torch.bfloat16).view(REQUESTS, D.HIDDEN))
 
         if layer.mono is None:
             layer.ffn.register_forward_pre_hook(ffn, with_kwargs=True)
@@ -156,14 +164,15 @@ class Probe(D.MonoProbe):
             model = self.model_runner.model  # type: ignore[attr-defined]
             model.language_model.logits_processor.register_forward_pre_hook(logits)
 
-    def routes(self) -> list:
-        """PROBE_LAYER's top-k experts of each captured step and row (the
-        request), in float64 from the MoE input."""
+    def routes(self) -> tuple[list, list]:
+        """PROBE_LAYER's top-k experts of each captured step and row, in
+        float64 from the MoE input, and each row's (position, input token)."""
         ffn = self._decoder_layers()[PROBE_LAYER].ffn
         x = torch.stack(self._router_in).double()
         w, b = ffn.gate.weight.double().cpu(), ffn.gate.e_score_correction_bias
         score = torch.nn.functional.softplus(x @ w.T).sqrt() + b.double().cpu()
-        return score.topk(ffn.n_activated_experts).indices.sort(-1).values.tolist()
+        top = score.topk(ffn.n_activated_experts).indices.sort(-1).values
+        return top.tolist(), torch.stack(self._rows).tolist()
 
 
 def _requests():
@@ -221,7 +230,7 @@ def _run(
         before = llm.collective_rpc("mono_layers")
         run = P.run_forced(llm, prompts, traces)
         after = llm.collective_rpc("mono_layers")
-        routes = torch.tensor(llm.collective_rpc("routes")[0])
+        routes, rows = map(torch.tensor, llm.collective_rpc("routes")[0])
     if mono:
         D._engaged(
             before, after, {i: "whole" for i in D.WHOLE}, STEPS - 1, replayed=graphs
@@ -229,6 +238,16 @@ def _run(
     else:
         assert all(set(a["layers"].values()) == {None} for a in after), after
     assert routes.shape[0] == STEPS - 1, routes.shape
+    # `_compare` takes row r of decode step s for request r: at position
+    # len(prompt) + s (the prompt lengths unique), fed its trace's token s
+    expected = torch.tensor(
+        [
+            [[len(p) + s for p in prompts], [t[s] for t in traces]]
+            for s in range(STEPS - 1)
+        ]
+    )
+    assert len({len(p) for p in prompts}) == REQUESTS
+    assert torch.equal(rows, expected), (rows, expected)
     return run, routes
 
 

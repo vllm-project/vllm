@@ -65,12 +65,14 @@ def read_records(cache, block: int, slots, fnuz=False) -> torch.Tensor:
 
 def pairs(region: torch.Tensor, n: int, tag: int | None = None) -> torch.Tensor:
     """The first `n` (value, tag) int32 mailbox pairs of a byte region ->
-    the int32 values, after checking every tag is `tag` (the launch's)."""
-    p = region[: n * 8].view(torch.int32).view(n, 2)
+    the int32 values, after checking every tag is `tag` (the launch's).
+    Tags and values come from one snapshot, so a peer rewriting the region
+    after the copy cannot pair a passed tag with a newer value."""
+    p = region[: n * 8].view(torch.int32).view(n, 2).clone()
     if tag is not None:
         stale = (p[:, 1] != tag).nonzero()
         assert stale.numel() == 0, f"{stale.numel()} stale pairs, first {stale[0]}"
-    return p[:, 0].clone()
+    return p[:, 0].contiguous()
 
 
 def words(region: torch.Tensor, n: int, dtype: torch.dtype) -> torch.Tensor:

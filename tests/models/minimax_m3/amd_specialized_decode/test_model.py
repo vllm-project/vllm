@@ -88,7 +88,9 @@ def model_dir(tmp_path_factory):
         round_method="half_even",
     )
     path = tmp_path_factory.mktemp("minimax_m3_mini")
-    MiniMaxM3VLConfig(
+    # torch_dtype / quantization_config: PretrainedConfig kwargs the upstream
+    # config's signature does not declare
+    MiniMaxM3VLConfig(  # type: ignore[call-arg]
         text_config=dict(
             num_hidden_layers=LAYERS,
             vocab_size=VOCAB,
@@ -202,6 +204,7 @@ def _randomize(worker):
             **new,
         )
         for key, src in zip(new, converted):
+            assert src is not None, key
             getattr(experts, key).view(torch.uint8).copy_(src.view(torch.uint8))
     torch.accelerator.synchronize()
 
@@ -285,8 +288,10 @@ def _scratch(runner, s):
     tag = int(runner.epoch[0])
 
     def pairs(name, n):
-        p = runner.region(s, name)[: n * 8].view(torch.int32).view(n, 2)
-        return p[:, 0].clone(), bool((p[:, 1] == tag).all())
+        # one read: a tag checked on the live region could pass for a value
+        # rewritten after the copy
+        p = runner.region(s, name)[: n * 8].view(torch.int32).view(n, 2).clone()
+        return p[:, 0], bool((p[:, 1] == tag).all())
 
     route, route_tags = pairs("route", s * 2 * ffn.TOPK)
     parts, part_tags = pairs("logit", s * ffn.EXPERTS * ffn.ROUTER_PARTS)

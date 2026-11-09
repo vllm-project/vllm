@@ -1417,11 +1417,11 @@ def test_m1c_m1b_splits_single_gpu(q: int, lens: list) -> None:
         lat.append(
             (lo.float() * e[..., None]).sum(0) / e.sum(0).clamp_min(1e-30)[..., None]
         )
-    lat = torch.cat(lat)
-    assert _rel_l2(lat, att) < 5e-3
+    lat_all = torch.cat(lat)
+    assert _rel_l2(lat_all, att) < 5e-3
     # W_UV quantizes the latent to mxfp4: compare at the same latent
     w = _mla_back_inputs(S, q, 1)
-    ref = _uv_gate(lat.to(bf), w)
+    ref = _uv_gate(lat_all.to(bf), w)
     health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device="cuda")
     flags = torch.zeros(1, dtype=torch.int32, device="cuda")
     core = torch.zeros(S, GROWS, dtype=bf, device="cuda")
@@ -2028,26 +2028,36 @@ def _rank_sum_var(parts):
 
 def _mx_alts(v, d) -> tuple:
     """MXFP4 (AITER's inline rule: e8m0_roundup6 codes, E2M1 RNE) of rows v
-    [..., K] known to +-d: (quantized v, [(row, delta over K)]), a delta for
-    each value whose other neighbour, or group whose other code, v +- d may
-    round to."""
+    [..., K] known to +-d: (quantized v, [(row, delta over K)]). A v' in
+    v +- d takes a code amax(|v| +- d) allows (per element, as
+    _assert_mxfp4_equal) and, under it, each element's quant of v or the
+    other neighbour v' may round to: a delta for each such element under
+    each allowed code, and one for each group's move to another code."""
     vb, db = v.unflatten(-1, (-1, 32)), d.unflatten(-1, (-1, 32))
     code = R.e8m0_roundup6(vb.abs().amax(-1))
-    sc = R.e8m0(code)[..., None]
-    q = R.to_e2m1_rne(vb / sc) * sc
     alts = []
-    for end in R.boundary(R.to_e2m1_rne, vb / sc, db / sc)[1:]:
-        for *row, g, j in ((end * sc) != q).nonzero().tolist():
+
+    def quant(c, groups):
+        sc = R.e8m0(c)[..., None]
+        base = R.to_e2m1_rne(vb / sc) * sc
+        for end in R.boundary(R.to_e2m1_rne, vb / sc, db / sc)[1:]:
+            moved = (end * sc != base) & groups[..., None]
+            for *row, g, j in moved.nonzero().tolist():
+                delta = torch.zeros_like(v[tuple(row)])
+                delta[g * 32 + j] = (end * sc - base)[(*row, g, j)]
+                alts.append((tuple(row), delta))
+        return base
+
+    q = quant(code, torch.ones_like(code, dtype=torch.bool))
+    lo, hi = (R.e8m0_roundup6((vb.abs() + e).amax(-1)) for e in (-db, db))
+    for off in range(int((lo - code).min()), int((hi - code).max()) + 1):
+        groups = (lo <= code + off) & (code + off <= hi)
+        if not off or not groups.any():
+            continue
+        q2 = quant(code + off, groups)
+        for *row, g in groups.nonzero().tolist():
             delta = torch.zeros_like(v[tuple(row)])
-            delta[g * 32 + j] = end[(*row, g, j)] * sc[(*row, g, 0)] - q[(*row, g, j)]
-            alts.append((tuple(row), delta))
-    for end in R.boundary(R.e8m0_roundup6, vb.abs().amax(-1), db.amax(-1))[1:]:
-        for *row, g in (end != code).nonzero().tolist():
-            s2 = R.e8m0(end[(*row, g)])
-            delta = torch.zeros_like(v[tuple(row)])
-            delta[g * 32 : g * 32 + 32] = (
-                R.to_e2m1_rne(vb[(*row, g)] / s2) * s2 - q[(*row, g)]
-            )
+            delta[g * 32 : g * 32 + 32] = q2[(*row, g)] - q[(*row, g)]
             alts.append((tuple(row), delta))
     return q.flatten(-2), alts
 
