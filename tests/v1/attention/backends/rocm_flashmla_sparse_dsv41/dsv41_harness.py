@@ -768,7 +768,15 @@ def _builder_checks(inp: LayerInputs, md, layer) -> dict:
         last = ((pos + 1) % ratio == 0) & valid & (swa.slot_mapping[: len(pos)] >= 0)
         want = torch.where(last, want, torch.full_like(want, -1))
         got = cmp_md.slot_mapping[: len(pos)].long()
-        out["compressed_slot_mapping_ok"] = bool(torch.equal(got, want))
+        # A replayed token whose compressed state is already cached keeps a
+        # PAD slot in the compressed group (its SWA slot may still be live),
+        # so PAD is allowed where a slot is expected. Every slot that is
+        # written must be the right one, and something must be written.
+        written = got != -1
+        out["compressed_slot_mapping_ok"] = bool(
+            torch.equal(got[written], want[written])
+            and (bool(written.any()) or not bool((want != -1).any()))
+        )
     return out
 
 

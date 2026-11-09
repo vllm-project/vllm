@@ -17,16 +17,17 @@ condition -> kernels:
   reduce epilogue does the inverse RoPE and the MXFP8 quant).
 - decode, Triton, bf16 out -> ``rocm_sparse_attn_decode`` +
   ``rocm_inverse_rope_rows_``.
-- decode, aiter, MXFP8 out -> ``triton_sparse_mla_fwd`` +
-  ``rocm_inverse_rope_mxfp8_rows``.
-- decode, aiter, bf16 out -> ``triton_sparse_mla_fwd`` +
-  ``rocm_inverse_rope_rows_``.
+- decode, aiter, MXFP8 out -> ``triton_sparse_mla_fwd`` alone: its store does
+  the inverse RoPE and the MXFP8 quant.
+- decode, aiter, bf16 out -> ``triton_sparse_mla_fwd`` (rotating store) +
+  ``rocm_inverse_rope_rows_`` over the rows left unrotated.
 - decode, compressed layer that is its own source -> also
   ``compute_global_topk_ragged_indices_and_indptr`` (consumers reuse it).
 - prefill, Triton -> ``dequantize_and_gather_k_cache`` +
   ``combine_topk_swa_indices`` + ``rocm_sparse_attn_prefill``, then
   ``rocm_inverse_rope_mxfp8_rows`` (MXFP8) or ``rocm_inverse_rope_rows_``.
-- prefill, aiter -> ``triton_sparse_mla_fwd`` + the same inverse RoPE.
+- prefill, aiter -> ``triton_sparse_mla_fwd`` (rotating store), plus
+  ``rocm_inverse_rope_rows_`` for bf16 output.
 - prefill, aiter, compressed layer that is its own source -> also
   ``build_prefill_topk_ragged_indices``.
 - mixed -> the decode row + the prefill row.
@@ -76,7 +77,12 @@ def expected_kernels(layer: int, phase: str, aiter: bool, output: str) -> set[st
     want: set[str] = set()
     if phase in ("decode", "mixed"):
         if aiter:
-            want |= {"triton_sparse_mla_fwd", rope}
+            # The aiter kernel's store applies the inverse RoPE (and the MXFP8
+            # cast) itself (#60154); the bf16 path still makes the standalone
+            # rope call, over the rows no kernel rotated (none here).
+            want.add("triton_sparse_mla_fwd")
+            if output == "bf16":
+                want.add(rope)
         else:
             want.add("rocm_sparse_attn_decode")
             if output == "bf16":
@@ -84,13 +90,15 @@ def expected_kernels(layer: int, phase: str, aiter: bool, output: str) -> set[st
         if layer in SOURCES:
             want.add("compute_global_topk_ragged_indices_and_indptr")
     if phase in ("prefill", "mixed"):
-        want.add(rope)
         if aiter:
             want.add("triton_sparse_mla_fwd")
+            if output == "bf16":
+                want.add(rope)
             if layer in SOURCES:
                 want.add("build_prefill_topk_ragged_indices")
         else:
             want |= {
+                rope,
                 "dequantize_and_gather_k_cache",
                 "combine_topk_swa_indices",
                 "rocm_sparse_attn_prefill",
