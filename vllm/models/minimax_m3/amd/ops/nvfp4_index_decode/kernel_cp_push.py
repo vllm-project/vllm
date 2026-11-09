@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Context-parallel decode index scorer for MiniMax-M3 (FlyDSL, gfx950, TP4).
 
-Rank ``me`` scores blocks b with (b // CP_CH) % 4 == me for all four index heads
-(bit for bit as ``kernel.py``) and stores head h's scores into rank h's buffer
-(``index_cp.IndexCP``); it returns once every rank's scores have arrived.
+Rank `me` scores blocks b with (b // CP_CH) % 4 == me for all four index heads
+(bit for bit as `kernel.py`) and stores head h's scores into rank h's buffer
+(`index_cp.IndexCP`); it returns once every rank's scores have arrived.
 """
 
 import flydsl.compiler as flyc
@@ -609,3 +609,5 @@ def compile_score_push():
 
 
 assert CNT_SC < CNT_WORDS and SC_DONE + SC_MAX_WG <= FLAG_BYTES // 4
+# Rows that fit the receive buffers also fit the request limits.
+assert MAX_ROWS == MAX_REQS * QL and MAX_REQS <= SC_MAX_REQS

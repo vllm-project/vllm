@@ -7,7 +7,16 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, fields
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    NamedTuple,
+    NewType,
+    Protocol,
+    TypeVar,
+    runtime_checkable,
+)
 
 import numpy as np
 import torch
@@ -344,7 +353,7 @@ class OffloadingManager(ABC):
     ) -> CacheHitSource:
         """Return the cache tier that supplied a successful lookup.
 
-        This is queried only after ``lookup`` resolves to ``HIT``. Composing
+        This is queried only after `lookup` resolves to `HIT`. Composing
         managers can override it to retain the origin across asynchronous
         promotion into a primary tier. The default keeps out-of-tree managers
         compatible while making unknown provenance explicit.
@@ -514,7 +523,7 @@ class OffloadingManager(ABC):
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources.
 
-        The one exception to the rule that callers hold ``lock``: call this
+        The one exception to the rule that callers hold `lock`: call this
         without it. A manager with a background thread stops that thread here
         and may need the lock to do so.
         """
@@ -572,8 +581,10 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
 class CanonicalKVCacheTensor:
     """A canonicalized KV cache tensor whose first dimension is num_blocks.
 
-    With standardized layouts (RFC #42082) num_blocks is always the leading
-    logical dimension.
+    For attention backends where the raw tensor has num_blocks at a
+    non-leading physical dimension (e.g. FlashAttention's
+    (2, num_blocks, ...) layout), the tensor is split so that each
+    resulting CanonicalKVCacheTensor starts with (num_blocks, ...).
     """
 
     # The KV cache tensor with shape (num_blocks, ...)
@@ -658,6 +669,45 @@ class CanonicalKVCaches:
 
 
 @dataclass
+class DevicePointers:
+    """Pre-resolved device pointers for a transfer.
+
+    Flat arrays in canonical order:
+        for each group:
+            for each data_ref in group:
+                for each block in group:
+                    ptrs[i], sizes[i]
+    """
+
+    ptrs: np.ndarray  # uint64, device memory addresses
+    sizes: np.ndarray  # uint64, byte sizes per copy op
+    group_block_counts: tuple[int, ...]  # device blocks per group
+    group_data_ref_counts: tuple[int, ...]  # data_refs per group
+    block_indices: tuple[int, ...]  # logical block offset per group
+
+
+class DevicePointerGroupInfo(NamedTuple):
+    group_idx: int
+    group_size: int
+    n_data_refs: int
+    skip: int
+    n_chunks: int
+    dev_ptr_offset: int
+
+
+@runtime_checkable
+class IOCompletion(Protocol):
+    """Completion handle for an async I/O operation.
+
+    `concurrent.futures.Future` satisfies this unchanged.  Stream-ordered
+    backends can implement this with a CUDA event, avoiding a thread.
+    """
+
+    def done(self) -> bool: ...
+    def result(self, timeout: float | None = None) -> object: ...
+
+
+@dataclass
 class TransferResult:
     job_id: int
     success: bool
@@ -672,19 +722,19 @@ class OffloadingWorker(ABC):
 
     @abstractmethod
     def submit_store(
-        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
+        self, job_id: int, device_ptrs: DevicePointers, dst_spec: LoadStoreSpec
     ) -> bool:
-        """Async GPU -> offloaded medium."""
+        """Async device -> offloaded medium."""
 
     @abstractmethod
     def submit_load(
         self,
         job_id: int,
         src_spec: LoadStoreSpec,
-        dst_spec: GPULoadStoreSpec,
+        device_ptrs: DevicePointers,
         expedited: bool = False,
     ) -> bool:
-        """Async offloaded medium -> GPU.
+        """Async offloaded medium -> device.
 
         An expedited load is waited on within the step, so it should not queue
         behind regular loads. Submission itself must still not block.
