@@ -288,7 +288,8 @@ impl EncodeLabelValue for LoraLoadedLevel {
 pub struct LoraLoadTransitionLabels {
     pub model_name: String,
     pub engine: u32,
-    /// `load` (disk into the CPU cache) or `activate` (CPU cache into a GPU slot).
+    /// `load` (disk into the CPU cache) or `activate` (host time to start the
+    /// copy from the CPU cache into a GPU slot).
     pub transition: String,
 }
 
@@ -341,6 +342,7 @@ pub struct SchedulerMetrics {
     pub lora_gpu_adapters: Family<EngineLabels, U64Gauge>,
     pub lora_cpu_adapters: Family<EngineLabels, U64Gauge>,
     pub lora_gpu_slots: Family<EngineLabels, U64Gauge>,
+    pub lora_cpu_slots: Family<EngineLabels, U64Gauge>,
     pub lora_adapter_loaded: Family<LoraLoadedLabels, U64Gauge>,
     pub lora_load_seconds: LoraLoadTransitionHistogramFamily,
 
@@ -504,6 +506,13 @@ impl SchedulerMetrics {
             lora_gpu_slots.clone(),
         );
 
+        let lora_cpu_slots = Family::default();
+        registry.register(
+            "vllm:max_cpu_lora_adapters",
+            "Number of CPU cache LoRA slots (max_cpu_loras).",
+            lora_cpu_slots.clone(),
+        );
+
         let lora_adapter_loaded = Family::default();
         registry.register(
             "vllm:lora_adapter_loaded",
@@ -514,7 +523,7 @@ impl SchedulerMetrics {
             Family::new_with_constructor(lora_load_seconds_histogram as fn() -> Histogram);
         registry.register(
             "vllm:lora_adapter_load_seconds",
-            "Histogram of LoRA adapter transition time in seconds. 'transition' is 'load' for a read from disk into the CPU cache and 'activate' for a move from the CPU cache into a GPU slot.",
+            "Histogram of LoRA adapter transition time on the worker in seconds. 'transition' is 'load' for a read from disk into the CPU cache and 'activate' for the host time to start the copy from the CPU cache into a GPU slot; the copy itself runs asynchronously and is not included.",
             lora_load_seconds.clone(),
         );
 
@@ -877,6 +886,7 @@ impl SchedulerMetrics {
             lora_gpu_adapters,
             lora_cpu_adapters,
             lora_gpu_slots,
+            lora_cpu_slots,
             lora_adapter_loaded,
             lora_load_seconds,
             prefix_cache_queries,

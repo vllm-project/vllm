@@ -178,13 +178,18 @@ impl SchedulerStatsRecorder {
             .iter()
             .filter_map(|engine| {
                 let index = engine.engine_id.engine_index()?;
-                metrics
-                    .lora_gpu_slots
-                    .get_or_create(&EngineLabels {
+                let ready = &engine.ready_response;
+                if ready.supports_lora {
+                    let labels = EngineLabels {
                         model_name: model_name.to_string(),
                         engine: index,
-                    })
-                    .set(u64::from(engine.ready_response.max_loras));
+                    };
+                    metrics.lora_gpu_slots.get_or_create(&labels).set(u64::from(ready.max_loras));
+                    metrics
+                        .lora_cpu_slots
+                        .get_or_create(&labels)
+                        .set(u64::from(ready.max_cpu_loras));
+                }
                 Some((
                     index,
                     resolve_scheduler_stats_handles(metrics, model_name, index),
@@ -928,7 +933,9 @@ mod tests {
 
         let metrics = Metrics::new();
         let mut ready = default_ready_response();
+        ready.supports_lora = true;
         ready.max_loras = 4;
+        ready.max_cpu_loras = 16;
         let _recorder = SchedulerStatsRecorder::new(
             &metrics.scheduler,
             "test-model",
@@ -939,14 +946,31 @@ mod tests {
         );
 
         let rendered = metrics.render().expect("render metrics");
-        let line = rendered
-            .lines()
-            .find(|l| l.starts_with("vllm:max_gpu_lora_adapters{"))
-            .expect("slot capacity gauge rendered");
-        assert!(line.ends_with(" 4"), "{line}");
+        let slots = rendered.lines().filter(|l| l.starts_with("vllm:max_")).sorted().join("\n");
+        expect![[r#"
+            vllm:max_cpu_lora_adapters{model_name="test-model",engine="0"} 16
+            vllm:max_gpu_lora_adapters{model_name="test-model",engine="0"} 4"#]]
+        .assert_eq(&slots);
+    }
+
+    #[test]
+    fn slot_capacity_is_not_published_without_lora() {
+        use crate::transport::{ConnectedEngine, EngineId};
+
+        let metrics = Metrics::new();
+        let _recorder = SchedulerStatsRecorder::new(
+            &metrics.scheduler,
+            "test-model",
+            &[ConnectedEngine {
+                engine_id: EngineId::from_engine_index(0),
+                ready_response: default_ready_response(),
+            }],
+        );
+
+        let rendered = metrics.render().expect("render metrics");
         assert!(
-            line.contains("model_name=\"test-model\"") && line.contains("engine=\"0\""),
-            "{line}"
+            !rendered.lines().any(|l| l.starts_with("vllm:max_")),
+            "{rendered}"
         );
     }
 
