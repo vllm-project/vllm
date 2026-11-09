@@ -129,6 +129,52 @@ enabled.
     and query costs. Keep custom lists short, and only override the families
     you actively monitor.
 
+## Request-Header Labels
+
+Multi-tenant deployments often need to attribute per-request metrics to the
+tenant a request belongs to. The `--prometheus-request-labels` option maps an
+allowlist of incoming HTTP headers onto extra Prometheus labels on the
+per-request metric families:
+
+```bash
+vllm serve Qwen/Qwen3-0.6B \
+    --prometheus-request-labels '{"x-fairness-id": "fairness_id", "x-client-id": "client_id"}'
+```
+
+A request carrying those headers then produces, for example:
+
+```text
+vllm:e2e_request_latency_seconds_bucket{
+  model_name="Qwen/Qwen3-0.6B", engine="0",
+  fairness_id="premium", client_id="client-a", le="1.0"}
+```
+
+The labels are applied to `vllm:request_success`, `vllm:time_to_first_token_seconds`,
+`vllm:request_time_per_output_token_seconds`, `vllm:e2e_request_latency_seconds`,
+`vllm:request_queue_time_seconds`, `vllm:request_inference_time_seconds`,
+`vllm:request_prefill_time_seconds`, `vllm:request_decode_time_seconds`,
+`vllm:request_num_preemptions`, `vllm:request_prompt_tokens`,
+`vllm:request_generation_tokens`, `vllm:request_params_max_tokens`, and
+`vllm:request_prefill_kv_computed_tokens`. Engine-wide scheduler metrics
+(running/waiting requests, KV cache usage, …) are unchanged.
+
+Only the allowlisted headers are ever read. A request missing a header
+records an empty value for the corresponding label, so the label set of each
+family stays fixed. Header values are truncated to 128 characters. Label
+names are validated at startup: they must be valid Prometheus label names,
+must not collide with labels vLLM already sets, and at most 5 labels are
+allowed. The option has no effect when log stats are disabled
+(`--disable-log-stats`).
+
+!!! warning "Label cardinality"
+    Every distinct label *value* multiplies the series of every labeled
+    family: two labels with 10 and 20 distinct values turn one
+    `vllm:e2e_request_latency_seconds` histogram into 200 child histograms
+    per model and engine. Only map headers whose values are a small set of
+    operator-assigned classes (for example, fairness tiers or client names
+    from your gateway). Never map user IDs, request IDs, or other unbounded
+    values.
+
 ## Deprecation Policy
 
 Note: when metrics are deprecated in version `X.Y`, they are hidden in version `X.Y+1`

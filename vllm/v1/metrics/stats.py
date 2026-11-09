@@ -302,6 +302,7 @@ class FinishedRequestStats:
     mean_time_per_output_token: float = 0.0
     is_corrupted: bool = False
     num_cached_tokens: int = 0
+    metrics_labels: dict[str, str] | None = None
 
 
 @dataclass
@@ -487,6 +488,8 @@ class IterationStats:
         self.max_num_generation_tokens_iter: list[int] = []
         self.n_params_iter: list[int] = []
         self.time_to_first_tokens_iter: list[float] = []
+        # Index-aligned with time_to_first_tokens_iter.
+        self.time_to_first_token_labels: list[dict[str, str] | None] = []
         self.inter_token_latencies_iter: list[float] = []
         self.num_corrupted_reqs: int = 0
         self.num_watermarked_reqs: int = 0
@@ -514,6 +517,7 @@ class IterationStats:
         req_stats: RequestStateStats,
         lora_states: "LoRARequestStates",
         lora_name: str | None,
+        metrics_labels: dict[str, str] | None = None,
     ):
         num_new_generation_tokens = len(output.new_token_ids)
 
@@ -524,6 +528,7 @@ class IterationStats:
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)
+            self.time_to_first_token_labels.append(metrics_labels)
             req_stats.first_token_latency = first_token_latency
 
         req_stats.num_generation_tokens += num_new_generation_tokens
@@ -594,6 +599,7 @@ class IterationStats:
         max_tokens_param: int | None,
         req_stats: RequestStateStats,
         num_cached_tokens: int = 0,
+        metrics_labels: dict[str, str] | None = None,
     ):
         e2e_latency = self._time_since(req_stats.arrival_time)
 
@@ -634,6 +640,7 @@ class IterationStats:
             mean_time_per_output_token=mean_time_per_output_token,
             is_corrupted=req_stats.is_corrupted,
             num_cached_tokens=num_cached_tokens,
+            metrics_labels=metrics_labels,
         )
         self.finished_requests.append(finished_req)
 

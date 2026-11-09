@@ -62,3 +62,36 @@ def test_enable_layerwise_nvtx_tracing_is_deprecated(caplog_vllm):
         assert msg not in caplog_vllm.text
         ObservabilityConfig(enable_layerwise_nvtx_tracing=True)
     assert msg in caplog_vllm.text
+
+
+def test_prometheus_request_labels_default_none():
+    assert ObservabilityConfig().prometheus_request_labels is None
+
+
+def test_prometheus_request_labels_valid():
+    mapping = {"x-fairness-id": "fairness_id", "x-client-id": "client_id"}
+    config = ObservabilityConfig(prometheus_request_labels=mapping)
+    assert config.prometheus_request_labels == mapping
+
+
+@pytest.mark.parametrize(
+    ("labels", "match"),
+    [
+        ({"x-a-b": "1bad"}, "not a valid Prometheus label name"),
+        ({"x-a-b": "has-dash"}, "not a valid Prometheus label name"),
+        ({"x-a-b": "model_name"}, "collides with a label"),
+        ({"x-a-b": "engine"}, "collides with a label"),
+        ({"x-a-b": "finished_reason"}, "collides with a label"),
+        ({"x-a-b": "le"}, "collides with a label"),
+        ({"bad header": "ok_name"}, "not a valid HTTP header name"),
+        ({"x-a": "same", "x-b": "same"}, "label names must be distinct"),
+        (
+            {f"x-h{i}": f"l{i}" for i in range(6)},
+            "at most 5 labels are allowed",
+        ),
+    ],
+)
+def test_prometheus_request_labels_rejects_invalid(labels, match):
+    """Invalid header/label mappings must fail fast at startup."""
+    with pytest.raises(ValidationError, match=match):
+        ObservabilityConfig(prometheus_request_labels=labels)

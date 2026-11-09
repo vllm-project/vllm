@@ -115,7 +115,9 @@ steps:
   - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py -k "not lora"
   # run_batch drives the Python batch runner, not a server. test_metrics_exist needs
   # vllm:admission_rejections (text) and image inputs (multimodal), which the Rust frontend lacks.
-  - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "not run_batch and not test_metrics_exist"
+  # test_prometheus_request_labels exercises --prometheus-request-labels header
+  # extraction, which only exists in the Python serving layer.
+  - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "not run_batch and not test_metrics_exist and not test_prometheus_request_labels"
   # /tokenizer_info returns 501 in the Rust frontend.
   - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
   # test_v2_endpoint_accepts_valid_api_token calls /v2/embed; the Rust frontend serves no pooling routes.
