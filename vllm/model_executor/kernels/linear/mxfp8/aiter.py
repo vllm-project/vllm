@@ -19,7 +19,7 @@ logger = init_logger(__name__)
 
 
 def _aiter_backend_forced() -> bool:
-    """Whether ``--linear-backend`` explicitly requests AITER for MXFP8."""
+    """Whether `--linear-backend` explicitly requests AITER for MXFP8."""
     from vllm.model_executor.kernels.linear import _get_linear_backend
 
     return _get_linear_backend(quantization="mxfp8") == "aiter"

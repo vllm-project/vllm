@@ -12,7 +12,7 @@ from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -352,6 +352,38 @@ def _warm_fused_gdn_decode_post_conv_mtp_kernel(
         )
 
 
+def _warm_state_gather_scatter_kernels(
+    device: torch.device, config: "_QwenGDNWarmupConfig"
+) -> None:
+    """Compile the gather/scatter variants serving hits.
+
+    Triton specializes on 16-byte pointer alignment and stride == 1; mixed
+    batches slice the indices/mask at `num_decodes` and spec-decode block
+    tables give stride-2 indices, so warm each combination.
+    """
+    from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
+        gather_initial_states,
+    )
+    from vllm.model_executor.layers.mamba.ops.scatter_states import (
+        scatter_states,
+    )
+
+    state = torch.zeros(
+        2, config.hv, config.v, config.k, dtype=config.state_dtype, device=device
+    )
+    idx_pool = torch.zeros(6, dtype=torch.int32, device=device)
+    has_pool = torch.zeros(2, dtype=torch.bool, device=device)
+    for idx, has in (
+        (idx_pool[:1], has_pool[:1]),  # aligned, contiguous
+        (idx_pool[1:2], has_pool[1:2]),  # unaligned
+        (idx_pool[4:5], has_pool[1:2]),  # aligned indices, unaligned mask
+        (idx_pool[::2][:1], has_pool[:1]),  # strided (spec-decode block table)
+    ):
+        gathered = gather_initial_states(state, idx, has)
+        scatter_states(state, gathered.to(torch.float32), idx)
+        scatter_states(state, gathered, idx)
+
+
 def _synchronize_device(device: torch.device) -> None:
     if device.type == "cuda":
         torch.accelerator.synchronize(device)
@@ -385,6 +417,7 @@ def qwen_triton_warmup(
     # Pooling only runs full prefills; the decode update kernel is unused.
     if not runner.is_pooling_model:
         _warm_fused_sigmoid_gating_delta_rule_update_kernel(device, gdn_config)
+    _warm_state_gather_scatter_kernels(device, gdn_config)
     # ROCm runs the Triton port of the fused MTP decode kernel.
     spec_config = runner.speculative_config
     if (

@@ -20,12 +20,6 @@ if device_capability is None or device_capability < (9, 0):
 
 vllm_config = VllmConfig()
 
-if current_platform.is_fp8_fnuz():
-    pytest.skip(
-        "Tests in this file require float8_e4m3fn and platform does not support",
-        allow_module_level=True,
-    )
-
 
 def native_w8a8_per_token_matmul(A, B, As, Bs, output_dtype=torch.float16):
     """Matrix multiplication function that supports per-token input
@@ -126,7 +120,8 @@ def test_w8a8_fp8_fused_moe(M, N, K, E, topk, dtype, seed):
     torch.manual_seed(seed)
     # Initialize int8 quantization parameters
     factor_for_scale = 1e-2
-    finfo = torch.finfo(torch.float8_e4m3fn)
+    fp8_dtype = current_platform.fp8_dtype()
+    finfo = torch.finfo(fp8_dtype)
     fp8_max = finfo.max
     fp8_min = finfo.min
 
@@ -136,10 +131,10 @@ def test_w8a8_fp8_fused_moe(M, N, K, E, topk, dtype, seed):
 
     # Generate int8 weights
     w1_fp32 = (torch.rand((E, 2 * N, K), dtype=torch.float32) - 0.5) * 2
-    w1 = (w1_fp32 * fp8_max).clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+    w1 = (w1_fp32 * fp8_max).clamp(min=fp8_min, max=fp8_max).to(fp8_dtype)
 
     w2_fp32 = (torch.rand((E, K, N), dtype=torch.float32) - 0.5) * 2
-    w2 = (w2_fp32 * fp8_max).clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+    w2 = (w2_fp32 * fp8_max).clamp(min=fp8_min, max=fp8_max).to(fp8_dtype)
 
     # Generate scale for each column (per-column quantization)
     w1_s = torch.rand(E, 2 * N, device=w1_fp32.device) * factor_for_scale

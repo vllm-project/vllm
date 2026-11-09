@@ -144,7 +144,7 @@ _AITER_TUNED_SHAPE = (1536, 6144)
 @contextmanager
 def _patch_rocm_platform(linear_backend: str = "auto"):
     """Patch the platform so kernel selection runs as on a CDNA4 GPU under
-    ``linear_backend``. Both native MXFP8 kernels report as supported; AITER
+    `linear_backend`. Both native MXFP8 kernels report as supported; AITER
     has tuned configs only for _AITER_TUNED_SHAPE."""
     with (
         patch("vllm.model_executor.kernels.linear.current_platform") as platform,

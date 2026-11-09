@@ -63,13 +63,18 @@ steps:
   source_file_dependencies:
   - .buildkite/test_areas/lm_eval.yaml
   - tests/evals/gsm8k/
+  - tests/watermarking/test_watermarking_e2e.py
+  - vllm/config/vllm.py
   - vllm/config/watermarking.py
   - vllm/sampling_params.py
+  - vllm/v1/engine/core.py
+  - vllm/v1/engine/input_processor.py
   - vllm/v1/watermarking/
   - vllm/v1/worker/gpu/
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
+  - pytest -s -v watermarking/test_watermarking_e2e.py
   mirror:
     amd:
       automatic_shard: true
@@ -93,19 +98,6 @@ steps:
         VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
-
-# - label: LM Eval Large Models (4xA100)
-#   key: lm-eval-large-models-4xa100
-#   device: a100
-#   optional: true
-#   num_devices: 4
-#   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-#   source_file_dependencies:
-#   - csrc/
-#   - vllm/model_executor/layers/quantization
-#   commands:
-#   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-#   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
 - label: ":nvidia: (H100) [Nightly] LM Eval Large Models"
   key: lm-eval-large-models-4xh100
@@ -157,6 +149,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) LM Eval Small Models"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       num_devices: 1
@@ -225,6 +218,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] LM Eval HiSparse"
   key: lm-eval-hisparse-nightly-4xb200
+  automatic_shard: true
   timeout_in_minutes: 60
   device: b200-k8s
   num_devices: 4
@@ -282,6 +276,7 @@ steps:
   - tests/watermarking/test_compatibility.py
   - tests/watermarking/test_engine_compatibility.py
   - tests/watermarking/test_parallel_compatibility.py
+  - tests/watermarking/test_watermarking_e2e.py
   - vllm/config/speculative.py
   - vllm/config/vllm.py
   - vllm/config/watermarking.py
@@ -299,6 +294,7 @@ steps:
     watermarking/test_compatibility.py
     watermarking/test_engine_compatibility.py
     watermarking/test_parallel_compatibility.py
+    watermarking/test_watermarking_e2e.py
   mirror:
     amd:
       automatic_shard: true
@@ -398,6 +394,64 @@ steps:
       - vllm/distributed/
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-spec-decode-rocm.txt
+
+- label: ":nvidia: (B200) [Nightly] LM Eval ReplaySSM"
+  key: lm-eval-replayssm-2xb200
+  timeout_in_minutes: 60
+  device: b200-k8s
+  optional: true
+  num_devices: 2
+  source_file_dependencies:
+  - .buildkite/test_areas/lm_eval.yaml
+  - tests/evals/gsm8k/configs/models-replayssm.txt
+  - tests/evals/gsm8k/configs/Nemotron-3-Super-120B-A12B-NVFP4-ReplaySSM-align.yaml
+  - tests/evals/gsm8k/test_gsm8k_correctness.py
+  - tests/evals/gsm8k/gsm8k_eval.py
+  - tests/evals/gsm8k/conftest.py
+  - vllm/model_executor/layers/mamba/abstract.py
+  - vllm/model_executor/layers/mamba/mamba_mixer2.py
+  - vllm/model_executor/layers/mamba/ops/ssu_dispatch.py
+  - vllm/model_executor/layers/mamba/ops/replayssm_config.py
+  - vllm/model_executor/warmup/kernel_warmup.py
+  - vllm/model_executor/warmup/replayssm_warmup.py
+  - vllm/v1/attention/backends/mamba_attn.py
+  - vllm/v1/worker/mamba_utils.py
+  - vllm/v1/worker/replayssm_utils.py
+  - vllm/v1/worker/gpu/model_states/mamba_hybrid.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-replayssm.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) LM Eval ReplaySSM"
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      timeout_in_minutes: 60
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/lm_eval.yaml
+      - tests/evals/gsm8k/configs/models-mi355-replayssm.txt
+      - tests/evals/gsm8k/configs/Nemotron-3-Super-120B-A12B-FP8-ReplaySSM-align-MI355.yaml
+      - tests/evals/gsm8k/test_gsm8k_correctness.py
+      - tests/evals/gsm8k/gsm8k_eval.py
+      - tests/evals/gsm8k/conftest.py
+      - vllm/model_executor/layers/mamba/abstract.py
+      - vllm/model_executor/layers/mamba/mamba_mixer2.py
+      - vllm/model_executor/layers/mamba/ops/ssu_dispatch.py
+      - vllm/model_executor/layers/mamba/ops/replayssm_config.py
+      - vllm/model_executor/layers/mamba/ops/selective_state_update_replayssm_output_only.py
+      - vllm/model_executor/warmup/kernel_warmup.py
+      - vllm/model_executor/warmup/replayssm_warmup.py
+      - vllm/v1/attention/backends/mamba_attn.py
+      - vllm/v1/worker/mamba_utils.py
+      - vllm/v1/worker/replayssm_utils.py
+      - vllm/v1/worker/gpu/model_states/mamba_hybrid.py
+      - vllm/platforms/rocm.py
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi355-replayssm.txt
 
 - label: ":nvidia: (B200) [Nightly] LM Eval Large Models EP"
   key: lm-eval-large-models-ep-2xb200
@@ -508,6 +562,7 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] LM Eval DeepSeek R1 TP"
   key: lm-eval-deepseek-r1-tp-8xh200
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200
   optional: true
@@ -518,6 +573,7 @@ steps:
     amd:
       label: ":amd: (MI355) LM Eval DeepSeek R1 TP"
       dind: false
+      automatic_shard: true
       device: mi355_4
       num_devices: 4
       timeout_in_minutes: 65
@@ -552,6 +608,7 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] LM Eval DeepSeek R1 DP"
   key: lm-eval-deepseek-r1-dp-8xh200
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200
   optional: true
@@ -561,6 +618,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval DeepSeek R1 DP"
+      automatic_shard: true
       dind: false
       device: mi355_4
       num_devices: 4
@@ -596,6 +654,7 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] LM Eval DeepSeek V3.2 TP"
   key: lm-eval-deepseek-v32-tp-8xh200
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200
   optional: true
@@ -606,6 +665,7 @@ steps:
     amd:
       label: ":amd: (MI355) LM Eval DeepSeek V3-2 TP"
       dind: false
+      automatic_shard: true
       device: mi355_4
       num_devices: 4
       timeout_in_minutes: 65
@@ -640,6 +700,7 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] LM Eval DeepSeek V3.2 DP"
   key: lm-eval-deepseek-v32-dp-8xh200
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200
   optional: true
@@ -649,6 +710,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval DeepSeek V3-2 DP"
+      automatic_shard: true
       dind: false
       device: mi355_4
       num_devices: 4
@@ -845,6 +907,29 @@ steps:
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt -k "Qwen3-30B-A3B-BF16-triton"
 
+- label: ":nvidia: (B200) MoE Refactor DP Integration (DeepEP v2)"
+  key: moe-refactor-dp-ep-test-b200-deepep-v2
+  device: b200-k8s
+  # DeepEP v2 needs every rank on one NVLink node, and EP_DISABLE_GIN drops its
+  # NCCL GIN/RDMA requirement at num_ranks > 1.
+  num_devices: 8
+  timeout_in_minutes: 120
+  env:
+    EP_DISABLE_GIN: "1"
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/prepare_finalize/deepep_v2.py
+  - vllm/model_executor/layers/fused_moe/all2all_utils.py
+  - vllm/distributed/device_communicators/all2all.py
+  - vllm/distributed/device_communicators/cuda_communicator.py
+  - vllm/config/parallel.py
+  - csrc/moe/fused_globalize_align_block_size.cu
+  - tests/evals/gsm8k/configs/moe-refactor-dp-ep/config-b200-deepep-v2.txt
+  - tests/evals/gsm8k/configs/moe-refactor-dp-ep/Qwen3-30B-A3B-BF16-fi-trtllm-deepep-v2.yaml
+  - tests/evals/gsm8k/configs/moe-refactor-dp-ep/Qwen3-30B-A3B-Fp8-AutoFp8-fi-trtllm-deepep-v2.yaml
+  - tests/evals/gsm8k/configs/moe-refactor-dp-ep/Qwen3-30B-A3B-MXFP4A16-deepgemm-deepep-v2.yaml
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200-deepep-v2.txt
+
 - label: ":nvidia: (L4) [Nightly] LM Eval Humming TEMPORARY"
   key: lm-eval-humming-l4
   automatic_shard: true
@@ -864,38 +949,6 @@ steps:
   - vllm/model_executor/kernels/linear/
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-l4.txt
-
-- label: ":nvidia: (A100) [Nightly] LM Eval Humming Default TEMPORARY Shard %N"
-  key: lm-eval-humming-a100-default
-  optional: true
-  timeout_in_minutes: 75
-  device: a100
-  num_devices: 1
-  parallelism: 3
-  source_file_dependencies:
-  - vllm/model_executor/layers/quantization/humming.py
-  - vllm/model_executor/layers/quantization/utils/humming/
-  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
-  - vllm/model_executor/layers/fused_moe/oracle/
-  - vllm/model_executor/kernels/linear/
-  commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-a100-shard-$$BUILDKITE_PARALLEL_JOB.txt
-
-- label: ":nvidia: (A100) [Nightly] LM Eval Humming Activation INT8 TEMPORARY Shard %N"
-  key: lm-eval-humming-a100-act
-  optional: true
-  timeout_in_minutes: 45
-  device: a100
-  num_devices: 1
-  parallelism: 2
-  source_file_dependencies:
-  - vllm/model_executor/layers/quantization/humming.py
-  - vllm/model_executor/layers/quantization/utils/humming/
-  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
-  - vllm/model_executor/layers/fused_moe/oracle/
-  - vllm/model_executor/kernels/linear/
-  commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-a100-act-int8-shard-$$BUILDKITE_PARALLEL_JOB.txt
 
 - label: ":nvidia: (H100) [Nightly] LM Eval Humming Default TEMPORARY"
   key: lm-eval-humming-h100-default
@@ -969,6 +1022,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] LM Eval Humming Activation FP8/INT8 TEMPORARY"
   key: lm-eval-humming-b200-act
+  automatic_shard: true
   optional: true
   timeout_in_minutes: 50
   device: b200-k8s
@@ -1175,6 +1229,7 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] GPQA Eval (GPT-OSS)"
   key: gpqa-eval-gpt-oss-2xh100
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h100
   optional: true
@@ -1188,6 +1243,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI300) GPQA Eval (GPT-OSS)"
+      automatic_shard: true
       dind: false
       device: mi300_2
       num_devices: 2
@@ -1244,6 +1300,30 @@ steps:
       - vllm/platforms/rocm.py
       commands:
       - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx950.txt
+
+# Disabled until DeepEP v2 can carry gpt-oss: its combine kernel requires
+# hidden % 256 == 0, but the mxfp4 TRTLLM experts emit unpadded hidden 2880.
+# Run configs/models-b200-deepep-v2.txt manually once hidden padding lands.
+# - label: ":nvidia: (B200) GPQA Eval (GPT-OSS, DeepEP v2)"
+#   key: gpqa-eval-gpt-oss-deepep-v2-b200
+#   device: b200-k8s
+#   # DeepEP v2 needs every rank on one NVLink node, and EP_DISABLE_GIN drops its
+#   # NCCL GIN/RDMA requirement at num_ranks > 1.
+#   num_devices: 8
+#   timeout_in_minutes: 60
+#   env:
+#     EP_DISABLE_GIN: "1"
+#   source_file_dependencies:
+#   - vllm/model_executor/layers/fused_moe/prepare_finalize/deepep_v2.py
+#   - vllm/model_executor/layers/fused_moe/all2all_utils.py
+#   - vllm/distributed/device_communicators/all2all.py
+#   - vllm/distributed/device_communicators/cuda_communicator.py
+#   - vllm/config/parallel.py
+#   - csrc/moe/fused_globalize_align_block_size.cu
+#   - tests/evals/gpt_oss/configs/models-b200-deepep-v2.txt
+#   - tests/evals/gpt_oss/configs/gpt-oss-20b-sm100-fi-mxfp4-mxfp8-trtllm-deepep-v2.yaml
+#   commands:
+#   - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200-deepep-v2.txt
 
 # Disabled until evalscope transitive dependencies are locked.
 # - label: ":nvidia: (B200) [Nightly] Qwen3.8-Flash-Next-FP8 Accuracy Eval"

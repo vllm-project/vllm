@@ -15,12 +15,17 @@ from vllm.config.cache import CacheDType
 from vllm.config.kernel import MoEBackend
 from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.config.utils import config, replace
+from vllm.config.utils import (
+    CompileFactors,
+    config,
+    get_compile_factors,
+    normalize_value,
+    replace,
+)
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_text_config, iter_rope_parameters
 from vllm.transformers_utils.repo_utils import get_subfolder_path
-from vllm.utils.hashing import safe_hash
-from vllm.utils.import_utils import LazyLoader, has_arctic_inference
+from vllm.utils.import_utils import LazyLoader
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.spec_decode.speculator_config import (
     SpeculatorConfig,
@@ -44,6 +49,29 @@ else:
     )
 
 logger = init_logger(__name__)
+
+
+# Positional-encoding keys the draft must share with the target (#58080).
+# ``max_position_embeddings`` is deliberately excluded: shared drafts already
+# get it via ``_maybe_override_draft_max_position_embeddings`` (#63909).
+_ROPE_HF_OVERRIDE_KEYS = frozenset(
+    {
+        "rope_scaling",
+        "rope_parameters",
+        "original_max_position_embeddings",
+        "rope_theta",
+        "partial_rotary_factor",
+    }
+)
+# Nested HF configs that commonly wrap those rope fields (VL / hybrid).
+_NESTED_HF_CONFIG_KEYS = frozenset(
+    {
+        "text_config",
+        "language_config",
+        "llm_config",
+        "thinker_config",
+    }
+)
 
 MTPModelTypes = Literal[
     "deepseek_mtp",
@@ -86,7 +114,6 @@ SpeculativeMethod = Literal[
     "ngram",
     "draft_model",
     "suffix",
-    "custom_class",
     EagleModelTypes,
     NgramGPUTypes,
     DSparkModelTypes,
@@ -469,9 +496,9 @@ class SpeculativeConfig:
 
     Besides the built-in methods, this can be a custom method registered with
     `vllm.v1.worker.gpu.spec_decode.speculator_config.register_speculative_method`
-    (e.g. by a vLLM plugin), which requires the V2 model runner. It is then
-    moved to `custom_method`, and this is set to the built-in method that its
-    config is based on (None if it isn't based on one)."""
+    (e.g. by a vLLM plugin). It is then moved to `custom_method`, and this is
+    set to the built-in method that its config is based on (None if it isn't
+    based on one)."""
     custom_method: str | None = field(default=None, init=False)
     """The configured custom speculative method, if any (see `method`)."""
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
@@ -515,11 +542,6 @@ class SpeculativeConfig:
     If `None`, use the value from the draft model's Hugging Face config."""
 
     # Advanced control
-    disable_padded_drafter_batch: bool = False
-    """Disable input padding for speculative decoding. If set to True,
-    speculative input batches can contain sequences of different lengths,
-    which may only be supported by certain attention backends. This currently
-    only affects the EAGLE method of speculation."""
     disable_eagle_block_drop: bool = False
     """Disable dropping the trailing prefix-cache block for EAGLE-like
     speculative methods. This is an experimental option for measuring the
@@ -532,41 +554,29 @@ class SpeculativeConfig:
     sharing a KV store and external consumers of KV cache events must use the
     same setting."""
     draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
-    """Quantize the drafter's copy of a target lm_head it shares (EAGLE and
-    MTP). "fp8" uses per-row weight and per-token activation scales on the
-    platform's FP8 linear kernel; "nvfp4" is weight-only on the platform's
-    W4A16 kernel. The target verifies with its own head, so only the
-    acceptance length can change. Model Runner V2 only."""
+    """Quantize the drafter's copy of a target lm_head it shares (EAGLE, MTP
+    and DeepSeek-V4/V4.1 DSpark). "fp8" uses per-row weight and per-token
+    activation scales on the platform's FP8 linear kernel; "nvfp4" is
+    weight-only on the platform's W4A16 kernel. The target verifies with its
+    own head, so only the acceptance length can change."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
     O(2 * tp_size) per token. Only applies to greedy draft selection in
     non-tree speculation."""
 
-    use_heterogeneous_vocab: bool = False
-    """Allow draft and target models to use different vocabularies.
-    When enabled, builds a token-level intersection at init and constrains
-    draft logits to shared tokens only (TLI algorithm). Requires
-    method='draft_model'."""
-
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
-    """Maximum size of ngram token window when using Ngram proposer, required
-    when method is set to ngram."""
+    """Maximum size of ngram token window when using Ngram proposer. Defaults
+    to `prompt_lookup_min` if set, otherwise 5."""
     prompt_lookup_min: int | None = Field(default=None, ge=1)
-    """Minimum size of ngram token window when using Ngram proposer, if
-    provided. Defaults to 1."""
+    """Minimum size of ngram token window when using Ngram proposer. Defaults
+    to `prompt_lookup_max` if set, otherwise 5."""
 
     # Alternative drafting strategies
-    parallel_drafting: bool = False
-    """Enable parallel drafting, where all speculative tokens are generated
-    in parallel rather than sequentially. This can improve performance but
-    requires the speculative model be trained to support parallel drafting.
-    Only compatible with EAGLE and draft model methods.
-
-    Deprecated: V1 model runner only (the V2 model runner falls back to V1 for
-    it), and will be removed with it. V2 speculators that draft in parallel,
-    such as DFlash and DSpark, do so without this option."""
+    parallel_drafting: bool | None = None
+    """Deprecated and has no effect. DFlash and DSpark always draft in
+    parallel, and no other method supports it."""
 
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
@@ -578,7 +588,7 @@ class SpeculativeConfig:
     num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None
     """Batch-size schedule used to dynamically choose speculative-token count.
 
-    Each entry is ``(range_start, range_end, num_speculative_tokens)`` with an
+    Each entry is `(range_start, range_end, num_speculative_tokens)` with an
     inclusive batch-size range.
     """
 
@@ -590,24 +600,26 @@ class SpeculativeConfig:
 
     # Suffix decoding configuration
     suffix_decoding_max_tree_depth: int = 24
-    """The maximum depth of the suffix decoding global and prompt trees. The
-    tree depth limits the sum of the prefix match and speculation lengths."""
+    """The maximum suffix match length for suffix decoding."""
 
     suffix_decoding_max_cached_requests: int = 10000
-    """The maximum number of requests to cache in the global suffix tree. If
-    exceeded, will trigger eviction in FIFO order. If set to 0, the global
-    suffix tree is disabled and past responses are not cached (prompt trees
-    are still used)."""
+    """Set to 0 to disable the cross-request corpus of finished responses
+    (equivalent to `suffix_decoding_corpus_tokens=0`), so that each request
+    matches only within its own prompt and output."""
+
+    suffix_decoding_corpus_tokens: int = 1 << 20
+    """Token capacity of the GPU corpus of finished responses used for
+    cross-request matching. Oldest responses are overwritten first. Set 0 (or
+    `suffix_decoding_max_cached_requests` to 0) to match only within each
+    request's own prompt and output."""
 
     suffix_decoding_max_spec_factor: float = 1.0
-    """The maximum spec factor for suffix decoding. The spec factor controls
-    speculation lengths based on the prefix match length: max_spec_tokens =
-    max_spec_factor * prefix_match_length."""
+    """Deprecated and has no effect: the GPU suffix speculator always drafts
+    `num_speculative_tokens` tokens."""
 
     suffix_decoding_min_token_prob: float = 0.1
-    """The minimum token probability for suffix decoding. Will only speculate
-    tokens with estimated probability (based on frequency counts) greater than
-    or equal to this value."""
+    """Deprecated and has no effect: the GPU suffix speculator always drafts
+    `num_speculative_tokens` tokens."""
 
     draft_load_config: LoadConfig | None = None
     """Load config for the draft model. If not specified, will use the load
@@ -700,7 +712,7 @@ class SpeculativeConfig:
     xpress_topc: int | None = Field(default=None, ge=0)
     """For XPress drafting, score each Jacobi pass only on the drafter's top-C
     base-logit candidates. 0 disables the narrowing and scores the full
-    vocabulary. Takes precedence over ``xpress_topc`` in the draft
+    vocabulary. Takes precedence over `xpress_topc` in the draft
     checkpoint's config, which is used when this is unset."""
 
     speculator_options: dict[str, Any] | None = None
@@ -709,7 +721,7 @@ class SpeculativeConfig:
 
     fly_window_size: int | None = Field(default=None, ge=1)
     """Number of subsequent native acceptance decisions checked by FLy.
-    If unset, defaults to ``min(6, num_speculative_tokens - 1)``."""
+    If unset, defaults to `min(6, num_speculative_tokens - 1)`."""
 
     fly_entropy_threshold: float = Field(default=0.3, ge=0)
     """Target top-k entropy lower bound for FLy loose acceptance."""
@@ -717,43 +729,69 @@ class SpeculativeConfig:
     fly_entropy_top_k: int = Field(default=3, ge=1)
     """Number of largest target probabilities used by FLy's entropy gate."""
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+    def compile_factors(self) -> CompileFactors:
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
         """
-        factors: list[Any] = []
+        ignored_factors = {
+            "enforce_eager",
+            "num_speculative_tokens",
+            "model",
+            "method",
+            "draft_tensor_parallel_size",
+            "tensor_parallel_size",
+            "quantization",
+            "moe_backend",
+            "attention_backend",
+            "kv_cache_dtype",
+            "max_model_len",
+            "revision",
+            "code_revision",
+            "index_share_for_mtp_iteration",
+            "disable_eagle_block_drop",
+            "disable_lookahead_block_hashes",
+            "draft_lm_head_quantization",
+            "use_local_argmax_reduction",
+            "prompt_lookup_max",
+            "prompt_lookup_min",
+            "parallel_drafting",
+            "target_model_config",
+            "target_parallel_config",
+            "num_speculative_tokens_per_batch_size",
+            "draft_parallel_config",
+            "suffix_decoding_max_tree_depth",
+            "suffix_decoding_max_cached_requests",
+            "suffix_decoding_corpus_tokens",
+            "suffix_decoding_max_spec_factor",
+            "suffix_decoding_min_token_prob",
+            "draft_load_config",
+            "rejection_sample_method",
+            "synthetic_acceptance_rates",
+            "synthetic_acceptance_length",
+            "enable_adaptive_verification",
+            "draft_sample_method",
+            "dspark_draft_topk",
+            "xpress_topc",
+            "fly_window_size",
+            "fly_entropy_threshold",
+            "fly_entropy_top_k",
+        }
+        factors = get_compile_factors(self, ignored_factors)
         # Eagle3 and extract_hidden_states affect the computation graph because
-        # they return intermediate hidden states in addition to the final hidden state.
-        uses_aux_hidden_states = self.uses_aux_hidden_states
-        factors.append(uses_aux_hidden_states)
-
+        # they return intermediate hidden states in addition to the final hidden
+        # state.
+        factors["uses_aux_hidden_states"] = self.uses_aux_hidden_states
+        factors["speculator"] = normalize_value(self.speculator_config.hash_factors())
         if self.draft_model_config is not None:
-            factors.append(self.draft_model_config.compute_hash())
             # The specific layers used also affect the computation graph.
             layer_ids = getattr(
                 self.draft_model_config.hf_config,
                 "eagle_aux_hidden_state_layer_ids",
                 None,
             )
-            if layer_ids is not None and uses_aux_hidden_states:
-                # Convert to tuple to make it hashable
-                factors.append(tuple(layer_ids))
-
-        # A custom speculator may compile a different draft model graph.
-        factors.append(self.custom_method)
-        if self.speculator_options:
-            factors.append(sorted(self.speculator_options.items()))
-        factors.extend(self.speculator_config.hash_factors())
-
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+            if layer_ids is not None and self.uses_aux_hidden_states:
+                factors["aux_hidden_state_layer_ids"] = list(layer_ids)
+        return factors
 
     @staticmethod
     def hf_config_override(
@@ -772,6 +810,12 @@ class SpeculativeConfig:
         ):
             # Qwen3 DSpark drafts reuse the DeepSeek-V4 DSpark architecture name.
             hf_config.update({"architectures": ["Qwen3DSparkModel"]})
+            return hf_config
+        if initial_architecture == "DFlash2DraftModel" and getattr(
+            hf_config, "no_rope_layers", None
+        ):
+            # Ripple's DFlash2 drafter is the one with NoPE layers.
+            hf_config.update({"architectures": ["DFlash2RicursiveDraftModel"]})
             return hf_config
         if initial_architecture == "Gemma4DSparkModel":
             # Normalize the Gemma4 DSpark draft's config keys to DSpark's.
@@ -1280,48 +1324,96 @@ class SpeculativeConfig:
         return target_hf_overrides(hf_config)
 
     @staticmethod
+    def _select_draft_hf_overrides(
+        overrides: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Keep rope-relevant keys, including those nested under VL wrappers."""
+        selected: dict[str, Any] = {}
+        for key, value in overrides.items():
+            if key in _ROPE_HF_OVERRIDE_KEYS:
+                selected[key] = copy.deepcopy(value)
+            elif key in _NESTED_HF_CONFIG_KEYS and isinstance(value, Mapping):
+                nested = SpeculativeConfig._select_draft_hf_overrides(value)
+                if nested:
+                    selected[key] = nested
+        return selected
+
+    @staticmethod
+    def _apply_dict_then_arch_override(
+        target_hf_overrides: dict[str, Any],
+        hf_config: PreTrainedConfig,
+        transformers_mtp_overrides: dict[str, Any] | None = None,
+    ) -> PreTrainedConfig:
+        """Apply dict rope overrides, then the draft arch rewrite.
+
+        Dict patches run first so nested keys (`text_config.rope_parameters`)
+        apply before arch mapping may promote `text_config`. Nested wrappers
+        are skipped on flat draft configs, where setting them would create a
+        bare `text_config` dict that `get_text_config()` picks up instead.
+        """
+        overrides = {
+            key: value
+            for key, value in target_hf_overrides.items()
+            if key not in _NESTED_HF_CONFIG_KEYS
+            or getattr(hf_config, key, None) is not None
+        }
+        ModelConfig._apply_dict_overrides(hf_config, overrides)
+        return SpeculativeConfig.hf_config_override(
+            hf_config, transformers_mtp_overrides
+        )
+
+    @staticmethod
     def compose_draft_hf_overrides(
         target_hf_overrides: HfOverrides | None,
         transformers_mtp_overrides: dict[str, Any] | None = None,
     ) -> Callable[[PreTrainedConfig], PreTrainedConfig]:
-        """Build the ``hf_overrides`` for the draft ``ModelConfig``.
+        """Build the `hf_overrides` for the draft `ModelConfig`.
 
         Callable overrides on the target are config-to-config transforms
-        (e.g. test harnesses shrinking ``num_hidden_layers``) and must also
+        (e.g. test harnesses shrinking `num_hidden_layers`) and must also
         reach the draft config — otherwise a draft belonging to a large
         target is instantiated at full size even when the target is shrunk.
-        Dict overrides are target-specific key patches and are not applied
-        to the draft.
 
-        The composed override must stay picklable: the draft ``ModelConfig``
+        Dict overrides are mostly target-specific key patches, but
+        rope-relevant keys (`rope_parameters` / `rope_scaling` /
+        `rope_theta`, including nested `text_config`) must reach the
+        draft or a YaRN-style target override leaves the draft on native
+        rope (#58080). `max_position_embeddings` stays target-only so the
+        draft max-model-len clamp keeps holding (#63909).
+
+        The composed override must stay picklable: the draft `ModelConfig`
         is sent to spawned engine-core processes, so a local closure would
-        fail with ``Can't get local object`` during pickling. Bind the
-        target via ``functools.partial`` over a module-referenceable static
+        fail with `Can't get local object` during pickling. Bind the
+        target via `functools.partial` over a module-referenceable static
         method instead.
         """
-        if not callable(target_hf_overrides):
+        if callable(target_hf_overrides):
+            return functools.partial(
+                SpeculativeConfig._apply_composed_hf_override,
+                target_hf_overrides,
+                transformers_mtp_overrides=transformers_mtp_overrides,
+            )
+
+        if not isinstance(target_hf_overrides, Mapping) or not target_hf_overrides:
+            return functools.partial(
+                SpeculativeConfig.hf_config_override,
+                transformers_mtp_overrides=transformers_mtp_overrides,
+            )
+
+        draft_overrides = SpeculativeConfig._select_draft_hf_overrides(
+            target_hf_overrides
+        )
+        if not draft_overrides:
             return functools.partial(
                 SpeculativeConfig.hf_config_override,
                 transformers_mtp_overrides=transformers_mtp_overrides,
             )
 
         return functools.partial(
-            SpeculativeConfig._apply_composed_hf_override,
-            target_hf_overrides,
+            SpeculativeConfig._apply_dict_then_arch_override,
+            draft_overrides,
             transformers_mtp_overrides=transformers_mtp_overrides,
         )
-
-    @staticmethod
-    def _is_custom_proposer_path(model: str | None) -> bool:
-        """True if ``model`` is a dotted import path (e.g. ``pkg.MyProposer``)."""
-        if model is None:
-            return False
-        if model.startswith(("http://", "https://", "file://")):
-            return False
-        if "/" in model:
-            return False
-        parts = model.split(".")
-        return len(parts) >= 2 and all(part.isidentifier() for part in parts)
 
     def __post_init__(self):
         # Note: "method" is a new parameter that helps to extend the
@@ -1342,11 +1434,6 @@ class SpeculativeConfig:
             )
             self.custom_method = self.method
             self.method = custom_cls.base_method  # type: ignore[assignment]
-        elif self.method is None and SpeculativeConfig._is_custom_proposer_path(
-            self.model
-        ):
-            # V1 model runner only: a custom proposer's module path.
-            self.method = "custom_class"
         elif self.method is None and self.model in ("ngram", "[ngram]"):
             self.method = "ngram"
         elif self.method is None and self.model is None:
@@ -1419,43 +1506,6 @@ class SpeculativeConfig:
     def uses_separate_workspace_lane(self) -> bool:
         """See `SpeculatorConfig.uses_separate_workspace_lane`."""
         return self.speculator_config.uses_separate_workspace_lane
-
-    def _validate_suffix_decoding(self):
-        # V1 model runner only, to be removed with it.
-        if not has_arctic_inference():
-            raise ImportError(
-                "Arctic Inference is required for suffix decoding. "
-                "Install via `pip install arctic-inference==0.1.1`."
-            )
-        if self.num_speculative_tokens is None:
-            # Suffix decoding decides the actual number of speculative tokens
-            # dynamically and treats num_speculative_tokens as a maximum limit.
-            self.num_speculative_tokens = self.suffix_decoding_max_tree_depth
-            logger.warning(
-                "Defaulted num_speculative_tokens to %s for suffix decoding.",
-                self.num_speculative_tokens,
-            )
-        # Validate values
-        if self.suffix_decoding_max_tree_depth < 1:
-            raise ValueError(
-                f"suffix_decoding_max_tree_depth="
-                f"{self.suffix_decoding_max_tree_depth} must be >= 1"
-            )
-        if self.suffix_decoding_max_cached_requests < 0:
-            raise ValueError(
-                f"suffix_decoding_max_cached_requests="
-                f"{self.suffix_decoding_max_cached_requests} must be >= 0"
-            )
-        if self.suffix_decoding_max_spec_factor < 0:
-            raise ValueError(
-                f"suffix_decoding_max_spec_factor="
-                f"{self.suffix_decoding_max_spec_factor} must be >= 0"
-            )
-        if not 0 <= self.suffix_decoding_min_token_prob <= 1:
-            raise ValueError(
-                f"suffix_decoding_min_token_prob="
-                f"{self.suffix_decoding_min_token_prob} must be in [0, 1]"
-            )
 
     @staticmethod
     def _maybe_override_draft_max_model_len(
@@ -1691,23 +1741,16 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        if self.use_heterogeneous_vocab and not self.uses_draft_model():
-            raise ValueError(
-                "use_heterogeneous_vocab only works with method='draft_model'"
-            )
-
-        if self.use_heterogeneous_vocab and self.draft_sample_method != "greedy":
-            raise ValueError(
-                "use_heterogeneous_vocab currently only supports greedy draft "
-                "sampling. Set draft_sample_method='greedy' (the default) or "
-                "omit it."
-            )
-
-        if self.use_heterogeneous_vocab and self.use_local_argmax_reduction:
-            raise ValueError(
-                "use_heterogeneous_vocab is not compatible with "
-                "use_local_argmax_reduction because token-level intersection "
-                "requires the full draft logits."
+        if self.parallel_drafting is not None:
+            if self.parallel_drafting and self.method not in ("dflash", "dspark"):
+                raise ValueError(
+                    "parallel_drafting is only supported by the dflash and dspark "
+                    f"methods, not {self.method!r}."
+                )
+            logger.warning_once(
+                "parallel_drafting is deprecated and has no effect: dflash and "
+                "dspark always draft in parallel, and no other method supports "
+                "it. It will be removed in a future release."
             )
 
         if self.rejection_sample_method == "fly":
@@ -1732,8 +1775,7 @@ class SpeculativeConfig:
                 "may degrade model outputs."
             )
 
-        if not self.use_heterogeneous_vocab:
-            self.verify_equal_vocab_size_if_draft_model()
+        self.verify_equal_vocab_size_if_draft_model()
         return self
 
     def verify_equal_vocab_size_if_draft_model(self):
@@ -1758,23 +1800,9 @@ class SpeculativeConfig:
         """Return the maximum additional drafting slots per request.
 
         The scheduler budget already includes one query slot per decoding request.
-        Let K be ``num_speculative_tokens``. Standard configurations require:
-
-        ==================== ============= ======== ================
-        Algorithm            Method        Parallel Additional slots
-        ==================== ============= ======== ================
-        EAGLE3               eagle3        No       0
-        P-EAGLE              eagle3        Yes      K - 1
-        DFlash               dflash        Yes      0
-        DSpark               dspark        Yes      0
-        MTP                  mtp           No       0
-        N-gram               ngram         No       0
-        Draft model          draft_model   No       1
-        PARD                 draft_model   Yes      K
-        ==================== ============= ======== ================
-
-        DFlash and DSpark draft in a separate query pass rather than adding
-        rows to the target batch.
+        Only the autoregressive draft-model input needs one more: it retains one
+        unsliced token. DFlash and DSpark draft in a separate query pass rather
+        than adding rows to the target batch.
         """
         return self.speculator_config.max_num_new_slots_for_drafting
 
@@ -1784,14 +1812,6 @@ class SpeculativeConfig:
             and self.draft_model_config is not None
             and getattr(self.draft_model_config.hf_config, "model_type", None)
             == "gemma4_mtp"
-        )
-
-    def use_step3p5_mtp(self) -> bool:
-        return (
-            self.method == "mtp"
-            and self.draft_model_config is not None
-            and getattr(self.draft_model_config.hf_config, "model_type", None)
-            == "step3p5_mtp"
         )
 
     def use_eagle(self) -> bool:
@@ -1841,13 +1861,26 @@ class SpeculativeConfig:
     def use_ngram(self) -> bool:
         return self.method in ("ngram", "ngram_gpu")
 
+    def num_mtp_modules(self) -> int:
+        """Number of MTP modules the drafter selects among by draft step."""
+        assert self.draft_model_config is not None
+        return getattr(self.draft_model_config.hf_config, "n_predict", None) or 1
+
     def use_multi_module_mtp(self) -> bool:
         if self.method != "mtp" or self.draft_model_config is None:
             return False
-        num_mtp_layers = getattr(
-            self.draft_model_config.hf_config, "num_nextn_predict_layers", 1
-        )
-        return min(num_mtp_layers, self.num_speculative_tokens) > 1
+        hf_config = self.draft_model_config.hf_config
+        if min(self.num_mtp_modules(), self.num_speculative_tokens) <= 1:
+            return False
+        index_share = self.index_share_for_mtp_iteration
+        if index_share is None:
+            index_share = getattr(hf_config, "index_share_for_mtp_iteration", False)
+        if index_share:
+            # TODO: Support index_share_for_mtp_iteration in
+            # MultiModuleMTPSpeculator.
+            return False
+        # TODO: Verify MiniMax-M3 with MultiModuleMTPSpeculator.
+        return hf_config.model_type != "minimax_m3_mtp"
 
     def __repr__(self) -> str:
         method = self.custom_method or self.method
@@ -1858,7 +1891,6 @@ class SpeculativeConfig:
                 "ngram",
                 "suffix",
                 "extract_hidden_states",
-                "custom_class",
             )
             else self.draft_model_config.model
         )
