@@ -17,7 +17,7 @@ The transfers need GPUDirect RDMA to run at network speed; without it UCX
 emulates them through host memory.
 
 Copies run on a background thread, split into transfers of about
-``_MAX_TRANSFER_BYTES``; loads go ahead of stores, so a load waits for at most
+`_MAX_TRANSFER_BYTES`; loads go ahead of stores, so a load waits for at most
 one transfer of a large store. A copy that fails is reported as a failed
 transfer. A transfer that ends in no terminal state may still land later, onto
 a chunk or block that was reassigned, so it stops the engine instead.
@@ -115,7 +115,7 @@ def _is_remote_disconnect(error: Exception) -> bool:
     """Whether a NIXL raise ends the transfer: its peer is gone.
 
     Any other raise says nothing about the transfer itself (see the p2p
-    tier's ``_is_terminal_state_error``).
+    tier's `_is_terminal_state_error`).
     """
     name = type(error).__name__
     return name == "nixlRemoteDisconnectError" or "NIXL_ERR_REMOTE_DISCONNECT" in str(
@@ -172,7 +172,7 @@ class RegionMirrorClient:
     region.
 
     Each transfer takes (GPU address, head region address, size) triples.
-    ``stop`` aborts waiting transfers.
+    `stop` aborts waiting transfers.
     """
 
     def __init__(
@@ -341,7 +341,7 @@ def slot_planners(
     slot_base: int,
 ) -> tuple[CopyPlanner, CopyPlanner]:
     """Store and load copy planners between this worker's GPU blocks and its
-    slot of the head region, which starts at ``slot_base``.
+    slot of the head region, which starts at `slot_base`.
 
     The slot holds each KV tensor's chunk page in turn, as on the head node.
     """
@@ -368,7 +368,7 @@ class RegionMirrorWorker(OffloadingWorker):
     """Offloading worker on a node other than the head's.
 
     A background thread copies the GPU blocks of each transfer to or from this
-    worker's slot of the head region, so ``wait`` covers those copies.
+    worker's slot of the head region, so `wait` covers those copies.
     """
 
     def __init__(
@@ -611,7 +611,7 @@ def _all_gather(topology: MirrorTopology, value: Any) -> list[Any]:
 def _gather_raising(
     topology: MirrorTopology, error: BaseException | None, value: Any, what: str
 ) -> list[Any]:
-    """All-gather ``value``; raise on every worker if any worker failed."""
+    """All-gather `value`; raise on every worker if any worker failed."""
     gathered = _all_gather(topology, (None if error is None else repr(error), value))
     if error is not None:
         raise error
@@ -636,7 +636,7 @@ def _storage_ranges(kv_caches: CanonicalKVCaches) -> list[tuple[int, int, int]]:
     """(address, size, device) of each storage behind the KV cache tensors.
 
     A strided view (HiSparse keeps per-layer views of block-outermost caches)
-    reaches past ``numel() * element_size()``, so its whole storage is
+    reaches past `numel() * element_size()`, so its whole storage is
     registered; views of one storage share one range.
     """
     ranges: dict[int, tuple[int, int, int]] = {}
@@ -666,7 +666,7 @@ def attach_region_mirror(
 
     Collective over the engine's workers: every rank takes part in the same
     exchanges, and any failure raises on all of them. Workers whose head
-    layouts differ are rejected. On failure the caller still owns ``worker``.
+    layouts differ are rejected. On failure the caller still owns `worker`.
 
     Args:
         worker: The CPU offloading worker on the head node; None elsewhere.

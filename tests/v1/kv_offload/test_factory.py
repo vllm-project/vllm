@@ -770,7 +770,7 @@ def test_build_metric_definitions_returns_counter_at_threshold():
 def _fake_node_groups(
     monkeypatch, spanning_group: str | None, world_size: int
 ) -> list[str]:
-    """Fake the TP, PP, PCP and world groups; ``spanning_group`` spans two
+    """Fake the TP, PP, PCP and world groups; `spanning_group` spans two
     nodes."""
     import vllm.distributed.parallel_state as parallel_state
 
@@ -796,12 +796,12 @@ def _fake_node_groups(
 
 
 def _span_nodes_on_rank(rank: int, init_method: str, results) -> None:
-    """Run ``_workers_span_nodes`` on one rank of a TP=2, PP=2 engine whose
+    """Run `_workers_span_nodes` on one rank of a TP=2, PP=2 engine whose
     ranks 0-2 share a node and rank 3 sits on another.
 
-    The groups are vLLM ``GroupCoordinator``s on Gloo without device
+    The groups are vLLM `GroupCoordinator`s on Gloo without device
     communicators, so no GPU is needed. Node placement is simulated where
-    ``in_the_same_node_as`` probes it: a shared memory segment created on one
+    `in_the_same_node_as` probes it: a shared memory segment created on one
     node cannot be opened from the other.
     """
     import uuid

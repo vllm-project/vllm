@@ -91,7 +91,7 @@ class Transfer:
 
 class TensorRows(NamedTuple):
     """Where the rows of a 2D int8 KV tensor are: row i starts at
-    ``base + i * stride`` and holds ``size`` bytes. Copy plans need nothing
+    `base + i * stride` and holds `size` bytes. Copy plans need nothing
     more, so they can address memory that this process has not allocated."""
 
     base: int

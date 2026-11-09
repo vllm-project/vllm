@@ -187,7 +187,7 @@ def test_slot_planners_reject_a_slot_too_small_for_the_kv():
 
 def test_strided_views_register_their_whole_storage():
     """Per-layer views of a block-outermost cache are strided: their blocks
-    reach past ``numel() * element_size()`` bytes from the view's start."""
+    reach past `numel() * element_size()` bytes from the view's start."""
     blocks = torch.zeros((16, 2, 512), dtype=torch.int8)
     caches = CanonicalKVCaches(
         tensors=[
