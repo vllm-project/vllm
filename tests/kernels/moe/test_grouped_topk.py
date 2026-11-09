@@ -291,6 +291,37 @@ def test_grouped_topk_single_group_large_batch():
     torch.testing.assert_close(actual_values, expected_values, atol=2e-5, rtol=0)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize("scoring_func", ["sigmoid", "softmax"])
+@pytest.mark.parametrize("renormalize", [False, True])
+def test_grouped_topk_batch_invariant_weights_across_block_warp_threshold(
+    scoring_func, renormalize, monkeypatch
+):
+    """BI routing must preserve unbiased scores across the 1024-token boundary."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    set_random_seed(0)
+    logits = torch.randn((1026, 256), device="cuda") - 4
+    logits[-1] = logits[0]
+    bias = torch.randn(256, device="cuda") * 8
+    router = GroupedTopKRouter(
+        top_k=8,
+        global_num_experts=256,
+        num_expert_group=1,
+        topk_group=1,
+        e_score_correction_bias=bias,
+        scoring_func=scoring_func,
+        renormalize=renormalize,
+        routed_scaling_factor=2.5,
+    )
+    hidden = torch.empty((1026, 0), device="cuda")
+    alone = router.select_experts(hidden[:1], logits[:1])
+    # The fused router switches from the block to the warp kernel above 1024.
+    batched = router.select_experts(hidden, logits)
+    for expected, actual in zip(alone, batched):
+        torch.testing.assert_close(actual[:1], expected, atol=0, rtol=0)
+        torch.testing.assert_close(actual[-1:], expected, atol=0, rtol=0)
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
 )

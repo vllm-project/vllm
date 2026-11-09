@@ -12,6 +12,7 @@ from utils import (
     TEST_MODEL,
     _extract_step_logprobs,
     _random_prompt,
+    skip_if_not_cuda,
     skip_if_not_cuda_alike,
     skip_unsupported,
 )
@@ -1069,6 +1070,45 @@ def test_sliding_window_logprobs_bitwise_alone_vs_mixed_batch():
             f"Prompt {i}: logprobs differ alone vs batched; "
             f"max abs diff {(lp1 - lpN).abs().max():.3e}"
         )
+
+
+def _assert_logprobs_with_long_prefill(llm):
+    sp = SamplingParams(temperature=0, max_tokens=16, logprobs=5)
+    needle = "The capital of France is a city that"
+    filler = "word " * 2500
+
+    def generate(prompts):
+        llm.sleep(level=0)
+        llm.enqueue(prompts, sp, use_tqdm=False)
+        llm.wake_up(tags=["scheduling"])
+        return llm.wait_for_completion(use_tqdm=False)
+
+    reference = generate([needle])[0].outputs[0]
+    for prompts, index in (([needle, filler], 0), ([filler, needle], 1)):
+        batched = generate(prompts)[index].outputs[0]
+        assert reference.token_ids == batched.token_ids
+        assert reference.logprobs == batched.logprobs
+
+
+@skip_if_not_cuda
+@pytest.mark.timeout(1000)
+def test_logprobs_bitwise_batch_invariance_with_long_prefill():
+    """Queue both requests before scheduling to exercise a real mixed prefill."""
+    llm = LLM(
+        model=TEST_MODEL,
+        tensor_parallel_size=int(os.getenv("VLLM_TEST_TP_SIZE", "1")),
+        enforce_eager=True,
+        max_num_seqs=2,
+        max_model_len=8192,
+        max_num_batched_tokens=8192,
+        gpu_memory_utilization=float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.9")),
+        kv_cache_dtype="bfloat16",
+        enable_prefix_caching=False,
+    )
+    try:
+        _assert_logprobs_with_long_prefill(llm)
+    finally:
+        llm.llm_engine.engine_core.shutdown()
 
 
 def LLM_with_max_seqs(

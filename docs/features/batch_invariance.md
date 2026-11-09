@@ -42,6 +42,21 @@ VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-1.7B \
     --attention-config.backend TRITON_ATTN
 ```
 
+### Sparse MLA on NVIDIA Blackwell
+
+GLM-5.3 supports batch invariance with `FLASHMLA_SPARSE` on GPUs with compute
+capability 10.x and an unquantized KV cache:
+
+```bash
+VLLM_BATCH_INVARIANT=1 vllm serve zai-org/GLM-5.3 \
+    --tensor-parallel-size 8 --attention-config.backend FLASHMLA_SPARSE \
+    --kv-cache-dtype bfloat16
+```
+
+Quantized sparse MLA KV caches and decode context parallelism are unsupported
+with batch invariance. Deterministic indexer selection and routing can increase
+BI-mode latency; the default execution paths are unchanged.
+
 ## Enabling Batch Invariance
 
 Batch invariance can be enabled by setting the `VLLM_BATCH_INVARIANT` environment variable to `1`:

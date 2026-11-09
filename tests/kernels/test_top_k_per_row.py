@@ -3052,6 +3052,30 @@ def test_top_k_per_row_batch_invariant(device: str) -> None:
         assert torch.equal(outn[0], alone[0])
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    "values,topk",
+    [
+        ([-0.0, 0.0], 1),
+        ([-float("nan"), float("nan"), float("inf")], 1),
+        ([4.0, 1.0], 4),
+        ([], 4),
+    ],
+)
+def test_bi_topk_numeric_ties_and_output_padding(device, values, topk):
+    """Numerical ties select the first column; every unused output is -1."""
+    from vllm.model_executor.layers.indexer_topk import top_k_per_row_batch_invariant
+
+    logits = torch.tensor([values], device=device, dtype=torch.float32)
+    ends = torch.tensor([len(values)], device=device, dtype=torch.int32)
+    output = torch.full((1, topk), -7, device=device, dtype=torch.int32)
+    top_k_per_row_batch_invariant(logits, ends, output, topk)
+    expected = torch.full_like(output, -1)
+    count = min(topk, len(values))
+    expected[0, :count] = _bi_reference_topk(logits[0], len(values), topk)
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
 def test_sparse_indexer_topk_bi_selection(monkeypatch) -> None:
     """Under VLLM_BATCH_INVARIANT the decode chain pins one backend and takes
     the FP32 logits copy; FLASHMLA_SPARSE opts in on SM100 with an
@@ -3060,6 +3084,7 @@ def test_sparse_indexer_topk_bi_selection(monkeypatch) -> None:
         pytest.skip("requires CUDA")
 
     from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
+    from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
 
     bf16 = torch.randn(8, 4096, dtype=torch.bfloat16, device="cuda")
@@ -3077,7 +3102,7 @@ def test_sparse_indexer_topk_bi_selection(monkeypatch) -> None:
             has_sink=False,
             use_sparse=True,
             use_mm_prefix=False,
-            device_capability=type("cap", (), {"major": 10, "minor": 0})(),
+            device_capability=DeviceCapability(10, 0),
         )
 
     if current_platform.is_device_capability_family(100):

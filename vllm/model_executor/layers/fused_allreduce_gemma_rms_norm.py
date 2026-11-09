@@ -16,6 +16,7 @@ numerically identical to the unfused model path.
 
 import torch
 
+import vllm.envs as envs
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -67,6 +68,8 @@ def _max_token_num(tp_size: int, hidden_size: int, dtype: torch.dtype) -> int | 
 
 def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool, int]:
     """Whether the flashinfer fused path applies; returns (ok, max_token_num)."""
+    if envs.VLLM_BATCH_INVARIANT:
+        return False, 0
     if (
         flashinfer_trtllm_fused_allreduce_norm is None
         or get_fi_ar_workspace is None

@@ -630,10 +630,12 @@ def sparse_attn_indexer(
             * (logits_dtype.itemsize + decode_copy_bytes),
         )
         if bi:
-            # One bounded int64 key chunk plus per-row topk/sort temporaries.
-            max_logits_bytes += (
-                _BI_TOPK_MAX_KEY_ELEMS * torch.int64.itemsize
-                + 3 * topk_tokens * torch.int64.itemsize * max_decode_tokens
+            # The int32 key and its int64 copy overlap during conversion;
+            # sorting also keeps temporary values and indices alive.
+            max_logits_bytes += _BI_TOPK_MAX_KEY_ELEMS * (
+                torch.int32.itemsize + torch.int64.itemsize
+            ) + 4 * topk_tokens * torch.int64.itemsize * max(
+                max_decode_tokens, q_quant.shape[0]
             )
         _ = torch.empty(
             max_logits_bytes, dtype=torch.uint8, device=hidden_states.device
