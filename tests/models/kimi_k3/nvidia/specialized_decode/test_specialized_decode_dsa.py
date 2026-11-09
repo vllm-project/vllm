@@ -919,7 +919,7 @@ def exact_topk(bits, k):
     return torch.topk(key, min(k, bits.shape[0])).indices.sort().values
 
 
-@pytest.mark.parametrize("mla_page", [UNIT, 2048])
+@pytest.mark.parametrize("mla_page", [UNIT, 2048, 1152, 9216])
 @pytest.mark.parametrize("gap", [GAP, FAR])
 @pytest.mark.parametrize("case", list(FUSED_INDEXER_CASES))
 def test_fused_indexer_selects_exact_topk(case, gap, mla_page):
@@ -928,8 +928,8 @@ def test_fused_indexer_selects_exact_topk(case, gap, mla_page):
     FP32 q . k order, and its selection exactly the
     top-2048 of its own logits (ties to the lowest key index), as the MLA cache's
     physical rows in key order, -1 past the count, with the counts. `mla_page`:
-    the MLA cache's tokens per block (2048: the hybrid model's attention pages,
-    with 64-token indexer pages)."""
+    the MLA cache's tokens per block (2048, and K3.1's 1152 and 9216 at TP8 and TP1:
+    the hybrid model's attention pages, with 64-token indexer pages)."""
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.indexer import (
         FusedIndexer,
     )

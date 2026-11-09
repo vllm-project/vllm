@@ -1198,8 +1198,8 @@ def st_cluster_u32(pointer, rank, value):
 class IndexerSelect:
     """The exact top-`topk` of every row (one CTA per row) -> `out` [rows,
     topk]: the physical KV rows (`block_rows` rows per `page`-token block of
-    the MLA cache, a power of two: 64, or e.g. 2048 in hybrid models whose
-    attention pages match the mamba state's) of the selected keys in key order,
+    the MLA cache: 64, or e.g. 9216 in hybrid models whose attention pages
+    match the mamba state's) of the selected keys in key order,
     -1 past the row's count, and `valid` [rows]: the counts. `ids`
     (`logical`): the key indices too.
 
@@ -1222,7 +1222,7 @@ class IndexerSelect:
         clusters: int = 1,
     ):
         assert topk % SELECT_THREADS == 0 and rows % q == 0
-        assert page > 0 and page & (page - 1) == 0, page
+        assert page > 0, page
         self.rows, self.q, self.topk, self.logical = rows, q, topk, logical
         # CTAs per row (a cluster): rows of at least SPLIT_FROM vectors split the
         # length-proportional passes over them; 1 compiles the single-CTA select.
@@ -1231,7 +1231,7 @@ class IndexerSelect:
         # without waiting for this grid first (FlashInfer prims_ts' split-KV decode
         # launches with PDL but does not wait before it reads its indices).
         self.release = release
-        self.page_shift = page.bit_length() - 1
+        self.page = page
 
     @cute.jit
     def pdl(self):
@@ -1273,9 +1273,10 @@ class IndexerSelect:
 
     @cute.jit
     def emit(self, out, ids, table, request, row, pos, key, block_rows):
-        shift: cutlass.Constexpr = self.page_shift
-        page = table_entry(table, request, key >> shift)
-        out[row, pos] = page * block_rows + (key & ((1 << shift) - 1))
+        size: cutlass.Constexpr = self.page
+        block = key // size
+        page = table_entry(table, request, block)
+        out[row, pos] = page * block_rows + (key - block * size)
         if cutlass.const_expr(self.logical):
             ids[row, pos] = key
 

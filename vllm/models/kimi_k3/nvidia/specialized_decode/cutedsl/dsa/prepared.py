@@ -462,7 +462,7 @@ class PreparedDsa:
             # (wait too: QueryWait runs only under DCP).
             hold = self.held(tuple(m for m in MODES if m not in LATE))
             # The select maps keys to rows of the MLA cache's pages (kv.shape[1]
-            # tokens: 64, or the hybrid model's attention page, e.g. 2048).
+            # tokens: 64, or the hybrid model's attention page, e.g. 9216).
             args = self.indexer, self.shapes, self.device, rows
             self.fused = FusedIndexer(*args, hold=hold, page=kv.shape[1])
         stage = self.indexer_stage
