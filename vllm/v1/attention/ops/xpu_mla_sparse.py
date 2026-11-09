@@ -185,15 +185,23 @@ def triton_bf16_mla_sparse_interface(
     d_v: int = 512,
     block_dpe: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    out : [num_tokens, num_heads_q, d_v]
-    max_logits : [num_tokens, num_heads_q]
-    lse : logsumexp, [num_tokens, num_heads_q]
+    """Sparse MLA attention over a BF16 latent KV cache, using Triton.
 
     Args:
+        q: Query tensor, [num_tokens, num_heads_q, dim_qk].
+        kv: Latent KV cache tensor.
+        indices: Sparse KV indices selected for each query token.
+        sm_scale: Softmax scale applied to the QK product.
+        d_v: Size of the value dimension.
         block_dpe: Size of positional embedding portion of dim_qk.
             Set to 0 when q/kv contain only the nope latent (e.g. DSv4
             prefill where RoPE is not split out).
+
+    Returns:
+        `out` `[num_tokens, num_heads_q, d_v]`, `max_logits`
+        `[num_tokens, num_heads_q]` and the logsumexp `lse`
+        `[num_tokens, num_heads_q]`.
+
     """
     num_tokens, num_heads_q, dim_qk = q.shape
     _, num_heads_kv, _ = kv.shape

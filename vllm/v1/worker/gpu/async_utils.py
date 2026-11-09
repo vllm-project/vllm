@@ -10,17 +10,19 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.platforms import current_platform
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
+    KVConnectorOutput,
     LogprobsTensors,
     ModelRunnerOutput,
     PoolerOutput,
-    RoutedExpertsTensors,
 )
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.utils import raise_if_nan_logits
 
 if TYPE_CHECKING:
+    from vllm.distributed.aux_output_connector.worker import PendingAuxOutput
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -46,7 +48,7 @@ class StepTimingEvents:
 
 
 class StepTimingCollector:
-    """Times the steps run inside ``collect``; record calls no-op outside it.
+    """Times the steps run inside `collect`; record calls no-op outside it.
 
     Every step gets its own events, so the steps queue back-to-back and the
     block resolves them all behind one sync on the way out.
@@ -120,8 +122,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         num_sampled_tokens: torch.Tensor,
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
-        check_ep_fault: bool = False,
-        routed_experts: RoutedExpertsTensors | None = None,
+        check_ep_fault: bool,
+        pending_aux_output: "PendingAuxOutput | None",
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -129,10 +131,14 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
-        self.routed_experts = routed_experts
+        self.pending_aux_output = pending_aux_output
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
+        self._has_fault_gpu: torch.Tensor | None = None
+        if check_ep_fault:
+            # Computed on the main stream: the copy stream only carries copies.
+            self._has_fault_gpu = get_ep_all2all_manager().query_fault()
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
@@ -152,16 +158,21 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 self.sampling_mask_tensors = (
                     sampler_output.sampling_mask_tensors.to_cpu_nonblocking()
                 )
-            self.routed_experts_cpu: RoutedExpertsTensors | None = None
-            if routed_experts is not None:
-                self.routed_experts_cpu = routed_experts.to_cpu_nonblocking()
             self.prompt_logprobs_dict = {
                 k: v.to_cpu_nonblocking() if v is not None else None
                 for k, v in self.model_runner_output.prompt_logprobs_dict.items()
             }
-            if check_ep_fault:
-                has_fault = get_ep_all2all_manager().query_fault()
-                self._has_fault = has_fault.to("cpu", non_blocking=True)
+            token_id_logprobs = self.model_runner_output.prompt_token_id_logprobs_dict
+            self.prompt_token_id_logprobs_dict = {
+                k: v.to("cpu", non_blocking=True) for k, v in token_id_logprobs.items()
+            }
+            if self.pending_aux_output is not None:
+                self.pending_aux_output.enqueue_cpu_copy(
+                    num_sampled=self.num_sampled_tokens_np,
+                    num_rejected=async_copy_to_np(sampler_output.num_rejected),
+                )
+            if self._has_fault_gpu is not None:
+                self._has_fault = self._has_fault_gpu.to("cpu", non_blocking=True)
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
@@ -179,7 +190,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
         if self.sampling_mask_tensors is not None:
             self.model_runner_output.sampling_masks = (
-                self.sampling_mask_tensors.tolists()
+                self.sampling_mask_tensors.tolists(self.num_sampled_tokens_np)
             )
 
         if self.num_nans is not None:
@@ -192,8 +203,13 @@ class AsyncOutput(AsyncModelRunnerOutput):
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
-        if self.routed_experts_cpu is not None:
-            self.model_runner_output.routed_experts = self.routed_experts_cpu.tolists()
+        self.model_runner_output.prompt_token_id_logprobs_dict = (
+            self.prompt_token_id_logprobs_dict
+        )
+        if self.pending_aux_output is not None:
+            self.model_runner_output.aux_output_connector_output = (
+                self.pending_aux_output.process_output()
+            )
 
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()
@@ -204,6 +220,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
             )
 
         return self.model_runner_output
+
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output."""
+        return self.model_runner_output.kv_connector_output
 
 
 class AsyncPoolingOutput(AsyncModelRunnerOutput):
@@ -249,9 +269,26 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
         self.model_runner_output.pooler_output = pooler_output
         return self.model_runner_output
 
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output."""
+        return self.model_runner_output.kv_connector_output
+
 
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
-    return x.to("cpu", non_blocking=True).numpy()
+    return x.to("cpu", non_blocking=True, copy=True).numpy()
+
+
+def new_d2h_stream(device: torch.device | int | None = None) -> torch.cuda.Stream:
+    """Create a stream for non_blocking D2H copies.
+
+    It must only carry copies: compute anything it copies on the producer stream
+    first (see `conf_compute_utils.new_external_d2h_stream()`).
+    """
+    if not current_platform.is_confidential_compute():
+        return torch.cuda.Stream(device)
+    from vllm.v1.conf_compute_utils import new_external_d2h_stream
+
+    return new_external_d2h_stream(device)
 
 
 @contextlib.contextmanager

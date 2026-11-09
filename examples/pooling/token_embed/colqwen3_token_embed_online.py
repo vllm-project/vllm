@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 
-"""
-Example online usage of Pooling API for ColQwen3 multi-vector retrieval.
+"""Example online usage of Pooling API for ColQwen3 multi-vector retrieval.
 
 ColQwen3 is a multi-modal late interaction model based on Qwen3-VL that
 produces per-token embeddings (320-dim, L2-normalized) for both text and
@@ -167,7 +166,7 @@ def main(args):
         # Score matrix
         for i, q_emb in enumerate(query_embeddings):
             print(f"  {queries[i]:<33s}", end="")
-            for j, d_emb in enumerate(doc_embeddings):
+            for d_emb in doc_embeddings:
                 score = compute_maxsim(q_emb, d_emb)
                 print(f"  {score:6.2f}", end="")
             print()

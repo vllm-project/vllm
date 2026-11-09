@@ -2,10 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+from tokenizers import Tokenizer, models, pre_tokenizers
+from transformers import TokenizersBackend
 
 from vllm.entrypoints.pooling.scoring.typing import ScoreInput
-from vllm.entrypoints.pooling.scoring.utils import validate_score_input
+from vllm.entrypoints.pooling.scoring.utils import (
+    truncate_text_to_tokens,
+    validate_score_input,
+)
 from vllm.exceptions import VLLMValidationError
+from vllm.tokenizers.mistral import MistralTokenizer
 
 
 @pytest.mark.parametrize(
@@ -63,3 +69,30 @@ def test_validate_score_input_rejects_invalid_inputs(
     assert str(exc_info.value) == message
     assert exc_info.value.parameter is None
     assert exc_info.value.value is None
+
+
+def test_truncate_text_to_tokens_handles_shared_character_offsets():
+    vocab = {
+        token: i for i, token in enumerate(sorted(pre_tokenizers.ByteLevel.alphabet()))
+    }
+    backend = Tokenizer(models.BPE(vocab=vocab, merges=[]))
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    tokenizer = TokenizersBackend(tokenizer_object=backend)
+
+    truncated = truncate_text_to_tokens("aéx", tokenizer, max_tokens=2)
+
+    assert truncated == "a"
+    assert len(tokenizer(truncated, add_special_tokens=False)["input_ids"]) == 1
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    ["mistralai/Mistral-7B-Instruct-v0.3", "mistralai/Magistral-Small-2509"],
+)
+def test_truncate_text_to_tokens_with_mistral_tokenizer(model_name: str):
+    """MistralTokenizer cannot return offset_mapping, but limits still apply."""
+    tokenizer = MistralTokenizer.from_pretrained(model_name)
+    text = "The quick brown fox jumps over the lazy dog"
+
+    assert truncate_text_to_tokens(text, tokenizer, max_tokens=3) == "The quick brown"
+    assert truncate_text_to_tokens(text, tokenizer, max_tokens=100) == text

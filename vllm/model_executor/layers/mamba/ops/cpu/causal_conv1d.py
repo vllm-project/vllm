@@ -6,7 +6,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from vllm._custom_ops import causal_conv1d_update_cpu_vec
+from vllm._cpu_ops import causal_conv1d_update_cpu_vec
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
 
@@ -123,8 +123,7 @@ def causal_conv1d_update_torch(
     bias: torch.Tensor | None = None,
     activation: str | None = None,
 ) -> torch.Tensor:
-    """
-    Pure PyTorch fallback for causal_conv1d_update.
+    """Pure PyTorch fallback for causal_conv1d_update.
     Currently used as a fallback for Arm (aarch64) to leverage
     oneDNN/ACL F.conv1d kernels for batched decoding.
     """

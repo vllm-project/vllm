@@ -187,7 +187,7 @@ def test_varlen_with_paged_kv(
         max_seqlen_k=max_kv_len,
         softmax_scale=scale,
         causal=True,
-        window_size=window_size,
+        window_size=list(window_size),
         block_table=block_tables,
         softcap=soft_cap if soft_cap is not None else 0,
         fa_version=fa_version,
@@ -219,29 +219,31 @@ def test_varlen_with_paged_kv(
 
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
-    reason="FA4 only has a dedicated head_size=256 kernel on Blackwell",
+    reason="FA4 head_size=256 requires Blackwell",
 )
 @pytest.mark.parametrize(
     "seq_lens", [[(1, 1328), (5, 18), (129, 463)], [(1, 523), (1, 37), (1, 2011)]]
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("block_size", [16, 128])
 @pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("soft_cap", [None, 30.0])
+@pytest.mark.parametrize("num_splits", [1, 4])
 @torch.inference_mode()
-def test_fa4_hd256_paged_call_shape(
+def test_fa4_hd256_varlen_with_paged_kv(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
+    block_size: int,
     sliding_window: int | None,
+    soft_cap: float | None,
+    num_splits: int,
 ) -> None:
-    """Handles excess block-table columns with page-aligned ``max_seqlen_k``."""
-    from vllm.v1.attention.backends.fa_utils import FA4_HD256_PAGE_SIZE
-
     if not is_fa_version_supported(4):
         pytest.skip(f'FA4 unsupported: "{fa_version_unsupported_reason(4)}"')
     torch.set_default_device("cuda")
     set_random_seed(0)
 
     head_size = 256
-    block_size = FA4_HD256_PAGE_SIZE
     num_blocks = 2048
     dtype = torch.bfloat16
     num_query_heads, num_kv_heads = num_heads
@@ -271,12 +273,13 @@ def test_fa4_hd256_paged_call_shape(
         cu_seqlens_q=cu_query_lens,
         seqused_k=torch.tensor(kv_lens, dtype=torch.int32),
         max_seqlen_q=max(query_lens),
-        max_seqlen_k=num_pages * block_size,
+        max_seqlen_k=max_kv_len,
         softmax_scale=scale,
         causal=True,
-        window_size=window_size,
-        block_table=block_tables[:, :num_pages],
-        num_splits=1,
+        window_size=list(window_size),
+        block_table=block_tables,
+        softcap=soft_cap if soft_cap is not None else 0,
+        num_splits=num_splits,
         fa_version=4,
     )
     ref_output = ref_paged_attn(
@@ -288,5 +291,6 @@ def test_fa4_hd256_paged_call_shape(
         block_tables=block_tables,
         scale=scale,
         sliding_window=sliding_window,
+        soft_cap=soft_cap,
     )
     torch.testing.assert_close(output, ref_output, atol=1.5e-2, rtol=1e-2)

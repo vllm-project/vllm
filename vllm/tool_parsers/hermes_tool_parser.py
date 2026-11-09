@@ -6,7 +6,6 @@ from collections.abc import Sequence
 
 import regex as re
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -20,6 +19,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
@@ -213,13 +213,13 @@ class Hermes2ProToolParser(ToolParser):
     ) -> DeltaMessage | None:
         """Incrementally stream tool call deltas from accumulated output.
 
-        On each invocation, re-parses the full ``current_text`` to find
-        ``<tool_call>`` regions, then diffs against previously sent state
+        On each invocation, re-parses the full `current_text` to find
+        `<tool_call>` regions, then diffs against previously sent state
         to emit only new content, tool names, or argument fragments.
 
-        Returns a ``DeltaMessage`` containing either plain content (for
-        text preceding any tool call) or one or more ``DeltaToolCall``
-        entries, or ``None`` if there is nothing new to send yet."""
+        Returns a `DeltaMessage` containing either plain content (for
+        text preceding any tool call) or one or more `DeltaToolCall`
+        entries, or `None` if there is nothing new to send yet."""
         try:
             # Extract any content before tool calls.
             content = self._extract_content(current_text)

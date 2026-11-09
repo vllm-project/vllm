@@ -9,28 +9,53 @@ import torch
 
 @dataclass
 class UnfinalizedMoEOutput:
-    """Unfinalized output of a monolithic MoE kernel.
+    """Unfinalized output of a MoE kernel.
 
-    Kernels that can stop after GEMM2 (the TRTLLM-Gen ``do_finalize=False`` path)
+    Kernels that can stop after GEMM2 (the TRTLLM-Gen `do_finalize=False` path)
     hand back their permuted, unweighted output plus the routing weights and the
     permute map, so that the top-k reduction can be fused with whatever follows
     -- the shared-expert add and the tensor-parallel all-reduce -- instead of
     running as its own kernel.
 
     The buffers are consumed as-is by the fused kernels, which index
-    ``gemm2_permuted`` by row: it must be densely packed at ``hidden_dim``, and
+    `gemm2_permuted` by row: it must be densely packed at `hidden_dim`, and
     its row count (an autotuner-dependent padded value) is never referenced.
     """
 
     # [num_permuted_rows, hidden_dim] permuted, unweighted GEMM2 output.
     gemm2_permuted: torch.Tensor
-    # [num_tokens, top_k] routing weights, in the activation dtype -- consumers
-    # index them as such, and a buffer typed wider than its contents reads as
-    # garbage. These already carry routed_scaling_factor for routing methods that
-    # fold it in.
+    # [num_tokens, top_k] routing weights, in the activation dtype when the
+    # kernel routed itself and in the router's dtype for modular experts --
+    # consumers index them as such, and a buffer typed wider than its contents
+    # reads as garbage. These already carry routed_scaling_factor for routing
+    # methods that fold it in.
     expert_weights: torch.Tensor
     # [num_tokens, top_k] int32 permute map; -1 = expert not local to this rank.
     expanded_idx_to_permuted_idx: torch.Tensor
+    # Row t * top_k + k holds route (t, k): the permute map is the identity apart
+    # from its -1 slots, and the row count is num_tokens * top_k on every rank.
+    route_major: bool = False
+
+
+def route_major_moe_output(
+    routes: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    expert_map: torch.Tensor | None,
+) -> UnfinalizedMoEOutput:
+    """Wrap one-row-per-route GEMM2 output; remote routes map to `-1`."""
+    num_tokens, top_k = topk_ids.shape
+    permuted_idx = torch.arange(
+        num_tokens * top_k, dtype=torch.int32, device=routes.device
+    ).view(num_tokens, top_k)
+    if expert_map is not None:
+        permuted_idx = permuted_idx.masked_fill(expert_map[topk_ids] < 0, -1)
+    return UnfinalizedMoEOutput(
+        gemm2_permuted=routes.view(num_tokens * top_k, routes.shape[-1]),
+        expert_weights=topk_weights,
+        expanded_idx_to_permuted_idx=permuted_idx,
+        route_major=True,
+    )
 
 
 def convert_flashinfer_moe_output(
@@ -49,7 +74,7 @@ def convert_flashinfer_moe_output(
         do_finalize: Whether FlashInfer ran its top-k finalize step.
         num_tokens: Number of input tokens.
         top_k: Number of routed experts per token.
-        finalized_output: Optional destination passed to FlashInfer's ``output``
+        finalized_output: Optional destination passed to FlashInfer's `output`
             argument.
 
     Returns:
@@ -57,8 +82,8 @@ def convert_flashinfer_moe_output(
 
     Raises:
         ValueError: If FlashInfer returns an unexpected layout.
-    """
 
+    """
     if num_tokens < 0:
         raise ValueError("num_tokens must be non-negative.")
     if top_k <= 0:
@@ -127,7 +152,7 @@ def convert_flashinfer_moe_output(
 class MoEOutput:
     """A MoE layer's output with its final reduction still open.
 
-    Returned by layers whose MoE runs un-reduced (``reduce_results=False``) so
+    Returned by layers whose MoE runs un-reduced (`reduce_results=False`) so
     that the consumer -- typically the next layer's RMSNorm -- can fuse the
     tensor-parallel all-reduce into itself instead of paying for a standalone
     one. Keeping the shared-expert output and the routed scale separate leaves
@@ -137,7 +162,7 @@ class MoEOutput:
 
     Producers only leave the routed output unfinalized when a fused consumer can
     actually take that form -- the token ceiling and topology support are theirs
-    to check -- so an ``UnfinalizedMoEOutput`` here means the fused path applies,
+    to check -- so an `UnfinalizedMoEOutput` here means the fused path applies,
     and a consumer need not re-derive that.
     """
 

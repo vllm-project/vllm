@@ -7,6 +7,7 @@ from bisect import bisect_right
 from collections.abc import (
     AsyncGenerator,
     Callable,
+    Hashable,
     Mapping,
     MutableSequence,
     Sequence,
@@ -20,6 +21,7 @@ from typing import (
     ClassVar,
     Literal,
     Protocol,
+    Self,
     TypeAlias,
     overload,
     runtime_checkable,
@@ -30,7 +32,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
-from typing_extensions import Self, TypeIs
+from typing_extensions import TypeIs
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -60,13 +62,16 @@ if TYPE_CHECKING:
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
     from vllm.tasks import ScoreType
+    from vllm.tokenizers import TokenizerLike
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
         EncoderCudaGraphReplayBuffers,
         EncoderItemSpec,
     )
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 
 logger = init_logger(__name__)
 
@@ -90,6 +95,13 @@ MambaStateShapes: TypeAlias = (
         tuple[int, int, int],
         tuple[int, int, int],
     ]
+    | tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int],
+        tuple[int, int, int],
+    ]
 )
 
 
@@ -111,8 +123,7 @@ class StreamingTranscriptionPostProcessor:
 
 
 def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
-    """
-    A helper function to be used in the context of
+    """A helper function to be used in the context of
     [vllm.model_executor.models.interfaces.SupportsMultiModal.embed_input_ids][]
     to provide a better error message.
     """
@@ -130,6 +141,13 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
 _language_model_by_module: "weakref.WeakKeyDictionary[nn.Module, VllmModel]" = (
     weakref.WeakKeyDictionary()
 )
+
+
+def _is_language_model(model: object) -> TypeIs[VllmModel]:
+    # Text towers can use config/position_ids signatures and omit loader hooks.
+    return callable(getattr(model, "embed_input_ids", None)) and callable(
+        getattr(model, "forward", None)
+    )
 
 
 @runtime_checkable
@@ -224,20 +242,18 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        """
-        Get the placeholder text for the `i`th `modality` item in the prompt.
-        """
+        """Get the placeholder text for the `i`th `modality` item in the prompt."""
         ...
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
-        """
-        Returns multimodal embeddings generated from multimodal kwargs
+        """Returns multimodal embeddings generated from multimodal kwargs
         to be merged with text embeddings.
 
         Note:
             The returned multimodal embeddings must be in the same order as
             the appearances of their corresponding multimodal data item in the
             input prompt.
+
         """
         ...
 
@@ -253,14 +269,14 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         )
 
     def get_language_model(self) -> "VllmModel":
-        """
-        Returns the underlying language model used for text generation.
+        """Returns the underlying language model used for text generation.
 
         This is typically the `torch.nn.Module` instance responsible for
         processing the merged multimodal embeddings and producing hidden states
 
         Returns:
             torch.nn.Module: The core language model component.
+
         """
         # Cached
         assert isinstance(self, nn.Module)
@@ -277,14 +293,14 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
                     mod = getattr(mod, attr)
 
             candidate: object = mod
-            if candidate is not self_module and isinstance(candidate, VllmModel):
+            if candidate is not self_module and _is_language_model(candidate):
                 _language_model_by_module[self_module] = candidate
                 return candidate
 
         # Fallback
         for mod in self_module.children():
             candidate = mod
-            if isinstance(candidate, VllmModel):
+            if _is_language_model(candidate):
                 _language_model_by_module[self_module] = candidate
                 return candidate
 
@@ -301,8 +317,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         *,
         targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
     ):
-        """
-        Mark each child module that was assigned to this model during this context
+        """Mark each child module that was assigned to this model during this context
         as a language model component.
 
         Language model components are automatically skipped in `--mm-encoder-only`
@@ -337,12 +352,12 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         *,
         targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
     ):
-        """
-        Mark each child module that was assigned to this model during this context
+        """Mark each child module that was assigned to this model during this context
         as a tower model component.
 
         Tower model components are automatically skipped when `--limit-mm-per-prompt`
-        is set to zero for all of their modalities.
+        is set to zero for all of their modalities, and on pipeline stages after the
+        first, since encoders run on the first stage only.
 
         If `targets` is set, instead include descendants that are an instance
         of `targets`, even if they aren't direct children.
@@ -351,6 +366,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         it supports tower offloading), since `make_layers` only ever sees the
         decoder layer stack.
         """
+        from vllm.distributed import get_pp_group
         from vllm.model_executor.offloader import get_offloader
 
         from .utils import StageMissingLayer, collect_children, no_init_weights
@@ -373,6 +389,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
                     targets=targets,
                 )
                 if all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
+                or not get_pp_group().is_first_rank
                 else nullcontext()
             ):
                 yield
@@ -396,8 +413,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         language_targets: type[nn.Module] | tuple[type[nn.Module], ...],
         tower_targets: dict[str, type[nn.Module] | tuple[type[nn.Module], ...]],
     ):
-        """
-        Composite wrapper over `_mark_language_model` and
+        """Composite wrapper over `_mark_language_model` and
         `_mark_tower_model` by modality.
         """
         with ExitStack() as stack:
@@ -419,24 +435,6 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
 
             yield
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        """
-        Implement this function to enable LoRA support
-        for the tower module of the multi-modal model.
-        Given the number of image tokens, output the number of
-        multi-modal encoder tokens.
-        """
-        ...
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        """
-        Implement this function to enable LoRA support
-        for the connector module of the multi-modal model.
-        Given the number of vision tokens, output the number of
-        multi-modal connector tokens.
-        """
-        ...
-
     def get_mm_lora_token_counts(
         self,
         *,
@@ -444,19 +442,15 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         mm_kwargs: "MultiModalKwargsItem | None",
         num_mm_embeds: int,
     ) -> tuple[int, int | None]:
-        """
-        Return ``(tower_tokens, connector_tokens)`` for multimodal LoRA mappings.
+        """Return `(tower_tokens, connector_tokens)` for multimodal LoRA mappings.
 
         MM LoRA uses these counts to build adapter mappings for the tower and
         connector forwards. Models with multiple modalities can override this
         when each modality has different encoder padding or pooling behavior.
         """
-        del modality, mm_kwargs
-        num_encoder_tokens = self.get_num_mm_encoder_tokens(num_mm_embeds)
-        num_connector_tokens = self.get_num_mm_connector_tokens(num_encoder_tokens)
-        return (
-            num_encoder_tokens,
-            num_connector_tokens if isinstance(num_connector_tokens, int) else None,
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement get_mm_lora_token_counts "
+            "to support tower/connector LoRA."
         )
 
     def _embed_text_input_ids(
@@ -503,8 +497,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         *,
         is_multimodal: Tensor | None = None,
     ) -> Tensor:
-        """
-        Apply token embeddings to `input_ids`.
+        """Apply token embeddings to `input_ids`.
 
         If `multimodal_embeddings` is passed, scatter them into
         `input_ids` according to the mask `is_multimodal`.
@@ -557,8 +550,7 @@ class SupportsMultiModalPruning(Protocol):
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
     ) -> tuple[Sequence[torch.Tensor], Tensor, int]:
-        """
-        Update part of input mrope positions (starting with
+        """Update part of input mrope positions (starting with
         num_computed_tokens index). Original mrope_positions are computed
         for unpruned sequence and becomes incorrect once pruning occurs,
         so once we prune media tokens we should reflect this in the
@@ -577,6 +569,7 @@ class SupportsMultiModalPruning(Protocol):
         Returns:
             Tuple of (multimodal_embeddings, mrope_positions,
                 mrope_position_delta).
+
         """
         ...
 
@@ -656,16 +649,12 @@ class SupportsScoreTemplate(Protocol):
 
     @classmethod
     def get_score_template(cls, query: str, document: str) -> str | None:
-        """
-        Generate a full prompt by populating the score template with query and document content.
-        """  # noqa: E501
+        """Generate a full prompt by populating the score template with query and document content."""  # noqa: E501
         ...
 
     @classmethod
     def post_process_tokens(cls, prompt: "TokensPrompt") -> None:
-        """
-        Perform architecture-specific manipulations on the input tokens.
-        """
+        """Perform architecture-specific manipulations on the input tokens."""
         ...
 
 
@@ -686,6 +675,47 @@ def supports_score_template(
 
 
 @runtime_checkable
+class SupportsKVCacheGrouping(Protocol):
+    """The interface required for models that own their KV cache grouping.
+
+    !!! note
+        Experimental. The classmethod contract may change as model-owned
+        grouping stabilizes.
+
+    Implementing it lets a model replace the default KV cache grouping (which
+    layers share a block table) while Core keeps owning placement, byte
+    accounting, and admission.
+    """
+
+    @classmethod
+    def get_kv_cache_groups(
+        cls,
+        vllm_config: "VllmConfig",
+        kv_cache_spec: dict[str, "KVCacheSpec"],
+    ) -> list["KVCacheGroupSpec"]:
+        """Split the model's layers into logical KV cache groups."""
+        ...
+
+
+@overload
+def supports_kv_cache_grouping(
+    model: type[object],
+) -> TypeIs[type[SupportsKVCacheGrouping]]: ...
+
+
+@overload
+def supports_kv_cache_grouping(
+    model: object,
+) -> TypeIs[SupportsKVCacheGrouping]: ...
+
+
+def supports_kv_cache_grouping(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsKVCacheGrouping]] | TypeIs[SupportsKVCacheGrouping]:
+    return isinstance(model, SupportsKVCacheGrouping)
+
+
+@runtime_checkable
 class SupportsLoRA(Protocol):
     """The interface required for all models that support LoRA."""
 
@@ -701,11 +731,11 @@ class SupportsLoRA(Protocol):
     is_non_gated_moe: ClassVar[bool] = False
     # The `embedding_module` and `embedding_padding_modules`
     # are empty by default.
-    embedding_modules: ClassVar[dict[str, str]] = {}
+    embedding_modules: dict[str, str] = {}
     packed_modules_mapping: dict[str, list[str]] = {}
     # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
     lora_skip_prefixes: ClassVar[list[str]] = []
-    lora_manager: "LoRAModelManager | None"
+    lora_manager: "LoRAModelManager | None" = None
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
@@ -796,8 +826,7 @@ class SupportsPP(Protocol):
         *,
         intermediate_tensors: "IntermediateTensors | None",
     ) -> "Tensor | IntermediateTensors | tuple[Tensor, list[Tensor]]":
-        """
-        Accept [`IntermediateTensors`][vllm.sequence.IntermediateTensors] when
+        """Accept [`IntermediateTensors`][vllm.sequence.IntermediateTensors] when
         PP rank > 0.
 
         Return [`IntermediateTensors`][vllm.sequence.IntermediateTensors] only
@@ -883,6 +912,27 @@ def _supports_pp_inspect(model: type[object] | object) -> bool:
 
 
 @runtime_checkable
+class SupportsHCSP(Protocol):
+    """Support sequence-parallel HC without changing MoE parallelism."""
+
+    supports_hc_sp: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_hc_sp(model: type[object]) -> TypeIs[type[SupportsHCSP]]: ...
+
+
+@overload
+def supports_hc_sp(model: object) -> TypeIs[SupportsHCSP]: ...
+
+
+def supports_hc_sp(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsHCSP]] | TypeIs[SupportsHCSP]:
+    return getattr(model, "supports_hc_sp", False)
+
+
+@runtime_checkable
 class HasInnerState(Protocol):
     """The interface required for all models that has inner state."""
 
@@ -959,6 +1009,7 @@ class IsHybrid(Protocol):
 
         Returns:
             Shapes for each state cache used by the model.
+
         """
         ...
 
@@ -972,6 +1023,7 @@ class IsHybrid(Protocol):
             (state, block_ids, cur_block_idx, num_accepted_tokens) and returns
             a MambaCopySpec describing the memory-copy parameters for prefix
             caching in align mode.
+
         """
         ...
 
@@ -1000,9 +1052,7 @@ def is_hybrid(
 
 @runtime_checkable
 class MixtureOfExperts(Protocol):
-    """
-    Check if the model is a mixture of experts (MoE) model.
-    """
+    """Check if the model is a mixture of experts (MoE) model."""
 
     expert_weights: MutableSequence[Sequence[Tensor]]
     """
@@ -1045,8 +1095,7 @@ class MixtureOfExperts(Protocol):
         logical_to_physical_map: Tensor,
         logical_replica_count: Tensor,
     ) -> None:
-        """
-        Register the EPLB state in the MoE model.
+        """Register the EPLB state in the MoE model.
 
         Since these are views of the actual EPLB state, any changes made by
         the EPLB algorithm are automatically reflected in the model's behavior
@@ -1060,11 +1109,18 @@ class MixtureOfExperts(Protocol):
             expert_load_view: A view of the expert load metrics tensor.
             logical_to_physical_map: Mapping from logical to physical experts.
             logical_replica_count: Count of replicas for each logical expert.
+
         """
         self.expert_weights = []
         for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(list(layer.get_expert_weights()))
+            # Register the expert weights. EPLB only moves bytes, so 1-byte
+            # dtypes NCCL lacks (e.g. E8M0, FP4x2) go as uint8 views.
+            self.expert_weights.append(
+                [
+                    w.view(torch.uint8) if w.element_size() == 1 else w
+                    for w in layer.get_expert_weights()
+                ]
+            )
             layer.set_eplb_state(
                 moe_layer_idx=layer_idx,
                 expert_load_view=expert_load_view,
@@ -1092,8 +1148,8 @@ def get_mixture_of_experts_model(model: object) -> MixtureOfExperts | None:
 
     Returns:
         The MixtureOfExperts instance contained within the model, or None.
-    """
 
+    """
     if is_mixture_of_experts(model):
         return model
 
@@ -1137,12 +1193,9 @@ def has_noops(
 
 @runtime_checkable
 class SupportsMambaPrefixCaching(Protocol):
-    """The interface for models whose mamba layers support prefix caching.
-
-    This is currently experimental.
+    """The interface for attention-free Mamba models that support prefix
+    caching. Hybrid models get the same methods from `IsHybrid`.
     """
-
-    supports_mamba_prefix_caching: ClassVar[Literal[True]] = True
 
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple["MambaStateCopyFunc", ...]:
@@ -1157,24 +1210,6 @@ class SupportsMambaPrefixCaching(Protocol):
         """Map legacy copy functions to each requested Mamba backend."""
         copy_funcs = cls.get_mamba_state_copy_func()
         return {mamba_type: copy_funcs for mamba_type in mamba_types}
-
-
-@overload
-def supports_mamba_prefix_caching(
-    model: type[object],
-) -> TypeIs[type[SupportsMambaPrefixCaching]]: ...
-
-
-@overload
-def supports_mamba_prefix_caching(
-    model: object,
-) -> TypeIs[SupportsMambaPrefixCaching]: ...
-
-
-def supports_mamba_prefix_caching(
-    model: type[object] | object,
-) -> TypeIs[type[SupportsMambaPrefixCaching]] | TypeIs[SupportsMambaPrefixCaching]:
-    return getattr(model, "supports_mamba_prefix_caching", False)
 
 
 @runtime_checkable
@@ -1274,7 +1309,7 @@ class SupportsRealtime(Protocol):
     Override in subclasses based on the model's expected output length."""
 
     @classmethod
-    async def buffer_realtime_audio(
+    def buffer_realtime_audio(
         cls,
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
@@ -1318,16 +1353,16 @@ class SupportsTranscription(Protocol):
     """
 
     supports_diarized_transcription: ClassVar[bool] = False
-    """Enables the ``diarized_json`` response format for the model."""
+    """Enables the `diarized_json` response format for the model."""
 
     supports_explicit_language_detection: ClassVar[bool] = False
     """
     Transcription models that require an explicit language detection step
     (e.g. Whisper needs a separate forward pass to predict the language
-    token) should set this to ``True`` and implement
-    :meth:`get_language_detection_prompt` and
-    :meth:`parse_language_detection_output` and
-    :meth:`get_language_token_ids`.
+    token) should set this to `True` and implement
+    `get_language_detection_prompt` and
+    `parse_language_detection_output` and
+    `get_language_token_ids`.
     """
 
     no_space_languages: ClassVar[set[str]] = {"ja", "zh"}
@@ -1365,8 +1400,7 @@ class SupportsTranscription(Protocol):
 
     @classmethod
     def validate_language(cls, language: str | None) -> str | None:
-        """
-        Ensure the language specified in the transcription request
+        """Ensure the language specified in the transcription request
         is a valid ISO 639-1 language code. If the request language is
         valid, but not natively supported by the model, trigger a
         warning (but not an exception).
@@ -1402,35 +1436,39 @@ class SupportsTranscription(Protocol):
         stt_config: "SpeechToTextConfig",
         model_config: "ModelConfig",
     ) -> int | None:
-        """
-        Map from audio duration to number of audio tokens produced by the ASR
+        """Map from audio duration to number of audio tokens produced by the ASR
         model, without running a forward pass.
         This is used for estimating the amount of processing for this audio.
         """
         return None
 
     @classmethod
-    def post_process_output(cls, text: str) -> str:
-        """
-        Post-process the raw model output text.
+    def post_process_output(cls, text: str, model_config: "ModelConfig") -> str:
+        """Post-process the raw model output text.
 
         Some ASR models output structured formats (e.g., language tags,
         special tokens) that need to be stripped before returning to the user.
 
         Args:
             text: Raw decoded text from the model.
+            model_config: The config of the model.
 
         Returns:
             Cleaned transcription text.
+
         """
         return text
 
     @classmethod
-    def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
+    def parse_diarized_transcript(
+        cls, text: str, model_config: "ModelConfig"
+    ) -> list[DiarizedTranscriptionSegment]:
         """Parse the model-specific diarized transcript format.
 
-        Only models that set ``supports_diarized_transcription`` must override
-        this method.
+        Receives the raw decoded output of one audio chunk, without
+        `post_process_output` applied, and returns timestamps relative to that
+        chunk. Only models that set `supports_diarized_transcription` must
+        override this method.
         """
         raise NotImplementedError
 
@@ -1438,8 +1476,7 @@ class SupportsTranscription(Protocol):
     def get_streaming_post_processor_cls(
         cls,
     ) -> type[StreamingTranscriptionPostProcessor]:
-        """
-        Return a stateful post-processor class for streaming output deltas.
+        """Return a stateful post-processor class for streaming output deltas.
 
         Each instance receives the next decoded text delta and whether the
         request output is final. It returns the cleaned delta that should be
@@ -1456,7 +1493,7 @@ class SupportsTranscription(Protocol):
         """Return a prompt that triggers language detection.
 
         Only needs to be implemented when
-        ``supports_explicit_language_detection`` is ``True``.
+        `supports_explicit_language_detection` is `True`.
         """
         raise NotImplementedError
 
@@ -1464,26 +1501,26 @@ class SupportsTranscription(Protocol):
     def parse_language_detection_output(
         cls,
         token_ids: list[int],
-        tokenizer: object,
+        tokenizer: "TokenizerLike",
     ) -> str:
         """Parse the detected language from model output token IDs.
 
         Only needs to be implemented when
-        ``supports_explicit_language_detection`` is ``True``.
+        `supports_explicit_language_detection` is `True`.
         """
         raise NotImplementedError
 
     @classmethod
     def get_language_token_ids(
         cls,
-        tokenizer: object,
+        tokenizer: "TokenizerLike",
     ) -> list[int] | None:
         """Return token IDs that represent valid language tokens.
 
         Used to constrain language detection to only produce valid language tokens.
 
         Only needs to be implemented when
-        ``supports_explicit_language_detection`` is ``True``.
+        `supports_explicit_language_detection` is `True`.
         """
         raise NotImplementedError
 
@@ -1502,6 +1539,20 @@ def supports_transcription(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsTranscription]] | TypeIs[SupportsTranscription]:
     return getattr(model, "supports_transcription", False)
+
+
+@runtime_checkable
+class SpeculativeDraftModel(Protocol):
+    """The interface of a speculative decoding draft model which declares the
+    speculator it's for. This is read through the model registry, so that it's
+    available without importing the model.
+    """
+
+    speculator_config_class: ClassVar[type["SpeculatorConfig"]]
+    """The config class of the speculator that this is a draft model of.
+    Unless a speculative method is configured that the checkpoint can't
+    override, a draft checkpoint with this model's architecture uses this
+    speculator."""
 
 
 @runtime_checkable
@@ -1537,13 +1588,13 @@ def supports_any_eagle(
 class LocalArgmaxMixin:
     """Mixin for draft model heads in speculative decoding.
 
-    Provides a D2T-aware ``get_top_tokens`` that preserves the
+    Provides a D2T-aware `get_top_tokens` that preserves the
     local-argmax communication reduction even when the draft vocabulary
     is smaller than the target vocabulary.
 
-    When ``draft_id_to_target_id`` is present (shape ``(draft_vocab_size,)``,
+    When `draft_id_to_target_id` is present (shape `(draft_vocab_size,)`,
     containing per-token offset to target vocab id), the draft argmax index
-    ``k`` is mapped to the target vocab id via::
+    `k` is mapped to the target vocab id via::
 
         target_id = k + draft_id_to_target_id[k]
 
@@ -1552,9 +1603,9 @@ class LocalArgmaxMixin:
     O(batch * 2 * tp_size) communication instead of O(batch * vocab_size).
 
     Requires the subclass to expose:
-        ``self.logits_processor``: LogitsProcessor
-        ``self.lm_head``: ParallelLMHead
-        ``self.draft_id_to_target_id`` (optional): nn.Parameter
+        `self.logits_processor`: LogitsProcessor
+        `self.lm_head`: ParallelLMHead
+        `self.draft_id_to_target_id` (optional): nn.Parameter
     """
 
     logits_processor: "LogitsProcessor"
@@ -1574,16 +1625,19 @@ class LocalArgmaxMixin:
 
 class EagleModelMixin:
     start_layer: int
+    end_layer: int
     aux_hidden_state_layers: tuple[int, ...] = ()
     supports_aux_hidden_states_over_pp: ClassVar[bool] = False
     AUX_HIDDEN_STATE_KEY: ClassVar[str] = "aux_hidden_states_"
     _aux_slot_base_cached: int = 0
-    _aux_upstream_total_cached: int = 0
+    # The previous PP stage takes the aux hidden state at its last layer,
+    # which is this stage's start_layer.
+    _aux_first_local_layer: int = 0
 
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.aux_hidden_state_layers = tuple(sorted(set(layers)))
         self._aux_slot_base_cached = 0
-        self._aux_upstream_total_cached = 0
+        self._aux_first_local_layer = 0
         self._cache_aux_pp_layout()
 
     def _cache_aux_pp_layout(self) -> None:
@@ -1595,14 +1649,12 @@ class EagleModelMixin:
         if not model_parallel_is_initialized():
             return
         pp = get_pp_group()
-        if pp.world_size < 2:
+        if pp.world_size < 2 or pp.is_first_rank:
             return
-        if not pp.is_first_rank:
-            self._aux_slot_base_cached = bisect_right(
-                self.aux_hidden_state_layers, self.start_layer
-            )
-        if pp.is_last_rank:
-            self._aux_upstream_total_cached = self._aux_slot_base_cached
+        self._aux_slot_base_cached = bisect_right(
+            self.aux_hidden_state_layers, self.start_layer
+        )
+        self._aux_first_local_layer = self.start_layer + 1
 
     def _maybe_add_hidden_state(
         self,
@@ -1611,8 +1663,15 @@ class EagleModelMixin:
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> list[torch.Tensor]:
-        if layer_idx in self.aux_hidden_state_layers:
-            value = hidden_states + residual if residual is not None else hidden_states
+        if (
+            layer_idx >= self._aux_first_local_layer
+            and layer_idx in self.aux_hidden_state_layers
+        ):
+            if residual is None:
+                # The first layer updates its residual (the embeddings) in place
+                value = hidden_states.clone()
+            else:
+                value = hidden_states + residual
             aux_hidden_states.append(value)
         return aux_hidden_states
 
@@ -1627,24 +1686,57 @@ class EagleModelMixin:
             for i, t in enumerate(aux_hidden_states)
         }
 
+    def aux_hidden_state_slot_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """`IntermediateTensors` keys of the aux hidden states this PP stage
+        receives from earlier stages, and of those it takes and sends on (none
+        on the last stage).
+
+        The forward returns only the aux hidden states this stage takes; the
+        runner adds the received ones once, on the last stage.
+        """
+        from vllm.distributed.parallel_state import get_pp_group
+
+        pp = get_pp_group()
+        if pp.world_size < 2:
+            return (), ()
+        base = self._aux_slot_base_cached
+        end = (
+            base
+            if pp.is_last_rank
+            else bisect_right(self.aux_hidden_state_layers, self.end_layer)
+        )
+        key = self.AUX_HIDDEN_STATE_KEY
+        return (
+            tuple(f"{key}{i}" for i in range(base)),
+            tuple(f"{key}{i}" for i in range(base, end)),
+        )
+
     def collect_remote_aux_hidden_states(
         self, intermediate_tensors: "IntermediateTensors | None"
     ) -> list[torch.Tensor]:
-        total = self._aux_upstream_total_cached
-        if total == 0:
-            return []
+        """Deprecated, kept for out-of-tree models: returns []. The model runner
+        now adds the earlier PP stages' aux hidden states on the last stage."""
+        return []
 
-        assert intermediate_tensors is not None
-        out: list[torch.Tensor] = []
-        for i in range(total):
-            key = f"{self.AUX_HIDDEN_STATE_KEY}{i}"
-            if key not in intermediate_tensors.tensors:
-                raise RuntimeError(
-                    f"Missing {key} from PP intermediate tensors: "
-                    f"{sorted(intermediate_tensors.tensors)}"
-                )
-            out.append(intermediate_tensors[key])
-        return out
+
+def _get_decoder_holder(model: object) -> object:
+    parent_ref = model
+    if hasattr(model, "get_language_model"):
+        parent_ref = model.get_language_model()
+    elif hasattr(model, "language_model"):
+        parent_ref = model.language_model
+    # The Transformers modeling backend's `.model` is the HF model, not the decoder
+    if isinstance(parent_ref, EagleModelMixin):
+        return parent_ref
+    # A multimodal model that builds its decoder inside `_mark_language_model`
+    # has get_language_model() return the decoder itself, with no `.model`.
+    return getattr(parent_ref, "model", parent_ref)
+
+
+def get_eagle_decoder(model: object) -> EagleModelMixin | None:
+    """The decoder of `model` that takes the aux hidden states, if any."""
+    holder = _get_decoder_holder(model)
+    return holder if isinstance(holder, EagleModelMixin) else None
 
 
 @runtime_checkable
@@ -1693,45 +1785,30 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
     """
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        """
-        Set which layers should output auxiliary hidden states for EAGLE-3.
+        """Set which layers should output auxiliary hidden states for EAGLE-3.
 
         Args:
             layers: Tuple of layer indices that should output auxiliary
                 hidden states.
+
         """
-        parent_ref = self
-        if hasattr(self, "get_language_model"):
-            parent_ref = self.get_language_model()
-        elif hasattr(self, "language_model"):
-            parent_ref = self.language_model
-        # A multimodal model that builds its decoder inside
-        # `_mark_language_model` has get_language_model() return the inner
-        # decoder itself, which IS the EagleModelMixin and has no further
-        # `.model`. Unwrap only when there is something to unwrap.
-        holder = getattr(parent_ref, "model", parent_ref)
-        assert isinstance(holder, EagleModelMixin), (
+        holder = get_eagle_decoder(self)
+        assert holder is not None, (
             "Model instance must inherit from EagleModelMixin to set auxiliary layers"
         )
         holder._set_aux_hidden_state_layers(layers)
 
     def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        """
-        Get the default layer indices that should output auxiliary hidden states
+        """Get the default layer indices that should output auxiliary hidden states
         for EAGLE-3 for this model. Models can override this method to provide
         different default layers based on their architecture, but it is encouraged
         to instead include the layer specification in the model's config if possible.
 
         Returns:
             Tuple of layer indices for auxiliary hidden state outputs.
+
         """
-        parent_ref = self
-        if hasattr(self, "get_language_model"):
-            parent_ref = self.get_language_model()
-        elif hasattr(self, "language_model"):
-            parent_ref = self.language_model
-        # Same unwrap-only-if-needed rule as set_aux_hidden_state_layers.
-        holder = getattr(parent_ref, "model", parent_ref)
+        holder = _get_decoder_holder(self)
         assert hasattr(holder, "layers"), (
             "Model instance must have 'layers' attribute to get number of layers"
         )
@@ -1771,8 +1848,7 @@ class SupportsMRoPE(Protocol):
         input_tokens: list[int],
         mm_features: list["MultiModalFeatureSpec"],
     ) -> tuple[torch.Tensor, int]:
-        """
-        Get M-RoPE input positions and delta value for this specific model.
+        """Get M-RoPE input positions and delta value for this specific model.
 
         This method should be implemented by each model that supports M-RoPE
         to provide model-specific logic for computing input positions.
@@ -1785,6 +1861,7 @@ class SupportsMRoPE(Protocol):
             llm_positions: Tensor of shape `[num_dims, num_tokens]`, one row
                 per M-RoPE position channel (e.g. T/H/W).
             mrope_position_delta: Delta for position calculations.
+
         """
         ...
 
@@ -1809,7 +1886,7 @@ class SupportsEncoderCudaGraph(Protocol):
     capture/replay.
 
     Models implement these methods to provide the
-    :class:`EncoderCudaGraphManager` with all model-specific logic
+    `EncoderCudaGraphManager` with all model-specific logic
     (input handling, metadata computation, forward pass) without the
     manager needing to know model internals.
     """
@@ -1842,8 +1919,8 @@ class SupportsEncoderCudaGraph(Protocol):
         - max_token_budget: estimated largest budget worth capturing
           (e.g. max_num_batched_tokens)
 
-        Used when ``encoder_cudagraph_token_budgets`` and/or
-        ``encoder_cudagraph_max_vision_items_per_batch`` are not explicitly
+        Used when `encoder_cudagraph_token_budgets` and/or
+        `encoder_cudagraph_max_vision_items_per_batch` are not explicitly
         specified by the user.
         """
         ...
@@ -1875,6 +1952,11 @@ class SupportsEncoderCudaGraph(Protocol):
         - Qwen-family: slice concatenated pixel_values by cumulative
           patch offsets, subset grid_thw by indices.
         - Batched models (CLIP): index pixel_values along dim 0.
+
+        Models that configure `EncoderCudaGraphConfig.capture_axes` must
+        additionally store the resolved per-axis keys (one key per axis, in
+        order) under `ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG` in the returned
+        dict; the manager pops it before the kwargs are used elsewhere.
         """
         ...
 
@@ -1887,13 +1969,16 @@ class SupportsEncoderCudaGraph(Protocol):
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
     ) -> None:
-        """
-        Post-process encoder output, directly call scatter_output_slices by default.
+        """Post-process encoder output, directly call scatter_output_slices by default.
 
         By default, delegates directly to scatter_output_slices.
         Override this for models that require additional processing on the raw
         encoder output prior to scattering, e.g. Step3-VL, which merges features
         according to dynamic patch counts before scattering.
+
+        With `clone=True`, the tensors written to `dest` must not alias
+        `outputs`: they are graph output buffers, shared across the token
+        budgets of a path, that the next replay overwrites.
         """
         from vllm.model_executor.models.utils import scatter_output_slices
 
@@ -1909,8 +1994,23 @@ class SupportsEncoderCudaGraph(Protocol):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> "EncoderCudaGraphCaptureInputs":
-        """Create dummy inputs and buffers for CUDA graph capture."""
+        """Create dummy inputs and buffers for CUDA graph capture.
+
+        Args:
+            token_budget: Token budget the capture is sized for.
+            max_batch_size: Maximum number of items in a captured batch.
+            max_frames_per_batch: Maximum number of frames in a captured batch.
+            device: Device the dummy inputs and buffers are created on.
+            dtype: Dtype of the dummy inputs and buffers.
+            path: Configured encoder path.
+            axis_keys: The resolved capture-axis keys (one per axis of
+                `EncoderCudaGraphConfig.capture_axes`) this capture is for.
+                None or empty when no capture axes are configured; models
+                without capture axes ignore it.
+
+        """
         ...
 
     def prepare_encoder_cudagraph_replay_buffers(
@@ -1920,7 +2020,12 @@ class SupportsEncoderCudaGraph(Protocol):
         max_frames_per_batch: int,
         path: str = "default",
     ) -> "EncoderCudaGraphReplayBuffers":
-        """Compute buffer values from actual batch inputs for replay."""
+        """Compute buffer values from actual batch inputs for replay.
+
+        Must provide every capture buffer that smaller budgets share as a prefix
+        view: other budgets' captures overwrite its capture-time contents, so
+        the manager raises if replay omits it.
+        """
         ...
 
     def encoder_cudagraph_forward(

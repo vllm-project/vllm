@@ -4,11 +4,13 @@
 
 Verifies that BlockStored/BlockRemoved events carry the correct storage
 medium (MEDIUM_CPU / MEDIUM_STORAGE) and per-group metadata when
-``enable_kv_cache_events`` is set, and that no events are emitted when it
+`enable_kv_cache_events` is set, and that no events are emitted when it
 is unset.
 """
 
 from __future__ import annotations
+
+import pytest
 
 from tests.v1.simple_kv_offload.test_scheduler import (
     _BYTES_PER_BLOCK,
@@ -19,8 +21,11 @@ from tests.v1.simple_kv_offload.test_scheduler import (
     SchedulerFixture,
     _alloc_and_register,
     _allocate_cp_gpu_blocks,
+    _allocate_gpu_blocks,
     _make_cp_request,
     _make_kv_cache_config,
+    _make_lookahead_config,
+    _make_scratch_kv_cache_config,
     _make_vllm_config,
     make_request,
     make_scheduler_output,
@@ -146,11 +151,14 @@ def make_events_scheduler(
     dcp_world_size: int = 1,
     kv_cache_config: KVCacheConfig | None = None,
     enable_events: bool = True,
+    num_lookahead: int = 0,
 ) -> SchedulerFixture:
     """Build a SimpleCPUOffloadScheduler with kv cache events enabled."""
     if kv_cache_config is None:
         kv_cache_config = _make_kv_cache_config(num_gpu_blocks, num_groups)
-    vllm_config = _make_vllm_config()
+    vllm_config = (
+        _make_lookahead_config(num_lookahead) if num_lookahead else _make_vllm_config()
+    )
     if enable_events:
         vllm_config.kv_events_config = KVEventsConfig(enable_kv_cache_events=True)
     vllm_config.parallel_config.decode_context_parallel_size = dcp_world_size
@@ -172,6 +180,7 @@ def make_events_scheduler(
         num_gpu_blocks=num_gpu_blocks,
         enable_caching=True,
         hash_block_size=virtual_block_size,
+        num_hash_lookahead_tokens=num_lookahead,
     )
     sched.bind_gpu_block_pool(gpu_block_pool)
     return SchedulerFixture(
@@ -188,7 +197,7 @@ def _do_eager_store(
     num_blocks: int = 2,
     lora_request: LoRARequest | None = None,
 ) -> tuple[object, Request]:
-    """Run an eager store of ``num_blocks`` and complete it.
+    """Run an eager store of `num_blocks` and complete it.
 
     Returns (meta, req) for further assertions.
     """
@@ -206,8 +215,15 @@ def _do_eager_store(
             block_hasher=get_request_block_hasher(BLOCK_SIZE, sha256),
         )
     else:
-        req = make_request(num_blocks=num_blocks)
+        num_lookahead = fix.vllm_config.num_hash_lookahead_tokens
+        req = make_request(
+            num_blocks=num_blocks,
+            extra_tokens=max(1, num_lookahead),
+            num_lookahead=num_lookahead,
+        )
     kv_blocks = _alloc_and_register(fix, req, num_blocks)
+    # Finish the prompt, including the multi-module MTP re-prefill window.
+    req.num_computed_tokens = req.num_tokens
     sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
     block_ids = kv_blocks.get_block_ids()
     sched_out = make_scheduler_output(
@@ -236,10 +252,12 @@ def test_events_disabled_no_events() -> None:
 # ---------------------------------------------------------------------------
 # eager store emits BlockStored with per-group metadata
 # ---------------------------------------------------------------------------
-def test_block_stored_per_group_metadata_full_attention() -> None:
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("num_lookahead", [0, 1, 5])
+def test_block_stored_per_group_metadata_full_attention(num_lookahead) -> None:
     """BlockStored carries medium, group_idx, kind, sliding_window, block_size,
     and the correct block hash."""
-    fix = make_events_scheduler()
+    fix = make_events_scheduler(num_lookahead=num_lookahead)
     sched = fix.scheduler
     assert sched.kv_event_medium == MEDIUM_CPU
     _, req = _do_eager_store(fix, num_blocks=2)
@@ -258,6 +276,7 @@ def test_block_stored_per_group_metadata_full_attention() -> None:
     )
     assert ev.block_hashes == [expected_hash_0]
     assert ev.parent_block_hash is None
+    assert req.prompt_token_ids is not None
     assert ev.token_ids == req.prompt_token_ids[0:BLOCK_SIZE]
 
     # Second block's parent_block_hash equals the first block's hash.
@@ -268,6 +287,11 @@ def test_block_stored_per_group_metadata_full_attention() -> None:
     assert ev1.block_hashes == [expected_hash_1]
     assert ev1.parent_block_hash == expected_hash_0
     assert ev1.token_ids == req.prompt_token_ids[BLOCK_SIZE : 2 * BLOCK_SIZE]
+    for i, event in enumerate(stored):
+        end = (i + 1) * BLOCK_SIZE
+        assert event.lookahead_token_ids == (
+            [req.prompt_token_ids[end : end + num_lookahead]] if num_lookahead else None
+        )
 
 
 def test_eager_store_lora_metadata() -> None:
@@ -294,7 +318,7 @@ def test_eager_store_lora_metadata() -> None:
         f"expected lora_name='test-lora', got {ev.lora_name!r}"
     )
     assert ev.extra_keys is not None, "expected extra_keys for lora request"
-    assert any("test-lora" in keys for keys in ev.extra_keys), (
+    assert any(keys is not None and "test-lora" in keys for keys in ev.extra_keys), (
         f"expected 'test-lora' in extra_keys, got {ev.extra_keys}"
     )
     assert len(ev.token_ids) == BLOCK_SIZE
@@ -370,6 +394,7 @@ def test_finished_eager_store_emits_all_storage_events() -> None:
     secondary_event_hash = maybe_convert_block_hash(get_block_hash(secondary_hash))
     by_hash = {event.block_hashes[0]: event for event in stored}
     assert set(by_hash) == {*primary_event_hashes, secondary_event_hash}
+    assert req.prompt_token_ids is not None
     assert (
         by_hash[primary_event_hashes[0]].token_ids == req.prompt_token_ids[:BLOCK_SIZE]
     )
@@ -449,6 +474,7 @@ def test_secondary_hash_block_stored_metadata() -> None:
     by_hash = {event.block_hashes[0]: event for event in stored}
     assert set(by_hash) == {primary_event_hash, secondary_event_hash}
     assert by_hash[primary_event_hash].block_size == BLOCK_SIZE
+    assert req.prompt_token_ids is not None
     assert by_hash[primary_event_hash].token_ids == req.prompt_token_ids[:BLOCK_SIZE]
     assert by_hash[secondary_event_hash].block_size == BLOCK_SIZE // 2
     assert (
@@ -612,7 +638,7 @@ def test_mamba_block_size_not_scaled() -> None:
 
     raw_hash = make_request(num_blocks=1).block_hashes[0]
     mamba_hash = make_block_hash_with_group_id(raw_hash, group_id=1)
-    gpu_blk._block_hash = mamba_hash  # type: ignore[attr-defined]
+    gpu_blk.block_hash = mamba_hash
 
     sched._process_store_completion(
         gpu_block_ids=[gpu_blk.block_id],
@@ -656,9 +682,7 @@ def test_multi_group_fa_block_stored_group_idx() -> None:
     for gidx in (0, 1):
         cpu_blk = cpu_pool.get_new_blocks(1)[0]
         gpu_blk = gpu_pool.get_new_blocks(1)[0]
-        gpu_blk._block_hash = make_block_hash_with_group_id(  # type: ignore
-            raw_hash, group_id=gidx
-        )
+        gpu_blk.block_hash = make_block_hash_with_group_id(raw_hash, group_id=gidx)
         sched._process_store_completion(
             gpu_block_ids=[gpu_blk.block_id],
             cpu_block_ids=[cpu_blk.block_id],
@@ -714,17 +738,8 @@ def test_disk_mode_block_removed_relabeled_storage() -> None:
         assert ev.medium == MEDIUM_STORAGE
 
 
-def test_mamba_dcp_metadata_guard() -> None:
-    """Mamba+DCP: token_ids guard emits [] when capture and emission sizes differ.
-
-    The metadata capture at _prepare_eager_store_specs uses
-    g_block_size = spec.block_size * cp_world_size = 32 * 2 = 64 to slice
-    tokens. The event emission uses block_size = spec.block_size * 1 = 32
-    for Mamba (SSM state is not CP-sharded). The guard in
-    _process_store_completion detects len(token_ids) != block_size and emits
-    token_ids=[] instead of misleading data. When #49962 fixes the capture
-    path, the guard stops triggering and correct token_ids flow through.
-    """
+def test_mamba_align_skips_positional_event_metadata() -> None:
+    """Mamba align emits events only from explicit boundary handoffs."""
     vbs = BLOCK_SIZE * 2
     kv_cfg = _make_mixed_kv_cache_config(
         num_blocks=16, with_mamba=True, mamba_block_size=32
@@ -739,8 +754,6 @@ def test_mamba_dcp_metadata_guard() -> None:
     sched = fix.scheduler
     gpu_pool = fix.gpu_block_pool
 
-    # Mamba g_block_size = 32 * 2 = 64, so 2 Mamba blocks need 128 computed
-    # tokens to be "ready"; FA g_block_size = 16 * 2 = 32 needs only 64.
     req = _make_cp_request(num_blocks=4, virtual_block_size=vbs)
     fa_blocks = _allocate_cp_gpu_blocks(gpu_pool, req, 2, vbs, group_id=0)
     mamba_blocks = _allocate_cp_gpu_blocks(gpu_pool, req, 2, vbs, group_id=1)
@@ -759,32 +772,47 @@ def test_mamba_dcp_metadata_guard() -> None:
 
     events = list(sched.take_events())
     stored = [e for e in events if isinstance(e, BlockStored)]
-    assert len(stored) == 4, (
-        f"expected 4 BlockStored (2 FA + 2 Mamba), got {len(stored)}"
-    )
-
-    by_group: dict[int, list[BlockStored]] = {}
-    for ev in stored:
-        by_group.setdefault(ev.group_idx, []).append(ev)
-
-    # FA group: capture size (64) == emission size (64) → token_ids present.
-    fa_events = by_group[0]
-    assert len(fa_events) == 2
-    for ev in fa_events:
+    assert len(stored) == 2
+    assert {ev.group_idx for ev in stored} == {0}
+    assert req.prompt_token_ids is not None
+    for idx, ev in enumerate(stored):
         assert ev.block_size == vbs
-        assert len(ev.token_ids) == vbs, (
-            f"FA token_ids should be {vbs}, got {len(ev.token_ids)}"
+        assert ev.token_ids == req.prompt_token_ids[idx * vbs : (idx + 1) * vbs]
+        expected_hash = maybe_convert_block_hash(
+            get_block_hash(make_block_hash_with_group_id(req.block_hashes[idx], 0))
         )
+        assert ev.block_hashes == [expected_hash]
 
-    # Mamba group: capture size (64) != emission size (32) → guard emits [].
-    mamba_events = by_group[1]
-    assert len(mamba_events) == 2
-    for ev in mamba_events:
-        assert ev.block_size == 32
-        assert ev.token_ids == [], (
-            f"Mamba token_ids should be [] (guard), got {ev.token_ids}"
-        )
-        assert ev.parent_block_hash is None, (
-            "Mamba parent_block_hash should be None (guard)"
-        )
-        assert ev.extra_keys is None, "Mamba extra_keys should be None (guard)"
+
+def test_scratch_group_store_emits_events_for_cacheable_groups_only() -> None:
+    """Event metadata is resolved only for prefix-cacheable groups.
+
+    A scratch group (GLM-5.3-Flash kpool tail) has a block size that does not
+    divide the hash block size, so viewing the request hashes at its block
+    size is impossible; the store must skip it and still emit BlockStored
+    for the attention blocks.
+    """
+    fix = make_events_scheduler(kv_cache_config=_make_scratch_kv_cache_config(16))
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    num_blocks = 2
+
+    req = make_request(num_blocks=num_blocks)
+    fa_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
+    scratch_block = gpu_pool.get_new_blocks(1)
+    kv_blocks = KVCacheBlocks(blocks=(fa_blocks, scratch_block))
+    req.num_computed_tokens = num_blocks * BLOCK_SIZE
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: kv_blocks.get_block_ids()},
+    )
+    meta = sched.build_connector_meta(sched_out)
+    assert sorted(meta.store_gpu_blocks) == sorted(b.block_id for b in fa_blocks)
+    simulate_store_completion(sched, meta.store_event)
+
+    events = list(sched.take_events())
+    assert len(events) == num_blocks
+    assert all(isinstance(e, BlockStored) for e in events)
+    assert {e.group_idx for e in events} == {0}
+    assert all(len(e.token_ids) == BLOCK_SIZE for e in events)

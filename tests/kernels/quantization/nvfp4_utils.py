@@ -20,7 +20,7 @@ def convert_swizzled_to_linear(a_sf_swizzled: torch.Tensor, m, k, block_size):
     tmp = torch.reshape(a_sf_swizzled, (1, m_tiles, k_tiles, 32, 4, 4))
     tmp = torch.permute(tmp, (0, 1, 4, 3, 2, 5))
     out = tmp.reshape(m_tiles * 128, k_tiles * f // block_size)
-    return out[0:m, 0:k]
+    return out[0:m, 0 : k // block_size]
 
 
 def convert_swizzled_8x4_layout_to_linear(
@@ -111,13 +111,14 @@ def dequant_nvfp4_kv_cache(
         global_scale: checkpoint dequant scale (k_scale or v_scale).
         head_size: head dimension.
         block_size: page size.
-        swizzled_scales: whether ``block_scale`` is in the 4x4-swizzled
-            layout of the SM100 trtllm-gen kernel. ``reshape_and_cache_flash``
-            writes K scales linearly and V scales swizzled, so pass ``False``
-            for K and ``True`` for V.
+        swizzled_scales: whether `block_scale` is in the 4x4-swizzled
+            layout of the SM100 trtllm-gen kernel. `reshape_and_cache_flash`
+            writes K scales linearly and V scales swizzled, so pass `False`
+            for K and `True` for V.
 
     Returns:
         [..., num_heads, block_size, head_size] float32.
+
     """
     data_dim = head_size // 2
     scale_dim = head_size // 16

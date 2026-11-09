@@ -39,11 +39,11 @@ def _get_tmp_suffix() -> str:
 
 
 def probe_o_direct(directory: str) -> bool:
-    """Return whether ``O_DIRECT`` I/O works in *directory*.
+    """Return whether `O_DIRECT` I/O works in *directory*.
 
-    ``O_DIRECT`` is unsupported on some filesystems (e.g. the overlayfs backing
-    a container ``/tmp``, older tmpfs, or some NFS mounts), where opening or
-    writing a file with it fails with ``EINVAL``. Probe once with an aligned
+    `O_DIRECT` is unsupported on some filesystems (e.g. the overlayfs backing
+    a container `/tmp`, older tmpfs, or some NFS mounts), where opening or
+    writing a file with it fails with `EINVAL`. Probe once with an aligned
     single-page write so callers can fall back to buffered I/O instead of
     failing on every block.
     """
@@ -94,9 +94,7 @@ def _store_block(
     block_size: int,
     use_o_direct: bool = True,
 ) -> None:
-    """
-    Store callback: Writes to a temp file then atomically replaces the destination.
-    """
+    """Store callback: write to a temp file then atomically replace the target."""
     # Check if block already exists to avoid redundant writes
     if os.path.exists(dest_path):
         return
@@ -123,7 +121,15 @@ def _store_block(
                 )
         finally:
             os.close(fd)
-        os.replace(tmp_path, dest_path)
+        try:
+            os.replace(tmp_path, dest_path)
+        except FileExistsError:
+            # Another writer published this block after the check above; some
+            # shared filesystems fail the rename with EEXIST instead of
+            # replacing. File names are content hashes, so the file already in
+            # place holds this block and the store is done.
+            with contextlib.suppress(OSError):
+                os.remove(tmp_path)
     except Exception:
         try:
             os.remove(tmp_path)
@@ -172,8 +178,7 @@ def batch_store_block(
     block_size: int,
     use_o_direct: bool = True,
 ) -> None:
-    """
-    Store a batch of KV blocks from a shared buffer to disk in one call.
+    """Store a batch of KV blocks from a shared buffer to disk in one call.
 
     Each block buffer[offsets[i] : offsets[i]+block_size] is written atomically
     to dest_paths[i] via a temp-file rename.  Raises on first error.
@@ -197,12 +202,11 @@ def batch_load_block(
     block_size: int,
     use_o_direct: bool = True,
 ) -> None:
-    """
-    Load a batch of KV blocks from disk into a shared buffer in one call.
+    """Load a batch of KV blocks from disk into a shared buffer in one call.
 
     Block i is read from source_paths[i] into view[offsets[i] : offsets[i]+block_size].
     Raises on first error (see _load_block for the delete-on-short-read policy).
-    On failure the raised OSError carries ``num_succeeded`` = the number of
+    On failure the raised OSError carries `num_succeeded` = the number of
     blocks loaded before the failing one, so the tier can keep them.
     """
     _validate_offsets(view, offsets, block_size)

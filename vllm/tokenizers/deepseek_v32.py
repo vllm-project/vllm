@@ -5,7 +5,7 @@ from typing import Any
 
 from transformers import TokenizersBackend
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
 
 from .deepseek_v32_encoding import encode_messages
 from .hf import HfTokenizer, get_cached_tokenizer
@@ -13,9 +13,7 @@ from .protocol import TokenizerLike
 
 
 def get_deepseek_v32_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
-    """
-    Wraps a tokenizer to use the custom DeepSeek V3.2 chat template encoding.
-    """
+    """Wraps a tokenizer to use the custom DeepSeek V3.2 chat template encoding."""
     dsv32_tokenizer = copy.copy(tokenizer)
 
     added_vocab = tokenizer.get_added_vocab()

@@ -1,0 +1,129 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Schedule EPLB expert migrations into conflict-free batches."""
+
+from dataclasses import dataclass
+
+import numpy as np
+
+
+@dataclass(frozen=True, slots=True)
+class MigrationFlow:
+    """Expert transfers between one directed rank pair."""
+
+    src_rank: int
+    dst_rank: int
+    # Experts being transferred.
+    expert_ids: tuple[int, ...]
+
+
+def schedule_migration_batches(
+    num_local_experts: int,
+    old_indices: np.ndarray,
+    new_indices: np.ndarray,
+) -> list[list[MigrationFlow]]:
+    """Schedule expert migrations without per-rank communication contention.
+
+    Experts assigned to the same source and destination ranks form one flow.
+    Each flow is placed in the first batch that does not already use either
+    endpoint, so a rank communicates with at most one peer in each batch while
+    independent rank pairs can transfer concurrently.
+    """
+    assert old_indices.shape == new_indices.shape
+    recv_ranks_by_expert: dict[int, list[int]] = {}
+    old_experts_by_rank: list[set[int]] = []
+    old_by_rank = old_indices.reshape(-1, num_local_experts)
+    new_by_rank = new_indices.reshape(-1, num_local_experts)
+
+    # First find the ranks that gain each expert. Existing local copies need no
+    # transfer, even if their physical row changes.
+    for rank, (old_local, new_local) in enumerate(zip(old_by_rank, new_by_rank)):
+        old_experts = set(old_local.tolist())
+        old_experts.discard(-1)
+        old_experts_by_rank.append(old_experts)
+
+        new_experts = set(new_local.tolist())
+        new_experts.discard(-1)
+        for expert_id in new_experts - old_experts:
+            recv_ranks_by_expert.setdefault(expert_id, []).append(rank)
+
+    old_ranks_by_expert: dict[int, list[int]] = {}
+    needed_experts = recv_ranks_by_expert.keys()
+
+    # Only index source copies for experts that need a remote transfer.
+    for rank, old_experts in enumerate(old_experts_by_rank):
+        for expert_id in old_experts & needed_experts:
+            old_ranks_by_expert.setdefault(expert_id, []).append(rank)
+
+    expert_ids_by_pair: dict[tuple[int, int], list[int]] = {}
+    for expert_id in sorted(recv_ranks_by_expert):
+        send_ranks = old_ranks_by_expert.get(expert_id, [])
+        if not send_ranks:
+            continue
+        recv_ranks = recv_ranks_by_expert[expert_id]
+
+        num_per_sender, remainder = divmod(len(recv_ranks), len(send_ranks))
+        remainder_start = len(send_ranks) * num_per_sender
+
+        # Preserve the unbatched path's balanced source assignment. Batching
+        # changes transfer order, not which existing replica supplies a copy.
+        for sender_idx, src_rank in enumerate(send_ranks):
+            start = sender_idx * num_per_sender
+            for dst_rank in recv_ranks[start : start + num_per_sender]:
+                expert_ids_by_pair.setdefault((src_rank, dst_rank), []).append(
+                    expert_id
+                )
+            if sender_idx < remainder:
+                dst_rank = recv_ranks[remainder_start + sender_idx]
+                expert_ids_by_pair.setdefault((src_rank, dst_rank), []).append(
+                    expert_id
+                )
+
+    # Transfers with the same directed rank pair have identical contention
+    # constraints, so coalesce them before grouping. The loop below is a
+    # deterministic first-fit edge coloring of the rank communication graph.
+    batches: list[list[MigrationFlow]] = []
+    endpoints_used: list[int] = []
+    for (src_rank, dst_rank), expert_ids in expert_ids_by_pair.items():
+        flow = MigrationFlow(src_rank, dst_rank, tuple(expert_ids))
+
+        # Direction is irrelevant for NIC contention. This endpoint mask keeps
+        # each rank connected to at most one peer in a batch. The conservative
+        # limit leaves bandwidth headroom for inference during async migration.
+        endpoints = (1 << src_rank) | (1 << dst_rank)
+        for batch_idx, (batch, used) in enumerate(zip(batches, endpoints_used)):
+            if not endpoints & used:
+                batch.append(flow)
+                endpoints_used[batch_idx] |= endpoints
+                break
+        else:
+            batches.append([flow])
+            endpoints_used.append(endpoints)
+
+    return batches
+
+
+def schedule_migration_batches_for_layers(
+    num_local_experts: int,
+    old_indices: np.ndarray,
+    new_indices: np.ndarray,
+) -> list[list[list[MigrationFlow]]]:
+    """Precompute the independent migration schedule for every MoE layer.
+
+    This reduces scheduling entry points from once per layer to once per
+    rebalance cycle. Only CPU scheduling is grouped; transfers remain ordered
+    by layer and preserve each layer's batch boundaries.
+    """
+    assert old_indices.shape == new_indices.shape
+    assert old_indices.ndim == 2
+    return [
+        schedule_migration_batches(num_local_experts, old_layer, new_layer)
+        for old_layer, new_layer in zip(old_indices, new_indices)
+    ]
+
+
+__all__ = [
+    "MigrationFlow",
+    "schedule_migration_batches",
+    "schedule_migration_batches_for_layers",
+]

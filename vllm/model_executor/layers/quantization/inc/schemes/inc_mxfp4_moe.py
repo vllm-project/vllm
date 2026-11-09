@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm.config.kernel import FLASHINFER_MOE_EP_BACKENDS
 from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
     RoutedExperts,
@@ -14,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     PACKED_MXFP4_CANDIDATE_BACKENDS,
     convert_weight_to_mxfp4_moe_kernel_format,
@@ -21,22 +23,31 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     make_mxfp4_moe_quant_config,
     select_mxfp4_moe_backend,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    move_parameter,
+    replace_parameter,
+    set_weight_attrs,
+)
 
 
 class INCMxfp4MoEMethod(FusedMoEMethodBase):
-    """W4A4 MXFP4 group MoE for AutoRound ``auto_round:llm_compressor`` exports.
+    """W4A4 MXFP4 group MoE for AutoRound `auto_round:llm_compressor` exports.
 
-    Registers the packed MXFP4 layout (uint8 ``weight_packed`` + uint8 E8M0
-    ``weight_scale``, ``group_size=32``); the oracle picks the backend and
+    Registers the packed MXFP4 layout (uint8 `weight_packed` + uint8 E8M0
+    `weight_scale`, `group_size=32`); the oracle picks the backend and
     converts the weights to its kernel format.
-    The per-expert ``gate_proj`` / ``up_proj`` / ``down_proj`` tensors are
-    folded into the stacked ``w13`` / ``w2`` parameters by
-    ``make_expert_params_mapping``.
+    The per-expert `gate_proj` / `up_proj` / `down_proj` tensors are
+    folded into the stacked `w13` / `w2` parameters by
+    `make_expert_params_mapping`.
     """
 
     def __init__(self, moe) -> None:
         super().__init__(moe)
+        if moe.moe_backend in FLASHINFER_MOE_EP_BACKENDS:
+            raise ValueError(
+                f"moe_backend={moe.moe_backend!r} is not supported for AutoRound "
+                "(INC) MXFP4 MoE checkpoints"
+            )
         self.group_size = 32
         self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
             moe, candidates=PACKED_MXFP4_CANDIDATE_BACKENDS
@@ -119,19 +130,8 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        # NOTE(rob): wN_weight_packed -> wN_weight is because ModularKernelMethod
-        # requires this naming convention. However, the name change breaks
-        # reloading because the state dict no longer matches disk. Once we
-        # remove MKM, we should revert this change to ensure compatibility.
-        layer.w13_weight = torch.nn.Parameter(
-            layer.w13_weight_packed.data, requires_grad=False
-        )
-        delattr(layer, "w13_weight_packed")
-
-        layer.w2_weight = torch.nn.Parameter(
-            layer.w2_weight_packed.data, requires_grad=False
-        )
-        delattr(layer, "w2_weight_packed")
+        move_parameter(layer, "w13_weight_packed", "w13_weight")
+        move_parameter(layer, "w2_weight_packed", "w2_weight")
 
         w13, w2, w13_scale, w2_scale, _, _ = convert_weight_to_mxfp4_moe_kernel_format(
             mxfp4_backend=self.mxfp4_backend,
@@ -155,6 +155,7 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
             mxfp4_backend=self.mxfp4_backend,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def apply(
@@ -165,7 +166,7 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             x,

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Benchmark hidden state extraction throughput.
+"""Benchmark hidden state extraction throughput.
 
 Measures two modes:
   1. Baseline: bulk inference with max_tokens=1, no extraction.
@@ -64,7 +63,7 @@ def consume_hidden_states(path: str) -> float:
     Returns a single float: the grand mean of all hidden state values.
     This forces the benchmark to actually read and reduce the data.
 
-    Uses :func:`load_hidden_states` which acquires a shared flock,
+    Uses `load_hidden_states` which acquires a shared flock,
     blocking (without polling) until the async writer releases its
     exclusive lock.
     """
@@ -406,7 +405,7 @@ def main():
 
     if not args.skip_baseline and not args.skip_extract:
         slowdown = baseline["tokens_per_s"] / extract["tokens_per_s"]
-        print("Extraction slowdown factor: {:.2f}x".format(slowdown))
+        print(f"Extraction slowdown factor: {slowdown:.2f}x")
 
 
 if __name__ == "__main__":

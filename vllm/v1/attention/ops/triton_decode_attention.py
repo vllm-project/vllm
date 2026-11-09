@@ -24,16 +24,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""
-Memory-efficient attention for decoding.
+"""Memory-efficient attention for decoding.
 It supports page size >= 1.
 """
 
 import logging
+import math
+from typing import Any
 
 import torch
 from packaging import version
 
+from vllm.model_executor.warmup.jit_warmup import WarmupChoices
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -97,6 +104,7 @@ def _fwd_kernel_stage1(
     logit_cap: tl.constexpr,
     Lk: tl.constexpr,
     Lv: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr = 0,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -114,8 +122,12 @@ def _fwd_kernel_stage1(
     off_q = cur_batch * stride_qbs + cur_head * stride_qh + offs_d
     q = tl.load(Q + off_q, mask=mask_d, other=0.0)
 
-    kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
-    split_kv_start = kv_len_per_split * split_kv_id
+    # A window of SLIDING_WINDOW keys ends at the sequence end.
+    window_start = 0
+    if SLIDING_WINDOW > 0:
+        window_start = tl.maximum(cur_batch_seq_len - SLIDING_WINDOW, 0)
+    kv_len_per_split = tl.cdiv(cur_batch_seq_len - window_start, NUM_KV_SPLITS)
+    split_kv_start = window_start + kv_len_per_split * split_kv_id
     split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
 
     e_max = -float("inf")
@@ -182,7 +194,7 @@ def _fwd_kernel_stage1(
             e_max = n_e_max
 
         offs_mid_o = (
-            cur_batch * stride_mid_ob
+            cur_batch.to(tl.int64) * stride_mid_ob
             + cur_head * stride_mid_oh
             + split_kv_id * stride_mid_os
             + offs_dv
@@ -195,7 +207,7 @@ def _fwd_kernel_stage1(
         )
 
         offs_mid_o_1 = (
-            cur_batch * stride_mid_ob
+            cur_batch.to(tl.int64) * stride_mid_ob
             + cur_head * stride_mid_oh
             + split_kv_id * stride_mid_os
             + Lv
@@ -220,6 +232,7 @@ def _decode_att_m_fwd(
     logit_cap,
     k_scale,
     v_scale,
+    sliding_window=0,
 ):
     BLOCK = 64 if not is_hip_ else 8
 
@@ -272,6 +285,7 @@ def _decode_att_m_fwd(
         num_stages=2,
         Lk=Lk,
         Lv=Lv,
+        SLIDING_WINDOW=sliding_window,
     )
 
 
@@ -311,6 +325,7 @@ def _fwd_grouped_kernel_stage1(
     Lk: tl.constexpr,
     Lv: tl.constexpr,
     IS_MLA: tl.constexpr = False,
+    SLIDING_WINDOW: tl.constexpr = 0,
 ):
     cur_batch = tl.program_id(0)
     cur_head_id = tl.program_id(1)
@@ -350,8 +365,12 @@ def _fwd_grouped_kernel_stage1(
             cache_modifier=".ca",
         )
 
-    kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
-    split_kv_start = kv_len_per_split * split_kv_id
+    # A window of SLIDING_WINDOW keys ends at the sequence end.
+    window_start = 0
+    if SLIDING_WINDOW > 0:
+        window_start = tl.maximum(cur_batch_seq_len - SLIDING_WINDOW, 0)
+    kv_len_per_split = tl.cdiv(cur_batch_seq_len - window_start, NUM_KV_SPLITS)
+    split_kv_start = window_start + kv_len_per_split * split_kv_id
     split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
 
     e_max = tl.zeros([BLOCK_H], dtype=tl.float32) - float("inf")
@@ -441,7 +460,7 @@ def _fwd_grouped_kernel_stage1(
             e_max = n_e_max
 
         offs_mid_o = (
-            cur_batch * stride_mid_ob
+            cur_batch.to(tl.int64) * stride_mid_ob
             + cur_head[:, None] * stride_mid_oh
             + split_kv_id * stride_mid_os
             + offs_dv[None, :]
@@ -454,7 +473,7 @@ def _fwd_grouped_kernel_stage1(
         )
 
         offs_mid_o_1 = (
-            cur_batch * stride_mid_ob
+            cur_batch.to(tl.int64) * stride_mid_ob
             + cur_head * stride_mid_oh
             + split_kv_id * stride_mid_os
             + Lv
@@ -467,6 +486,55 @@ def _fwd_grouped_kernel_stage1(
         )
 
 
+def _decode_grouped_att_m_fwd_warmup_inputs(
+    *,
+    q_dtype: torch.dtype,
+    kv_dtype: torch.dtype,
+    num_heads: int,
+    head_size: int,
+    kv_lora_rank: int,
+    page_size: int,
+    kv_block_stride: int,
+    kv_token_stride: int,
+    num_kv_splits: tuple[int, ...],
+    sliding_window: int = 0,
+) -> dict[str, Any]:
+    # TritonMLAImpl.forward_mqa: one latent KV head whose cache row holds the
+    # latent (Lv = kv_lora_rank) then the RoPE part (Lk = head_size). K and V
+    # view the same [num_blocks, page_size, 1, Lk] cache. The block-table row
+    # width depends on the runner's kernel block size split, which the layer
+    # cannot see, so warm both of its integer classes (generic, multiple of 16).
+    splits: Any = WarmupChoices(*num_kv_splits)
+    block_table_width: Any = WarmupChoices(2, 16)
+    kv_strides = (kv_block_stride, kv_token_stride, head_size, 1)
+    return dict(
+        q=TritonWarmupTensor(q_dtype, shape=(1, num_heads, head_size)),
+        k_buffer=TritonWarmupTensor(
+            kv_dtype, shape=(1, page_size, 1, head_size), strides=kv_strides
+        ),
+        v_buffer=TritonWarmupTensor(
+            kv_dtype, shape=(1, page_size, 1, kv_lora_rank), strides=kv_strides
+        ),
+        att_out=TritonWarmupTensor(
+            torch.float32, shape=(1, num_heads, splits, kv_lora_rank + 1)
+        ),
+        Req_to_tokens=TritonWarmupTensor(torch.int32, shape=(1, block_table_width)),
+        B_Seqlen=TritonWarmupTensor(torch.int32),
+        num_kv_splits=splits,
+        sm_scale=1.0,
+        page_size=page_size,
+        logit_cap=0.0,
+        k_scale=TritonWarmupTensor(torch.float32),
+        v_scale=TritonWarmupTensor(torch.float32),
+        is_mla=True,
+        sliding_window=sliding_window,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_fwd_grouped_kernel_stage1,
+    warmup_inputs=_decode_grouped_att_m_fwd_warmup_inputs,
+)
 def _decode_grouped_att_m_fwd(
     q,
     k_buffer,
@@ -481,7 +549,8 @@ def _decode_grouped_att_m_fwd(
     k_scale,
     v_scale,
     is_mla=False,
-):
+    sliding_window=0,
+) -> DispatchSpec:
     # with is_mla there is only a single c_kv in smem.
     # could increase BLOCK or num_stages.
     Lk = k_buffer.shape[-1]
@@ -531,28 +600,29 @@ def _decode_grouped_att_m_fwd(
         # exceeds 101376 bytes limit
         num_stages = 1
 
-    _fwd_grouped_kernel_stage1[grid](
-        q,
-        k_buffer,
-        v_buffer,
-        sm_scale,
-        Req_to_tokens,
-        B_Seqlen,
-        att_out,
-        Req_to_tokens.stride(0),
-        q.stride(0),
-        q.stride(1),
-        _page_stride(k_buffer, page_size),
-        k_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        k_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        _page_stride(v_buffer, page_size),
-        v_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        v_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        att_out.stride(0),
-        att_out.stride(1),
-        att_out.stride(2),
-        k_scale,
-        v_scale,
+    return grid, dict(
+        Q=q,
+        K_Buffer=k_buffer,
+        V_Buffer=v_buffer,
+        sm_scale=sm_scale,
+        Req_to_tokens=Req_to_tokens,
+        B_Seqlen=B_Seqlen,
+        Att_Out=att_out,
+        stride_req_to_tokens_b=Req_to_tokens.stride(0),
+        stride_qbs=q.stride(0),
+        stride_qh=q.stride(1),
+        stride_buf_kpbs=_page_stride(k_buffer, page_size),
+        # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+        stride_buf_kbs=k_buffer.stride(-3),
+        stride_buf_kh=k_buffer.stride(-2),
+        stride_buf_vpbs=_page_stride(v_buffer, page_size),
+        stride_buf_vbs=v_buffer.stride(-3),
+        stride_buf_vh=v_buffer.stride(-2),
+        stride_mid_ob=att_out.stride(0),
+        stride_mid_oh=att_out.stride(1),
+        stride_mid_os=att_out.stride(2),
+        k_scale=k_scale,
+        v_scale=v_scale,
         kv_group_num=kv_group_num,
         q_head_num=head_num,
         BLOCK_DMODEL=BLOCK_DMODEL,
@@ -568,6 +638,7 @@ def _decode_grouped_att_m_fwd(
         Lk=Lk,
         Lv=Lv,
         IS_MLA=is_mla,
+        SLIDING_WINDOW=sliding_window,
         **extra_kargs,
     )
 
@@ -588,6 +659,7 @@ def _fwd_kernel_stage2(
     BLOCK_DV: tl.constexpr,
     Lv: tl.constexpr,
     OUTPUT_FP16: tl.constexpr = 0,
+    SLIDING_WINDOW: tl.constexpr = 0,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -601,12 +673,15 @@ def _fwd_kernel_stage2(
     e_max = -float("inf")
     acc = tl.zeros([BLOCK_DV], dtype=tl.float32)
 
-    offs_v = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + offs_d
-    offs_logic = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + Lv
+    offs_v = cur_batch.to(tl.int64) * stride_mid_ob + cur_head * stride_mid_oh + offs_d
+    offs_logic = cur_batch.to(tl.int64) * stride_mid_ob + cur_head * stride_mid_oh + Lv
 
+    window_start = 0
+    if SLIDING_WINDOW > 0:
+        window_start = tl.maximum(cur_batch_seq_len - SLIDING_WINDOW, 0)
     for split_kv_id in range(0, NUM_KV_SPLITS):
-        kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
-        split_kv_start = kv_len_per_split * split_kv_id
+        kv_len_per_split = tl.cdiv(cur_batch_seq_len - window_start, NUM_KV_SPLITS)
+        split_kv_start = window_start + kv_len_per_split * split_kv_id
         split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
 
         if split_kv_end > split_kv_start:
@@ -639,6 +714,35 @@ def _fwd_kernel_stage2(
     )
 
 
+def _decode_softmax_reducev_fwd_warmup_inputs(
+    *,
+    dtype: torch.dtype,
+    num_heads: int,
+    kv_lora_rank: int,
+    num_kv_splits: tuple[int, ...],
+    sliding_window: int = 0,
+) -> dict[str, Any]:
+    # TritonMLAImpl.forward_mqa: [B, H, num_kv_splits, Lv + 1] scratch, and a
+    # [B, H, Lv] output and [B, H] LSE in the query dtype.
+    splits: Any = WarmupChoices(*num_kv_splits)
+    return dict(
+        logits=TritonWarmupTensor(
+            torch.float32, shape=(1, num_heads, splits, kv_lora_rank + 1)
+        ),
+        q=TritonWarmupTensor(dtype, shape=(1, num_heads, 1)),
+        o=TritonWarmupTensor(dtype, shape=(1, num_heads, kv_lora_rank)),
+        lse=TritonWarmupTensor(dtype, shape=(1, num_heads)),
+        v_buffer=TritonWarmupTensor(dtype, shape=(1, 1, 1, kv_lora_rank)),
+        b_seq_len=TritonWarmupTensor(torch.int32),
+        num_kv_splits=splits,
+        sliding_window=sliding_window,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_fwd_kernel_stage2,
+    warmup_inputs=_decode_softmax_reducev_fwd_warmup_inputs,
+)
 def _decode_softmax_reducev_fwd(
     logits,
     q,
@@ -647,7 +751,8 @@ def _decode_softmax_reducev_fwd(
     v_buffer,
     b_seq_len,
     num_kv_splits,
-):
+    sliding_window=0,
+) -> DispatchSpec:
     batch, head_num = q.shape[0], q.shape[1]
     Lv = v_buffer.shape[-1]
     BLOCK_DV = triton.next_power_of_2(Lv)
@@ -661,20 +766,21 @@ def _decode_softmax_reducev_fwd(
         extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
 
     grid = (batch, head_num)
-    _fwd_kernel_stage2[grid](
-        logits,
-        o,
-        lse,
-        b_seq_len,
-        logits.stride(0),
-        logits.stride(1),
-        logits.stride(2),
-        o.stride(0),
-        o.stride(1),
-        lse.stride(0),
+    return grid, dict(
+        Mid_O=logits,
+        o=o,
+        lse=lse,
+        B_Seqlen=b_seq_len,
+        stride_mid_ob=logits.stride(0),
+        stride_mid_oh=logits.stride(1),
+        stride_mid_os=logits.stride(2),
+        stride_obs=o.stride(0),
+        stride_oh=o.stride(1),
+        stride_lse_bs=lse.stride(0),
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         BLOCK_DV=BLOCK_DV,
         Lv=Lv,
+        SLIDING_WINDOW=sliding_window,
         num_warps=4,
         num_stages=2,
         **extra_kargs,
@@ -696,6 +802,7 @@ def decode_attention_fwd_normal(
     logit_cap=0.0,
     k_scale=None,
     v_scale=None,
+    sliding_window=0,
 ):
     _decode_att_m_fwd(
         q,
@@ -710,9 +817,10 @@ def decode_attention_fwd_normal(
         logit_cap,
         k_scale,
         v_scale,
+        sliding_window=sliding_window,
     )
     _decode_softmax_reducev_fwd(
-        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
+        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits, sliding_window
     )
 
 
@@ -732,6 +840,7 @@ def decode_attention_fwd_grouped(
     k_scale=None,
     v_scale=None,
     is_mla=False,
+    sliding_window=0,
 ):
     _decode_grouped_att_m_fwd(
         q,
@@ -747,9 +856,10 @@ def decode_attention_fwd_grouped(
         k_scale,
         v_scale,
         is_mla=is_mla,
+        sliding_window=sliding_window,
     )
     _decode_softmax_reducev_fwd(
-        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
+        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits, sliding_window
     )
 
 
@@ -769,8 +879,11 @@ def decode_attention_fwd(
     k_scale=None,
     v_scale=None,
     is_mla=False,
+    sliding_window: int | None = None,
 ):
+    """`sliding_window` limits each row to its last `sliding_window` keys."""
     assert num_kv_splits == attn_logits.shape[2]
+    sliding_window = sliding_window or 0
 
     if k_scale is None:
         k_scale = torch.tensor(1.0, dtype=torch.float32, device=q.device)
@@ -796,6 +909,7 @@ def decode_attention_fwd(
             logit_cap,
             k_scale,
             v_scale,
+            sliding_window=sliding_window,
         )
     else:
         # GQA/MQA/MLA
@@ -815,4 +929,732 @@ def decode_attention_fwd(
             k_scale,
             v_scale,
             is_mla=is_mla,
+            sliding_window=sliding_window,
         )
+
+
+# ---------------------------------------------------------------------------
+# Folded causal verify (MLA, single latent KV head).
+#
+# One stage-1 program owns (request, row block, split). The rows of a request
+# are the flattened (verify token t, head h) pairs r = t * H + h, so a program
+# loads each KV tile of the request once for BLOCK_H rows and applies the
+# causal limit lim_r = min(L - qlen + 1 + t_r, L_real) per row. Splits
+# partition [0, max_r lim_r) identically in both stages. Partials and the LSE
+# are kept in the log2 domain inside the workspace; the final LSE is natural.
+# With a single split, stage 1 writes o / lse directly and stage 2 is skipped.
+# ---------------------------------------------------------------------------
+
+_LOG2E = 1.4426950408889634
+_LN2 = tl.constexpr(0.6931471805599453)
+
+
+@triton.jit
+def _verify_split_len(
+    L_split,
+    NUM_KV_SPLITS,
+    SPLIT_ALIGN: tl.constexpr,
+    MIN_SPLIT_LEN: tl.constexpr,
+):
+    # NUM_KV_SPLITS is a static upper bound (sized for cudagraphs); short
+    # requests use fewer, longer splits so tiny splits do not dominate.
+    per = tl.maximum(tl.cdiv(L_split, NUM_KV_SPLITS), MIN_SPLIT_LEN)
+    return tl.cdiv(per, SPLIT_ALIGN) * SPLIT_ALIGN
+
+
+@triton.jit
+def _verify_tile_off(
+    pt,
+    start_n,
+    split_end,
+    stride_buf_kpbs,
+    stride_buf_kbs,
+    BLOCK_N: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+):
+    # Row offsets of keys [start_n, start_n + BLOCK_N); masked keys read
+    # nothing, so a tile past split_end is free.
+    offs_n = start_n + tl.arange(0, BLOCK_N)
+    mask_n = offs_n < split_end
+    kv_page_number = tl.load(pt + offs_n // PAGE_SIZE, mask=mask_n, other=0).to(
+        tl.int64
+    )  # page_number * page stride overflows int32
+    return kv_page_number * stride_buf_kpbs + (offs_n % PAGE_SIZE) * stride_buf_kbs
+
+
+@triton.jit
+def _verify_load_tile_qsplit(
+    K_Buffer,
+    kv_off,
+    mask_n,
+    offs_d0,
+    offs_d,
+    offs_dpe,
+    HALF: tl.constexpr,
+    BLOCK_DPE: tl.constexpr,
+):
+    # [HALF, N] K halves (QK operands), [N, 2 * HALF] V (PV operand, loaded
+    # in its own layout) and the [DPE, N] rope part.
+    k0 = tl.load(
+        K_Buffer + kv_off[None, :] + offs_d0[:, None], mask=mask_n[None, :], other=0.0
+    )
+    k1 = tl.load(
+        K_Buffer + kv_off[None, :] + HALF + offs_d0[:, None],
+        mask=mask_n[None, :],
+        other=0.0,
+    )
+    v = tl.load(
+        K_Buffer + kv_off[:, None] + offs_d[None, :], mask=mask_n[:, None], other=0.0
+    )
+    if BLOCK_DPE > 0:
+        kpe = tl.load(
+            K_Buffer + kv_off[None, :] + offs_dpe[:, None],
+            mask=mask_n[None, :],
+            other=0.0,
+        )
+    else:
+        kpe = k0
+    return k0, k1, v, kpe
+
+
+# Launch-varying ints are not specialized, so serving reuses the variants
+# compiled by warmup_decode_attention_fwd_verify.
+@triton.jit(
+    do_not_specialize=["stride_mid_ob", "stride_mid_oh", "BATCH", "NUM_KV_SPLITS"]
+)
+def _fwd_verify_kernel_stage1(
+    Q,
+    K_Buffer,
+    sm_scale_log2,
+    Req_to_tokens,
+    B_Seqlen,
+    Real_Seqlen,
+    Att_Out,
+    Out,
+    Lse,
+    stride_req_to_tokens_b,
+    stride_qbs,
+    stride_qh,
+    stride_buf_kpbs,
+    stride_buf_kbs,
+    stride_mid_ob,
+    stride_mid_oh,
+    stride_mid_os,
+    stride_obs,
+    stride_oh,
+    stride_lse_bs,
+    stride_lse_h,
+    k_scale,
+    BATCH,
+    QLEN: tl.constexpr,
+    NUM_HEADS: tl.constexpr,
+    HAS_REAL: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    BLOCK_DPE: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    NUM_KV_SPLITS,
+    SPLIT_ALIGN: tl.constexpr,
+    MIN_SPLIT_LEN: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    Lv: tl.constexpr,
+    QSPLIT: tl.constexpr,
+    SINGLE: tl.constexpr,
+):
+    # 1D grid ordered (split, request, row block), row blocks fastest: the row
+    # blocks of one request run back to back and share its KV tiles through
+    # L2. The row-block count is constexpr so the decode needs no runtime
+    # division by it.
+    NUM_ROW_BLOCKS: tl.constexpr = (QLEN * NUM_HEADS + BLOCK_H - 1) // BLOCK_H
+    pid = tl.program_id(0)
+    row_block = pid % NUM_ROW_BLOCKS
+    group = pid // NUM_ROW_BLOCKS
+    cur_batch = group % BATCH
+    split_kv_id = group // BATCH
+
+    rows = row_block * BLOCK_H + tl.arange(0, BLOCK_H)
+    row_valid = rows < QLEN * NUM_HEADS
+    tok = rows // NUM_HEADS
+    head = rows % NUM_HEADS
+
+    seq_len = tl.load(B_Seqlen + cur_batch)
+    L_cap = seq_len
+    if HAS_REAL:
+        L_cap = tl.minimum(seq_len, tl.load(Real_Seqlen + cur_batch))
+    L_cap = tl.maximum(L_cap, 0)
+    lim = tl.minimum(seq_len - QLEN + 1 + tok, L_cap)
+    lim = tl.where(row_valid, tl.maximum(lim, 0), 0)
+
+    per_split = _verify_split_len(L_cap, NUM_KV_SPLITS, SPLIT_ALIGN, MIN_SPLIT_LEN)
+    split_start = per_split * split_kv_id
+    split_end = tl.minimum(split_start + per_split, tl.max(lim, 0))
+
+    # SINGLE (num_kv_splits == 1): o / lse are written here, rows without keys
+    # get o = 0, lse = -inf, and stage 2 is not launched.
+    if (split_end > split_start) | SINGLE:
+        q_row = cur_batch.to(tl.int64) * QLEN + tok
+        offs_d = tl.arange(0, BLOCK_DMODEL)
+        offs_q = q_row[:, None] * stride_qbs + head[:, None] * stride_qh
+        HALF: tl.constexpr = BLOCK_DMODEL // 2
+        offs_d0 = tl.arange(0, HALF)
+        if QSPLIT:
+            # Two half-width Q tiles: halves the LDS scratch of the Q layout
+            # conversion at large BLOCK_H.
+            q = tl.load(
+                Q + offs_q + offs_d0[None, :], mask=row_valid[:, None], other=0.0
+            )
+            q1 = tl.load(
+                Q + offs_q + HALF + offs_d0[None, :],
+                mask=row_valid[:, None],
+                other=0.0,
+            )
+        else:
+            q = tl.load(
+                Q + offs_q + offs_d[None, :],
+                mask=row_valid[:, None],
+                other=0.0,
+            )
+        if BLOCK_DPE > 0:
+            offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
+            qpe = tl.load(
+                Q + offs_q + offs_dpe[None, :],
+                mask=row_valid[:, None],
+                other=0.0,
+            )
+        else:
+            offs_dpe = offs_d0
+        row_end = tl.minimum(lim, split_end)
+
+        e_max = tl.zeros([BLOCK_H], dtype=tl.float32) - float("inf")
+        e_sum = tl.zeros([BLOCK_H], dtype=tl.float32)
+        acc = tl.zeros([BLOCK_H, BLOCK_DMODEL], dtype=tl.float32)
+        ks = tl.load(k_scale)
+        pt = Req_to_tokens + stride_req_to_tokens_b * cur_batch.to(tl.int64)
+        if QSPLIT:
+            # Software pipeline: the next K/V tile is loaded before this
+            # tile's math and the block table is read two tiles ahead, so
+            # global latency overlaps the MFMAs (one wave per SIMD here).
+            nkv_off = _verify_tile_off(
+                pt,
+                split_start,
+                split_end,
+                stride_buf_kpbs,
+                stride_buf_kbs,
+                BLOCK_N,
+                PAGE_SIZE,
+            )
+            nmask = split_start + tl.arange(0, BLOCK_N) < split_end
+            nk0, nk1, nv, nkpe = _verify_load_tile_qsplit(
+                K_Buffer, nkv_off, nmask, offs_d0, offs_d, offs_dpe, HALF, BLOCK_DPE
+            )
+            nkv_off = _verify_tile_off(
+                pt,
+                split_start + BLOCK_N,
+                split_end,
+                stride_buf_kpbs,
+                stride_buf_kbs,
+                BLOCK_N,
+                PAGE_SIZE,
+            )
+            for start_n in tl.range(split_start, split_end, BLOCK_N):
+                offs_n = start_n + tl.arange(0, BLOCK_N)
+                k0 = nk0
+                k1 = nk1
+                v = nv
+                kpe = nkpe
+                nmask = offs_n + BLOCK_N < split_end
+                if PAGE_SIZE < 8 and not K_Buffer.dtype.element_ty.is_fp8():
+                    # Two-tile block-table read-ahead spills VGPRs here.
+                    nkv_off = _verify_tile_off(
+                        pt,
+                        start_n + BLOCK_N,
+                        split_end,
+                        stride_buf_kpbs,
+                        stride_buf_kbs,
+                        BLOCK_N,
+                        PAGE_SIZE,
+                    )
+                nk0, nk1, nv, nkpe = _verify_load_tile_qsplit(
+                    K_Buffer,
+                    nkv_off,
+                    nmask,
+                    offs_d0,
+                    offs_d,
+                    offs_dpe,
+                    HALF,
+                    BLOCK_DPE,
+                )
+                nkv_off = _verify_tile_off(
+                    pt,
+                    start_n + 2 * BLOCK_N,
+                    split_end,
+                    stride_buf_kpbs,
+                    stride_buf_kbs,
+                    BLOCK_N,
+                    PAGE_SIZE,
+                )
+                if v.dtype.is_fp8():
+                    k0 = k0.to(tl.float32) * ks
+                    k1 = k1.to(tl.float32) * ks
+                    v = v.to(tl.float32) * ks
+                    kpe = kpe.to(tl.float32) * ks
+                qk = tl.dot(q, k0.to(q.dtype))
+                qk = tl.dot(q1, k1.to(q.dtype), qk)
+                if BLOCK_DPE > 0:
+                    qk = tl.dot(qpe, kpe.to(qpe.dtype), qk)
+                qk *= sm_scale_log2
+                qk = tl.where(offs_n[None, :] < row_end[:, None], qk, float("-inf"))
+
+                n_e_max = tl.maximum(tl.max(qk, 1), e_max)
+                safe_max = tl.where(n_e_max == float("-inf"), 0.0, n_e_max)
+                re_scale = tl.exp2(e_max - safe_max)
+                p = tl.exp2(qk - safe_max[:, None])
+                acc = acc * re_scale[:, None] + tl.dot(p.to(q.dtype), v.to(q.dtype))
+                e_sum = e_sum * re_scale + tl.sum(p, 1)
+                e_max = n_e_max
+        else:
+            for start_n in tl.range(split_start, split_end, BLOCK_N):
+                offs_n = start_n + tl.arange(0, BLOCK_N)
+                mask_n = offs_n < split_end
+                kv_off = _verify_tile_off(
+                    pt,
+                    start_n,
+                    split_end,
+                    stride_buf_kpbs,
+                    stride_buf_kbs,
+                    BLOCK_N,
+                    PAGE_SIZE,
+                )
+                k = tl.load(
+                    K_Buffer + kv_off[None, :] + offs_d[:, None],
+                    mask=mask_n[None, :],
+                    other=0.0,
+                )
+                if k.dtype.is_fp8():
+                    k = (k.to(tl.float32) * ks).to(q.dtype)
+                k = k.to(q.dtype)
+                qk = tl.dot(q, k)
+                # MLA reads V from the latent K tile.
+                v = tl.trans(k)
+                if BLOCK_DPE > 0:
+                    kpe = tl.load(
+                        K_Buffer + kv_off[None, :] + offs_dpe[:, None],
+                        mask=mask_n[None, :],
+                        other=0.0,
+                    )
+                    if kpe.dtype.is_fp8():
+                        kpe = (kpe.to(tl.float32) * ks).to(qpe.dtype)
+                    qk += tl.dot(qpe, kpe.to(qpe.dtype))
+                qk *= sm_scale_log2
+                qk = tl.where(offs_n[None, :] < row_end[:, None], qk, float("-inf"))
+
+                n_e_max = tl.maximum(tl.max(qk, 1), e_max)
+                safe_max = tl.where(n_e_max == float("-inf"), 0.0, n_e_max)
+                re_scale = tl.exp2(e_max - safe_max)
+                p = tl.exp2(qk - safe_max[:, None])
+                acc = acc * re_scale[:, None] + tl.dot(p.to(q.dtype), v)
+                e_sum = e_sum * re_scale + tl.sum(p, 1)
+                e_max = n_e_max
+
+        has = e_sum > 0.0
+        denom = tl.where(has, e_sum, 1.0)
+        if SINGLE:
+            tl.store(
+                Out
+                + q_row[:, None] * stride_obs
+                + head[:, None] * stride_oh
+                + offs_d[None, :],
+                (acc / denom[:, None]).to(Out.dtype.element_ty),
+                mask=row_valid[:, None],
+            )
+            tl.store(
+                Lse + q_row * stride_lse_bs + head * stride_lse_h,
+                tl.where(has, (e_max + tl.log2(denom)) * _LN2, float("-inf")),
+                mask=row_valid,
+            )
+        else:
+            offs_mid = (
+                q_row * stride_mid_ob
+                + head * stride_mid_oh
+                + split_kv_id * stride_mid_os
+            )
+            tl.store(
+                Att_Out + offs_mid[:, None] + offs_d[None, :],
+                acc / denom[:, None],
+                mask=row_valid[:, None],
+            )
+            # The LSE is computed after the tile store: the reverse order
+            # measured ~6% slower on gfx942 (16,8,32,16384).
+            tl.store(
+                Att_Out + offs_mid + Lv,
+                tl.where(has, e_max + tl.log2(denom), float("-inf")),
+                mask=row_valid,
+            )
+
+
+@triton.jit(do_not_specialize=["stride_mid_ob", "stride_mid_oh", "NUM_KV_SPLITS"])
+def _fwd_verify_kernel_stage2(
+    Mid_O,
+    o,
+    lse,
+    B_Seqlen,
+    Real_Seqlen,
+    stride_mid_ob,
+    stride_mid_oh,
+    stride_mid_os,
+    stride_obs,
+    stride_oh,
+    stride_lse_bs,
+    stride_lse_h,
+    QLEN: tl.constexpr,
+    HAS_REAL: tl.constexpr,
+    NUM_KV_SPLITS,
+    SPLIT_ALIGN: tl.constexpr,
+    MIN_SPLIT_LEN: tl.constexpr,
+    BLOCK_S: tl.constexpr,
+    BLOCK_DV: tl.constexpr,
+    Lv: tl.constexpr,
+):
+    # One (row, head) per program; BLOCK_S splits are combined per step so
+    # the loads of a step are independent (long split lists stay cheap).
+    q_row = tl.program_id(0)
+    head = tl.program_id(1)
+    cur_batch = q_row // QLEN
+    tok = q_row % QLEN
+
+    seq_len = tl.load(B_Seqlen + cur_batch)
+    L_cap = seq_len
+    if HAS_REAL:
+        L_cap = tl.minimum(seq_len, tl.load(Real_Seqlen + cur_batch))
+    L_cap = tl.maximum(L_cap, 0)
+    lim = tl.maximum(tl.minimum(seq_len - QLEN + 1 + tok, L_cap), 0)
+    per_split = _verify_split_len(L_cap, NUM_KV_SPLITS, SPLIT_ALIGN, MIN_SPLIT_LEN)
+    num_active = tl.cdiv(lim, per_split)
+
+    offs_d = tl.arange(0, BLOCK_DV)
+    offs_s = tl.arange(0, BLOCK_S)
+    base = q_row.to(tl.int64) * stride_mid_ob + head * stride_mid_oh
+
+    e_max = -float("inf")
+    e_sum = 0.0
+    acc = tl.zeros([BLOCK_DV], dtype=tl.float32)
+    for s0 in range(0, num_active, BLOCK_S):
+        sid = s0 + offs_s
+        mask_s = sid < num_active
+        off = base + sid * stride_mid_os
+        tlogic = tl.load(Mid_O + off + Lv, mask=mask_s, other=float("-inf"))
+        tv = tl.load(
+            Mid_O + off[:, None] + offs_d[None, :], mask=mask_s[:, None], other=0.0
+        )
+        n_e_max = tl.maximum(tl.max(tlogic, 0), e_max)
+        old_scale = tl.exp2(e_max - n_e_max)
+        w = tl.exp2(tlogic - n_e_max)
+        acc = acc * old_scale + tl.sum(w[:, None] * tv, 0)
+        e_sum = e_sum * old_scale + tl.sum(w, 0)
+        e_max = n_e_max
+
+    has = e_sum > 0.0
+    denom = tl.where(has, e_sum, 1.0)
+    tl.store(
+        o + q_row.to(tl.int64) * stride_obs + head * stride_oh + offs_d,
+        (acc / denom).to(o.dtype.element_ty),
+    )
+    tl.store(
+        lse + q_row.to(tl.int64) * stride_lse_bs + head * stride_lse_h,
+        tl.where(has, (e_max + tl.log2(denom)) * _LN2, float("-inf")),
+    )
+
+
+_VERIFY_BASE_CONFIG: dict[str, Any] = dict(
+    BLOCK_N=32,
+    num_warps=4,
+    num_stages=1,
+    waves_per_eu=1,
+    matrix_instr_nonkdim=16,
+    kpack=2,
+    SPLIT_ALIGN=16,
+    MIN_SPLIT_LEN=128,
+    QSPLIT=False,
+    S2_BLOCK_S=16,
+    s2_num_warps=4,
+)
+
+
+def verify_row_blocks(qlen: int, num_heads: int, block_h: int) -> int:
+    return triton.cdiv(qlen * num_heads, block_h)
+
+
+def verify_num_kv_splits(
+    max_seq_len: int,
+    batch: int,
+    qlen: int,
+    num_heads: int,
+    sm_count: int,
+    max_splits: int = 8,
+) -> int:
+    """Static upper bound on KV splits (safe to bake into a cudagraph).
+
+    The kernel splits each request's own length into
+    max(cdiv(L, splits), MIN_SPLIT_LEN) chunks, so this only caps the split
+    count. The config's `occupancy` is the number of resident stage-1
+    programs per CU. If one split of every request fits in a single dispatch
+    round, use as many splits as fit in that round; otherwise pick
+    n <= max_splits minimising rounds(n) / n (the idle tail of the last round),
+    preferring fewer splits within 5% of the best.
+    """
+    cfg = select_verify_config(batch, qlen, num_heads)
+    programs_per_split = max(1, batch) * verify_row_blocks(
+        qlen, num_heads, cfg["BLOCK_H"]
+    )
+    ideal = triton.cdiv(max(1, max_seq_len), cfg["MIN_SPLIT_LEN"])
+    slots = max(1, int(cfg["occupancy"] * sm_count))
+    if programs_per_split <= slots:
+        n = slots // programs_per_split
+    else:
+        cost = [
+            (triton.cdiv(n * programs_per_split, slots) / n, n)
+            for n in range(1, max(1, min(ideal, max_splits)) + 1)
+        ]
+        best = min(c for c, _ in cost)
+        n = min(n for c, n in cost if c <= best * 1.05)
+    return max(1, min(ideal, n, sm_count * 2))
+
+
+def decode_attention_fwd_verify(
+    q,
+    k_buffer,
+    v_buffer,
+    o,
+    lse,
+    req_to_token,
+    seq_lens,
+    real_seq_lens,
+    qlen,
+    attn_logits,
+    num_kv_splits,
+    sm_scale,
+    page_size,
+    k_scale=None,
+):
+    """Causal MLA verify over a per-request block table.
+
+    Args:
+        q (torch.Tensor): [B * qlen, H, Lk] queries, verify tokens of a request
+            contiguous.
+        k_buffer (torch.Tensor): paged latent cache, [num_pages, page_size, 1, Lk]
+            (or 3D [num_pages * page_size, 1, Lk]).
+        v_buffer (torch.Tensor): k_buffer[..., :Lv] (V is read from K; only its
+            width is used).
+        o (torch.Tensor): [B * qlen, H, Lv] output.
+        lse (torch.Tensor): [B * qlen, H] fp32 natural-log LSE (-inf for rows
+            with no key).
+        req_to_token (torch.Tensor): [B, max_pages] per-request block table
+            (not repeated).
+        seq_lens (torch.Tensor): [B] int32 kernel KV lengths L.
+        real_seq_lens (torch.Tensor | None): [B] int32 or None; row limit is
+            max(min(L - qlen + 1 + t, L_real), 0).
+        qlen (int): verify tokens per request.
+        attn_logits (torch.Tensor | None): fp32 workspace with >= B * qlen * H *
+            num_kv_splits * (Lv + 1) elements, laid out
+            [B * qlen, H, num_kv_splits, Lv + 1].
+            Unused, and may be None, when num_kv_splits is 1.
+        num_kv_splits (int): static cap on KV splits per request (see
+            verify_num_kv_splits); shorter requests use fewer, longer splits.
+        sm_scale (float): softmax scale.
+        page_size (int): tokens per KV cache page.
+        k_scale (torch.Tensor | None): scalar tensor dequantizing an FP8 cache;
+            ignored for bf16.
+
+    """
+    cfg = select_verify_config(q.shape[0] // qlen, qlen, q.shape[1])
+    Lk = k_buffer.shape[-1]
+    Lv = v_buffer.shape[-1]
+    assert k_buffer.shape[-2] == 1, "verify path expects a single latent KV head"
+    num_rows, num_heads = q.shape[0], q.shape[1]
+    assert num_rows % qlen == 0
+    batch = num_rows // qlen
+    if num_kv_splits == 1:
+        # Stage 1 writes o / lse directly; o only stands in for the pointer.
+        attn_logits, mid_strides = o, (0, 0, 0)
+    else:
+        assert attn_logits.shape[-2] == num_kv_splits
+        mid_strides = attn_logits.stride()[:3]
+    if k_scale is None:
+        k_scale = torch.ones((), dtype=torch.float32, device=q.device)
+    BLOCK_DMODEL = triton.next_power_of_2(Lv)
+    BLOCK_DPE = triton.next_power_of_2(Lk - Lv) if Lk > Lv else 0
+    assert Lv == BLOCK_DMODEL and Lk == BLOCK_DMODEL + BLOCK_DPE
+    has_real = real_seq_lens is not None
+    real = real_seq_lens if has_real else seq_lens
+
+    hip_kw = {}
+    if is_hip_:
+        hip_kw = dict(
+            waves_per_eu=cfg["waves_per_eu"],
+            matrix_instr_nonkdim=cfg["matrix_instr_nonkdim"],
+            kpack=cfg["kpack"],
+        )
+    grid = (verify_row_blocks(qlen, num_heads, cfg["BLOCK_H"]) * batch * num_kv_splits,)
+    _fwd_verify_kernel_stage1[grid](
+        q,
+        k_buffer,
+        sm_scale * _LOG2E,
+        req_to_token,
+        seq_lens,
+        real,
+        attn_logits,
+        o,
+        lse,
+        req_to_token.stride(0),
+        q.stride(0),
+        q.stride(1),
+        _page_stride(k_buffer, page_size),
+        k_buffer.stride(-3),
+        *mid_strides,
+        o.stride(0),
+        o.stride(1),
+        lse.stride(0),
+        lse.stride(1),
+        k_scale,
+        batch,
+        QLEN=qlen,
+        NUM_HEADS=num_heads,
+        HAS_REAL=has_real,
+        BLOCK_DMODEL=BLOCK_DMODEL,
+        BLOCK_DPE=BLOCK_DPE,
+        BLOCK_N=cfg["BLOCK_N"],
+        BLOCK_H=cfg["BLOCK_H"],
+        NUM_KV_SPLITS=num_kv_splits,
+        SPLIT_ALIGN=cfg["SPLIT_ALIGN"],
+        MIN_SPLIT_LEN=cfg["MIN_SPLIT_LEN"],
+        PAGE_SIZE=page_size,
+        Lv=Lv,
+        QSPLIT=bool(cfg["QSPLIT"]),
+        SINGLE=num_kv_splits == 1,
+        num_warps=cfg["num_warps"],
+        num_stages=cfg["num_stages"],
+        **hip_kw,
+    )
+    if num_kv_splits == 1:
+        return  # stage 1 wrote o / lse
+    _fwd_verify_kernel_stage2[(num_rows, num_heads)](
+        attn_logits,
+        o,
+        lse,
+        seq_lens,
+        real,
+        attn_logits.stride(0),
+        attn_logits.stride(1),
+        attn_logits.stride(2),
+        o.stride(0),
+        o.stride(1),
+        lse.stride(0),
+        lse.stride(1),
+        QLEN=qlen,
+        HAS_REAL=has_real,
+        NUM_KV_SPLITS=num_kv_splits,
+        SPLIT_ALIGN=cfg["SPLIT_ALIGN"],
+        MIN_SPLIT_LEN=cfg["MIN_SPLIT_LEN"],
+        BLOCK_S=cfg["S2_BLOCK_S"],
+        BLOCK_DV=triton.next_power_of_2(Lv),
+        Lv=Lv,
+        num_warps=cfg["s2_num_warps"],
+        num_stages=1,
+    )
+
+
+_VERIFY_SMALL_CONFIG: dict[str, Any] = dict(BLOCK_H=32, kpack=1, occupancy=2.0)
+# 64-row tiles, Q and the QK operand split in two 256-wide halves (QSPLIT,
+# which also enables the K/V prefetch), 32 keys per step on 4 warps. 8 warps
+# cap VGPRs at 256 and spill or idle MFMA rows here.
+_VERIFY_LARGE_CONFIG: dict[str, Any] = dict(BLOCK_H=64, QSPLIT=True, occupancy=1.0)
+
+
+_VERIFY_SMALL_MAX_ROWS = 640
+
+
+def select_verify_config(batch: int, qlen: int, num_heads: int) -> dict[str, Any]:
+    """Launch config from MI300X (gfx942) sweeps, bf16, page 16.
+
+    Few rows (B * qlen * H <= 640): 32-row tiles with more KV splits fill the
+    GPU. Otherwise 64-row tiles (Q split in two 256-wide halves, next K/V
+    tile prefetched) halve the KV re-reads per request.
+    """
+    cfg = dict(_VERIFY_BASE_CONFIG)
+    if batch * qlen * num_heads <= _VERIFY_SMALL_MAX_ROWS:
+        cfg.update(_VERIFY_SMALL_CONFIG)
+    else:
+        cfg.update(_VERIFY_LARGE_CONFIG)
+    return cfg
+
+
+def _storage_view(t, shape):
+    """Contiguous `shape` over `t`'s storage, or a new tensor if too small."""
+    if math.prod(shape) > t.untyped_storage().nbytes() // t.element_size():
+        return t.new_empty(shape)
+    strides = [1]
+    for size in reversed(shape[1:]):
+        strides.insert(0, strides[0] * size)
+    return torch.as_strided(t, shape, strides, 0)
+
+
+def warmup_decode_attention_fwd_verify(
+    q,
+    k_buffer,
+    o,
+    lse,
+    req_to_token,
+    has_real,
+    qlens,
+    attn_logits,
+    sm_scale,
+    page_size,
+    k_scale=None,
+):
+    """Compile every launch variant serving can reach for these tensors.
+
+    A launch specializes on qlen, the row-count config and a single split, but
+    graph capture and profiling only run the full verify length. Each variant
+    runs once on scratch tensors with the strides of the real ones; the split
+    scratch reuses attn_logits' storage, whose size the launch specializes on.
+    """
+    num_heads, Lv = q.shape[1], o.shape[-1]
+    if attn_logits is None:
+        attn_logits = q.new_empty(0, dtype=torch.float32)
+
+    def scratch(t, rows):
+        return torch.empty_strided(
+            (rows, *t.shape[1:]), t.stride(), dtype=t.dtype, device=t.device
+        )
+
+    for qlen in qlens:
+        for batch in {1, _VERIFY_SMALL_MAX_ROWS // (qlen * num_heads) + 1}:
+            rows = batch * qlen
+            seq_lens = torch.full((batch,), qlen, dtype=torch.int32, device=q.device)
+            block_table = torch.empty_strided(
+                (batch, req_to_token.shape[1]),
+                req_to_token.stride(),
+                dtype=req_to_token.dtype,
+                device=req_to_token.device,
+            ).zero_()
+            for num_kv_splits in (1, 2):
+                decode_attention_fwd_verify(
+                    scratch(q, rows).zero_(),
+                    k_buffer,
+                    k_buffer[..., :Lv],
+                    scratch(o, rows),
+                    scratch(lse, rows),
+                    block_table,
+                    seq_lens,
+                    seq_lens if has_real else None,
+                    qlen,
+                    None
+                    if num_kv_splits == 1
+                    else _storage_view(
+                        attn_logits, (rows, num_heads, num_kv_splits, Lv + 1)
+                    ),
+                    num_kv_splits,
+                    sm_scale,
+                    page_size,
+                    k_scale=k_scale,
+                )

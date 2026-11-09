@@ -12,7 +12,12 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
+    is_flashinfer_moe_ep_backend,
+)
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    FLASHINFER_MOE_EP_MXFP4_BACKENDS,
     PACKED_MXFP4_CANDIDATE_BACKENDS,
     convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
@@ -22,16 +27,29 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    move_parameter,
+    replace_parameter,
+    set_weight_attrs,
+)
 
 
 class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
     def __init__(self, moe):
         super().__init__(moe)
         self.group_size = 32
-        self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-            moe, candidates=PACKED_MXFP4_CANDIDATE_BACKENDS
-        )
+        if is_flashinfer_moe_ep_backend(moe.moe_backend):
+            self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(moe)
+        else:
+            self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(
+                moe, candidates=PACKED_MXFP4_CANDIDATE_BACKENDS
+            )
+        assert experts_cls is not None
+        self.experts_cls = experts_cls
+
+    @property
+    def supports_eplb(self) -> bool:
+        return self.mxfp4_backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS
 
     def create_weights(
         self,
@@ -114,19 +132,8 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        # NOTE(rob): wN_weight_packed -> wN_weight is because ModularKernelMethod
-        # requires this naming convention. However, the name change breaks
-        # reloading because the state dict no longer matches disk. Once we
-        # remove MKM, we should revert this change to ensure compatibility.
-        layer.w13_weight = torch.nn.Parameter(
-            layer.w13_weight_packed.data, requires_grad=False
-        )
-        delattr(layer, "w13_weight_packed")
-
-        layer.w2_weight = torch.nn.Parameter(
-            layer.w2_weight_packed.data, requires_grad=False
-        )
-        delattr(layer, "w2_weight_packed")
+        move_parameter(layer, "w13_weight_packed", "w13_weight")
+        move_parameter(layer, "w2_weight_packed", "w2_weight")
 
         w13, w2, w13_scale, w2_scale, _, _ = convert_weight_to_mxfp4_moe_kernel_format(
             mxfp4_backend=self.mxfp4_backend,
@@ -150,6 +157,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             mxfp4_backend=self.mxfp4_backend,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def apply(
@@ -160,7 +168,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             x,

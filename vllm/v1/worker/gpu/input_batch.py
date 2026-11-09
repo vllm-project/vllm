@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -11,16 +12,16 @@ from vllm.utils import random_uuid
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.attn_utils import FastPrefillBatchMetadata
     from vllm.v1.worker.gpu.block_table import BlockTables
+    from vllm.v1.worker.gpu.pcp_manager import PCPBatchMetadata
+    from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
+        AdmittedDraftCounts,
+    )
 
 
 class InputBuffers:
-    def __init__(
-        self,
-        max_num_reqs: int,
-        max_num_tokens: int,
-        device: torch.device,
-    ):
+    def __init__(self, max_num_reqs: int, max_num_tokens: int, device: torch.device):
         self.max_num_reqs = max_num_reqs
         self.max_num_tokens = max_num_tokens
         self.device = device
@@ -84,6 +85,8 @@ class InputBatch:
     is_prefilling_np: np.ndarray
     # == np.any(is_prefilling_np)
     has_prefill: bool
+    # No prefills, or only prefill rows that run as decodes.
+    decode_graph_eligible: bool
 
     # [num_tokens_after_padding]
     input_ids: torch.Tensor
@@ -104,10 +107,29 @@ class InputBatch:
     # [num_reqs] per-request prompt length, only populated for R-SWA.
     prompt_lens: torch.Tensor | None
 
+    # [num_reqs] only populated for non-dummy pipeline-parallel batches.
+    max_seq_len_np: np.ndarray | None = None
+
     # Longest query the batch may contain. Set when a cudagraph descriptor promises
     # a query length this batch's own split does not reach, so attention metadata
     # stays valid for every replay the graph serves.
     max_query_len: int | None = None
+
+    # Arms the KV-sharing fast prefill path for this step. Absent for dummy
+    # (cudagraph capture) batches, which run the KV-sharing layers in full.
+    fast_prefill: "FastPrefillBatchMetadata | None" = None
+
+    # Set only on a PCP rank-local batch.
+    pcp: "PCPBatchMetadata | None" = None
+
+    # [num_reqs] prefilling rows that schedule one new prompt token (excluding
+    # drafts) over existing context and so compute exactly like decodes.
+    # None if there are no prefills.
+    prefill_runs_as_decode_np: np.ndarray | None = None
+
+    # [num_reqs] admitted draft counts in flight to the host. Set only under
+    # adaptive verification with batch-sharded sampling, when the budget binds.
+    num_admitted_draft_tokens: "AdmittedDraftCounts | None" = None
 
     @classmethod
     def make_dummy(
@@ -116,6 +138,7 @@ class InputBatch:
         num_tokens: int,
         input_buffers: InputBuffers,
         max_query_len: int | None = None,
+        is_padding: bool = True,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
@@ -159,7 +182,7 @@ class InputBatch:
         input_ids = input_buffers.input_ids[:num_tokens].zero_()
         positions = input_buffers.positions[:num_tokens].zero_()
 
-        input_buffers.is_padding[:num_tokens].fill_(True)
+        input_buffers.is_padding[:num_tokens].fill_(is_padding)
         is_padding = input_buffers.is_padding[:num_tokens]
 
         logits_indices = query_start_loc[1:] - 1
@@ -191,6 +214,8 @@ class InputBatch:
             num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
             is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
             has_prefill=False,
+            max_seq_len_np=None,
+            decode_graph_eligible=True,
             input_ids=input_ids,
             positions=positions,
             is_padding=is_padding,
@@ -209,9 +234,13 @@ def set_dummy_context(
     context_len: int,
     num_kv_blocks: int,
     max_model_len: int,
+    input_block_tables: Sequence[torch.Tensor] | None = None,
 ) -> None:
-    """Give each dummy request context_len of context, used when profiling step cost."""
-    if not block_tables.input_block_tables:
+    """Give each dummy request context_len of context, for profiling step cost
+    and for DCP FULL cudagraph capture."""
+    if input_block_tables is None:
+        input_block_tables = block_tables.input_block_tables
+    if not input_block_tables:
         # Attention-free models have no KV context to fabricate.
         return
     num_reqs = input_batch.num_reqs
@@ -232,17 +261,18 @@ def set_dummy_context(
     input_batch.positions.copy_(torch.from_numpy(local_pos + context_len))
 
     seq_len = context_len + query_len
-    for block_table, block_size, bpk in zip(
-        block_tables.input_block_tables,
-        block_tables.kernel_block_sizes,
-        block_tables.blocks_per_kv_block,
-    ):
+    for block_table, block_size in zip(input_block_tables, block_tables.block_sizes):
         num_blocks = min(cdiv(seq_len, block_size), block_table.shape[1])
         # Spans are disjoint until the pool runs out, then they wrap and share
         # blocks: profiling only needs the reads to be realistic, not distinct.
-        block_ids = torch.arange(
-            num_reqs * num_blocks, dtype=block_table.dtype, device=block_table.device
-        ) % (num_kv_blocks * bpk)
+        block_ids = (
+            torch.arange(
+                num_reqs * num_blocks,
+                dtype=block_table.dtype,
+                device=block_table.device,
+            )
+            % num_kv_blocks
+        )
         block_table[:num_reqs, :num_blocks] = block_ids.view(num_reqs, num_blocks)
 
 
@@ -461,11 +491,7 @@ def combine_sampled_and_draft_tokens(
     num_reqs = idx_mapping.shape[0]
     num_speculative_steps = draft_tokens.shape[-1]
 
-    logits_indices = torch.empty(
-        num_logits,
-        dtype=torch.int64,
-        device=input_ids.device,
-    )
+    logits_indices = torch.empty(num_logits, dtype=torch.int64, device=input_ids.device)
     _combine_sampled_and_draft_tokens_kernel[(num_reqs,)](
         input_ids,
         idx_mapping,
@@ -551,12 +577,22 @@ def _post_update_kernel(
     all_token_ids_ptr,
     all_token_ids_stride,
     total_len_ptr,
+    draft_tokens_ptr,
+    draft_tokens_out_ptr,
+    num_draft_tokens,
 ):
     req_id = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
     if req_state_idx < 0:
         # Filter rows with negative index entries.
         return
+
+    if draft_tokens_ptr is not None:
+        for i in range(num_draft_tokens):
+            token_id = tl.load(draft_tokens_ptr + req_id * num_draft_tokens + i)
+            tl.store(
+                draft_tokens_out_ptr + req_state_idx * num_draft_tokens + i, token_id
+            )
 
     total_len = tl.load(total_len_ptr + req_state_idx)
     num_sampled = tl.load(num_sampled_ptr + req_id)
@@ -618,8 +654,17 @@ def post_update(
     all_token_ids: torch.Tensor,
     # [max_num_reqs]
     total_len: torch.Tensor,
+    # [num_reqs, num_speculative_steps], contiguous
+    draft_tokens: torch.Tensor | None = None,
+    # [max_num_reqs, num_speculative_steps], contiguous; required with draft_tokens
+    draft_tokens_out: torch.Tensor | None = None,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
+    if draft_tokens is not None:
+        # The kernel uses num_speculative_steps as the row stride of both.
+        assert draft_tokens_out is not None
+        assert draft_tokens.shape[1] == draft_tokens_out.shape[1]
+        assert draft_tokens.is_contiguous() and draft_tokens_out.is_contiguous()
     _post_update_kernel[(num_reqs,)](
         idx_mapping,
         num_computed_tokens,
@@ -634,6 +679,9 @@ def post_update(
         all_token_ids,
         all_token_ids.stride(0),
         total_len,
+        draft_tokens,
+        draft_tokens_out,
+        draft_tokens.shape[1] if draft_tokens is not None else 0,
         num_warps=1,
     )
 

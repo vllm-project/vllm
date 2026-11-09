@@ -1,26 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Fused inverse RoPE + block-scaled FP8 quantization kernel for DeepseekV4 attention.
+"""Fused inverse RoPE + block-scaled FP8 quantization kernel for DeepseekV4 attention.
 
 Output scale format is pre-transformed (MN-major TMA-aligned; FP32 on SM90,
 INT32-packed UE8M0 on SM100) so fp8_einsum skips transform_sf_into_required_layout.
 """
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import WarmupChoices, kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
+
+
+def _heads_per_program(heads_per_group: int) -> int:
+    """Heads one program rotates and quantizes; they must share an output group.
+
+    One 512-dim head is only 1 KiB of bf16, so a program per (token, head) keeps
+    too few bytes in flight to saturate HBM on large prefills.
+    """
+    return math.gcd(heads_per_group, 4)
 
 
 class FusedInvRopeFP8QuantKernel(
@@ -32,149 +41,182 @@ class FusedInvRopeFP8QuantKernel(
         fp8_max: float
         quant_group_size: int
         chunks_per_head: int
-        rope_start: int
+        nope_dim: int
         half_rope: int
         tma_aligned_scales: bool
         launch_pdl: bool
+        quantize: bool
+        num_warps: int
 
     @staticmethod
     # scale_stride_k = align(num_tokens, 4) is only 4-aligned, so its Triton int
     # class varies with batch size; not specialized so one warmup key covers all
-    # (int64-cast, scalar addressing only, so perf-neutral).
+    # (int64-cast, so perf-neutral).
     @triton.jit(do_not_specialize=["num_tokens", "scale_stride_k"])
     def kernel(
         o_ptr,
         positions_ptr,
         cos_sin_cache_ptr,
-        fp8_ptr,
+        out_ptr,
         scale_ptr,
         num_tokens,
         heads_per_group: tl.constexpr,
         o_stride_token,
         o_stride_head,
         cache_stride_pos,
-        fp8_stride_group,
-        fp8_stride_token,
+        out_stride_group,
+        out_stride_token,
         scale_stride_group,
         scale_stride_k,
         fp8_max: tl.constexpr,
         eps: tl.constexpr,
         QUANT_GROUP_SIZE: tl.constexpr,
         CHUNKS_PER_HEAD: tl.constexpr,
-        ROPE_START: tl.constexpr,
+        NOPE_DIM: tl.constexpr,
         HALF_ROPE: tl.constexpr,
+        QUANTIZE: tl.constexpr,
         TMA_ALIGNED_SCALES: tl.constexpr,
+        BLOCK_H: tl.constexpr,
         launch_pdl: tl.constexpr,
     ):
         # Cast every stride to int64 — without this, Python-int strides are
         # inferred as int32 and `pid_token(int64) × stride(int32)` can lower to
         # int32 arithmetic, wrapping past 2³¹ for large prefill batches → IMA.
         pid_token = tl.program_id(0).to(tl.int64)
-        pid_gh = tl.program_id(1).to(tl.int64)
+        pid_hb = tl.program_id(1).to(tl.int64)
         o_stride_token = o_stride_token.to(tl.int64)
         o_stride_head = o_stride_head.to(tl.int64)
         cache_stride_pos = cache_stride_pos.to(tl.int64)
-        fp8_stride_group = fp8_stride_group.to(tl.int64)
-        fp8_stride_token = fp8_stride_token.to(tl.int64)
+        out_stride_group = out_stride_group.to(tl.int64)
+        out_stride_token = out_stride_token.to(tl.int64)
         scale_stride_group = scale_stride_group.to(tl.int64)
         scale_stride_k = scale_stride_k.to(tl.int64)
 
-        g = pid_gh // heads_per_group
-        head_in_group = pid_gh % heads_per_group
-        global_head = pid_gh
-        qb_start = head_in_group * CHUNKS_PER_HEAD
+        # This program handles BLOCK_H consecutive heads; BLOCK_H divides
+        # heads_per_group, so they all land in group g.
+        first_head = pid_hb * BLOCK_H
+        g = first_head // heads_per_group
+        head_in_group = first_head % heads_per_group + tl.arange(0, BLOCK_H)
         if launch_pdl:
             tl.extra.cuda.gdc_launch_dependents()
             tl.extra.cuda.gdc_wait()
         # Padding rows in the TMA-aligned scale buffer: fill with zero and skip quant.
         if pid_token >= num_tokens:
+            if not QUANTIZE:
+                return
             if TMA_ALIGNED_SCALES:
+                packed_offsets = tl.arange(0, CHUNKS_PER_HEAD // 4)
                 scale_addr = (
                     scale_ptr
                     + g * scale_stride_group
                     + pid_token
-                    + head_in_group * scale_stride_k
+                    + (
+                        head_in_group[:, None] * (CHUNKS_PER_HEAD // 4)
+                        + packed_offsets[None, :]
+                    )
+                    * scale_stride_k
                 )
-                tl.store(scale_addr, tl.zeros((), dtype=tl.int32))
+                tl.store(
+                    scale_addr,
+                    tl.zeros((BLOCK_H, CHUNKS_PER_HEAD // 4), dtype=tl.int32),
+                )
             else:
                 block_offsets = tl.arange(0, CHUNKS_PER_HEAD)
-                qb_indices = qb_start + block_offsets
                 scale_addrs = (
                     scale_ptr
                     + g * scale_stride_group
                     + pid_token
-                    + qb_indices * scale_stride_k
+                    + (
+                        head_in_group[:, None] * CHUNKS_PER_HEAD
+                        + block_offsets[None, :]
+                    )
+                    * scale_stride_k
                 )
-                tl.store(scale_addrs, tl.zeros((CHUNKS_PER_HEAD,), dtype=tl.float32))
+                tl.store(
+                    scale_addrs, tl.zeros((BLOCK_H, CHUNKS_PER_HEAD), dtype=tl.float32)
+                )
             return
-
-        input_base = o_ptr + pid_token * o_stride_token + global_head * o_stride_head
 
         HEAD_DIM: tl.constexpr = CHUNKS_PER_HEAD * QUANT_GROUP_SIZE
         offsets = tl.arange(0, HEAD_DIM)
-        x = tl.load(input_base + offsets).to(tl.float32)
+        input_base = (
+            o_ptr
+            + pid_token * o_stride_token
+            + (first_head + tl.arange(0, BLOCK_H))[:, None] * o_stride_head
+        )
+        x = tl.load(input_base + offsets[None, :]).to(tl.float32)
 
-        rope_abs_start: tl.constexpr = (
-            CHUNKS_PER_HEAD - 1
-        ) * QUANT_GROUP_SIZE + ROPE_START
+        # GPT-J inverse RoPE on (even, odd) pairs, swapped in registers rather
+        # than re-loading each element's partner from global memory.
         pos = tl.load(positions_ptr + pid_token)
         cache_base = cos_sin_cache_ptr + pos * cache_stride_pos
-        is_rope = offsets >= rope_abs_start
-        rope_local = offsets - rope_abs_start
+        pair = tl.arange(0, HEAD_DIM // 2)
+        is_rope_pair = pair >= NOPE_DIM // 2
+        cs_idx = tl.maximum(pair - NOPE_DIM // 2, 0)
+        cos_v = tl.load(cache_base + cs_idx, mask=is_rope_pair, other=1.0)[None, :]
+        sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope_pair, other=0.0)[
+            None, :
+        ]
+        even, odd = tl.split(tl.reshape(x, (BLOCK_H, HEAD_DIM // 2, 2)))
+        rope = is_rope_pair[None, :]
+        rot_even = tl.where(rope, even * cos_v + odd * sin_v, even)
+        rot_odd = tl.where(rope, odd * cos_v - even * sin_v, odd)
+        x = tl.reshape(tl.join(rot_even, rot_odd), (BLOCK_H, HEAD_DIM))
 
-        x_partner = tl.load(input_base + (offsets ^ 1), mask=is_rope, other=0.0).to(
-            tl.float32
+        out_ptrs = (
+            out_ptr
+            + g * out_stride_group
+            + pid_token * out_stride_token
+            + head_in_group[:, None] * HEAD_DIM
+            + offsets[None, :]
         )
-        cs_idx = tl.maximum(rope_local >> 1, 0)
-        cos_v = tl.load(cache_base + cs_idx, mask=is_rope, other=1.0)
-        sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope, other=0.0)
-        x_add = x * cos_v + x_partner * sin_v
-        x_sub = x * cos_v - x_partner * sin_v
-        is_even = (rope_local & 1) == 0
-        rotated = tl.where(is_even, x_add, x_sub)
-        x = tl.where(is_rope, rotated, x)
+        if not QUANTIZE:
+            tl.store(out_ptrs, x)
+            return
 
-        x_2d = tl.reshape(tl.abs(x), (CHUNKS_PER_HEAD, QUANT_GROUP_SIZE))
-        block_absmax = tl.maximum(tl.max(x_2d, axis=1), eps)
+        x_3d = tl.reshape(tl.abs(x), (BLOCK_H, CHUNKS_PER_HEAD, QUANT_GROUP_SIZE))
+        block_absmax = tl.maximum(tl.max(x_3d, axis=2), eps)
         scale_raw = block_absmax * (1.0 / fp8_max)
         scales = tl.math.exp2(tl.ceil(tl.log2(scale_raw)))
 
         scales_exp = tl.reshape(
             tl.broadcast_to(
-                tl.reshape(scales, (CHUNKS_PER_HEAD, 1)),
-                (CHUNKS_PER_HEAD, QUANT_GROUP_SIZE),
+                tl.reshape(scales, (BLOCK_H, CHUNKS_PER_HEAD, 1)),
+                (BLOCK_H, CHUNKS_PER_HEAD, QUANT_GROUP_SIZE),
             ),
-            (HEAD_DIM,),
+            (BLOCK_H, HEAD_DIM),
         )
         x_quant = tl.clamp(x / scales_exp, -fp8_max, fp8_max).to(tl.float8e4nv)
+        tl.store(out_ptrs, x_quant)
 
-        fp8_base = (
-            fp8_ptr
-            + g * fp8_stride_group
-            + pid_token * fp8_stride_token
-            + qb_start * QUANT_GROUP_SIZE
-        )
-        tl.store(fp8_base + offsets, x_quant)
-
-        block_offsets = tl.arange(0, CHUNKS_PER_HEAD)
-        qb_indices = qb_start + block_offsets
         if TMA_ALIGNED_SCALES:
             scale_bits = scales.to(tl.int32, bitcast=True)
             ue8m0_bytes = (scale_bits >> 23) & 0xFF
-            packed_val = tl.sum(ue8m0_bytes << (block_offsets * 8))
+            packed_val = tl.sum(
+                tl.reshape(ue8m0_bytes, (BLOCK_H, CHUNKS_PER_HEAD // 4, 4))
+                << (tl.arange(0, 4)[None, None, :] * 8),
+                axis=2,
+            )
+            packed_offsets = tl.arange(0, CHUNKS_PER_HEAD // 4)
             scale_addr = (
                 scale_ptr
                 + g * scale_stride_group
                 + pid_token
-                + head_in_group * scale_stride_k
+                + (
+                    head_in_group[:, None] * (CHUNKS_PER_HEAD // 4)
+                    + packed_offsets[None, :]
+                )
+                * scale_stride_k
             )
             tl.store(scale_addr, packed_val)
         else:
+            block_offsets = tl.arange(0, CHUNKS_PER_HEAD)
             scale_addrs = (
                 scale_ptr
                 + g * scale_stride_group
                 + pid_token
-                + qb_indices * scale_stride_k
+                + (head_in_group[:, None] * CHUNKS_PER_HEAD + block_offsets[None, :])
+                * scale_stride_k
             )
             tl.store(scale_addrs, scales)
 
@@ -186,9 +228,10 @@ class FusedInvRopeFP8QuantKernel(
         nope_dim: int,
         rope_dim: int,
         quant_group_size: int,
+        num_warps: int,
         runtime_fp8_max: float | None = None,
         runtime_chunks_per_head: int | None = None,
-        runtime_rope_start: int | None = None,
+        runtime_nope_dim: int | None = None,
         runtime_half_rope: int | None = None,
         **compile_key_fields: bool,
     ) -> CompileKey:
@@ -202,11 +245,7 @@ class FusedInvRopeFP8QuantKernel(
             if runtime_chunks_per_head is not None
             else head_dim // quant_group_size
         )
-        rope_start = (
-            runtime_rope_start
-            if runtime_rope_start is not None
-            else nope_dim % quant_group_size
-        )
+        nope_dim = runtime_nope_dim if runtime_nope_dim is not None else nope_dim
         half_rope = (
             runtime_half_rope if runtime_half_rope is not None else rope_dim // 2
         )
@@ -216,8 +255,9 @@ class FusedInvRopeFP8QuantKernel(
             fp8_max=fp8_max,
             quant_group_size=quant_group_size,
             chunks_per_head=chunks_per_head,
-            rope_start=rope_start,
+            nope_dim=nope_dim,
             half_rope=half_rope,
+            num_warps=num_warps,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -250,11 +290,13 @@ class FusedInvRopeFP8QuantKernel(
             quant_group_size=128,
             tma_aligned_scales=capability.major >= 10,
             launch_pdl=current_platform.is_arch_support_pdl(),
+            quantize=True,
+            num_warps=WarmupChoices(1, 4),
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         head_dim = compile_key.chunks_per_head * compile_key.quant_group_size
-        fp8_dim = compile_key.heads_per_group * head_dim
+        out_dim = compile_key.heads_per_group * head_dim
         scale_dtype = torch.int32 if compile_key.tma_aligned_scales else torch.float32
         return dict(
             o=TritonWarmupTensor(
@@ -266,10 +308,10 @@ class FusedInvRopeFP8QuantKernel(
                 torch.float32,
                 shape=(1, compile_key.half_rope * 2),
             ),
-            fp8_buf=TritonWarmupTensor(
-                torch.float8_e4m3fn,
-                shape=(compile_key.heads_per_group, 1, fp8_dim),
-                strides=(fp8_dim, fp8_dim, 1),
+            out_buf=TritonWarmupTensor(
+                torch.float8_e4m3fn if compile_key.quantize else torch.bfloat16,
+                shape=(compile_key.heads_per_group, 1, out_dim),
+                strides=(out_dim, out_dim, 1),
             ),
             scale_buf=TritonWarmupTensor(
                 scale_dtype,
@@ -280,12 +322,18 @@ class FusedInvRopeFP8QuantKernel(
             heads_per_group=compile_key.heads_per_group,
             quant_group_size=compile_key.quant_group_size,
             chunks_per_head=compile_key.chunks_per_head,
-            rope_start=compile_key.rope_start,
+            nope_dim=compile_key.nope_dim,
             half_rope=compile_key.half_rope,
             tma_aligned_scales=compile_key.tma_aligned_scales,
+            quantize=compile_key.quantize,
             fp8_max=compile_key.fp8_max,
             launch_pdl=compile_key.launch_pdl,
-            grid=(1, compile_key.heads_per_group),
+            num_warps=compile_key.num_warps,
+            grid=(
+                1,
+                compile_key.heads_per_group
+                // _heads_per_program(compile_key.heads_per_group),
+            ),
         )
 
     @kernel_launcher
@@ -294,39 +342,43 @@ class FusedInvRopeFP8QuantKernel(
         o: torch.Tensor,
         positions: torch.Tensor,
         cos_sin_cache: torch.Tensor,
-        fp8_buf: torch.Tensor,
+        out_buf: torch.Tensor,
         scale_buf: torch.Tensor,
         num_tokens: int,
         *,
         heads_per_group: int,
         quant_group_size: int,
         chunks_per_head: int,
-        rope_start: int,
+        nope_dim: int,
         half_rope: int,
         tma_aligned_scales: bool,
+        quantize: bool,
         fp8_max: float,
         launch_pdl: bool,
+        num_warps: int,
         grid: tuple[int, int],
     ) -> LaunchSpec:
         return grid, dict(
-            fp8_ptr=fp8_buf,
+            out_ptr=out_buf,
             scale_ptr=scale_buf,
             o_stride_token=o.stride(0),
             o_stride_head=o.stride(1),
             cache_stride_pos=cos_sin_cache.stride(0),
-            fp8_stride_group=fp8_buf.stride(0),
-            fp8_stride_token=fp8_buf.stride(1),
-            scale_stride_group=scale_buf.stride(0),
-            scale_stride_k=scale_buf.stride(2),
+            out_stride_group=out_buf.stride(0),
+            out_stride_token=out_buf.stride(1),
+            scale_stride_group=scale_buf.stride(0) if quantize else 0,
+            scale_stride_k=scale_buf.stride(2) if quantize else 0,
             eps=1e-10,
             QUANT_GROUP_SIZE=quant_group_size,
             CHUNKS_PER_HEAD=chunks_per_head,
-            ROPE_START=rope_start,
+            NOPE_DIM=nope_dim,
             HALF_ROPE=half_rope,
+            QUANTIZE=quantize,
             TMA_ALIGNED_SCALES=tma_aligned_scales,
+            BLOCK_H=_heads_per_program(heads_per_group),
             launch_pdl=launch_pdl,
             num_stages=1,
-            num_warps=1,
+            num_warps=num_warps,
         )
 
 
@@ -340,6 +392,7 @@ def fused_inv_rope_fp8_quant(
     rope_dim: int = 64,
     quant_group_size: int = 128,
     tma_aligned_scales: bool = False,
+    quantize: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused inverse RoPE + block-scaled FP8 quantization.
 
@@ -354,10 +407,12 @@ def fused_inv_rope_fp8_quant(
         quant_group_size: FP8 quantization block size (default 128).
         tma_aligned_scales: Output INT32 packed UE8M0 for SM100 (True)
                             or FP32 for SM90 (False).
+        quantize: Quantize the rotated output to FP8 and return its scales.
 
     Returns:
-        o_fp8: [T, G, D] float8_e4m3fn, strides (D, T*D, 1).
-        o_scale: Pre-transformed scale tensor for fp8_einsum.
+        Rotated output in [T, G, D] and its FP8 scales. The scale tensor is
+        empty when quantization is disabled.
+
     """
     from vllm.utils.deep_gemm import get_tma_aligned_size
 
@@ -365,7 +420,6 @@ def fused_inv_rope_fp8_quant(
     assert num_heads == n_groups * heads_per_group
     assert head_dim == nope_dim + rope_dim
     assert head_dim % quant_group_size == 0
-    assert nope_dim % quant_group_size == (quant_group_size - rope_dim)
     assert rope_dim % 2 == 0
     assert cos_sin_cache.shape[-1] == rope_dim
     assert cos_sin_cache.dtype == torch.float32
@@ -377,23 +431,26 @@ def fused_inv_rope_fp8_quant(
     fp8_dtype = torch.float8_e4m3fn
     fp8_max = torch.finfo(fp8_dtype).max
 
-    tma_aligned_T = get_tma_aligned_size(num_tokens, 4)
-    if tma_aligned_scales:
+    tma_aligned_T = get_tma_aligned_size(num_tokens, 4) if quantize else num_tokens
+    if quantize and tma_aligned_scales:
+        assert chunks_per_head % 4 == 0
         packed_sf_k = (num_scale_blocks + 3) // 4
         scale_inner = packed_sf_k
-    else:
+    elif quantize:
         scale_inner = num_scale_blocks
+    else:
+        scale_inner = 0
 
     # Run kernel through a custom op so inductor sees an opaque boundary.
     # It's a pytorch bug, see https://github.com/vllm-project/vllm/issues/41106
-    fp8_buf, scale_buf = torch.ops.vllm.fused_inv_rope_fp8_quant_kernel(
+    out_buf, scale_buf = torch.ops.vllm.fused_inv_rope_fp8_quant_kernel(
         o,
         positions,
         cos_sin_cache,
         heads_per_group,
         quant_group_size,
         chunks_per_head,
-        nope_dim % quant_group_size,
+        nope_dim,
         rope_dim // 2,
         tma_aligned_scales,
         fp8_max,
@@ -402,8 +459,11 @@ def fused_inv_rope_fp8_quant(
         n_groups,
         d,
         scale_inner,
+        quantize,
     )
-    return fp8_buf.transpose(0, 1), scale_buf.transpose(0, 1)
+    output = out_buf.transpose(0, 1)
+    scales = scale_buf.transpose(0, 1) if quantize else scale_buf
+    return output, scales
 
 
 def _fused_inv_rope_fp8_quant_kernel_impl(
@@ -413,7 +473,7 @@ def _fused_inv_rope_fp8_quant_kernel_impl(
     heads_per_group: int,
     quant_group_size: int,
     chunks_per_head: int,
-    rope_start: int,
+    nope_dim: int,
     half_rope: int,
     tma_aligned_scales: bool,
     fp8_max: float,
@@ -422,41 +482,53 @@ def _fused_inv_rope_fp8_quant_kernel_impl(
     n_groups: int,
     d: int,
     scale_inner: int,
+    quantize: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    fp8_buf = torch.empty(
-        (n_groups, num_tokens, d),
-        dtype=torch.float8_e4m3fn,
-        device=o.device,
-    )
     scale_dtype = torch.int32 if tma_aligned_scales else torch.float32
-    scale_buf = torch.empty(
-        n_groups * scale_inner * tma_aligned_T,
-        dtype=scale_dtype,
+    out_buf = torch.empty(
+        (n_groups, num_tokens, d),
+        dtype=torch.float8_e4m3fn if quantize else o.dtype,
         device=o.device,
-    ).as_strided(
-        (n_groups, num_tokens, scale_inner),
-        (scale_inner * tma_aligned_T, 1, tma_aligned_T),
     )
-    grid = (tma_aligned_T, n_groups * heads_per_group)
+    if quantize:
+        scale_buf = torch.empty(
+            n_groups * scale_inner * tma_aligned_T,
+            dtype=scale_dtype,
+            device=o.device,
+        ).as_strided(
+            (n_groups, num_tokens, scale_inner),
+            (scale_inner * tma_aligned_T, 1, tma_aligned_T),
+        )
+    else:
+        scale_buf = torch.empty(0, dtype=scale_dtype, device=o.device)
+    grid = (
+        tma_aligned_T,
+        n_groups * heads_per_group // _heads_per_program(heads_per_group),
+    )
+    # Few programs (decode): more warps per program for latency. Many (prefill):
+    # one warp each, so more programs stay resident and keep HBM busy.
+    num_warps = 4 if grid[0] * grid[1] < 2048 else 1
     launch_pdl = current_platform.is_arch_support_pdl()
     _FUSED_INV_ROPE_FP8_QUANT_KERNEL(
         o,
         positions,
         cos_sin_cache,
-        fp8_buf,
+        out_buf,
         scale_buf,
         num_tokens,
         heads_per_group=heads_per_group,
         quant_group_size=quant_group_size,
         chunks_per_head=chunks_per_head,
-        rope_start=rope_start,
+        nope_dim=nope_dim,
         half_rope=half_rope,
         tma_aligned_scales=tma_aligned_scales,
+        quantize=quantize,
         fp8_max=fp8_max,
         launch_pdl=launch_pdl,
+        num_warps=num_warps,
         grid=grid,
     )
-    return fp8_buf, scale_buf
+    return out_buf, scale_buf
 
 
 def _fused_inv_rope_fp8_quant_kernel_fake(
@@ -466,7 +538,7 @@ def _fused_inv_rope_fp8_quant_kernel_fake(
     heads_per_group: int,
     quant_group_size: int,
     chunks_per_head: int,
-    rope_start: int,
+    nope_dim: int,
     half_rope: int,
     tma_aligned_scales: bool,
     fp8_max: float,
@@ -475,13 +547,16 @@ def _fused_inv_rope_fp8_quant_kernel_fake(
     n_groups: int,
     d: int,
     scale_inner: int,
+    quantize: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    fp8_buf = torch.empty(
+    scale_dtype = torch.int32 if tma_aligned_scales else torch.float32
+    out_buf = torch.empty(
         (n_groups, num_tokens, d),
-        dtype=torch.float8_e4m3fn,
+        dtype=torch.float8_e4m3fn if quantize else o.dtype,
         device=o.device,
     )
-    scale_dtype = torch.int32 if tma_aligned_scales else torch.float32
+    if not quantize:
+        return out_buf, torch.empty(0, dtype=scale_dtype, device=o.device)
     scale_buf = torch.empty(
         n_groups * scale_inner * tma_aligned_T,
         dtype=scale_dtype,
@@ -490,7 +565,7 @@ def _fused_inv_rope_fp8_quant_kernel_fake(
         (n_groups, num_tokens, scale_inner),
         (scale_inner * tma_aligned_T, 1, tma_aligned_T),
     )
-    return fp8_buf, scale_buf
+    return out_buf, scale_buf
 
 
 direct_register_custom_op(

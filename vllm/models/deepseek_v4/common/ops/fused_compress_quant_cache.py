@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Fused compressor + FP8/MXFP4 UE8M0 quantization + KV cache insert kernels.
+"""Fused compressor + FP8/MXFP4 UE8M0 quantization + KV cache insert kernels.
 
 Three specialized kernels:
   - _fused_kv_compress_norm_rope_insert_sparse_attn:
@@ -26,15 +25,17 @@ from typing import Any
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 from vllm.utils.math_utils import round_up
+from vllm.v1.attention.ops.common import pack_ue8m0_x4
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import _ON_GFX950
@@ -70,8 +71,8 @@ def compress_norm_rope_store_triton(
 ) -> None:
     """Shared triton launcher for the fused compress+norm+RoPE+insert path.
 
-    Picks one of the three kernels in this module based on ``head_dim`` and
-    ``use_fp4_cache``. Identical launch signature for all three.
+    Picks one of the three kernels in this module based on `head_dim` and
+    `use_fp4_cache`. Identical launch signature for all three.
     """
     if head_dim == 512:
         kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
@@ -188,7 +189,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
 
     One program per token; early-exits for non-boundary positions.
 
-    Cache block layout (``block_size`` tokens):
+    Cache block layout (`block_size` tokens):
       [0, bs*576):       token data (448 fp8 + 128 bf16 each)
       [bs*576, +bs*8):   uint8 UE8M0 scales (7 real + 1 pad each)
     """
@@ -390,7 +391,7 @@ def _compress_gather_split_sparse_attn(
     NUM_SPLITS: tl.constexpr,
     HEAD_TILE: tl.constexpr,  # HEAD_SIZE // NUM_SPLITS
 ):
-    """Stage 1: per-(token, head-split) compress gather, write to fp32 scratch
+    """Stage 1: per-(token, head-split) compress gather, write to fp32 scratch.
 
     No-overlap gather (cr>=128) on rows [0, COMPRESS_RATIO)
     """
@@ -639,7 +640,7 @@ def compress_norm_rope_store_two_stage_triton(
     num_decode_tokens: int,
     compress_scratch: torch.Tensor,
 ) -> None:
-    """Two-stage split compressor dispatch for head=512 cr>=128 (no-overlap)
+    """Two-stage split compressor dispatch for head=512 cr>=128 (no-overlap).
 
     Run the occupancy-fanned two-stage split for prefill [num_decodee_tokens:]
     to fill the CUs, and use the original single-pass launcher
@@ -743,6 +744,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     TOKEN_STRIDE: tl.constexpr,  # 128 for indexer
     SCALE_DIM: tl.constexpr,  # 4 for indexer (1 float32)
     KV_BLOCK_STRIDE: tl.constexpr,
+    MX_SCALE: tl.constexpr,  # store the scale as 4 packed UE8M0 bytes
 ):
     """Fused compress → RMSNorm → RoPE → FP8 quant → store.
 
@@ -754,7 +756,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
 
     For head_dim=128 we have exactly one quant block, so we skip the
     [N_QUANT_BLOCKS, QUANT_BLOCK] reshape entirely and use a flat
-    ``tl.max`` reduction.
+    `tl.max` reduction.
     """
     token_idx = tl.program_id(0)
 
@@ -879,7 +881,10 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
 
     # Single float32 scale
     scale_val = tl.exp2(exponent)
-    tl.store(scale_ptr.to(tl.pointer_type(tl.float32)), scale_val)
+    if MX_SCALE:
+        tl.store(scale_ptr.to(tl.pointer_type(tl.int32)), pack_ue8m0_x4(scale_val))
+    else:
+        tl.store(scale_ptr.to(tl.pointer_type(tl.float32)), scale_val)
 
 
 # =============================================================================
@@ -928,12 +933,13 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     TOKEN_STRIDE: tl.constexpr,  # HEAD_SIZE // 2 = 64 packed bytes/token
     SCALE_DIM: tl.constexpr,  # HEAD_SIZE // QUANT_BLOCK = 4 ue8m0 bytes/token
     KV_BLOCK_STRIDE: tl.constexpr,
+    MX_SCALE: tl.constexpr,  # unused for MXFP4 (kept for signature parity)
 ):
     """Fused compress → RMSNorm → RoPE → MXFP4 quant → store.
 
     One program per token; early-exits for non-boundary positions.
 
-    Cache block layout (``block_size`` tokens per cache block):
+    Cache block layout (`block_size` tokens per cache block):
       [0, bs*TOKEN_STRIDE):        packed MXFP4 nibbles (2 values/byte)
       [bs*TOKEN_STRIDE, +bs*SCALE_DIM): ue8m0 scale bytes (one per 32-elem block)
 
@@ -1103,6 +1109,7 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         block_size: int
         kv_cache_block_size: int
         kv_block_stride: int
+        mx_scale: bool
 
     # Canonical kernel for the launcher's arg_names mapping; the launched
     # variant (fp8/mxfp4, same arg_names) is picked per call in __call__.
@@ -1182,6 +1189,7 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
             block_size=state_block_size,
             kv_cache_block_size=kv_cache_block_size,
             kv_block_stride=kv_block_stride,
+            mx_scale=not use_fp4_cache and mqa_logits_use_mx_scales(),
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -1195,6 +1203,10 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         )
 
         use_fp4_cache = dsa_indexer_uses_fp4(vllm_config)
+        # The MXFP4 variant packs FP4 with CUDA PTX; ROCm writes the MXFP4
+        # indexer cache with aiter's op instead.
+        if use_fp4_cache and current_platform.is_rocm():
+            return []
         head_dim = int(getattr(hf_config, "index_head_dim", 0) or 0)
         rope_head_dim = int(getattr(hf_config, "qk_rope_head_dim", 0) or 0)
         if head_dim <= 0 or rope_head_dim <= 0 or cache_block_size <= 0:
@@ -1302,6 +1314,7 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
             TOKEN_STRIDE=token_stride,
             SCALE_DIM=scale_dim,
             KV_BLOCK_STRIDE=kv_cache.stride(0),
+            MX_SCALE=not use_fp4_cache and mqa_logits_use_mx_scales(),
             num_warps=1,
             **pdl_kwargs,
         )

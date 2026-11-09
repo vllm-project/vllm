@@ -4,7 +4,7 @@
 
 These lock in the redesign that addresses the PR #45043 review feedback
 (njhill): the connector must NOT self-derive a DP rank, and the prefill leg
-must *return* the rank it actually ran on via ``request_finished`` so the
+must *return* the rank it actually ran on via `request_finished` so the
 decode->prefill notify is routed by pure propagation (READ / serial WRITE),
 not by an independent hash on each side.
 
@@ -20,12 +20,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
 from vllm.v1.request import RequestStatus
 
 _request_finished = MoRIIOConnectorScheduler.request_finished
+_clip_blocks = MoRIIOConnectorScheduler.get_exchange_clipped_blocks
 
 
 def _producer(global_dp_rank: int, dp_size: int, dp_size_local: int):
     """Minimal prefill-side (producer) scheduler stand-in for request_finished."""
-    return SimpleNamespace(
+    s = SimpleNamespace(
         is_producer=True,
+        _is_hma_required=False,
+        _has_mamba=False,
+        blocks_per_sw=[0],
         _global_dp_rank=global_dp_rank,
         engine_id="engine-abc",
         host_ip="10.0.0.1",
@@ -36,9 +40,12 @@ def _producer(global_dp_rank: int, dp_size: int, dp_size_local: int):
                 data_parallel_size=dp_size,
                 data_parallel_size_local=dp_size_local,
                 tensor_parallel_size=1,
+                pipeline_parallel_size=1,
             )
         ),
     )
+    s.get_exchange_clipped_blocks = _clip_blocks.__get__(s)
+    return s
 
 
 def _req(

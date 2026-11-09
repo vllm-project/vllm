@@ -3,8 +3,8 @@
 """Ling3 parser for reasoning and tool calls.
 
 Ling3 uses the same XML tool-call format as GLM-4.7 and defaults thinking on.
-It follows the GLM-style ``<think>`` / ``</think>`` reasoning format and
-treats ``<tool_call>`` as an implicit reasoning terminator.
+It follows the GLM-style `<think>` / `</think>` reasoning format and
+treats `<tool_call>` as an implicit reasoning terminator.
 """
 
 from __future__ import annotations
@@ -71,10 +71,7 @@ class Ling3Parser(Glm47MoeParser):
         if not self.thinking_enabled:
             return None, model_output
 
-        reasoning, content = super().extract_reasoning(model_output, request)
-        if reasoning and not content and "<tool_call>" not in model_output:
-            return None, reasoning
-        return reasoning, content
+        return super().extract_reasoning(model_output, request)
 
 
 (

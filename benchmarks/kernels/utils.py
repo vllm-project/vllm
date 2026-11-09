@@ -17,8 +17,7 @@ class CudaGraphBenchParams:
 
 @dataclasses.dataclass
 class ArgPool:
-    """
-    When some argument of the benchmarking function is annotated with this type,
+    """When some argument of the benchmarking function is annotated with this type,
     the benchmarking class (BenchMM) will collapse the argument to a pick a
     single value from the given list of values, during function invocation.
     For every invocation during a benchmarking run, it will choose a
